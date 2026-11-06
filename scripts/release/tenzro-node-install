@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# Install a Linux tenzro-node release archive, refusing a build that does not
+# match the machine's role.
+#
+#   tenzro-node-install [--dry-run] [--role gpu|cpu|edge] [--prefix DIR]
+#                       [--sums SHA256SUMS [--sig SHA256SUMS.sig --key tenzro-release.pub]]
+#                       <archive.tar.gz | extracted dir>
+#
+# A GPU role (the default on a machine with a GPU) takes a CUDA build or a
+# Vulkan build. A CUDA build is proven three ways, all of which must agree:
+#   1. the node binary carries the CUDA backend (ggml_cuda_init) and links
+#      ONNX Runtime dynamically, resolved through $ORIGIN/../lib;
+#   2. the archive's lib/ holds ONNX Runtime with its CUDA provider
+#      (libonnxruntime_providers_cuda.so and libonnxruntime_providers_shared.so);
+#   3. the binary's own check (`tenzro-node hardware`), run from the unpacked
+#      archive on this machine, reports a CUDA build, at least one GPU, the
+#      CUDA execution provider for ONNX Runtime, and `startup: ok`.
+# A Vulkan build is proven by its Vulkan backend (ggml_vulkan) and its link to
+# the Vulkan loader (libvulkan.so.1), and by its own check reporting a Vulkan
+# build, at least one GPU and `startup: ok`. It serves llama.cpp models only:
+# ONNX Runtime has no Vulkan provider.
+# A CPU-only build is refused for a GPU role. A CPU role takes a CPU build.
+# The edge role takes the light build (no model engines, the edge profile),
+# proven by the absence of the engines in the binary and by its own check
+# reporting `build: light` and `startup: ok`. Without --role, a machine with
+# no GPU offered a light build takes it for the edge role.
+#
+# Installs bin/tenzro-node and bin/tenzro into PREFIX/bin (default
+# /usr/local) and, for a CUDA build, the ONNX Runtime libraries into
+# PREFIX/lib, where the binary's $ORIGIN/../lib run path finds them. The
+# previous node binary is kept beside it. --dry-run runs every check and
+# installs nothing.
+#
+# --sums checks the archive against the release's SHA256SUMS before it is
+# unpacked, and refuses an archive the file does not list or lists with
+# another hash. With --sig and --key it first verifies the signature of
+# SHA256SUMS with cosign 3.x (verify-blob against the public key, offline: the
+# release signature is not in a transparency log), so the hash it then trusts is the
+# one the release signed. A signature without the sums, or the other way
+# round, is refused. Without --sums nothing is verified here: verify the
+# download first (docs/VERIFY-DOWNLOAD.md).
+set -euo pipefail
+
+DRY=0 ROLE="" PREFIX=/usr/local SRC="" SUMS="" SIG="" KEY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY=1 ;;
+        --role) ROLE="${2:-}"; shift ;;
+        --prefix) PREFIX="${2:-}"; shift ;;
+        --sums) SUMS="${2:-}"; shift ;;
+        --sig) SIG="${2:-}"; shift ;;
+        --key) KEY="${2:-}"; shift ;;
+        -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) echo "unknown option: $1" >&2; exit 64 ;;
+        *) SRC="$1" ;;
+    esac
+    shift
+done
+[ -n "$SRC" ] && [ -e "$SRC" ] || { echo "usage: tenzro-node-install [--dry-run] [--role gpu|cpu|edge] [--prefix DIR] [--sums FILE [--sig FILE --key FILE]] <archive.tar.gz | dir>" >&2; exit 64; }
+
+# The download is verified before anything is unpacked.
+if [ -n "$SIG$KEY" ] && { [ -z "$SUMS" ] || [ -z "$SIG" ] || [ -z "$KEY" ]; }; then
+    echo "REFUSED: --sig and --key go together and need --sums" >&2; exit 64
+fi
+if [ -n "$SUMS" ]; then
+    [ -f "$SRC" ] || { echo "REFUSED: --sums checks an archive file, not a directory" >&2; exit 64; }
+    [ -f "$SUMS" ] || { echo "REFUSED: $SUMS does not exist" >&2; exit 64; }
+    if [ -n "$SIG" ]; then
+        command -v cosign >/dev/null 2>&1 || { echo "REFUSED: cosign is not installed, so $SUMS cannot be verified" >&2; exit 1; }
+        cosign verify-blob --key "$KEY" --insecure-ignore-tlog=true --signature "$SIG" "$SUMS" >/dev/null 2>&1 \
+            || { echo "REFUSED: the signature of $SUMS does not verify against $KEY" >&2; exit 1; }
+        echo "verified: $SUMS is signed by $KEY"
+    else
+        echo "note: $SUMS is not verified against a signature (no --sig and --key)"
+    fi
+    listed=$(awk -v f="$(basename "$SRC")" '{n=$2; sub(/^\*/, "", n); if (n == f) print $1}' "$SUMS")
+    [ -n "$listed" ] || { echo "REFUSED: $SUMS does not list $(basename "$SRC")" >&2; exit 1; }
+    actual=$(sha256sum "$SRC" | awk '{print $1}')
+    [ "$listed" = "$actual" ] || { echo "REFUSED: $(basename "$SRC") hashes to $actual, $SUMS lists $listed" >&2; exit 1; }
+    echo "verified: $(basename "$SRC") matches $SUMS"
+fi
+GIVEN=$ROLE
+if [ -z "$ROLE" ]; then
+    ROLE=cpu
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU '; then ROLE=gpu; fi
+    # AMD (0x1002) and Intel (0x8086) GPUs show up as DRM render nodes.
+    for v in /sys/class/drm/renderD*/device/vendor; do
+        case "$(cat "$v" 2>/dev/null)" in 0x1002|0x8086|0x10de) ROLE=gpu ;; esac
+    done
+fi
+case "$ROLE" in gpu|cpu|edge) ;; *) echo "--role must be gpu, cpu or edge" >&2; exit 64 ;; esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+if [ -d "$SRC" ]; then
+    root=$SRC
+else
+    tar -xzf "$SRC" -C "$work"
+    root=$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -1)
+fi
+node="$root/bin/tenzro-node"
+cli="$root/bin/tenzro"
+[ -f "$node" ] && [ -f "$cli" ] || { echo "REFUSED: $SRC has no bin/tenzro-node and bin/tenzro" >&2; exit 1; }
+# The light build carries no model engine.
+engines=1; grep -qa ggml_init "$node" || engines=0
+[ -z "$GIVEN" ] && [ "$ROLE" = cpu ] && [ $engines = 0 ] && ROLE=edge
+
+fail=0
+refuse() { echo "REFUSED: $*" >&2; fail=1; }
+
+echo "candidate: $SRC"
+echo "  role: $ROLE"
+echo "  node: $(( $(stat -c %s "$node") / 1000000 )) MB, cli: $(( $(stat -c %s "$cli") / 1000000 )) MB"
+
+want=$(uname -m)
+file -L "$node" | grep -q "$( [ "$want" = aarch64 ] && echo aarch64 || echo x86-64 )" \
+    || refuse "bin/tenzro-node is not a $want binary"
+
+# 1. The binary: CUDA backend and ONNX Runtime linkage.
+cuda_backend=0; grep -qa ggml_cuda_init "$node" && cuda_backend=1
+vulkan_backend=0; grep -qa 'ggml_vulkan:' "$node" && vulkan_backend=1
+needed=$(readelf -d "$node" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+runpath=$(readelf -d "$node" | sed -n 's/.*(RUNPATH).*\[\(.*\)\]/\1/p')
+echo "  CUDA backend: $([ $cuda_backend = 1 ] && echo yes || echo no)"
+echo "  Vulkan backend: $([ $vulkan_backend = 1 ] && echo yes || echo no)"
+echo "  links: $(echo $needed)"
+echo "  run path: ${runpath:-none}"
+
+if [ "$ROLE" = gpu ] && [ $vulkan_backend = 1 ]; then
+    [ $cuda_backend = 0 ] || refuse "bin/tenzro-node carries both the CUDA and the Vulkan backend"
+    echo "$needed" | grep -qx 'libvulkan\.so\.1' \
+        || refuse "bin/tenzro-node does not link the Vulkan loader (libvulkan.so.1)"
+    ldd "$node" 2>/dev/null | grep -q 'libvulkan\.so\.1 => /' \
+        || refuse "the Vulkan loader (libvulkan.so.1) is not installed on this machine"
+elif [ "$ROLE" = gpu ]; then
+    [ $cuda_backend = 1 ] || refuse "no GPU backend in bin/tenzro-node: this is a CPU build; a GPU role needs the CUDA or the Vulkan build"
+    echo "$needed" | grep -qx 'libonnxruntime\.so\.1' \
+        || refuse "bin/tenzro-node does not link ONNX Runtime dynamically, so it cannot load the CUDA provider"
+    case ":$runpath:" in *':$ORIGIN/../lib:'*) ;; *) refuse "bin/tenzro-node has no \$ORIGIN/../lib run path" ;; esac
+
+    # 2. The archive: ONNX Runtime and its CUDA provider beside the binary.
+    for lib in libonnxruntime.so.1 libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+        if [ -e "$root/lib/$lib" ]; then echo "  lib/$lib: present"; else refuse "lib/$lib is missing from the archive"; fi
+    done
+    if [ -e "$root/lib/libonnxruntime_providers_cuda.so" ]; then
+        readelf -d "$root/lib/libonnxruntime_providers_cuda.so" | grep -q 'NEEDED.*libcudart\|NEEDED.*libcublas' \
+            || refuse "lib/libonnxruntime_providers_cuda.so does not link the CUDA runtime"
+    fi
+    # The ONNX Runtime the binary loads must be the one shipped beside it.
+    resolved=$(ldd "$node" 2>/dev/null | awk '/libonnxruntime\.so/ {print $3}')
+    echo "  ONNX Runtime resolves to: ${resolved:-not found}"
+    [ "$(readlink -f "${resolved:-/nonexistent}")" = "$(readlink -f "$root/lib/libonnxruntime.so.1")" ] \
+        || refuse "bin/tenzro-node loads ONNX Runtime from ${resolved:-nowhere}, not from the archive's lib/"
+elif [ "$ROLE" = edge ]; then
+    [ $engines = 0 ] || refuse "bin/tenzro-node carries the model engines; the edge role takes the light build"
+    [ $cuda_backend = 0 ] || refuse "this is a CUDA build; the edge role takes the light build"
+    [ $vulkan_backend = 0 ] || refuse "this is a Vulkan build; the edge role takes the light build"
+else
+    [ $cuda_backend = 0 ] || refuse "this is a CUDA build; a CPU role takes the CPU build"
+    [ $vulkan_backend = 0 ] || refuse "this is a Vulkan build; a CPU role takes the CPU build"
+fi
+
+# 3. The binary's own check on this machine.
+report=$("$node" hardware 2>/dev/null) && verdict=0 || verdict=$?
+echo "$report" | sed 's/^/  self-check: /'
+field() { echo "$report" | sed -n "s/^$1: //p" | head -1; }
+if [ -z "$(field build)" ]; then
+    refuse "bin/tenzro-node has no hardware self-check (\`tenzro-node hardware\`); it predates it, take a current release"
+elif [ "$ROLE" = gpu ] && [ $vulkan_backend = 1 ]; then
+    [ "$(field build)" = Vulkan ] || refuse "the binary reports a $(field build) build, not Vulkan"
+    [ "$(field gpus)" -ge 1 ] 2>/dev/null || refuse "the binary finds no usable Vulkan GPU on this machine"
+    [ "$verdict" = 0 ] && [ "$(field startup)" = ok ] || refuse "the node would not start here ($(field startup))"
+elif [ "$ROLE" = gpu ]; then
+    [ "$(field build)" = CUDA ] || refuse "the binary reports a $(field build) build, not CUDA"
+    [ "$(field gpus)" -ge 1 ] 2>/dev/null || refuse "the binary finds no usable GPU on this machine"
+    case ",$(field onnx)," in *,CUDA,*) ;; *) refuse "ONNX Runtime will not use CUDA here (onnx: $(field onnx))" ;; esac
+    [ "$verdict" = 0 ] && [ "$(field startup)" = ok ] || refuse "the node would not start here ($(field startup))"
+elif [ "$ROLE" = edge ]; then
+    [ "$(field build)" = light ] || refuse "the binary reports a $(field build) build, not the light build"
+    [ "$verdict" = 0 ] && [ "$(field startup)" = ok ] || refuse "the node would not start here ($(field startup))"
+else
+    [ "$(field build)" = CPU ] || refuse "the binary reports a $(field build) build, not CPU"
+    [ "$verdict" = 0 ] && [ "$(field startup)" = ok ] || refuse "the node would not start here ($(field startup))"
+fi
+
+# The CLI never carries the CUDA backend: it serves no model.
+! grep -qa ggml_cuda_init "$cli" || echo "  note: bin/tenzro carries the CUDA backend it does not use (packaging)"
+
+if [ $fail -ne 0 ]; then
+    echo; echo "Nothing installed." >&2; exit 1
+fi
+echo "ACCEPTED for the $ROLE role."
+if [ $DRY = 1 ]; then
+    echo "dry run: nothing installed."; exit 0
+fi
+
+sudo install -d "$PREFIX/bin"
+if [ -e "$PREFIX/bin/tenzro-node" ]; then
+    bak="$PREFIX/bin/tenzro-node.bak-$(date +%Y%m%d-%H%M%S)"
+    sudo cp -a "$PREFIX/bin/tenzro-node" "$bak"
+    echo "previous node kept at $bak"
+fi
+if [ "$ROLE" = gpu ] && [ $cuda_backend = 1 ]; then
+    sudo install -d "$PREFIX/lib"
+    for f in "$root"/lib/libonnxruntime*; do sudo cp -a "$f" "$PREFIX/lib/"; done
+fi
+sudo install -m755 "$cli" "$PREFIX/bin/tenzro"
+sudo install -m755 "$node" "$PREFIX/bin/tenzro-node"
+if [ "$ROLE" = gpu ] && [ $cuda_backend = 1 ]; then
+    got=$(ldd "$PREFIX/bin/tenzro-node" | awk '/libonnxruntime\.so/ {print $3}')
+    [ "$(readlink -f "$got")" = "$(readlink -f "$PREFIX/lib/libonnxruntime.so.1")" ] \
+        || echo "WARNING: the installed node loads ONNX Runtime from $got, not $PREFIX/lib" >&2
+fi
+echo "installed into $PREFIX. Restart the node service to run it."

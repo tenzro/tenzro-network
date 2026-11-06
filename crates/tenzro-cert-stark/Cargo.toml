@@ -1,0 +1,36 @@
+[package]
+name = "tenzro-cert-stark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compact checkpoint certificates: one STARK for a quorum's ML-DSA-65 signatures"
+
+[dependencies]
+bincode = { workspace = true }
+sha3 = { workspace = true }
+p3-air = { workspace = true }
+p3-batch-stark = { workspace = true }
+p3-lookup = { workspace = true }
+p3-challenger = { workspace = true }
+p3-commit = { workspace = true }
+p3-dft = { workspace = true }
+p3-field = { workspace = true }
+p3-fri = { workspace = true }
+p3-goldilocks = { workspace = true }
+p3-keccak = { workspace = true }
+p3-matrix = { workspace = true }
+# Proving uses every core it is given; the prover runs off the critical path.
+p3-maybe-rayon = { workspace = true, optional = true }
+p3-merkle-tree = { workspace = true }
+p3-symmetric = { workspace = true }
+p3-uni-stark = { workspace = true }
+
+[features]
+# Prove and verify on every core. A single-threaded host (a zkVM guest)
+# builds without it.
+default = ["parallel"]
+parallel = ["dep:p3-maybe-rayon", "p3-maybe-rayon/parallel"]
+
+[dev-dependencies]
+ml-dsa = { workspace = true }
+p3-keccak-air = { workspace = true }

@@ -1,0 +1,91 @@
+"""Delegated agents: Terms granted by one root, actions within them, and the
+kill-switch receipts and quarantine state that control them."""
+
+
+from .controls import (
+    AgentQuarantine,
+    KillSwitchPage,
+    KillSwitchReceipt,
+    ListedKillSwitchReceipt,
+    agent_quarantine,
+    kill_switch_receipt,
+    kill_switches_by_agent,
+    kill_switches_by_controller,
+)
+from .terms import (
+    AgentActRequest,
+    AgentPayment,
+    AgentStepUp,
+    AgentTerms,
+    Authorize,
+    CounterpartyKyc,
+    DelegationScope,
+    ServingNodeRef,
+    agent_act,
+    agent_voucher,
+    delegate_agent,
+    REVOCATION_GAS_LIMIT,
+    RootApproval,
+    passkey_root_approval,
+    revocation_target,
+    revoke_identity,
+    update_agent_terms,
+)
+
+__all__ = [
+    "AgentQuarantine",
+    "KillSwitchPage",
+    "KillSwitchReceipt",
+    "ListedKillSwitchReceipt",
+    "agent_quarantine",
+    "kill_switch_receipt",
+    "kill_switches_by_agent",
+    "kill_switches_by_controller",
+    "AgentActRequest",
+    "AgentPayment",
+    "AgentStepUp",
+    "AgentTerms",
+    "Authorize",
+    "CounterpartyKyc",
+    "DelegationScope",
+    "ServingNodeRef",
+    "agent_act",
+    "agent_voucher",
+    "delegate_agent",
+    "REVOCATION_GAS_LIMIT",
+    "RootApproval",
+    "passkey_root_approval",
+    "revocation_target",
+    "revoke_identity",
+    "update_agent_terms",
+]
+
+from .openshell import (
+    OPENSHELL_AGENT_ANNOTATION,
+    OPENSHELL_PAYMENT_PROTOCOLS,
+    OPENSHELL_RECEIPT_HEADER,
+    OPENSHELL_TENZRO_MIDDLEWARE,
+    mint_openshell_credential,
+    openshell_payments,
+    openshell_session_id,
+    openshell_terms,
+    parse_openshell_entries,
+    verify_openshell_receipt,
+    verify_openshell_session,
+    verify_openshell_signature,
+)
+
+__all__ += [
+    "OPENSHELL_PAYMENT_PROTOCOLS",
+    "OPENSHELL_TENZRO_MIDDLEWARE",
+    "OPENSHELL_AGENT_ANNOTATION",
+    "OPENSHELL_RECEIPT_HEADER",
+    "mint_openshell_credential",
+    "openshell_payments",
+    "openshell_session_id",
+    "openshell_terms",
+    "parse_openshell_entries",
+    "verify_openshell_receipt",
+    "verify_openshell_session",
+    "verify_openshell_signature",
+]

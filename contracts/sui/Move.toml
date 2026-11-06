@@ -1,0 +1,6 @@
+[package]
+name = "tenzro_bridge"
+edition = "2024"
+
+[addresses]
+tenzro_bridge = "0x0"

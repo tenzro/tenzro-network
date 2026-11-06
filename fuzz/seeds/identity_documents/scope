@@ -1,0 +1,1 @@
+{"max_transaction_value": 1000, "max_daily_spend": 5000, "allowed_operations": ["transfer"], "allowed_contracts": [[1, 2, 3]], "time_bound": null, "allowed_payment_protocols": ["x402", "mpp"], "allowed_chains": ["tenzro"], "machine_resources": [], "max_uses_per_minute": 10, "max_bytes": 1024, "operation_bounds": []}

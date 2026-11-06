@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+  <key>com.apple.security.files.downloads.read-write</key>
+  <true/>
+  <!--
+    WALLET PERSISTENCE — keychain-access-groups.
+
+    tenzro-device-key needs this entitlement to persist the Secure Enclave
+    wallet key across restarts. Without it, SecKey::new(persistent) returns
+    errSecMissingEntitlement (-34018) and the app falls back to a session-only
+    key (wallet recreated each launch — graceful, by design).
+
+    It is COMMENTED OUT because enabling it on a Developer-ID + hardened-runtime
+    build with NO embedded provisioning profile makes macOS/AMFI SIGKILL the app
+    at launch (<2s, no log output) — tested 2026-06-22. Even the app's OWN
+    App-ID group requires a profile on macOS.
+
+    TO ENABLE (one step once the profile is in place):
+      1. Drop a current macOS `.provisionprofile` for App ID com.tenzro.control
+         (with the Keychain Sharing capability) at src-tauri/embedded.provisionprofile.
+      2. Add the `provisioningProfile` key to tauri.conf.json (macOS bundle).
+      3. Uncomment the <key>/<array> block below.
+      4. Rebuild + sign. The SE key lands in the default app keychain group
+         R5FXGKNFBP.com.tenzro.control (device_key uses DataProtectionKeychain,
+         no explicit kSecAttrAccessGroup), so this single group is sufficient.
+
+    The group string is $(AppIdentifierPrefix)<bundle-id> = team prefix + id.
+  -->
+  <!--
+  <key>keychain-access-groups</key>
+  <array>
+    <string>R5FXGKNFBP.com.tenzro.control</string>
+  </array>
+  -->
+</dict>
+</plist>

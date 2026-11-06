@@ -1,0 +1,12 @@
+[Unit]
+Description=Load the Groth16 prover container the image carries into local storage
+Documentation=https://tenzro.com/docs/node/confidential-vm
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/tenzro/prover-image
+
+[Install]
+WantedBy=multi-user.target

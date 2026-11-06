@@ -1,0 +1,103 @@
+[Unit]
+Description=Tenzro Network Node
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/tenzro/tenzro-network
+
+# The node runs confined: a dedicated unprivileged user, its own state
+# directory, no new privileges, a read-only view of the rest of the system and
+# only the devices it needs (the TPM, and a GPU when it serves models). Every
+# HTTP listener binds loopback by default; peers are reached over the network's
+# own transport. Exposing anything publicly is the operator's own choice, made
+# outside the node (their own reverse proxy in front of the loopback ports).
+
+[Service]
+Type=simple
+User=tenzro
+Group=tenzro
+StateDirectory=tenzro
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/tenzro
+ExecStart=/usr/local/bin/tenzro-node \
+  --config /etc/tenzro/config.json \
+  --data-dir /var/lib/tenzro/data \
+  --log-level info
+
+# The TPM derivation root is authorised by the attestation key
+# `tenzro-node tpm provision` made (config [tpm] root_authorization_handle);
+# no credential is loaded.
+Environment=TENZRO_DEVICE_KEY_DIR=/var/lib/tenzro/device-key
+
+# Privileges
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# Filesystem: read-only system, no home directories, private /tmp, writable
+# state only.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tenzro
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+
+# Devices: closed by default. The TPM resource manager for hardware-rooted
+# keys, and the GPU device nodes for model serving (harmless when absent).
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+DeviceAllow=char-nvidiactl rw
+DeviceAllow=char-nvidia-uvm rw
+DeviceAllow=char-nvidia-frontend rw
+DeviceAllow=char-drm rw
+
+# Network: IP and local sockets only (netlink for interface discovery).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# Resource limits
+#
+# RocksDB opens many files and a node holds a socket per peer; 1024 is not
+# enough and the failure is an obscure "Too many open files" from the storage
+# engine rather than anything naming the limit.
+LimitNOFILE=65536
+
+# NO MemoryMax, deliberately.
+#
+# On unified-memory hardware a cgroup cap does not constrain the allocations
+# that actually consume the pool: GPU driver allocations are not charged to the
+# process memcg, so a cap bounds the bookkeeping and not the memory, which is
+# worse than no cap because it looks like protection.
+#
+# The real ceiling is the node's own `[memory]` budget, which admits every load
+# against both its ledger and what the machine reports as free. That check sees
+# allocations the cgroup does not.
+#
+# What a cgroup IS good for here is protection rather than limitation: a floor
+# the kernel will not reclaim below, so the node keeps answering while something
+# else on the box is being squeezed.
+MemoryMin=1G
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tenzro-node
+
+[Install]
+WantedBy=multi-user.target

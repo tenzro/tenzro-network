@@ -1,0 +1,42 @@
+#!/bin/sh
+# Wrap each receipt in the inbox into a Groth16 proof, bind the proof to an
+# attestation of this machine's TEE through the node, verify the bound proof,
+# and leave everything in the outbox. Each result is also printed to the serial
+# console as tagged lines.
+set -u
+in=/var/lib/tenzro-prover/inbox
+out=/var/lib/tenzro-prover/outbox
+emit() {
+    base64 -w 0 | fold -w 120 | sed "s/^/$1 /"
+    echo
+    echo "$1 END"
+}
+# Proofs are bound through the node; wait for its RPC.
+i=0
+until curl -sf --max-time 10 -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_detectTee","params":{}}' http://127.0.0.1:8545 >/dev/null; do
+    i=$((i + 1))
+    [ "$i" -ge 180 ] && { echo "TENZRO-PROVER the node RPC did not answer"; exit 1; }
+    sleep 5
+done
+for r in "$in"/*.receipt; do
+    [ -e "$r" ] || continue
+    n=$(basename "$r" .receipt)
+    w="$out/$n"
+    mkdir -p "$w"
+    mv "$r" "$w/receipt.bin"
+    echo "TENZRO-PROVER $n wrapping"
+    start=$(date +%s)
+    if ! tenzro-finality-prover wrap --receipt "$w/receipt.bin" --out "$w/proof.json" > "$w/wrap.log" 2>&1; then
+        echo "TENZRO-PROVER $n wrap failed: $(tail -c 600 "$w/wrap.log" | tr '\n' ' ')"
+        continue
+    fi
+    echo "TENZRO-PROVER $n wrapped in $(( $(date +%s) - start )) s"
+    if ! tenzro zk attest-finality-proof --proof "$w/proof.json" --out "$w/bound.json" > "$w/attest.log" 2>&1; then
+        echo "TENZRO-PROVER $n attestation failed: $(tail -c 600 "$w/attest.log" | tr '\n' ' ')"
+        continue
+    fi
+    tenzro zk verify-tee-finality-proof --bundle "$w/bound.json" > "$w/verify.json" 2>&1
+    echo "TENZRO-PROVER-VERIFY $n $(jq -c 'del(.measurements)' "$w/verify.json" 2>/dev/null || tr '\n' ' ' < "$w/verify.json")"
+    gzip -9nc "$w/bound.json" | emit "TENZRO-PROVER-BUNDLE-$n"
+done

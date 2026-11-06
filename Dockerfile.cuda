@@ -1,0 +1,279 @@
+# CUDA image variant. Builds tenzro-node with GPU acceleration:
+#   - llama.cpp CUDA backend for LLM inference (feature `tenzro-node/cuda`)
+#   - ONNX Runtime CUDA and TensorRT execution providers for the non-LLM
+#     modalities (the same `tenzro-node/cuda` feature; forecast / vision /
+#     text-embedding / segmentation / detection / audio / video runtimes)
+#
+# Builds on both x86_64 and aarch64 (Grace-Blackwell GB10 / DGX Spark, Grace
+# Hopper GH200, Jetson Thor). The base images are multi-arch, so `docker build`
+# on the target machine picks the matching one with no extra flags.
+#
+# ONNX Runtime with the CUDA and TensorRT providers is compiled from source in
+# a separate stage on both architectures. Expect roughly an extra hour and
+# ~60 GB of RAM for that stage; see the ort-cuda stage below.
+#
+# Run with the NVIDIA container runtime: `docker run --gpus all ...`
+# The CPU image is built from ./Dockerfile and is unchanged by this file.
+
+# TensorRT 10 built for CUDA 13.0. ONNX Runtime 1.24 does not compile against
+# TensorRT 11 (its ONNX parser dropped the subgraph collection types), and the
+# apt repository serves the newest major unless the version is named.
+ARG TENSORRT_VERSION=10.14.1.48-1+cuda13.0
+
+# Stage 0: ONNX Runtime with the CUDA and TensorRT execution providers.
+#
+# pyke's `ort` binary distribution carries a CUDA build for x86_64 only, and
+# against CUDA 12; for aarch64 it publishes a CPU-only build, which ort-sys
+# downloads in place of the requested CUDA one with nothing more than a log
+# line. Neither fits this CUDA 13 image, so the runtime is compiled here on
+# both architectures and handed to ort-sys via ORT_LIB_LOCATION. The node
+# checks at startup that the linked ONNX Runtime lists the CUDA provider and
+# refuses to run on an NVIDIA machine if it does not.
+FROM docker.io/nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04@sha256:0230b7f243483cb15969fa3cc724a9459599604427052fc2a0d4291c7c0647dd AS ort-cuda
+
+# Empty selects per architecture. aarch64: 90 = Grace Hopper GH200, 110 =
+# Jetson Thor (renumbered from SM101 in CUDA 13.0), 121 = GB10 (CUDA 13.0 is
+# the first toolkit to carry it); Jetson Orin (sm_87) stays on the CUDA 12.x
+# JetPack line. x86_64: 80 = A100, 86 = RTX 30 / A-series, 89 = RTX 40 / L40,
+# 90 = H100 / H200, 100 = B200, 120 = RTX 50 / RTX PRO Blackwell. Every
+# additional architecture costs build time, so pass the one the target has.
+ARG ORT_CUDA_ARCHITECTURES=
+# Pinned to the release NVIDIA's own DGX Spark build guide validates against
+# CUDA 13.0 + cuDNN 9 on Ubuntu 24.04. ONNX Runtime below 1.24.4 does not
+# compile against CUDA 13 at all.
+ARG ONNXRUNTIME_VERSION=v1.24.4
+# The commit the tag must resolve to; a moved tag fails the build.
+ARG ONNXRUNTIME_COMMIT=2d924974ef147392ced8409d36bd6d2e7fcc8a74
+ARG TENSORRT_VERSION
+# Parallel compile jobs inside ONNX Runtime. Each CUDA translation unit holds
+# several GB per target architecture; the release script derives this from
+# the container memory cap.
+ARG ORT_JOBS=2
+
+# TensorRT comes from the NVIDIA apt repository the CUDA base image already
+# configures, at TENSORRT_VERSION; the runtime stage installs the same version.
+RUN set -eux; \
+    mkdir -p /opt/onnxruntime/lib; \
+    archs="${ORT_CUDA_ARCHITECTURES}"; \
+    if [ -z "$archs" ]; then \
+      if [ "$(uname -m)" = "aarch64" ]; then archs="90;110;121"; \
+      else archs="80;86;89;90;100;120"; fi; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates git wget ninja-build g++ gcc make \
+      python3 python3-pip python3-dev \
+      libnvinfer10="$TENSORRT_VERSION" libnvinfer-dev="$TENSORRT_VERSION" \
+      libnvinfer-headers-dev="$TENSORRT_VERSION" \
+      libnvinfer-plugin10="$TENSORRT_VERSION" \
+      libnvinfer-plugin-dev="$TENSORRT_VERSION" \
+      libnvinfer-headers-plugin-dev="$TENSORRT_VERSION" \
+      libnvonnxparsers10="$TENSORRT_VERSION" \
+      libnvonnxparsers-dev="$TENSORRT_VERSION"; \
+    rm -rf /var/lib/apt/lists/*; \
+    pip3 install --break-system-packages --no-cache-dir \
+      cmake==4.4.3 psutil==7.2.2 packaging==26.3; \
+    git clone --depth 1 --branch "$ONNXRUNTIME_VERSION" --recursive \
+      https://github.com/microsoft/onnxruntime /src/onnxruntime; \
+    cd /src/onnxruntime; \
+    test "$(git rev-parse HEAD)" = "$ONNXRUNTIME_COMMIT"; \
+    ./build.sh \
+      --config Release \
+      --use_cuda \
+      --cuda_home /usr/local/cuda \
+      --cudnn_home /usr \
+      --use_tensorrt \
+      --tensorrt_home /usr \
+      --build_shared_lib \
+      --skip_tests \
+      --allow_running_as_root \
+      --parallel "$ORT_JOBS" \
+      --nvcc_threads 1 \
+      --cmake_extra_defines \
+        "CMAKE_CUDA_ARCHITECTURES=${archs}" \
+        CMAKE_INSTALL_LIBDIR=lib \
+        onnxruntime_BUILD_UNIT_TESTS=OFF; \
+    cmake --install build/Linux/Release --prefix /opt/onnxruntime; \
+    cp build/Linux/Release/libonnxruntime_providers_*.so /opt/onnxruntime/lib/; \
+    ls -l /opt/onnxruntime/lib; \
+    test -f /opt/onnxruntime/lib/libonnxruntime.so; \
+    test -f /opt/onnxruntime/lib/libonnxruntime_providers_cuda.so; \
+    test -f /opt/onnxruntime/lib/libonnxruntime_providers_tensorrt.so; \
+    test -f /opt/onnxruntime/lib/libonnxruntime_providers_shared.so; \
+    rm -rf /src/onnxruntime
+
+# Stage 1: Build
+FROM docker.io/nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04@sha256:0230b7f243483cb15969fa3cc724a9459599604427052fc2a0d4291c7c0647dd AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    protobuf-compiler \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (the workspace rust-toolchain.toml selects the channel;
+# rustup syncs it on the first cargo invocation)
+# rustup-init is a fixed release, checked against its published sha256; any
+# other file fails the build.
+ARG RUSTUP_VERSION=1.29.1
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64) t=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;; \
+      aarch64) t=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;; \
+      *) echo "no pinned rustup-init for $(uname -m)"; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${t}/rustup-init"; \
+    echo "${sum}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --default-toolchain 1.99.1 --profile minimal; \
+    rm /tmp/rustup-init
+ENV PATH=/root/.cargo/bin:$PATH
+
+# The CUDA and TensorRT ONNX Runtime prefix built in the ort-cuda stage.
+COPY --from=ort-cuda /opt/onnxruntime /opt/onnxruntime
+
+WORKDIR /build
+# The commit time (build-linux.sh passes it), for every tool that stamps a date.
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+# Force clang as the C/C++ compiler (required by llama-cpp-sys-2 which uses
+# clang-specific flags). nvcc keeps g++ as its host compiler via CUDAHOSTCXX —
+# clang is not a supported nvcc host compiler on every CUDA 12.x minor.
+ENV CC=clang
+ENV CXX=clang++
+ENV CUDAHOSTCXX=g++
+
+# CUDAARCHS is deliberately unset. ggml picks the architecture list itself when
+# CMAKE_CUDA_ARCHITECTURES is undefined (ggml/src/ggml-cuda/CMakeLists.txt),
+# covering Turing through Blackwell and appending 121a-real on CUDA >= 12.9 —
+# the compute capability of GB10, which no hand-written list here would carry.
+# It only falls back to the unusable "native" when GGML_NATIVE is ON, and
+# llama-cpp-sys-2 sets that OFF unless the Rust target-cpu is native.
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY tools/ tools/
+COPY sdk/tenzro-ts-sdk/native/ sdk/tenzro-ts-sdk/native/
+COPY sdk/tenzro-py/native/ sdk/tenzro-py/native/
+# vendor/* subtrees (erc8004-evm, erc8004-solana, erc8004-atom)
+# are source artifacts for regenerate.sh, not build-time
+# dependencies — they're copied here because COPY vendor/ is a single layer
+# and the cost is negligible vs. surgical sub-copies.
+COPY vendor/ vendor/
+
+# Build tenzro-node (llama.cpp CUDA + ONNX Runtime CUDA and TensorRT), then
+# tenzro-cli in its own cargo run: built together, cargo unifies the CUDA
+# feature into the CLI, which serves no model and would carry the whole CUDA
+# backend for nothing.
+#
+# ORT_LIB_LOCATION points ort-sys at the prefix the ort-cuda stage compiled;
+# ort-sys checks that variable before the download path, and
+# ORT_SKIP_DOWNLOAD makes the precedence explicit rather than incidental. That
+# link is dynamic: ort-sys 2.0.0-rc.11 and later link the prefix statically
+# unless ORT_PREFER_DYNAMIC_LINK=1, and the prefix holds the shared libraries
+# only. The dynamic link searches only the directory it is given, so ort-sys
+# gets the lib/ of the prefix as ORT_LIB_PATH, which it reads first. ort-sys
+# emits no rpath of its own, so one is set here
+# pointing at where the runtime stage lands the libraries. Forecast / vision /
+# text-embedding / segmentation / detection / audio / video then run on the
+# GPU alongside LLM inference.
+#
+# Compilation width. Both cargo and the cmake crate default to nproc, which on
+# a many-core machine with modest RAM gets rustc and nvcc OOM-killed -- and a
+# killed compiler reports itself as a signal, which reads like a compiler bug
+# rather than a memory ceiling. Unset uses nproc; a workstation passes --build-arg CARGO_BUILD_JOBS=N.
+# cargo exports the same number to build scripts as NUM_JOBS, so ggml-cuda's
+# cmake parallelism follows it instead of needing its own knob.
+ARG CARGO_BUILD_JOBS
+RUN set -eux; \
+    export ORT_LIB_LOCATION=/opt/onnxruntime; \
+    export ORT_PREFER_DYNAMIC_LINK=1 ORT_LIB_PATH=/opt/onnxruntime/lib; \
+    export ORT_SKIP_DOWNLOAD=1; \
+    # RUSTFLAGS replaces .cargo/config.toml's target flags, so they are repeated here.
+    case "$(uname -m)" in \
+      x86_64) cpu="-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq" ;; \
+      *) cpu="" ;; \
+    esac; \
+    export RUSTFLAGS="$cpu --remap-path-prefix=/build=/tenzro --remap-path-prefix=/root/.cargo=/cargo -C link-arg=-Wl,-rpath,\$ORIGIN/../lib"; \
+    cargo build --release --locked -j "${CARGO_BUILD_JOBS:-$(nproc)}" \
+      -p tenzro-node --features "tenzro-node/cuda"; \
+    ldd target/release/tenzro-node | grep -q 'libonnxruntime\.so'; \
+    cargo build --release --locked -j "${CARGO_BUILD_JOBS:-$(nproc)}" -p tenzro-cli; \
+    ! grep -qa ggml_cuda_init target/release/tenzro
+
+
+# Stage 2: Runtime
+FROM docker.io/nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04@sha256:14f6d08d1cd4a96effbfe3101d0b56326f552c199d05e4979ee0bd616df5811b AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3t64 \
+    curl \
+    libstdc++6 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro
+
+# Copy binaries from builder
+COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
+COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+
+# tenzro-node links ONNX Runtime dynamically against the prefix built in the
+# ort-cuda stage, resolved through its only run path, $ORIGIN/../lib: here
+# /usr/local/lib, in a release archive the lib/ beside bin/. A run path with
+# an absolute directory would let whatever ONNX Runtime a host keeps there
+# shadow the one shipped with the binary. The CUDA, TensorRT and
+# shared-provider objects must sit in the same directory as libonnxruntime.so
+# — ONNX Runtime dlopens them relative to its own load path, and its docs
+# advise against putting them on a library search path.
+COPY --from=ort-cuda /opt/onnxruntime/lib /usr/local/lib/
+RUN rm -rf /usr/local/lib/cmake /usr/local/lib/pkgconfig
+
+# TensorRT runtime for the TensorRT execution provider, from the NVIDIA apt
+# repository the CUDA base image configures, at the version built against.
+ARG TENSORRT_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnvinfer10="$TENSORRT_VERSION" \
+    libnvinfer-plugin10="$TENSORRT_VERSION" \
+    libnvonnxparsers10="$TENSORRT_VERSION" \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create data directories
+# One root for everything on the persistent volume. `TENZRO_HOME` moves the
+# shared model store, the HuggingFace cache, and any per-instance data dir
+# onto /data/tenzro, which is the mounted volume. Keeping weights off the
+# container's ephemeral layer means a restart does not re-download them.
+#
+# `--data-dir /data/tenzro` stays pinned in CMD below. That is the documented
+# escape hatch, and it is used here deliberately: the chain database lives at
+# /data/tenzro/db rather than under /data/tenzro/instances/default.
+ENV TENZRO_HOME=/data/tenzro
+RUN mkdir -p /data/tenzro/models /data/tenzro/hf /config && chown -R tenzro:tenzro /data /config
+
+USER tenzro
+WORKDIR /home/tenzro
+
+# Expose ports
+# P2P, JSON-RPC, Web API, Metrics, MCP, A2A
+EXPOSE 9000 8545 8080 9090 3001 3002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/verify/health || exit 1
+
+# Default entrypoint
+ENTRYPOINT ["tenzro-node"]
+
+# Default args (override with docker run args)
+CMD ["--data-dir", "/data/tenzro", "--log-level", "info"]

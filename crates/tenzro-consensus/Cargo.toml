@@ -1,0 +1,51 @@
+[package]
+name = "tenzro-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Tenzro consensus: signature-free DAG ordering with post-quantum hardware-signed checkpoint certificates"
+documentation = "https://docs.rs/tenzro-consensus"
+readme = "README.md"
+keywords = ["tenzro", "consensus", "dag", "bft", "post-quantum"]
+categories = ["asynchronous", "cryptography"]
+
+[features]
+# Software validator keys and in-memory vote records for tests and the
+# network simulator. Never enabled by a release crate.
+test-keys = []
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-storage = { workspace = true }
+tenzro-cert-stark = { workspace = true, features = ["parallel"] }
+tenzro-finality = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
+libc = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+blake3 = { workspace = true }
+ml-dsa = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+x25519-dalek = { workspace = true }
+hkdf = "0.12"
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+flate2 = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,598 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+        "revision": "c25a394dd583836952667c12f008335071b3f43d",
+        "sha256": "bf27b2f3f9ef9c32ca337d75b361fa99439deaeaefe82e4701b2dbd8439197cc",
+        "size": 307161415
+      },
+      {
+        "path": "onnx/model.onnx_data",
+        "repo": "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+        "revision": "c25a394dd583836952667c12f008335071b3f43d",
+        "sha256": "f0a61604465929a27e68aa6217c8c89ec6186572f0209fdb7711adda48a9b9a9",
+        "size": 2093436928
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+        "revision": "c25a394dd583836952667c12f008335071b3f43d",
+        "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+        "size": 11423705
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "Qwen3-Embedding 0.6B — multilingual text embeddings, edge-tier",
+        "embedding_dim": 1024,
+        "embedding_template": {
+          "InstructQuery": {
+            "default_task": "Given a web search query, retrieve relevant passages that answer the query"
+          }
+        },
+        "external_data_filenames": [
+          "onnx/model.onnx_data"
+        ],
+        "family": "qwen3-embedding",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+        "id": "qwen3-embedding-0.6b",
+        "matryoshka_dims": [
+          768,
+          512,
+          256,
+          128,
+          64,
+          32
+        ],
+        "max_sequence_length": 32768,
+        "min_ram_gb": 3,
+        "name": "Qwen3-Embedding 0.6B",
+        "size_bytes": 2400000000,
+        "supports_fp16": true,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model.onnx",
+        "repo": "onnx-community/Qwen3-Embedding-4B-ONNX",
+        "revision": "7d046e08591811ddd93dfe815b1d3bfccb16c041",
+        "sha256": "54f36c53f4b0573eae79d927b9f4ac24de38cb1ce67d90c2a398669b8b0977a0",
+        "size": 2061782
+      },
+      {
+        "path": "model.onnx_data",
+        "repo": "onnx-community/Qwen3-Embedding-4B-ONNX",
+        "revision": "7d046e08591811ddd93dfe815b1d3bfccb16c041",
+        "sha256": "3a2cf9a232f7a5ea7d4275195146703bab19211f1c124c5c0e4bfc598c51d356",
+        "size": 16087097600
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "onnx-community/Qwen3-Embedding-4B-ONNX",
+        "revision": "7d046e08591811ddd93dfe815b1d3bfccb16c041",
+        "sha256": "83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d",
+        "size": 11422947
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "Qwen3-Embedding 4B — mid-tier multilingual text embeddings",
+        "embedding_dim": 2560,
+        "embedding_template": {
+          "InstructQuery": {
+            "default_task": "Given a web search query, retrieve relevant passages that answer the query"
+          }
+        },
+        "external_data_filenames": [
+          "model.onnx_data"
+        ],
+        "family": "qwen3-embedding",
+        "hf_filename": "model.onnx",
+        "hf_repo": "onnx-community/Qwen3-Embedding-4B-ONNX",
+        "id": "qwen3-embedding-4b",
+        "matryoshka_dims": [
+          2048,
+          1536,
+          1024,
+          768,
+          512,
+          256,
+          128,
+          32
+        ],
+        "max_sequence_length": 32768,
+        "min_ram_gb": 20,
+        "name": "Qwen3-Embedding 4B",
+        "size_bytes": 16100000000,
+        "supports_fp16": true,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model.onnx",
+        "repo": "onnx-community/Qwen3-Embedding-8B-ONNX",
+        "revision": "c2a6a92aa4c7de0557453649f0605e568a249e73",
+        "sha256": "bdd05a9551790de6f670ade8c2837e45977c3e45316dd6669dd19932a6289ddb",
+        "size": 2061942
+      },
+      {
+        "path": "model.onnx_data",
+        "repo": "onnx-community/Qwen3-Embedding-8B-ONNX",
+        "revision": "c2a6a92aa4c7de0557453649f0605e568a249e73",
+        "sha256": "1827e98ceecf4ef3e42e867eff95035186849b88b74166276137f1621a5322ea",
+        "size": 30269182208
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "onnx-community/Qwen3-Embedding-8B-ONNX",
+        "revision": "c2a6a92aa4c7de0557453649f0605e568a249e73",
+        "sha256": "83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d",
+        "size": 11422947
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "Qwen3-Embedding 8B — flagship multilingual text embeddings",
+        "embedding_dim": 4096,
+        "embedding_template": {
+          "InstructQuery": {
+            "default_task": "Given a web search query, retrieve relevant passages that answer the query"
+          }
+        },
+        "external_data_filenames": [
+          "model.onnx_data"
+        ],
+        "family": "qwen3-embedding",
+        "hf_filename": "model.onnx",
+        "hf_repo": "onnx-community/Qwen3-Embedding-8B-ONNX",
+        "id": "qwen3-embedding-8b",
+        "matryoshka_dims": [
+          2560,
+          2048,
+          1024,
+          512,
+          256,
+          128,
+          32
+        ],
+        "max_sequence_length": 32768,
+        "min_ram_gb": 36,
+        "name": "Qwen3-Embedding 8B",
+        "size_bytes": 30300000000,
+        "supports_fp16": true,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "onnx-community/embeddinggemma-300m-ONNX",
+        "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+        "sha256": "ea91fd315a7c152d427d231746f0f811a1ac93beaba656abfdf2b24e091265e4",
+        "size": 479932
+      },
+      {
+        "path": "onnx/model.onnx_data",
+        "repo": "onnx-community/embeddinggemma-300m-ONNX",
+        "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+        "sha256": "ef835ae565d8695236652475903078e8ed794c7c35faf1164d78ec3238e8a88d",
+        "size": 1234521088
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "onnx-community/embeddinggemma-300m-ONNX",
+        "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+        "sha256": "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+        "size": 20323312
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "id": "gemma",
+      "name": "Gemma Terms of Use",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "Google EmbeddingGemma 300M — Matryoshka edge embeddings, fp32-only",
+        "embedding_dim": 768,
+        "embedding_template": {
+          "GemmaTask": {
+            "default_task": "search result"
+          }
+        },
+        "external_data_filenames": [
+          "onnx/model.onnx_data"
+        ],
+        "family": "embeddinggemma",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/embeddinggemma-300m-ONNX",
+        "id": "embeddinggemma-300m",
+        "matryoshka_dims": [
+          512,
+          256,
+          128
+        ],
+        "max_sequence_length": 2048,
+        "min_ram_gb": 3,
+        "name": "EmbeddingGemma 300M",
+        "size_bytes": 1235000000,
+        "supports_fp16": false,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "BAAI/bge-m3",
+        "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+        "sha256": "f84251230831afb359ab26d9fd37d5936d4d9bb5d1d5410e66442f630f24435b",
+        "size": 724923
+      },
+      {
+        "path": "onnx/model.onnx_data",
+        "repo": "BAAI/bge-m3",
+        "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+        "sha256": "1eebfb28493f67bba03ce0ef64bfdc7fc5a3bd9d7493f818bb1d78cd798416b4",
+        "size": 2266820608
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "BAAI/bge-m3",
+        "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+        "sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
+        "size": 17098108
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "BAAI BGE-M3 — multilingual multi-granularity retrieval encoder",
+        "embedding_dim": 1024,
+        "embedding_template": "None",
+        "external_data_filenames": [
+          "onnx/model.onnx_data"
+        ],
+        "family": "bge",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "BAAI/bge-m3",
+        "id": "bge-m3",
+        "matryoshka_dims": [],
+        "max_sequence_length": 8192,
+        "min_ram_gb": 4,
+        "name": "BGE-M3",
+        "size_bytes": 2270000000,
+        "supports_fp16": true,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "nomic-ai/modernbert-embed-base",
+        "revision": "d556a88e332558790b210f7bdbe87da2fa94a8d8",
+        "sha256": "3b9dbe455b29fa24f50e7aa7c3ae923b0ad08ea87530cf2fe8e28ebc57a6ddc7",
+        "size": 596492399
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "nomic-ai/modernbert-embed-base",
+        "revision": "d556a88e332558790b210f7bdbe87da2fa94a8d8",
+        "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        "size": 3583228
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "ModernBERT-embed base — 8192-context mean-pooled retrieval encoder, Matryoshka 256",
+        "embedding_dim": 768,
+        "embedding_template": "NomicPrefix",
+        "external_data_filenames": [],
+        "family": "modernbert",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "nomic-ai/modernbert-embed-base",
+        "id": "modernbert-embed-base",
+        "matryoshka_dims": [
+          256
+        ],
+        "max_sequence_length": 8192,
+        "min_ram_gb": 2,
+        "name": "ModernBERT-embed base",
+        "size_bytes": 596000000,
+        "supports_fp16": true,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "lightonai/modernbert-embed-large",
+        "revision": "95a19bff4963b66d3c14fd4a20d147ebb4aaccfc",
+        "sha256": "71890860122f39eb922f6bf96714fda22ba10eb5bf1bc57bfdcf02ec93acc5d0",
+        "size": 1579551135
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "lightonai/modernbert-embed-large",
+        "revision": "95a19bff4963b66d3c14fd4a20d147ebb4aaccfc",
+        "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        "size": 3583228
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "ModernBERT-embed large — 8192-context mean-pooled retrieval encoder",
+        "embedding_dim": 1024,
+        "embedding_template": "NomicPrefix",
+        "external_data_filenames": [],
+        "family": "modernbert",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "lightonai/modernbert-embed-large",
+        "id": "modernbert-embed-large",
+        "matryoshka_dims": [],
+        "max_sequence_length": 8192,
+        "min_ram_gb": 3,
+        "name": "ModernBERT-embed large",
+        "size_bytes": 1580000000,
+        "supports_fp16": true,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "onnx-community/harrier-oss-v1-270m-ONNX",
+        "revision": "d59c919d0159aea2c19ed7d04288fcdd048d0f9c",
+        "sha256": "d5bff170c042556850e4941617bd45e05e7f2dd0868dc9e2beef05b8c5b62d06",
+        "size": 182338
+      },
+      {
+        "path": "onnx/model.onnx_data",
+        "repo": "onnx-community/harrier-oss-v1-270m-ONNX",
+        "revision": "d59c919d0159aea2c19ed7d04288fcdd048d0f9c",
+        "sha256": "f27e5e94060e994a9d79be8be9910fc2513e0f9939d934103489a2156b0ff9a8",
+        "size": 1105947136
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "onnx-community/harrier-oss-v1-270m-ONNX",
+        "revision": "d59c919d0159aea2c19ed7d04288fcdd048d0f9c",
+        "sha256": "ec95be298bea26f90370854faa650744c9fb0a04ca5e5ff95dd3913393ac5e45",
+        "size": 20323311
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "Harrier OSS v1 270M: 270M decoder text embeddings, last-token pooled and L2-normalised; edge tier",
+        "embedding_dim": 640,
+        "embedding_template": {
+          "InstructQuery": {
+            "default_task": "Given a web search query, retrieve relevant passages that answer the query"
+          }
+        },
+        "external_data_filenames": [
+          "onnx/model.onnx_data"
+        ],
+        "family": "harrier",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/harrier-oss-v1-270m-ONNX",
+        "id": "harrier-oss-v1-270m",
+        "matryoshka_dims": [],
+        "max_sequence_length": 32768,
+        "min_ram_gb": 2,
+        "name": "Harrier OSS v1 270M",
+        "size_bytes": 1126452785,
+        "supports_fp16": false,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "0b00719ada6846976a7abbb09eaf95893ebe197c19268e5f847a4d5d6c1d0a84",
+        "built_from": {
+          "repo": "nvidia/Nemotron-3-Embed-1B-BF16",
+          "revision": "c0c9fea93ea424587517f2c59e20db9f1d6bf615"
+        },
+        "path": "model.onnx",
+        "recipe": "tools/embed-export/export.py",
+        "repo": "tenzro/nemotron-3-embed-1b-onnx",
+        "sha256": "2067e4ff268ab87e3af3893c907d32213542a7d007e69cbd715678de7cb2d2bc",
+        "size": 689714
+      },
+      {
+        "blake3": "6859e1a09179013dcc48f3f800fa7c1e2f70887527d243dbdbe882e8e04ce31a",
+        "built_from": {
+          "repo": "nvidia/Nemotron-3-Embed-1B-BF16",
+          "revision": "c0c9fea93ea424587517f2c59e20db9f1d6bf615"
+        },
+        "path": "model.onnx_data",
+        "recipe": "tools/embed-export/export.py",
+        "repo": "tenzro/nemotron-3-embed-1b-onnx",
+        "sha256": "4b3714c62f0ed36504dcce7f6489be22163a791431a60d5f9c6ea0d55daaad69",
+        "size": 4563673088
+      },
+      {
+        "blake3": "de8ca159a61a113b95d456f074de77ded1f43fe061531de180fafd973f37be9b",
+        "built_from": {
+          "repo": "nvidia/Nemotron-3-Embed-1B-BF16",
+          "revision": "c0c9fea93ea424587517f2c59e20db9f1d6bf615"
+        },
+        "path": "tokenizer.json",
+        "recipe": "tools/embed-export/export.py",
+        "repo": "tenzro/nemotron-3-embed-1b-onnx",
+        "sha256": "797410dfb649a5b9ba92bc4fef7dbf4022d00e73de6867c4ac199a8846439421",
+        "size": 17077678
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "OpenMDW-1.1",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "NVIDIA Nemotron 3 Embed 1B: bidirectional 1B text embeddings, mean pooled and L2-normalised; multilingual retrieval",
+        "embedding_dim": 2048,
+        "embedding_template": "QueryPassagePrefix",
+        "external_data_filenames": [
+          "model.onnx_data"
+        ],
+        "family": "nemotron-embed",
+        "hf_filename": "model.onnx",
+        "hf_repo": "tenzro/nemotron-3-embed-1b-onnx",
+        "id": "nemotron-3-embed-1b",
+        "matryoshka_dims": [],
+        "max_sequence_length": 32768,
+        "min_ram_gb": 6,
+        "name": "Nemotron 3 Embed 1B",
+        "size_bytes": 4581440480,
+        "supports_fp16": false,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "onnx-community/embeddinggemma-2-ONNX",
+        "revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+        "sha256": "bc47de15f81208a5c99e5ab10f746d5e33b51ea228b7dc0bef9c133a94f1c1c3",
+        "size": 421421
+      },
+      {
+        "path": "onnx/model.onnx_data",
+        "repo": "onnx-community/embeddinggemma-2-ONNX",
+        "revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+        "sha256": "9fd452bfc6916e5a92f080f8dada35598ca4512b21c65897d4c5974d5f9630a2",
+        "size": 1084170240
+      },
+      {
+        "path": "tokenizer.json",
+        "repo": "onnx-community/embeddinggemma-2-ONNX",
+        "revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+        "sha256": "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4",
+        "size": 32170510
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-text-embedding",
+      "spec": {
+        "description": "Google EmbeddingGemma 2 text encoder (270M of the 740M model) as ONNX: 768-dimensional Matryoshka embeddings truncated to 512, 256 or 128 and re-normalised, 8,192-token context, 100+ languages, task prompts SearchQuery, Document, CodeRetrieval, SentenceSimilarity. fp32 only: float16 gives NaN.",
+        "embedding_dim": 768,
+        "embedding_template": {
+          "GemmaTask": {
+            "default_task": "search result"
+          }
+        },
+        "external_data_filenames": [
+          "onnx/model.onnx_data"
+        ],
+        "family": "embeddinggemma",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/embeddinggemma-2-ONNX",
+        "id": "embeddinggemma-2",
+        "matryoshka_dims": [
+          512,
+          256,
+          128
+        ],
+        "max_sequence_length": 8192,
+        "min_ram_gb": 3,
+        "name": "EmbeddingGemma 2",
+        "size_bytes": 1116762171,
+        "supports_fp16": false,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  }
+]

@@ -1,0 +1,2 @@
+# Recorded streams keep their exact bytes, line terminators included.
+*.sse -text

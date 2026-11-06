@@ -1,0 +1,84 @@
+[package]
+name = "tenzro-iroh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Iroh (QUIC-native content-addressed transport) integration for Tenzro Network — endpoint lifecycle, blob distribution, CRDT documents, and the tenzro:// URI resolver"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-storage = { workspace = true }
+
+# Async + error plumbing for the resolver trait surface.
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "io-util"] }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+url = { workspace = true }
+
+# Iroh stack.
+# DaBackend over iroh-blobs.
+# outer-gradient distribution over iroh-blobs.
+# sealed-shard ciphertexts over iroh-blobs; the
+#                    SealedDatasetManifest itself rides the existing
+#                    dataset gossip topic instead of
+#                    iroh-docs (see sealed_shard_store.rs for rationale).
+# Pre-launch hygiene: no unused deps added to the workspace.
+iroh = { workspace = true, features = ["unstable-custom-transports", "platform-verifier"] }
+n0-watcher = { workspace = true }
+noq-udp = { workspace = true }
+noq-proto = { workspace = true }
+rand = { workspace = true }
+iroh-base = { workspace = true }
+iroh-blobs = { workspace = true }
+# Local-network discovery of cluster members (multicast only, no outside service).
+iroh-mdns-address-lookup = { workspace = true }
+futures-util = { workspace = true }
+base64 = { workspace = true }
+# Topic broadcast between nodes (gossip.rs).
+iroh-gossip = { workspace = true }
+blake3 = { workspace = true }
+
+# Machine identity: endpoint records are signed by the machine's hardware
+# P-256 key and verified against the identity it derives.
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+# The ML-DSA leg of endpoint authentication (src/pq_endpoint.rs).
+tenzro-crypto = { workspace = true }
+serde_json = { workspace = true }
+
+# The relay role: the iroh relay service embedded in one HTTP listener
+# beside the identity directory and pkarr store (src/relay.rs).
+iroh-relay = { version = "1.3", features = ["server", "platform-verifier"] }
+netdev = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+reqwest = { workspace = true }
+
+# Endpoint TLS with the X25519MLKEM768 post-quantum hybrid key exchange.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# The discovery store's address-lookup stream (src/discovery.rs).
+futures = { workspace = true }
+
+[dev-dependencies]
+# Self-signed certificates for the in-memory TLS handshake tests.
+rcgen = "0.14"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tenzro-cluster = { workspace = true, features = ["test-support"] }
+criterion = { workspace = true }
+p256 = { workspace = true }
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+
+[[bench]]
+name = "iroh_uri_benchmarks"
+harness = false
+
+[lints]
+workspace = true

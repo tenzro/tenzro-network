@@ -1,0 +1,16 @@
+[workspace]
+members = ["programs/atom-engine"]
+resolver = "2"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+panic = 'abort'
+strip = true
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1

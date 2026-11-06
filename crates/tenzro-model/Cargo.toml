@@ -1,0 +1,236 @@
+[package]
+name = "tenzro-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AI model registry, inference routing, and provider management for Tenzro Network"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+tenzro-storage = { workspace = true }
+tenzro-cluster = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+bincode = { workspace = true }
+
+# HuggingFace Hub downloads
+
+# llama.cpp bindings — GPU-accelerated GGUF inference (the `engine` feature)
+# Metal auto-links on macOS ARM64 (no feature flag needed)
+# Other backends enabled via feature flags below
+tenzro-catalog = { workspace = true }
+llama-cpp-2 = { workspace = true, optional = true }
+# The flash-attention policy setter on `LlamaContextParams` takes a raw
+# `llama_cpp_sys_2::llama_flash_attn_type`, so the sys crate has to be nameable here --
+# the safe wrapper exposes the setter but not the enum.
+#
+# All three come from the same praecise-engine commit (workspace root), so this is the one
+# `llama-cpp-sys-2` instance `llama-cpp-2` is built against.
+llama-cpp-sys-2 = { workspace = true, optional = true }
+praecise-runtime = { workspace = true }
+# Engines other than llama.cpp: supervised, confined runtime hosts, one engine
+# per model, admitted against the node's memory budget.
+praecise-host = { workspace = true }
+# Native media generation on the same ggml build as the language models.
+praecise-diffusion = { workspace = true, optional = true }
+# LoRA training on the same ggml build, in process: replayable steps, step
+# logs and content-hashed checkpoints.
+praecise-train = { workspace = true, optional = true }
+
+# Unicode decoding for llama.cpp token_to_piece
+encoding_rs = { version = "0.8", optional = true }
+
+# The Praecise engine's ONNX backend for non-LLM modalities (timeseries,
+# vision, text-embedding, segmentation, detection, audio, video). Part of the
+# `engine` feature, with llama-cpp-2: an engine build can serve any model in
+# the catalog. Runtime cost when no model is loaded is zero (sessions are
+# per-loaded-model, gated by tenzro_load*Model RPCs).
+praecise-onnx = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+image = { workspace = true }
+turbojpeg = { workspace = true, optional = true }
+
+# MoE expert-host execution: per-expert safetensors weight blobs
+# (gate/up/down projections) and gating-network extraction. base64
+# carries hidden-state batches on the tenzro/moe wire (f32 LE bytes).
+safetensors = { workspace = true }
+# The model parser child's resource caps and seccomp filter (parse_jail.rs).
+libc = { workspace = true }
+half = { workspace = true }
+base64 = { workspace = true }
+
+# Text-embedding tokenizer (Qwen3, BGE-M3, EmbeddingGemma, Snowflake Arctic)
+# and Whisper/Moonshine BPE.
+tokenizers = { workspace = true, optional = true }
+
+# Audio decode + resample + FFT for ASR runtime.
+hound = { workspace = true, optional = true }
+symphonia = { workspace = true, optional = true }
+rubato = { workspace = true, optional = true }
+realfft = { workspace = true, optional = true }
+
+# Scratch files for sealed models and audio decoding.
+tempfile = { workspace = true }
+
+# System memory/disk probing for model-load admission control.
+sysinfo = "0.31"
+
+# MoE GPU expert-compute backends (optional, pulled only by moe-cuda/moe-wgpu).
+# cudarc drives cuBLAS grouped GEMM on NVIDIA; wgpu runs cross-vendor WGSL
+# compute (AMD / Apple / Intel). The default build pulls neither.
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["std", "driver", "cublas", "dynamic-loading", "cuda-13000"] }
+wgpu = { version = "22", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+
+[features]
+default = ["engine", "mtmd"]
+# The model engines: llama.cpp/ggml (through praecise-runtime's bundled
+# backend), native media generation, LoRA training, the ONNX runtimes and their
+# decoders and tokenizers. Without it the crate keeps the engine-free parts a
+# node needs to take part in the network (catalog, registry, routing,
+# admission, pricing, SLA, provenance, sealed-model records, commitments) and
+# none of the modules that load or run a model are compiled.
+engine = [
+  "dep:llama-cpp-2",
+  "dep:llama-cpp-sys-2",
+  "praecise-runtime/bundled-llama",
+  "praecise-runtime/image-gen",
+  "dep:praecise-diffusion",
+  "dep:praecise-train",
+  "dep:praecise-onnx",
+  "dep:ort",
+  "dep:ndarray",
+  "dep:turbojpeg",
+  "dep:tokenizers",
+  "dep:hound",
+  "dep:symphonia",
+  "dep:rubato",
+  "dep:realfft",
+  "dep:encoding_rs",
+]
+# Multimodal projector serving: builds llama.cpp's mtmd sources so a catalog
+# entry that declares an `mmproj` (Gemma 4's SigLIP tower, Kimi K3's
+# MoonViT-3d) loads its projector at model-load time and accepts image and
+# audio input alongside text. Enabled by default — the downloader already
+# fetches the projector for every entry that declares one.
+mtmd = ["engine", "llama-cpp-2/mtmd", "praecise-runtime/mtmd"]
+# NVIDIA CUDA — datacenter (A100/H100/B200) and consumer (RTX 3090/4090)
+#
+# One feature covers every engine: llama.cpp's CUDA backend, the cuBLAS MoE
+# expert kernels, and the CUDA and TensorRT execution providers of the ONNX
+# runtimes. On x86_64 Linux the ONNX backend
+# downloads a CUDA ONNX Runtime; on aarch64 no such download exists, so the
+# build must point ORT_LIB_LOCATION at a CUDA ONNX Runtime prefix (see
+# Dockerfile.cuda). The node refuses to start on an NVIDIA machine if the
+# linked ONNX Runtime lacks the CUDA provider.
+cuda = ["engine", "llama-cpp-2/cuda", "praecise-diffusion/cuda", "praecise-train/cuda", "praecise-onnx/cuda", "moe-cuda"]
+# NVIDIA CUDA without virtual memory management (older drivers / embedded)
+cuda-no-vmm = ["cuda", "llama-cpp-2/cuda-no-vmm"]
+# AMD ROCm/HIP — datacenter (MI300X/MI325X) and consumer (RX 7900 XTX, Radeon).
+# Also the ROCm and MIGraphX execution providers of the ONNX runtimes, which
+# need a ROCm-built ONNX Runtime (ORT_LIB_LOCATION), and the wgpu MoE kernels.
+rocm = ["engine", "llama-cpp-2/rocm", "praecise-onnx/rocm", "moe-wgpu"]
+# Vulkan — cross-vendor GPU (NVIDIA, AMD, Intel Arc/Battlemage, ARM Mali, Adreno),
+# with the wgpu MoE kernels.
+vulkan = ["engine", "llama-cpp-2/vulkan", "praecise-onnx/vulkan", "moe-wgpu"]
+# Apple Metal — explicit opt-in (auto-linked on macOS ARM64 regardless)
+metal = ["engine", "llama-cpp-2/metal"]
+# Intel oneAPI SYCL — Arc / Battlemage / Data Center GPU Max / integrated Xe.
+# Needs the oneAPI DPC++ toolchain (icpx) at build time.
+sycl = ["engine", "llama-cpp-2/sycl"]
+# OpenVINO — runs GGUF on Intel CPU / GPU / NPU. Runtime device via the
+# GGML_OPENVINO_DEVICE env var (CPU / GPU / NPU), forwarded by the runtime.
+openvino = ["engine", "llama-cpp-2/openvino"]
+# OpenCL — Qualcomm Adreno, ARM Mali, and other OpenCL 3.0 GPUs.
+opencl = ["engine", "llama-cpp-2/opencl"]
+# Moore Threads MUSA — MTT S-series GPUs.
+musa = ["engine", "llama-cpp-2/musa"]
+# Huawei Ascend CANN — Ascend 910 / 310 NPUs.
+cann = ["engine", "llama-cpp-2/cann"]
+# WebGPU (Dawn) — cross-vendor GPU via the WebGPU API.
+webgpu = ["engine", "llama-cpp-2/webgpu"]
+# BLAS CPU acceleration (OpenBLAS / Intel MKL / Apple Accelerate).
+blas = ["engine", "llama-cpp-2/blas"]
+# IBM Z zDNN — Telum on-chip AI accelerator.
+zdnn = ["engine", "llama-cpp-2/zdnn"]
+# CoreML execution provider for the ONNX runtimes on Apple machines. CUDA and
+# TensorRT come with the `cuda` feature above. Provider selection is in
+# the Praecise engine's praecise-onnx session module.
+onnx-coreml = ["engine", "praecise-onnx/coreml"]
+# MoE expert-compute GPU backends for the hand-rolled `ExpertCompute` seam
+# (distinct from the llama.cpp GGUF and ONNX EP features above). `moe-gpu` is
+# the umbrella that turns on both device probes; `moe-cuda` / `moe-wgpu` pull
+# just one. `cuda` pulls `moe-cuda`; `rocm` and `vulkan` pull `moe-wgpu`.
+# Runtime `ComputeBackend::select()` follows the detected GPU and refuses a GPU
+# no compiled backend can drive. Default build pulls none.
+moe-gpu = ["moe-cuda", "moe-wgpu"]
+moe-cuda = ["engine", "dep:cudarc"]
+moe-wgpu = ["engine", "dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+# ONNX Runtime publishes no prebuilt binaries for Intel macOS, so ort-sys
+# cannot be linked at build time there. On that target alone this crate asks
+# ort for `load-dynamic`, which turns ort-sys linking off (feature unification
+# overrides praecise-onnx's `download-binaries` for the build script) and loads
+# libonnxruntime at run time. onnx_session loads it before any session is
+# built and reports ONNX as unavailable when it is not there. Every other
+# target links the runtime as before; this entry is not built for them.
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# The parser child's job object (parse_jail.rs): memory, CPU time, one process.
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tenzro-catalog = { workspace = true, features = ["test-seed"] }
+tempfile = "3"
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+p256 = { workspace = true }
+tenzro-cluster = { workspace = true, features = ["test-support"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "model_benchmarks"
+harness = false
+
+[[test]]
+name = "hosted_engines"
+harness = false
+
+[[test]]
+name = "parse_jail"
+harness = false
+
+[[test]]
+name = "real_model_requests"
+harness = false
+
+[lints]
+workspace = true

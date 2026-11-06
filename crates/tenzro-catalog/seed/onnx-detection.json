@@ -1,0 +1,227 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "RF-DETR nano — fastest real-time DETR, edge-tier",
+        "family": "rf-detr",
+        "hf_filename": "rf-detr-nano.onnx",
+        "hf_repo": "PierreMarieCurie/rf-detr-onnx",
+        "id": "rf-detr-nano",
+        "input_size": 384,
+        "min_ram_gb": 1,
+        "name": "RF-DETR nano",
+        "num_classes": 90,
+        "size_bytes": 30000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "RF-DETR small — balanced speed/accuracy",
+        "family": "rf-detr",
+        "hf_filename": "rf-detr-small.onnx",
+        "hf_repo": "PierreMarieCurie/rf-detr-onnx",
+        "id": "rf-detr-small",
+        "input_size": 512,
+        "min_ram_gb": 1,
+        "name": "RF-DETR small",
+        "num_classes": 90,
+        "size_bytes": 60000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "RF-DETR medium — mid-tier real-time DETR",
+        "family": "rf-detr",
+        "hf_filename": "rf-detr-medium.onnx",
+        "hf_repo": "PierreMarieCurie/rf-detr-onnx",
+        "id": "rf-detr-medium",
+        "input_size": 576,
+        "min_ram_gb": 2,
+        "name": "RF-DETR medium",
+        "num_classes": 90,
+        "size_bytes": 110000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "RF-DETR base — real-time DETR baseline (COCO)",
+        "family": "rf-detr",
+        "hf_filename": "rf-detr-base-coco.onnx",
+        "hf_repo": "PierreMarieCurie/rf-detr-onnx",
+        "id": "rf-detr-base",
+        "input_size": 560,
+        "min_ram_gb": 2,
+        "name": "RF-DETR base",
+        "num_classes": 90,
+        "size_bytes": 180000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "RF-DETR large — high-accuracy real-time DETR (2026 refresh)",
+        "family": "rf-detr",
+        "hf_filename": "rf-detr-large-2026.onnx",
+        "hf_repo": "PierreMarieCurie/rf-detr-onnx",
+        "id": "rf-detr-large",
+        "input_size": 704,
+        "min_ram_gb": 3,
+        "name": "RF-DETR large",
+        "num_classes": 90,
+        "size_bytes": 350000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "RF-DETR 2x-large — flagship >60 AP on COCO (ICLR 2026)",
+        "family": "rf-detr",
+        "hf_filename": "rf-detr-xxlarge.onnx",
+        "hf_repo": "PierreMarieCurie/rf-detr-onnx",
+        "id": "rf-detr-2xl",
+        "input_size": 768,
+        "min_ram_gb": 4,
+        "name": "RF-DETR 2x-large",
+        "num_classes": 90,
+        "size_bytes": 700000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "D-FINE small — efficient DETR variant",
+        "family": "d-fine",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/dfine_s_coco-ONNX",
+        "id": "d-fine-s",
+        "input_size": 640,
+        "min_ram_gb": 1,
+        "name": "D-FINE small",
+        "num_classes": 80,
+        "size_bytes": 40000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "D-FINE medium — mid-tier DETR baseline",
+        "family": "d-fine",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/dfine_m_coco-ONNX",
+        "id": "d-fine-m",
+        "input_size": 640,
+        "min_ram_gb": 2,
+        "name": "D-FINE medium",
+        "num_classes": 80,
+        "size_bytes": 80000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-detection",
+      "spec": {
+        "description": "D-FINE large — high-accuracy DETR baseline",
+        "family": "d-fine",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/dfine_l_coco-ONNX",
+        "id": "d-fine-l",
+        "input_size": 640,
+        "min_ram_gb": 2,
+        "name": "D-FINE large",
+        "num_classes": 80,
+        "size_bytes": 130000000
+      }
+    }
+  }
+]

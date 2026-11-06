@@ -1,0 +1,240 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # prost-build shells out to `protoc` and fails the whole job without it
+      # ("Could not find `protoc`"), which is why Check has been red on every
+      # PR while Test/Clippy sat SKIPPED behind it. libclang is needed for the
+      # bindgen-based crates, matching what the test job already installs.
+      # cmake is needed by `aws-lc-sys`, whose build script does not probe for
+      # it but panics outright ("Missing dependency: cmake"), taking the whole
+      # job down after everything else has already compiled.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev cmake
+      - name: Check compilation
+        run: cargo check --locked --workspace
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev cmake
+      - name: Run tests
+        run: cargo test --locked --workspace -- --nocapture
+
+  # Long-running tests, kept out of the default suite so a local `cargo test`
+  # stays fast, but run here on every push. They were ignored and unrun for
+  # long enough that all five cluster simulations had silently stopped
+  # finalising any blocks at all — an ignored test nothing executes is not
+  # coverage, it is a comment.
+  #
+  # Two classes: the consensus cluster simulations (2-3 min), and the model
+  # catalog verifiers that resolve every HuggingFace repo + filename (network).
+  slow-tests:
+    name: Slow and network tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev cmake
+      - name: Consensus cluster simulations
+        run: cargo test --locked -p tenzro-consensus --test tail_fork_regression -- --ignored --nocapture
+      - name: Settlement plan fuzzing (time-boxed)
+        timeout-minutes: 20
+        env:
+          PROPTEST_CASES: "2000"
+        run: cargo test --locked -p tenzro-settlement-fuzz --release
+      - name: Model catalog resolves on HuggingFace
+        run: cargo test --locked -p tenzro-model --lib catalog -- --ignored --nocapture
+
+  benches:
+    name: Bench compile-check
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev cmake
+      - name: Check bench compilation
+        run: cargo check --locked --workspace --benches
+
+      # Run benchmarks against the saved `main` baseline (cached via
+      # Swatinem/rust-cache@v2's `target/` directory) and fail the build
+      # if any benchmark regresses by more than 10%. The baseline is
+      # saved on the main branch by a separate cron job; PRs only
+      # compare. This catches hot-path regressions before they ship.
+      - name: Bench regression gate
+        if: github.event_name == 'pull_request'
+        run: |
+          set -e
+          # Only compare if baseline exists in cache.
+          if [ -d "target/criterion" ] && find target/criterion -name "base" -type d | grep -q .; then
+            cargo bench --locked --workspace -- --baseline main 2>&1 | tee bench-output.txt
+            # criterion emits "Performance has regressed" lines when a
+            # change exceeds the threshold. Fail the job if any are seen.
+            if grep -q "Performance has regressed" bench-output.txt; then
+              echo "::error::Bench regression detected — see output above"
+              exit 1
+            fi
+          else
+            echo "No baseline cached yet — skipping regression gate"
+          fi
+
+      - name: Save bench baseline (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: cargo bench --locked --workspace -- --save-baseline main
+
+      # Performance hard-threshold gate. Reads tools/bench-gate/thresholds.toml
+      # (each entry pins a public reference bound for the target) and fails the
+      # build if any bench exceeds its ceiling or falls below its floor. Runs on
+      # every PR so regressions caught here are absolute, not relative.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
+        with:
+          python-version: '3.11'
+      - name: Run criterion suite for performance gate
+        if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
+        run: cargo bench --locked --workspace -- --warm-up-time 1 --measurement-time 3
+      - name: Performance hard-threshold gate
+        if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
+        run: python3 tools/bench-gate/gate.py
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libclang-dev cmake
+      - name: Run clippy
+        run: cargo clippy --locked --workspace -- -D warnings
+
+  sdks:
+    name: SDKs
+    runs-on: ubuntu-latest
+    # The Rust and TypeScript SDKs are standalone workspaces with their own
+    # lockfiles, because each ships as its own published package. That means
+    # `cargo check --workspace` from the repo root does not reach them, and
+    # `-p tenzro-sdk` resolves to nothing at all — a check against them from
+    # the root can look like it passed while compiling none of their code.
+    #
+    # They depend on tenzro-types, so a change there breaks them silently.
+    # This job is the thing that makes that break visible.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Rust SDK — format
+        working-directory: sdk/tenzro-sdk
+        run: cargo fmt --all -- --check
+      - name: Rust SDK — clippy
+        working-directory: sdk/tenzro-sdk
+        run: cargo clippy --locked --lib -- -D warnings
+      - name: Rust SDK — test
+        working-directory: sdk/tenzro-sdk
+        run: cargo test --locked --lib
+      - name: Rust SDK — the core and each capability build alone
+        working-directory: sdk/tenzro-sdk
+        run: |
+          cargo check --locked --lib --no-default-features
+          for f in payments settlement agents bridge inference chain; do cargo check --locked --lib --no-default-features --features "$f"; done
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: TypeScript SDK — install (npm workspace: core, capability packages, umbrella)
+        working-directory: sdk/tenzro-ts-sdk
+        run: npm ci
+      - name: TypeScript SDK — build and test every package
+        working-directory: sdk/tenzro-ts-sdk
+        run: npm test
+      # Both of the checks below exist because the two most recent publish
+      # blockers were findable only by attempting a publish, and would have
+      # shipped broken packages.
+      #
+      # `cargo publish --dry-run` packages the crate the way the registry
+      # will. That matters because cargo selects files via the VCS, and
+      # `sdk/` is gitignored in the monorepo — so a newly added module was
+      # silently omitted from the tarball while compiling fine in place.
+      - name: Rust SDK — publish dry-run (catches files missing from the tarball)
+        working-directory: sdk/tenzro-sdk
+        run: cargo publish --dry-run
+      # A clean checkout has no node_modules, so it resolves the newest
+      # TypeScript rather than the pinned one. That is what a publish does,
+      # and it is how a TS-7-only type error reached the registry gate
+      # unnoticed. Run it explicitly rather than waiting to find out.
+      - name: API reference matches the source (docs/RPC.md, docs/MCP.md)
+        run: python3 scripts/gen-api-docs.py --check
+      - name: TypeScript SDK — typecheck against the newest compiler
+        working-directory: sdk/tenzro-ts-sdk
+        run: npx -y -p typescript@latest tsc -b --force
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # The node and CLI build natively for x86_64-pc-windows-msvc (the release
+  # archives come from scripts/release/build-windows.ps1). This job keeps every
+  # crate and test target compiling there; the test run itself is
+  # the Windows build host's workspace test script, because the
+  # TPM tests need the host's own TPM.
+  windows:
+    name: Windows check
+    runs-on: windows-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check compilation of every crate and test target
+        shell: cmd
+        run: scripts\windows\build-env.cmd cargo check --locked --workspace --all-targets

@@ -1,0 +1,11 @@
+POST
+api.example.com
+/v1/pay
+a=1
+signature-input: sig1=("@method" "@authority" "@path" "@query" "content-digest");created=1790000000;expires=1790000300;keyid="k1";alg="hmac-sha256";nonce="n1";tag="web-bot-auth"
+signature: sig1=:BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQ==:
+content-digest: sha-256=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:
+signature-agent: https://agents.example.com
+x-fuzz-key: 0411111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+
+{"amount":1}

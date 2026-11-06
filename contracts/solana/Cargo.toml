@@ -1,0 +1,35 @@
+[package]
+name = "tenzro-finality-solana"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Tenzro's finality client on Solana: checkpoints proven by Groth16, verified with the alt_bn128 syscalls"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Build the library without the program entrypoint (for tests that link it).
+no-entrypoint = []
+
+[dependencies]
+solana-program = "3"
+solana-bn254 = "3"
+tenzro-finality-verifier = { path = "../finality-verifier" }
+
+[dev-dependencies]
+hex = "0.4"
+serde_json = "1"
+mollusk-svm = "0.15"
+solana-account = "4"
+# The runtime release the harness was built against; later 4.x runtimes
+# changed the program cache it constructs.
+solana-program-runtime = "=4.2.2"
+solana-bpf-loader-program = "=4.2.2"
+solana-svm-callback = "=4.2.2"
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

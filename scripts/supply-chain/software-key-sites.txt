@@ -1,0 +1,12 @@
+# Non-test files that still create, derive or store a private key in software, with the number of sites.
+# Each is a one-shot ephemeral key or is still to move to a hardware key. Lower a count or delete a line when a site is removed; never raise one.
+crates/tenzro-consensus/src/session.rs 2
+crates/tenzro-crypto/src/encryption.rs 1
+crates/tenzro-crypto/src/keys.rs 4
+crates/tenzro-crypto/src/p256.rs 2
+crates/tenzro-crypto/src/signatures.rs 4
+crates/tenzro-network/src/pq_announce.rs 1
+crates/tenzro-node/src/agent_kit_auth.rs 1
+crates/tenzro-tee/src/x509.rs 1
+# crates/tenzro-consensus/src/session.rs lists 2: one ephemeral session key per scheme (P-256 leg for ML-DSA-65, P-384 leg for ML-DSA-87), drawn from the OS random source and certified by the hardware key.
+# crates/tenzro-crypto/src/session.rs holds no production site: its software SessionKey is compiled only under cfg(any(test, feature = "test-keys")).

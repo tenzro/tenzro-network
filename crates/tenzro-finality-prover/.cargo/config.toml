@@ -1,0 +1,15 @@
+# The prover builds none of the C++ the workspace's forced `<cstdint>` include
+# is for, and under nvcc that include is applied twice to every CUDA kernel,
+# so the prover clears it. Cargo reads this file over the workspace's when
+# building from this directory, and only then: run the prover's cargo commands
+# from here, not from the repository root with --manifest-path, or nvcc gets
+# the include and the CUDA build of risc0-sys fails.
+[env]
+CXXFLAGS_x86_64-unknown-linux-gnu = ""
+CXXFLAGS_aarch64-unknown-linux-gnu = ""
+
+# The Groth16 wrap's field arithmetic (BN254 in blst) is built with the
+# ADX/BMI2 multiply instructions on x86-64, and its CUDA host code links
+# against those variants; every machine with a supported NVIDIA GPU has them.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+adx,+bmi2"]

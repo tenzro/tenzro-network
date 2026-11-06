@@ -1,0 +1,54 @@
+{
+  "name": "@tenzro/agents",
+  "version": "0.9.0",
+  "description": "Tenzro delegated agents: Terms, wallets, payments, governance, lifecycle and the task market",
+  "keywords": [
+    "tenzro",
+    "tenzro-sdk",
+    "agents",
+    "delegation",
+    "terms"
+  ],
+  "homepage": "https://tenzro.com/docs/sdk",
+  "bugs": {
+    "url": "https://github.com/tenzro/tenzro-network/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenzro/tenzro-network.git",
+    "directory": "sdk/tenzro-ts-sdk/packages/agents"
+  },
+  "license": "Apache-2.0",
+  "author": "Tenzro <eng@tenzro.com>",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "prepublishOnly": "node -e \"require('fs').accessSync('dist/index.js')\""
+  },
+  "dependencies": {
+    "@noble/post-quantum": "0.7.1",
+    "@tenzro/core": "0.9.0",
+    "@tenzro/payments": "0.9.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

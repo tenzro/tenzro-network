@@ -1,0 +1,24 @@
+[package]
+name = "tenzro-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Chain event log with proofs and live event streaming for Tenzro Network"
+documentation = "https://docs.rs/tenzro-events"
+readme = "README.md"
+keywords = ["tenzro", "events", "streaming", "subscriptions"]
+categories = ["asynchronous", "web-programming"]
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-storage = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true

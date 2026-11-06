@@ -1,0 +1,14 @@
+[Unit]
+Description=Print the node's TEE attestation and boot event log to the serial console
+Documentation=https://tenzro.com/docs/node/confidential-vm
+After=tenzro-node.service tenzro-tpm-provision.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/tenzro/attestation-report
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

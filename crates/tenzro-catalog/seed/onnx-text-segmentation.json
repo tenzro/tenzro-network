@@ -1,0 +1,53 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "sam3_decoder.onnx",
+        "repo": "wkentaro/sam3-onnx-models",
+        "revision": "8e0e8d84459144ad442e1ef514b4f29a221f5097",
+        "sha256": "aca3109a1bf87d1589bf2a4a61c641fd97624152b21c6e9a5aa85735db398884",
+        "size": 129858120
+      },
+      {
+        "path": "sam3_image_encoder.onnx",
+        "repo": "wkentaro/sam3-onnx-models",
+        "revision": "8e0e8d84459144ad442e1ef514b4f29a221f5097",
+        "sha256": "3dd676271e9c459463f7026d8ab2c6318672cd89511f89c30b34cdf0a2e67a3f",
+        "size": 2509348
+      },
+      {
+        "path": "sam3_language_encoder.onnx",
+        "repo": "wkentaro/sam3-onnx-models",
+        "revision": "8e0e8d84459144ad442e1ef514b4f29a221f5097",
+        "sha256": "af80dffcd8fc369281b0422295244ba22f64e8424e9eefa111ac8966e9ea9ba6",
+        "size": 1396738
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "id": "meta-sam",
+      "name": "Meta SAM License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "onnx-text-segmentation",
+      "spec": {
+        "context_length": 32,
+        "decoder_filename": "sam3_decoder.onnx",
+        "description": "Meta SAM 3 ViT-H — text-promptable open-vocabulary segmenter (community ONNX)",
+        "family": "sam3",
+        "hf_repo": "wkentaro/sam3-onnx-models",
+        "id": "sam3-vit-h",
+        "image_encoder_filename": "sam3_image_encoder.onnx",
+        "input_size": 1008,
+        "language_encoder_filename": "sam3_language_encoder.onnx",
+        "min_ram_gb": 6,
+        "name": "SAM 3 ViT-H",
+        "size_bytes": 2500000000,
+        "tokenizer_filename": "tokenizer.json"
+      }
+    }
+  }
+]

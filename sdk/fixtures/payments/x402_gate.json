@@ -1,0 +1,422 @@
+{
+ "source": "sdk/tenzro-ts-sdk/packages/payments/src/web/gate.ts, the reference the Rust and Python gates match",
+ "about": "Each case is one request to origin+path through a gate over `policy`, quoting usd_e6 * quote_rate base units. `payment_text` is base64-encoded into PAYMENT-SIGNATURE. `facilitator` answers /settle with `respond`, or is unreachable; `settled` is the exact /settle body, null when the facilitator is not called. `required_body` is the exact 402 body for the agent without a payment, every challengeId replaced by CHALLENGE.",
+ "policy": {
+  "chainId": 1337,
+  "payTo": "abababababababababababababababababababababababababababababababab",
+  "facilitator": "https://facilitator.example",
+  "routes": [
+   {
+    "path": "/articles/*",
+    "usdE6": 2000,
+    "permits": [
+     "ai-input",
+     "search"
+    ],
+    "prohibits": [
+     "ai-train"
+    ],
+    "contentUsage": "train-ai=n",
+    "description": "An article"
+   },
+   {
+    "path": "/articles/free",
+    "usdE6": 0,
+    "amount": "0"
+   },
+   {
+    "path": "/data/feed",
+    "usdE6": 1500000,
+    "amount": "7",
+    "asset": "USDC",
+    "schemes": [
+     "tenzro-hybrid"
+    ],
+    "licenceType": "crawl"
+   },
+   {
+    "path": "/a&b/<x>",
+    "usdE6": 10,
+    "permits": [
+     "search"
+    ]
+   }
+  ]
+ },
+ "origin": "https://pub.example/",
+ "quote_rate": 1000,
+ "rsl_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rsl xmlns=\"https://rslstandard.org/rsl\">\n  <content url=\"https://pub.example/articles/*\">\n    <license>\n      <permits type=\"usage\">ai-input search</permits>\n      <prohibits type=\"usage\">ai-train</prohibits>\n      <payment type=\"use\">\n        <amount currency=\"USD\">0.002</amount>\n      </payment>\n    </license>\n  </content>\n  <content url=\"https://pub.example/articles/free\">\n    <license>\n      <payment type=\"use\">\n        <amount currency=\"USD\">0</amount>\n      </payment>\n    </license>\n  </content>\n  <content url=\"https://pub.example/data/feed\">\n    <license>\n      <payment type=\"crawl\">\n        <amount currency=\"USD\">1.5</amount>\n      </payment>\n    </license>\n  </content>\n  <content url=\"https://pub.example/a&amp;b/&lt;x&gt;\">\n    <license>\n      <permits type=\"usage\">search</permits>\n      <payment type=\"use\">\n        <amount currency=\"USD\">0.00001</amount>\n      </payment>\n    </license>\n  </content>\n</rsl>\n",
+ "robots_line": "License: https://pub.example/license.xml",
+ "matches": [
+  [
+   "/articles/x",
+   "/articles/*"
+  ],
+  [
+   "/articles/free",
+   "/articles/free"
+  ],
+  [
+   "/articles/",
+   "/articles/*"
+  ],
+  [
+   "/articles",
+   null
+  ],
+  [
+   "/about",
+   null
+  ],
+  [
+   "/data/feed",
+   "/data/feed"
+  ],
+  [
+   "/data/feed/x",
+   null
+  ]
+ ],
+ "required_body": "{\"x402Version\":2,\"resource\":{\"url\":\"https://pub.example/articles/1?page=2\",\"description\":\"An article\"},\"accepts\":[{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"CHALLENGE\",\"chain_id\":1337,\"usd_e6\":2000}},{\"scheme\":\"tenzro-hybrid\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"CHALLENGE\",\"chain_id\":1337,\"usd_e6\":2000}}]}",
+ "cases": [
+  {
+   "name": "a person browses free; the licence terms ride along",
+   "path": "/articles/1",
+   "headers": {},
+   "expect": {
+    "status": 200,
+    "served": true,
+    "content_usage": "train-ai=n",
+    "settled": null
+   }
+  },
+  {
+   "name": "an unlisted path is free to an agent",
+   "path": "/about",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "expect": {
+    "status": 200,
+    "served": true,
+    "content_usage": null,
+    "settled": null
+   }
+  },
+  {
+   "name": "an agent without a payment is asked to pay",
+   "path": "/articles/1?page=2",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": null,
+    "content_usage": "train-ai=n",
+    "settled": null
+   }
+  },
+  {
+   "name": "a payload that is not JSON",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "not json",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "invalid_payload",
+    "settled": null
+   }
+  },
+  {
+   "name": "a payload that accepts nothing",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "a lower price is refused before the facilitator",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"1999999\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "another payee is refused before the facilitator",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "another network is refused before the facilitator",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "another asset is refused before the facilitator",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"USDC\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "a scheme not offered is refused before the facilitator",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"exact\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "no challenge id is refused before the facilitator",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "an amount that is not an integer is refused before the facilitator",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2e6\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "a payment is settled before the handler runs, and forwarded as sent",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "facilitator": {
+    "respond": {
+     "success": true,
+     "transaction": "tx-1",
+     "network": "tenzro:1337",
+     "amount": "2000000"
+    }
+   },
+   "expect": {
+    "status": 200,
+    "served": true,
+    "content_usage": "train-ai=n",
+    "settled": "{\"x402Version\":2,\"paymentPayload\":{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}},\"paymentRequirements\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}}",
+    "payment_response": "{\"success\":true,\"transaction\":\"tx-1\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\"}"
+   }
+  },
+  {
+   "name": "scheme, payee and asset compare without case; paying more is accepted",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"BATCH-SETTLEMENT\",\"network\":\"tenzro:1337\",\"amount\":\"2000001\",\"asset\":\"tnzo\",\"payTo\":\"0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "facilitator": {
+    "respond": {
+     "success": true,
+     "transaction": "tx-1",
+     "network": "tenzro:1337",
+     "amount": "2000000"
+    }
+   },
+   "expect": {
+    "status": 200,
+    "served": true,
+    "content_usage": "train-ai=n",
+    "settled": "{\"x402Version\":2,\"paymentPayload\":{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"BATCH-SETTLEMENT\",\"network\":\"tenzro:1337\",\"amount\":\"2000001\",\"asset\":\"tnzo\",\"payTo\":\"0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}},\"paymentRequirements\":{\"scheme\":\"BATCH-SETTLEMENT\",\"network\":\"tenzro:1337\",\"amount\":\"2000001\",\"asset\":\"tnzo\",\"payTo\":\"0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}}",
+    "payment_response": "{\"success\":true,\"transaction\":\"tx-1\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\"}"
+   }
+  },
+  {
+   "name": "a refused settlement serves nothing",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "facilitator": {
+    "respond": {
+     "success": false,
+     "errorReason": "insufficient_funds",
+     "transaction": "",
+     "network": "tenzro:1337"
+    }
+   },
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "insufficient_funds",
+    "settled": "{\"x402Version\":2,\"paymentPayload\":{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}},\"paymentRequirements\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}}"
+   }
+  },
+  {
+   "name": "a refusal without a reason",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "facilitator": {
+    "respond": {
+     "success": false,
+     "transaction": "",
+     "network": "tenzro:1337"
+    }
+   },
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "settlement_failed",
+    "settled": "{\"x402Version\":2,\"paymentPayload\":{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}},\"paymentRequirements\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}}"
+   }
+  },
+  {
+   "name": "an unreachable facilitator serves nothing",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "facilitator": {
+    "unreachable": true
+   },
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "facilitator_unreachable",
+    "settled": "{\"x402Version\":2,\"paymentPayload\":{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}, \"payload\":{\"n\":123456789012345678901234567890}},\"paymentRequirements\":{\"scheme\":\"batch-settlement\",\"network\":\"tenzro:1337\",\"amount\":\"2000000\",\"asset\":\"TNZO\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-1\"}}}"
+   }
+  },
+  {
+   "name": "a fixed-price route in another asset",
+   "path": "/data/feed",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"tenzro-hybrid\",\"network\":\"tenzro:1337\",\"amount\":\"7\",\"asset\":\"USDC\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-2\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "facilitator": {
+    "respond": {
+     "success": true,
+     "transaction": "tx-3",
+     "network": "tenzro:1337",
+     "amount": "7"
+    }
+   },
+   "expect": {
+    "status": 200,
+    "served": true,
+    "content_usage": null,
+    "settled": "{\"x402Version\":2,\"paymentPayload\":{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"tenzro-hybrid\",\"network\":\"tenzro:1337\",\"amount\":\"7\",\"asset\":\"USDC\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-2\"}}, \"payload\":{\"n\":123456789012345678901234567890}},\"paymentRequirements\":{\"scheme\":\"tenzro-hybrid\",\"network\":\"tenzro:1337\",\"amount\":\"7\",\"asset\":\"USDC\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-2\"}}}",
+    "payment_response": "{\"success\":true,\"transaction\":\"tx-3\",\"network\":\"tenzro:1337\",\"amount\":\"7\"}"
+   }
+  },
+  {
+   "name": "a fixed-price route paid short",
+   "path": "/data/feed",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "payment_text": "{\"x402Version\":2, \"resource\":{\"url\":\"https://pub.example/articles/1\"}, \"accepted\":{\"scheme\":\"tenzro-hybrid\",\"network\":\"tenzro:1337\",\"amount\":\"6\",\"asset\":\"USDC\",\"payTo\":\"abababababababababababababababababababababababababababababababab\",\"maxTimeoutSeconds\":300,\"extra\":{\"challengeId\":\"chal-2\"}}, \"payload\":{\"n\":123456789012345678901234567890}}",
+   "expect": {
+    "status": 402,
+    "served": false,
+    "error": "requirement_not_offered",
+    "settled": null
+   }
+  },
+  {
+   "name": "a USD price with no quote answers 503",
+   "path": "/articles/1",
+   "headers": {
+    "signature-input": "sig1=(\"@authority\");tag=\"web-bot-auth\"",
+    "signature": "sig1=:AAAA:"
+   },
+   "quote": false,
+   "expect": {
+    "status": 503,
+    "served": false,
+    "settled": null
+   }
+  }
+ ]
+}

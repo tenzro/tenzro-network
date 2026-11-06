@@ -1,0 +1,39 @@
+[package]
+name = "tenzro-types"
+# Explicit version override — tenzro-types has evolved past the
+# published `0.1.0` artifact (new `IdentityType::Institution` enum
+# variant; new fields on identity types for the institution class).
+# Crates that consume `tenzro-types = "0.1"` from crates.io will
+# resolve to the latest 0.1.x automatically; pinning the workspace
+# dep at `>= 0.1.1` upgrades the floor for downstream crates that
+# rely on the new surface.
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core types and constants for Tenzro Network"
+documentation = "https://docs.rs/tenzro-types"
+readme = "README.md"
+keywords = ["tenzro", "blockchain", "ai", "agents", "web3"]
+categories = ["data-structures", "cryptography", "web-programming"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true, features = ["serde"] }
+bs58 = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+rlp = { workspace = true }
+blake3 = { workspace = true }
+blake2 = "0.10"
+bech32 = "0.11"
+curve25519-dalek = { workspace = true }
+
+[lints]
+workspace = true

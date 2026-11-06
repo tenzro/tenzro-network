@@ -1,0 +1,57 @@
+{
+  "name": "@tenzro/payments",
+  "version": "0.9.0",
+  "description": "Tenzro machine payments: x402 payers and the publisher gate, MPP, Permit2, funding and purchases",
+  "keywords": [
+    "tenzro",
+    "tenzro-sdk",
+    "x402",
+    "mpp",
+    "payments",
+    "permit2"
+  ],
+  "homepage": "https://tenzro.com/docs/sdk",
+  "bugs": {
+    "url": "https://github.com/tenzro/tenzro-network/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenzro/tenzro-network.git",
+    "directory": "sdk/tenzro-ts-sdk/packages/payments"
+  },
+  "license": "Apache-2.0",
+  "author": "Tenzro <eng@tenzro.com>",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./web": {
+      "types": "./dist/web/index.d.ts",
+      "default": "./dist/web/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "prepublishOnly": "node -e \"require('fs').accessSync('dist/index.js')\""
+  },
+  "dependencies": {
+    "@tenzro/core": "0.9.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

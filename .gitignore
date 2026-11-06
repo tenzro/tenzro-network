@@ -1,0 +1,55 @@
+# Build output
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+lcov.info
+coverage/
+apps/tenzro-control/src-tauri/target/
+
+# Node.js and SDK build output
+node_modules/
+dist/
+build/
+.next/
+sdk/**/target/
+sdk/**/.turbo/
+sdk/**/*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+.venv/
+venv/
+.coverage
+
+# Environment files and key material (.env.example is tracked)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+
+# Node data and logs
+/data/
+*.db
+*.rocksdb/
+crates/tenzro-node/data/
+*.log
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

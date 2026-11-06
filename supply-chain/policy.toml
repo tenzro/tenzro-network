@@ -1,0 +1,46 @@
+# Supply-chain policy for this repository. The enforcing files are deny.toml, .cargo/audit.toml,
+# supply-chain/config.toml (cargo-vet), scripts/supply-chain/*.sh and
+# .github/workflows/supply-chain.yml; crates/tenzro-types/tests/supply_chain_guard.rs fails when one
+# of them drifts from what is written here. Procedure: docs/SUPPLY-CHAIN.md.
+
+[lockfile]
+# Cargo.lock is committed and every build, test and check in CI and in the build scripts passes
+# --locked, so the lockfile is what is built.
+committed = true
+locked = true
+
+[toolchain]
+# rust-toolchain.toml names one exact version (never "stable" or "nightly").
+exact_version = true
+
+[sources]
+# The only registry, and the only git sources; deny.toml must list exactly these.
+registry = "https://github.com/rust-lang/crates.io-index"
+git = [
+    "https://github.com/Plonky3/Plonky3",
+    "https://github.com/Praecise/praecise-engine",
+    "https://github.com/NVIDIA/OpenShell.git",
+]
+
+[advisories]
+# A yanked crate fails the build; every accepted advisory carries a reason.
+yanked = "deny"
+exceptions_need_reason = true
+
+[ci]
+workflow = ".github/workflows/supply-chain.yml"
+tools_env = "scripts/testnet/security/tools.env"
+# What the workflow must run.
+steps = [
+    "scripts/supply-chain/check-pins.sh",
+    "cargo deny --locked check",
+    "scripts/supply-chain/advisory-gate.sh",
+    "cargo vet --locked",
+]
+# Every `uses:` in every workflow names its action by commit SHA.
+actions_pinned_by_sha = true
+
+[npm]
+# Install scripts do not run: every npm project carries an .npmrc with ignore-scripts=true, checked
+# by scripts/supply-chain/check-pins.sh (on branch c-sec-ux, merging with it).
+ignore_scripts = true

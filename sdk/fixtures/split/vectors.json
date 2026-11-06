@@ -1,0 +1,615 @@
+[
+ {
+  "name": "sole payee",
+  "gross": "1000000000000000000",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 10,
+   "min_fee": "1000",
+   "burn_bps": 5000,
+   "insurance_bps": 1000
+  },
+  "network_fees": "0",
+  "rule_hash": "1cff8d6e966aff7e02aff1aef6f288129f72a65675e36d95ddad51a5b0064466",
+  "expect": {
+   "gross": "1000000000000000000",
+   "fee": {
+    "fee": "1000000000000000",
+    "burn": "500000000000000",
+    "treasury": "450000000000000",
+    "insurance": "50000000000000"
+   },
+   "network_fees": "0",
+   "net": "999000000000000000",
+   "credits": [
+    "999000000000000000"
+   ]
+  }
+ },
+ {
+  "name": "fee floor applies to a tiny payment",
+  "gross": "5000",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 10,
+   "min_fee": "1000",
+   "burn_bps": 5000,
+   "insurance_bps": 1000
+  },
+  "network_fees": "0",
+  "rule_hash": "1cff8d6e966aff7e02aff1aef6f288129f72a65675e36d95ddad51a5b0064466",
+  "expect": {
+   "gross": "5000",
+   "fee": {
+    "fee": "1000",
+    "burn": "500",
+    "treasury": "450",
+    "insurance": "50"
+   },
+   "network_fees": "0",
+   "net": "4000",
+   "credits": [
+    "4000"
+   ]
+  }
+ },
+ {
+  "name": "min fee never exceeds the gross",
+  "gross": "700",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 10,
+   "min_fee": "1000",
+   "burn_bps": 5000,
+   "insurance_bps": 1000
+  },
+  "network_fees": "0",
+  "rule_hash": "1cff8d6e966aff7e02aff1aef6f288129f72a65675e36d95ddad51a5b0064466",
+  "expect": {
+   "gross": "700",
+   "fee": {
+    "fee": "700",
+    "burn": "350",
+    "treasury": "315",
+    "insurance": "35"
+   },
+   "network_fees": "0",
+   "net": "0",
+   "credits": [
+    "0"
+   ]
+  }
+ },
+ {
+  "name": "publisher 30% licensor 5% payee rest",
+  "gross": "123456789012345678901",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "publisher",
+     "recipient": {
+      "address": "0202020202020202020202020202020202020202020202020202020202020202"
+     },
+     "basis": {
+      "bps": 3000
+     },
+     "cap": null
+    },
+    {
+     "role": "licensor",
+     "recipient": {
+      "address": "0303030303030303030303030303030303030303030303030303030303030303"
+     },
+     "basis": {
+      "bps": 500
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 10,
+   "min_fee": "1000",
+   "burn_bps": 5000,
+   "insurance_bps": 1000
+  },
+  "network_fees": "0",
+  "rule_hash": "983e5be909a7d3ff100a64ede503a7fb586cc32101f70ad3cca60f9343907d1e",
+  "expect": {
+   "gross": "123456789012345678901",
+   "fee": {
+    "fee": "123456789012345678",
+    "burn": "61728394506172839",
+    "treasury": "55555555055555556",
+    "insurance": "6172839450617283"
+   },
+   "network_fees": "0",
+   "net": "123333332223333333223",
+   "credits": [
+    "36999999666999999967",
+    "6166666611166666661",
+    "80166665945166666595"
+   ]
+  }
+ },
+ {
+  "name": "thirds by largest remainder",
+  "gross": "10003",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": {
+      "bps": 3334
+     },
+     "cap": null
+    },
+    {
+     "role": "referrer",
+     "recipient": {
+      "address": "0202020202020202020202020202020202020202020202020202020202020202"
+     },
+     "basis": {
+      "bps": 3333
+     },
+     "cap": null
+    },
+    {
+     "role": "relayer",
+     "recipient": {
+      "address": "0303030303030303030303030303030303030303030303030303030303030303"
+     },
+     "basis": {
+      "bps": 3333
+     },
+     "cap": null
+    },
+    {
+     "role": "refund",
+     "recipient": {
+      "address": "0404040404040404040404040404040404040404040404040404040404040404"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 0,
+   "min_fee": "0",
+   "burn_bps": 0,
+   "insurance_bps": 0
+  },
+  "network_fees": "0",
+  "rule_hash": "01428afc7c5d16a0d679b74ade699b5dc6591d45493c719d15471423ff42814a",
+  "expect": {
+   "gross": "10003",
+   "fee": {
+    "fee": "0",
+    "burn": "0",
+    "treasury": "0",
+    "insurance": "0"
+   },
+   "network_fees": "0",
+   "net": "10003",
+   "credits": [
+    "3335",
+    "3334",
+    "3334",
+    "0"
+   ]
+  }
+ },
+ {
+  "name": "fixed facilitator then bps, network fee",
+  "gross": "1000000000000000",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "facilitator",
+     "recipient": {
+      "address": "0505050505050505050505050505050505050505050505050505050505050505"
+     },
+     "basis": {
+      "fixed": "2000000000000"
+     },
+     "cap": null
+    },
+    {
+     "role": "publisher",
+     "recipient": {
+      "did_derived": "did:tenzro:human:abc"
+     },
+     "basis": {
+      "bps": 2500
+     },
+     "cap": "10000000000000"
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 10,
+   "min_fee": "1000",
+   "burn_bps": 5000,
+   "insurance_bps": 1000
+  },
+  "network_fees": "3000000000000",
+  "rule_hash": "48ee8f321d416832e61355f0f100a3e8887bc6df33254d67bc80351f8bcb0b85",
+  "expect": {
+   "gross": "1000000000000000",
+   "fee": {
+    "fee": "1000000000000",
+    "burn": "500000000000",
+    "treasury": "450000000000",
+    "insurance": "50000000000"
+   },
+   "network_fees": "3000000000000",
+   "net": "996000000000000",
+   "credits": [
+    "2000000000000",
+    "10000000000000",
+    "984000000000000"
+   ]
+  }
+ },
+ {
+  "name": "fixed line capped by what remains",
+  "gross": "5000",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "relayer",
+     "recipient": "leg_submitter",
+     "basis": {
+      "fixed": "100000"
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 10,
+   "min_fee": "1000",
+   "burn_bps": 5000,
+   "insurance_bps": 1000
+  },
+  "network_fees": "0",
+  "rule_hash": "b3566d6a74e2cce63c24055661efbeb8d1f74fb83f97a9c33fe175dc1ade8c80",
+  "expect": {
+   "gross": "5000",
+   "fee": {
+    "fee": "1000",
+    "burn": "500",
+    "treasury": "450",
+    "insurance": "50"
+   },
+   "network_fees": "0",
+   "net": "4000",
+   "credits": [
+    "4000",
+    "0"
+   ]
+  }
+ },
+ {
+  "name": "sixteen lines",
+  "gross": "1267650600228229401496703217721",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0000000000000000000000000000000000000000000000000000000000000000"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0202020202020202020202020202020202020202020202020202020202020202"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0303030303030303030303030303030303030303030303030303030303030303"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0404040404040404040404040404040404040404040404040404040404040404"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0505050505050505050505050505050505050505050505050505050505050505"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0606060606060606060606060606060606060606060606060606060606060606"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0707070707070707070707070707070707070707070707070707070707070707"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0808080808080808080808080808080808080808080808080808080808080808"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0909090909090909090909090909090909090909090909090909090909090909"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+     },
+     "basis": {
+      "bps": 625
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "6363636363636363636363636363636363636363636363636363636363636363"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 25,
+   "min_fee": "0",
+   "burn_bps": 3333,
+   "insurance_bps": 777
+  },
+  "network_fees": "17",
+  "rule_hash": "ba7bbeb903bf2ad6cc364a74208206a07fdf84a54cbfa8323f95300b2a786582",
+  "expect": {
+   "gross": "1267650600228229401496703217721",
+   "fee": {
+    "fee": "3169126500570573503741758044",
+    "burn": "1056269862640172148797127956",
+    "treasury": "1948687677163209169665432331",
+    "insurance": "164168960767192185279197757"
+   },
+   "network_fees": "17",
+   "net": "1264481473727658827992961459660",
+   "credits": [
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091229",
+    "79030092107978676749560091228",
+    "79030092107978676749560091228",
+    "79030092107978676749560091228",
+    "79030092107978676749560091228",
+    "79030092107978676749560091229"
+   ]
+  }
+ },
+ {
+  "name": "u128 max gross",
+  "gross": "340282366920938463463374607431768211455",
+  "rule": {
+   "version": 1,
+   "lines": [
+    {
+     "role": "solver",
+     "recipient": {
+      "address": "0707070707070707070707070707070707070707070707070707070707070707"
+     },
+     "basis": {
+      "bps": 9999
+     },
+     "cap": null
+    },
+    {
+     "role": "payee",
+     "recipient": {
+      "address": "0101010101010101010101010101010101010101010101010101010101010101"
+     },
+     "basis": "remainder",
+     "cap": null
+    }
+   ]
+  },
+  "params": {
+   "fee_bps": 10,
+   "min_fee": "1000",
+   "burn_bps": 5000,
+   "insurance_bps": 1000
+  },
+  "network_fees": "0",
+  "rule_hash": "db2503368beaae145a4e8cf94544b0c444285d7539c082fe70333b9e40e7220b",
+  "expect": {
+   "gross": "340282366920938463463374607431768211455",
+   "fee": {
+    "fee": "340282366920938463463374607431768211",
+    "burn": "170141183460469231731687303715884105",
+    "treasury": "153127065114422308558518573344295696",
+    "insurance": "17014118346046923173168730371588410"
+   },
+   "network_fees": "0",
+   "net": "339942084554017524999911232824336443244",
+   "credits": [
+    "339908090345562123247411241701054009599",
+    "33994208455401752499991123282433645"
+   ]
+  }
+ }
+]

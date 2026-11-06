@@ -1,0 +1,51 @@
+[package]
+name = "tenzro-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OAuth 2.1 + DPoP + RAR authentication for Tenzro Network — DPoP-bound JWTs with RAR scopes"
+
+[dependencies]
+tenzro-types = { workspace = true }
+# WebAuthn attestation objects are CBOR; their chains are X.509.
+ciborium = { workspace = true }
+tenzro-storage = { workspace = true }
+# Certificate-chain and signature verification for attestation statements.
+tenzro-tee = { workspace = true }
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+p256 = { workspace = true }
+
+# JWT + DPoP
+jsonwebtoken = { workspace = true }
+base64 = { workspace = true }
+
+# Crypto
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+
+# Time + IDs
+uuid = { workspace = true }
+
+# Errors + logging
+thiserror = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+# Constant-time comparison for the admission gate's hashed service keys.
+
+[dev-dependencies]
+tenzro-tee = { workspace = true, features = ["test-ca"] }
+tokio = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true

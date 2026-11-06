@@ -1,0 +1,29 @@
+[package]
+name = "tenzro-wasm-client"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "A light client of Tenzro for Cosmos chains (ibc-go 08-wasm): checkpoints proven by Groth16, state proven under their roots"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std = "3"
+serde = { version = "1", default-features = false, features = ["derive"] }
+sha2 = { version = "0.10", default-features = false }
+tenzro-finality-verifier = { path = "../finality-verifier", features = ["arkworks"] }
+
+[dev-dependencies]
+hex = "0.4"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+[workspace]

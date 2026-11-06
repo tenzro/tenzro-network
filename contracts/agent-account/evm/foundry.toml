@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+solc_version = "0.8.28"
+evm_version = "osaka"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+remappings = ["finality/=../../finality/", "openzeppelin/=../../finality/vendor/openzeppelin/"]
+allow_paths = ["../../finality"]
+fs_permissions = [{ access = "read", path = "../../../sdk/fixtures" }, { access = "read", path = "../../../crates/tenzro-vm/tests/fixtures" }]

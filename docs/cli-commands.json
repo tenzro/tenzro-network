@@ -1,0 +1,6355 @@
+{
+ "tenzro access": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access audit": [
+  "--format",
+  "--help",
+  "--limit",
+  "--method",
+  "--principal",
+  "--rpc",
+  "--since",
+  "--until",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access audit-verify": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access preview": [
+  "--class",
+  "--did",
+  "--format",
+  "--help",
+  "--method",
+  "--rpc",
+  "--surface",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access revoke": [
+  "--did",
+  "--format",
+  "--help",
+  "--jti",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access set": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access show": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access sign-in": [
+  "--format",
+  "--help",
+  "--key-label",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro access tokens": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro adaptive-burn": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro adaptive-burn config": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro adaptive-burn economy": [
+  "--epoch",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro adaptive-burn fee-rate": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--symbol",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro adaptive-burn metrics": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro adaptive-burn proposals": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro adaptive-burn recommendation": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent accounts": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent act": [
+  "--action",
+  "--chain",
+  "--format",
+  "--help",
+  "--nonce",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit attestation": [
+  "--committer",
+  "--epoch",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit evidence": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit evidence check": [
+  "--format",
+  "--help",
+  "--items",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit evidence export": [
+  "--agent",
+  "--audit",
+  "--covers",
+  "--format",
+  "--help",
+  "--out",
+  "--payment",
+  "--proposal",
+  "--receipts",
+  "--root",
+  "--rpc",
+  "--token",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit evidence profile": [
+  "--file",
+  "--format",
+  "--help",
+  "--out",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit evidence verify": [
+  "--chain-id",
+  "--file",
+  "--format",
+  "--genesis-committee-root",
+  "--genesis-hash",
+  "--handover-program",
+  "--help",
+  "--profile",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit quarantine": [
+  "--agent-did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent audit verify": [
+  "--format",
+  "--help",
+  "--proof",
+  "--rpc",
+  "--signer",
+  "--signer-pq",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent bridge-circuit": [
+  "--adapter",
+  "--format",
+  "--help",
+  "--rpc",
+  "--source-chain",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation act": [
+  "--amount",
+  "--asset",
+  "--chain",
+  "--counterparty",
+  "--format",
+  "--help",
+  "--model",
+  "--operation",
+  "--payment-id",
+  "--payment-protocol",
+  "--quote-digest",
+  "--request",
+  "--rpc",
+  "--step-up",
+  "--usd-e6",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation challenge": [
+  "--account",
+  "--agent-did",
+  "--format",
+  "--help",
+  "--reason",
+  "--rotate-tokens",
+  "--rpc",
+  "--terms",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation create-as-machine": [
+  "--bond",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--terms",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation onboard": [
+  "--authorization",
+  "--format",
+  "--help",
+  "--rpc",
+  "--terms",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation revoke": [
+  "--agent-did",
+  "--approval",
+  "--controller-did",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reason",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation sign": [
+  "--challenge",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent delegation update": [
+  "--agent-did",
+  "--authorization",
+  "--format",
+  "--help",
+  "--rotate-tokens",
+  "--rpc",
+  "--terms",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent flag-audit": [
+  "--agent-did",
+  "--epoch",
+  "--findings",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent fund": [
+  "--agent-did",
+  "--amount-wei",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent grant": [
+  "--asset",
+  "--budget",
+  "--chain",
+  "--exact",
+  "--format",
+  "--help",
+  "--per-action",
+  "--relay-fee-max",
+  "--rpc",
+  "--step-up",
+  "--target",
+  "--ttl-ms",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent grant-proof": [
+  "--chain",
+  "--checkpoint",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent kill-switch-by-agent": [
+  "--agent-did",
+  "--cursor",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent kill-switch-by-controller": [
+  "--controller-did",
+  "--cursor",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent kill-switch-receipt": [
+  "--format",
+  "--help",
+  "--receipt-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent lift-quarantine": [
+  "--agent-did",
+  "--controller",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reason-text",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent node-pq-key": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent pause": [
+  "--agent-did",
+  "--controller",
+  "--controller-did",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reason-code",
+  "--reason-text",
+  "--rpc",
+  "--until",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent quarantine": [
+  "--agent-did",
+  "--controller",
+  "--controller-did",
+  "--evidence-hash",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reason-code",
+  "--reason-text",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent record-audit-session": [
+  "--count",
+  "--format",
+  "--help",
+  "--mmr-root",
+  "--rpc",
+  "--session-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent resolve-key": [
+  "--agent-did",
+  "--format",
+  "--help",
+  "--keyid",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent sync": [
+  "--chain",
+  "--checkpoint",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent terminate": [
+  "--agent-did",
+  "--cascade",
+  "--controller",
+  "--controller-did",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reason-code",
+  "--reason-text",
+  "--rpc",
+  "--slash-bps",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent terms": [
+  "--agent-did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent tool-call-records": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro agent wallet-consent": [
+  "--agent-id",
+  "--chain",
+  "--deadline",
+  "--did",
+  "--format",
+  "--help",
+  "--owner",
+  "--registry",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth discovery": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth dpop-key": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth dpop-proof": [
+  "--format",
+  "--help",
+  "--method",
+  "--token",
+  "--url",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth exchange-token": [
+  "--capability",
+  "--child-bearer-did",
+  "--child-dpop-jkt",
+  "--format",
+  "--help",
+  "--requested-rar",
+  "--requested-ttl-secs",
+  "--rpc",
+  "--subject-token",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth introspect": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--token",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth onboard-agent": [
+  "--device-public-key",
+  "--dpop-jkt",
+  "--format",
+  "--help",
+  "--machine-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth onboard-human": [
+  "--authenticator-data-hex",
+  "--challenge-id",
+  "--client-data-json",
+  "--credential-id-hex",
+  "--display-name",
+  "--format",
+  "--help",
+  "--ml-dsa-public-key-hex",
+  "--ml-dsa-signature-hex",
+  "--public-key-hex",
+  "--rpc",
+  "--signature-hex",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro auth refresh": [
+  "--format",
+  "--help",
+  "--refresh-token",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro beacon": [
+  "--at-ms",
+  "--format",
+  "--help",
+  "--round",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bond": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bond get": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bond increase": [
+  "--agent-did",
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bond list": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bond post": [
+  "--agent-did",
+  "--amount",
+  "--controller-did",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bond withdraw": [
+  "--agent-did",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge attest": [
+  "--adapter",
+  "--beacon",
+  "--chain",
+  "--expiry-ms",
+  "--format",
+  "--from-set",
+  "--handover",
+  "--help",
+  "--nonce",
+  "--outbound-sequence",
+  "--pq-signature",
+  "--request-in",
+  "--request-out",
+  "--rpc",
+  "--sequence",
+  "--signature",
+  "--source-rpc",
+  "--tx",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge cancel-exit": [
+  "--format",
+  "--help",
+  "--id",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge deliver": [
+  "--adapter",
+  "--delivery",
+  "--format",
+  "--from-chain",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge descriptor": [
+  "--format",
+  "--help",
+  "--signers",
+  "--threshold",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge draw-committee": [
+  "--adapter",
+  "--chain",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge exit": [
+  "--format",
+  "--help",
+  "--id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge ibc": [
+  "--acknowledgement",
+  "--chain",
+  "--cosmos-rpc",
+  "--format",
+  "--height",
+  "--help",
+  "--key-namespace",
+  "--message",
+  "--rpc",
+  "--sequence",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge light-client": [
+  "--adapter",
+  "--beacon",
+  "--chain",
+  "--cosmos-rpc",
+  "--format",
+  "--height",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--update",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge outflow": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge release-exit": [
+  "--format",
+  "--help",
+  "--id",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge report-equivocation": [
+  "--adapter",
+  "--chain",
+  "--first",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--member",
+  "--rpc",
+  "--second",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge report-wrong-handover": [
+  "--adapter",
+  "--chain",
+  "--expires-at",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--members",
+  "--rpc",
+  "--set-index",
+  "--signature",
+  "--signed-by-set",
+  "--threshold",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge route": [
+  "--adapter",
+  "--chain",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge routes": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge send": [
+  "--amount",
+  "--asset",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--recipient",
+  "--rpc",
+  "--target-chain",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge withdrawal": [
+  "--chain",
+  "--format",
+  "--help",
+  "--request-in",
+  "--request-out",
+  "--rpc",
+  "--sequence",
+  "--signatures",
+  "--signer",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge-fee": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro bridge-fee quote": [
+  "--adapter",
+  "--dest-chain",
+  "--format",
+  "--help",
+  "--native-fee",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro catalog": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro catalog list": [
+  "--engine",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro catalog publish": [
+  "--format",
+  "--help",
+  "--key-label",
+  "--out",
+  "--rpc",
+  "--sequence",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro catalog show": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro catalog withdraw": [
+  "--format",
+  "--help",
+  "--key-label",
+  "--rpc",
+  "--sequence",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro chat": [
+  "--budget",
+  "--channel-voucher",
+  "--draft-n",
+  "--format",
+  "--help",
+  "--jurisdiction",
+  "--max-tokens",
+  "--optimize",
+  "--quality-floor",
+  "--require-jurisdiction-receipt",
+  "--rpc",
+  "--temperature",
+  "--use-case",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro cluster": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro cluster accept": [
+  "--cluster-did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--seq",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro cluster derive": [
+  "--format",
+  "--help",
+  "--member",
+  "--name",
+  "--operator-did",
+  "--rpc",
+  "--seq",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro cluster members": [
+  "--cluster-did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro cluster set": [
+  "--challenge-id",
+  "--format",
+  "--help",
+  "--membership",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro contract": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro contract call": [
+  "--call",
+  "--format",
+  "--gas-limit",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro contract deploy": [
+  "--args",
+  "--bytecode",
+  "--format",
+  "--gas-limit",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro crypto": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro crypto verify": [
+  "--format",
+  "--help",
+  "--key",
+  "--key-type",
+  "--message",
+  "--rpc",
+  "--signature",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da availability": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da blobs": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da challenge": [
+  "--commitment",
+  "--format",
+  "--help",
+  "--rpc",
+  "--target-index",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da challenges": [
+  "--format",
+  "--help",
+  "--limit",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da committee": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da object": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro da retention": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro decide": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro decide catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro decide load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro decide run": [
+  "--format",
+  "--help",
+  "--model",
+  "--provider",
+  "--questions",
+  "--rpc",
+  "--state",
+  "--state-file",
+  "--verbose",
+  "--verification",
+  "--yes-no",
+  "-h",
+  "-v"
+ ],
+ "tenzro decide unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro detect": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro detect catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro detect load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro detect run": [
+  "--format",
+  "--help",
+  "--image",
+  "--model",
+  "--provider",
+  "--rpc",
+  "--score-threshold",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro detect unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro dev": [
+  "--data-dir",
+  "--format",
+  "--fund",
+  "--help",
+  "--key-namespace",
+  "--rpc-addr",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro device": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro device bind-device": [
+  "--attestation-object-b64",
+  "--format",
+  "--help",
+  "--identity-did",
+  "--label",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro device list": [
+  "--format",
+  "--help",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro device revoke": [
+  "--authorization",
+  "--challenge-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro device transfer": [
+  "--authority",
+  "--authorization",
+  "--challenge-id",
+  "--controller-did",
+  "--format",
+  "--help",
+  "--machine-signature-hex",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro device wallet-readiness": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--this-device",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro discover": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro discover profile": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro duty": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro duty get": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro duty list": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-image": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-image catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-image load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-image run": [
+  "--format",
+  "--help",
+  "--image",
+  "--model",
+  "--normalize",
+  "--provider",
+  "--rpc",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-image similarity": [
+  "--format",
+  "--help",
+  "--image-embedding",
+  "--rpc",
+  "--text-embedding",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-image unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-text": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-text catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-text load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-text run": [
+  "--format",
+  "--help",
+  "--image",
+  "--input",
+  "--media-text",
+  "--model",
+  "--normalize",
+  "--provider",
+  "--requested-dim",
+  "--role",
+  "--rpc",
+  "--task",
+  "--title",
+  "--verbose",
+  "--verification",
+  "--video-frames",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-text unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-video": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-video catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-video load": [
+  "--format",
+  "--help",
+  "--model",
+  "--num-frames",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "--vision-model",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-video run": [
+  "--format",
+  "--frame-stride",
+  "--help",
+  "--model",
+  "--normalize",
+  "--provider",
+  "--rpc",
+  "--verbose",
+  "--verification",
+  "--video",
+  "-h",
+  "-v"
+ ],
+ "tenzro embed-video unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow by-payee": [
+  "--cursor",
+  "--format",
+  "--help",
+  "--payee",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow by-payer": [
+  "--cursor",
+  "--format",
+  "--help",
+  "--payer",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow close-channel": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow create": [
+  "--amount",
+  "--asset",
+  "--epoch-ms",
+  "--executor",
+  "--expires-at",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--payee",
+  "--rate-per-epoch",
+  "--reference",
+  "--release",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow get": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow meter-bond": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow open-channel": [
+  "--channel-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow redeem-delivery": [
+  "--escrow-id",
+  "--format",
+  "--help",
+  "--network-escrow-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow refund": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--payer",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow release": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--payer",
+  "--proof",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro escrow voucher": [
+  "--binding",
+  "--charge",
+  "--cumulative",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--out",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro events": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro events complete": [
+  "--address",
+  "--chain-id",
+  "--format",
+  "--from-cursor",
+  "--from-height",
+  "--genesis-committee-root",
+  "--genesis-hash",
+  "--handover-program",
+  "--help",
+  "--limit",
+  "--rpc",
+  "--to-cursor",
+  "--topic",
+  "--types",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro events history": [
+  "--address",
+  "--format",
+  "--from-cursor",
+  "--from-height",
+  "--help",
+  "--limit",
+  "--rpc",
+  "--to-cursor",
+  "--types",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro events info": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro events logs": [
+  "--address",
+  "--format",
+  "--from-block",
+  "--help",
+  "--limit",
+  "--rpc",
+  "--to-block",
+  "--topic0",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro events subscribe": [
+  "--address",
+  "--format",
+  "--from-cursor",
+  "--from-height",
+  "--help",
+  "--limit",
+  "--rpc",
+  "--topic",
+  "--types",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro events verify": [
+  "--chain-id",
+  "--format",
+  "--genesis-committee-root",
+  "--genesis-hash",
+  "--handover-program",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro fee-market": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro finality": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro finality handover": [
+  "--epoch",
+  "--format",
+  "--help",
+  "--out",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro finality step": [
+  "--chain-id",
+  "--format",
+  "--genesis-hash",
+  "--help",
+  "--index",
+  "--out",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro finality verify": [
+  "--chain-id",
+  "--format",
+  "--genesis-committee-root",
+  "--genesis-hash",
+  "--handover-program",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro forecast": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro forecast catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro forecast load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro forecast run": [
+  "--context",
+  "--context-file",
+  "--format",
+  "--frequency-seconds",
+  "--help",
+  "--horizon",
+  "--model",
+  "--provider",
+  "--quantile",
+  "--rpc",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro forecast unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding claim-rewards": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding release-milestone": [
+  "--evidence",
+  "--format",
+  "--grant-id",
+  "--help",
+  "--index",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding release-vesting": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding report-work": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--legs",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding request-grant": [
+  "--amount",
+  "--asset",
+  "--category",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--link",
+  "--memo",
+  "--milestones",
+  "--recipient",
+  "--release",
+  "--rpc",
+  "--threshold",
+  "--tranches",
+  "--verbose",
+  "--verifiers",
+  "--vesting",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding request-tranche": [
+  "--format",
+  "--grant-id",
+  "--help",
+  "--index",
+  "--key-namespace",
+  "--memo",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding show": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro funding verify-milestone": [
+  "--evidence",
+  "--format",
+  "--grant-id",
+  "--help",
+  "--index",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance concern": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance decode-action": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--transaction",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance disclose": [
+  "--file",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance economic-policy": [
+  "--format",
+  "--help",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance execute": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance guardians": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance levers": [
+  "--area",
+  "--format",
+  "--help",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance list": [
+  "--before",
+  "--format",
+  "--help",
+  "--json",
+  "--kind",
+  "--limit",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance params": [
+  "--format",
+  "--help",
+  "--json",
+  "--key",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance pause": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--resume",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance payouts": [
+  "--address",
+  "--format",
+  "--help",
+  "--limit",
+  "--offset",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance policy": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose": [
+  "--action",
+  "--file",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--node-account",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-approve-grantee": [
+  "--class",
+  "--format",
+  "--grantee",
+  "--help",
+  "--key-namespace",
+  "--link",
+  "--memo",
+  "--node-account",
+  "--rpc",
+  "--summary",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-approve-operator": [
+  "--class",
+  "--format",
+  "--help",
+  "--history-from-epoch",
+  "--history-to-epoch",
+  "--independence",
+  "--key-namespace",
+  "--link",
+  "--memo",
+  "--node-account",
+  "--operator",
+  "--provider-did",
+  "--region",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-operator-running-cost": [
+  "--amount",
+  "--format",
+  "--from-epoch",
+  "--help",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--operator",
+  "--rpc",
+  "--to-epoch",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-operator-stable": [
+  "--amount",
+  "--format",
+  "--from-epoch",
+  "--help",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--operator",
+  "--period-exception",
+  "--rpc",
+  "--to-epoch",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-param": [
+  "--format",
+  "--help",
+  "--key",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--rpc",
+  "--value",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-recall-sponsored-bond": [
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--rpc",
+  "--validator",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-reinstate-validator": [
+  "--account",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-revoke-grantee": [
+  "--account",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-revoke-operator": [
+  "--account",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance propose-sponsor-bond": [
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--memo",
+  "--node-account",
+  "--rpc",
+  "--validator",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance readiness": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance receipt": [
+  "--chain-id",
+  "--file",
+  "--format",
+  "--genesis-committee-root",
+  "--genesis-hash",
+  "--handover-program",
+  "--help",
+  "--out",
+  "--rpc",
+  "--verbose",
+  "--verify",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance release-sponsored-bond": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance show": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance sponsored-bond": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance treasury": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance upgrade-ready": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance veto": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance veto-signal": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance veto-withdraw": [
+  "--format",
+  "--help",
+  "--holder",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance vote": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--machine-root",
+  "--no",
+  "--rpc",
+  "--validator",
+  "--verbose",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro governance voting-power": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro hardware": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity delegation7702": [
+  "--authority",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity document": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity forget": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity issue-kya-credential": [
+  "--did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--validity-secs",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity list": [
+  "--detailed",
+  "--format",
+  "--help",
+  "--identity-type",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity register": [
+  "--capabilities",
+  "--controller",
+  "--format",
+  "--help",
+  "--identity-type",
+  "--key-namespace",
+  "--name",
+  "--public-key",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity register-machine": [
+  "--capabilities",
+  "--controller",
+  "--did-envelope",
+  "--format",
+  "--help",
+  "--public-key",
+  "--request-in",
+  "--request-out",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity resolve": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity resolve-did": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity resolve-document": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity revoke": [
+  "--approval",
+  "--approver",
+  "--format",
+  "--gas-limit",
+  "--help",
+  "--key-namespace",
+  "--reason",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity revoke-jwt": [
+  "--did-envelope",
+  "--format",
+  "--help",
+  "--reason",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity rotate-to-pq": [
+  "--did",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--sequence",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity service": [
+  "--did",
+  "--endpoint",
+  "--format",
+  "--help",
+  "--id",
+  "--key-namespace",
+  "--machine-namespace",
+  "--remove",
+  "--rpc",
+  "--service-type",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity services": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity update": [
+  "--did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--update",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity verify-did-document": [
+  "--document",
+  "--format",
+  "--help",
+  "--id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity verify-envelope": [
+  "--envelope",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro identity verify-kya-credential": [
+  "--credential",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference audit-challenge": [
+  "--challenge-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference commit-vote": [
+  "--commit-hash",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "--voter-rpc",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference difficulty-stats": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference file-challenge": [
+  "--format",
+  "--help",
+  "--reason",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference finalize-challenge": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference generation": [
+  "--format",
+  "--help",
+  "--id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference get-challenge": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference get-commitment": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference list-challenges": [
+  "--format",
+  "--help",
+  "--provider",
+  "--rpc",
+  "--status",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference moe-dispute-receipt": [
+  "--format",
+  "--help",
+  "--key",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference moe-execute": [
+  "--format",
+  "--help",
+  "--request",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference moe-route": [
+  "--format",
+  "--help",
+  "--hidden-states",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference prefix-probe": [
+  "--digests",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference record-outcome": [
+  "--cluster",
+  "--format",
+  "--help",
+  "--model-id",
+  "--outcome",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference request": [
+  "--format",
+  "--help",
+  "--max-price",
+  "--max-tokens",
+  "--output-file",
+  "--rpc",
+  "--temperature",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference reveal-vote": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--salt",
+  "--verbose",
+  "--verdict",
+  "--voter-rpc",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference route": [
+  "--budget",
+  "--est-input-tokens",
+  "--est-output-tokens",
+  "--format",
+  "--help",
+  "--jurisdiction",
+  "--max-tokens",
+  "--message",
+  "--optimize",
+  "--payer-address",
+  "--payer-did",
+  "--prompt",
+  "--quality-floor",
+  "--require-jurisdiction-receipt",
+  "--rpc",
+  "--use-case",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference router-metrics": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference sponsored": [
+  "--format",
+  "--help",
+  "--max-tokens",
+  "--model",
+  "--rpc",
+  "--sponsor",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference standby-quote": [
+  "--format",
+  "--help",
+  "--jurisdiction",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference usage": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--provider",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference verify-commitment": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro inference verify-receipt": [
+  "--format",
+  "--help",
+  "--level",
+  "--receipt",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro info": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro insurance": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro insurance claim": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--recon-adapter",
+  "--recon-chain",
+  "--recon-position",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro insurance get": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro insurance list": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro insurance pool": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro interaction": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro interaction mirror": [
+  "--chain",
+  "--digest-only",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--primary-committed",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro iroh": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro iroh alpns": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro iroh connectivity": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro iroh endpoint-id": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro iroh fetch": [
+  "--format",
+  "--help",
+  "--out",
+  "--rpc",
+  "--uri",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro iroh info": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro iroh publish": [
+  "--file",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro join": [
+  "--format",
+  "--help",
+  "--name",
+  "--origin",
+  "--provider",
+  "--rpc",
+  "--type",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro machine-access": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro machine-access add": [
+  "--authorization",
+  "--challenge-id",
+  "--expires-at-ms",
+  "--expires-in-secs",
+  "--folder",
+  "--format",
+  "--grantee",
+  "--help",
+  "--max-bytes",
+  "--max-uses-per-minute",
+  "--network",
+  "--operations",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro machine-access list": [
+  "--authorization",
+  "--challenge-id",
+  "--format",
+  "--help",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro machine-access revoke": [
+  "--authorization",
+  "--challenge-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro media-gen": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro media-gen catalog": [
+  "--format",
+  "--help",
+  "--kind",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro media-gen render": [
+  "--channel-voucher",
+  "--format",
+  "--help",
+  "--input",
+  "--json",
+  "--kind",
+  "--model",
+  "--out",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro model": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model attestation-log": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model build-manifest": [
+  "--format",
+  "--help",
+  "--name",
+  "--path",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model delete": [
+  "--format",
+  "--help",
+  "--verbose",
+  "--yes",
+  "-h",
+  "-v",
+  "-y"
+ ],
+ "tenzro model delete-served": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model discover": [
+  "--category",
+  "--format",
+  "--help",
+  "--limit",
+  "--name",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model download": [
+  "--catalog-rpc",
+  "--format",
+  "--help",
+  "--source",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model endpoint": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model endpoints": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model info": [
+  "--catalog-rpc",
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model install-sealed": [
+  "--format",
+  "--help",
+  "--manifest-file",
+  "--model-id",
+  "--recipient-did",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model key-release-get": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model key-release-register": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model key-release-request": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model key-release-revoke": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model list": [
+  "--catalog-rpc",
+  "--downloaded",
+  "--family",
+  "--format",
+  "--help",
+  "--loaded",
+  "--serving",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model load-media-model": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model metadata": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model moe-receipts": [
+  "--cursor",
+  "--format",
+  "--help",
+  "--limit",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model pin": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model preview-serve": [
+  "--context-length",
+  "--format",
+  "--help",
+  "--max-concurrent",
+  "--model-id",
+  "--quant",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model prune": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model recipient-key": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model register-endpoint": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--provider",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model seal": [
+  "--artifact-name",
+  "--format",
+  "--help",
+  "--owner-did",
+  "--path",
+  "--recipient",
+  "--rpc",
+  "--shard-bytes",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model sealed-get": [
+  "--format",
+  "--help",
+  "--out",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model sealed-list": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model serve": [
+  "--catalog-rpc",
+  "--cluster",
+  "--force-single",
+  "--format",
+  "--gated",
+  "--help",
+  "--no-speculative",
+  "--private",
+  "--public",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model stop": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model territory": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model trained-provenance": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model training-commit-round": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model training-settle-round": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model unload-media-model": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model unpin": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro model unregister-endpoint": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe catalog-shape": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe forward": [
+  "--allow-cold",
+  "--d-model",
+  "--format",
+  "--help",
+  "--hidden-file",
+  "--layer",
+  "--model-id",
+  "--out-file",
+  "--rpc",
+  "--top-k",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe load-expert": [
+  "--expert",
+  "--file",
+  "--format",
+  "--help",
+  "--layer",
+  "--model-id",
+  "--rpc",
+  "--uri",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe load-gate": [
+  "--file",
+  "--format",
+  "--help",
+  "--layer",
+  "--model-id",
+  "--rpc",
+  "--uri",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe plan-dispatch": [
+  "--allow-cold",
+  "--format",
+  "--help",
+  "--model-id",
+  "--routings-json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe prepare-experts": [
+  "--experts",
+  "--format",
+  "--help",
+  "--layer",
+  "--model-id",
+  "--no-gate",
+  "--quant",
+  "--quant-json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe prepare-status": [
+  "--format",
+  "--help",
+  "--job-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe replication-policy": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe shard-map": [
+  "--format",
+  "--help",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe status": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe unload-expert": [
+  "--expert",
+  "--format",
+  "--help",
+  "--layer",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro moe unload-gate": [
+  "--format",
+  "--help",
+  "--layer",
+  "--model-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node account-contention": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node activity": [
+  "--epochs",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node block": [
+  "--block-number",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node block-number": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node cleanup-idle-model-services": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node consensus-metrics": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node current-header": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node da-backends": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node did-document": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node export-config": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node fabric-profile": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node fee-market": [
+  "--blocks",
+  "--format",
+  "--help",
+  "--percentiles",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node finality": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node gossip-stats": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node graceful-exit": [
+  "--force",
+  "--format",
+  "--help",
+  "--max-wait-secs",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node hardware-level": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node hardware-profile": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node layer-pipeline-status": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node liveness-stats": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node mempool-lane": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node mempool-stats": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node peers": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node produce-snapshot": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node resolve-tenzro-uri": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--tenzro-uri",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node reward-coupons": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node reward-epoch": [
+  "--epoch",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node reward-schedule": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node role": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node set-draining": [
+  "--draining",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node set-role": [
+  "--format",
+  "--help",
+  "--role",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node snapshot-manifest": [
+  "--format",
+  "--height",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node snapshots": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node start": [
+  "--config",
+  "--data-dir",
+  "--format",
+  "--help",
+  "--metrics",
+  "--roles",
+  "--rpc-addr",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node state-proof": [
+  "--format",
+  "--help",
+  "--key",
+  "--namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node state-root": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node stats": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node status": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node stop": [
+  "--force",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node storage": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node storage retrieve": [
+  "--format",
+  "--help",
+  "--object-id",
+  "--out",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node storage set-pricing": [
+  "--format",
+  "--help",
+  "--rate",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node storage status": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node storage store": [
+  "--data-shards",
+  "--file",
+  "--format",
+  "--help",
+  "--object-id",
+  "--owner",
+  "--parity-shards",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node sync-range": [
+  "--end",
+  "--format",
+  "--help",
+  "--max",
+  "--rpc",
+  "--start",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node syncing": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node upgrade": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node upgrade apply": [
+  "--file",
+  "--format",
+  "--help",
+  "--install-to",
+  "--platform",
+  "--rpc",
+  "--verbose",
+  "--version",
+  "-h",
+  "-v"
+ ],
+ "tenzro node upgrade check": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node upgrade publish": [
+  "--artifact",
+  "--format",
+  "--help",
+  "--key-label",
+  "--rpc",
+  "--verbose",
+  "--version",
+  "-h",
+  "-v"
+ ],
+ "tenzro node validator-self-stake": [
+  "--additional",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node verify-da-pointer": [
+  "--format",
+  "--help",
+  "--pointer",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node verify-event-proof": [
+  "--certified-proof",
+  "--format",
+  "--help",
+  "--proof",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro node vesting": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro passkey": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro passkey enroll": [
+  "--authorization",
+  "--credential-id-hex",
+  "--display-name",
+  "--format",
+  "--help",
+  "--ml-dsa-public-key-hex",
+  "--passkey-pubkey-hex",
+  "--registration-authenticator-data-hex",
+  "--rp-id",
+  "--salt",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro passkey keystore": [
+  "--anchor",
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro passkey login": [
+  "--display-name",
+  "--format",
+  "--help",
+  "--salt",
+  "--verbose",
+  "--web-url",
+  "-h",
+  "-v"
+ ],
+ "tenzro passkey resolve": [
+  "--format",
+  "--help",
+  "--rp-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro passkey update": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment agent-voucher": [
+  "--channel-id",
+  "--cumulative-amount",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment challenge": [
+  "--amount",
+  "--asset",
+  "--format",
+  "--help",
+  "--protocol",
+  "--recipient",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment history": [
+  "--agent-did",
+  "--asset",
+  "--class",
+  "--format",
+  "--from-cursor",
+  "--from-height",
+  "--help",
+  "--limit",
+  "--payee",
+  "--payer",
+  "--proofs",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment legs": [
+  "--cursor",
+  "--format",
+  "--help",
+  "--limit",
+  "--provider",
+  "--rpc",
+  "--status",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment prove": [
+  "--agent-did",
+  "--chain",
+  "--delivery",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment quote": [
+  "--accept",
+  "--format",
+  "--help",
+  "--rpc",
+  "--usd-e6",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment record": [
+  "--format",
+  "--help",
+  "--pay-ref",
+  "--payment-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment refund": [
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--pay-ref",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment remote-voucher": [
+  "--chain",
+  "--channel-id",
+  "--cumulative-amount",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment retry-leg": [
+  "--format",
+  "--help",
+  "--payment-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment set-split": [
+  "--clear",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--rule",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment settle": [
+  "--amount",
+  "--app-wallet",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--margin-bps",
+  "--payee",
+  "--payment-id",
+  "--quote-digest",
+  "--request",
+  "--rpc",
+  "--usd-e6",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment settlements": [
+  "--cursor",
+  "--format",
+  "--from-ms",
+  "--help",
+  "--limit",
+  "--payer",
+  "--provider",
+  "--rpc",
+  "--to-ms",
+  "--verbose",
+  "--work-class",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment split": [
+  "--format",
+  "--help",
+  "--payee",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment statement": [
+  "--account",
+  "--format",
+  "--help",
+  "--max",
+  "--rpc",
+  "--verbose",
+  "--verify",
+  "--verify-rpc",
+  "-h",
+  "-v"
+ ],
+ "tenzro payment verify": [
+  "--credential",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro permit2": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro permit2 nonce-used": [
+  "--format",
+  "--help",
+  "--nonce",
+  "--owner",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro permit2 verify-and-consume": [
+  "--amount",
+  "--chain-id",
+  "--deadline",
+  "--format",
+  "--help",
+  "--nonce",
+  "--owner",
+  "--rpc",
+  "--signature",
+  "--spender",
+  "--token",
+  "--verbose",
+  "--witness",
+  "--witness-type-string",
+  "-h",
+  "-v"
+ ],
+ "tenzro pq-hybrid": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro pq-hybrid enroll": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro pq-hybrid inspect": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--tx-hash",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provenance": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provenance get": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provenance model": [
+  "--chain-id",
+  "--file",
+  "--format",
+  "--genesis-committee-root",
+  "--genesis-hash",
+  "--handover-program",
+  "--help",
+  "--verbose",
+  "--weights",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond finalize": [
+  "--address",
+  "--did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond get": [
+  "--did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond increase": [
+  "--address",
+  "--amount",
+  "--did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond list": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond params": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond post": [
+  "--address",
+  "--amount",
+  "--did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider bond withdraw": [
+  "--address",
+  "--did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider compute-claim": [
+  "--claim-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider compute-claims": [
+  "--format",
+  "--help",
+  "--limit",
+  "--party",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider compute-price-feed": [
+  "--attested-only",
+  "--format",
+  "--help",
+  "--limit",
+  "--model-id",
+  "--region",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider list": [
+  "--format",
+  "--help",
+  "--provider-type",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider models": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider pricing": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider pricing card": [
+  "--format",
+  "--help",
+  "--model",
+  "--provider",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider pricing post": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider pricing set": [
+  "--denom",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--line",
+  "--min-charge",
+  "--model",
+  "--post",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider pricing show": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider quote": [
+  "--format",
+  "--help",
+  "--input-tokens",
+  "--model",
+  "--output-tokens",
+  "--provider",
+  "--rpc",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider scorecard": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider sla-params": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider sla-probe": [
+  "--deadline-ms",
+  "--epoch",
+  "--format",
+  "--help",
+  "--provider-did",
+  "--round",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider sla-probes": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider sla-verdict": [
+  "--epoch",
+  "--format",
+  "--help",
+  "--provider-did",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider statement": [
+  "--also-rpc",
+  "--format",
+  "--from",
+  "--help",
+  "--lines",
+  "--period",
+  "--provider",
+  "--rpc",
+  "--to",
+  "--verbose",
+  "--verify",
+  "--verify-rpc",
+  "-h",
+  "-v"
+ ],
+ "tenzro provider status": [
+  "--address",
+  "--detailed",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rails": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rails list": [
+  "--asset",
+  "--format",
+  "--help",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "--x402-only",
+  "-h",
+  "-v"
+ ],
+ "tenzro rails route": [
+  "--asset",
+  "--format",
+  "--help",
+  "--rpc",
+  "--tnzo-micro-usd",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro registry": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro registry get": [
+  "--format",
+  "--help",
+  "--id",
+  "--rpc",
+  "--verbose",
+  "--version",
+  "-h",
+  "-v"
+ ],
+ "tenzro registry list": [
+  "--after",
+  "--format",
+  "--help",
+  "--kind",
+  "--limit",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro relay": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro relay agent-account": [
+  "--agent",
+  "--chain",
+  "--delivery",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rerank": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rerank catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rerank load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro rerank run": [
+  "--document",
+  "--document-image",
+  "--document-video-frames",
+  "--format",
+  "--help",
+  "--model",
+  "--provider",
+  "--query",
+  "--query-image",
+  "--query-video-frames",
+  "--return-documents",
+  "--rpc",
+  "--top-n",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro rerank unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro reserve": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro reserve get": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro reserve submit": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rpc": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rpc call": [
+  "--format",
+  "--help",
+  "--params",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro rpc methods": [
+  "--contains",
+  "--format",
+  "--help",
+  "--namespace",
+  "--namespaces",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro schedule": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro schedule stacks": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro segment": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro segment catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro segment load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro segment run": [
+  "--format",
+  "--help",
+  "--image",
+  "--model",
+  "--prompts",
+  "--provider",
+  "--rpc",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro segment unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle decision": [
+  "--format",
+  "--help",
+  "--plan-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle dispute": [
+  "--evidence",
+  "--format",
+  "--help",
+  "--index",
+  "--key-namespace",
+  "--plan-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle get": [
+  "--format",
+  "--help",
+  "--plan-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle list": [
+  "--format",
+  "--help",
+  "--limit",
+  "--payer",
+  "--rpc",
+  "--status",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle mismatches": [
+  "--adapter",
+  "--chain",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle netting": [
+  "--asset",
+  "--format",
+  "--help",
+  "--participant",
+  "--rpc",
+  "--seq",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle open": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--plan",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle post-collateral": [
+  "--agent-auth",
+  "--amount",
+  "--asset",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle preview": [
+  "--format",
+  "--gross",
+  "--help",
+  "--network-fees",
+  "--rpc",
+  "--split",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle prove": [
+  "--evidence",
+  "--format",
+  "--help",
+  "--index",
+  "--key-namespace",
+  "--network-fee",
+  "--plan-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle receipt": [
+  "--format",
+  "--help",
+  "--index",
+  "--plan-id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle reconcile": [
+  "--adapter",
+  "--chain",
+  "--checkpoint",
+  "--entries",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle reconciliation": [
+  "--adapter",
+  "--chain",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro settle withdraw-collateral": [
+  "--agent-auth",
+  "--amount",
+  "--asset",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro setup": [
+  "--access",
+  "--apply",
+  "--bootstrap",
+  "--chain-id",
+  "--data-dir",
+  "--format",
+  "--genesis",
+  "--help",
+  "--machine-name",
+  "--mode",
+  "--name",
+  "--network-name",
+  "--operator",
+  "--path",
+  "--provision-tpm",
+  "--roles",
+  "--rpc",
+  "--stake",
+  "--validator-stake",
+  "--verbose",
+  "--visibility",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro speech": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro speech catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro speech load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro speech speak": [
+  "--channel-voucher",
+  "--format",
+  "--help",
+  "--language",
+  "--model",
+  "--out",
+  "--provider",
+  "--rpc",
+  "--seed",
+  "--text",
+  "--verbose",
+  "--verification",
+  "--voice-reference",
+  "-h",
+  "-v"
+ ],
+ "tenzro speech unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro sponsor": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro sponsor apply": [
+  "--account",
+  "--did",
+  "--format",
+  "--grant-amount",
+  "--help",
+  "--hours",
+  "--independence",
+  "--json",
+  "--out",
+  "--region",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro sponsor check": [
+  "--account",
+  "--did",
+  "--format",
+  "--help",
+  "--hours",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro sponsor status": [
+  "--account",
+  "--did",
+  "--format",
+  "--help",
+  "--hours",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake bond": [
+  "--accelerators",
+  "--amount",
+  "--bridge-signer",
+  "--domain",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--pq-proof",
+  "--pq-public-key",
+  "--role",
+  "--rpc",
+  "--rpc-provider",
+  "--signer-proof",
+  "--terabytes",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake endpoint": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--role",
+  "--rpc",
+  "--url",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake endpoints": [
+  "--format",
+  "--help",
+  "--role",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake info": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake relays": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake unbond": [
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--role",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake wallet-provider": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro stake withdraw": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--role",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro status": [
+  "--format",
+  "--help",
+  "--json",
+  "--rpc",
+  "--verbose",
+  "--watch",
+  "-h",
+  "-v"
+ ],
+ "tenzro tee": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tee attest": [
+  "--format",
+  "--help",
+  "--out",
+  "--rpc",
+  "--user-data",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tee challenge": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tee detect": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tee providers": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tee verify": [
+  "--bound-data",
+  "--format",
+  "--help",
+  "--nonce",
+  "--report",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro text-segment": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro text-segment catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro text-segment load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro text-segment run": [
+  "--box",
+  "--format",
+  "--help",
+  "--image",
+  "--model",
+  "--provider",
+  "--rpc",
+  "--score-threshold",
+  "--text",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro text-segment unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token approve": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--op",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token balance": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--token",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token build-reserve-attestation-from-por": [
+  "--asset-id",
+  "--attestor-did",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token burn": [
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token can-transfer": [
+  "--amount",
+  "--format",
+  "--from",
+  "--help",
+  "--rpc",
+  "--to",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token claim": [
+  "--expires-ms",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--kind",
+  "--rpc",
+  "--subject",
+  "--token-id",
+  "--value",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token create": [
+  "--council",
+  "--decimals",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--max-supply",
+  "--name",
+  "--policy",
+  "--powers",
+  "--reserve-attestor-stake",
+  "--rpc",
+  "--supply",
+  "--symbol",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token execute-policy": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token force-transfer": [
+  "--amount",
+  "--evidence",
+  "--format",
+  "--from",
+  "--help",
+  "--key-namespace",
+  "--reason-code",
+  "--rpc",
+  "--to",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token freeze": [
+  "--account",
+  "--amount",
+  "--evidence",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reason-code",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token halt": [
+  "--evidence",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reason-code",
+  "--resume",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token info": [
+  "--address",
+  "--format",
+  "--help",
+  "--id",
+  "--rpc",
+  "--symbol",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token list": [
+  "--format",
+  "--help",
+  "--limit",
+  "--rpc",
+  "--verbose",
+  "--vm",
+  "-h",
+  "-v"
+ ],
+ "tenzro token mint": [
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--reserve",
+  "--rpc",
+  "--to",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token por-reserve": [
+  "--asset-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token renounce": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--power",
+  "--rpc",
+  "--to",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token reserve-feed": [
+  "--asset-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token revoke-claim": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--kind",
+  "--rpc",
+  "--subject",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token set-policy": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--policy",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token set-reserve-backing": [
+  "--attestor-stake",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro token transfer": [
+  "--amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--to",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro training": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro training load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro training round": [
+  "--format",
+  "--help",
+  "--model",
+  "--round",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro training unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro transcribe": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro transcribe catalog": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro transcribe load": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--visibility",
+  "-h",
+  "-v"
+ ],
+ "tenzro transcribe run": [
+  "--audio",
+  "--format",
+  "--help",
+  "--language",
+  "--model",
+  "--provider",
+  "--rpc",
+  "--temperature",
+  "--timestamps",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro transcribe stream": [
+  "--audio",
+  "--chunk-ms",
+  "--format",
+  "--help",
+  "--language",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "--verification",
+  "-h",
+  "-v"
+ ],
+ "tenzro transcribe unload": [
+  "--format",
+  "--help",
+  "--model",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust credentials": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust draft-credential": [
+  "--evidence",
+  "--format",
+  "--grade",
+  "--help",
+  "--index",
+  "--issuer",
+  "--kind",
+  "--out",
+  "--scheme",
+  "--scope",
+  "--score",
+  "--subject",
+  "--valid-days",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust draft-issuer-revocation": [
+  "--format",
+  "--help",
+  "--issuer",
+  "--out",
+  "--reason",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust draft-policy": [
+  "--format",
+  "--help",
+  "--operator",
+  "--out",
+  "--sequence",
+  "--terms",
+  "--valid-days",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust draft-revocation": [
+  "--format",
+  "--help",
+  "--index",
+  "--issuer",
+  "--out",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust draft-violation": [
+  "--clause",
+  "--format",
+  "--help",
+  "--out",
+  "--policy",
+  "--receipt",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust host-model": [
+  "--format",
+  "--help",
+  "--name",
+  "--path",
+  "--root",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust manifest": [
+  "--format",
+  "--help",
+  "--name",
+  "--out",
+  "--path",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust observe-hub": [
+  "--format",
+  "--help",
+  "--listing",
+  "--observer",
+  "--out",
+  "--repo",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust policy": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust provenance": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust publish-tee-measurement": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--measurement",
+  "--nonce",
+  "--report",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust scan-model-files": [
+  "--format",
+  "--help",
+  "--name",
+  "--path",
+  "--root",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust sign": [
+  "--doc",
+  "--format",
+  "--help",
+  "--key-label",
+  "--out",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust status-list": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust submit": [
+  "--file",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust verify": [
+  "--file",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust verify-file": [
+  "--file",
+  "--format",
+  "--help",
+  "--path",
+  "--root",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust verify-model-files": [
+  "--format",
+  "--help",
+  "--name",
+  "--path",
+  "--root",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro trust whoami": [
+  "--format",
+  "--help",
+  "--key-label",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tx": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tx explain": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tx signing-payload": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro urwa": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro urwa get-frozen-tokens": [
+  "--account",
+  "--format",
+  "--help",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro urwa is-kill-switched": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator attach-attestation": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator exit": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator get": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator increase-stake": [
+  "--additional",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator keys": [
+  "--format",
+  "--help",
+  "--name",
+  "--rpc",
+  "--stake",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator list": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--status",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator list-active": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator register": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--metadata-uri",
+  "--ml-dsa-public-key",
+  "--node-key",
+  "--node-key-proof",
+  "--p256-public-key",
+  "--proof-of-possession",
+  "--rpc",
+  "--self-stake",
+  "--verbose",
+  "--vrf-key",
+  "--vrf-key-proof",
+  "--withdrawal-address",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator register-machine": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro validator update-metadata": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--metadata-uri",
+  "--rpc",
+  "--tee-attestation-hash",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro version": [
+  "--detailed",
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro visibility": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro visibility set": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro visibility show": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro vrf": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro vrf verify": [
+  "--alpha",
+  "--format",
+  "--help",
+  "--proof",
+  "--pubkey",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet balance": [
+  "--address",
+  "--detailed",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet create-local": [
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet history": [
+  "--format",
+  "--help",
+  "--limit",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet native-balance": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet nonce": [
+  "--address",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow approval-target": [
+  "--account",
+  "--format",
+  "--help",
+  "--id",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow cancel-pending": [
+  "--account",
+  "--approval-file",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow cancel-release": [
+  "--account",
+  "--approval-file",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow claim": [
+  "--account",
+  "--approval-file",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow delegate-check": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow release": [
+  "--account",
+  "--approval-file",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow remove": [
+  "--account",
+  "--approval-file",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow set": [
+  "--account",
+  "--approval-file",
+  "--cap",
+  "--format",
+  "--guardian",
+  "--help",
+  "--hold-hours",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "--window-hours",
+  "--yes",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet outflow show": [
+  "--account",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet send": [
+  "--asset",
+  "--confirm-address",
+  "--confirm-amount",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet set-settlement-preference": [
+  "--asset",
+  "--format",
+  "--help",
+  "--key-namespace",
+  "--payee-did",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet settlement-preference": [
+  "--format",
+  "--help",
+  "--payee-did",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro wallet token-balance": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--token",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk attest-finality-proof": [
+  "--format",
+  "--help",
+  "--out",
+  "--proof",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk attestation": [
+  "--commitment",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk circuits": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk create-proof": [
+  "--binding",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "--witness",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk create-tee-zk-proof": [
+  "--binding",
+  "--circuit-id",
+  "--format",
+  "--help",
+  "--rpc",
+  "--vendor",
+  "--verbose",
+  "--witness",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk list-circuits": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk prove": [
+  "--binding",
+  "--circuit-id",
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk verify": [
+  "--bundle",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk verify-tee-finality-proof": [
+  "--bundle",
+  "--format",
+  "--help",
+  "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro zk verify-tee-proof": [
+  "--format",
+  "--help",
+  "--rpc",
+  "--tee-zk-proof",
+  "--verbose",
+  "-h",
+  "-v"
+ ]
+}

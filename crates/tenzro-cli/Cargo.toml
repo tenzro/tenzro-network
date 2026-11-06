@@ -1,0 +1,91 @@
+[package]
+name = "tenzro-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tenzro Network CLI — node operation, wallet management, provider tools"
+
+[[bin]]
+name = "tenzro"
+path = "src/main.rs"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-bridge = { workspace = true }
+tenzro-finality = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-identity = { workspace = true }
+tenzro-trust = { workspace = true }
+# No `tenzro-node`.
+#
+# The CLI used to depend on it for ten symbols — two record types, two method
+# names, a canonical encoder, a schema version, a chat renderer, and keygen —
+# and paid for the entire node to get them: 1062 crates, llama.cpp's C++ build
+# among them, to offer `tenzro wallet`. That is why neither an 8 GB Mac nor a
+# Windows box could build the CLI.
+#
+# Those symbols now live where they are shared from: wire types and encodings
+# in `tenzro-types`, validator keys in `tenzro-keygen`.
+tenzro-keygen = { workspace = true }
+tenzro-catalog = { workspace = true }
+# Still here, and honestly so: `tenzro model download` and `tenzro model run`
+# use HfDownloader and ModelRuntime, and both live in tenzro-model. Only `run`
+# needs the runtime (the `engine` feature); the downloader does not, and moving
+# `run` behind a CLI feature is what would take llama.cpp out of this binary.
+tenzro-model = { workspace = true, features = ["engine", "mtmd"] }
+tenzro-zk = { workspace = true }
+tenzro-consensus = { workspace = true }
+tenzro-events = { workspace = true }
+tenzro-storage = { workspace = true }
+bincode = { workspace = true }
+# The hardware key the DPoP proofs are signed with.
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+tenzro-tee = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+indicatif = { workspace = true }
+dialoguer = { workspace = true }
+console = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+dirs = "5"
+sysinfo = "0.31"
+sha2 = { workspace = true }
+chrono = "0.4"
+rand = { workspace = true }
+# Keeps a root out of the CLI process memory once it has been stored.
+
+[features]
+default = []
+
+# The GPU features are gone with the dependency they forwarded to.
+#
+# They existed to pass `cuda`, `rocm`, `vulkan` and `metal` through to
+# `tenzro-model`, and they were vestigial even before that: the CLI does not
+# run inference. It reads the catalog to name a model and talks to a node over
+# RPC to serve one. Building it with `--features cuda` compiled a CUDA
+# llama.cpp that nothing in this binary could call.
+#
+# `tenzro-node` is where those features belong, and it still has them.
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Tests only: an in-memory hybrid signer for payment credentials.
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+# Tests only: keysets from the test identity root (release builds refuse them).
+tenzro-keygen = { workspace = true, features = ["test-keys"] }
+# The node's own DPoP verifier, so the client's proofs are checked against the
+# code that will actually receive them rather than against a fixture.
+tenzro-auth = { workspace = true }
+tempfile = { workspace = true }
+# Test stand-in for the hardware DPoP key.
+p256 = { workspace = true }

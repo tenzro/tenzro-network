@@ -1,0 +1,31 @@
+[package]
+name = "tenzro-cosmos-agent-account"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Tenzro agent accounts on CosmWasm chains: a registry that follows Tenzro finality and the accounts it instantiates"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std = { version = "3", features = ["cosmwasm_2_1"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+sha2 = { version = "0.10", default-features = false }
+tenzro-finality-verifier = { path = "../finality-verifier", features = ["arkworks"] }
+
+[dev-dependencies]
+cw-multi-test = { version = "3", features = ["cosmwasm_2_1"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+hex = "0.4"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+[workspace]

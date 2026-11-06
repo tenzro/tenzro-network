@@ -1,0 +1,4 @@
+# The host functions a CosmWasm contract calls (db_read, addr_validate, ...)
+# are imports the chain's VM provides, not symbols this build defines.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined"]

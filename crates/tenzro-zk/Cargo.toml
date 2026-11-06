@@ -1,0 +1,58 @@
+[package]
+name = "tenzro-zk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zero-knowledge proofs for Tenzro Network — Keccak-f preimage statements proven in two Plonky3 STARK systems and an independent Halo2 implementation, with TEE-bound proof bundles"
+
+[dependencies]
+tenzro-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true, features = ["serde"] }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+bincode = { workspace = true }
+ciborium = { workspace = true }
+
+# Verifies finality proofs: the STARK receipt of the finality guest, or its Groth16 wrap.
+# Verification only; proving lives in the separate finality prover.
+risc0-zkvm = { workspace = true }
+
+# Salt and blinding randomness. The OS generator seeds a ChaCha stream from the
+# rand release Plonky3 is built against, which is what its hiding commitments take.
+rand = { workspace = true }
+rand_p3 = { package = "rand", version = "0.10", default-features = false, features = ["std_rng"] }
+
+# Plonky3 STARK stack (single pinned git rev, see the workspace manifest).
+p3-air = { workspace = true }
+p3-uni-stark = { workspace = true }
+p3-field = { workspace = true }
+p3-koala-bear = { workspace = true }
+p3-goldilocks = { workspace = true }
+p3-keccak-air = { workspace = true }
+p3-merkle-tree = { workspace = true }
+p3-fri = { workspace = true }
+p3-challenger = { workspace = true }
+p3-matrix = { workspace = true }
+p3-commit = { workspace = true }
+p3-dft = { workspace = true }
+p3-symmetric = { workspace = true }
+p3-sha256 = { workspace = true }
+p3-blake3 = { workspace = true }
+
+# Halo2 over Pasta with IPA commitments: an implementation of the same
+# statement sharing no code with the Plonky3 stack.
+halo2_proofs = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "zk_benchmarks"
+harness = false
+
+[lints]
+workspace = true

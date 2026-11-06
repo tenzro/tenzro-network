@@ -1,0 +1,201 @@
+[package]
+name = "tenzro-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+tenzro-types = { path = "../crates/tenzro-types" }
+tenzro-crypto = { path = "../crates/tenzro-crypto", features = ["test-keys"] }
+tenzro-consensus = { path = "../crates/tenzro-consensus" }
+tenzro-bridge = { path = "../crates/tenzro-bridge" }
+tenzro-network = { path = "../crates/tenzro-network" }
+tenzro-vm = { path = "../crates/tenzro-vm" }
+tenzro-iroh = { path = "../crates/tenzro-iroh" }
+tenzro-identity = { path = "../crates/tenzro-identity" }
+tenzro-auth = { path = "../crates/tenzro-auth" }
+tenzro-storage = { path = "../crates/tenzro-storage" }
+tenzro-payments = { path = "../crates/tenzro-payments" }
+tenzro-tee = { path = "../crates/tenzro-tee" }
+tenzro-device-key = { path = "../crates/tenzro-device-key" }
+tenzro-finality = { path = "../crates/tenzro-finality" }
+tenzro-cert-stark = { path = "../crates/tenzro-cert-stark" }
+tenzro-zk = { path = "../crates/tenzro-zk" }
+# The light build: identity, payments, agents and RPC without the model engines.
+tenzro-node = { path = "../crates/tenzro-node", default-features = false }
+hex = "0.4"
+tokio = { version = "1", features = ["rt", "io-util"] }
+
+# Detach from the parent workspace: fuzz targets build with
+# `-C passes=sancov-module` instrumentation and must not leak
+# those flags into the main dependency graph.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "bridge_route_delivery"
+path = "fuzz_targets/bridge_route_delivery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settlement_plan"
+path = "fuzz_targets/settlement_plan.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "consensus_frame"
+path = "fuzz_targets/consensus_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "staking_arithmetic"
+path = "fuzz_targets/staking_arithmetic.rs"
+test = false
+doc = false
+bench = false
+
+
+[[bin]]
+name = "transaction_decode"
+path = "fuzz_targets/transaction_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gossip_decode"
+path = "fuzz_targets/gossip_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jsonrpc_parse"
+path = "fuzz_targets/jsonrpc_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settlement_native"
+path = "fuzz_targets/settlement_native.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bridge_verify"
+path = "fuzz_targets/bridge_verify.rs"
+test = false
+doc = false
+bench = false
+
+# The root workspace's patches, which a separate workspace does not inherit: all of them, so the targets
+# exercise the same patched crates the node builds with (checked by scripts/testnet/security/test_security_programme.py).
+[patch.crates-io]
+lance-linalg = { path = "../vendor/lance-linalg" }
+noq-proto = { path = "../vendor/noq-proto" }
+reed-solomon-erasure = { path = "../vendor/reed-solomon-erasure" }
+iroh = { path = "../vendor/iroh" }
+iroh-gossip = { path = "../vendor/iroh-gossip" }
+openh264-sys2 = { path = "../vendor/openh264-sys2" }
+
+[[bin]]
+name = "external_tx_decode"
+path = "fuzz_targets/external_tx_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iroh_request"
+path = "fuzz_targets/iroh_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_documents"
+path = "fuzz_targets/identity_documents.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_tokens"
+path = "fuzz_targets/auth_tokens.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_signature"
+path = "fuzz_targets/http_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tee_attestation"
+path = "fuzz_targets/tee_attestation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "device_attestation"
+path = "fuzz_targets/device_attestation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x402_payload"
+path = "fuzz_targets/x402_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ton_cell"
+path = "fuzz_targets/ton_cell.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ml_dsa_differential"
+path = "fuzz_targets/ml_dsa_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proof_decode"
+path = "fuzz_targets/proof_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_protocol_messages"
+path = "fuzz_targets/agent_protocol_messages.rs"
+test = false
+doc = false
+bench = false

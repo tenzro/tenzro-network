@@ -1,0 +1,13 @@
+[Unit]
+Description=Wrap finality receipts and bind each proof to the node's TEE attestation
+Documentation=https://tenzro.com/docs/node/confidential-vm
+After=tenzro-node.service tenzro-prover-image.service
+Requires=tenzro-prover-image.service
+Wants=tenzro-node.service
+
+[Service]
+Type=oneshot
+Environment=TENZRO_HOME=/var/lib/tenzro
+ExecStart=/usr/libexec/tenzro/prover-inbox
+StandardOutput=journal+console
+StandardError=journal+console

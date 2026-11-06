@@ -1,0 +1,14 @@
+target/
+**/node_modules/
+.git/
+.github/
+.vscode/
+apps/
+*.md
+!README.md
+.DS_Store
+*.swp
+*.swo
+*~
+.env
+.env.local

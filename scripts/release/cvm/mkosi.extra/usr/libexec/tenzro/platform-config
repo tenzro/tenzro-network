@@ -1,0 +1,28 @@
+#!/bin/sh
+# Operator settings from the cloud platform's instance metadata, when the
+# guest has a metadata service:
+#
+#   tenzro-node-args   extra tenzro-node flags, written to
+#                      /var/lib/tenzro-config/node.env as TENZRO_NODE_ARGS
+#
+# Without a metadata service, or without the attribute, nothing is written
+# and an operator file already in place is kept.
+set -eu
+md=http://169.254.169.254/computeMetadata/v1
+get() { curl -sf --max-time 5 -H 'Metadata-Flavor: Google' "$md/$1"; }
+# The metadata service answers once the network is up; give it a minute.
+i=0
+until get instance/id >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge 30 ]; then
+        echo "tenzro: no instance metadata service; network state:"
+        ip -br addr; ip route
+        networkctl status --no-pager -n 20 2>&1 | tail -n 30
+        exit 0
+    fi
+    sleep 2
+done
+if args=$(get instance/attributes/tenzro-node-args); then
+    umask 077
+    printf 'TENZRO_NODE_ARGS=%s\n' "$args" > /var/lib/tenzro-config/node.env
+fi

@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-5","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-5","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"content":"Par"},"finish_reason":null}]}
+
+data: {"error":{"message":"generation failed","type":"server_error","code":"inference_error"}}
+
+data: [DONE]
+

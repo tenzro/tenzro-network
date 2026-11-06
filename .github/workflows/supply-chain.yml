@@ -1,0 +1,38 @@
+# Supply-chain gates on every push and pull request, and weekly so a new advisory against an
+# unchanged lockfile still fails a run. The tool versions are the pins in
+# scripts/testnet/security/tools.env; the policy they enforce is supply-chain/policy.toml and the
+# procedure is docs/SUPPLY-CHAIN.md. A guard test (crates/tenzro-types/tests/supply_chain_guard.rs)
+# fails when this file stops running a tool or stops pinning an action.
+name: supply-chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - name: Install the pinned tools
+        run: |
+          set -euo pipefail
+          . scripts/testnet/security/tools.env
+          cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
+          cargo install --locked cargo-audit --version "$CARGO_AUDIT_VERSION"
+          cargo install --locked cargo-vet --version "$CARGO_VET_VERSION"
+      - name: Build pins (one toolchain, --locked, base images, action SHAs)
+        run: scripts/supply-chain/check-pins.sh
+      - name: cargo deny (advisories, bans, licences, sources)
+        run: cargo deny --locked check
+      - name: Advisory gate (RustSec, with the recorded exceptions)
+        run: scripts/supply-chain/advisory-gate.sh
+      - name: cargo vet (every dependency audited or exempted on record)
+        run: cargo vet --locked

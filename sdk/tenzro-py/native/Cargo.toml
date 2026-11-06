@@ -1,0 +1,27 @@
+[package]
+name = "tenzro-device-key-py"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Python binding over tenzro-device-key: read the public key, sign a digest, and attest a TPM or Secure Enclave key. The private key never leaves the hardware."
+publish = false
+
+[lib]
+name = "tenzro_device_key"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The CPython glue, built as an extension module: on only for the wheel
+# build (`maturin build` sets it from pyproject.toml). Test binaries are not
+# loaded by Python and have no interpreter symbols to link against.
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+tenzro-device-key-node = { path = "../../tenzro-ts-sdk/native" }
+pyo3 = { version = "0.29", default-features = false, features = ["macros", "abi3-py310", "extension-module"], optional = true }
+
+[lints]
+workspace = true

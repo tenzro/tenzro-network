@@ -1,0 +1,277 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "onnx/decoder_model_merged.onnx",
+        "description": "Moonshine Tiny — on-device English ASR, edge-tier (raw waveform input)",
+        "encoder_filename": "onnx/encoder_model.onnx",
+        "family": "moonshine",
+        "hf_repo": "onnx-community/moonshine-tiny-ONNX",
+        "id": "moonshine-tiny",
+        "preprocessor_filename": null,
+        "tokenizer_filename": "tokenizer.json",
+        "languages": [
+          "en"
+        ],
+        "max_audio_seconds": 30,
+        "min_ram_gb": 1,
+        "name": "Moonshine Tiny",
+        "sample_rate": 16000,
+        "size_bytes": 100000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "onnx/decoder_model_merged.onnx",
+        "description": "Moonshine Base — on-device English ASR, balanced (raw waveform input)",
+        "encoder_filename": "onnx/encoder_model.onnx",
+        "family": "moonshine",
+        "hf_repo": "onnx-community/moonshine-base-ONNX",
+        "id": "moonshine-base",
+        "preprocessor_filename": null,
+        "tokenizer_filename": "tokenizer.json",
+        "languages": [
+          "en"
+        ],
+        "max_audio_seconds": 30,
+        "min_ram_gb": 1,
+        "name": "Moonshine Base",
+        "sample_rate": 16000,
+        "size_bytes": 240000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "onnx/decoder_model_merged.onnx",
+        "description": "Distil-Whisper small.en — distilled English ASR (80-mel)",
+        "encoder_filename": "onnx/encoder_model.onnx",
+        "family": "whisper",
+        "hf_repo": "distil-whisper/distil-small.en",
+        "id": "distil-whisper-small-en",
+        "preprocessor_filename": null,
+        "tokenizer_filename": "tokenizer.json",
+        "languages": [
+          "en"
+        ],
+        "max_audio_seconds": 30,
+        "min_ram_gb": 2,
+        "name": "Distil-Whisper small.en",
+        "sample_rate": 16000,
+        "size_bytes": 330000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "onnx/decoder_model_merged.onnx",
+        "description": "Distil-Whisper medium.en — higher-accuracy distilled English ASR (80-mel)",
+        "encoder_filename": "onnx/encoder_model.onnx",
+        "family": "whisper",
+        "hf_repo": "distil-whisper/distil-medium.en",
+        "id": "distil-whisper-medium-en",
+        "preprocessor_filename": null,
+        "tokenizer_filename": "tokenizer.json",
+        "languages": [
+          "en"
+        ],
+        "max_audio_seconds": 30,
+        "min_ram_gb": 3,
+        "name": "Distil-Whisper medium.en",
+        "sample_rate": 16000,
+        "size_bytes": 760000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "onnx/decoder_model_merged.onnx",
+        "description": "Distil-Whisper large-v3 — multilingual distilled ASR (128-mel)",
+        "encoder_filename": "onnx/encoder_model.onnx",
+        "family": "whisper",
+        "hf_repo": "distil-whisper/distil-large-v3",
+        "id": "distil-whisper-large-v3",
+        "preprocessor_filename": null,
+        "tokenizer_filename": "tokenizer.json",
+        "languages": [
+          "multilingual"
+        ],
+        "max_audio_seconds": 30,
+        "min_ram_gb": 4,
+        "name": "Distil-Whisper large-v3",
+        "sample_rate": 16000,
+        "size_bytes": 1500000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "onnx/decoder_model_merged.onnx",
+        "description": "OpenAI Whisper Large-v3-turbo — flagship multilingual ASR (128-mel)",
+        "encoder_filename": "onnx/encoder_model.onnx",
+        "family": "whisper",
+        "hf_repo": "onnx-community/whisper-large-v3-turbo",
+        "id": "whisper-large-v3-turbo",
+        "preprocessor_filename": null,
+        "tokenizer_filename": "tokenizer.json",
+        "languages": [
+          "multilingual"
+        ],
+        "max_audio_seconds": 30,
+        "min_ram_gb": 5,
+        "name": "Whisper Large-v3-turbo",
+        "sample_rate": 16000,
+        "size_bytes": 1600000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "CC-BY-4.0",
+      "tier": "attribution"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "decoder_joint-model.onnx",
+        "description": "NVIDIA Parakeet TDT 0.6B v3 — multilingual TDT transducer (25 langs, 128-mel)",
+        "encoder_filename": "encoder-model.onnx",
+        "family": "parakeet",
+        "hf_repo": "istupakov/parakeet-tdt-0.6b-v3-onnx",
+        "id": "parakeet-tdt-0.6b-v3",
+        "preprocessor_filename": "nemo128.onnx",
+        "tokenizer_filename": "vocab.txt",
+        "languages": [
+          "en",
+          "es",
+          "fr",
+          "de",
+          "bg",
+          "hr",
+          "cs",
+          "da",
+          "nl",
+          "et",
+          "fi",
+          "el",
+          "hu",
+          "it",
+          "lv",
+          "lt",
+          "mt",
+          "pl",
+          "pt",
+          "ro",
+          "sk",
+          "sl",
+          "sv",
+          "ru",
+          "uk"
+        ],
+        "max_audio_seconds": 60,
+        "min_ram_gb": 4,
+        "name": "NeMo Parakeet TDT 0.6B v3",
+        "sample_rate": 16000,
+        "size_bytes": 2500000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "CC-BY-4.0",
+      "tier": "attribution"
+    },
+    "model": {
+      "engine": "onnx-audio",
+      "spec": {
+        "decoder_filename": "decoder-model.onnx",
+        "description": "NVIDIA Canary 1B Flash — Conformer AED with translation across 4 languages (en/de/es/fr)",
+        "encoder_filename": "encoder-model.onnx",
+        "family": "canary",
+        "hf_repo": "istupakov/canary-1b-flash-onnx",
+        "id": "canary-1b-flash",
+        "preprocessor_filename": "nemo128.onnx",
+        "tokenizer_filename": "vocab.txt",
+        "languages": [
+          "en",
+          "de",
+          "es",
+          "fr"
+        ],
+        "max_audio_seconds": 40,
+        "min_ram_gb": 6,
+        "name": "NVIDIA Canary 1B Flash",
+        "sample_rate": 16000,
+        "size_bytes": 4000000000
+      }
+    }
+  }
+]

@@ -1,0 +1,99 @@
+{
+  "description": "A KeystoreUpdate as a client builds it (a new credential carries no added_at_ms: the chain sets it) and as the node encodes it in tx_type, which the signing payload carries: added_at_ms present and zero. Every SDK sends the encoded form.",
+  "cases": [
+    {
+      "update": {
+        "chain_id": 1337,
+        "account": "1111111111111111111111111111111111111111",
+        "anchor": null,
+        "previous_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+        "op": {
+          "add_credential": {
+            "credential": {
+              "rp_id": "example.org",
+              "credential_id": "33333333333333333333333333333333",
+              "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+              "aaguid": "55555555555555555555555555555555",
+              "backup_eligible": true,
+              "backup_state": false,
+              "counts_as_root_from_ms": 0,
+              "label": "Security key"
+            }
+          }
+        },
+        "approvals": [],
+        "possession": null
+      },
+      "encoded": {
+        "chain_id": 1337,
+        "account": "1111111111111111111111111111111111111111",
+        "anchor": null,
+        "previous_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+        "op": {
+          "add_credential": {
+            "credential": {
+              "rp_id": "example.org",
+              "credential_id": "33333333333333333333333333333333",
+              "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+              "aaguid": "55555555555555555555555555555555",
+              "backup_eligible": true,
+              "backup_state": false,
+              "counts_as_root_from_ms": 0,
+              "label": "Security key",
+              "added_at_ms": 0
+            }
+          }
+        },
+        "approvals": [],
+        "possession": null
+      }
+    },
+    {
+      "update": {
+        "chain_id": 1337,
+        "account": "1111111111111111111111111111111111111111",
+        "anchor": null,
+        "previous_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+        "op": {
+          "start_recovery": {
+            "credential": {
+              "rp_id": "example.org",
+              "credential_id": "33333333333333333333333333333333",
+              "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+              "aaguid": "55555555555555555555555555555555",
+              "backup_eligible": true,
+              "backup_state": false,
+              "counts_as_root_from_ms": 0,
+              "label": "Security key"
+            }
+          }
+        },
+        "approvals": [],
+        "possession": null
+      },
+      "encoded": {
+        "chain_id": 1337,
+        "account": "1111111111111111111111111111111111111111",
+        "anchor": null,
+        "previous_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+        "op": {
+          "start_recovery": {
+            "credential": {
+              "rp_id": "example.org",
+              "credential_id": "33333333333333333333333333333333",
+              "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+              "aaguid": "55555555555555555555555555555555",
+              "backup_eligible": true,
+              "backup_state": false,
+              "counts_as_root_from_ms": 0,
+              "label": "Security key",
+              "added_at_ms": 0
+            }
+          }
+        },
+        "approvals": [],
+        "possession": null
+      }
+    }
+  ]
+}

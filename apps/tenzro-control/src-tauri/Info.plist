@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bluetooth is required by the FIDO caBLE cross-device passkey
+         ceremony (`webauthn-authenticator-rs` cable feature). Without
+         these usage description strings macOS refuses to surface the
+         BLE permission prompt and the QR-pair flow silently fails. -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Tenzro Control uses Bluetooth to complete cross-device passkey sign-ins from your phone (FIDO caBLE).</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>Tenzro Control uses Bluetooth to complete cross-device passkey sign-ins from your phone (FIDO caBLE).</string>
+    <!-- Face ID (and Touch ID on supported Macs) gates the local
+         Secure-Enclave passkey ceremony invoked by
+         `device_sign_with_passkey`. -->
+    <key>NSFaceIDUsageDescription</key>
+    <string>Tenzro Control uses Face ID to unlock your wallet and approve transactions.</string>
+</dict>
+</plist>

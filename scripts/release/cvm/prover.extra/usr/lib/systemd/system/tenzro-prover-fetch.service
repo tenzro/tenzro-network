@@ -1,0 +1,13 @@
+[Unit]
+Description=Fetch a finality receipt named in the cloud platform's instance metadata
+Documentation=https://tenzro.com/docs/node/confidential-vm
+After=network-online.target systemd-tmpfiles-setup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/tenzro/prover-fetch
+
+[Install]
+WantedBy=multi-user.target

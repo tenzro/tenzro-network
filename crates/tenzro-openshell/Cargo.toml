@@ -1,0 +1,61 @@
+[package]
+name = "tenzro-openshell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenShell extensions backed by Tenzro: credentials minted under Terms, Terms-checked sandbox control, signed records, per-unit settlement, payments from the sandbox and host attestation"
+
+[features]
+# The end-to-end test against a live OpenShell gateway on a Docker host with a
+# TPM. Off by default: it needs the OpenShell release binaries and images.
+openshell-e2e = []
+
+[dependencies]
+# OpenShell's own generated contract types, pinned to the release tested
+# against (v0.1.5).
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell.git", rev = "bdb956f2cd65a635f1294fccf1d138d263bf650f", default-features = false }
+tonic = { version = "0.14", features = ["transport", "server", "tls-aws-lc"] }
+prost-types = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
+
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-payments = { workspace = true }
+tenzro-tee = { workspace = true }
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+p256 = { workspace = true }
+parking_lot = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+# OpenShell's own e2e harness (sandbox lifecycle through the CLI), pinned with
+# the contract types above.
+openshell-e2e = { git = "https://github.com/NVIDIA/OpenShell.git", rev = "bdb956f2cd65a635f1294fccf1d138d263bf650f" }
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rustls = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[test]]
+name = "openshell_e2e"
+path = "tests/openshell_e2e.rs"
+required-features = ["openshell-e2e"]
+
+[lints]
+workspace = true

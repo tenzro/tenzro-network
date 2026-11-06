@@ -1,0 +1,19 @@
+[package]
+name = "tenzro-receipt-verify"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Verifies Tenzro inference receipts from the published format alone"
+publish = false
+
+# Its own workspace: it builds without the node's workspace and links no
+# Tenzro crate.
+[workspace]
+
+[dependencies]
+ed25519-dalek = "2"
+hex = "0.4"
+ml-dsa = "=0.1.1"
+p256 = { version = "0.13", features = ["ecdsa"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"

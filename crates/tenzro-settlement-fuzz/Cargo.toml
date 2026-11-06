@@ -1,0 +1,18 @@
+[package]
+name = "tenzro-settlement-fuzz"
+description = "Property-based fuzzing of settlement plan operations against the native executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+proptest = "1.11"
+tenzro-types = { workspace = true }
+
+[dev-dependencies]
+tenzro-vm = { workspace = true }
+tenzro-storage = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }

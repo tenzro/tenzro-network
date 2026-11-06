@@ -1,0 +1,57 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; Tenzro state proofs on TON: the rules of Tenzro's state trie (SHA-256
+;; throughout). An entry's 32-byte tree key is a 31-byte stem (a path of 248
+;; bits) and a slot byte; its value hashes to the leaf sha256(0x00 || value).
+;;
+;; The proof cell: depth (16), refs: the path siblings (cells of up to
+;; three, chained) and the eight slot siblings (cells of 3, 3, 2).
+
+int sha_pair(int tag, int a, int b) inline {
+    return string_hash(begin_cell().store_uint(tag, 8).store_uint(a, 256).store_uint(b, 256).end_cell().begin_parse());
+}
+
+int slot_pair(int l, int r) inline {
+    return ((l == 0) & (r == 0)) ? 0 : sha_pair(3, l, r);
+}
+
+;; Whether `proof` shows the value whose leaf hash is `leaf` at tree key `tk`
+;; under `root`.
+int verify_leaf(int root, int tk, int leaf, cell proof) {
+    slice p = proof.begin_parse();
+    int depth = p~load_uint(16);
+    if (depth > 248) {
+        return 0;
+    }
+    tuple sibs = empty_tuple();
+    slice c = p~load_ref().begin_parse();
+    repeat (depth) {
+        if (c.slice_bits() == 0) {
+            c = c~load_ref().begin_parse();
+        }
+        sibs~tpush(c~load_uint(256));
+    }
+    slice slots = p~load_ref().begin_parse();
+    int s = leaf;
+    int index = tk & 255;
+    repeat (8) {
+        if (slots.slice_bits() == 0) {
+            slots = slots~load_ref().begin_parse();
+        }
+        int sib = slots~load_uint(256);
+        s = (index & 1) == 0 ? slot_pair(s, sib) : slot_pair(sib, s);
+        index = index >> 1;
+    }
+    if (s == 0) {
+        return 0;
+    }
+    int stem = tk >> 8;
+    int acc = string_hash(begin_cell().store_uint(2, 8).store_uint(stem, 248).store_uint(s, 256).end_cell().begin_parse());
+    int d = depth;
+    while (d > 0) {
+        d -= 1;
+        int sib = sibs.at(d);
+        int bit = (stem >> (247 - d)) & 1;
+        acc = bit == 0 ? sha_pair(1, acc, sib) : sha_pair(1, sib, acc);
+    }
+    return acc == root;
+}

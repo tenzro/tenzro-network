@@ -1,0 +1,93 @@
+# Anchor
+.anchor
+target/
+**/*.rs.bk
+programs/**/*.so
+
+# Archive (backup before consolidation)
+programs/_archive/
+
+# IDL (keep idl/ folder, ignore target/idl/)
+target/idl/
+
+# TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+
+# Test keys
+test-ledger/
+.test-keypairs/
+.test-wallets.json
+
+# SDK tests (local development only)
+tests/sdk/
+
+# Documentation archives (old versions, audits, refs)
+docs/archive/
+
+# Documentation markdown (local, except SEAL.md)
+docs/**/*.md
+!docs/SEAL.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Debug test files
+tests/debug-*.ts
+test-wallets-backup.json
+
+# Marketing content
+twitter-thread-*.md
+
+# Local changelog
+ATOM-CHANGELOG.md
+
+# Temp planning files
+PLAN-*.md
+*_PLAN.md
+audit_8004/
+
+# Generated IDL/types at root (use idl/ folder instead)
+/agent_registry_8004.*
+/atom_engine.*
+
+# Temp scripts
+scripts/measure-costs*.ts
+scripts/start-localnet.sh
+tests/test-atom-optional.ts
+keys/
+keys/**/*.json
+
+# Claude Code instructions
+CLAUDE.md
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Local cargo config for path overrides (keep example template)
+.cargo/*
+!.cargo/config.toml.example
+!.cargo/audit.toml
+
+# Audit files (local only)
+audit.md
+docs/PLAN_COLLECTION_EXTENSION_ONCHAIN_PRIVATE.md

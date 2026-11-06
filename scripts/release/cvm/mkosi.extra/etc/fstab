@@ -1,0 +1,1 @@
+PARTLABEL=tenzro-var /var ext4 defaults,nodev,nosuid,x-systemd.device-timeout=120s 0 2

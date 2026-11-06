@@ -1,0 +1,30 @@
+# cargo-audit configuration for the control app's workspace. Each entry is the
+# decision recorded, with its reachability analysis, in the repository root's
+# .cargo/audit.toml; the app pulls the same crates through the node crates.
+
+[advisories]
+ignore = [
+  # rsa 0.9 timing side channel: no fixed release; public-key verification
+  # only (see the root audit.toml).
+  "RUSTSEC-2023-0071",
+  # tracing-subscriber 0.2: only behind ark-relations' constraint-trace layer,
+  # which nothing installs (see the root audit.toml).
+  "RUSTSEC-2025-0055",
+  # crypto-bigint 0.5.5: no fixed 0.5 release; only under k256 0.13 and p521
+  # 0.13, which verify and recover over public data (see the root audit.toml).
+  # The 0.7 line is on 0.7.8.
+  "RUSTSEC-2026-0387",
+  # glib 0.18.5: VariantStrIter's Iterator impls are unsound (fixed in 0.20).
+  # It comes in only through Tauri's Linux backend: tao 0.37, wry 0.57,
+  # tray-icon and muda all require gtk 0.18 and webkit2gtk =2.0.2, which pin
+  # glib 0.18, so no Tauri 2 release reaches a fixed glib. NOT REACHABLE: the
+  # app never builds a GVariant string array, and no crate in this lockfile
+  # calls VariantStrIter or Variant::array_iter_str (checked in the registry
+  # sources of gtk, gdk, gio, atk, webkit2gtk, javascriptcore, soup3,
+  # libappindicator, tao, wry, muda, tray-icon and the Tauri plugins).
+  # macOS and Windows builds do not compile glib at all.
+  # RE-ASSESS IF: Tauri moves its Linux backend to gtk 0.20+ / gtk4 (then
+  # upgrade and drop this entry), or the app or a new dependency starts
+  # iterating GVariant string arrays.
+  "RUSTSEC-2024-0429",
+]

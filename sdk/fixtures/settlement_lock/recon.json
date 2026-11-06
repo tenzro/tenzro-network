@@ -1,0 +1,55 @@
+{
+  "domain": "tenzro/settlement/recon/v1",
+  "entries": [
+    {
+      "plan_id": "0xff39945f610e67d55c8c0ec52e62f47d49dd7a293527cd1c5d17b8401f33a02c",
+      "leg_id": "0x9a46781a150083cf236f0336d9de74701d23c0cd969fbedb720c5d757cdc002e",
+      "index": 0,
+      "kind": 1,
+      "amount": "400",
+      "acc": "0x87f572fcea568bf192ccb0e6b0485da44549bdcb28b5e9e3d1de73de97d6d344"
+    },
+    {
+      "plan_id": "0xe84cdb4c63130097f6d891fe8d7e41e16dfe54f26f7e365d68227ce183f8d614",
+      "leg_id": "0x8879ef05759f21ad33050a532ef2f7e6ee94e13525404a558e44c4a07a635464",
+      "index": 2,
+      "kind": 1,
+      "amount": "1000000000000000000",
+      "acc": "0xafd9c0ae0b92e97e89ce50402051872f3e8cc734ea6d2468374c399b5ef66adf"
+    },
+    {
+      "plan_id": "0xff39945f610e67d55c8c0ec52e62f47d49dd7a293527cd1c5d17b8401f33a02c",
+      "leg_id": "0x9a46781a150083cf236f0336d9de74701d23c0cd969fbedb720c5d757cdc002e",
+      "index": 0,
+      "kind": 2,
+      "amount": "400",
+      "acc": "0x6d21d50966b39cc4de644657d08125ce234c10d962fa9eaa75d4153593184a97"
+    },
+    {
+      "plan_id": "0xe84cdb4c63130097f6d891fe8d7e41e16dfe54f26f7e365d68227ce183f8d614",
+      "leg_id": "0x8879ef05759f21ad33050a532ef2f7e6ee94e13525404a558e44c4a07a635464",
+      "index": 2,
+      "kind": 3,
+      "amount": "1000000000000000000",
+      "acc": "0xf008892aefe72343b22890e243ef8b8d471864283f265e29e834ed979f21d74e"
+    },
+    {
+      "plan_id": "0x560e4d6671b804b2de028358b359be8b884adbcc3aa1e2926163a66d99d8bdc8",
+      "leg_id": "0x5961baaac471cf8bcbb4cb8816cc664863d49601ab91b19ebdec0710af2ef9eb",
+      "index": 1,
+      "kind": 1,
+      "amount": "250",
+      "acc": "0xac6ff2a84a306272e04457c876b47369f87f69755ce7ddcb1d76141db157d79d"
+    },
+    {
+      "plan_id": "0x560e4d6671b804b2de028358b359be8b884adbcc3aa1e2926163a66d99d8bdc8",
+      "leg_id": "0x5961baaac471cf8bcbb4cb8816cc664863d49601ab91b19ebdec0710af2ef9eb",
+      "index": 1,
+      "kind": 3,
+      "amount": "250",
+      "acc": "0x375111922b0be21f25ad54b505467229080fd12340e5b01e4f56220cb3ecb58a"
+    }
+  ],
+  "count": 6,
+  "acc": "0x375111922b0be21f25ad54b505467229080fd12340e5b01e4f56220cb3ecb58a"
+}

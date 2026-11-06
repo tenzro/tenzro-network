@@ -1,0 +1,483 @@
+//! Hands the live network model-offer set to intent routing.
+//!
+//! Providers broadcast signed [`ModelRegistrationMessage`]s on `tenzro/models`
+//! carrying the model's modality, capabilities, context length, the provider's
+//! own price, a serving schedule, a TTL, and the address that serves the call.
+//! The event loop verifies each announcement, pins the signing key per
+//! `(model_id, provider)` pair, and keeps the unexpired set in
+//! [`crate::node::NetworkModelEntry`] records.
+//!
+//! [`tenzro_model::routing::InferenceRouter`] scores candidates over its own
+//! catalog, which is whatever this operator registered locally. Without this
+//! adapter it never sees what the rest of the network is serving, so intent
+//! routing would depend on per-node curation. Implementing
+//! [`NetworkCatalog`] over the announcement map makes every live offer a
+//! candidate scored on the price and capabilities its provider signed — and
+//! because the offer names its own payee, the settlement split follows from the
+//! winning offer instead of node configuration.
+//!
+//! The adapter holds the announcement map directly rather than an
+//! `Arc<TenzroNode>`, so attaching it to the router the node owns creates no
+//! reference cycle.
+
+use std::sync::Arc;
+
+use chrono::{Datelike, Timelike, Utc};
+use dashmap::DashMap;
+use tenzro_model::catalog::parse_params_active_b;
+use tenzro_model::routing::intent::{ModelOffer, NetworkCatalog};
+use tenzro_network::{ModelRegistrationMessage, ModelSchedule};
+use tenzro_types::model::{ModelInfo, ModelModality, ModelStatus};
+use tenzro_types::primitives::Address;
+
+use crate::node::{NetworkModelEntry, NetworkProviderEntry};
+
+/// [`NetworkCatalog`] over the gossip announcement map. See module docs.
+pub struct GossipNetworkCatalog {
+    models: Arc<DashMap<String, NetworkModelEntry>>,
+    /// The provider-announcement map, keyed by iroh endpoint id, joined onto each
+    /// model offer to recover the serving envelope. `None` leaves every offer
+    /// without a capacity, which selection reads as "nothing known".
+    providers: Option<Arc<DashMap<String, NetworkProviderEntry>>>,
+    /// Chain state, whose compute bonds decide whether a provider's claim to
+    /// serve optimistic answers is backed by a bond.
+    chain: Option<Arc<dyn tenzro_storage::KvStore>>,
+}
+
+impl GossipNetworkCatalog {
+    /// Wraps the node's announcement map.
+    pub fn new(models: Arc<DashMap<String, NetworkModelEntry>>) -> Self {
+        Self {
+            models,
+            providers: None,
+            chain: None,
+        }
+    }
+
+    /// Checks providers' optimistic-level claims against the compute bonds
+    /// in this chain state.
+    #[must_use]
+    pub fn with_chain(mut self, chain: Option<Arc<dyn tenzro_storage::KvStore>>) -> Self {
+        self.chain = chain;
+        self
+    }
+
+    /// The provider's announced capacity with its verification levels cut to
+    /// those this node can check (see
+    /// [`crate::verifiable_inference::routable_levels`]).
+    pub(crate) fn checked_capacity(
+        &self,
+        reg: &ModelRegistrationMessage,
+    ) -> Option<tenzro_types::AdvertisedCapacity> {
+        let mut capacity = self.capacity_for(&reg.iroh_endpoint_id)?;
+        let tee_vendor = self
+            .providers
+            .as_ref()
+            .and_then(|p| {
+                p.get(&reg.iroh_endpoint_id)
+                    .map(|e| e.announcement.trust_profile.tee_vendor.clone())
+            })
+            .unwrap_or_default();
+        let bonded = self.chain.as_ref().is_some_and(|store| {
+            crate::verifiable_inference::bonded_machine(
+                &tenzro_vm::StateAdapter::with_storage(store.clone()),
+                &reg.machine_did,
+            )
+        });
+        let witnesses = self
+            .models
+            .iter()
+            .filter(|e| {
+                e.registration.model_id == reg.model_id && e.registration.provider != reg.provider
+            })
+            .count();
+        capacity.verification = crate::verifiable_inference::routable_levels(
+            &capacity.verification,
+            &tee_vendor,
+            bonded,
+            witnesses,
+        );
+        Some(capacity)
+    }
+
+    /// Also joins provider announcements onto offers, so selection sees the
+    /// warm-prefix summary and concurrency the offering provider signed.
+    ///
+    /// The two live on separate gossip topics with separate TTLs — a model
+    /// offer names its `iroh_endpoint_id`, and the provider announcement is keyed by
+    /// exactly that — so this is a join, not a wire-format change. Without it
+    /// an offer reaches selection as `{model, endpoint}` and every
+    /// latency-deciding property the provider signed is dropped on the floor.
+    #[must_use]
+    pub fn with_providers(mut self, providers: Arc<DashMap<String, NetworkProviderEntry>>) -> Self {
+        self.providers = Some(providers);
+        self
+    }
+
+    /// The serving envelope the endpoint `endpoint_id` last announced, if it
+    /// is still within its own TTL.
+    ///
+    /// TTL is rechecked here rather than trusted from the model offer: the two
+    /// announcements expire independently, and a stale warm-prefix summary is
+    /// worse than none — it would route a prompt to a cache that has since
+    /// been evicted, paying the full prefill anyway plus a worse provider.
+    fn capacity_for(&self, endpoint_id: &str) -> Option<tenzro_types::AdvertisedCapacity> {
+        let providers = self.providers.as_ref()?;
+        let entry = providers.get(endpoint_id)?;
+        let ttl = std::time::Duration::from_secs(entry.announcement.ttl_secs);
+        if std::time::Instant::now().duration_since(entry.last_seen) >= ttl {
+            return None;
+        }
+        Some(entry.announcement.capacity.clone())
+    }
+}
+
+impl NetworkCatalog for GossipNetworkCatalog {
+    fn live_offers(&self, modality: ModelModality) -> Vec<ModelOffer> {
+        let now = std::time::Instant::now();
+        self.models
+            .iter()
+            .filter(|entry| {
+                let ttl = std::time::Duration::from_secs(entry.registration.ttl_secs);
+                now.duration_since(entry.last_seen) < ttl
+            })
+            .filter_map(|entry| {
+                let reg = &entry.registration;
+                if reg.withdrawn || reg.iroh_endpoint_id.is_empty() {
+                    return None;
+                }
+                if !schedule_admits(reg.schedule.as_ref()) {
+                    return None;
+                }
+                let model = offer_model(reg)?;
+                // Compound modalities are supersets of their components, so
+                // `supports` — not equality — decides whether an offer can
+                // serve the intent.
+                if !model.modality.supports(modality) {
+                    return None;
+                }
+                Some(ModelOffer {
+                    model,
+                    endpoint: reg.iroh_endpoint_id.clone(),
+                    capacity: self.checked_capacity(reg),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Whether the provider's serving schedule admits a call right now. An offer
+/// with no schedule, or with scheduling switched off, is always available.
+fn schedule_admits(schedule: Option<&ModelSchedule>) -> bool {
+    let Some(s) = schedule else {
+        return true;
+    };
+    if !s.enabled {
+        return true;
+    }
+    let now = Utc::now();
+    // `days_of_week` is 0=Sunday on the wire.
+    let today = now.weekday().num_days_from_sunday() as u8;
+    if !s.days_of_week.contains(&today) {
+        return false;
+    }
+    let hour = now.hour() as u8;
+    hour >= s.start_hour && hour < s.end_hour
+}
+
+/// Projects an announcement into the [`ModelInfo`] shape scoring reads.
+///
+/// Returns `None` for an announcement whose provider address or modality does
+/// not parse — an offer that cannot name its payee is not payable, and one
+/// whose modality is unknown cannot be matched to an intent.
+fn offer_model(reg: &ModelRegistrationMessage) -> Option<ModelInfo> {
+    let provider = Address::from_hex(&reg.provider).ok()?;
+    let modality = parse_modality(&reg.modality)?;
+
+    let mut model = ModelInfo::new(
+        reg.model_id.clone(),
+        reg.name.clone(),
+        String::new(),
+        modality,
+        provider,
+    );
+    model.description = reg.description.clone();
+    // Announced offers are live by construction: the provider is serving the
+    // model now and refreshes the announcement within its TTL.
+    model.status = ModelStatus::Active;
+
+    let active_b = parse_params_active_b(&reg.parameters);
+    if active_b > 0.0 {
+        model.parameters.parameter_count = Some((active_b * 1e9) as u64);
+    }
+    if reg.context_length > 0 {
+        model.parameters.context_window = reg.context_length;
+    }
+    // The category is what the provider says the model is for ("chat",
+    // "embedding", "code", …), which is the axis quality tiering reads
+    // capabilities on.
+    if !reg.category.is_empty() {
+        model.parameters.capabilities.push(reg.category.clone());
+    }
+
+    // An announcement carries a single category, which is thinner than what the
+    // catalog knows. Capability tags are a catalog-owned fact — the entry's
+    // `capabilities`, which `to_model_info` stamps on a locally served model
+    // and `refresh_catalog_fields` re-derives on a stored one — so a node
+    // whose catalog holds the model recovers the full set from its id alone.
+    //
+    // Tiering is capability-sensitive between the tag floor (7B) and the raw
+    // size floor (30B): a 27B trained for code reaches `Strong` only via its
+    // tag. Rebuilt from one category it scores `Cheap` on every peer, and an
+    // intent asking for `quality_floor = strong` matches nothing — which
+    // surfaces to a caller as a budget failure rather than a tiering one.
+    //
+    // Only the tags are taken. Price, endpoint, schedule and liveness stay with
+    // the announcement, which is the provider's to declare.
+    if let Some(entry) = tenzro_model::catalog::get_model_by_id(&reg.model_id) {
+        // Size is catalog-owned too, and it is the other half of the tier test:
+        // `quality_tier` reads `parameter_count` for BOTH of its arms, so a
+        // `None` here tiers even a 30B model `Cheap` no matter what tags it
+        // carries. The announcement's own parameter string is a display value
+        // the provider composed, and it does not always survive parsing.
+        if let Some(count) = Some(tenzro_model::catalog::parse_params_active_b(
+            &entry.parameters,
+        ))
+        .filter(|b| *b > 0.0)
+        .map(|b| (b * 1e9) as u64)
+        {
+            model.parameters.parameter_count = Some(count);
+        }
+        let tags = tenzro_model::catalog::entry(&reg.model_id)
+            .map(|e| e.capabilities)
+            .unwrap_or_default();
+        for tag in tags {
+            if !model
+                .parameters
+                .capabilities
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&tag))
+            {
+                model.parameters.capabilities.push(tag);
+            }
+        }
+    }
+
+    // The provider's own rate card, as it announced it.
+    model.pricing = reg.pricing.clone();
+
+    // The two inputs `quality_tier` reads, logged at the point they are decided.
+    // A sub-30B model needs a code/reasoning tag to reach the strong tier and a
+    // parameter count to reach it at all, and both arrive here by inference
+    // rather than from the wire — so when a peer will not route to an offer,
+    // this line is the difference between reading the projection and guessing.
+    tracing::debug!(
+        model_id = %reg.model_id,
+        announced_category = %reg.category,
+        announced_parameters = %reg.parameters,
+        parameter_count = ?model.parameters.parameter_count,
+        capabilities = ?model.parameters.capabilities,
+        "projected a gossiped offer"
+    );
+
+    Some(model)
+}
+
+/// Parses the announcement's modality string. Specialized task names collapse
+/// onto the modality that carries them, matching how the catalog and the model
+/// registry classify the same families.
+fn parse_modality(s: &str) -> Option<ModelModality> {
+    match s.to_lowercase().as_str() {
+        "text" | "text-embedding" | "text_embedding" | "embedding" => Some(ModelModality::Text),
+        "image" | "segmentation" | "segment" | "detection" | "detect" => Some(ModelModality::Image),
+        "audio" => Some(ModelModality::Audio),
+        "timeseries" | "ts" => Some(ModelModality::Timeseries),
+        "video" => Some(ModelModality::Video),
+        "text_image" | "textimage" => Some(ModelModality::TextImage),
+        "text_audio" | "textaudio" => Some(ModelModality::TextAudio),
+        "multimodal" => Some(ModelModality::Multimodal),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenzro_types::price_card::{Denom, Rate, RateCard};
+
+    fn card(per_input_token: u128) -> RateCard {
+        RateCard {
+            denom: Denom::Wei,
+            lines: [("input_tokens".to_string(), Rate::per(per_input_token, 0))]
+                .into_iter()
+                .collect(),
+            min_charge: 500,
+        }
+    }
+
+    fn announcement() -> ModelRegistrationMessage {
+        ModelRegistrationMessage {
+            model_id: "qwen3-8b".to_string(),
+            name: "Qwen3 8B".to_string(),
+            modality: "text".to_string(),
+            category: "chat".to_string(),
+            parameters: "8B".to_string(),
+            context_length: 32_768,
+            provider: hex::encode([7u8; 32]),
+            pricing: card(12),
+            ttl_secs: 120,
+            iroh_endpoint_id: "04".repeat(32),
+            ..Default::default()
+        }
+    }
+
+    fn catalog(entries: Vec<ModelRegistrationMessage>) -> GossipNetworkCatalog {
+        let map = Arc::new(DashMap::new());
+        for (i, reg) in entries.into_iter().enumerate() {
+            map.insert(
+                format!("{}:{i}", reg.model_id),
+                NetworkModelEntry {
+                    registration: reg,
+                    last_seen: std::time::Instant::now(),
+                },
+            );
+        }
+        GossipNetworkCatalog::new(map)
+    }
+
+    #[test]
+    fn announcement_becomes_a_priced_offer_naming_its_payee() {
+        let offers = catalog(vec![announcement()]).live_offers(ModelModality::Text);
+        assert_eq!(offers.len(), 1);
+        let offer = &offers[0];
+        assert_eq!(offer.endpoint, "04".repeat(32));
+        assert_eq!(offer.model.provider, Address::new([7u8; 32]));
+        assert_eq!(offer.model.pricing, card(12));
+        assert_eq!(offer.model.parameters.context_window, 32_768);
+        assert_eq!(offer.model.parameters.parameter_count, Some(8_000_000_000));
+        assert_eq!(offer.model.status, ModelStatus::Active);
+    }
+
+    /// `qwen3.8-27b` sits between the tag floor (7B) and the raw size floor
+    /// (30B), so it reaches the strong tier only by its `code`/`reasoning` tag.
+    /// The announcement carries one category, so without recovering the rest
+    /// from the catalog a peer tiers it `Cheap` and never offers it for work
+    /// asking for `quality_floor = strong`.
+    #[test]
+    fn a_catalogued_offer_recovers_the_tags_tiering_reads() {
+        tenzro_catalog::install_test_seed();
+        let mut reg = announcement();
+        reg.model_id = "qwen3.8-27b".to_string();
+        reg.name = "Qwen 3.8 27B".to_string();
+        reg.parameters = "27B (dense)".to_string();
+
+        let offers = catalog(vec![reg]).live_offers(ModelModality::Text);
+        let caps = &offers[0].model.parameters.capabilities;
+
+        // What the provider announced is kept,
+        assert!(caps.iter().any(|c| c == "chat"), "caps: {caps:?}");
+        // and what the catalog knows is recovered alongside it.
+        assert!(caps.iter().any(|c| c == "code"), "caps: {caps:?}");
+        assert!(caps.iter().any(|c| c == "reasoning"), "caps: {caps:?}");
+    }
+
+    /// An operator's own model is not in the catalog, so the announcement is
+    /// the only description of it that exists and nothing is invented.
+    #[test]
+    fn an_uncatalogued_offer_keeps_only_what_was_announced() {
+        let mut reg = announcement();
+        reg.model_id = "an-operators-own-finetune".to_string();
+
+        let offers = catalog(vec![reg]).live_offers(ModelModality::Text);
+        assert_eq!(offers[0].model.parameters.capabilities, vec!["chat"]);
+    }
+
+    #[test]
+    fn two_providers_of_one_model_are_two_offers() {
+        let mut cheap = announcement();
+        cheap.provider = hex::encode([8u8; 32]);
+        cheap.pricing = card(3);
+        cheap.iroh_endpoint_id = "05".repeat(32);
+
+        let offers = catalog(vec![announcement(), cheap]).live_offers(ModelModality::Text);
+        assert_eq!(offers.len(), 2);
+        assert!(offers.iter().any(|o| o.model.pricing == card(12)));
+        assert!(offers.iter().any(|o| o.model.pricing == card(3)));
+    }
+
+    #[test]
+    fn withdrawn_endpointless_and_off_modality_offers_are_dropped() {
+        let mut withdrawn = announcement();
+        withdrawn.withdrawn = true;
+        let mut endpointless = announcement();
+        endpointless.iroh_endpoint_id = String::new();
+        let mut unparseable_provider = announcement();
+        unparseable_provider.provider = "not-an-address".to_string();
+
+        let c = catalog(vec![
+            withdrawn,
+            endpointless,
+            unparseable_provider,
+            announcement(),
+        ]);
+        assert_eq!(c.live_offers(ModelModality::Text).len(), 1);
+        assert!(c.live_offers(ModelModality::Audio).is_empty());
+    }
+
+    #[test]
+    fn expired_announcements_are_dropped() {
+        let map = Arc::new(DashMap::new());
+        let mut reg = announcement();
+        reg.ttl_secs = 0;
+        map.insert(
+            "qwen3-8b:0".to_string(),
+            NetworkModelEntry {
+                registration: reg,
+                last_seen: std::time::Instant::now(),
+            },
+        );
+        assert!(
+            GossipNetworkCatalog::new(map)
+                .live_offers(ModelModality::Text)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_disabled_schedule_never_blocks_an_offer() {
+        let mut reg = announcement();
+        reg.schedule = Some(ModelSchedule {
+            enabled: false,
+            start_hour: 9,
+            end_hour: 10,
+            timezone: "UTC".to_string(),
+            days_of_week: vec![],
+        });
+        assert_eq!(catalog(vec![reg]).live_offers(ModelModality::Text).len(), 1);
+    }
+
+    #[test]
+    fn a_schedule_excluding_today_blocks_the_offer() {
+        let today = Utc::now().weekday().num_days_from_sunday() as u8;
+        let mut reg = announcement();
+        reg.schedule = Some(ModelSchedule {
+            enabled: true,
+            start_hour: 0,
+            end_hour: 24,
+            timezone: "UTC".to_string(),
+            days_of_week: (0u8..7).filter(|d| *d != today).collect(),
+        });
+        assert!(
+            catalog(vec![reg])
+                .live_offers(ModelModality::Text)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_multimodal_offer_serves_a_text_intent() {
+        let mut reg = announcement();
+        reg.modality = "multimodal".to_string();
+        assert_eq!(catalog(vec![reg]).live_offers(ModelModality::Text).len(), 1);
+    }
+}

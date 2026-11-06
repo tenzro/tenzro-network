@@ -1,0 +1,959 @@
+{
+  "description": "OpenShell sandbox policy plus a grant to Tenzro Terms. Terms are held by Tenzro, approved by the controller's passkey: the policy's tenzro network middleware takes no config and only routes traffic through the extensions. The grant names the models, limits, rails, payees and services; each payment service must be an endpoint of the policy's network_policies. Every sandbox may be created and reach its endpoints (sandbox, fetch); policy changes, MCP tool calls, inference and payments are granted explicitly.",
+  "options": {
+    "controller_did": "did:tenzro:human:controller",
+    "agent_name": "openshell-example",
+    "serving_nodes": [
+      {
+        "machine_did": "did:tenzro:machine:serving-a",
+        "operator_did": "did:tenzro:human:operator-a"
+      }
+    ],
+    "capabilities": [
+      "openshell"
+    ],
+    "now_ms": 1800000000000
+  },
+  "cases": [
+    {
+      "name": "inference and x402 to a named payee",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600,
+        "chains": [
+          "tenzro",
+          "eip155:8453"
+        ]
+      },
+      "terms": {
+        "controller_did": "did:tenzro:human:controller",
+        "agent_name": "openshell-example",
+        "delegation_scope": {
+          "max_transaction_value": "1000000",
+          "max_daily_spend": "5000000",
+          "allowed_operations": [
+            "sandbox",
+            "fetch",
+            "inference",
+            "pay"
+          ],
+          "allowed_payment_protocols": [
+            "x402"
+          ],
+          "allowed_chains": [
+            "tenzro",
+            "eip155:8453"
+          ],
+          "allowed_models": [
+            "qwen3-0.6b"
+          ],
+          "allowed_counterparties": [
+            "0xabcdef0123456789abcdef0123456789abcdef01"
+          ]
+        },
+        "capabilities": [
+          "openshell"
+        ],
+        "serving_nodes": [
+          {
+            "machine_did": "did:tenzro:machine:serving-a",
+            "operator_did": "did:tenzro:human:operator-a"
+          }
+        ],
+        "expires_at_ms": 1800003600000
+      }
+    },
+    {
+      "name": "inference only, policy changes and tool calls allowed",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "expires_in_secs": 3600,
+        "policy_changes": true,
+        "tools": true
+      },
+      "terms": {
+        "controller_did": "did:tenzro:human:controller",
+        "agent_name": "openshell-example",
+        "delegation_scope": {
+          "max_transaction_value": "1000000",
+          "max_daily_spend": "5000000",
+          "allowed_operations": [
+            "sandbox",
+            "fetch",
+            "sandbox.policy",
+            "tool",
+            "inference"
+          ],
+          "allowed_payment_protocols": [],
+          "allowed_chains": [
+            "tenzro"
+          ],
+          "allowed_models": [
+            "qwen3-0.6b"
+          ],
+          "allowed_counterparties": []
+        },
+        "capabilities": [
+          "openshell"
+        ],
+        "serving_nodes": [
+          {
+            "machine_did": "did:tenzro:machine:serving-a",
+            "operator_did": "did:tenzro:human:operator-a"
+          }
+        ],
+        "expires_at_ms": 1800003600000
+      }
+    },
+    {
+      "name": "every rail to any payee, egress without inference",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              },
+              {
+                "host": "shop.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com",
+                "shop.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "X402",
+            "mpp",
+            "ap2"
+          ],
+          "any_payee": true,
+          "services": [
+            "shop.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "terms": {
+        "controller_did": "did:tenzro:human:controller",
+        "agent_name": "openshell-example",
+        "delegation_scope": {
+          "max_transaction_value": "1000000",
+          "max_daily_spend": "5000000",
+          "allowed_operations": [
+            "sandbox",
+            "fetch",
+            "pay"
+          ],
+          "allowed_payment_protocols": [
+            "x402",
+            "mpp",
+            "ap2"
+          ],
+          "allowed_chains": [
+            "tenzro"
+          ],
+          "allowed_models": [],
+          "allowed_counterparties": []
+        },
+        "capabilities": [
+          "openshell"
+        ],
+        "serving_nodes": [
+          {
+            "machine_did": "did:tenzro:machine:serving-a",
+            "operator_did": "did:tenzro:human:operator-a"
+          }
+        ],
+        "expires_at_ms": 1800003600000
+      }
+    },
+    {
+      "name": "egress alone, fail-closed middleware",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "on_error": "fail_closed"
+          }
+        }
+      },
+      "grant": {
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "expires_in_secs": 60
+      },
+      "terms": {
+        "controller_did": "did:tenzro:human:controller",
+        "agent_name": "openshell-example",
+        "delegation_scope": {
+          "max_transaction_value": "1000000",
+          "max_daily_spend": "5000000",
+          "allowed_operations": [
+            "sandbox",
+            "fetch"
+          ],
+          "allowed_payment_protocols": [],
+          "allowed_chains": [
+            "tenzro"
+          ],
+          "allowed_models": [],
+          "allowed_counterparties": []
+        },
+        "capabilities": [
+          "openshell"
+        ],
+        "serving_nodes": [
+          {
+            "machine_did": "did:tenzro:machine:serving-a",
+            "operator_did": "did:tenzro:human:operator-a"
+          }
+        ],
+        "expires_at_ms": 1800000060000
+      }
+    }
+  ],
+  "refusals": [
+    {
+      "name": "no tenzro middleware",
+      "policy": {
+        "network_policies": {},
+        "network_middlewares": {}
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "the policy has no tenzro middleware"
+    },
+    {
+      "name": "the middleware twice",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          },
+          "again": {
+            "middleware": "tenzro"
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "the policy names the tenzro middleware twice"
+    },
+    {
+      "name": "Terms in the middleware config",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "config": {
+              "max_daily_spend": "1"
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "the tenzro middleware takes no config"
+    },
+    {
+      "name": "a fail-open middleware",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "on_error": "fail_open"
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "the tenzro middleware must fail closed"
+    },
+    {
+      "name": "a model wildcard",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "*"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "models must be named"
+    },
+    {
+      "name": "an unknown rail",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "card"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "payment protocol card is not one of"
+    },
+    {
+      "name": "open payees",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "name the payees or set any_payee"
+    },
+    {
+      "name": "a malformed payee",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0x1234"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "is not a 20-byte hex address"
+    },
+    {
+      "name": "a service outside the network policy",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "evil.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "is not an endpoint of the network policy"
+    },
+    {
+      "name": "a service without a rail",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "payment services need a payment rail"
+    },
+    {
+      "name": "no daily limit",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "max_daily_spend is not a canonical decimal"
+    },
+    {
+      "name": "a leading zero",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "0100",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "max_transaction_value is not a canonical decimal"
+    },
+    {
+      "name": "per payment above per day",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "6000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 3600
+      },
+      "error": "max_transaction_value is above max_daily_spend"
+    },
+    {
+      "name": "no expiry",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        }
+      },
+      "error": "expires_in_secs must be a positive whole number"
+    },
+    {
+      "name": "a fractional expiry",
+      "policy": {
+        "network_policies": {
+          "data": {
+            "name": "data",
+            "endpoints": [
+              {
+                "host": "data.example.com",
+                "port": 443
+              }
+            ]
+          }
+        },
+        "network_middlewares": {
+          "tenzro": {
+            "middleware": "tenzro",
+            "endpoints": {
+              "include": [
+                "data.example.com"
+              ]
+            }
+          }
+        }
+      },
+      "grant": {
+        "models": [
+          "qwen3-0.6b"
+        ],
+        "max_transaction_value": "1000000",
+        "max_daily_spend": "5000000",
+        "payments": {
+          "protocols": [
+            "x402"
+          ],
+          "payees": [
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+          ],
+          "services": [
+            "data.example.com"
+          ]
+        },
+        "expires_in_secs": 1.5
+      },
+      "error": "expires_in_secs must be a positive whole number"
+    }
+  ]
+}

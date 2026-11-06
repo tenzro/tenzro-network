@@ -1,0 +1,25 @@
+{
+  "description": "AP2 v0.2 open Payment Mandate constraints mapped onto agent Terms. Each case is one payment under one open mandate whose constraints are listed; payment.reference to the checkout is added to every case. A mandate only narrows the Terms: expect is the outcome after both the mandate and the Terms (per-payment limit terms_max) are checked. $PAYEE is the payee DID; amounts are minor units of currency.",
+  "ap2_version": "0.2",
+  "payee": "did:tenzro:machine:seller",
+  "currency": "TNZO",
+  "cases": [
+    {"name": "no_constraint_beyond_reference_terms_decide", "terms_field": "limits.per_tx", "constraints": [], "amount": 400, "terms_max": 500, "expect": "accept"},
+    {"name": "terms_refuse_what_the_mandate_allows", "terms_field": "limits.per_tx", "constraints": [{"type": "payment.amount_range", "currency": "TNZO", "max": 10000}], "amount": 900, "terms_max": 500, "expect": "refuse"},
+    {"name": "amount_range_inside", "terms_field": "limits.per_tx", "constraints": [{"type": "payment.amount_range", "currency": "TNZO", "min": 100, "max": 500}], "amount": 400, "terms_max": 10000, "expect": "accept"},
+    {"name": "amount_range_above", "terms_field": "limits.per_tx", "constraints": [{"type": "payment.amount_range", "currency": "TNZO", "max": 300}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "amount_range_below", "terms_field": "limits.per_tx", "constraints": [{"type": "payment.amount_range", "currency": "TNZO", "min": 500, "max": 900}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "amount_range_other_currency", "terms_field": "limits.per_tx", "constraints": [{"type": "payment.amount_range", "currency": "USD", "max": 900}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "allowed_payees_listed", "terms_field": "counterparties", "constraints": [{"type": "payment.allowed_payees", "allowed": [{"id": "$PAYEE", "name": "seller"}]}], "amount": 400, "terms_max": 10000, "expect": "accept"},
+    {"name": "allowed_payees_not_listed", "terms_field": "counterparties", "constraints": [{"type": "payment.allowed_payees", "allowed": [{"id": "did:tenzro:machine:other", "name": "other"}]}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "allowed_instruments_listed", "terms_field": "scope.protocols", "constraints": [{"type": "payment.allowed_payment_instruments", "allowed": [{"id": "tenzro-wallet", "type": "tenzro"}]}], "amount": 400, "terms_max": 10000, "expect": "accept"},
+    {"name": "allowed_instruments_not_listed", "terms_field": "scope.protocols", "constraints": [{"type": "payment.allowed_payment_instruments", "allowed": [{"id": "card-1", "type": "card"}]}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "execution_date_open", "terms_field": "expires_at_ms", "constraints": [{"type": "payment.execution_date", "not_before": "2020-01-01T00:00:00Z", "not_after": "2099-01-01T00:00:00Z"}], "amount": 400, "terms_max": 10000, "expect": "accept"},
+    {"name": "execution_date_passed", "terms_field": "expires_at_ms", "constraints": [{"type": "payment.execution_date", "not_after": "2020-01-01T00:00:00Z"}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "allowed_pisps_does_not_apply_on_chain", "terms_field": "none", "constraints": [{"type": "payment.allowed_pisps", "allowed": []}], "amount": 400, "terms_max": 10000, "expect": "accept"},
+    {"name": "budget_needs_a_store_use_period_limit", "terms_field": "limits.per_period", "constraints": [{"type": "payment.budget", "currency": "TNZO", "max": 1000}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "recurrence_needs_a_store_use_period_limit", "terms_field": "limits.per_period", "constraints": [{"type": "payment.agent_recurrence", "frequency": "monthly", "max_occurrences": 3}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "unknown_constraint_refused", "terms_field": "none", "constraints": [{"type": "payment.not_in_v0_2"}], "amount": 400, "terms_max": 10000, "expect": "refuse"},
+    {"name": "reference_missing_refused", "terms_field": "none", "constraints": [], "omit_reference": true, "amount": 400, "terms_max": 10000, "expect": "refuse"}
+  ]
+}

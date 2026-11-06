@@ -1,0 +1,47 @@
+# OpenShell provider profile for inference through the Tenzro network.
+# OpenShell does not load it; import it explicitly:
+#   openshell provider profile lint   -f providers/tenzro.yaml
+#   openshell provider profile import -f providers/tenzro.yaml --global
+#
+# Copy and edit this file rather than importing it unchanged. `binaries` is the
+# least-privilege control that decides which processes may reach the endpoint
+# below, so it has to name the paths in your image.
+#
+# Client binaries:   curl.
+# Reference layout:  curl at /usr/bin/curl or /usr/local/bin/curl. Add the SDK
+#                    interpreter if the workload calls the API through a library.
+# Credential scope:  TENZRO_AGENT_TOKEN, sent as a bearer authorization header to
+#                    api.tenzro.com and nowhere else. The value is never a key:
+#                    the Tenzro credential driver mints it for each resolve,
+#                    valid for minutes, under the agent's Terms. Create the
+#                    provider with the agent's DID as its credential value.
+# Endpoint access:   api.tenzro.com, read-write, L7 enforced. Each call is
+#                    checked against the agent's Terms, settled per unit from
+#                    the agent's wallet and answered with a signed receipt in
+#                    the x-tenzro-receipt header.
+# Smoke test:        openshell sandbox create --provider <name> \
+#                      --annotation tenzro.agent=<agent DID> -- \
+#                      curl -sS https://api.tenzro.com/v1/models \
+#                      -H "Authorization: Bearer $TENZRO_AGENT_TOKEN"
+
+id: tenzro
+display_name: Tenzro
+description: Inference routed through the Tenzro network, settled per call against signed receipts
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Short-lived credential minted under the agent's Terms
+    env_vars: [TENZRO_AGENT_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: api.tenzro.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/bin/curl, /usr/local/bin/curl]

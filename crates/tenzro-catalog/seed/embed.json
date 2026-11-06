@@ -1,0 +1,87 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "ffa41509a19ed783db077024282b4a50ee5e53d5ecf1c3824501909494c02033",
+        "built_from": {
+          "repo": "Qwen/Qwen3-VL-Embedding-2B",
+          "revision": "9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda"
+        },
+        "path": "qwen3-vl-embedding-2b-f16.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/qwen3-vl-embedding-2b-gguf",
+        "sha256": "7b2fff438709fb18ab6caf325bc823d6f6f761080b70bcf65c2f86df0b720302",
+        "size": 3447351008
+      },
+      {
+        "blake3": "f0e8c439d95313ad1869850a7b6c0062818d299374b6e9c8b92ba96bbd8b6be5",
+        "built_from": {
+          "repo": "Qwen/Qwen3-VL-Embedding-2B",
+          "revision": "9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda"
+        },
+        "path": "qwen3-vl-embedding-2b-mmproj-f16.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/qwen3-vl-embedding-2b-gguf",
+        "sha256": "521c481325245b7cb043fd33cfd891abf31c1925f504235fb8ca9d6b1dd5eb9d",
+        "size": 819395200
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "embed",
+      "spec": {
+        "description": "Qwen3-VL Embedding 2B: vision-language embedder over text, pictures and video frames, together in one input; last-token pooled and L2-normalised, multilingual retrieval",
+        "embedding_dim": 2048,
+        "embedding_template": {
+          "ChatInstruct": {
+            "default_task": "Retrieve relevant documents for the query.",
+            "document_task": "Represent the user's input."
+          }
+        },
+        "family": "qwen3-vl-embedding",
+        "hf_filename": "qwen3-vl-embedding-2b-f16.gguf",
+        "hf_repo": "tenzro/qwen3-vl-embedding-2b-gguf",
+        "id": "qwen3-vl-embedding-2b",
+        "matryoshka_dims": [],
+        "max_sequence_length": 32768,
+        "min_ram_gb": 6,
+        "mmproj": {
+          "filename": "qwen3-vl-embedding-2b-mmproj-f16.gguf"
+        },
+        "name": "Qwen3-VL Embedding 2B",
+        "quantization": "F16",
+        "size_bytes": 3447351008,
+        "vision_input": {
+          "image_max_pixels": 1843200,
+          "image_mean": [
+            0.5,
+            0.5,
+            0.5
+          ],
+          "image_min_pixels": 4096,
+          "image_std": [
+            0.5,
+            0.5,
+            0.5
+          ],
+          "merge_size": 2,
+          "patch_size": 16,
+          "temporal_patch_size": 2,
+          "video_frame_max_pixels": 786432,
+          "video_frame_min_pixels": 131072,
+          "video_frame_round_factor": 64,
+          "video_frame_round_min_pixels": 16384,
+          "video_frames": 64,
+          "video_sample_fps": 2.0,
+          "video_total_pixels": 7864320
+        }
+      }
+    }
+  }
+]

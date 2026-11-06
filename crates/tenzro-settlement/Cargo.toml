@@ -1,0 +1,23 @@
+[package]
+name = "tenzro-settlement"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared settlement pieces for Tenzro Network: escrow record and netting"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-token = { workspace = true }
+tenzro-wallet = { workspace = true }
+tenzro-storage = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,27 @@
+[package]
+name = "tenzro-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic network simulator: validators running the consensus core and the VM ledger under a simulated clock and network"
+publish = false
+
+[dependencies]
+tenzro-consensus = { workspace = true, features = ["test-keys"] }
+tenzro-vm = { workspace = true }
+tenzro-storage = { workspace = true }
+tenzro-types = { workspace = true }
+tenzro-token = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+ml-dsa = { workspace = true }
+
+[lints]
+workspace = true

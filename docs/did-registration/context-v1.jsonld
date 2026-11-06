@@ -1,0 +1,56 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@protected": true,
+
+    "TenzroIdentity": {
+      "@id": "https://tenzro.com/ns/did#TenzroIdentity",
+      "@context": {
+        "@version": 1.1,
+        "@protected": true,
+        "id": "@id",
+        "type": "@type",
+        "identityType": "https://tenzro.com/ns/did#identityType",
+        "kycTier": "https://tenzro.com/ns/did#kycTier",
+        "controller": "https://www.w3.org/ns/did#controller",
+        "controlledMachines": "https://tenzro.com/ns/did#controlledMachines",
+        "delegationScope": "https://tenzro.com/ns/did#delegationScope",
+        "tenzroAgentId": "https://tenzro.com/ns/did#tenzroAgentId"
+      }
+    },
+
+    "DelegationScope": {
+      "@id": "https://tenzro.com/ns/did#DelegationScope",
+      "@context": {
+        "@version": 1.1,
+        "@protected": true,
+        "maxTransactionValue": "https://tenzro.com/ns/did#maxTransactionValue",
+        "maxDailySpend": "https://tenzro.com/ns/did#maxDailySpend",
+        "allowedOperations": "https://tenzro.com/ns/did#allowedOperations",
+        "allowedContracts": "https://tenzro.com/ns/did#allowedContracts",
+        "timeBound": "https://tenzro.com/ns/did#timeBound",
+        "allowedPaymentProtocols": "https://tenzro.com/ns/did#allowedPaymentProtocols",
+        "allowedChains": "https://tenzro.com/ns/did#allowedChains"
+      }
+    },
+
+    "KycCredential": "https://tenzro.com/ns/did#KycCredential",
+    "CapabilityCredential": "https://tenzro.com/ns/did#CapabilityCredential",
+    "AttestationCredential": "https://tenzro.com/ns/did#AttestationCredential",
+
+    "kycTier": {
+      "@id": "https://tenzro.com/ns/did#kycTier",
+      "@type": "https://tenzro.com/ns/did#KycTier"
+    },
+
+    "capabilities": {
+      "@id": "https://tenzro.com/ns/did#capabilities",
+      "@container": "@set"
+    },
+
+    "walletId": "https://tenzro.com/ns/did#walletId",
+    "tenzroDid": "https://tenzro.com/ns/did#tenzroDid",
+    "registrationFee": "https://tenzro.com/ns/did#registrationFee",
+    "reputation": "https://tenzro.com/ns/did#reputation"
+  }
+}

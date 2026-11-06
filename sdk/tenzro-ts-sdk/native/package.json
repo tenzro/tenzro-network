@@ -1,0 +1,70 @@
+{
+  "name": "@tenzro/device-key",
+  "version": "0.1.1",
+  "description": "Hardware device keys for Node.js: read the public key and sign a digest with a key held in the TPM 2.0 (Linux, Windows) or the Apple Secure Enclave. No key export, no software fallback.",
+  "keywords": [
+    "tenzro",
+    "tpm",
+    "tpm2",
+    "secure-enclave",
+    "p256",
+    "hardware-key",
+    "device-key",
+    "napi"
+  ],
+  "homepage": "https://tenzro.com/docs/hardware-rooted-keys",
+  "bugs": {
+    "url": "https://github.com/tenzro/tenzro-network/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenzro/tenzro-network.git",
+    "directory": "sdk/tenzro-ts-sdk/native"
+  },
+  "license": "Apache-2.0",
+  "author": "Tenzro <eng@tenzro.com>",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "bin",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "napi": {
+    "name": "device-key",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test": "node --test test/*.test.cjs",
+    "stage": "node scripts/stage.js"
+  },
+  "optionalDependencies": {
+    "@tenzro/device-key-linux-x64-gnu": "0.1.1",
+    "@tenzro/device-key-linux-arm64-gnu": "0.1.1",
+    "@tenzro/device-key-darwin-arm64": "0.1.1",
+    "@tenzro/device-key-darwin-x64": "0.1.1",
+    "@tenzro/device-key-win32-x64-msvc": "0.1.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "tenzro-device-key": "bin/tenzro-device-key.js"
+  }
+}

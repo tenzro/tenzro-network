@@ -1,0 +1,231 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; A client of Tenzro finality on TON.
+;;
+;; Tenzro's finality proofs are Groth16 proofs over BN254. TON verifies
+;; pairings over BLS12-381 only, so the client takes the wrapped form: a
+;; Groth16 proof over BLS12-381 that a valid BN254 finality proof exists for
+;; the receipt claim whose two 128-bit halves are its public inputs. The
+;; client recomputes the claim from the journal, checks
+;; e(A, B) = e(alpha, beta) e(IC0 + lo IC1 + hi IC2, gamma) e(C, delta),
+;; and records the checkpoint the journal states when its committee is the
+;; one the client holds for that epoch. A checkpoint that ends an epoch hands
+;; over to the next committee. Contracts read a final state root by asking
+;; the client to report it: the client answers with a message only it can
+;; send.
+
+const int op::submit = 0x4f1c3b7a;
+const int op::report = 0x6a2d9e15;
+const int op::state_root = 0x2b7f4c93;
+
+const int error::malformed = 300;
+const int error::wrong_chain = 301;
+const int error::unknown_committee = 302;
+const int error::already_final = 303;
+const int error::invalid_proof = 304;
+const int error::unknown_checkpoint = 305;
+
+;; SHA-256 of "risc0.Output" and of "risc0.ReceiptClaim".
+const int TAG_OUTPUT = 0x77eafeb366a78b47747de0d7bb176284085ff5564887009a5be63da32d3559d4;
+const int TAG_CLAIM = 0xcb1fefcd1f2d9a64975cbbbf6e161e2914434b0cbb9960b84df5d717e86b48af;
+;; The terminal state of a halted program.
+const int POST_STATE = 0xa3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2;
+
+;; Storage: image_id (256), chain_id (64), genesis_hash (256), latest index
+;; (64); refs: the verifying key, committee roots by epoch, checkpoints by
+;; index (state root 256, timestamp 64, digest 256).
+(int, int, int, int, cell, cell, cell) load_state() inline {
+    slice s = get_data().begin_parse();
+    return (s~load_uint(256), s~load_uint(64), s~load_uint(256), s~load_uint(64), s~load_ref(), s~load_dict(), s~load_dict());
+}
+
+() save_state(int image_id, int chain_id, int genesis, int latest, cell vk, cell committees, cell checkpoints) impure inline {
+    set_data(begin_cell()
+        .store_uint(image_id, 256).store_uint(chain_id, 64).store_uint(genesis, 256).store_uint(latest, 64)
+        .store_ref(vk).store_dict(committees).store_dict(checkpoints)
+        .end_cell());
+}
+
+;; The digest of a successful receipt claim of `image_id` with journal
+;; digest `journal_digest`.
+int claim_digest(int image_id, int journal_digest) {
+    int output = string_hash(begin_cell()
+        .store_uint(TAG_OUTPUT, 256).store_uint(journal_digest, 256).store_uint(0, 256).store_uint(0x0200, 16)
+        .end_cell().begin_parse());
+    slice head = begin_cell().store_uint(TAG_CLAIM, 256).store_uint(0, 256).store_uint(image_id, 256).end_cell().begin_parse();
+    slice tail = begin_cell().store_uint(POST_STATE, 256).store_uint(output, 256).store_uint(0, 64).store_uint(0x0400, 16)
+        .end_cell().begin_parse();
+    return sha256_2(head, tail);
+}
+
+;; 16 bytes in reverse order.
+int reverse16(int x) inline {
+    int r = 0;
+    repeat (16) {
+        r = (r << 8) | (x & 255);
+        x = x >> 8;
+    }
+    return r;
+}
+
+;; The commitment challenge: the wrap circuit commits to its internal checks,
+;; and the challenge is (sha256(D || 0 || M) || sha256(D || 1 || M)[:16]) mod r
+;; for the compressed commitment M.
+const int R = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001;
+
+int commitment_challenge(slice m) {
+    int hi = string_hash(begin_cell().store_slice("tenzro/finality-wrap/commitment").store_uint(0, 8).store_slice(m).end_cell().begin_parse());
+    int lo = string_hash(begin_cell().store_slice("tenzro/finality-wrap/commitment").store_uint(1, 8).store_slice(m).end_cell().begin_parse()) >> 128;
+    (_, int shifted) = muldivmod(hi % R, 1 << 128, R);
+    return (shifted + lo) % R;
+}
+
+;; The verifying key cell: alpha and IC0 (G1, 48 bytes each); refs beta,
+;; gamma, delta (G2, 96 bytes each) and a cell of IC1 and IC2 whose refs are
+;; IC3 and the commitment key G and G sigma^-1. The proof: A, B, C and the
+;; commitment M with its proof of knowledge. Checks
+;; e(M, G sigma^-1) e(PoK, G) = 1 and
+;; e(-A, B) e(alpha, beta) e(IC0 + lo IC1 + hi IC2 + h IC3 + M, gamma) e(C, delta) = 1.
+int verify_wrapped(cell vk, int claim, slice a, slice b, slice c, slice m, slice pok) {
+    int lo = reverse16(claim >> 128);
+    int hi = reverse16(claim & ((1 << 128) - 1));
+    slice v = vk.begin_parse();
+    slice alpha = v~load_bits(384);
+    slice ic0 = v~load_bits(384);
+    slice beta = v~load_ref().begin_parse();
+    slice gamma = v~load_ref().begin_parse();
+    slice delta = v~load_ref().begin_parse();
+    slice ics = v~load_ref().begin_parse();
+    slice ic1 = ics~load_bits(384);
+    slice ic2 = ics~load_bits(384);
+    slice ic3 = ics~load_ref().begin_parse();
+    slice cg = ics~load_ref().begin_parse();
+    slice cgs = ics~load_ref().begin_parse();
+    ifnot (bls_pairing_check2(m, cgs, pok, cg)) {
+        return 0;
+    }
+    slice k = bls_g1_add(bls_g1_add(ic0, m), bls_g1_mul(ic1, lo));
+    k = bls_g1_add(bls_g1_add(k, bls_g1_mul(ic2, hi)), bls_g1_mul(ic3, commitment_challenge(m)));
+    return bls_pairing_check4(bls_g1_neg(a), b, alpha, beta, k, gamma, c, delta);
+}
+
+;; A journal word holding an integer of at most 64 bits.
+int small(int w) inline {
+    throw_unless(error::malformed, (w >> 64) == 0);
+    return w;
+}
+
+() recv_internal(int balance, int value, cell in_msg, slice body) impure {
+    slice cs = in_msg.begin_parse();
+    int flags = cs~load_uint(4);
+    if ((flags & 1) | body.slice_empty?()) {
+        return ();
+    }
+    slice sender = cs~load_msg_addr();
+    int op = body~load_uint(32);
+    int query_id = body~load_uint(64);
+    var (image_id, chain_id, genesis, latest, vk, committees, checkpoints) = load_state();
+
+    if (op == op::submit) {
+        ;; The journal: five cells of three, three, three, three and one words.
+        cell journal = body~load_ref();
+        slice j0 = journal.begin_parse();
+        slice j1 = j0.preload_ref().begin_parse();
+        slice j2 = j1.preload_ref().begin_parse();
+        slice j3 = j2.preload_ref().begin_parse();
+        slice j4 = j3.preload_ref().begin_parse();
+        throw_unless(error::malformed, (j0.slice_bits() == 768) & (j1.slice_bits() == 768) & (j2.slice_bits() == 768)
+            & (j3.slice_bits() == 768) & (j4.slice_bits() == 256) & (j4.slice_refs() == 0));
+        int journal_digest = sha256_5(j0, j1, j2, j3, j4);
+        ;; The seal: A and C (G1); refs B (G2) and the commitment with its
+        ;; proof of knowledge (G1, G1).
+        slice seal = body~load_ref().begin_parse();
+        throw_unless(error::malformed, (seal.slice_bits() == 768) & (seal.slice_refs() == 2));
+        slice a = seal~load_bits(384);
+        slice c = seal~load_bits(384);
+        slice b = seal~load_ref().begin_parse();
+        slice mp = seal~load_ref().begin_parse();
+        throw_unless(error::malformed, (b.slice_bits() == 768) & (mp.slice_bits() == 768));
+        slice m = mp~load_bits(384);
+        throw_unless(error::invalid_proof, verify_wrapped(vk, claim_digest(image_id, journal_digest), a, b, c, m, mp));
+
+        int j_chain = small(j0~load_uint(256));
+        int j_genesis = j0~load_uint(256);
+        int epoch = small(j0~load_uint(256));
+        int committee = j1~load_uint(256);
+        int index = small(j1~load_uint(256));
+        int digest = j1~load_uint(256);
+        j2~skip_bits(256);
+        int state_height = small(j2~load_uint(256));
+        int state_root = j2~load_uint(256);
+        j3~skip_bits(512);
+        int next_committee = j3~load_uint(256);
+        int timestamp = small(j4~load_uint(256));
+        throw_unless(error::wrong_chain, (j_chain == chain_id) & (j_genesis == genesis));
+        (slice held, int found) = committees.udict_get_slice?(64, epoch);
+        throw_unless(error::unknown_committee, found);
+        int root = held~load_uint(256);
+        throw_unless(error::unknown_committee, (root == committee) & (root != 0));
+        (_, int final?) = checkpoints.udict_get_slice?(64, index);
+        throw_if(error::already_final, final?);
+        checkpoints = checkpoints.udict_set(64, index, begin_cell().store_uint(state_root, 256).store_uint(timestamp, 64)
+            .store_uint(digest, 256).store_uint(state_height, 64).end_cell().begin_parse());
+        if (index > latest) {
+            latest = index;
+        }
+        if (next_committee != 0) {
+            (_, int known) = committees.udict_get_slice?(64, epoch + 1);
+            ifnot (known) {
+                committees = committees.udict_set(64, epoch + 1, begin_cell().store_uint(next_committee, 256).end_cell().begin_parse());
+            }
+        }
+        save_state(image_id, chain_id, genesis, latest, vk, committees, checkpoints);
+        return ();
+    }
+
+    if (op == op::report) {
+        ;; Tell `to` the state root of final checkpoint `index`, carrying the
+        ;; caller's payload back.
+        int index = body~load_uint(64);
+        slice to = body~load_msg_addr();
+        cell payload = body~load_ref();
+        (slice entry, int found) = checkpoints.udict_get_slice?(64, index);
+        throw_unless(error::unknown_checkpoint, found);
+        int state_root = entry~load_uint(256);
+        int timestamp = entry~load_uint(64);
+        send_raw_message(begin_cell()
+            .store_uint(0x10, 6).store_slice(to).store_coins(0).store_uint(0, 1 + 4 + 4 + 64 + 32 + 1)
+            .store_uint(1, 1)
+            .store_ref(begin_cell().store_uint(op::state_root, 32).store_uint(query_id, 64).store_uint(index, 64)
+                .store_uint(state_root, 256).store_uint(timestamp, 64).store_ref(payload).end_cell())
+            .end_cell(), 64);
+        return ();
+    }
+
+    throw(0xffff);
+}
+
+int get_state_root(int index) method_id {
+    var (_, _, _, _, _, _, checkpoints) = load_state();
+    (slice entry, int found) = checkpoints.udict_get_slice?(64, index);
+    throw_unless(error::unknown_checkpoint, found);
+    return entry~load_uint(256);
+}
+
+int get_checkpoint_timestamp(int index) method_id {
+    var (_, _, _, _, _, _, checkpoints) = load_state();
+    (slice entry, int found) = checkpoints.udict_get_slice?(64, index);
+    throw_unless(error::unknown_checkpoint, found);
+    entry~skip_bits(256);
+    return entry~load_uint(64);
+}
+
+int get_latest_index() method_id {
+    var (_, _, _, latest, _, _, _) = load_state();
+    return latest;
+}
+
+int get_committee_root(int epoch) method_id {
+    var (_, _, _, _, _, committees, _) = load_state();
+    (slice held, int found) = committees.udict_get_slice?(64, epoch);
+    return found ? held~load_uint(256) : 0;
+}

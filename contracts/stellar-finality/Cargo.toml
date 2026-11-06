@@ -1,0 +1,31 @@
+[package]
+name = "tenzro-stellar-finality"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "A client of Tenzro finality on Stellar: checkpoints proven by Groth16 with the BN254 host functions"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = "28"
+tenzro-finality-verifier = { path = "../finality-verifier" }
+
+[dev-dependencies]
+soroban-sdk = { version = "28", features = ["testutils"] }
+hex = "0.4"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[workspace]

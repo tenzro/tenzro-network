@@ -1,0 +1,17 @@
+[Unit]
+Description=Read the operator's node settings from the cloud platform
+Documentation=https://tenzro.com/docs/node/confidential-vm
+After=network-online.target
+Wants=network-online.target
+Before=tenzro-node.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/tenzro/platform-config
+
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

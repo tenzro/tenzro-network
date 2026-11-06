@@ -1,0 +1,33 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "references": [
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./packages/payments"
+    },
+    {
+      "path": "./packages/settlement"
+    },
+    {
+      "path": "./packages/agents"
+    },
+    {
+      "path": "./packages/bridge"
+    },
+    {
+      "path": "./packages/inference"
+    },
+    {
+      "path": "./packages/chain"
+    }
+  ]
+}

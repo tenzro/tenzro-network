@@ -1,0 +1,88 @@
+# Registry of timeseries ONNX export targets.
+#
+# Each [[target]] block describes one model the harness knows how to
+# export. The `id` field is the local name used by `export.py`. The
+# `context_length` and `max_horizon` fields will be consumed by the
+# Tenzro `TimeseriesRuntime` when the resulting artifact is registered
+# (`tenzro_loadForecastModel` RPC).
+#
+# Note: the TimesFM 2.5 200M entry in `get_forecast_catalog` points at
+# the community ONNX export at
+# `pdufour/timesfm-2.5-200m-transformers-onnx`. The harness below is
+# the fallback path for producing our own ONNX if that community
+# export ever goes offline or falls behind upstream.
+#
+# Only Apache-2.0 / MIT weights belong here — re-exporting produces an
+# artifact we host ourselves, and `test_all_licenses_are_redistributable`
+# enforces that.
+
+[[target]]
+id = "timesfm-2.5-200m"
+hf_repo = "google/timesfm-2.5-200m-transformers"
+arch = "timesfm"                # Decoder-only transformer with patch tokenizer
+license = "Apache-2.0"
+params = "200M"
+context_length = 2048
+max_horizon = 128
+n_quantiles = 10
+notes = "Decoder-only patch-tokenized transformer. The transformers-format repo is the maintained source: google/timesfm-2.5-200m-pytorch has not moved since 2025-10 and the community ONNX derives from the transformers layout. That export at pdufour/timesfm-2.5-200m-transformers-onnx pins batch_size=2 because of force_flip_invariance=true; any re-export must preserve that contract."
+
+[[target]]
+id = "chronos-2-small"
+hf_repo = "autogluon/chronos-2-small"
+revision = "ddec01313e50b6bc58ebaa92ede81bc24a3d9f9a"
+arch = "chronos2"
+license = "Apache-2.0"
+params = "28M"
+context_length = 5760
+max_horizon = 672
+n_quantiles = 13
+notes = "Chronos-2 small. Inputs context, group_ids, attention_mask (f32), future_covariates and future_covariates_mask; output quantile_preds [B, 13, 672], quantile-major. Exported by Tenzro from the official weights."
+
+[[target]]
+id = "chronos-2"
+hf_repo = "amazon/chronos-2"
+revision = "29ec3766d36d6f73f0696f85560a422f50e8498c"
+arch = "chronos2"
+license = "Apache-2.0"
+params = "120M"
+context_length = 5760
+max_horizon = 672
+n_quantiles = 13
+notes = "Chronos-2. Same contract as chronos-2-small."
+
+[[target]]
+id = "tirex-2"
+hf_repo = "NX-AI/TiRex-2"
+revision = "05e5b26db52bfb256f1ae1bdf785589850482de3"
+arch = "tirex2"
+license = "Apache-2.0"
+params = "95M"
+context_length = 2048
+max_horizon = 320
+n_quantiles = 9
+notes = "TiRex-2, xLSTM forecaster. Input context [1, 2048] -> quantiles [1, 320, 9] (levels 0.1-0.9). The trend test and the differenced path are inside the graph. Exported by Tenzro from the official checkpoint."
+
+[[target]]
+id = "toto-2.0-22m"
+hf_repo = "Datadog/Toto-2.0-22m"
+revision = "685e4ae3e2be8d8998025e53dd98e7fdcb296a89"
+arch = "toto2"
+license = "Apache-2.0"
+params = "22M"
+context_length = 2048
+max_horizon = 768
+n_quantiles = 9
+notes = "Toto 2.0, causal patch decoder. Input context [1, 2048] -> quantiles [1, 768, 9] (levels 0.1-0.9), one decode block. Exported by Tenzro from the official weights."
+
+[[target]]
+id = "toto-2.0-313m"
+hf_repo = "Datadog/Toto-2.0-313m"
+revision = "a7bab288f5e95f8606f8306f86659357e1c001ef"
+arch = "toto2"
+license = "Apache-2.0"
+params = "313M"
+context_length = 2048
+max_horizon = 768
+n_quantiles = 9
+notes = "Toto 2.0, causal patch decoder. Input context [1, 2048] -> quantiles [1, 768, 9] (levels 0.1-0.9), one decode block. Exported by Tenzro from the official weights."

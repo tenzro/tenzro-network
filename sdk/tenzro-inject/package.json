@@ -1,0 +1,92 @@
+{
+  "name": "@tenzro/inject",
+  "version": "0.2.0",
+  "description": "Tenzro injected provider — window.tenzro for browser extensions and dApps. CAIP-25/27 multichain core, EIP-1193/EIP-6963 EVM façade, Wallet Standard SVM façade. Holds no key: the user's passkey signs in the open wallet.",
+  "keywords": [
+    "tenzro",
+    "wallet",
+    "browser-extension",
+    "eip-1193",
+    "eip-6963",
+    "wallet-standard",
+    "caip-25",
+    "caip-27",
+    "multichain"
+  ],
+  "homepage": "https://tenzro.com/docs/wallet-sdk",
+  "bugs": {
+    "url": "https://github.com/tenzro/tenzro-network/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenzro/tenzro-network.git",
+    "directory": "sdk/tenzro-inject"
+  },
+  "license": "Apache-2.0",
+  "author": "Tenzro <eng@tenzro.com>",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./inpage": {
+      "types": "./dist/inpage.d.ts",
+      "import": "./dist/inpage.js"
+    },
+    "./detect": {
+      "types": "./dist/detect.d.ts",
+      "import": "./dist/detect.js"
+    },
+    "./content-script": {
+      "types": "./dist/content-script.d.ts",
+      "import": "./dist/content-script.js"
+    },
+    "./session-store": {
+      "types": "./dist/session-store.d.ts",
+      "import": "./dist/session-store.js"
+    },
+    "./routing": {
+      "types": "./dist/routing.d.ts",
+      "import": "./dist/routing.js"
+    },
+    "./wallet-window": {
+      "types": "./dist/wallet-window.d.ts",
+      "import": "./dist/wallet-window.js"
+    },
+    "./service-worker": {
+      "types": "./dist/service-worker.d.ts",
+      "import": "./dist/service-worker.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --import ./test/resolve-js.mjs --test test/*.test.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "dependencies": {
+    "tenzro-sdk": "^0.9.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

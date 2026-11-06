@@ -1,0 +1,966 @@
+# Production genesis.
+#
+# Validators hold their consensus keys in hardware. Replace `validators = []`
+# with one `[[validators]]` entry per founding validator, each printed on its
+# own machine by `tenzro-node validator-entry --stake <whole TNZO>`. A node
+# refuses to start on a genesis that names no validators. Each founding node
+# also adds one `[[role_stakes]]` entry per bonded role it serves, bonding
+# from the node account its validator entry names; every founding node bonds
+# `rpc` with its seed URL as `endpoint`. Leave `stake` out to bond what the
+# governed `stake.*` parameters require at genesis.
+version = 1
+chain_id = 13380
+timestamp = 0
+validators = []
+accounts = []
+
+# Time rules every validator applies; the genesis state root commits to
+# them. A rehearsal network may compress them (shorter epochs, checkpoints and
+# lifetimes) to run many epochs quickly.
+[time]
+checkpoint_interval_ms = 500
+epoch_checkpoints = 7200
+handover_confirmations = 2
+announcement_lifetime_ms = 21600000
+compact_interval_ms = 60000
+compact_handoff_ms = 90000
+leader_slots = 2
+calendar_scale = 1
+idle_round_interval_ms = 5000
+
+[network_params]
+# Starting values of governed network parameters. Each is changed only by an
+# enacted governance proposal and applies from the next epoch. A parameter
+# not listed starts at its registry value; see docs/GOVERNANCE_PARAMS.md.
+# The TNZO/USD rate fees are priced at. 0 (governance) uses fees.tnzo_usd_nano until
+# enough independent validators report; their sealed-then-opened reports run
+# alongside as a published shadow. 1 (validators) uses the stake-weighted median of
+# the opened reports, smoothed and bounded per hourly epoch.
+"fees.usd_rate_mode" = 0
+# 0.10 USD per TNZO, in nano-USD.
+"fees.tnzo_usd_nano" = 100000000
+# Rises at most 1% per hour (1.27x a day) and falls at most 5% per hour, so a
+# crash is followed within days and a pump is not; only reporters holding two
+# thirds of stake can move the rate, and no faster than this.
+"fees.usd_rate_max_change_bps" = 100
+"fees.usd_rate_max_fall_bps" = 500
+# Safety checks (security ratio, stake-backed bridge caps, bond floors) value
+# TNZO at the lower of the rate in force and the lowest median of the last day.
+"fees.safety_rate_window_epochs" = 24
+# Two thirds of bonded stake must open its sealed rates for a median to count.
+# 6666, not 6667: with stake split in thirds, an honest two thirds suffices.
+"fees.usd_rate_quorum_bps" = 6666
+# The rate moves only into the band between the one-third and two-thirds
+# stake-weighted quantiles of the opened reports.
+"fees.usd_rate_quantile_low_bps" = 3334
+"fees.usd_rate_quantile_high_bps" = 6666
+"fees.usd_rate_frozen" = 0
+# Short of the quorum, a rate more than 3% from the median of the stake that
+# still reports (at least a majority) for six hourly epochs in a row moves
+# toward that median at the hourly bound: withholding reports freezes the
+# rate for six hours at most.
+"fees.usd_rate_stale_epochs" = 6
+"fees.usd_rate_stale_gap_bps" = 300
+"fees.usd_rate_stale_quorum_bps" = 5001
+# A validator rate no newer median has set for a day is reported held: fees
+# go on at it, and tenzro_getFeeRate answers held = true.
+"fees.usd_rate_max_age_epochs" = 24
+# Posted USD prices per use, paid in TNZO at the rate in force and burned in full.
+# One cent per identity: a Sybil cost far above the chain cost of the record.
+"fees.identity_register_micro_usd" = 10000
+# A tenth of a cent per proof attestation.
+"fees.verify_micro_usd" = 1000
+# A hundredth of a cent per inference settlement.
+"fees.inference_settle_micro_usd" = 100
+# A provider's bond covers 1.1x the TNZO it holds in open escrows.
+"compute_bond.var_ratio_bps" = 11000
+# Issuance in TNZO (never in fiat): 60M in year 0, 15% less each year, at least
+# 10M a year, times a controller multiplier between 0.5x and 1x that moves at
+# most 25% of 1x a year: up while slashable stake covers less than
+# security.min_ratio_bps of what one attack can take out over the bridges,
+# down once it covers more. Issuance never exceeds the base schedule.
+"mint.base_tnzo_per_year" = 60000000
+"mint.decay_bps_per_year" = 1500
+"mint.floor_tnzo_per_year" = 10000000
+"mint.adj_bps_per_year" = 2500
+"mint.min_mult_bps" = 5000
+"mint.max_mult_bps" = 10000
+# Validators 45%, providers 40%, apps 15%; providers are paid per settlement
+# at most 40% of the fee it paid outside the trade, apps at most 50% of it, so
+# a settlement never earns back what it cost.
+"mint.validator_share_bps" = 4500
+"mint.provider_share_bps" = 4000
+"mint.ecosystem_share_bps" = 1500
+"mint.revenue_peg_bps" = 10000
+"mint.provider_reward_cost_bps" = 4000
+# Validators' running cost: 1,500 USD a month each, paid first in stable assets from
+# the validator cover reserve (below); the base reward pays what that left, at the rate
+# in force, at most 20,000 TNZO a month, funded by up to a quarter of each epoch's burn.
+"fees.validator_burn_share_bps" = 2500
+"validator.base_cost_usd_month" = 1500
+# Validators' running cost is paid first in stable assets, from a reserve filled
+# only by the stable settlement fees the treasury keeps, up to 12 months of cost.
+"validator.stable_cover_fee_share_bps" = 10000
+"validator.stable_cover_target_months" = 12
+"validator.base_cap_tnzo_month" = 20000
+# A validator claims its running-cost base liquid, before the rest of the claim
+# is split into its liquid and vesting parts.
+"rewards.base_liquid_bps" = 10000
+# 0.1% of settled value = the low end of DEX pool fee tiers (0.05%-0.3%).
+"fees.settlement_fee_bps" = 10
+# 50% burned, 50% to the treasury = supply sink and funded treasury in equal weight.
+"fees.settlement_fee_burn_bps" = 5000
+# 50% of the fee paid = a settlement's reward never covers its fee, so wash trading loses.
+"fees.activity_reward_fee_bps" = 5000
+# 10% of the spend ceiling = lower bound of typical performance bonds.
+"agent_bond.spend_bps" = 1000
+# Foundation stewardship of the treasury. Steward seats can veto a queued
+# treasury or expedited proposal, or hold treasury and expedited enactment for
+# at most governance.max_pause_ms; they never spend, propose or set anything.
+# After the sunset no steward seat holds power. Governance may move the sunset
+# earlier or lower the seat cap; neither can move later or higher.
+# 2030-10-01T00:00:00Z. Three steward seats are filled at genesis.
+"governance.steward_sunset_ms" = 1917043200000
+"governance.steward_max_seats" = 5
+# Provider routing standing, out of 10000: a live serving bond holds
+# routing.standing_bonded; SLA verdicts over the last
+# routing.standing_window_hours closed hours add up to
+# routing.standing_availability by the share found available, or
+# routing.standing_unjudged_bps of it before any verdict.
+"routing.standing_bonded" = 3000
+"routing.standing_availability" = 7000
+"routing.standing_unjudged_bps" = 5000
+"routing.standing_window_hours" = 24
+# Base fee floor and ceiling, atto-USD per unit of gas: the floor is the
+# marginal cost of a transfer (about 0.0000021 USD for 21,000 gas); the
+# ceiling only stops runaway pricing.
+"fees.min_base_fee" = 100000000
+"fees.max_base_fee" = 1000000000000
+"fees.base_fee_change_denominator" = 8
+"fees.min_settlement_fee_micro_usd" = 1
+# 10% of the treasury's fee revenue goes to the insurance pool.
+"fees.insurance_pool_bps" = 1000
+# Admission lanes. Fee multiples are of the base fee the next block charges;
+# rates are transactions per second per sender (thousandths), bursts in
+# transactions. An open (unbonded) key pays 4x and is held to one transaction
+# every four seconds, bursts of 10: honest anonymous use is unaffected while
+# a funded flood of fresh keys pays four times as much and gets in at a
+# quarter of the rate. Above 4x the multiple buys little: the cheapest
+# full flood goes through bonded identities.
+"admission.open_fee_mult_bps" = 40000
+"admission.open_rate_milli" = 250
+"admission.open_burst" = 10
+"admission.delegated_fee_mult_bps" = 15000
+"admission.delegated_rate_milli" = 10000
+"admission.delegated_burst" = 100
+"admission.verified_fee_mult_bps" = 10000
+"admission.verified_rate_milli" = 50000
+"admission.verified_burst" = 500
+# Staking: 10,000 TNZO validator self-stake; seven days to unbond, longer
+# than a vote and its timelock (five days), so stake that votes stays bonded
+# until the outcome is enacted.
+"stake.validator_tnzo" = 10000
+# New validators register only from accounts an enacted ApproveValidators
+# proposal approved, until governance sets this to 0. Genesis validators and
+# ones already registered are not affected.
+"validator.admission_approval" = 1
+# A new bond keeps the USD value it has at 0.10 USD per TNZO: below that rate,
+# at the safety rate, every stake.* amount rises in proportion for entry.
+"stake.bond_floor_rate_nano_usd" = 100000000
+"stake.unbonding_ms" = 604800000
+"staking.validator_unbonding_ms" = 604800000
+# At most 4% of the active set's self-stake finishes exiting in one epoch
+# (at least one validator always does).
+"staking.exit_churn_bps" = 400
+# A validator that signs nothing certified for 5,000 epochs is moved to exit,
+# never below the four a launch accepts.
+"staking.inactivity_limit_epochs" = 5000
+"staking.active_set_floor" = 4
+"staking.inactivity_activation_epoch" = 0
+# Governance: three days to vote, a third of stake for quorum, two thirds to
+# pass, two days of timelock. Stake must be bonded seven days before a
+# proposal opens to count on it.
+"governance.voting_period_ms" = 259200000
+"governance.quorum_bps" = 3334
+"governance.threshold_bps" = 6667
+"governance.timelock_ms" = 172800000
+"governance.min_bond_age_ms" = 604800000
+# Any payment out of the treasury or its reserve needs yes votes of three
+# quarters of all eligible stake (not of the stake that voted); one of
+# 100,000 TNZO or more also waits fourteen days of timelock.
+"governance.large_spend_tnzo" = 100000
+"governance.large_spend_approval_bps" = 7500
+"governance.large_spend_timelock_ms" = 1209600000
+# One proposal may at most double a bridge cap, a capture guard or an exit
+# limit, or loosen one by as much; tightening is never limited.
+"governance.max_cap_raise_bps" = 20000
+# Treasury outflow: at most 2% of the balance per proposal and 3% in any
+# thirty days. These bound grants and recoveries from the
+# treasury; running costs are paid from the running-cost reserve under the
+# rules below (docs/ECONOMICS.md, "Treasury policy").
+"treasury.max_proposal_outflow_bps" = 200
+"treasury.max_period_outflow_bps" = 300
+"treasury.outflow_period_ms" = 2592000000
+# A change that loosens a capture guard (treasury outflow, the vote's quorum
+# and thresholds, issuance, validator pay, slashing, unbonding, the fee
+# rate's move cap and quorum) applies ninety days after it enacts.
+"governance.guard_loosening_grace_epochs" = 2160
+# Running-cost reserve. No amount is fixed: the treasury and the reserve may
+# both start empty, and every flow follows from realised fee revenue and
+# observed traded volume. At each hourly epoch boundary half of the fee
+# revenue the treasury realised moves into the reserve while the reserve is
+# under twelve months of observed running cost. Running costs may use 30% of
+# the trailing month's (720 epochs') revenue plus 3% of the reserve a month,
+# and the reserve sells into the market at most 5% of the TNZO traded in an
+# epoch, taking the lowest of the last week of validators' volume reports,
+# the newest no older than six epochs. What an
+# enacted payment has not been paid within a month lapses.
+"treasury.reserve_fill_share_bps" = 5000
+"treasury.reserve_target_months" = 12
+"treasury.running_cost_revenue_share_bps" = 3000
+"treasury.reserve_drawdown_bps" = 300
+"treasury.month_epochs" = 720
+"treasury.sale_volume_share_bps" = 500
+# Whatever volume is reported, the reserve pays out at most 10,000 TNZO an
+# epoch.
+"treasury.max_sale_tnzo_epoch" = 10000
+"treasury.volume_max_age_epochs" = 6
+"treasury.volume_window_epochs" = 168
+"treasury.payment_ttl_epochs" = 720
+# A bridge exit above a quarter of its route's outflow bucket waits 24 hours,
+# in which a guardian, or anyone after a proven committee fault, may cancel it.
+"bridge.exit_delay_ms" = 86400000
+"bridge.exit_delay_threshold_bps" = 2500
+# Economic security: a third of bonded stake must cover 1.5 times what one
+# attack can take out over the bridges in a day. Raising any outflow cap, or
+# switching the fee rate to validator mode, is refused below that.
+"security.min_ratio_bps" = 15000
+"security.attack_stake_bps" = 3334
+"security.attack_window_epochs" = 24
+# Caps other than TNZO's shrink each epoch so one epoch lets out at most two
+# thirds of bonded stake over 1 + gamma (gamma = 1), at the safety rate. An
+# exit over the cap queues for up to a day's worth of the cap.
+"bridge.security_gamma_bps" = 10000
+"bridge.queue_max_epochs" = 24
+# Ready transactions wait at most 10 s on their assigned validator before the
+# next in turn may batch them.
+"consensus.sender_failover_ms" = 10000
+# Optimistic inference audits: at least 5% of answers re-executed elsewhere,
+# plus 10 points for each whole TNZO the answer's payment holds.
+"inference.optimistic.sample_bps" = 500
+"inference.optimistic.sample_escrow_step_gwei" = 1000000000
+"inference.optimistic.sample_step_bps" = 1000
+# An upheld fault pays 20x the answer's payment (the inverse of the 5% floor
+# share, so cheating never pays in expectation), at least 10 cents in TNZO.
+"inference.optimistic.penalty_payment_bps" = 200000
+"inference.optimistic.penalty_floor_micro_usd" = 100000
+
+[economy]
+# TPM manufacturer EK roots (PEM) a machine's endorsement certificate must
+# chain to for machine admission. A governance parameter: governance replaces
+# the set with a policy update. Each certificate below is exactly as its
+# manufacturer publishes it at the URL named above it, converted from DER to PEM.
+tpm_endorsement_roots_pem = [
+  # Infineon OPTIGA(TM) RSA Root CA
+  # Source: https://pki.infineon.com/OptigaRsaRootCA/OptigaRsaRootCA.crt
+  # SHA-256 fingerprint: 89:9E:35:47:4C:98:07:EB:4C:7F:2F:7A:12:DA:00:28:FB:25:0C:D0:21:54:D0:00:9F:CA:7D:9C:66:57:4F:3B
+  '''
+-----BEGIN CERTIFICATE-----
+MIIFqzCCA5OgAwIBAgIBAzANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJERTEh
+MB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJ
+R0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkgUlNB
+IFJvb3QgQ0EwHhcNMTMwNzI2MDAwMDAwWhcNNDMwNzI1MjM1OTU5WjB3MQswCQYD
+VQQGEwJERTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYD
+VQQLDBJPUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElH
+QShUTSkgUlNBIFJvb3QgQ0EwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoIC
+AQC7E+gc0B5T7awzux66zMMZMTtCkPqGv6a3NVx73ICg2DSwnipFwBiUl9soEodn
+25SVVN7pqmvKA2gMTR5QexuYS9PPerfRZrBY00xyFx84V+mIRPg4YqUMLtZBcAwr
+R3GO6cffHp20SBH5ITpuqKciwb0v5ueLdtZHYRPq1+jgy58IFY/vACyF/ccWZxUS
+JRNSe4ruwBgI7NMWicxiiWQmz1fE3e0mUGQ1tu4M6MpZPxTZxWzN0mMz9noj1oIT
+ZUnq/drN54LHzX45l+2b14f5FkvtcXxJ7OCkI7lmWIt8s5fE4HhixEgsR2RX5hzl
+8XiHiS7uD3pQhBYSBN5IBbVWREex1IUat5eAOb9AXjnZ7ivxJKiY/BkOmrNgN8k2
+7vOS4P81ix1GnXsjyHJ6mOtWRC9UHfvJcvM3U9tuU+3dRfib03NGxSPnKteL4SP1
+bdHfiGjV3LIxzFHOfdjM2cvFJ6jXg5hwXCFSdsQm5e2BfT3dWDBSfR4h3Prpkl6d
+cAyb3nNtMK3HR5yl6QBuJybw8afHT3KRbwvOHOCR0ZVJTszclEPcM3NQdwFlhqLS
+ghIflaKSPv9yHTKeg2AB5q9JSG2nwSTrjDKRab225+zJ0yylH5NwxIBLaVHDyAEu
+81af+wnm99oqgvJuDKSQGyLf6sCeuy81wQYO46yNa+xJwQIDAQABo0IwQDAdBgNV
+HQ4EFgQU3LtWq/EY/KaadREQZYQSntVBkrkwDgYDVR0PAQH/BAQDAgAGMA8GA1Ud
+EwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIBAGHTBUx3ETIXYJsaAgb2pyyN
+UltVL2bKzGMVSsnTCrXUU8hKrDQh3jNIMrS0d6dU/fGaGJvehxmmJfjaN/IFWA4M
+BdZEnpAe2fJEP8vbLa/QHVfsAVuotLD6QWAqeaC2txpxkerveoV2JAwj1jrprT4y
+rkS8SxZuKS05rYdlG30GjOKTq81amQtGf2NlNiM0lBB/SKTt0Uv5TK0jIWbz2WoZ
+gGut7mF0md1rHRauWRcoHQdxWSQTCTtgoQzeBj4IS6N3QxQBKV9LL9UWm+CMIT7Y
+np8bSJ8oW4UdpSuYWe1ZwSjZyzDiSzpuc4gTS6aHfMmEfoVwC8HN03/HD6B1Lwo2
+DvEaqAxkya9IYWrDqkMrEErJO6cqx/vfIcfY/8JYmUJGTmvVlaODJTwYwov/2rjr
+la5gR+xrTM7dq8bZimSQTO8h6cdL6u+3c8mGriCQkNZIZEac/Gdn+KwydaOZIcnf
+Rdp3SalxsSp6cWwJGE4wpYKB2ClM2QF3yNQoTGNwMlpsxnU72ihDi/RxyaRTz9OR
+pubNq8Wuq7jQUs5U00ryrMCZog1cxLzyfZwwCYh6O2CmbvMoydHNy5CU3ygxaLWv
+JpgZVHN103npVMR3mLNa3QE+5MFlBlP3Mmystu8iVAKJas39VO5y5jad4dRLkwtM
+6sJa8iBpdRjZrBp5sJBI
+-----END CERTIFICATE-----
+''',
+  # Infineon OPTIGA(TM) ECC Root CA
+  # Source: https://pki.infineon.com/OptigaEccRootCA/OptigaEccRootCA.crt
+  # SHA-256 fingerprint: CF:EB:02:FE:CD:55:AD:7A:73:C6:E1:D1:19:85:D4:C4:7D:EE:24:8A:B6:3D:CB:66:09:1A:24:89:66:04:43:C3
+  '''
+-----BEGIN CERTIFICATE-----
+MIICWzCCAeKgAwIBAgIBBDAKBggqhkjOPQQDAzB3MQswCQYDVQQGEwJERTEhMB8G
+A1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJR0Eo
+VE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShUTSkgRUNDIFJv
+b3QgQ0EwHhcNMTMwNzI2MDAwMDAwWhcNNDMwNzI1MjM1OTU5WjB3MQswCQYDVQQG
+EwJERTEhMB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQL
+DBJPUFRJR0EoVE0pIERldmljZXMxKDAmBgNVBAMMH0luZmluZW9uIE9QVElHQShU
+TSkgRUNDIFJvb3QgQ0EwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQm1HxLVgvAu1q2
+GM+ymTz12zdTEu0JBVG9CdsVEJv/pE7pSWOlsG3YwU792YAvjSy7zL+WtDK40KGe
+Om8bSWt46QJ00MQUkYxz6YqXbb14BBr06hWD6u6IMBupNkPd9pKjQjBAMB0GA1Ud
+DgQWBBS0GIXISkrFEnryQDnexPWLHn5K0TAOBgNVHQ8BAf8EBAMCAAYwDwYDVR0T
+AQH/BAUwAwEB/zAKBggqhkjOPQQDAwNnADBkAjA6QZcV8DjjbPuKjKDZQmTRywZk
+MAn8wE6kuW3EouVvBt+/2O+szxMe4vxj8R6TDCYCMG7c9ov86ll/jDlJb/q0L4G+
++O3Bdel9P5+cOgzIGANkOPEzBQM3VfJegfnriT/kaA==
+-----END CERTIFICATE-----
+''',
+  # Infineon OPTIGA(TM) RSA Root CA 2
+  # Source: https://pki.infineon.com/OptigaRsaRootCA2/OptigaRsaRootCA2.crt
+  # SHA-256 fingerprint: B4:13:C7:15:80:AF:3E:C5:EF:E8:3F:AD:31:DB:2D:4A:F4:61:23:55:E3:B0:1E:50:90:3B:10:76:3D:73:88:94
+  '''
+-----BEGIN CERTIFICATE-----
+MIIFsTCCA5mgAwIBAgIBWTANBgkqhkiG9w0BAQsFADB5MQswCQYDVQQGEwJERTEh
+MB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJ
+R0EoVE0pIERldmljZXMxKjAoBgNVBAMMIUluZmluZW9uIE9QVElHQShUTSkgUlNB
+IFJvb3QgQ0EgMjAgFw0xOTExMjIwMDAwMDBaGA8yMDU0MTEyMjIzNTk1OVoweTEL
+MAkGA1UEBhMCREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEb
+MBkGA1UECwwST1BUSUdBKFRNKSBEZXZpY2VzMSowKAYDVQQDDCFJbmZpbmVvbiBP
+UFRJR0EoVE0pIFJTQSBSb290IENBIDIwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAw
+ggIKAoICAQClvyAQlJNoJwAXwO5AojnaZO3rYqEbnox1r4jVvsjVnbDYSm9qYMIh
+X0lEweLh3GmC/B0VgN0eoVTdfUZ/H9laK+PETmzQnKya8Gsq/XSCq8nWKslTgdoY
+w44ddSBrTKoLWLPb8VW0FU0YIZaQEdXtWCQ2UqP+3Y6HbR8+RPO5DW64VsaGbeDx
+VZgskZauH0oZ4eU7pCa9z6WwhExHMqgTOMHNuCgAWD/OkxqBsS74/2L4nv6zJD9+
+yPLF3PjbVolC5WzR8M3ZUhN2iGp9V80/SEmj8SGS/z5l0cIwqua9DLhj/VCTo2Tl
+qJ1hjQVaKYRnPaLPnxOmjbwPkCBO/Tj4jHVLfjk1XArSR3tjZK2CvRERweLC/XdK
+doJuPPASeR8qmbhaj39wHBT5CTpJ8Hlh3uL1nMpeRJHJ0qM+7enirx/7WPuoI6FZ
+N9xEWh7k6kma8wjjettN8r8qHBJjQN6IeJ8p2dETfRK+Wva718S2TKf3RyrD2aX3
+RUGjFPxZcwDAX+YlqW7p03/77nf1SYnvyX7EyTZ99fRUjghVnM2tnTC4Soi6Sv1Z
+oXxWFSOMUeRb3YN+OlWvqnVIJ1UNiTe5l1qCnEE+P+lj87sSjwSP63ME4xaNFmlT
+v50t3+Gxpj92h8/owOpUBTD1uwLiZNDXhBE3qTtqO5T655ulTBsiZQIDAQABo0Iw
+QDAdBgNVHQ4EFgQU+0/LDx9uXdViIvTFSiU55L1NaigwDgYDVR0PAQH/BAQDAgAG
+MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIBAFUkfuMp8AubFwcY
+id4j4W5d3vTkSHxLWQ+ILgw8t3goF/Zp1ikDJMPVynEaVEIet5qjT5jZe56j0HkI
+gyrOtjUxXXXvjSYEiUsoghp4ECM6EMj3nUmSqFkP8A9eGLtfpjTDFml0kPsBrK3e
+o0+moWLvRsFRL9wVKKu2OTdA3aUG8hfNocvu/H7yqsLNg1DAwmhBajQl3PtICjPB
+xUmhE1mxq998CVvdId7PqkTrBmUK8mNTNnLsDqFP2API//XxPWI9/LCib4StwM1w
+v0ECNelb/bAw3FDx6HcJqkA8mRqfjg+cngOCPQXa3MWXbod5RM6DzQhwgAaofSlv
+PzZGZvOu84FILJkSxj9ZpPVDy3bgTS2AE9Iy0C6y/1GyeHhDYFYdxg40osoCOBxu
+1WwsEPr0FkYYXX2YSRa3MmrkkWzXrgx1JKzJB6p/mQ14j1R3eMiYWKx5DjtkAmM9
+9qsnIU42jIpbwvQF1YC41GYclP2pX45LmDGTWgBDSBBtjEPnn2gwYH6uaSR3zndx
+nqu/imr4HSyvrsIGNak5RLEed8e02nbjTAehOLAZGdj+TMnvbQBS0AiZZO3qWx9T
+/ABQ8gFSGgorfvS5Lg7ANIiBSsCsVIa28I2eiYrJZatuFAo1Xg4z3n2kvL7S1wZy
+8MZsUVujMk+IInhi81MQZFUR2QbA
+-----END CERTIFICATE-----
+''',
+  # Infineon OPTIGA(TM) ECC Root CA 2
+  # Source: https://pki.infineon.com/OptigaEccRootCA2/OptigaEccRootCA2.crt
+  # SHA-256 fingerprint: EE:0C:82:75:55:C4:E9:01:20:37:DF:42:57:BB:8A:AA:26:08:4A:17:B1:3E:DE:41:CD:78:95:C8:D6:C1:11:90
+  '''
+-----BEGIN CERTIFICATE-----
+MIICrTCCAg6gAwIBAgIBWjAKBggqhkjOPQQDBDB5MQswCQYDVQQGEwJERTEhMB8G
+A1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJR0Eo
+VE0pIERldmljZXMxKjAoBgNVBAMMIUluZmluZW9uIE9QVElHQShUTSkgRUNDIFJv
+b3QgQ0EgMjAgFw0xOTExMjIwMDAwMDBaGA8yMDU0MTEyMjIzNTk1OVoweTELMAkG
+A1UEBhMCREUxITAfBgNVBAoMGEluZmluZW9uIFRlY2hub2xvZ2llcyBBRzEbMBkG
+A1UECwwST1BUSUdBKFRNKSBEZXZpY2VzMSowKAYDVQQDDCFJbmZpbmVvbiBPUFRJ
+R0EoVE0pIEVDQyBSb290IENBIDIwgZswEAYHKoZIzj0CAQYFK4EEACMDgYYABABD
+6MnFaakBVM/vveSWg55BTIdxWdxAzGf2+fEUo5b9hMF6kVSWaR0wAAm2p9qeXNAV
+j7tfQkhz1CxvNz4TauSBQQGf94WLcIKyh7d6zC6/AIloqPizTIGb5xl4ogqyz6ZC
+T/D5FiOPA98TYzoThdqM8cpcI74e2xOyNgAffsm/BRiuFKNCMEAwHQYDVR0OBBYE
+FIK4PcxxuD5+9pzWHchNUjJwbMedMA4GA1UdDwEB/wQEAwIABjAPBgNVHRMBAf8E
+BTADAQH/MAoGCCqGSM49BAMEA4GMADCBiAJCAOXJYwRt86BtRKSuiN5LNATNX6Nc
+hs4DUiggpQhbgggV3Lf+T39l71KvCIPb8n5ZjSi5AKflmPGzumCjqDAPsgmsAkIA
+vpqNqptg4Sf3hrdAsLAqNPZGnx8gRBnsTvvQzNUOZETuBp+nbmSrKMWZpd5G7HkM
+9uXFb5ctX1cZQUbYFA2qG5g=
+-----END CERTIFICATE-----
+''',
+  # STMicroelectronics STSAFE RSA Root CA 02
+  # Source: https://sw-center.st.com/STSAFE/STSAFERsaRootCA02.crt
+  # SHA-256 fingerprint: C8:F1:79:94:33:56:E1:3D:9D:84:B1:00:20:1C:EF:AB:BF:40:88:80:24:1E:53:29:E6:0D:95:0C:E1:DE:A6:23
+  '''
+-----BEGIN CERTIFICATE-----
+MIIFXjCCA0agAwIBAgIGVR0gAAACMA0GCSqGSIb3DQEBDAUAME0xCzAJBgNVBAYT
+AkNIMR4wHAYDVQQKExVTVE1pY3JvZWxlY3Ryb25pY3MgTlYxHjAcBgNVBAMTFVNU
+U0FGRSBSU0EgUm9vdCBDQSAwMjAgFw0yMjAxMjAwMDAwMDBaGA85OTk5MTIzMTAw
+MDAwMFowTTELMAkGA1UEBhMCQ0gxHjAcBgNVBAoTFVNUTWljcm9lbGVjdHJvbmlj
+cyBOVjEeMBwGA1UEAxMVU1RTQUZFIFJTQSBSb290IENBIDAyMIICIjANBgkqhkiG
+9w0BAQEFAAOCAg8AMIICCgKCAgEAyDtHbW51K/pnDbnPdLQTls2U/bu/aDATTi1W
+CZDAtFC9sWtCRK6jQ0SG9DCCys7ur170V3Q+HVov88FzH6bYg4TWY7+wEQKLR/4W
+IgdCjcW3uXMimsh9tOb+UlfRMW0yEozi7F+F/v07lULTJg+itCOMASi/caV1ySYI
+cX5z/5Woj3hDgJGa4scOoxdOfPg1GCkEjQPy7fG/IBt883palE/T4UNg1megfLcg
+hjOrbaPTFB3qXmm6E07QDYMkPiqryz3v9MCnOw62EXGcQLFIK4DwPxySU7NxO0ta
+DHXv+8B5ljv4Jtx5OLkDf9YAfjEg6ZOpsyIGKI+bgIoVYtGbXTDZAtoMKw3ystQX
+va9ceQ4cIQQUjpH6nFm8dbm/TOrkZd6m9pmLftR6kTuzRd8hhKCwpfcKbxQlMI2u
+TDVbw03IFUhk23uDSTOzsyOjB2f93SLEw1yTBuiYXhO2YHUHFJckbiuz7RdE4sjN
+1J0LwxKKbm9kleYEP+Kah6IJ0Zs7vbP3WNZUpmt6/XTmszb+paTSpanUYbBr2/IE
+aQCRiAlv0H26i5u4CjSHRjjRIqLAuGnpn0gZ2Zgs1espJwmey7MPKvTJtK1H+TQN
+0HZW8DYtcdzPkpxqKndWIUR7JTnozVPCVOcirSPGdkSvhbAGPyoyv7ju86RnTiT0
+NLz7SbECAwEAAaNCMEAwHQYDVR0OBBYEFHzCjb5uWdhKVANGmxMIANL48G0nMA4G
+A1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBDAUAA4IC
+AQCykiyYyHAXHzRBdqJ3QLr8qTDDNO3RdLToZmiFRdslaRr2RtlDDjcAEFKf1u/E
+1qprZe926Ob5KxWIQREvDAgqAbRS9fd3+w6hZ+ZrmHNh5aH2UEgsfAi9vZ3K8BH/
+rReqTm0oxCMz4socJ9tIpvGSZhJg6PDTidsIscr8iNcSsVYJO60wSMxn7tv+Buh+
+ZgJFddzEYZqTuezsdiXswkAkwqTJY9KM1w0bFLHrmifkc0y6I+jeBgjGxMknz8G5
+p7YX4GoeJp5LjM8z36qBFKcjkKpYEb2H+u6CxgXFsxu6nkB0pn3u2uNwmXTYIQKO
+trcshrmoKUv7mDvtaNIa0blMTRTEZzkwrR1BsHm/Gz7NLhgkDIv9p1u5oiCwlebh
+eJ1cDJ9I7puSBPiDDpkdvVPg0wNFPai/SAhjW0OaULcybVR7kXzST9/xerCoquYp
+I+qLjTs+RqahgL5a9ZRPVABX3DwvnDCarwVqMSfRjGP4e8b2BspDM+wPTvQH1K4O
+xk+qc9HT7YubzqhtJ/yfcYd/eKTsk60aNmknatNZDSFzq03lxN048n3D9mcjGDkR
+15Kv5NX8DhZuCNcBddkGC96uYpgSvl089RgnSL/qPlM+QlVjPbqDpISd/z3X4RNb
+vdT+agOdZZJRB1MROQXDnACVdQB1ba/DTO4UNEou27D03Q==
+-----END CERTIFICATE-----
+''',
+  # STMicroelectronics STSAFE ECC Root CA 02
+  # Source: https://sw-center.st.com/STSAFE/STSAFEEccRootCA02.crt
+  # SHA-256 fingerprint: FD:1E:7B:68:AC:CD:82:56:36:B2:7B:31:77:C6:74:02:D4:63:A7:F0:4C:97:B6:C4:7A:B7:05:FC:DC:1A:04:F6
+  '''
+-----BEGIN CERTIFICATE-----
+MIICWjCCAbugAwIBAgIGVR0gAAECMAoGCCqGSM49BAMEME0xCzAJBgNVBAYTAkNI
+MR4wHAYDVQQKExVTVE1pY3JvZWxlY3Ryb25pY3MgTlYxHjAcBgNVBAMTFVNUU0FG
+RSBFQ0MgUm9vdCBDQSAwMjAgFw0yMjAxMjAwMDAwMDBaGA85OTk5MTIzMTAwMDAw
+MFowTTELMAkGA1UEBhMCQ0gxHjAcBgNVBAoTFVNUTWljcm9lbGVjdHJvbmljcyBO
+VjEeMBwGA1UEAxMVU1RTQUZFIEVDQyBSb290IENBIDAyMIGbMBAGByqGSM49AgEG
+BSuBBAAjA4GGAAQAJFgkbtp5mZpvISjL8zAUSSJXxXpPhxhSVGQfqU0GEjPBIMMD
+KNvc23xCcyIsiFTMD4MZQ1wov0SaBE3M31bWx78BrbiPCJ4lXUvJWiwm9+v3EL1z
+lznBtyJDYUkrUe2n7r8NH7kAQ1X/csItvyomECdRtm4wwD8VX1n+l3npVlMNOxWj
+QjBAMB0GA1UdDgQWBBT1XLcHvEsXQiYkgEBLu3yAulo8vjAOBgNVHQ8BAf8EBAMC
+AQYwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDBAOBjAAwgYgCQgC85uufYwd5
+yelX2EKkjx7s8LP6qgcXHxkO1zZYrTU7umomS5beVyPf2hA12yPVG9VnYUqs9+RA
+L0mbODJNfHR5yAJCAUf2a5qPe3a/BpZBoY7YI68nUt1UD8ScX+IbkLJQ6mPe8pNR
+xRJfSy8RvtTJcPEqH7kpj5sZjlRC5GUG/3Sco8uX
+-----END CERTIFICATE-----
+''',
+  # Nuvoton TPM Root CA 1110
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%201110.cer
+  # SHA-256 fingerprint: 27:82:E5:1A:95:E8:6D:95:57:FE:42:04:31:6C:F8:05:BD:6F:58:98:F8:1F:97:32:E9:44:D7:42:BC:DC:5F:54
+  '''
+-----BEGIN CERTIFICATE-----
+MIICBjCCAaygAwIBAgIIEDiqn2SaqGMwCgYIKoZIzj0EAwIwVTFTMB8GA1UEAxMY
+TnV2b3RvbiBUUE0gUm9vdCBDQSAxMTEwMCUGA1UEChMeTnV2b3RvbiBUZWNobm9s
+b2d5IENvcnBvcmF0aW9uMAkGA1UEBhMCVFcwHhcNMTUwNTExMDg0MzMzWhcNMzUw
+NTA3MDg0MzMzWjBVMVMwHwYDVQQDExhOdXZvdG9uIFRQTSBSb290IENBIDExMTAw
+JQYDVQQKEx5OdXZvdG9uIFRlY2hub2xvZ3kgQ29ycG9yYXRpb24wCQYDVQQGEwJU
+VzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABDVkEOpuyhuviaDH6xQj3faaV2Z4
+FvXSdwUkTiB1JjPDgv1PU0SFYtEE1W9VmI1GcOn5FAUi2/QM36DPhmPTd+qjZjBk
+MA4GA1UdDwEB/wQEAwICBDASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBQV
+kdS26vmNAQSGS2kDpI3QAmB30zAfBgNVHSMEGDAWgBQVkdS26vmNAQSGS2kDpI3Q
+AmB30zAKBggqhkjOPQQDAgNIADBFAiEAlfxysfHDcxYDed5dmRbvHPKHLEEq9Y9P
+wAxoKqH7Q5kCIGfsxiLr2j9nJ9jELwXz0/VWN9PhUNdM3qmsx2JEne6p
+-----END CERTIFICATE-----
+''',
+  # Nuvoton TPM Root CA 1111
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%201111.cer
+  # SHA-256 fingerprint: E3:8C:28:0F:7C:0E:0B:49:F3:1E:FC:75:31:03:2B:B6:A8:6C:3F:BA:4E:B8:9B:EB:1D:51:0E:AA:45:10:AE:4A
+  '''
+-----BEGIN CERTIFICATE-----
+MIICBzCCAa2gAwIBAgIJAN/u3L0l8osZMAoGCCqGSM49BAMCMFUxUzAfBgNVBAMT
+GE51dm90b24gVFBNIFJvb3QgQ0EgMTExMTAlBgNVBAoTHk51dm90b24gVGVjaG5v
+bG9neSBDb3Jwb3JhdGlvbjAJBgNVBAYTAlRXMB4XDTE3MDgyMTAzMzI1M1oXDTM3
+MDgxNzAzMzI1M1owVTFTMB8GA1UEAxMYTnV2b3RvbiBUUE0gUm9vdCBDQSAxMTEx
+MCUGA1UEChMeTnV2b3RvbiBUZWNobm9sb2d5IENvcnBvcmF0aW9uMAkGA1UEBhMC
+VFcwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATRcgnHcQk99FFMQ+9UVVFzf64J
+1jnhxpGAdZEHRleZfkfTYGHsdr3L9FLdGVUb+BA2cim30ovuPDZOGOUKPraLo2Yw
+ZDAOBgNVHQ8BAf8EBAMCAgQwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU
+iC8Ee4cSHPmIXzEWC8e7VYavRxswHwYDVR0jBBgwFoAUiC8Ee4cSHPmIXzEWC8e7
+VYavRxswCgYIKoZIzj0EAwIDSAAwRQIhANrKhBfLXyHCznBRtWRBmTbfYJR9mCl1
+2N/xZkcohRZIAiBDufnmhZWCbX4pibbzAOgcxjsc5+qmpAovxW9ipWJEsA==
+-----END CERTIFICATE-----
+''',
+  # Nuvoton TPM Root CA 2110
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%202110.cer
+  # SHA-256 fingerprint: 4A:EB:E7:7A:51:ED:29:95:9A:7F:9F:5E:07:A2:4A:55:8D:EE:81:67:F3:98:5D:72:49:95:A5:41:C2:58:DF:DA
+  '''
+-----BEGIN CERTIFICATE-----
+MIICBjCCAaygAwIBAgIIP5MvnZk8FrswCgYIKoZIzj0EAwIwVTFTMB8GA1UEAxMY
+TnV2b3RvbiBUUE0gUm9vdCBDQSAyMTEwMCUGA1UEChMeTnV2b3RvbiBUZWNobm9s
+b2d5IENvcnBvcmF0aW9uMAkGA1UEBhMCVFcwHhcNMTUxMDE5MDQzMjAwWhcNMzUx
+MDE1MDQzMjAwWjBVMVMwHwYDVQQDExhOdXZvdG9uIFRQTSBSb290IENBIDIxMTAw
+JQYDVQQKEx5OdXZvdG9uIFRlY2hub2xvZ3kgQ29ycG9yYXRpb24wCQYDVQQGEwJU
+VzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABPv9uK2BNm8/nmIyNsc2/aKHV0WR
+ptzge3jKAIgUMosQIokl4LE3iopXWD3Hruxjf9vkLMDJrTeK3hWh2ySS4ySjZjBk
+MA4GA1UdDwEB/wQEAwICBDASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBSf
+u3mqD1JieL7RUJKacXHpajW+9zAfBgNVHSMEGDAWgBSfu3mqD1JieL7RUJKacXHp
+ajW+9zAKBggqhkjOPQQDAgNIADBFAiEA/jiywhOKpiMOUnTfDmXsXfDFokhKVNTX
+B6Xtqm7J8L4CICjT3/Y+rrSnf8zrBXqWeHDh8Wi41+w2ppq6Ev9orZFI
+-----END CERTIFICATE-----
+''',
+  # Nuvoton TPM Root CA 2111
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%202111.cer
+  # SHA-256 fingerprint: CD:81:85:FF:89:95:ED:09:81:19:70:09:0A:8C:36:FA:FA:B3:4E:F8:7F:47:FA:51:FD:B9:EC:F9:5C:9C:2E:04
+  '''
+-----BEGIN CERTIFICATE-----
+MIICBzCCAa2gAwIBAgIJAOCIUWvKMfuGMAoGCCqGSM49BAMCMFUxUzAfBgNVBAMT
+GE51dm90b24gVFBNIFJvb3QgQ0EgMjExMTAlBgNVBAoTHk51dm90b24gVGVjaG5v
+bG9neSBDb3Jwb3JhdGlvbjAJBgNVBAYTAlRXMB4XDTE3MDkxMTA3MDk0OVoXDTM3
+MDkwNzA3MDk0OVowVTFTMB8GA1UEAxMYTnV2b3RvbiBUUE0gUm9vdCBDQSAyMTEx
+MCUGA1UEChMeTnV2b3RvbiBUZWNobm9sb2d5IENvcnBvcmF0aW9uMAkGA1UEBhMC
+VFcwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATanNywPkE/RICBZ4VjwCymLDts
+B7Unv52Oj0HyEsAfc7+vjOl2DP8JbrcozY05s7GFfQqR3vhv4ZdkJMalgOr2o2Yw
+ZDAOBgNVHQ8BAf8EBAMCAgQwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU
+I/TiKtO+N0pEl3KVSqKDrtdSVy4wHwYDVR0jBBgwFoAUI/TiKtO+N0pEl3KVSqKD
+rtdSVy4wCgYIKoZIzj0EAwIDSAAwRQIgXgXs2eVt2U4sCoRf1GLoUTf2ZzYTSsyg
+6I5w6hPTLigCIQDLLFlXK1xw1a1D1/idVhdd3a8gkE0FnTJO890WwiQbpg==
+-----END CERTIFICATE-----
+''',
+  # Intel TPM EK root (PTT)
+  # Source: https://upgrades.intel.com/content/CRL/ekcert/EKRootPublicKey.cer
+  # SHA-256 fingerprint: 2E:1B:3B:A7:9A:F5:6D:75:8B:E5:16:97:62:1B:C4:B9:E8:CE:E0:98:3D:B3:E7:49:C5:5E:B9:B3:7C:6D:2A:E0
+  '''
+-----BEGIN CERTIFICATE-----
+MIICdzCCAh6gAwIBAgIUB+dPf7a3IyJGO923z34oQLRP7pwwCgYIKoZIzj0EAwIw
+gYcxCzAJBgNVBAYMAlVTMQswCQYDVQQIDAJDQTEUMBIGA1UEBwwLU2FudGEgQ2xh
+cmExGjAYBgNVBAoMEUludGVsIENvcnBvcmF0aW9uMSEwHwYDVQQLDBhUUE0gRUsg
+cm9vdCBjZXJ0IHNpZ25pbmcxFjAUBgNVBAMMDXd3dy5pbnRlbC5jb20wHhcNMTQw
+MTE1MDAwMDAwWhcNNDkxMjMxMjM1OTU5WjCBhzELMAkGA1UEBgwCVVMxCzAJBgNV
+BAgMAkNBMRQwEgYDVQQHDAtTYW50YSBDbGFyYTEaMBgGA1UECgwRSW50ZWwgQ29y
+cG9yYXRpb24xITAfBgNVBAsMGFRQTSBFSyByb290IGNlcnQgc2lnbmluZzEWMBQG
+A1UEAwwNd3d3LmludGVsLmNvbTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJR9
+gVEsjUrMb+E/dl19ywJsKZDnghmwVyG16dAfQ0Pftp1bjhtPEGEguvbLGRRopKWH
+VscAOlTFnvCHq+6/9/SjZjBkMB8GA1UdIwQYMBaAFOhSBcJP2NLVpSFHFrbODHtb
+uncPMB0GA1UdDgQWBBToUgXCT9jS1aUhRxa2zgx7W7p3DzASBgNVHRMBAf8ECDAG
+AQH/AgEBMA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNHADBEAiAldFScWQ6L
+PQgW/YT+2GILcATEA2TgzASaCrG+AzL6FgIgLH8ABRzm028hRYR/JZVGkHiomzYX
+VILmTjHwSL7uZBU=
+-----END CERTIFICATE-----
+''',
+  # AMD fTPM root (AMDTPM, ECC)
+  # Source: https://ftpm.amd.com/pki/aia/23452201D41C5AB064032BD23F158FEF
+  # SHA-256 fingerprint: 14:AA:C9:FD:58:47:1A:61:2A:FD:75:D8:C0:95:5D:AF:99:F0:91:B1:86:37:02:F9:E0:D4:11:3F:AF:23:4F:9D
+  '''
+-----BEGIN CERTIFICATE-----
+MIIDBTCCAqygAwIBAgIQI0UiAdQcWrBkAyvSPxWP7zAKBggqhkjOPQQDAjB2MRQw
+EgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQBgNVBAcMCVN1bm55
+dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2VkIE1pY3JvIERldmlj
+ZXMxDzANBgNVBAMMBkFNRFRQTTAiGA8yMDE2MDEwMTA1MDAwMFoYDzIwNDEwMTAx
+MDUwMDAwWjB2MRQwEgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQ
+BgNVBAcMCVN1bm55dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2Vk
+IE1pY3JvIERldmljZXMxDzANBgNVBAMMBkFNRFRQTTBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABCizRsNBd7qu5HKGWs0gJuOjVMoiCQuQ4DQD6NQn6z7J91LUZ4tQ
+8QtcWrDLbyKN4wFR2ZVbJgE9YNK+V4jW+ZqjggEWMIIBEjAOBgNVHQ8BAf8EBAMC
+AQYwIwYJKwYBBAGCNxUrBBYEFPIa0Pjoowbpy804foZyYxfbwb65MB0GA1UdDgQW
+BBTyGtD46KMG6cvNOH6GcmMX28G+uTAPBgNVHRMBAf8EBTADAQH/MDgGCCsGAQUF
+BwEBBCwwKjAoBggrBgEFBQcwAYYcaHR0cDovL2Z0cG0uYW1kLmNvbS9wa2kvb2Nz
+cDAsBgNVHR8EJTAjMCGgH6AdhhtodHRwOi8vZnRwbS5hbWQuY29tL3BraS9jcmww
+QwYDVR0gBDwwOjA4BgorBgEEAZx4ZRUKMCowKAYIKwYBBQUHAgEWHGh0dHBzOi8v
+ZnRwbS5hbWQuY29tL3BraS9jcHMwCgYIKoZIzj0EAwIDRwAwRAIgdC//Fcx0tGsf
+HFjnzGiI77v83f5UkEFaTtHmodwAqkUCIHZ+ONVyeqVYIkRFWGl9GTnhSfvmghKj
+Ra64ryoheLlO
+-----END CERTIFICATE-----
+''',
+  # AMD fTPM root (AMDTPM, RSA)
+  # Source: https://ftpm.amd.com/pki/aia/264D39A23CEB5D5B49D610044EEBD121
+  # SHA-256 fingerprint: 67:BD:24:72:A5:46:75:1C:AC:A5:F3:58:A7:8F:80:72:75:31:67:13:38:96:0A:9B:CF:DF:BE:6A:34:D0:C6:A1
+  '''
+-----BEGIN CERTIFICATE-----
+MIIEjDCCA3SgAwIBAgIQJk05ojzrXVtJ1hAETuvRITANBgkqhkiG9w0BAQsFADB2
+MRQwEgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQBgNVBAcMCVN1
+bm55dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2VkIE1pY3JvIERl
+dmljZXMxDzANBgNVBAMMBkFNRFRQTTAiGA8yMDE0MTAyMzE0MzQzMloYDzIwMzkx
+MDIzMTQzNDMyWjB2MRQwEgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMx
+EjAQBgNVBAcMCVN1bm55dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFu
+Y2VkIE1pY3JvIERldmljZXMxDzANBgNVBAMMBkFNRFRQTTCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBALLJzgGLuZ0X5UJNG1bbExXC0gDMfaHWeBMt5+vz
+AOhQ+wxAiBO9ERmYGkSCA9Hm/ncl985zK6dU0vpQ/hiUsO8gyaynlOIrfHDC6ha6
+hpuEhMf1+RgWtdbE5i+IutKSeZw6Nk+vToifoqmM4AX2CS6h0GnkkTemwWMp98NR
++CTczwzb6ih75D32HsB41ABSQCNXUoWDvERJzQgfHnqJY9++Z8pnwAGc4APL+85h
+V/9bVSwsuzJup+853U+OdkwdZnpPSwuS5MJZ8gAcGjdkPC1eDVqSAM04K+ecW1OV
+b4HCKcPv6nG2B5qi+mcwknhNYESkF5bMmyvluKYQrUHzIB0CAwEAAaOCARAwggEM
+MA4GA1UdDwEB/wQEAwIBBjAjBgkrBgEEAYI3FSsEFgQUV4xUX3lpUUISIaSleKzb
+X2gvicgwHQYDVR0OBBYEFFeMVF95aVFCEiGkpXis219oL4nIMA8GA1UdEwEB/wQF
+MAMBAf8wOAYIKwYBBQUHAQEELDAqMCgGCCsGAQUFBzABhhxodHRwOi8vZnRwbS5h
+bWQuY29tL3BraS9vY3NwMCwGA1UdHwQlMCMwIaAfoB2GG2h0dHA6Ly9mdHBtLmFt
+ZC5jb20vcGtpL2NybDA9BgNVHSAENjA0MDIGBFUdIAAwKjAoBggrBgEFBQcCARYc
+aHR0cHM6Ly9mdHBtLmFtZC5jb20vcGtpL2NwczANBgkqhkiG9w0BAQsFAAOCAQEA
+EYk2axIzYPg4eCyUFk3phQW4lUhIJrmhrZRNQ/vMNd0Ao34SgORF6af8XW2xVnwE
+iNMJ4kOSeehJnsuuixB4NXf4XRift1UESoqQLOMzlgQTcAoXIqzPxqG28aApOiAn
+Vt7v6YJqcXRf4WfQI8EnOuCydl3a5OhlM2uEoy/GWHqvWoMuh1/j5/L8aWCacwGw
+hz/uL0I64lUSLLoTZFdBIJ9r2RDiEqxsb7MbgtLOqeZFWfVITasTbcno8+rIOmn/
+860bTAfKuQWVIMKyHV/rElwa7A0d75Nl+p6BEMDxAs/bLq10PaGSxao8iGWiCihm
+tgzAbWXJ0VoaLTb3eZw+Rg==
+-----END CERTIFICATE-----
+''',
+]
+# Bridge mint caps bound what a forged delivery can create. Governance raises
+# a cap at most doubling it per enacted proposal.
+# Most one bridge mint may carry through any route, whole TNZO. Each
+# route's own governed limit may be tighter.
+bridge_mint_per_mint_tnzo = 10000
+# Most one bridge route may mint in one epoch (an hour), whole TNZO.
+bridge_mint_per_epoch_tnzo = 25000
+# The tighter caps of a route without a light client, whose
+# deliveries rest on its committee alone: one mint, and one epoch, whole TNZO
+# (a fifth of the light-client caps).
+bridge_attested_per_mint_tnzo = 2000
+bridge_attested_per_epoch_tnzo = 5000
+# The most of each unit that may leave Tenzro over every bridge route
+# together in one epoch, in its smallest denomination (TNZO: 18 decimals,
+# USDC and OUSD: 6). A unit not named here cannot leave at all until
+# governance gives it a cap. Sized from genesis stake, not from expected
+# volume: 21 validators of 10,000 TNZO put a third of 210,000 TNZO at risk,
+# which at security.min_ratio_bps 1.5 over a day's attack window covers about
+# 1,945 TNZO an hour, split equally by USD at 0.10 USD per TNZO: 648 TNZO,
+# 64.82 USDC and 64.82 OUSD an hour. A raise is refused until stake secures
+# it; the caps other than TNZO's also shrink at once when stake loses value.
+bridge_outflow = [
+    { unit = "TNZO", per_epoch = "648000000000000000000" },
+    { unit = "USDC", per_epoch = "64820000" },
+    { unit = "OUSD", per_epoch = "64820000" },
+]
+# The finality program (RISC Zero image id) whose wrapped proofs the chain
+# accepts: the guest as RISC Zero's guest-builder container builds it, which the
+# prover embeds; `tenzro-finality-prover image-id` prints the same id anywhere.
+finality_program = "578bacf21a7a6a60d75ba661def3099b49231a66f52434b55cc987a18cf6ce39"
+
+# Bridge routes the network starts with. Chain selectors are written as
+# strings, since TOML integers stop at 2^63 - 1. Every route below is a
+# PLACEHOLDER:
+# `placeholders` names the fields still to fill (committee sizes and
+# thresholds, contract, pool and ramp addresses, light-client anchors).
+# Committee members are never named here or in a proposal: they are drawn on
+# chain from the accounts bonded as attestors with a bridge signing key. A
+# placeholder route is closed with zero caps and starts disabled; a governance
+# vote fills it and another opens it, and opening is refused while any field
+# is still a placeholder (docs/BRIDGE.md, "Genesis routes" and "Route modes").
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "light_client", "lane_limits", "assets"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "evm"
+source_chain = "ethereum"
+# The CCIP chain selector of ethereum.
+source_chain_id = "5009297550715157269"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane_limits = { version = "2.0.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+# The beacon chain's genesis_validators_root and current fork version are
+# public; the trusted finalized block root is chosen at launch.
+light_client = { ethereum_sync_committee = { genesis_validators_root = [75, 54, 61, 185, 78, 40, 97, 32, 215, 110, 185, 5, 52, 15, 221, 78, 84, 191, 233, 240, 107, 243, 63, 246, 207, 90, 210, 127, 81, 27, 254, 149], fork_version = [6, 0, 0, 0], trusted_block_root = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] } }
+
+# USDC carried over the ethereum route by lock-and-mint: the token stays in the
+# route's vault on ethereum while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "USDC"
+name = "USD Coin (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:1/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# OUSD carried over the ethereum route by lock-and-mint: the token stays in the
+# route's vault on ethereum while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "OUSD"
+name = "Open USD (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:1/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "lane_limits", "assets"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "evm"
+source_chain = "base"
+# The CCIP chain selector of base.
+source_chain_id = "15971525489660198786"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane_limits = { version = "2.0.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+
+# USDC carried over the base route by lock-and-mint: the token stays in the
+# route's vault on base while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "USDC"
+name = "USD Coin (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:8453/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# OUSD carried over the base route by lock-and-mint: the token stays in the
+# route's vault on base while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "OUSD"
+name = "Open USD (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:8453/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "lane_limits"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "evm"
+source_chain = "arbitrum"
+# The CCIP chain selector of arbitrum.
+source_chain_id = "4949039107694359620"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane_limits = { version = "2.0.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "lane_limits", "assets"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "solana"
+source_chain = "solana"
+# The CCIP chain selector of solana.
+source_chain_id = "124615329519749607"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+# Solana's CCIP router emits the 1.6.0 message layout.
+lane_limits = { version = "1.6.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+
+# USDC carried over the solana route by lock-and-mint: the token stays in the
+# route's vault on solana while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "USDC"
+name = "USD Coin (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:11111111111111111111111111111111"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# OUSD carried over the solana route by lock-and-mint: the token stays in the
+# route's vault on solana while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "OUSD"
+name = "Open USD (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:11111111111111111111111111111111"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# Chains agents hold accounts on: the agent account code's deterministic
+# deployment on each (docs/AGENT_ACCOUNTS.md). Every entry below is a
+# PLACEHOLDER: the deployment is filled and the chain opened by a governance
+# vote (SetAgentAccountChain) once the code is deployed there. Until then no
+# grant is issued for the chain. No chain proves its accounts' reports yet,
+# so a grant's whole budget counts as spent.
+[[economy.agent_account_chains]]
+caip2 = "eip155:1"
+open = false
+[economy.agent_account_chains.deployment]
+family = "eip155"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+init_code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "eip155:8453"
+open = false
+[economy.agent_account_chains.deployment]
+family = "eip155"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+init_code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "eip155:42161"
+open = false
+[economy.agent_account_chains.deployment]
+family = "eip155"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+init_code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+open = false
+[economy.agent_account_chains.deployment]
+family = "solana"
+program_id = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "sui:mainnet"
+open = false
+[economy.agent_account_chains.deployment]
+family = "sui"
+registry = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "aptos:1"
+open = false
+[economy.agent_account_chains.deployment]
+family = "aptos"
+creator = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "stellar:pubnet"
+open = false
+[economy.agent_account_chains.deployment]
+family = "stellar"
+network_passphrase = "Public Global Stellar Network ; September 2015"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "cosmos:cosmoshub-4"
+open = false
+[economy.agent_account_chains.deployment]
+family = "cosmos"
+hrp = "cosmos"
+factory = []
+code_checksum = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "tvm:-239"
+open = false
+[economy.agent_account_chains.deployment]
+family = "tvm"
+workchain = 0
+code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+code_depth = 0
+
+# Guardian seats the network starts with. Protocol guardians pause governance
+# enactment, governance guardians veto a queued proposal; either takes
+# `governance.guardian_threshold` distinct seated guardians of the role, and a
+# pause lifts by itself after `governance.max_pause_ms`. Every seat is a human
+# identity and holds a hard term within one year of the genesis time; after
+# that only an enacted SetGuardian proposal seats guardians. PLACEHOLDER: the
+# genesis set and its terms are set at genesis; a placeholder seat is not
+# written, and governance fills it (docs/TOKENOMICS.md, "Tracks").
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "protocol"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "protocol"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "protocol"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "governance"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "governance"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "governance"
+term_ends_ms = 0
+
+# Foundation steward seats: Tenzro Foundation's stewards, each a human
+# passkey identity whose key is rooted in a different provider or device
+# (key_root), with a one-year term and an end no later than steward_sunset_ms.
+# PLACEHOLDER: filled with the Foundation's seat holders before genesis.
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "steward"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "steward"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "steward"
+term_ends_ms = 0
+

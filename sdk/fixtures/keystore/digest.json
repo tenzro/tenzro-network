@@ -1,0 +1,135 @@
+{
+  "chain_id": 1337,
+  "account": "1111111111111111111111111111111111111111",
+  "previous_commitment": "2222222222222222222222222222222222222222222222222222222222222222",
+  "cases": [
+    {
+      "op": {
+        "add_credential": {
+          "credential": {
+            "rp_id": "tenzro.com",
+            "credential_id": "33333333333333333333333333333333",
+            "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+            "aaguid": "55555555555555555555555555555555",
+            "backup_eligible": true,
+            "backup_state": false,
+            "counts_as_root_from_ms": 0,
+            "label": "Phone"
+          }
+        }
+      },
+      "digest": "c99b3e589033c3f9a476da39b0a07b69d29c48ce87a0c3c0ba693038abd54047"
+    },
+    {
+      "op": {
+        "add_credential": {
+          "credential": {
+            "rp_id": "wallet.example.org",
+            "credential_id": "7777777777777777777777777777777777777777",
+            "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+            "aaguid": "55555555555555555555555555555555",
+            "backup_eligible": true,
+            "backup_state": false,
+            "counts_as_root_from_ms": 0,
+            "label": "Other wallet"
+          }
+        }
+      },
+      "digest": "22fd8eb7a79c81b21d4c1f7e84897b5648041ea8763775033070cc275a650f16"
+    },
+    {
+      "op": {
+        "remove_credential": {
+          "credential_id": "33333333333333333333333333333333"
+        }
+      },
+      "digest": "503d251eab96cb69f5d0856f56b33e5587f1ebc80c92cc3ce37a3498923c3f07"
+    },
+    {
+      "op": {
+        "set_policy": {
+          "policy": "two_credentials"
+        }
+      },
+      "digest": "60947c71c739db8c3bf3e06286cbc5f18e0ac15d134aaad41b5a684fa75f870d"
+    },
+    {
+      "op": {
+        "set_recovery": {
+          "signers": [
+            {
+              "rp_id": "",
+              "public_key": "66666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666",
+              "aaguid": "00000000000000000000000000000000",
+              "backup_eligible": false,
+              "backup_state": false,
+              "role": "recovery_key",
+              "label": "Backup key"
+            }
+          ],
+          "threshold": 1
+        }
+      },
+      "digest": "eb4ba1a8bbd5fbd7197a78c144b064b6825499ea9fe74d6532838179be92c4c2"
+    },
+    {
+      "op": {
+        "start_recovery": {
+          "credential": {
+            "rp_id": "tenzro.com",
+            "credential_id": "33333333333333333333333333333333",
+            "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+            "aaguid": "55555555555555555555555555555555",
+            "backup_eligible": true,
+            "backup_state": false,
+            "counts_as_root_from_ms": 0,
+            "label": ""
+          }
+        }
+      },
+      "digest": "b56272513f421653f0281449195f395f393455f4f246453cc8a36ef6fd83afd7"
+    },
+    {
+      "op": "cancel_recovery",
+      "digest": "6942a6b775d4689749ab76b8f2a9230cca7d1a3995f8455aabcc9b0e8c3657b9"
+    },
+    {
+      "op": "finish_recovery",
+      "digest": "064995c09a525d7d2b457c4eca3d7795bb6f26e7e9fe6e879727359b67193eb9"
+    },
+    {
+      "op": {
+        "set_recovery_code": {
+          "commitment": "25508b85f1304fa26c9bd39192acaf50f8ccbcbac9174b476186abdc270a6701"
+        }
+      },
+      "digest": "4b86c4cdea0003d42d2dd579b4112dceefc5bb8d45755b2ee54677dfd411cb6c"
+    },
+    {
+      "op": {
+        "claim_recovery_code": {
+          "claim": "6bac73e4760136cde32be910b15b260a8896759ef370d11c8b845e4f36efedb8"
+        }
+      },
+      "digest": "8e575db4ae6de74c668fc8bacf439d82383065ba890689bcccf116d6bda581e6"
+    },
+    {
+      "op": {
+        "recover_with_code": {
+          "code": "7777777777777777777777777777777777777777777777777777777777777777",
+          "credential": {
+            "rp_id": "tenzro.com",
+            "credential_id": "33333333333333333333333333333333",
+            "public_key": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+            "aaguid": "55555555555555555555555555555555",
+            "backup_eligible": true,
+            "backup_state": false,
+            "counts_as_root_from_ms": 0,
+            "label": "Phone"
+          }
+        }
+      },
+      "digest": "80db7cdf9f83271bc1195e89975b3f05ab29e5265216abe75a393f918a97d4c3"
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+# Local development genesis.
+#
+# Validators hold their consensus keys in hardware, so no key can be
+# generated for them here. Replace `validators = []` with one `[[validators]]`
+# entry per validator, each printed on its own machine by
+#   tenzro-node validator-entry --stake <whole TNZO>
+# A node refuses to start on a genesis that names no validators.
+version = 1
+chain_id = 1337
+timestamp = 0
+validators = []
+
+# Time rules, compressed for a local network: ten-second epochs and compact
+# certificates every ten seconds, with rounds at their real pace. The
+# calendar runs 8,640 times faster than block time, so one epoch is one
+# calendar day and a calendar year is about an hour; set `timestamp` to the
+# launch time (Unix seconds), which anchors the calendar. The genesis state
+# root commits to them.
+[time]
+checkpoint_interval_ms = 500
+epoch_checkpoints = 20
+handover_confirmations = 2
+announcement_lifetime_ms = 3600000
+compact_interval_ms = 10000
+compact_handoff_ms = 30000
+leader_slots = 2
+calendar_scale = 8640
+idle_round_interval_ms = 1000
+
+# Economy parameters (see genesis-prod.toml).
+[network_params]
+# Starting values of governed network parameters. Each is changed only by an
+# enacted governance proposal and applies from the next epoch. A parameter
+# not listed starts at its registry value; see docs/GOVERNANCE_PARAMS.md.
+"fees.usd_rate_mode" = 0
+"fees.tnzo_usd_nano" = 100000000
+"fees.usd_rate_max_change_bps" = 1000
+"fees.settlement_fee_bps" = 10
+"fees.settlement_fee_burn_bps" = 5000
+"fees.activity_reward_fee_bps" = 5000
+"agent_bond.spend_bps" = 1000
+# Provider routing standing, out of 10000: a live serving bond holds
+# routing.standing_bonded; SLA verdicts over the last
+# routing.standing_window_hours closed hours add up to
+# routing.standing_availability by the share found available, or
+# routing.standing_unjudged_bps of it before any verdict.
+"routing.standing_bonded" = 3000
+"routing.standing_availability" = 7000
+"routing.standing_unjudged_bps" = 5000
+"routing.standing_window_hours" = 24
+
+[economy]
+tpm_endorsement_roots_pem = []
+bridge_mint_per_mint_tnzo = 10000
+bridge_mint_per_epoch_tnzo = 100000
+bridge_attested_per_mint_tnzo = 2000
+bridge_attested_per_epoch_tnzo = 20000
+# The most of each unit that may leave Tenzro over every bridge route
+# together in one epoch, in its smallest denomination (TNZO: 18 decimals,
+# USDC and OUSD: 6). A unit not named here cannot leave at all until
+# governance gives it a cap.
+bridge_outflow = [
+    { unit = "TNZO", per_epoch = "1000000000000000000000000" },
+    { unit = "USDC", per_epoch = "2500000000000" },
+    { unit = "OUSD", per_epoch = "2500000000000" },
+]
+
+[[accounts]]
+address = "0000000000000000000000000000000000000000000000000000000000000010"
+balance = 1000000
+
+[[accounts]]
+address = "0000000000000000000000000000000000000000000000000000000000000011"
+balance = 1000000

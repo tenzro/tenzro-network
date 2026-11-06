@@ -1,0 +1,20 @@
+id: 51c2:0
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+id: 51c2:1
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"reasoning_content":"Two plus"},"finish_reason":null}]}
+
+id: 51c2:2
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"reasoning_content":" two is four."},"finish_reason":null}]}
+
+id: 51c2:3
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"content":"The answer"},"finish_reason":null}]}
+
+id: 51c2:4
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"content":" is 4."},"finish_reason":null}]}
+
+id: 51c2:5
+data: {"id":"chatcmpl-2","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"eos"}],"usage":{"prompt_tokens":11,"completion_tokens":9,"total_tokens":20},"cost_wei":"4200","generation_time_ms":30,"tokens_per_second":300.0,"seed":11}
+
+data: [DONE]
+

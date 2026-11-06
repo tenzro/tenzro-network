@@ -1,0 +1,119 @@
+{
+  "content": {
+    "events": [
+      { "type": "content", "text": "Hel" },
+      { "type": "content", "text": "lo, wörld 世界" },
+      { "type": "finish", "finish_reason": "stop", "native_finish_reason": "eos" },
+      {
+        "type": "usage",
+        "usage": { "prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9 },
+        "cost_wei": "1500"
+      }
+    ],
+    "completion": {
+      "id": "chatcmpl-1",
+      "model": "qwen3.5-4b",
+      "content": "Hello, wörld 世界",
+      "reasoning": "",
+      "tool_calls": [],
+      "finish_reason": "stop",
+      "native_finish_reason": "eos",
+      "usage": { "prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9 },
+      "cost_wei": "1500"
+    },
+    "error": null
+  },
+  "reasoning": {
+    "events": [
+      { "type": "reasoning", "text": "Two plus" },
+      { "type": "reasoning", "text": " two is four." },
+      { "type": "content", "text": "The answer" },
+      { "type": "content", "text": " is 4." },
+      { "type": "finish", "finish_reason": "stop", "native_finish_reason": "eos" },
+      {
+        "type": "usage",
+        "usage": { "prompt_tokens": 11, "completion_tokens": 9, "total_tokens": 20 },
+        "cost_wei": "4200"
+      }
+    ],
+    "completion": {
+      "id": "chatcmpl-2",
+      "model": "qwen3.5-4b",
+      "content": "The answer is 4.",
+      "reasoning": "Two plus two is four.",
+      "tool_calls": [],
+      "finish_reason": "stop",
+      "native_finish_reason": "eos",
+      "usage": { "prompt_tokens": 11, "completion_tokens": 9, "total_tokens": 20 },
+      "cost_wei": "4200"
+    },
+    "error": null
+  },
+  "tool-calls": {
+    "events": [
+      { "type": "tool_call", "index": 0, "id": "call_1", "name": "get_weather", "arguments": "" },
+      { "type": "tool_call", "index": 0, "arguments": "{\"city\":" },
+      { "type": "tool_call", "index": 0, "arguments": "\"Paris\"}" },
+      { "type": "tool_call", "index": 1, "id": "call_2", "name": "get_time", "arguments": "{}" },
+      { "type": "finish", "finish_reason": "tool_calls", "native_finish_reason": "tool_use" },
+      {
+        "type": "usage",
+        "usage": { "prompt_tokens": 40, "completion_tokens": 18, "total_tokens": 58 },
+        "cost_wei": "9000"
+      }
+    ],
+    "completion": {
+      "id": "chatcmpl-3",
+      "model": "qwen3.5-4b",
+      "content": "",
+      "reasoning": "",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+        },
+        {
+          "id": "call_2",
+          "type": "function",
+          "function": { "name": "get_time", "arguments": "{}" }
+        }
+      ],
+      "finish_reason": "tool_calls",
+      "native_finish_reason": "tool_use",
+      "usage": { "prompt_tokens": 40, "completion_tokens": 18, "total_tokens": 58 },
+      "cost_wei": "9000"
+    },
+    "error": null
+  },
+  "usage": {
+    "events": [
+      { "type": "content", "text": "Short" },
+      { "type": "finish", "finish_reason": "length", "native_finish_reason": "length" },
+      {
+        "type": "usage",
+        "usage": { "prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4 },
+        "cost_wei": "700"
+      }
+    ],
+    "completion": {
+      "id": "chatcmpl-4",
+      "model": "gemma4-12b",
+      "content": "Short",
+      "reasoning": "",
+      "tool_calls": [],
+      "finish_reason": "length",
+      "native_finish_reason": "length",
+      "usage": { "prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4 },
+      "cost_wei": "700"
+    },
+    "error": null
+  },
+  "error": {
+    "events": [
+      { "type": "content", "text": "Par" }
+    ],
+    "completion": null,
+    "error": { "message": "generation failed", "type": "server_error", "code": "inference_error" }
+  }
+}

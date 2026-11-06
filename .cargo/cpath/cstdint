@@ -1,0 +1,5 @@
+// Found first for `-include cstdint` (see .cargo/config.toml). C++ gets the
+// standard header; assembly preprocessed by the C++ compiler gets nothing.
+#ifdef __cplusplus
+#include_next <cstdint>
+#endif

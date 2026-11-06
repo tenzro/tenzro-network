@@ -1,0 +1,128 @@
+use anchor_lang::prelude::*;
+
+#[error_code]
+pub enum RegistryError {
+    // ========== Identity Errors (6000-6049) ==========
+    #[msg("URI exceeds 250 bytes")]
+    UriTooLong = 6000,
+    #[msg("Key exceeds 32 bytes")]
+    KeyTooLong = 6001,
+    #[msg("Value exceeds 250 bytes")]
+    ValueTooLong = 6002,
+    #[msg("Metadata limit reached")]
+    MetadataLimitReached = 6003,
+    #[msg("Unauthorized")]
+    Unauthorized = 6004,
+    #[msg("Arithmetic overflow")]
+    Overflow = 6005,
+    #[msg("Metadata key not found")]
+    MetadataNotFound = 6006,
+    #[msg("Invalid token account")]
+    InvalidTokenAccount = 6007,
+    #[msg("Extension not found")]
+    ExtensionNotFound = 6008,
+    #[msg("Invalid extension index")]
+    InvalidExtensionIndex = 6009,
+    #[msg("Invalid collection")]
+    InvalidCollection = 6010,
+    #[msg("Invalid asset")]
+    InvalidAsset = 6011,
+    #[msg("Transfer to self not allowed")]
+    TransferToSelf = 6012,
+    #[msg("Metadata is immutable and cannot be modified or deleted")]
+    MetadataImmutable = 6013,
+    #[msg("Parent link is locked")]
+    ParentAlreadySet = 6014,
+    #[msg("Parent cannot reference self")]
+    ParentSelfReference = 6015,
+    #[msg("Invalid parent asset")]
+    InvalidParentAsset = 6016,
+    #[msg("Only parent creator can link this child")]
+    NotParentCreator = 6017,
+    #[msg("Invalid collection pointer format")]
+    InvalidCollectionPointer = 6018,
+    #[msg("Collection pointer is locked")]
+    CollectionPointerAlreadySet = 6019,
+    #[msg("Only agent creator can set collection pointer")]
+    NotAgentCreator = 6020,
+
+    // ========== Reputation Errors (6050-6099) ==========
+    #[msg("Score must be 0-100")]
+    InvalidScore = 6050,
+    #[msg("Response URI exceeds 250 bytes")]
+    ResponseUriTooLong = 6051,
+    #[msg("Feedback already revoked")]
+    AlreadyRevoked = 6052,
+    #[msg("Agent not found")]
+    AgentNotFound = 6053,
+    #[msg("Feedback not found")]
+    FeedbackNotFound = 6054,
+    #[msg("Invalid feedback index")]
+    InvalidFeedbackIndex = 6055,
+    #[msg("Tag exceeds 32 bytes")]
+    TagTooLong = 6056,
+    /// RESERVED: Tags are optional per ERC-8004 spec
+    /// Error code kept for backwards compatibility with indexers/clients
+    #[msg("Reserved - tags are optional")]
+    EmptyTags = 6057,
+    #[msg("Endpoint exceeds 250 bytes")]
+    EndpointTooLong = 6060,
+    #[msg("Invalid decimals (max 18)")]
+    InvalidDecimals = 6061,
+    #[msg("ATOM stats not initialized - call initialize_atom_stats first")]
+    AtomStatsNotInitialized = 6058,
+    #[msg("ATOM already enabled for this agent")]
+    AtomAlreadyEnabled = 6059,
+
+    // ========== Validation Errors (6100-6149) ==========
+    #[msg("Request URI exceeds 250 bytes")]
+    RequestUriTooLong = 6100,
+    #[msg("Response must be 0-100")]
+    InvalidResponse = 6101,
+    #[msg("Unauthorized validator")]
+    UnauthorizedValidator = 6102,
+    #[msg("Unauthorized requester")]
+    UnauthorizedRequester = 6103,
+    #[msg("Validation request not found")]
+    RequestNotFound = 6104,
+    #[msg("Invalid nonce")]
+    InvalidNonce = 6105,
+    #[msg("Request hash mismatch")]
+    RequestHashMismatch = 6106,
+    #[msg("Rent receiver must be agent owner")]
+    InvalidRentReceiver = 6107,
+
+    // ========== Metadata Errors (6150-6199) ==========
+    #[msg("Key hash does not match SHA256(key)")]
+    KeyHashMismatch = 6150,
+    #[msg("Key hash collision detected - stored key differs from provided key")]
+    KeyHashCollision = 6151,
+    #[msg("Reserved metadata key - use dedicated instruction")]
+    ReservedMetadataKey = 6152,
+
+    // ========== Wallet Errors (6200-6249) ==========
+    #[msg("Deadline has expired")]
+    DeadlineExpired = 6200,
+    #[msg("Deadline too far in the future (max 5 minutes)")]
+    DeadlineTooFar = 6201,
+    #[msg("Missing Ed25519 signature verification instruction")]
+    MissingSignatureVerification = 6202,
+    #[msg("Ed25519 signature verification failed")]
+    InvalidSignature = 6203,
+
+    // ========== Registry Errors (6250-6299) ==========
+    #[msg("Root config already initialized")]
+    RootAlreadyInitialized = 6251,
+
+    // ========== Anti-Gaming Errors (6300-6309) ==========
+    #[msg("Self-feedback is not allowed - agent owner cannot give feedback to their own agent")]
+    SelfFeedbackNotAllowed = 6300,
+    #[msg("Self-validation is not allowed - agent owner cannot validate their own agent")]
+    SelfValidationNotAllowed = 6301,
+
+    // ========== CPI Errors (6400-6409) ==========
+    #[msg("Invalid program ID for CPI call")]
+    InvalidProgram = 6400,
+    #[msg("Invalid AtomStats account - must be correct PDA for this asset")]
+    InvalidAtomStatsAccount = 6401,
+}

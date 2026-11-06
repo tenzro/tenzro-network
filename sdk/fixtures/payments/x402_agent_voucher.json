@@ -1,0 +1,36 @@
+{
+  "description": "An agent's channel voucher as the payer SDKs send it (PAYMENT-SIGNATURE) and the node's x402 types decode it.",
+  "requirement": {
+    "scheme": "batch-settlement",
+    "network": "tenzro:1337",
+    "amount": "90071992547409930",
+    "asset": "TNZO",
+    "payTo": "0909090909090909090909090909090909090909090909090909090909090909",
+    "maxTimeoutSeconds": 300,
+    "extra": {
+      "challengeId": "c0ffee00-0000-4000-8000-000000000001",
+      "chain_id": 1337,
+      "usd_e6": 2000
+    }
+  },
+  "resource": {
+    "url": "https://pub.example/articles/1"
+  },
+  "channel_id": "abababababababababababababababababababababababababababababababab",
+  "cumulative_amount": "180143985094819860",
+  "voucher": {
+    "signature": {
+      "classical": {
+        "form": "raw",
+        "signature": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    "agent": {
+      "agent_did": "did:tenzro:agent:a",
+      "machine_did": "did:tenzro:machine:m",
+      "as_of_ms": 1800000000000
+    }
+  },
+  "credential_id": "7e57c0de-0000-4000-8000-000000000002",
+  "payment_signature": "eyJ4NDAyVmVyc2lvbiI6MiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cHM6Ly9wdWIuZXhhbXBsZS9hcnRpY2xlcy8xIn0sImFjY2VwdGVkIjp7InNjaGVtZSI6ImJhdGNoLXNldHRsZW1lbnQiLCJuZXR3b3JrIjoidGVuenJvOjEzMzciLCJhbW91bnQiOiI5MDA3MTk5MjU0NzQwOTkzMCIsImFzc2V0IjoiVE5aTyIsInBheVRvIjoiMDkwOTA5MDkwOTA5MDkwOTA5MDkwOTA5MDkwOTA5MDkwOTA5MDkwOTA5MDkwOTA5MDkwOTA5MDkwOTA5MDkwOSIsIm1heFRpbWVvdXRTZWNvbmRzIjozMDAsImV4dHJhIjp7ImNoYWxsZW5nZUlkIjoiYzBmZmVlMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAxIiwiY2hhaW5faWQiOjEzMzcsInVzZF9lNiI6MjAwMH19LCJwYXlsb2FkIjp7ImNyZWRlbnRpYWxfaWQiOiI3ZTU3YzBkZS0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDIiLCJjaGFsbGVuZ2VfaWQiOiJjMGZmZWUwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJwcm90b2NvbCI6Ing0MDIiLCJwYXllcl9kaWQiOiJkaWQ6dGVuenJvOmFnZW50OmEiLCJwYXllcl9hZGRyZXNzIjoiIiwiYW1vdW50Ijo5MDA3MTk5MjU0NzQwOTkzMCwiYXNzZXQiOiJUTlpPIiwic2lnbmF0dXJlIjp7ImNsYXNzaWNhbCI6eyJmb3JtIjoicmF3Iiwic2lnbmF0dXJlIjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEifX0sImV4dHJhIjp7ImVzY3Jvd19pZCI6ImFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWIiLCJjdW11bGF0aXZlX2Ftb3VudCI6IjE4MDE0Mzk4NTA5NDgxOTg2MCIsImFnZW50X2RpZCI6ImRpZDp0ZW56cm86YWdlbnQ6YSIsIm1hY2hpbmVfZGlkIjoiZGlkOnRlbnpybzptYWNoaW5lOm0iLCJhc19vZl9tcyI6IjE4MDAwMDAwMDAwMDAifX19"
+}

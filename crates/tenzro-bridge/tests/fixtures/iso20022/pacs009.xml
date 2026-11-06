@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.009.001.08">
+  <FICdtTrf>
+    <GrpHdr>
+      <MsgId>BANKDEFF-20261001-0007</MsgId>
+      <CreDtTm>2026-10-01T10:00:00Z</CreDtTm>
+      <NbOfTxs>1</NbOfTxs>
+      <SttlmInf>
+        <SttlmMtd>INGA</SttlmMtd>
+      </SttlmInf>
+    </GrpHdr>
+    <CdtTrfTxInf>
+      <PmtId>
+        <EndToEndId>TREASURY-0007</EndToEndId>
+        <UETR>3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d</UETR>
+      </PmtId>
+      <IntrBkSttlmAmt Ccy="EUR">1000000</IntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-10-01</IntrBkSttlmDt>
+      <Dbtr>
+        <FinInstnId>
+          <BICFI>BANKDEFFXXX</BICFI>
+        </FinInstnId>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <Othr>
+            <Id>did:tenzro:human:11112222333344445555666677778888</Id>
+          </Othr>
+        </Id>
+      </DbtrAcct>
+      <Cdtr>
+        <FinInstnId>
+          <BICFI>BANKFRPPXXX</BICFI>
+        </FinInstnId>
+      </Cdtr>
+      <CdtrAcct>
+        <Id>
+          <Othr>
+            <Id>did:tenzro:human:99990000aaaabbbbccccddddeeeeffff</Id>
+          </Othr>
+        </Id>
+      </CdtrAcct>
+    </CdtTrfTxInf>
+  </FICdtTrf>
+</Document>

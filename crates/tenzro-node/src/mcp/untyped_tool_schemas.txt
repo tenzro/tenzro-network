@@ -1,0 +1,3 @@
+# Hand-typed MCP tools whose input or output still converts to a free-form
+# TypeScript type (see the_tool_list_converts_to_typed_typescript_declarations
+# in server.rs). One per line: input <tool> or output <tool>.

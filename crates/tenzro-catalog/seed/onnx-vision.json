@@ -1,0 +1,239 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "OpenAI CLIP ViT-B/32 — compact image encoder, 512-dim embeddings",
+        "embedding_dim": 512,
+        "family": "clip",
+        "hf_filename": "onnx/vision_model.onnx",
+        "hf_repo": "Xenova/clip-vit-base-patch32",
+        "id": "clip-vit-b32",
+        "input_size": 224,
+        "min_ram_gb": 2,
+        "name": "CLIP ViT-B/32",
+        "normalization": "clip",
+        "size_bytes": 352000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "OpenAI CLIP ViT-L/14 — large image encoder, 768-dim embeddings",
+        "embedding_dim": 768,
+        "family": "clip",
+        "hf_filename": "onnx/vision_model.onnx",
+        "hf_repo": "Xenova/clip-vit-large-patch14",
+        "id": "clip-vit-l14",
+        "input_size": 224,
+        "min_ram_gb": 4,
+        "name": "CLIP ViT-L/14",
+        "normalization": "clip",
+        "size_bytes": 1220000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "Google SigLIP base — sigmoid-loss image-text encoder",
+        "embedding_dim": 768,
+        "family": "siglip",
+        "hf_filename": "onnx/vision_model.onnx",
+        "hf_repo": "Xenova/siglip-base-patch16-224",
+        "id": "siglip-base-224",
+        "input_size": 224,
+        "min_ram_gb": 2,
+        "name": "SigLIP base patch16-224",
+        "normalization": "siglip",
+        "size_bytes": 372000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "Google SigLIP2 base — improved multilingual image-text encoder",
+        "embedding_dim": 768,
+        "family": "siglip2",
+        "hf_filename": "onnx/vision_model.onnx",
+        "hf_repo": "onnx-community/siglip2-base-patch16-224-ONNX",
+        "id": "siglip2-base-224",
+        "input_size": 224,
+        "min_ram_gb": 2,
+        "name": "SigLIP2 base patch16-224",
+        "normalization": "siglip",
+        "size_bytes": 372000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "Google SigLIP2 large — high-fidelity multilingual image-text encoder",
+        "embedding_dim": 1024,
+        "family": "siglip2",
+        "hf_filename": "onnx/vision_model.onnx",
+        "hf_repo": "onnx-community/siglip2-large-patch16-256-ONNX",
+        "id": "siglip2-large-256",
+        "input_size": 256,
+        "min_ram_gb": 4,
+        "name": "SigLIP2 large patch16-256",
+        "normalization": "siglip",
+        "size_bytes": 1300000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "Google SigLIP2 SO400M-384 — flagship encoder, top zero-shot accuracy",
+        "embedding_dim": 1152,
+        "family": "siglip2",
+        "hf_filename": "onnx/vision_model.onnx",
+        "hf_repo": "onnx-community/siglip2-so400m-patch14-384-ONNX",
+        "id": "siglip2-so400m-384",
+        "input_size": 384,
+        "min_ram_gb": 6,
+        "name": "SigLIP2 SO400M patch14-384",
+        "normalization": "siglip",
+        "size_bytes": 1700000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "id": "dinov3",
+      "name": "DINOv3 License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "Meta DINOv3 ViT-S/16 — next-gen self-supervised features, edge-tier",
+        "embedding_dim": 384,
+        "family": "dinov3",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/dinov3-vits16-pretrain-lvd1689m-ONNX",
+        "id": "dinov3-vits16",
+        "input_size": 224,
+        "min_ram_gb": 1,
+        "name": "DINOv3 ViT-S/16",
+        "normalization": "imagenet",
+        "size_bytes": 92000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "id": "dinov3",
+      "name": "DINOv3 License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "Meta DINOv3 ViT-B/16 — flagship self-supervised features, base-tier",
+        "embedding_dim": 768,
+        "family": "dinov3",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/dinov3-vitb16-pretrain-lvd1689m-ONNX",
+        "id": "dinov3-vitb16",
+        "input_size": 224,
+        "min_ram_gb": 2,
+        "name": "DINOv3 ViT-B/16",
+        "normalization": "imagenet",
+        "size_bytes": 350000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "id": "dinov3",
+      "name": "DINOv3 License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "onnx-vision",
+      "spec": {
+        "description": "Meta DINOv3 ViT-L/16 — large self-supervised features",
+        "embedding_dim": 1024,
+        "family": "dinov3",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "onnx-community/dinov3-vitl16-pretrain-lvd1689m-ONNX",
+        "id": "dinov3-vitl16",
+        "input_size": 224,
+        "min_ram_gb": 4,
+        "name": "DINOv3 ViT-L/16",
+        "normalization": "imagenet",
+        "size_bytes": 1240000000
+      }
+    }
+  }
+]

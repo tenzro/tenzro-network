@@ -1,0 +1,208 @@
+[package]
+name = "tenzro-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tenzro Network full node — ties all subsystems into a running node"
+
+[[bin]]
+name = "tenzro-node"
+path = "src/main.rs"
+
+[[example]]
+name = "test_passkey"
+required-features = ["test-passkey"]
+
+[dependencies]
+# Advisory cross-platform file lock for the single-instance guard
+# (single_instance.rs) — flock on Unix, LockFileEx on Windows.
+fs4 = { workspace = true }
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-tee = { workspace = true }
+# The hardware signer (TPM / Secure Enclave keys) and TPM command encoding.
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+tenzro-zk = { workspace = true }
+tenzro-network = { workspace = true }
+tenzro-storage = { workspace = true }
+# GridPlus needs no transport beyond reqwest, so it is always available as an
+# EVM hardware signer; Ledger and Trezor transports are opt-in features.
+tenzro-wallet = { workspace = true, features = ["gridplus-signer"] }
+tenzro-keystore-unlock = { workspace = true }
+tenzro-keygen = { workspace = true }
+tenzro-consensus = { workspace = true }
+tenzro-vm = { workspace = true }
+tenzro-token = { workspace = true }
+tenzro-identity = { workspace = true }
+tenzro-payments = { workspace = true }
+# The engines (llama.cpp/ggml, media, training, ONNX) come with the
+# `inference` feature; without it only the engine-free parts are linked.
+tenzro-model = { workspace = true }
+# The runtime-host confinement launcher, entered first thing in `main`.
+praecise-host = { workspace = true }
+tenzro-settlement = { workspace = true }
+tenzro-storage-provider = { workspace = true }
+tenzro-trust = { workspace = true }
+tenzro-cluster = { workspace = true }
+tenzro-bridge = { workspace = true }
+tenzro-events = { workspace = true }
+tenzro-iroh = { workspace = true }
+tenzro-auth = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+# Signed agent cards are canonicalised (RFC 8785) from parsed JSON, so a
+# number must parse to the exact double its text denotes.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+parking_lot = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tower = { workspace = true }
+qrcode = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+maxminddb = { workspace = true }
+toml = { workspace = true }
+hex = { workspace = true }
+bs58 = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+bytes = { workspace = true }
+blake3 = { workspace = true }
+bincode = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+dashmap = { workspace = true }
+# Re-encodes an image a connector endpoint returns in another format to PNG.
+image = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+url = { workspace = true }
+urlencoding = "2"
+# `Limited` bodies: the JSON-RPC root caps a request by who presents it.
+http-body-util = "0.1"
+# P-256 ECDSA verification.
+p256 = { workspace = true }
+tokio-stream = "0.1"
+async-stream = "0.3"
+futures = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+sysinfo = "0.31"
+libc = { workspace = true }
+portmapper = { workspace = true }
+prometheus-client = { workspace = true }
+rustls = { workspace = true }
+aws-lc-rs = { workspace = true }
+ed25519-dalek = { workspace = true }
+zeroize = { workspace = true }
+k256 = { workspace = true }
+# getrandom 0.4 → SysRng impls rand_core 0.10's TryCryptoRng; wrap in
+# UnwrapErr to satisfy the `CryptoRng` bound that k256/p256 0.14-rc's
+# `SecretKey::random` requires (signature 3.0.0 → rand_core ^0.10).
+getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["std"] }
+
+[[test]]
+name = "sponsored_inference_e2e"
+harness = false
+required-features = ["inference"]
+
+[features]
+# TEST FIXTURE ONLY: builds the examples/test_passkey software passkey that signs transport grants for private
+# test networks. Never in default, never enabled by a release or deploy build.
+test-passkey = []
+default = ["inference", "mcp-output-schemas"]
+# The model engines and every surface that runs a model on this machine:
+# local chat and completions, embeddings, rerank, speech, vision, media
+# generation, training, MoE expert hosting and the layer pipeline. Required by
+# the `ai`, `compute` and `tee` roles. A build without it (the light build,
+# `--no-default-features`) keeps identity, payments, agents, RPC, consensus
+# following, storage and the remote-TPM client, forwards inference to
+# providers on the network, and refuses those three roles at startup.
+inference = ["tenzro-model/engine", "tenzro-model/mtmd"]
+# A typed output schema for every MCP tool that has one, and each result
+# checked against its type before it is returned. Without it (the edge build)
+# the tools return the same results under the same `result` envelope,
+# described as any JSON value: the schemas and the checks are about 8 MB of
+# the edge binary.
+mcp-output-schemas = []
+# Hardware EVM signer transports for bridge, relayer and ERC-8004 keys.
+ledger-signer = ["tenzro-wallet/ledger-signer"]
+trezor-signer = ["tenzro-wallet/trezor-signer"]
+# llama.cpp/ggml LLM backends. Each forwards to tenzro-model, which sets the
+# matching GGML_<X> cmake define on the vendored llama-cpp-sys-2 build. A node
+# is CPU-only unless one of these is enabled; the runtime reports the compiled
+# set via HardwareInfo (compiled_backends / active_backend).
+cuda = ["inference", "tenzro-model/cuda"]
+cuda-no-vmm = ["inference", "tenzro-model/cuda-no-vmm"]
+rocm = ["inference", "tenzro-model/rocm"]
+vulkan = ["inference", "tenzro-model/vulkan"]
+metal = ["inference", "tenzro-model/metal"]
+sycl = ["inference", "tenzro-model/sycl"]
+openvino = ["inference", "tenzro-model/openvino"]
+opencl = ["inference", "tenzro-model/opencl"]
+musa = ["inference", "tenzro-model/musa"]
+cann = ["inference", "tenzro-model/cann"]
+webgpu = ["inference", "tenzro-model/webgpu"]
+zdnn = ["inference", "tenzro-model/zdnn"]
+blas = ["inference", "tenzro-model/blas"]
+# CoreML execution provider for the ONNX runtimes on Apple machines. The CUDA
+# and TensorRT providers come with `cuda`.
+onnx-coreml = ["inference", "tenzro-model/onnx-coreml"]
+# Embed Anza's solana-svm for real SBF program execution in the SVM VM. Off by
+# default; forwards to tenzro-vm. Without it the SVM SBF path returns
+# VmError::SvmFullFeatureRequired.
+svm-full = ["tenzro-vm/svm-full"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+# tests/tls_roots.rs: a local TLS server under a test authority.
+rcgen = "0.14"
+tokio-rustls = { workspace = true }
+# External wallet transactions in tests are built as the wallets build them.
+rlp = { workspace = true }
+sha3 = { workspace = true }
+tenzro-wallet = { workspace = true, features = ["gridplus-signer", "test-signer"] }
+# Tests that read the catalog without running a node install the seed entries.
+tenzro-catalog = { workspace = true, features = ["test-seed"] }
+# Tests only: node keys from a fixed software root (release builds derive from
+# the TPM or Secure Enclave).
+tenzro-keygen = { workspace = true, features = ["test-keys"] }
+# Enrolment now has to prove possession of the keys it enrols, so the
+# integration tests perform the real ceremony rather than asserting a public
+# key and being believed.
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+tenzro-consensus = { workspace = true, features = ["test-keys"] }
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0", features = ["test-root"] }
+hex = { workspace = true }
+tempfile = "3"
+filetime = "0.2"
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tenzro-auth = { workspace = true }
+tenzro-identity = { workspace = true }
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+bincode = { workspace = true }
+# A software GPU device and certificate authority for tests.
+tenzro-tee = { workspace = true, features = ["test-ca"] }
+# Test stand-ins for the TPM / Secure Enclave P-256 signer.
+p256 = { workspace = true }
+# Signed cluster membership lists from software keys.
+tenzro-cluster = { workspace = true, features = ["test-support"] }
+# The network contract suite: in-process endpoints behind a local test relay.
+iroh = { workspace = true, features = ["test-utils"] }
+iroh-blobs = { workspace = true }
+
+[lints]
+workspace = true

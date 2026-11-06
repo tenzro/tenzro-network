@@ -1,0 +1,7 @@
+[toolchain]
+# One Rust version for every build: local builds, the build hosts and the Dockerfiles use
+# 1.99.1. Change it here and in the `rust:` images together;
+# scripts/supply-chain/check-pins.sh refuses a mismatch.
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]

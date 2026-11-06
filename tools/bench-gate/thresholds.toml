@@ -1,0 +1,57 @@
+# Performance hard-threshold gate for criterion benchmarks.
+#
+# Each entry pins the p99 / op bound for a criterion bench target.
+# CI runs the matching criterion bench and fails the build when the
+# measured value exceeds `max_ns` (or falls below `min_ops_per_sec` for
+# throughput-shaped targets).
+#
+# The bench id format is `<group_id>/<bench_id>` as criterion emits to
+# `target/criterion/<group>/<bench>/new/estimates.json` after a run.
+
+[[bench]]
+id = "zk_benchmarks/plonky3_verify"
+metric = "mean_ns"
+max_ns = 25_000_000  # 25 ms — Plonky3 STARK verify, our pinned config
+reference = "Plonky3 5-20ms verify for comparable AIRs"
+
+[[bench]]
+id = "crypto_benchmarks/ed25519_sign"
+metric = "mean_ns"
+max_ns = 50_000  # 50 µs single sign
+reference = "ed25519-dalek 22 µs sign on M2"
+
+[[bench]]
+id = "crypto_benchmarks/ed25519_verify"
+metric = "mean_ns"
+max_ns = 100_000  # 100 µs single verify
+reference = "ed25519-dalek 70 µs verify on M2"
+
+[[bench]]
+id = "crypto_benchmarks/aes256_gcm_seal_4kb"
+metric = "mean_ns"
+max_ns = 15_000  # 15 µs for 4 KB plaintext
+reference = "RustCrypto AES-NI 3-5 GB/s"
+
+[[bench]]
+id = "storage_benchmarks/write_batch_sync_single"
+metric = "ops_per_sec"
+min_ops_per_sec = 5_000  # 5 kops/s single-thread fsync floor
+reference = "RocksDB Perf Wiki NVMe fsync-bound"
+
+[[bench]]
+id = "storage_benchmarks/write_batch_sync_32"
+metric = "ops_per_sec"
+min_ops_per_sec = 500  # 500 batches/sec amortized
+reference = "Same RocksDB baseline / 32 puts per fsync"
+
+[[bench]]
+id = "storage_benchmarks/point_get_cold"
+metric = "mean_ns"
+max_ns = 100_000  # 100 µs cold-cache point-get
+reference = "RocksDB NVMe + block-cache hit ~80 µs"
+
+[[bench]]
+id = "vm_benchmarks/eip1559_base_fee_adjust"
+metric = "mean_ns"
+max_ns = 5_000  # 5 µs per-tx admission
+reference = "Pure arithmetic + DashMap insert"

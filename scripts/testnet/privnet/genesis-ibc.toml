@@ -1,0 +1,106 @@
+# Local development genesis.
+#
+# Validators hold their consensus keys in hardware, so no key can be
+# generated for them here. Replace `validators = []` with one `[[validators]]`
+# entry per validator, each printed on its own machine by
+#   tenzro-node validator-entry --stake <whole TNZO>
+# A node refuses to start on a genesis that names no validators.
+version = 1
+chain_id = 1337
+timestamp = 0
+validators = []
+
+# Time rules, compressed for a local network: ten-second epochs and compact
+# certificates every ten seconds, with rounds at their real pace. The
+# calendar runs 8,640 times faster than block time, so one epoch is one
+# calendar day and a calendar year is about an hour; set `timestamp` to the
+# launch time (Unix seconds), which anchors the calendar. The genesis state
+# root commits to them.
+[time]
+checkpoint_interval_ms = 500
+epoch_checkpoints = 20
+handover_confirmations = 2
+announcement_lifetime_ms = 3600000
+compact_interval_ms = 10000
+compact_handoff_ms = 30000
+leader_slots = 2
+calendar_scale = 8640
+idle_round_interval_ms = 1000
+
+# Economy parameters (see genesis-prod.toml).
+[network_params]
+"governance.voting_period_ms" = 86400000
+"governance.timelock_ms" = 86400000
+# Starting values of governed network parameters. Each is changed only by an
+# enacted governance proposal and applies from the next epoch. A parameter
+# not listed starts at its registry value; see docs/GOVERNANCE_PARAMS.md.
+"fees.usd_rate_mode" = 0
+"fees.tnzo_usd_nano" = 100000000
+"fees.usd_rate_max_change_bps" = 1000
+"fees.settlement_fee_bps" = 10
+"fees.settlement_fee_burn_bps" = 5000
+"fees.activity_reward_fee_bps" = 5000
+"agent_bond.spend_bps" = 1000
+
+[economy]
+tpm_endorsement_roots_pem = []
+bridge_mint_per_mint_tnzo = 10000
+bridge_mint_per_epoch_tnzo = 100000
+bridge_attested_per_mint_tnzo = 2000
+bridge_attested_per_epoch_tnzo = 20000
+bridge_outflow = [
+    { unit = "TNZO", per_epoch = "1000000000000000000000000" },
+    { unit = "USDC", per_epoch = "2500000000000" },
+    { unit = "OUSD", per_epoch = "2500000000000" },
+]
+
+[[accounts]]
+address = "0000000000000000000000000000000000000000000000000000000000000010"
+balance = 1000000
+
+[[accounts]]
+address = "0000000000000000000000000000000000000000000000000000000000000011"
+balance = 1000000
+
+# IBC routes of the round trip (scripts/ibc-round-trip.sh), open from genesis
+# against the local Cosmos chain ibc-local-1. Their light-client anchor is the
+# chain's header at the moment the network is created: the ibc stage writes
+# trusted_height and trusted_header_hash below before genesis. Keep this
+# section last: the ibc-governance stage drops it to install the routes by a
+# governance proposal instead.
+
+[[economy.bridge_routes]]
+open = true
+[economy.bridge_routes.route]
+adapter = "ibc"
+family = "cosmos"
+source_chain = "ibc-local-classic"
+source_chain_id = "118"
+local_selector = "7777"
+peer = [99, 70, 72, 98, 167, 18, 183, 161, 39, 205, 114, 24, 234, 162, 181, 107, 253, 115, 133, 16, 61, 68, 37, 197, 146, 107, 215, 52, 26, 45, 36, 28]
+ramp = [105, 98, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [49, 188, 232, 171, 130, 94, 107, 71, 160, 231, 196, 216, 93, 25, 209, 111, 24, 170, 118, 31, 139, 160, 128, 225, 48, 69, 112, 173, 162, 198, 219, 241]
+remote_token = [147, 237, 147, 214, 231, 117, 129, 255, 248, 215, 118, 252, 52, 248, 252, 99, 52, 20, 207, 30, 222, 116, 197, 72, 74, 231, 104, 211, 118, 167, 155, 32]
+verifiers = { set_index = 0, size = 3, members = [], threshold = 2 }
+light_client = { tendermint = { chain_id = "ibc-local-1", trusted_height = 1, trusted_header_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], trusting_period_secs = 1209600 } }
+mint_limit = { per_mint = "1000000000000000000000", per_epoch = "10000000000000000000000" }
+outflow = { capacity = "10000000000000000000000", rate = "1000000000000000000" }
+ibc = { version = "classic", counterparty_client_id = "08-wasm-0", counterparty_connection_id = "connection-0", counterparty_channel_id = "channel-0", packet_timeout_secs = 600 }
+
+[[economy.bridge_routes]]
+open = true
+[economy.bridge_routes.route]
+adapter = "ibc"
+family = "cosmos"
+source_chain = "ibc-local-v2"
+source_chain_id = "118"
+local_selector = "7777"
+peer = [142, 131, 27, 213, 24, 236, 15, 167, 25, 30, 174, 246, 109, 142, 37, 130, 119, 123, 241, 171, 82, 157, 194, 117, 198, 215, 53, 151, 236, 249, 168, 190]
+ramp = [105, 98, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [48, 55, 237, 33, 46, 101, 248, 139, 201, 5, 99, 99, 191, 39, 224, 62, 91, 192, 94, 159, 124, 205, 235, 240, 243, 238, 127, 8, 228, 158, 38, 135]
+remote_token = [106, 146, 5, 252, 34, 47, 172, 186, 133, 23, 53, 152, 131, 163, 213, 126, 78, 217, 141, 180, 17, 240, 11, 240, 210, 162, 208, 84, 207, 210, 216, 63]
+verifiers = { set_index = 0, size = 3, members = [], threshold = 2 }
+light_client = { tendermint = { chain_id = "ibc-local-1", trusted_height = 1, trusted_header_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], trusting_period_secs = 1209600 } }
+mint_limit = { per_mint = "1000000000000000000000", per_epoch = "10000000000000000000000" }
+outflow = { capacity = "10000000000000000000000", rate = "1000000000000000000" }
+ibc = { version = "v2", counterparty_client_id = "08-wasm-1", packet_timeout_secs = 600 }

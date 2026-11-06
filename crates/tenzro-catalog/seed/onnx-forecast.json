@@ -1,0 +1,276 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "onnx/model.onnx",
+        "repo": "pdufour/timesfm-2.5-200m-transformers-onnx",
+        "revision": "8f5747e6dfc3256886db81fa65c62c5975b88707",
+        "sha256": "4d6b58f3d21f6ffa1171f230d0b8001028d218e9b976bd60b3d7043b4033a751",
+        "size": 1001713626
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-forecast",
+      "spec": {
+        "batch_size": 2,
+        "context_length": 2048,
+        "description": "Google TimesFM 2.5 — foundation timeseries forecaster, patch-tokenized decoder",
+        "family": "timesfm",
+        "hf_filename": "onnx/model.onnx",
+        "hf_repo": "pdufour/timesfm-2.5-200m-transformers-onnx",
+        "id": "timesfm-2.5-200m",
+        "max_horizon": 128,
+        "min_ram_gb": 2,
+        "n_quantiles": 10,
+        "name": "TimesFM 2.5 200M",
+        "output_name": "full_predictions",
+        "parameters": "200M",
+        "size_bytes": 1001713626
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "chronos-2-small.onnx",
+        "repo": "OpenSTEF/chronos-2-small-onnx",
+        "revision": "d7743f169215d59270490bfc096bc9454821e8ef",
+        "sha256": "8aad469fc899da6163442bf8e3a7a46e832f551e1595b93a1206dbc39c1ffa0b",
+        "size": 112083145
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-forecast",
+      "spec": {
+        "batch_size": 1,
+        "context_length": 5760,
+        "description": "Amazon Chronos-2 — multivariate-capable foundation forecaster, 13-quantile head",
+        "family": "chronos2",
+        "hf_filename": "chronos-2-small.onnx",
+        "hf_repo": "OpenSTEF/chronos-2-small-onnx",
+        "id": "chronos-2-small",
+        "max_horizon": 672,
+        "min_ram_gb": 2,
+        "n_quantiles": 13,
+        "name": "Chronos-2 Small",
+        "output_name": "quantile_preds",
+        "parameters": "120M",
+        "size_bytes": 112083145
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "chronos-2.onnx",
+        "repo": "OpenSTEF/chronos-2-onnx",
+        "revision": "d3aa45b0acbedadf69d241954ed1b21167937bae",
+        "sha256": "e08c6a563966daa373447116c08880b22b9877aa2a59fa27df5d8f5419a87566",
+        "size": 478544773
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-forecast",
+      "spec": {
+        "batch_size": 1,
+        "context_length": 5760,
+        "description": "Amazon Chronos-2 (full) — multivariate-capable foundation forecaster, 13-quantile head",
+        "family": "chronos2",
+        "hf_filename": "chronos-2.onnx",
+        "hf_repo": "OpenSTEF/chronos-2-onnx",
+        "id": "chronos-2",
+        "max_horizon": 672,
+        "min_ram_gb": 3,
+        "n_quantiles": 13,
+        "name": "Chronos-2",
+        "output_name": "quantile_preds",
+        "parameters": "120M",
+        "size_bytes": 478544773
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "fb1d09fac4845e2c348df71986d4e1b98f0d895d9e7aa3477ece89eea67497b9",
+        "built_from": {
+          "repo": "NX-AI/TiRex-2",
+          "revision": "05e5b26db52bfb256f1ae1bdf785589850482de3"
+        },
+        "path": "tirex-2.onnx",
+        "recipe": "tools/ts-export/export.py",
+        "repo": "tenzro/tirex-2-onnx",
+        "sha256": "a95ae626598600c409b213de4c0d063fcd77fd2f84dafa4639c2cfecd2895ebe",
+        "size": 198691921
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-forecast",
+      "spec": {
+        "batch_size": 1,
+        "context_length": 2048,
+        "description": "NXAI TiRex-2: xLSTM zero-shot forecaster, 9-quantile head; trending series are differenced inside the graph",
+        "family": "tirex2",
+        "hf_filename": "tirex-2.onnx",
+        "hf_repo": "tenzro/tirex-2-onnx",
+        "id": "tirex-2",
+        "max_horizon": 320,
+        "min_ram_gb": 2,
+        "n_quantiles": 9,
+        "name": "TiRex-2",
+        "output_name": "quantiles",
+        "parameters": "95M",
+        "size_bytes": 198691921
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "52f1b0dd959e0f4a74c29eb54700e2222a0df2bff8d8868e975163e19e40aa72",
+        "built_from": {
+          "repo": "Datadog/Toto-2.0-22m",
+          "revision": "685e4ae3e2be8d8998025e53dd98e7fdcb296a89"
+        },
+        "path": "toto-2.0-22m.onnx",
+        "recipe": "tools/ts-export/export.py",
+        "repo": "tenzro/toto-2.0-22m-onnx",
+        "sha256": "31e825b736508dd79ff7fb7796c7bc18733e7a25cb4024e0bea94f2ce02fc423",
+        "size": 90219882
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-forecast",
+      "spec": {
+        "batch_size": 1,
+        "context_length": 2048,
+        "description": "Datadog Toto 2.0 22M: causal patch decoder forecaster, 9-quantile head, 768-step horizon in one pass",
+        "family": "toto2",
+        "hf_filename": "toto-2.0-22m.onnx",
+        "hf_repo": "tenzro/toto-2.0-22m-onnx",
+        "id": "toto-2.0-22m",
+        "max_horizon": 768,
+        "min_ram_gb": 1,
+        "n_quantiles": 9,
+        "name": "Toto 2.0 22M",
+        "output_name": "quantiles",
+        "parameters": "22M",
+        "size_bytes": 90219882
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "d49b63bd5215fcce054fbe28403c6811bf66bf1d199e4eb1547499e3b9f33c80",
+        "built_from": {
+          "repo": "Datadog/Toto-2.0-313m",
+          "revision": "a7bab288f5e95f8606f8306f86659357e1c001ef"
+        },
+        "path": "toto-2.0-313m.onnx",
+        "recipe": "tools/ts-export/export.py",
+        "repo": "tenzro/toto-2.0-313m-onnx",
+        "sha256": "7cd635b84f22e80d78e69b9e010ec05ebe071b6cae51eeb69b3f15cda9d9e8c2",
+        "size": 1254238782
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-forecast",
+      "spec": {
+        "batch_size": 1,
+        "context_length": 2048,
+        "description": "Datadog Toto 2.0 313M: causal patch decoder forecaster, 9-quantile head, 768-step horizon in one pass",
+        "family": "toto2",
+        "hf_filename": "toto-2.0-313m.onnx",
+        "hf_repo": "tenzro/toto-2.0-313m-onnx",
+        "id": "toto-2.0-313m",
+        "max_horizon": 768,
+        "min_ram_gb": 3,
+        "n_quantiles": 9,
+        "name": "Toto 2.0 313M",
+        "output_name": "quantiles",
+        "parameters": "313M",
+        "size_bytes": 1254238782
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "t0-beta-grouped-int8.onnx",
+        "repo": "theforecastingcompany/t0-beta-onnx-int8",
+        "revision": "6e43e99cad6390ac3c32a77c2e3fa7e8148007c1",
+        "sha256": "2c517869aac22518c1e04a35386a739d2656490574a40ea9a31187f4f115ac9b",
+        "size": 269070420
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-forecast",
+      "spec": {
+        "batch_size": 1,
+        "context_length": 8192,
+        "description": "t0-beta: grouped multivariate patch decoder with known-future covariates and 21 native quantiles (int8 weights, fp32 compute)",
+        "family": "t0",
+        "hf_filename": "t0-beta-grouped-int8.onnx",
+        "hf_repo": "theforecastingcompany/t0-beta-onnx-int8",
+        "id": "t0-beta",
+        "max_horizon": 1024,
+        "min_ram_gb": 2,
+        "n_quantiles": 21,
+        "name": "t0 beta",
+        "output_name": "quantiles",
+        "parameters": "256M",
+        "size_bytes": 269070420
+      }
+    }
+  }
+]

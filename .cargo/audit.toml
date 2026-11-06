@@ -1,0 +1,136 @@
+# cargo-audit configuration.
+#
+# Every entry is a *recorded decision* backed by a reachability analysis, not a
+# silenced warning. Each states what was verified and what would invalidate it.
+# Assessed 2026-07-31.
+#
+# Advisories cleared by upgrading rather than ignoring, same session:
+#   rustls-webpki   0.103.11 -> 0.103.13   RUSTSEC-2026-0098/0099/0104
+#   quinn-proto     0.11.14  -> 0.11.16    RUSTSEC-2026-0185
+#   ruint           1.17.2   -> 1.20.0     RUSTSEC-2026-0220
+#   crossbeam-epoch 0.9.18   -> 0.9.20     RUSTSEC-2026-0204
+#   quick-xml       0.38     -> 0.41       RUSTSEC-2026-0194/0195
+#   plist           1.9.0    -> 1.10.0     drops its quick-xml 0.39 copy entirely
+#
+# Cleared by upgrading, assessed 2026-10-25:
+#   rustls              0.23.45  -> 0.23.46   RUSTSEC-2026-0346/0347/0348/0349
+#                                             (0348, Brotli certificate decompression
+#                                             allocating up to 1 GiB, patched in 0.23.46;
+#                                             Cargo.lock holds 0.23.46, so the tree is
+#                                             not affected and nothing is ignored)
+#   rustls-webpki       0.103.15 -> 0.103.16  RUSTSEC-2026-0382
+#   webpki-roots        1.0.9    -> 1.0.11    RUSTSEC-2026-0381
+#   webpki-root-certs   1.0.7    -> 1.0.11    RUSTSEC-2026-0383
+#   crypto-bigint       0.7.4    -> 0.7.10    RUSTSEC-2026-0387 (the 0.7 line;
+#                                             0.7.8 was yanked, 0.7.10 is current)
+#   ctutils             0.4.2    -> 0.4.5     RUSTSEC-2026-0385
+#   cmov                0.5.3    -> 0.5.4     GHSA-3rjw-m598-pq24
+#   tokio               1.51.1   -> 1.54.1    RUSTSEC-2026-0386
+#   quinn-proto         0.11.16  -> 0.11.19   RUSTSEC-2026-0338..0342
+#   lru                 0.18.0   -> 0.18.5    RUSTSEC-2026-0253 (0.7.8 dropped:
+#                                             reed-solomon-erasure is vendored)
+#   memmap2             0.9.10   -> 0.9.12    RUSTSEC-2026-0186
+#   jsonwebtoken        9.3.1    -> 10.4.0    CVE-2026-25537
+#   serde_with          3.20.0   -> 3.21.0
+#   openssl             0.10.77  -> 0.10.81
+#   tar                 0.4.45   -> 0.4.46
+
+[advisories]
+ignore = [
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2023-0071 — rsa 0.9.10, "Marvin" timing sidechannel.
+  #
+  # No patched release exists: every 0.9.x is affected and there is no 0.10.
+  #
+  # NOT REACHABLE. The attack requires an attacker to observe timing on a
+  # *private-key* operation. Every production use here is public-key
+  # verification:
+  #   - tenzro-tee::attestation   — RSA-PSS verify over attestation payloads
+  #   - tenzro-payments::rfc9421  — RSA-PSS / PKCS#1v15 verify, JWKS parsing
+  #
+  # `create_http_signature` is the only signing entry point in the tree, and its
+  # single production caller (`visa_tap::issuer`) is pinned to Ed25519. The
+  # `sign_rsa_pss` / `sign_rsa_pkcs1v15` arms are reached only from unit tests.
+  # There is no RSA decryption anywhere in the workspace.
+  #
+  # RE-ASSESS IF: an RSA signing or decryption path is wired to a request
+  # handler, or `visa_tap::issuer` gains a non-Ed25519 algorithm.
+  "RUSTSEC-2023-0071",
+
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2026-0118 — hickory-proto 0.25.2, NSEC3 closest-encloser proof
+  # validation enters an unbounded loop on cross-zone responses.
+  #
+  # NOT COMPILED — a compile-time fact, not a judgement call. In hickory-proto
+  # 0.25.2 the entire DNSSEC module is feature-gated:
+  #
+  #     #[cfg(any(feature = "dnssec-aws-lc-rs", feature = "dnssec-ring"))]
+  #     pub mod dnssec;                                     // src/lib.rs:55
+  #
+  # and `src/dnssec/nsec3.rs` — the vulnerable code — lives inside it. The
+  # features active in this build are `tokio`, `mdns`, `std`, `futures-io` and
+  # `socket2`; neither dnssec feature is enabled. Verified independently by
+  # `cargo tree -p hickory-proto@0.25.2 --depth 1`, which pulls in neither
+  # `ring` nor `aws-lc-rs` — both optional deps activated only by those
+  # features.
+  #
+  # Note the advisory's `patched` field is empty, which reads as "no fix
+  # exists"; its `unaffected` field is `>=0.26.0-beta.1`, so the 0.26 line is
+  # in fact clear. Read both fields before concluding an advisory is permanent.
+  #
+  # RE-ASSESS IF: anything enables `dnssec-ring` or `dnssec-aws-lc-rs`.
+  "RUSTSEC-2026-0118",
+
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2025-0055 — tracing-subscriber 0.2.25, ANSI escape sequences from
+  # logged user input reach the terminal through the fmt layer.
+  #
+  # NOT REACHABLE. The 0.2 copy enters only through ark-relations 0.5.1
+  # (ark-groth16 <- risc0-groth16 <- risc0-zkvm <- tenzro-zk), whose `std`
+  # feature uses it for `r1cs::trace::ConstraintLayer`, a layer that records
+  # constraint-system spans and only acts when an application installs it.
+  # Nothing in this workspace installs it (no `ConstraintLayer` or
+  # `ark_relations` reference in crates/). The node's own logging is
+  # tracing-subscriber 0.3, which is patched. No ark-relations 0.5 release
+  # drops the 0.2 dependency.
+  #
+  # RE-ASSESS IF: anything installs an ark-relations layer, or risc0 moves to
+  # an ark-relations release on tracing-subscriber 0.3.
+  "RUSTSEC-2025-0055",
+
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2026-0387 — crypto-bigint 0.5.5, secret-dependent branches in
+  # subtraction, division, Montgomery multiplication and inversion.
+  #
+  # The 0.7 line, under the P-256/P-384 0.14 stack that signs with secret keys
+  # (consensus session key, derived device keys), is upgraded to 0.7.10 above.
+  # No 0.5.x release carries the fix.
+  #
+  # NOT REACHABLE. 0.5.5 enters only through elliptic-curve 0.13.8, under
+  #   - k256 0.13.4 <- alloy-primitives, alloy-eip7702, revm-precompile:
+  #     ecrecover and signature recovery over public transaction data;
+  #   - p521 0.13.3 <- tenzro-tee x509.rs: ECDSA verification of vendor
+  #     attestation certificate chains.
+  # Neither holds a secret scalar, so a timing difference reveals nothing.
+  # Verified with `cargo tree -i crypto-bigint@0.5.5` and
+  # `git grep p521 crates/` (verify-only call sites).
+  #
+  # RE-ASSESS IF: anything signs, derives or decrypts with k256 0.13 or p521
+  # 0.13 (an alloy local signer, say), or crypto-bigint 0.7 again appears in
+  # an advisory: this id covers both lines.
+  "RUSTSEC-2026-0387",
+
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2025-0141 — bincode 1.3.3, unmaintained (no vulnerability).
+  #
+  # bincode 1.x is the on-disk and wire record encoding of identity and ledger
+  # records across the workspace. The notice names no flaw; the decoders that
+  # take outside bytes through it are fuzzed nightly (fuzz/: transaction_decode,
+  # gossip_decode, consensus_frame, proof_decode). Moving off it is a
+  # data-format migration, not a dependency bump.
+  #
+  # RE-ASSESS IF: a vulnerability (not only the unmaintained notice) is filed
+  # against bincode 1.x, or a fuzz target finds an allocation or panic inside
+  # bincode itself.
+  "RUSTSEC-2025-0141",
+]

@@ -1,0 +1,21 @@
+{
+  "name": "tenzro-bridge-ton",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --test tests/*.test.mjs",
+    "test:native": "node scripts/build.mjs && node scripts/require-native.mjs && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@noble/curves": "^1.9.0",
+    "@noble/hashes": "^1.8.0",
+    "@ton-community/func-js": "^0.10.0",
+    "@ton/core": "^0.62.0",
+    "@ton/crypto": "^3.3.0",
+    "@ton/sandbox": "^0.45.0",
+    "koffi": "^2.11.0"
+  }
+}

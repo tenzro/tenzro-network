@@ -1,0 +1,129 @@
+[build]
+# Use all available CPU cores (omit jobs to use default auto-detection)
+
+# Hardware autodetection strategy:
+# - Do NOT set target-cpu=native globally — it breaks llama-cpp-sys-2 on
+#   Apple Silicon (Apple Clang rejects -mcpu=native for aarch64).
+# - Instead, Rust codegen already targets the host architecture by default.
+# - For release builds wanting max SIMD, set RUSTFLAGS per-platform in CI:
+#     x86_64: RUSTFLAGS="-C target-cpu=x86-64-v3"  (AVX2, most modern CPUs)
+#     ARM64:  (no flag needed — compiler defaults are optimal)
+# - GPU acceleration (Metal/CUDA/ROCm/Vulkan) is handled by cargo features.
+# - llama.cpp native CPU detection is controlled via CMAKE_ARGS env var.
+
+[env]
+# Force GGML_NATIVE=OFF to prevent llama-cpp-sys-2 from passing -mcpu=native
+# to Apple Clang. Metal GPU acceleration is unaffected (auto-enabled on macOS).
+# On Linux x86_64, AVX2/AVX-512 are still auto-detected by the compiler.
+CMAKE_ARGS = "-DGGML_NATIVE=OFF"
+
+# C++ flags for the vendored/`-sys` C++ builds (rocksdb, snappy, zstd).
+#
+# `-include cstdint` — rocksdb 8.10 (librocksdb-sys 0.16) predates GCC 13's
+# stricter libstdc++ headers, which stopped transitively including
+# `<cstdint>`. Without it every `uint64_t` / `uint32_t` in
+# `db/blob/blob_file_meta.h` and friends fails with "has not been declared",
+# and dependent types cascade ("'LinkedSsts' does not name a type"). The
+# upstream fix landed in a later rocksdb; forcing the include is the
+# minimal equivalent and is a no-op on toolchains that already provide it.
+#
+# Per-target rather than a bare global `CXXFLAGS`: this is GCC/Clang syntax
+# (MSVC's forced-include is `/FI`, a different spelling entirely), and on
+# Windows/MSVC `cl.exe` doesn't just ignore it — it warns "ignoring unknown
+# option '-include'" and then tries to compile the *next* token, "cstdint",
+# as if it were a source file, which fails the whole build with
+# `error C1083: Cannot open source file: 'cstdint'`.
+#
+# A target-scoped `CXXFLAGS_<triple>` cannot override/cancel a bare global
+# `CXXFLAGS`, because the `cc` crate's `envflags()` concatenates every
+# matching variant (`CXXFLAGS_$TARGET`, `CXXFLAGS_$TARGET_underscored`,
+# `HOST_CXXFLAGS`, bare `CXXFLAGS`) rather than picking one winner — an empty
+# override alongside the global value still leaves the global value's flags
+# on the command line. So the only correct way to keep MSVC from ever seeing
+# this flag is to not set a bare `CXXFLAGS` at all, and instead set it only
+# on the target triples that actually need it: verified by isolating this
+# exact scenario in a throwaway crate against this workspace's pinned
+# `cc 1.2.64` — the bare-`CXXFLAGS` form leaked `-include cstdint` into
+# MSVC's `cl.exe` invocation every time, while this per-target form did not.
+#
+# This flag exists for a libstdc++-with-old-GCC gap specifically — Apple's
+# libc++ (macOS) and the MSVC STL (Windows) are not affected by it, so
+# Windows carries no flag; each triple below sets it explicitly.
+# Linux release builds also map the in-container build and cargo paths to
+# fixed names (-ffile-prefix-map), so no build path reaches a binary.
+CXXFLAGS_x86_64-unknown-linux-gnu = "-include cstdint -ffile-prefix-map=/build=/tenzro -ffile-prefix-map=/usr/local/cargo=/cargo -ffile-prefix-map=/root/.cargo=/cargo"
+CFLAGS_x86_64-unknown-linux-gnu = "-ffile-prefix-map=/build=/tenzro -ffile-prefix-map=/usr/local/cargo=/cargo -ffile-prefix-map=/root/.cargo=/cargo"
+CXXFLAGS_x86_64-unknown-linux-musl = "-include cstdint"
+CXXFLAGS_aarch64-unknown-linux-gnu = "-include cstdint -ffile-prefix-map=/build=/tenzro -ffile-prefix-map=/usr/local/cargo=/cargo -ffile-prefix-map=/root/.cargo=/cargo"
+CFLAGS_aarch64-unknown-linux-gnu = "-ffile-prefix-map=/build=/tenzro -ffile-prefix-map=/usr/local/cargo=/cargo -ffile-prefix-map=/root/.cargo=/cargo"
+CXXFLAGS_aarch64-apple-darwin = "-include cstdint"
+CXXFLAGS_x86_64-apple-darwin = "-include cstdint"
+
+# Spawned-thread stack size, 32 MiB.
+#
+# Rust gives a spawned thread 2 MiB by default. libtest (and cargo-nextest) run
+# each test on a spawned thread, and the `tenzro-node` integration suites
+# construct a full `TenzroNode` — storage, RPC, auth engine, the whole subsystem
+# graph — which does not fit. Those tests abort with
+# `fatal runtime error: stack overflow` rather than failing an assertion, so the
+# symptom looks like a crash rather than a test failure.
+#
+# This is a harness limit, not a product one: in production `TenzroNode::new` is
+# reached from `main()` under `#[tokio::main]` and runs on the main thread, which
+# gets 8 MiB. Setting this here makes the test environment match the one the code
+# actually runs in. cargo-nextest reads `[env]` from this file, so it applies to
+# every test process.
+RUST_MIN_STACK = "33554432"
+
+# The forced `-include cstdint` above also reaches assembly that a C++ build
+# preprocesses (openh264's ARM64 `.S` files), where the C++ standard headers
+# are not on the search path. `cpath/cstdint` is searched first in every
+# language: it forwards to the standard header under C++ and is empty
+# otherwise.
+CPATH = { value = ".cargo/cpath", relative = true }
+
+[target.x86_64-unknown-linux-gnu]
+# x86_64 Linux: enable AVX2 for modern CPUs (Haswell+ / Zen+)
+#
+# `+pclmulqdq` is not cosmetic. rocksdb's `util/crc32c.cc` compiles
+# `__builtin_ia32_pclmulqdq128`, and librocksdb-sys only passes the matching
+# `-mpclmul` to the C++ compiler when the Rust target-feature list contains
+# `pclmulqdq` (its build.rs gates on exactly that). `x86-64-v3` implies
+# avx2/sse4.1/sse4.2 but *not* pclmulqdq, so without this the intrinsic is
+# compiled with no ISA flag enabling it and the build dies with
+# "'__builtin_ia32_pclmulqdq128' needs isa option -mpclmul -msse2".
+#
+# Declaring it here rather than forcing `-mpclmul` through global CXXFLAGS
+# keeps the fix inside the x86 target section (an aarch64 compiler would
+# reject the flag) and lets librocksdb-sys's own detection do the work.
+# Every x86-64-v3-class CPU has the instruction — it shipped with Westmere.
+# The build and cargo paths are mapped to fixed names (--remap-path-prefix).
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+pclmulqdq", "--remap-path-prefix=/build=/tenzro", "--remap-path-prefix=/usr/local/cargo=/cargo", "--remap-path-prefix=/root/.cargo=/cargo"]
+
+[target.x86_64-unknown-linux-musl]
+# x86_64 Linux musl (Alpine/static): same AVX2 baseline
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.aarch64-unknown-linux-gnu]
+# ARM64 Linux: no target-cpu. rustc's default for this target is already the
+# baseline CPU, and naming any value here makes llama-cpp-sys-2 pass it to the C
+# compiler as -march=<value>, which GCC on aarch64 rejects for "generic" (and
+# "native" would tie the binary to its build host). Build and cargo paths are
+# mapped to fixed names.
+rustflags = ["--remap-path-prefix=/build=/tenzro", "--remap-path-prefix=/usr/local/cargo=/cargo", "--remap-path-prefix=/root/.cargo=/cargo"]
+
+[target.aarch64-apple-darwin]
+# Apple Silicon (M1/M2/M3/M4): compiler defaults are optimal
+# Metal GPU acceleration auto-enabled by llama-cpp-sys-2 on macOS
+# Do NOT set target-cpu=native — breaks llama-cpp cmake build
+rustflags = []
+
+[target.x86_64-apple-darwin]
+# Intel macOS: enable AVX2 baseline
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# Every binary cargo runs or tests on Unix goes through this runner, which
+# raises the soft open-file limit to the hard limit first: a node test binary
+# opens far more than the common default of 1024 files across its parallel tests.
+[target.'cfg(unix)']
+runner = "scripts/test-runner.sh"

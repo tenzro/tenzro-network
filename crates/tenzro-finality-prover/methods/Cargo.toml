@@ -1,0 +1,13 @@
+[package]
+name = "tenzro-finality-methods"
+version = "0.2.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[build-dependencies]
+risc0-binfmt = "3.0.5"
+
+[dev-dependencies]
+risc0-build = "3.0.5"
+sha2 = "0.10"

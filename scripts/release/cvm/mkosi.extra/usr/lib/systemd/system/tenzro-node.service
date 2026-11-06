@@ -1,0 +1,62 @@
+# The node of the confidential VM image. It runs as root inside the guest
+# because the TEE's report interfaces (configfs-tsm, /dev/sev-guest) are
+# root's, and is otherwise confined like the standard unit: no capabilities,
+# a read-only system, only its state and the TEE and TPM devices writable.
+# Operator flags come from /var/lib/tenzro-config/node.env (TENZRO_NODE_ARGS);
+# they are configuration, not code, and are not part of the measurement.
+
+[Unit]
+Description=Tenzro Network Node
+Documentation=https://tenzro.com/docs/node/confidential-vm
+After=network-online.target tenzro-tpm-provision.service tenzro-platform-config.service
+Wants=network-online.target
+Requires=tenzro-tpm-provision.service
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/tenzro
+EnvironmentFile=-/var/lib/tenzro-config/node.env
+Environment=TENZRO_HOME=/var/lib/tenzro
+Environment=TENZRO_DEVICE_KEY_DIR=/var/lib/tenzro/device-key
+ExecStart=/usr/bin/tenzro-node --data-dir /var/lib/tenzro/data --log-level info $TENZRO_NODE_ARGS
+
+# Without capabilities root is held to file permissions: the TPM resource
+# manager belongs to the tss group.
+SupplementaryGroups=tss
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tenzro
+ReadWritePaths=-/sys/kernel/config/tsm/report
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+DeviceAllow=/dev/tdx_guest rw
+DeviceAllow=/dev/sev-guest rw
+DeviceAllow=/dev/nsm rw
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LimitNOFILE=65536
+MemoryMin=1G
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal+console
+StandardError=journal+console
+SyslogIdentifier=tenzro-node
+
+[Install]
+WantedBy=multi-user.target

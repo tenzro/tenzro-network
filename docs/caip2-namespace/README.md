@@ -1,0 +1,89 @@
+# Tenzro CAIP-2 Namespace — Staging Directory
+
+This directory stages the Tenzro namespace specification for upstream
+submission to [ChainAgnostic/namespaces][].
+
+## Layout
+
+```
+docs/caip2-namespace/
+├── README.md            ← this file (not part of the upstream PR)
+└── tenzro/              ← copied verbatim into ChainAgnostic/namespaces/tenzro/
+    ├── README.md        ← namespace overview
+    ├── caip2.md         ← chain identifier (CAIP-2)
+    ├── caip10.md        ← address format (CAIP-10)
+    ├── caip19.md        ← asset identifier (CAIP-19)
+    └── caip25.md        ← provider authorization (CAIP-25)
+```
+
+The `tenzro/` subdirectory mirrors the upstream layout: each ChainAgnostic
+namespace lives under `namespaces/<namespace>/` and contains a `README.md`
+plus per-CAIP markdown files. Compare `namespaces/solana/` or
+`namespaces/eip155/` upstream for the convention.
+
+## Authoritative facts encoded in these files
+
+These values are referenced across multiple files; if any change, update
+all of them in lockstep.
+
+| Field                    | Value                                                                 |
+| :---                     | :---                                                                  |
+| Namespace identifier     | `tenzro`                                                              |
+| Testnet genesis state root | `bd7db8168a4fb61538147696bc8572700d644e6eb544d8c0469e816fd652036a`  |
+| Testnet CAIP-2 reference | `tenzro:bd7db8168a4fb61538147696bc857270` (first 16 bytes / 32 hex)   |
+| EVM chain ID             | `<chain-id>`, set by each network's genesis (`133801` on the preview network) |
+| Mainnet CAIP-2 reference | TBD — populated at mainnet launch                                     |
+| Address width            | 32 bytes (hex `0x` + 64 chars OR 44-char base58btc)                   |
+| Native asset (slip44)    | `tenzro` (pre-registration; SLIP-44 PR pending)                       |
+| Token / NFT IDs          | 32-byte SHA-256 of `creator || nonce`                                 |
+| Wallet `rdns` (EIP-6963) | `com.tenzro.wallet`                                               |
+
+## Where the code does not yet follow these files
+
+The node names the Tenzro chain by its chain id, while this namespace spec
+names it by its genesis root; the two must be reconciled before the namespace
+is upstreamed.
+
+| Surface | Identifier used | Source |
+| :--- | :--- | :--- |
+| Settlement networks, x402 `network`, micropayment routing | `tenzro:<chain-id>`, the chain id of the node's genesis (`tenzro:133801` on the preview network), not the genesis root | `crates/tenzro-types/src/settlement_network.rs` (`tenzro_caip2`) |
+
+## Upstreaming workflow
+
+1. **Fork** [ChainAgnostic/namespaces][] under your GitHub account or
+   the `tenzro` org.
+
+2. **Copy** the `tenzro/` directory verbatim into the fork at
+   `namespaces/tenzro/`:
+
+   ```bash
+   git clone git@github.com:tenzro/namespaces.git /tmp/chain-agnostic-namespaces
+   cd /tmp/chain-agnostic-namespaces
+   git checkout -b add-tenzro-namespace
+   cp -R "$TENZRO_REPO/docs/caip2-namespace/tenzro" namespaces/tenzro
+   git add namespaces/tenzro
+   git commit -m "Add tenzro namespace (CAIP-2/10/19/25)"
+   git push -u origin add-tenzro-namespace
+   ```
+
+   `$TENZRO_REPO` is your checkout of `tenzro/tenzro-network`.
+
+3. **Open the PR** against `ChainAgnostic/namespaces:main` with title
+   `Add tenzro namespace (CAIP-2/10/19/25)` and a body summarizing:
+   - Tenzro Ledger is a DAG BFT network with post-quantum checkpoint certificates
+   - Multi-VM execution layer (EVM + SVM) over a single
+     native balance (Sei-V2 pointer model)
+   - One namespace + four CAIPs in this PR (2 / 10 / 19 / 25)
+   - Mainnet reference will be added in a follow-up PR at mainnet launch
+   - Repo: <https://github.com/tenzro/tenzro-network>
+
+4. **Update `discussions-to`** in each markdown frontmatter once the
+   PR number is assigned (currently set to `TBD`).
+
+5. **File the SLIP-44 PR** in parallel against
+   [satoshilabs/slips][] to register a coin index for `TNZO`. Until
+   that PR is merged, the `slip44` reference in `caip19.md` uses the
+   pre-registration string `tenzro`.
+
+[ChainAgnostic/namespaces]: https://github.com/ChainAgnostic/namespaces
+[satoshilabs/slips]: https://github.com/satoshilabs/slips

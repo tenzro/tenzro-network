@@ -1,0 +1,244 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "Laya-Q8_0.gguf",
+        "repo": "ggml-org/Laya-GGUF",
+        "revision": "845f314dd047fc2444a5289a4d50c1e1d59e27e1",
+        "sha256": "c06528c5746d3bb8baa72a27938be95abbfd0b226f8471e8a9e365ed0bb066d2",
+        "size": 449397600
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "decision",
+      "spec": {
+        "architecture": "modernbert",
+        "context_length": 512,
+        "description": "Laya by ConvAI Innovations: a 421M-parameter ModernBERT-large decision model. Give it a state (text, email, ticket, or JSON) and typed questions (yes/no, choice, score) and it answers each in one forward pass with calibrated probabilities; it generates no text. English, 512-token prompts, up to 64 questions per request, up to 255 options per question and 2 to 10 score levels. Runs on the CPU. Apache-2.0. Served through tenzro_decide.",
+        "download_filename": "laya.gguf",
+        "drafter_id": null,
+        "family": "laya",
+        "hf_filename": "Laya-Q8_0.gguf",
+        "hf_repo": "ggml-org/Laya-GGUF",
+        "id": "laya",
+        "min_ram_gb": 2,
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Laya (English)",
+        "parameters": "421M",
+        "promotable": true,
+        "quantization": "Q8_0",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": false,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": false,
+          "temperature": 0.0,
+          "top_k": 0,
+          "top_p": 1.0
+        },
+        "size_bytes": 449397600,
+        "template_fix": {
+          "kind": "none"
+        }
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "Laya-BF16.gguf",
+        "repo": "ggml-org/Laya-GGUF",
+        "revision": "845f314dd047fc2444a5289a4d50c1e1d59e27e1",
+        "sha256": "edeea94939cd1575c1f984c28982170c0e47caab66e4b80993fed992519573b4",
+        "size": 844026720
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "decision",
+      "spec": {
+        "architecture": "modernbert",
+        "context_length": 512,
+        "description": "Laya by ConvAI Innovations: a 421M-parameter ModernBERT-large decision model. Give it a state (text, email, ticket, or JSON) and typed questions (yes/no, choice, score) and it answers each in one forward pass with calibrated probabilities; it generates no text. English, 512-token prompts, up to 64 questions per request, up to 255 options per question and 2 to 10 score levels. Runs on the CPU. Apache-2.0. Served through tenzro_decide.",
+        "download_filename": "laya-bf16.gguf",
+        "drafter_id": null,
+        "family": "laya",
+        "hf_filename": "Laya-BF16.gguf",
+        "hf_repo": "ggml-org/Laya-GGUF",
+        "id": "laya-bf16",
+        "min_ram_gb": 5,
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Laya (English) BF16",
+        "parameters": "421M",
+        "promotable": true,
+        "quantization": "BF16",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": false,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": false,
+          "temperature": 0.0,
+          "top_k": 0,
+          "top_p": 1.0
+        },
+        "size_bytes": 844026720,
+        "template_fix": {
+          "kind": "none"
+        }
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "cbcc7f7d7bc8672cfa55fc9c6fb407cfd31d9cad259fa550b688838e41d1a365",
+        "built_from": {
+          "repo": "convaiinnovations/laya-multilingual",
+          "revision": "1720e3e3357cfe1e281542e223f8273b0890ca34"
+        },
+        "path": "laya-multilingual-bf16.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/laya-multilingual-gguf",
+        "sha256": "d608717386ae300f97826cf7f00895122090f876c7d594f08b4270c4dce79876",
+        "size": 658415072
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "decision",
+      "spec": {
+        "architecture": "modernbert",
+        "context_length": 1024,
+        "description": "Laya by ConvAI Innovations (convaiinnovations/laya-multilingual, Apache-2.0): a 322M-parameter mmBERT-base decision model for 100+ languages (256K vocabulary, 22 layers, 1024-token prompts as shipped, the encoder reads up to 8192). Answers typed questions (yes/no, choice, score) about a text in one forward pass with calibrated probabilities and generates no text; up to 64 questions per request, 255 options per question and 2 to 10 score levels. Runs on the CPU. Converted from the upstream checkpoint at revision 1720e3e3357cfe1e281542e223f8273b0890ca34 to the engine's decision layout (BF16: the 8-bit build moved a near-tie answer by 0.13 against the reference, BF16 stays within 0.02) with tools/gguf-export/convert.sh laya-multilingual <work-dir> (converter: Praecise/llama.cpp 6f13159558a6ffff90e452218a5e66faf837dc62); the file's SHA-256 is the same when rebuilt on x86-64 and arm64. Served through tenzro_decide.",
+        "download_filename": "laya-multilingual.gguf",
+        "drafter_id": null,
+        "family": "laya",
+        "hf_filename": "laya-multilingual-bf16.gguf",
+        "hf_repo": "tenzro/laya-multilingual-gguf",
+        "id": "laya-multilingual",
+        "min_ram_gb": 2,
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Laya Multilingual",
+        "parameters": "322M (mmBERT-base)",
+        "promotable": true,
+        "quantization": "BF16",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": false,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": false,
+          "temperature": 0.0,
+          "top_k": 0,
+          "top_p": 1.0
+        },
+        "size_bytes": 658415072,
+        "template_fix": {
+          "kind": "none"
+        }
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "d98670a02d7f66c9021f8145b1809d37e803963a39a074f8bd1dd001167825b2",
+        "built_from": {
+          "repo": "convaiinnovations/laya-typed-decisions",
+          "revision": "e929ae5cf69bc34259cd2f95c9e91145b818b1f0"
+        },
+        "path": "laya-typed-decisions-q8_0.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/laya-typed-decisions-gguf",
+        "sha256": "a7024fe3200233ff0ec4f8554d4b6f65b06bf294e610eef1093e0d4c23447c27",
+        "size": 449396896
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "decision",
+      "spec": {
+        "architecture": "modernbert",
+        "context_length": 1024,
+        "description": "Laya by ConvAI Innovations (convaiinnovations/laya-typed-decisions, Apache-2.0): a 421M-parameter ModernBERT-large decision model for the typed-decisions workflows (1024-token prompts). Answers typed questions (yes/no, choice, score) about a text in one forward pass with calibrated probabilities and generates no text; up to 64 questions per request, 255 options per question and 2 to 10 score levels. Runs on the CPU. Converted from the upstream checkpoint at revision e929ae5cf69bc34259cd2f95c9e91145b818b1f0 to the engine's decision layout (Q8_0) with tools/gguf-export/convert.sh laya-typed <work-dir> (converter: Praecise/llama.cpp 6f13159558a6ffff90e452218a5e66faf837dc62); the file's SHA-256 is the same when rebuilt on x86-64 and arm64. Served through tenzro_decide.",
+        "download_filename": "laya-typed-decisions.gguf",
+        "drafter_id": null,
+        "family": "laya",
+        "hf_filename": "laya-typed-decisions-q8_0.gguf",
+        "hf_repo": "tenzro/laya-typed-decisions-gguf",
+        "id": "laya-typed-decisions",
+        "min_ram_gb": 2,
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Laya Typed Decisions",
+        "parameters": "421M (ModernBERT-large)",
+        "promotable": true,
+        "quantization": "Q8_0",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": false,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": false,
+          "temperature": 0.0,
+          "top_k": 0,
+          "top_p": 1.0
+        },
+        "size_bytes": 449396896,
+        "template_fix": {
+          "kind": "none"
+        }
+      }
+    }
+  }
+]

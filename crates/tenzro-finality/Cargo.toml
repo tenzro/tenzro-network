@@ -1,0 +1,23 @@
+[package]
+name = "tenzro-finality"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tenzro checkpoint finality: the committee, session and certificate checks a light client runs"
+
+# Every dependency builds for a zkVM guest: the finality prover runs these
+# checks inside one.
+[dependencies]
+tenzro-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+ml-dsa = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+solc_version = "0.8.28"
+evm_version = "osaka"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+remappings = ["agent-account/=../../agent-account/evm/src/", "cheats/=../../agent-account/evm/test/", "finality/=../../finality/", "openzeppelin/=../../finality/vendor/openzeppelin/"]
+allow_paths = ["../../agent-account/evm/src", "../../agent-account/evm/test", "../../finality"]
+fs_permissions = [{ access = "read", path = "../../../sdk/fixtures" }]

@@ -1,0 +1,9 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; Where this build of the agent account points. The deployment fills these in
+;; before the build whose code hash Tenzro records for TON.
+;; The finality client's account id (workchain 0).
+const int FINALITY = 0;
+;; sha256("tvm:-239").
+const int CHAIN = 0x4c4033c233f0d4354a729a4c42ae6af64f6af48ab2d6604ffcb55376b18c65fe;
+;; sha256("tvm:-239/slip44:607").
+const int ASSET = 0x8d48183387aaaa27911b8fd3608a9573bfe4add46413d16a709073d108e839fe;

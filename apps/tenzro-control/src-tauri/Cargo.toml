@@ -1,0 +1,101 @@
+[package]
+name = "tenzro-control"
+version = "0.1.0"
+description = "Tenzro Control — run a Tenzro node"
+authors = ["Tenzro"]
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Empty [workspace] isolates this app from any parent workspace so the bundle
+# builds the same way whether the repo is cloned standalone or nested inside
+# the tenzro-network monorepo during development.
+[workspace]
+
+[lib]
+name = "tenzro_control"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+dirs = "5"
+sysinfo = "0.32"
+chrono = { version = "0.4", features = ["clock"] }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Version + features MUST match the monorepo workspace so Cargo unifies to a
+# single rustls instance. The embedded node's iroh QUIC transport negotiates
+# the PQ-hybrid X25519MLKEM768 group, which only aws-lc-rs ships.
+rustls = { version = "0.23.39", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }
+
+# FIDO caBLE (cross-device passkey linking) drags btleplug for Bluetooth, which
+# needs a per-OS permission string at runtime: NSBluetoothAlwaysUsageDescription
+# in Info.plist on macOS, a bluetooth capability entry on Windows.
+webauthn-authenticator-rs = { version = "0.6.1-dev", features = ["cable"] }
+webauthn-rs-proto = "0.6.1-dev"
+
+tauri-plugin-os = "2"
+
+tenzro-node = { path = "../../../crates/tenzro-node" }
+tenzro-types = { path = "../../../crates/tenzro-types" }
+tenzro-crypto = { path = "../../../crates/tenzro-crypto" }
+tenzro-vm = { path = "../../../crates/tenzro-vm" }
+tenzro-model = { path = "../../../crates/tenzro-model" }
+tenzro-device-key = { path = "../../../crates/tenzro-device-key" }
+tenzro-sdk = { path = "../../../sdk/tenzro-sdk" }
+
+[dev-dependencies]
+p256 = { version = "=0.14.0-rc.12", features = ["ecdsa"] }
+tempfile = "3"
+tenzro-iroh = { path = "../../../crates/tenzro-iroh" }
+
+# Windows 11's own window material. Applied in `lib.rs::setup` — Mac keeps its
+# native vibrancy via `titleBarStyle: Overlay`, so this is Windows-only.
+[target.'cfg(windows)'.dependencies]
+window-vibrancy = "0.8"
+
+# `tenzro-model` and `tenzro-device-key` need the same
+# vendored forks the root workspace patches in — see the root Cargo.toml's
+# own [patch.crates-io] and the comment above its `members` list for why
+# each exists. The empty [workspace] above isolates this crate from the
+# monorepo root, which means it does not inherit that patch and needs its
+# own copy pointed at the same vendored paths, one directory level deeper.
+[patch.crates-io]
+lance-linalg = { path = "../../../vendor/lance-linalg" }
+# The node's transport: noq-proto's stream-reassembly cap, iroh's
+# custom-transport paths and its separate endpoint TLS provider (tenzro-iroh
+# calls Builder::peer_crypto_provider), iroh-gossip's full-queue fix.
+noq-proto = { path = "../../../vendor/noq-proto" }
+iroh = { path = "../../../vendor/iroh" }
+iroh-gossip = { path = "../../../vendor/iroh-gossip" }
+# lru 0.18 in place of the lru 0.7.8 that reed-solomon-erasure 6.0.0 pins.
+reed-solomon-erasure = { path = "../../../vendor/reed-solomon-erasure" }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

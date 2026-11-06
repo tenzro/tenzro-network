@@ -1,0 +1,288 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "qwen3-reranker-0.6b-q8_0.gguf",
+        "repo": "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF",
+        "revision": "a02f48bb4f057028298c21fa033da2b30d7742d5",
+        "sha256": "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48",
+        "size": 639153184
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "rerank",
+      "spec": {
+        "architecture": "qwen3",
+        "context_length": 32768,
+        "description": "Cross-encoder reranker: scores how well each document answers a query",
+        "download_filename": "qwen3-reranker-0.6b.gguf",
+        "drafter_id": null,
+        "family": "qwen3-reranker",
+        "hf_filename": "qwen3-reranker-0.6b-q8_0.gguf",
+        "hf_repo": "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF",
+        "id": "qwen3-reranker-0.6b",
+        "min_ram_gb": 2,
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Qwen3 Reranker 0.6B",
+        "parameters": "0.6B",
+        "promotable": false,
+        "quantization": "Q8_0",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": true,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": true,
+          "temperature": 0.6000000238418579,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "size_bytes": 639153184,
+        "template_fix": {
+          "kind": "none"
+        }
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "a2d8e1d03a5e460b571d447589058ed29e6c21a0144d585252ccef7b0573e5ab",
+        "built_from": {
+          "repo": "Qwen/Qwen3-Reranker-4B",
+          "revision": "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
+        },
+        "path": "qwen3-reranker-4b-q8_0.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/qwen3-reranker-4b-gguf",
+        "sha256": "cb6c823a39950a8b302f9802b2a1758269cf065b1c2793b3b08dcf23d7e016e1",
+        "size": 4279678880
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "rerank",
+      "spec": {
+        "architecture": "qwen3",
+        "context_length": 32768,
+        "description": "Cross-encoder reranker: scores how well each document answers a query",
+        "download_filename": "qwen3-reranker-4b.gguf",
+        "drafter_id": null,
+        "family": "qwen3-reranker",
+        "hf_filename": "qwen3-reranker-4b-q8_0.gguf",
+        "hf_repo": "tenzro/qwen3-reranker-4b-gguf",
+        "id": "qwen3-reranker-4b",
+        "min_ram_gb": 6,
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Qwen3 Reranker 4B",
+        "parameters": "4B",
+        "promotable": false,
+        "quantization": "Q8_0",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": true,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": true,
+          "temperature": 0.6000000238418579,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "size_bytes": 4279678880,
+        "template_fix": {
+          "kind": "none"
+        }
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "a2574ccd8a113edd03e302a54a719c1181f28842d73b3444edd2baf68bfc395f",
+        "built_from": {
+          "repo": "Qwen/Qwen3-Reranker-8B",
+          "revision": "77d193c791ed757ca307ee72715aa132723da912"
+        },
+        "path": "qwen3-reranker-8b-q8_0.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/qwen3-reranker-8b-gguf",
+        "sha256": "0491496bb713f2fc2b33f03348294ff588d1084167bc138af3c3ec0443b8c0a2",
+        "size": 8047134272
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "rerank",
+      "spec": {
+        "architecture": "qwen3",
+        "context_length": 32768,
+        "description": "Cross-encoder reranker: scores how well each document answers a query",
+        "download_filename": "qwen3-reranker-8b.gguf",
+        "drafter_id": null,
+        "family": "qwen3-reranker",
+        "hf_filename": "qwen3-reranker-8b-q8_0.gguf",
+        "hf_repo": "tenzro/qwen3-reranker-8b-gguf",
+        "id": "qwen3-reranker-8b",
+        "min_ram_gb": 10,
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Qwen3 Reranker 8B",
+        "parameters": "8B",
+        "promotable": false,
+        "quantization": "Q8_0",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": true,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": true,
+          "temperature": 0.6000000238418579,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "size_bytes": 8047134272,
+        "template_fix": {
+          "kind": "none"
+        }
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "blake3": "c0b9ed58a9aa4858a915490ca60cf03eb54248857961bee6a4ec7395be723dd2",
+        "built_from": {
+          "repo": "Qwen/Qwen3-VL-Reranker-2B",
+          "revision": "4bd860ac4f15ad1897a214615cccc700f8f71818"
+        },
+        "path": "qwen3-vl-reranker-2b-f16.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/qwen3-vl-reranker-2b-gguf",
+        "sha256": "d1bd5aa463e407c3d218a8332fa59578c70bae39264882d1aa6625440be4c2a6",
+        "size": 3447362048
+      },
+      {
+        "blake3": "1cc00b7108eb78802b033c3ee627b50c951c2005c0d4f4a7a97b222271d2755f",
+        "built_from": {
+          "repo": "Qwen/Qwen3-VL-Reranker-2B",
+          "revision": "4bd860ac4f15ad1897a214615cccc700f8f71818"
+        },
+        "path": "qwen3-vl-reranker-2b-mmproj-f16.gguf",
+        "recipe": "tools/gguf-export/convert.sh",
+        "repo": "tenzro/qwen3-vl-reranker-2b-gguf",
+        "sha256": "1be27a6eed76a29a4890a5bd56031800ff36fce82d2d184edd613a70979e233e",
+        "size": 819395296
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "rerank",
+      "spec": {
+        "architecture": "qwen3vl",
+        "context_length": 32768,
+        "description": "Cross-encoder reranker over text, pictures and video: scores how well each document answers a query, either side carrying any of them",
+        "download_filename": "qwen3-vl-reranker-2b.gguf",
+        "drafter_id": null,
+        "family": "qwen3-vl-reranker",
+        "hf_filename": "qwen3-vl-reranker-2b-f16.gguf",
+        "hf_repo": "tenzro/qwen3-vl-reranker-2b-gguf",
+        "id": "qwen3-vl-reranker-2b",
+        "min_ram_gb": 6,
+        "mmproj": {
+          "filename": "qwen3-vl-reranker-2b-mmproj-f16.gguf"
+        },
+        "mtp_default_draft_n": null,
+        "mtp_kind": "none",
+        "name": "Qwen3-VL Reranker 2B",
+        "parameters": "2B",
+        "promotable": false,
+        "quantization": "F16",
+        "reasoning": {
+          "default_mode": "never",
+          "supports_thinking": false,
+          "thinking_min_budget_tokens": 0,
+          "thinking_safe_min_b": 0.0
+        },
+        "serving": {
+          "jinja_required": true,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "reasoning_default": true,
+          "temperature": 0.6000000238418579,
+          "top_k": 20,
+          "top_p": 0.949999988079071
+        },
+        "size_bytes": 3447362048,
+        "template_fix": {
+          "kind": "none"
+        },
+        "vision_input": {
+          "image_max_pixels": 1310720,
+          "image_mean": [
+            0.5,
+            0.5,
+            0.5
+          ],
+          "image_min_pixels": 4096,
+          "image_std": [
+            0.5,
+            0.5,
+            0.5
+          ],
+          "merge_size": 2,
+          "patch_size": 16,
+          "temporal_patch_size": 2,
+          "video_frame_max_pixels": 786432,
+          "video_frame_min_pixels": 131072,
+          "video_frame_round_factor": 64,
+          "video_frame_round_min_pixels": 16384,
+          "video_frames": 64,
+          "video_sample_fps": 2.0,
+          "video_total_pixels": 10485760
+        }
+      }
+    }
+  }
+]

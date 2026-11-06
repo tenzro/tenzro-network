@@ -1,0 +1,32 @@
+{
+  "name": "@tenzro/device-key-linux-x64-gnu",
+  "version": "0.1.1",
+  "description": "Prebuilt @tenzro/device-key binary for linux-x64-gnu",
+  "homepage": "https://tenzro.com/docs/hardware-rooted-keys",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenzro/tenzro-network.git",
+    "directory": "sdk/tenzro-ts-sdk/native/npm/linux-x64-gnu"
+  },
+  "license": "Apache-2.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "main": "device-key.linux-x64-gnu.node",
+  "files": [
+    "device-key.linux-x64-gnu.node",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prepack": "node -e \"require('fs').accessSync('device-key.linux-x64-gnu.node')\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

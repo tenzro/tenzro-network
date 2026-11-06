@@ -1,0 +1,9 @@
+#!/bin/sh
+# The image carries the Groth16 prover container as a directory of its
+# manifest and layers, by digest. Load it into container storage on the state
+# partition once; the wrap runs it by that digest with --pull=never.
+set -eu
+ref=$(cat /usr/share/tenzro/groth16-prover.ref)
+podman image exists "$ref" && exit 0
+skopeo copy --quiet --preserve-digests dir:/usr/share/tenzro/groth16-prover "containers-storage:$ref"
+podman image exists "$ref"

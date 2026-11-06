@@ -1,0 +1,25 @@
+#!/bin/sh
+# On a cloud platform with instance metadata, an operator can hand the prover
+# one receipt: the attribute tenzro-prover-receipt names a gs:// object, read
+# with the instance's own service account into the inbox.
+set -eu
+md=http://169.254.169.254/computeMetadata/v1
+get() { curl -sf --max-time 5 -H 'Metadata-Flavor: Google' "$md/$1"; }
+i=0
+until get instance/id >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -ge 30 ] && exit 0
+    sleep 2
+done
+url=$(get instance/attributes/tenzro-prover-receipt 2>/dev/null) || exit 0
+case "$url" in gs://*/*) ;; *) echo "tenzro-prover: tenzro-prover-receipt must be gs://bucket/object" >&2; exit 1 ;; esac
+path=${url#gs://}
+bucket=${path%%/*}
+object=$(printf '%s' "${path#*/}" | jq -sRr @uri)
+token=$(get instance/service-accounts/default/token | jq -r .access_token)
+name=$(basename "${path#*/}" .receipt)
+umask 077
+curl -sf --max-time 300 -H "Authorization: Bearer $token" \
+    "https://storage.googleapis.com/storage/v1/b/$bucket/o/$object?alt=media" \
+    -o "/var/lib/tenzro-prover/inbox/.$name.part"
+mv "/var/lib/tenzro-prover/inbox/.$name.part" "/var/lib/tenzro-prover/inbox/$name.receipt"

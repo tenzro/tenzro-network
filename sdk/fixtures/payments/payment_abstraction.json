@@ -1,0 +1,399 @@
+{
+  "description": "Payment abstraction vectors: price parsing, idempotent payment ids, the ledger authorization preimage, asset choice from a quote and the receipt a settlement records. Pinned by tenzro-types tests; every SDK checks against it.",
+  "prices": [
+    [
+      "0.25",
+      250000
+    ],
+    [
+      "1",
+      1000000
+    ],
+    [
+      "12.000001",
+      12000001
+    ],
+    [
+      "0.1",
+      100000
+    ]
+  ],
+  "bad_prices": [
+    "",
+    ".5",
+    "1.",
+    "0",
+    "0.0000001",
+    "-1",
+    "1e3",
+    " 1",
+    "1.2.3"
+  ],
+  "payment_id": {
+    "idempotency_key": "order-7f3a",
+    "payer": "1111111111111111111111111111111111111111111111111111111111111111",
+    "payee": "2222222222222222222222222222222222222222222222222222222222222222",
+    "request_digest": "2b3f80391f5bf155728f06d258fe37ba0def2af456a93d7dc48ca36ba1e84e3f",
+    "payment_id": "df8b5b08aac3c2b8724175473abf23dc4a9dcb3674862ad60868ed2b656ad090"
+  },
+  "authorization": {
+    "chain_id": 1337,
+    "payment_id": "df8b5b08aac3c2b8724175473abf23dc4a9dcb3674862ad60868ed2b656ad090",
+    "payer": "1111111111111111111111111111111111111111111111111111111111111111",
+    "payee": "2222222222222222222222222222222222222222222222222222222222222222",
+    "max_amount": "1001002",
+    "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+    "request_digest": "2b3f80391f5bf155728f06d258fe37ba0def2af456a93d7dc48ca36ba1e84e3f",
+    "quote_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "usd_e6": 1000000,
+    "preimage": "74656e7a726f2f7061796d656e742d617574686f72697a6174696f6e39050000000000004000000064663862356230386161633363326238373234313735343733616266323364633461396463623336373438363261643630383638656432623635366164303930111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222222a460f00000000000000000000000000420000003078356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335632b3f80391f5bf155728f06d258fe37ba0def2af456a93d7dc48ca36ba1e84e3f000000000000000000000000000000000000000000000000000000000000000040420f000000000000"
+  },
+  "quote": {
+    "response": {
+      "usd_e6": 1000000,
+      "unit": {
+        "basket": "USD",
+        "version": 1
+      },
+      "rate_epoch": null,
+      "assets": [
+        {
+          "asset": "0x7777777777777777777777777777777777777777777777777777777777777777",
+          "error": {
+            "code": "asset_off_peg",
+            "reason": "settlement asset EURX is off its USD peg"
+          }
+        },
+        {
+          "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+          "amount": "1001002",
+          "fee": "1001",
+          "fee_asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+          "rate_epoch": null
+        },
+        {
+          "asset": "TNZO",
+          "amount": "10000000000000000000",
+          "fee": "10000000000000000",
+          "fee_asset": "TNZO",
+          "rate_epoch": null
+        }
+      ]
+    },
+    "accept": [
+      "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "TNZO"
+    ],
+    "chosen": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+    "accept_none": [
+      "0x7777777777777777777777777777777777777777777777777777777777777777"
+    ],
+    "none_code": "asset_off_peg"
+  },
+  "quote_suspended": {
+    "response": {
+      "usd_e6": 1000000,
+      "unit": {
+        "basket": "USD",
+        "version": 1
+      },
+      "rate_epoch": null,
+      "assets": [
+        {
+          "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+          "error": {
+            "code": "asset_suspended",
+            "reason": "settlement asset USDC is suspended by its peg breaker since epoch 41; it settles again after 24 epochs on its peg within 50 bps"
+          }
+        },
+        {
+          "asset": "0x7171717171717171717171717171717171717171717171717171717171717171",
+          "amount": "1001002",
+          "fee": "1001",
+          "fee_asset": "0x7171717171717171717171717171717171717171717171717171717171717171",
+          "rate_epoch": null
+        }
+      ]
+    },
+    "accept": [
+      "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "0x7171717171717171717171717171717171717171717171717171717171717171"
+    ],
+    "chosen": "0x7171717171717171717171717171717171717171717171717171717171717171",
+    "accept_none": [
+      "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+    ],
+    "none_code": "asset_suspended"
+  },
+  "quote_inflow_full": {
+    "response": {
+      "usd_e6": 1000000,
+      "unit": {
+        "basket": "USD",
+        "version": 1
+      },
+      "rate_epoch": null,
+      "assets": [
+        {
+          "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+          "error": {
+            "code": "asset_inflow_full",
+            "reason": "settlement asset USDC has 0 micro-units of its epoch inflow cap left; the payment is worth 1000000"
+          }
+        },
+        {
+          "asset": "TNZO",
+          "amount": "10000000000000000000",
+          "fee": "10000000000000000",
+          "fee_asset": "TNZO",
+          "rate_epoch": null
+        }
+      ]
+    },
+    "accept": [
+      "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "TNZO"
+    ],
+    "chosen": "TNZO",
+    "accept_none": [
+      "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+    ],
+    "none_code": "asset_inflow_full"
+  },
+  "receipt": {
+    "record": {
+      "pay_ref": "abababababababababababababababababababababababababababababababab",
+      "class": "native",
+      "payer": "1111111111111111111111111111111111111111111111111111111111111111",
+      "payee": [
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34
+      ],
+      "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "amount": "1001002",
+      "fee": "1001",
+      "fee_asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "fee_tnzo_eq": "10010000000000000",
+      "burn_eq": "5010000000000000",
+      "rate_epoch": null,
+      "unit": {
+        "basket": "USD",
+        "version": 1
+      },
+      "value_units": "1000000",
+      "payout_asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "legs": [
+        {
+          "role": "operator",
+          "account": "2222222222222222222222222222222222222222222222222222222222222222",
+          "amount": "1001002",
+          "fee": "1001"
+        }
+      ],
+      "binding": {
+        "request_digest": "2b3f80391f5bf155728f06d258fe37ba0def2af456a93d7dc48ca36ba1e84e3f",
+        "quote_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "usd_e6": 1000000,
+        "app_margin": null
+      },
+      "nonce": "df8b5b08aac3c2b8724175473abf23dc4a9dcb3674862ad60868ed2b656ad090",
+      "agent_did": null,
+      "source": null,
+      "attestor": null,
+      "receipts": [],
+      "refunded": "0",
+      "recorded_at_ms": 1700000000000
+    },
+    "expected": {
+      "payment_id": "df8b5b08aac3c2b8724175473abf23dc4a9dcb3674862ad60868ed2b656ad090",
+      "payee": "2222222222222222222222222222222222222222222222222222222222222222",
+      "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "amount": "1001002",
+      "request": "https://api.example/v1/infer"
+    },
+    "other_request": "https://other.example/v1/infer"
+  },
+  "authorization_resold": {
+    "chain_id": 1337,
+    "payment_id": "df8b5b08aac3c2b8724175473abf23dc4a9dcb3674862ad60868ed2b656ad090",
+    "payer": "1111111111111111111111111111111111111111111111111111111111111111",
+    "payee": "2222222222222222222222222222222222222222222222222222222222222222",
+    "max_amount": "1101103",
+    "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+    "request_digest": "2b3f80391f5bf155728f06d258fe37ba0def2af456a93d7dc48ca36ba1e84e3f",
+    "quote_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "usd_e6": 1000000,
+    "resellers": [
+      {
+        "reseller": "3333333333333333333333333333333333333333333333333333333333333333",
+        "commission_bps": 1000
+      }
+    ],
+    "preimage": "74656e7a726f2f7061796d656e742d617574686f72697a6174696f6e39050000000000004000000064663862356230386161633363326238373234313735343733616266323364633461396463623336373438363261643630383638656432623635366164303930111111111111111111111111111111111111111111111111111111111111111122222222222222222222222222222222222222222222222222222222222222222fcd1000000000000000000000000000420000003078356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335633563356335632b3f80391f5bf155728f06d258fe37ba0def2af456a93d7dc48ca36ba1e84e3f000000000000000000000000000000000000000000000000000000000000000040420f00000000000002010000003333333333333333333333333333333333333333333333333333333333333333e8030000"
+  },
+  "quote_resold": {
+    "resellers": [
+      {
+        "reseller": "3333333333333333333333333333333333333333333333333333333333333333",
+        "commission_bps": 1000
+      }
+    ],
+    "response": {
+      "usd_e6": 1000000,
+      "unit": {
+        "basket": "USD",
+        "version": 1
+      },
+      "rate_epoch": null,
+      "assets": [
+        {
+          "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+          "amount": "1101103",
+          "fee": "1102",
+          "fee_asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+          "rate_epoch": null,
+          "operator_amount": "1001002",
+          "legs": [
+            {
+              "reseller": "3333333333333333333333333333333333333333333333333333333333333333",
+              "commission_bps": 1000,
+              "amount": "100101",
+              "fee": "101"
+            }
+          ]
+        }
+      ]
+    },
+    "accept": [
+      "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+    ],
+    "operator_amount": "1001002",
+    "commission": "100101"
+  },
+  "receipt_resold": {
+    "record": {
+      "pay_ref": "abababababababababababababababababababababababababababababababab",
+      "class": "native",
+      "payer": "1111111111111111111111111111111111111111111111111111111111111111",
+      "payee": [
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34,
+        34
+      ],
+      "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "amount": "1101103",
+      "fee": "1102",
+      "fee_asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "fee_tnzo_eq": "10010000000000000",
+      "burn_eq": "5010000000000000",
+      "rate_epoch": null,
+      "unit": {
+        "basket": "USD",
+        "version": 1
+      },
+      "value_units": "1000000",
+      "payout_asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "legs": [
+        {
+          "role": "operator",
+          "account": "2222222222222222222222222222222222222222222222222222222222222222",
+          "amount": "1001002",
+          "fee": "1001"
+        },
+        {
+          "role": "reseller",
+          "account": "3333333333333333333333333333333333333333333333333333333333333333",
+          "amount": "100101",
+          "fee": "101",
+          "commission_bps": 1000
+        }
+      ],
+      "binding": {
+        "request_digest": "2b3f80391f5bf155728f06d258fe37ba0def2af456a93d7dc48ca36ba1e84e3f",
+        "quote_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "usd_e6": 1000000,
+        "app_margin": null
+      },
+      "nonce": "df8b5b08aac3c2b8724175473abf23dc4a9dcb3674862ad60868ed2b656ad090",
+      "agent_did": null,
+      "source": null,
+      "attestor": null,
+      "receipts": [],
+      "refunded": "0",
+      "recorded_at_ms": 1700000000000
+    },
+    "expected": {
+      "payment_id": "df8b5b08aac3c2b8724175473abf23dc4a9dcb3674862ad60868ed2b656ad090",
+      "payee": "2222222222222222222222222222222222222222222222222222222222222222",
+      "asset": "0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+      "amount": "1101103",
+      "request": "https://api.example/v1/infer",
+      "resellers": [
+        {
+          "reseller": "3333333333333333333333333333333333333333333333333333333333333333",
+          "commission_bps": 1000
+        }
+      ]
+    }
+  }
+}

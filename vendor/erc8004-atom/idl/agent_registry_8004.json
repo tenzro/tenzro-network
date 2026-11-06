@@ -1,0 +1,2613 @@
+{
+  "address": "8oo48pya1SZD23ZhzoNMhxR2UGb8BRa41Su4qP9EuaWm",
+  "metadata": {
+    "name": "agent_registry_8004",
+    "version": "0.5.2",
+    "spec": "0.1.0",
+    "description": "8004 AI Agent Identity & Reputation Registry (Consolidated)"
+  },
+  "instructions": [
+    {
+      "name": "append_response",
+      "docs": [
+        "Append response to feedback",
+        "SEAL v1: Client provides seal_hash from the original feedback"
+      ],
+      "discriminator": [
+        162,
+        210,
+        186,
+        50,
+        180,
+        4,
+        47,
+        104
+      ],
+      "accounts": [
+        {
+          "name": "responder",
+          "docs": [
+            "Responder must be agent owner or agent wallet"
+          ],
+          "signer": true
+        },
+        {
+          "name": "agent_account",
+          "docs": [
+            "Agent account for authorization check and hash-chain update"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "asset_key"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset (for PDA derivation)"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "asset_key",
+          "type": "pubkey"
+        },
+        {
+          "name": "client_address",
+          "type": "pubkey"
+        },
+        {
+          "name": "feedback_index",
+          "type": "u64"
+        },
+        {
+          "name": "response_uri",
+          "type": "string"
+        },
+        {
+          "name": "response_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "seal_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "core_owner_of",
+      "docs": [
+        "Get authoritative Core owner (reads live from Metaplex Core)"
+      ],
+      "discriminator": [
+        245,
+        250,
+        220,
+        217,
+        227,
+        230,
+        4,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset to read owner from"
+          ]
+        }
+      ],
+      "args": [],
+      "returns": "pubkey"
+    },
+    {
+      "name": "delete_metadata_pda",
+      "docs": [
+        "Delete agent metadata PDA and recover rent (key_hash = SHA256(key)[0..16])"
+      ],
+      "discriminator": [
+        228,
+        190,
+        195,
+        255,
+        61,
+        221,
+        26,
+        152
+      ],
+      "accounts": [
+        {
+          "name": "metadata_entry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116,
+                  95,
+                  109,
+                  101,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              },
+              {
+                "kind": "arg",
+                "path": "key_hash"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent_account",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset - verifies ownership"
+          ]
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Owner must be the asset owner (verified in instruction)",
+            "Receives rent back when PDA is closed"
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "key_hash",
+          "type": {
+            "array": [
+              "u8",
+              16
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "enable_atom",
+      "docs": [
+        "Enable ATOM for an agent (one-way)"
+      ],
+      "discriminator": [
+        202,
+        27,
+        88,
+        88,
+        150,
+        1,
+        240,
+        97
+      ],
+      "accounts": [
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset for ownership verification"
+          ]
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Agent owner (must match Core asset owner)"
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "give_feedback",
+      "docs": [
+        "Give feedback to an agent",
+        "SEAL v1: feedback_file_hash is optional (hash of external file),",
+        "the program computes seal_hash on-chain for trustless integrity."
+      ],
+      "discriminator": [
+        145,
+        136,
+        123,
+        3,
+        215,
+        165,
+        98,
+        41
+      ],
+      "accounts": [
+        {
+          "name": "client",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset"
+        },
+        {
+          "name": "collection"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "atom_config",
+          "docs": [
+            "AtomConfig PDA (owned by atom-engine)"
+          ],
+          "optional": true
+        },
+        {
+          "name": "atom_stats",
+          "docs": [
+            "AtomStats PDA - OPTIONAL initialization",
+            "If uninitialized, feedback works without ATOM Engine"
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "atom_engine_program",
+          "optional": true
+        },
+        {
+          "name": "registry_authority",
+          "optional": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  116,
+                  111,
+                  109,
+                  95,
+                  99,
+                  112,
+                  105,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "value",
+          "type": "i64"
+        },
+        {
+          "name": "value_decimals",
+          "type": "u8"
+        },
+        {
+          "name": "score",
+          "type": {
+            "option": "u8"
+          }
+        },
+        {
+          "name": "feedback_file_hash",
+          "type": {
+            "option": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        },
+        {
+          "name": "tag1",
+          "type": "string"
+        },
+        {
+          "name": "tag2",
+          "type": "string"
+        },
+        {
+          "name": "endpoint",
+          "type": "string"
+        },
+        {
+          "name": "feedback_uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "docs": [
+        "Initialize the registry with root config and base collection"
+      ],
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "root_config",
+          "docs": [
+            "Global root config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "registry_config",
+          "docs": [
+            "Base registry config"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "collection"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "docs": [
+            "Base collection (created by CPI to Metaplex Core)"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "program_data",
+          "docs": [
+            "Program data account for upgrade authority verification"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  254,
+                  154,
+                  235,
+                  128,
+                  134,
+                  246,
+                  203,
+                  89,
+                  88,
+                  221,
+                  213,
+                  226,
+                  164,
+                  81,
+                  160,
+                  35,
+                  9,
+                  166,
+                  24,
+                  227,
+                  95,
+                  246,
+                  37,
+                  185,
+                  197,
+                  164,
+                  45,
+                  202,
+                  159,
+                  85,
+                  13
+                ]
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                2,
+                168,
+                246,
+                145,
+                78,
+                136,
+                161,
+                176,
+                226,
+                16,
+                21,
+                62,
+                247,
+                99,
+                174,
+                43,
+                0,
+                194,
+                185,
+                61,
+                22,
+                193,
+                36,
+                210,
+                192,
+                83,
+                122,
+                16,
+                4,
+                128,
+                0,
+                0
+              ]
+            }
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "mpl_core_program",
+          "docs": [
+            "Metaplex Core program"
+          ],
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "owner_of",
+      "docs": [
+        "Get agent owner (cached - may be stale after external transfer)"
+      ],
+      "discriminator": [
+        165,
+        85,
+        46,
+        249,
+        100,
+        61,
+        249,
+        112
+      ],
+      "accounts": [
+        {
+          "name": "agent_account",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset (for PDA derivation)"
+          ]
+        }
+      ],
+      "args": [],
+      "returns": "pubkey"
+    },
+    {
+      "name": "register",
+      "docs": [
+        "Register agent in the base collection"
+      ],
+      "discriminator": [
+        211,
+        124,
+        67,
+        15,
+        211,
+        194,
+        178,
+        240
+      ],
+      "accounts": [
+        {
+          "name": "root_config",
+          "docs": [
+            "Root config to validate base collection"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "registry_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "collection"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "New asset to create"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "collection",
+          "docs": [
+            "Base collection"
+          ],
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "mpl_core_program",
+          "docs": [
+            "Metaplex Core program"
+          ],
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        }
+      ],
+      "args": [
+        {
+          "name": "agent_uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "register_with_options",
+      "docs": [
+        "Register agent with explicit ATOM setting (default is true)"
+      ],
+      "discriminator": [
+        177,
+        175,
+        96,
+        41,
+        59,
+        166,
+        13,
+        6
+      ],
+      "accounts": [
+        {
+          "name": "root_config",
+          "docs": [
+            "Root config to validate base collection"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  111,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "registry_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "collection"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "New asset to create"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "collection",
+          "docs": [
+            "Base collection"
+          ],
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "mpl_core_program",
+          "docs": [
+            "Metaplex Core program"
+          ],
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        }
+      ],
+      "args": [
+        {
+          "name": "agent_uri",
+          "type": "string"
+        },
+        {
+          "name": "atom_enabled",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "revoke_feedback",
+      "docs": [
+        "Revoke feedback",
+        "SEAL v1: Client provides seal_hash (can be recomputed using computeSealHash)"
+      ],
+      "discriminator": [
+        211,
+        37,
+        230,
+        82,
+        118,
+        216,
+        137,
+        206
+      ],
+      "accounts": [
+        {
+          "name": "client",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "atom_config",
+          "docs": [
+            "AtomConfig PDA (owned by atom-engine)"
+          ],
+          "optional": true
+        },
+        {
+          "name": "atom_stats",
+          "docs": [
+            "AtomStats PDA - OPTIONAL initialization",
+            "If uninitialized, revoke works without ATOM Engine"
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "atom_engine_program",
+          "optional": true
+        },
+        {
+          "name": "registry_authority",
+          "optional": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  116,
+                  111,
+                  109,
+                  95,
+                  99,
+                  112,
+                  105,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "feedback_index",
+          "type": "u64"
+        },
+        {
+          "name": "seal_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_agent_uri",
+      "docs": [
+        "Set agent URI"
+      ],
+      "discriminator": [
+        43,
+        254,
+        168,
+        104,
+        192,
+        51,
+        39,
+        46
+      ],
+      "accounts": [
+        {
+          "name": "registry_config",
+          "docs": [
+            "Registry config for this collection"
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "collection"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset for URI update"
+          ],
+          "writable": true
+        },
+        {
+          "name": "collection",
+          "docs": [
+            "Collection account (required by Core for assets in collection)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "mpl_core_program",
+          "docs": [
+            "Metaplex Core program"
+          ],
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "set_agent_wallet",
+      "docs": [
+        "Set agent wallet with Ed25519 signature verification"
+      ],
+      "discriminator": [
+        154,
+        87,
+        251,
+        23,
+        51,
+        12,
+        4,
+        150
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "docs": [
+            "Agent owner (must be Core asset owner)"
+          ],
+          "signer": true
+        },
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset - ownership verified in instruction"
+          ]
+        },
+        {
+          "name": "instructions_sysvar",
+          "docs": [
+            "Instructions sysvar for Ed25519 signature introspection"
+          ],
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_wallet",
+          "type": "pubkey"
+        },
+        {
+          "name": "deadline",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "set_metadata_pda",
+      "docs": [
+        "Set agent metadata as individual PDA (key_hash = SHA256(key)[0..16])"
+      ],
+      "discriminator": [
+        236,
+        60,
+        23,
+        48,
+        138,
+        69,
+        196,
+        153
+      ],
+      "accounts": [
+        {
+          "name": "metadata_entry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116,
+                  95,
+                  109,
+                  101,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              },
+              {
+                "kind": "arg",
+                "path": "key_hash"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent_account",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset - verifies ownership"
+          ]
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Owner must be the asset owner (verified in instruction)"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "key_hash",
+          "type": {
+            "array": [
+              "u8",
+              16
+            ]
+          }
+        },
+        {
+          "name": "key",
+          "type": "string"
+        },
+        {
+          "name": "value",
+          "type": "bytes"
+        },
+        {
+          "name": "immutable",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "sync_owner",
+      "docs": [
+        "Sync agent owner from Core asset"
+      ],
+      "discriminator": [
+        46,
+        5,
+        232,
+        198,
+        59,
+        158,
+        160,
+        119
+      ],
+      "accounts": [
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset - ownership is read from asset data"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "transfer_agent",
+      "docs": [
+        "Transfer agent with automatic owner sync"
+      ],
+      "discriminator": [
+        137,
+        80,
+        56,
+        147,
+        107,
+        99,
+        39,
+        192
+      ],
+      "accounts": [
+        {
+          "name": "agent_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "Core asset to transfer"
+          ],
+          "writable": true
+        },
+        {
+          "name": "collection",
+          "docs": [
+            "Collection (required by Core transfer)"
+          ],
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Current owner (must sign)"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "new_owner",
+          "docs": [
+            "New owner receiving the asset"
+          ]
+        },
+        {
+          "name": "mpl_core_program",
+          "docs": [
+            "Metaplex Core program"
+          ],
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "AgentAccount",
+      "discriminator": [
+        241,
+        119,
+        69,
+        140,
+        233,
+        9,
+        112,
+        50
+      ]
+    },
+    {
+      "name": "MetadataEntryPda",
+      "discriminator": [
+        48,
+        145,
+        12,
+        249,
+        176,
+        141,
+        197,
+        187
+      ]
+    },
+    {
+      "name": "RegistryConfig",
+      "discriminator": [
+        23,
+        118,
+        10,
+        246,
+        173,
+        231,
+        243,
+        156
+      ]
+    },
+    {
+      "name": "RootConfig",
+      "discriminator": [
+        42,
+        216,
+        8,
+        82,
+        19,
+        209,
+        223,
+        246
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AgentOwnerSynced",
+      "discriminator": [
+        101,
+        228,
+        184,
+        252,
+        20,
+        185,
+        70,
+        249
+      ]
+    },
+    {
+      "name": "AgentRegistered",
+      "discriminator": [
+        191,
+        78,
+        217,
+        54,
+        232,
+        100,
+        189,
+        85
+      ]
+    },
+    {
+      "name": "AtomEnabled",
+      "discriminator": [
+        246,
+        179,
+        174,
+        223,
+        97,
+        110,
+        74,
+        200
+      ]
+    },
+    {
+      "name": "FeedbackRevoked",
+      "discriminator": [
+        205,
+        16,
+        31,
+        94,
+        54,
+        101,
+        16,
+        199
+      ]
+    },
+    {
+      "name": "MetadataDeleted",
+      "discriminator": [
+        251,
+        244,
+        153,
+        63,
+        35,
+        252,
+        131,
+        54
+      ]
+    },
+    {
+      "name": "MetadataSet",
+      "discriminator": [
+        190,
+        125,
+        71,
+        119,
+        14,
+        31,
+        26,
+        197
+      ]
+    },
+    {
+      "name": "NewFeedback",
+      "discriminator": [
+        14,
+        162,
+        58,
+        194,
+        131,
+        42,
+        11,
+        149
+      ]
+    },
+    {
+      "name": "RegistryInitialized",
+      "discriminator": [
+        144,
+        138,
+        62,
+        105,
+        58,
+        38,
+        100,
+        177
+      ]
+    },
+    {
+      "name": "ResponseAppended",
+      "discriminator": [
+        168,
+        169,
+        214,
+        193,
+        171,
+        1,
+        232,
+        123
+      ]
+    },
+    {
+      "name": "UriUpdated",
+      "discriminator": [
+        170,
+        199,
+        78,
+        167,
+        49,
+        84,
+        102,
+        11
+      ]
+    },
+    {
+      "name": "WalletUpdated",
+      "discriminator": [
+        215,
+        34,
+        10,
+        59,
+        24,
+        114,
+        201,
+        129
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 12000,
+      "name": "UriTooLong",
+      "msg": "URI exceeds 250 bytes"
+    },
+    {
+      "code": 12001,
+      "name": "KeyTooLong",
+      "msg": "Key exceeds 32 bytes"
+    },
+    {
+      "code": 12002,
+      "name": "ValueTooLong",
+      "msg": "Value exceeds 250 bytes"
+    },
+    {
+      "code": 12003,
+      "name": "MetadataLimitReached",
+      "msg": "Metadata limit reached"
+    },
+    {
+      "code": 12004,
+      "name": "Unauthorized",
+      "msg": "Unauthorized"
+    },
+    {
+      "code": 12005,
+      "name": "Overflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 12006,
+      "name": "MetadataNotFound",
+      "msg": "Metadata key not found"
+    },
+    {
+      "code": 12007,
+      "name": "InvalidTokenAccount",
+      "msg": "Invalid token account"
+    },
+    {
+      "code": 12008,
+      "name": "ExtensionNotFound",
+      "msg": "Extension not found"
+    },
+    {
+      "code": 12009,
+      "name": "InvalidExtensionIndex",
+      "msg": "Invalid extension index"
+    },
+    {
+      "code": 12010,
+      "name": "InvalidCollection",
+      "msg": "Invalid collection"
+    },
+    {
+      "code": 12011,
+      "name": "InvalidAsset",
+      "msg": "Invalid asset"
+    },
+    {
+      "code": 12012,
+      "name": "TransferToSelf",
+      "msg": "Transfer to self not allowed"
+    },
+    {
+      "code": 12013,
+      "name": "MetadataImmutable",
+      "msg": "Metadata is immutable and cannot be modified or deleted"
+    },
+    {
+      "code": 12050,
+      "name": "InvalidScore",
+      "msg": "Score must be 0-100"
+    },
+    {
+      "code": 12051,
+      "name": "ResponseUriTooLong",
+      "msg": "Response URI exceeds 250 bytes"
+    },
+    {
+      "code": 12052,
+      "name": "AlreadyRevoked",
+      "msg": "Feedback already revoked"
+    },
+    {
+      "code": 12053,
+      "name": "AgentNotFound",
+      "msg": "Agent not found"
+    },
+    {
+      "code": 12054,
+      "name": "FeedbackNotFound",
+      "msg": "Feedback not found"
+    },
+    {
+      "code": 12055,
+      "name": "InvalidFeedbackIndex",
+      "msg": "Invalid feedback index"
+    },
+    {
+      "code": 12056,
+      "name": "TagTooLong",
+      "msg": "Tag exceeds 32 bytes"
+    },
+    {
+      "code": 12057,
+      "name": "EmptyTags",
+      "msg": "Reserved - tags are optional"
+    },
+    {
+      "code": 12060,
+      "name": "EndpointTooLong",
+      "msg": "Endpoint exceeds 250 bytes"
+    },
+    {
+      "code": 12061,
+      "name": "InvalidDecimals",
+      "msg": "Invalid decimals (max 6)"
+    },
+    {
+      "code": 12058,
+      "name": "AtomStatsNotInitialized",
+      "msg": "ATOM stats not initialized - call initialize_atom_stats first"
+    },
+    {
+      "code": 12059,
+      "name": "AtomAlreadyEnabled",
+      "msg": "ATOM already enabled for this agent"
+    },
+    {
+      "code": 12100,
+      "name": "RequestUriTooLong",
+      "msg": "Request URI exceeds 250 bytes"
+    },
+    {
+      "code": 12101,
+      "name": "InvalidResponse",
+      "msg": "Response must be 0-100"
+    },
+    {
+      "code": 12102,
+      "name": "UnauthorizedValidator",
+      "msg": "Unauthorized validator"
+    },
+    {
+      "code": 12103,
+      "name": "UnauthorizedRequester",
+      "msg": "Unauthorized requester"
+    },
+    {
+      "code": 12104,
+      "name": "RequestNotFound",
+      "msg": "Validation request not found"
+    },
+    {
+      "code": 12105,
+      "name": "InvalidNonce",
+      "msg": "Invalid nonce"
+    },
+    {
+      "code": 12106,
+      "name": "RequestHashMismatch",
+      "msg": "Request hash mismatch"
+    },
+    {
+      "code": 12107,
+      "name": "InvalidRentReceiver",
+      "msg": "Rent receiver must be agent owner"
+    },
+    {
+      "code": 12150,
+      "name": "KeyHashMismatch",
+      "msg": "Key hash does not match SHA256(key)"
+    },
+    {
+      "code": 12151,
+      "name": "KeyHashCollision",
+      "msg": "Key hash collision detected - stored key differs from provided key"
+    },
+    {
+      "code": 12152,
+      "name": "ReservedMetadataKey",
+      "msg": "Reserved metadata key - use dedicated instruction"
+    },
+    {
+      "code": 12200,
+      "name": "DeadlineExpired",
+      "msg": "Deadline has expired"
+    },
+    {
+      "code": 12201,
+      "name": "DeadlineTooFar",
+      "msg": "Deadline too far in the future (max 5 minutes)"
+    },
+    {
+      "code": 12202,
+      "name": "MissingSignatureVerification",
+      "msg": "Missing Ed25519 signature verification instruction"
+    },
+    {
+      "code": 12203,
+      "name": "InvalidSignature",
+      "msg": "Ed25519 signature verification failed"
+    },
+    {
+      "code": 12251,
+      "name": "RootAlreadyInitialized",
+      "msg": "Root config already initialized"
+    },
+    {
+      "code": 12300,
+      "name": "SelfFeedbackNotAllowed",
+      "msg": "Self-feedback is not allowed - agent owner cannot give feedback to their own agent"
+    },
+    {
+      "code": 12301,
+      "name": "SelfValidationNotAllowed",
+      "msg": "Self-validation is not allowed - agent owner cannot validate their own agent"
+    },
+    {
+      "code": 12400,
+      "name": "InvalidProgram",
+      "msg": "Invalid program ID for CPI call"
+    },
+    {
+      "code": 12401,
+      "name": "InvalidAtomStatsAccount",
+      "msg": "Invalid AtomStats account - must be correct PDA for this asset"
+    }
+  ],
+  "types": [
+    {
+      "name": "AgentAccount",
+      "docs": [
+        "Agent account (represents an AI agent identity)",
+        "Seeds: [b\"agent\", asset.key()]",
+        "EVM conformity: asset = unique identifier (no sequential agent_id)",
+        "Keeps nft_name to avoid extra Metaplex RPC calls"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "collection",
+            "docs": [
+              "Collection this agent belongs to (offset 8 - for filtering)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "docs": [
+              "Agent owner (cached from Core asset)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "asset",
+            "docs": [
+              "Metaplex Core asset address (unique identifier)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "atom_enabled",
+            "docs": [
+              "ATOM Engine enabled (irreversible once set to true)"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "agent_wallet",
+            "docs": [
+              "Agent's operational wallet (set via Ed25519 signature verification)",
+              "None = no wallet set, Some = wallet address"
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "feedback_digest",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "feedback_count",
+            "type": "u64"
+          },
+          {
+            "name": "response_digest",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "response_count",
+            "type": "u64"
+          },
+          {
+            "name": "revoke_digest",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "revoke_count",
+            "type": "u64"
+          },
+          {
+            "name": "agent_uri",
+            "docs": [
+              "Agent URI (IPFS/Arweave/HTTP link, max 250 bytes)"
+            ],
+            "type": "string"
+          },
+          {
+            "name": "nft_name",
+            "docs": [
+              "NFT name (e.g., \"Agent #123\", max 32 bytes)",
+              "Kept to avoid extra RPC to Metaplex for display"
+            ],
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AgentOwnerSynced",
+      "docs": [
+        "Event emitted when agent owner is synced after transfer"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_owner",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AgentRegistered",
+      "docs": [
+        "Event emitted when agent is registered",
+        "Field order: fixed-size first (Pubkey, bool), variable-size last (String)"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "collection",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "atom_enabled",
+            "type": "bool"
+          },
+          {
+            "name": "agent_uri",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AtomEnabled",
+      "docs": [
+        "Event emitted when ATOM is enabled for an agent (one-way)"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "enabled_by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FeedbackRevoked",
+      "docs": [
+        "Event emitted when feedback is revoked",
+        "SEAL v1: Uses seal_hash (on-chain computed) for identification."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "client_address",
+            "type": "pubkey"
+          },
+          {
+            "name": "feedback_index",
+            "type": "u64"
+          },
+          {
+            "name": "seal_hash",
+            "docs": [
+              "SEAL v1: The seal_hash from the original feedback (for identification)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          },
+          {
+            "name": "original_score",
+            "type": "u8"
+          },
+          {
+            "name": "atom_enabled",
+            "docs": [
+              "Whether ATOM Engine was used for this revocation"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "had_impact",
+            "docs": [
+              "Enriched fields from revoke result (0 values if atom_enabled=false)"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "new_trust_tier",
+            "type": "u8"
+          },
+          {
+            "name": "new_quality_score",
+            "type": "u16"
+          },
+          {
+            "name": "new_confidence",
+            "type": "u16"
+          },
+          {
+            "name": "new_revoke_digest",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "new_revoke_count",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MetadataDeleted",
+      "docs": [
+        "Event emitted when agent metadata is deleted"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "key",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MetadataEntryPda",
+      "docs": [
+        "Individual metadata entry stored as separate PDA",
+        "Seeds: [b\"agent_meta\", asset.key(), key_hash[0..16]]",
+        "key_hash is SHA256(key)[0..16] for collision resistance (2^128 space)",
+        "",
+        "This replaces Vec<MetadataEntry> in AgentAccount for:",
+        "- Unlimited metadata entries per agent",
+        "- Ability to delete entries and recover rent",
+        "- Optional immutability for certification/audit use cases"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "docs": [
+              "Asset this metadata belongs to (unique identifier)"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "immutable",
+            "docs": [
+              "If true, this metadata cannot be modified or deleted (static - fixed offset)"
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed (static - fixed offset)"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "metadata_key",
+            "docs": [
+              "Metadata key (max 32 bytes)"
+            ],
+            "type": "string"
+          },
+          {
+            "name": "metadata_value",
+            "docs": [
+              "Metadata value (max 250 bytes, arbitrary binary data)"
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MetadataSet",
+      "docs": [
+        "Event emitted when agent metadata is set",
+        "Field order optimized for indexing: fixed-size fields first, variable-size (String/Vec) last"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "immutable",
+            "type": "bool"
+          },
+          {
+            "name": "key",
+            "type": "string"
+          },
+          {
+            "name": "value",
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "NewFeedback",
+      "docs": [
+        "Event emitted when new feedback is given",
+        "Field order optimized for indexing: fixed-size fields first, variable-size (String) last",
+        "",
+        "SEAL v1: feedback_file_hash is optional (hash of external file content),",
+        "seal_hash is computed on-chain from feedback parameters (trustless)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "client_address",
+            "type": "pubkey"
+          },
+          {
+            "name": "feedback_index",
+            "type": "u64"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          },
+          {
+            "name": "value",
+            "type": "i64"
+          },
+          {
+            "name": "value_decimals",
+            "type": "u8"
+          },
+          {
+            "name": "score",
+            "type": {
+              "option": "u8"
+            }
+          },
+          {
+            "name": "feedback_file_hash",
+            "docs": [
+              "SEAL v1: Optional hash of the feedback file content (ERC-8004 spec)",
+              "Client-provided, used for external file integrity verification."
+            ],
+            "type": {
+              "option": {
+                "array": [
+                  "u8",
+                  32
+                ]
+              }
+            }
+          },
+          {
+            "name": "seal_hash",
+            "docs": [
+              "SEAL v1: Hash computed on-chain from feedback parameters (trustless)",
+              "This is the authoritative content hash used in the hash-chain."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "atom_enabled",
+            "type": "bool"
+          },
+          {
+            "name": "new_trust_tier",
+            "type": "u8"
+          },
+          {
+            "name": "new_quality_score",
+            "type": "u16"
+          },
+          {
+            "name": "new_confidence",
+            "type": "u16"
+          },
+          {
+            "name": "new_risk_score",
+            "type": "u8"
+          },
+          {
+            "name": "new_diversity_ratio",
+            "type": "u8"
+          },
+          {
+            "name": "is_unique_client",
+            "type": "bool"
+          },
+          {
+            "name": "new_feedback_digest",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "new_feedback_count",
+            "type": "u64"
+          },
+          {
+            "name": "tag1",
+            "type": "string"
+          },
+          {
+            "name": "tag2",
+            "type": "string"
+          },
+          {
+            "name": "endpoint",
+            "type": "string"
+          },
+          {
+            "name": "feedback_uri",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RegistryConfig",
+      "docs": [
+        "Registry configuration for the base collection",
+        "Seeds: [\"registry_config\", collection.key()]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "collection",
+            "docs": [
+              "Metaplex Core Collection address"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "docs": [
+              "Protocol authority"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed"
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RegistryInitialized",
+      "docs": [
+        "Event emitted when registry is initialized"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "collection",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ResponseAppended",
+      "docs": [
+        "Event emitted when response is appended to feedback",
+        "SEAL v1: Uses seal_hash (on-chain computed) for feedback identification."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "client",
+            "type": "pubkey"
+          },
+          {
+            "name": "feedback_index",
+            "type": "u64"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          },
+          {
+            "name": "responder",
+            "type": "pubkey"
+          },
+          {
+            "name": "response_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seal_hash",
+            "docs": [
+              "SEAL v1: The seal_hash from the original feedback (for identification)"
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "new_response_digest",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "new_response_count",
+            "type": "u64"
+          },
+          {
+            "name": "response_uri",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RootConfig",
+      "docs": [
+        "Root configuration - Global registry state",
+        "Seeds: [\"root_config\"]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "base_collection",
+            "docs": [
+              "Base collection for agent registrations"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "docs": [
+              "Protocol authority"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed"
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UriUpdated",
+      "docs": [
+        "Event emitted when agent URI is updated",
+        "Field order optimized for indexing: fixed-size fields first, variable-size (String) last"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "updated_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_uri",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WalletUpdated",
+      "docs": [
+        "Event emitted when agent wallet is set or updated"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_wallet",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "new_wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "updated_by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    }
+  ]
+}

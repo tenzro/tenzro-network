@@ -1,0 +1,45 @@
+# Tenzro Control, the desktop app, built for Linux: Debian bookworm (glibc 2.36
+# floor), the pinned Rust toolchain, Node from its signed release tarball, and
+# every dependency from a lockfile (npm ci, cargo --locked). The context is a
+# `git archive` of a committed ref; scripts/release/build-control-linux.sh
+# drives it.
+FROM docker.io/library/rust:1.99.1-slim-bookworm@sha256:ed2c95ca377d6571b124b05e75e01207973ded639dce7d5542eb7bcd797e32aa
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev libclang-dev clang cmake protobuf-compiler git \
+    curl ca-certificates xz-utils file \
+    libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+    libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG NODE_VERSION=22.23.4
+ARG NODE_SHA256_X64=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+ARG NODE_SHA256_ARM64=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
+RUN set -e; \
+    case "$(uname -m)" in \
+      x86_64) arch=x64; sum=$NODE_SHA256_X64 ;; \
+      aarch64) arch=arm64; sum=$NODE_SHA256_ARM64 ;; \
+      *) echo "unsupported architecture $(uname -m)"; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${arch}.tar.xz"; \
+    echo "$sum  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; \
+    rm /tmp/node.tar.xz
+
+ARG SOURCE_DATE_EPOCH
+ARG CARGO_BUILD_JOBS=8
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+    CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} \
+    CARGO_INCREMENTAL=0 \
+    CC=clang \
+    CXX=clang++ \
+    CI=true
+
+COPY . /build
+WORKDIR /build/apps/tenzro-control
+RUN npm ci --no-audit --no-fund \
+    && npm test \
+    && npx tauri build --ci --bundles deb,rpm -- --locked \
+    && mkdir -p /out \
+    && cp src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/rpm/*.rpm /out/ \
+    && cp src-tauri/target/release/tenzro-control /out/tenzro-control

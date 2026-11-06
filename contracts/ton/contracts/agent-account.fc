@@ -1,0 +1,347 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; A Tenzro agent's account on TON.
+;;
+;; The account's address is the hash of its StateInit: this code and the
+;; data cell sha256(did) || the state tree key of the agent's grant on this
+;; chain. It holds no key. Its authority is the grant Tenzro issued for the
+;; agent here, installed by anyone: a relayer asks Tenzro's finality client on
+;; TON to report the state root of a final checkpoint to the account, with
+;; the grant and its state proof as payload; the account accepts the report
+;; only from that client and installs the grant if it proves under the root.
+;; An action sends TON to its target when serving nodes of the agent signed
+;; the action's digest with P-256 keys in the grant's key root (two of
+;; distinct operators above the cosign threshold), within the grant's budget,
+;; per-action limit, time window and targets. An exact grant carries one
+;; action, run once. A void grant stops every action. The sender of an action
+;; is refunded up to the grant's cap. Events go out as external messages.
+;;
+;; FINALITY (the finality client's account id, workchain 0), CHAIN
+;; (sha256 of this chain's CAIP-2 id) and ASSET (sha256 of the CAIP-19 id of
+;; TON) are fixed by the deployment's build.
+
+const int op::state_root = 0x2b7f4c93;
+const int op::sync = 0x5c3e1a77;
+const int op::act = 0x3a6d0b21;
+const int op::act_exact = 0x7e19c4d5;
+const int log::synced = 0x51;
+const int log::closed = 0x52;
+const int log::acted = 0x53;
+
+const int error::not_finality = 400;
+const int error::malformed = 401;
+const int error::bad_state_proof = 402;
+const int error::not_this_account = 403;
+const int error::stale_grant = 404;
+const int error::asset_mismatch = 405;
+const int error::no_live_grant = 406;
+const int error::grant_void = 407;
+const int error::outside_window = 408;
+const int error::exact_grant = 409;
+const int error::not_exact = 410;
+const int error::exact_used = 411;
+const int error::payload_mismatch = 412;
+const int error::high_s = 413;
+const int error::bad_signature = 414;
+const int error::key_not_in_root = 415;
+const int error::cosign_required = 416;
+const int error::target_not_allowed = 417;
+const int error::over_per_action = 418;
+const int error::over_budget = 419;
+const int error::relay_over_cap = 420;
+
+const int P256_HALF_N = 0x7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8;
+
+;; Data: agent (256), tree key (256); once a grant is installed, a ref to the
+;; grant state: seq (64), void (1), not_before (64), not_after (64), budget,
+;; per_action_max, cosign_above, relay_fee_max (128 each); refs: the roots
+;; (keys, targets, payload; 256 each) and the counters (spent 128, nonce 64,
+;; exact used 1).
+(int, int, cell) load_account() inline {
+    slice s = get_data().begin_parse();
+    int agent = s~load_uint(256);
+    int tree_key = s~load_uint(256);
+    cell state = s.slice_refs_empty?() ? null() : s~load_ref();
+    return (agent, tree_key, state);
+}
+
+() save_account(int agent, int tree_key, cell state) impure inline {
+    set_data(begin_cell().store_uint(agent, 256).store_uint(tree_key, 256).store_ref(state).end_cell());
+}
+
+;; Whether `proof` (see state-proof.fc) shows the grant cells g0, g1, g2 at
+;; tree key `tk` under `root`.
+int verify_grant(int root, int tk, slice g0, slice g1, slice g2, cell proof) {
+    return verify_leaf(root, tk, sha256_4(begin_cell().store_uint(0, 8).end_cell().begin_parse(), g0, g1, g2), proof);
+}
+
+;; Whether `leaf` is under `root` with the siblings in `proof` (cells of up
+;; to three, chained; pairs hashed in sorted order).
+int merkle_verify(int root, int leaf, cell proof) {
+    int acc = leaf;
+    slice c = proof.begin_parse();
+    while (c.slice_bits() > 0) {
+        int sib = c~load_uint(256);
+        acc = acc <= sib ? sha_pair(1, acc, sib) : sha_pair(1, sib, acc);
+        if ((c.slice_bits() == 0) & (c.slice_refs() > 0)) {
+            c = c~load_ref().begin_parse();
+        }
+    }
+    return acc == root;
+}
+
+() emit_log(builder body) impure inline {
+    send_raw_message(begin_cell().store_uint(3, 2).store_uint(0, 4).store_uint(0, 64 + 32 + 1).store_uint(1, 1)
+        .store_ref(body.end_cell()).end_cell(), 0);
+}
+
+() install(int index, int root, slice payload) impure {
+    var (agent, tree_key, state) = load_account();
+    int payee = payload~load_uint(256);
+    cell grant = payload~load_ref();
+    cell proof = payload~load_ref();
+    slice g0 = grant.begin_parse();
+    slice g1 = g0.preload_ref().begin_parse();
+    slice g2 = g1.preload_ref().begin_parse();
+    throw_unless(error::malformed, (g0.slice_bits() == 97 * 8) & (g1.slice_bits() == 112 * 8) & (g2.slice_bits() == 113 * 8));
+    throw_unless(error::bad_state_proof, verify_grant(root, tree_key, g0, g1, g2, proof));
+    ;; A: version, chain, account, agent.
+    throw_unless(error::malformed, g0~load_uint(8) == 1);
+    int chain = g0~load_uint(256);
+    int account = g0~load_uint(256);
+    int g_agent = g0~load_uint(256);
+    (_, int here) = parse_std_addr(my_address());
+    throw_unless(error::not_this_account, (chain == CHAIN) & (account == here) & (g_agent == agent));
+    ;; B: terms version, seq, window, asset, budget, per action, cosign.
+    g1~skip_bits(64);
+    int seq = g1~load_uint(64);
+    int not_before = g1~load_uint(64);
+    int not_after = g1~load_uint(64);
+    throw_unless(error::asset_mismatch, g1~load_uint(256) == ASSET);
+    int budget = g1~load_uint(128);
+    int per_action = g1~load_uint(128);
+    int cosign = g1~load_uint(128);
+    ;; C: keys root, targets root, payload hash, relay cap, void.
+    int keys_root = g2~load_uint(256);
+    int targets_root = g2~load_uint(256);
+    int payload_hash = g2~load_uint(256);
+    int relay_cap = g2~load_uint(128);
+    int void = g2~load_uint(8);
+    throw_unless(error::malformed, void <= 1);
+    int spent = 0;
+    int nonce = 0;
+    int exact_used = 0;
+    if (~ null?(state)) {
+        slice st = state.begin_parse();
+        int cur_seq = st~load_uint(64);
+        int cur_void = st~load_uint(1);
+        slice counters = st.preload_ref().begin_parse().preload_ref().begin_parse();
+        int later = seq > cur_seq;
+        throw_unless(error::stale_grant, later | ((seq == cur_seq) & (void == 1) & (cur_void == 0)));
+        int cur_spent = counters~load_uint(128);
+        nonce = counters~load_uint(64);
+        if (later) {
+            emit_log(begin_cell().store_uint(log::closed, 8).store_uint(cur_seq, 64).store_uint(cur_spent, 128));
+        } else {
+            spent = cur_spent;
+            exact_used = counters~load_uint(1);
+        }
+    }
+    cell counters = begin_cell().store_uint(spent, 128).store_uint(nonce, 64).store_uint(exact_used, 1).end_cell();
+    cell roots = begin_cell().store_uint(keys_root, 256).store_uint(targets_root, 256).store_uint(payload_hash, 256)
+        .store_ref(counters).end_cell();
+    save_account(agent, tree_key, begin_cell()
+        .store_uint(seq, 64).store_uint(void, 1).store_uint(not_before, 64).store_uint(not_after, 64)
+        .store_uint(budget, 128).store_uint(per_action, 128).store_uint(cosign, 128).store_uint(relay_cap, 128)
+        .store_ref(roots).end_cell());
+    emit_log(begin_cell().store_uint(log::synced, 8).store_uint(seq, 64).store_uint(void, 1).store_uint(payee, 256));
+}
+
+;; The P-256 key `x || y` compressed.
+slice compress(int x, int y) inline {
+    return begin_cell().store_uint(2 + (y & 1), 8).store_uint(x, 256).end_cell().begin_parse();
+}
+
+() act(slice sender, slice body, int exact) impure {
+    var (agent, tree_key, state) = load_account();
+    throw_if(error::no_live_grant, null?(state));
+    slice st = state.begin_parse();
+    int seq = st~load_uint(64);
+    int void = st~load_uint(1);
+    int not_before = st~load_uint(64);
+    int not_after = st~load_uint(64);
+    int budget = st~load_uint(128);
+    int per_action = st~load_uint(128);
+    int cosign = st~load_uint(128);
+    int relay_cap = st~load_uint(128);
+    slice roots = st~load_ref().begin_parse();
+    int keys_root = roots~load_uint(256);
+    int targets_root = roots~load_uint(256);
+    int payload_hash = roots~load_uint(256);
+    slice counters = roots~load_ref().begin_parse();
+    int spent = counters~load_uint(128);
+    int nonce = counters~load_uint(64);
+    int exact_used = counters~load_uint(1);
+    throw_unless(error::grant_void, void == 0);
+    int now_ms = now() * 1000;
+    throw_unless(error::outside_window, (now_ms >= not_before) & (now_ms <= not_after));
+    ;; The action: target (u16 32, then 32 bytes), selector (u16, bytes),
+    ;; amount, refund (u128 each), data (u32, bytes), in one cell.
+    slice action = body~load_ref().begin_parse();
+    slice a = action;
+    throw_unless(error::malformed, a~load_uint(16) == 32);
+    int target = a~load_uint(256);
+    int sl = a~load_uint(16);
+    slice selector = a~load_bits(sl * 8);
+    int amount = a~load_uint(128);
+    int refund = a~load_uint(128);
+    int dl = a~load_uint(32);
+    slice data = a~load_bits(dl * 8);
+    throw_unless(error::malformed, a.slice_empty?());
+    ;; A "call" action sends its amount with a message body to its target:
+    ;; its data is the hash of that body, which follows as the last ref.
+    int call = 0;
+    if (sl == 4) {
+        call = selector.preload_uint(32) == 0x63616c6c;
+    }
+    if (call) {
+        throw_unless(error::malformed, dl == 32);
+    }
+    throw_unless(error::relay_over_cap, refund <= relay_cap);
+    int digest = 0;
+    if (exact) {
+        throw_unless(error::not_exact, payload_hash != 0);
+        throw_unless(error::exact_used, exact_used == 0);
+        digest = string_hash(action);
+        throw_unless(error::payload_mismatch, digest == payload_hash);
+        exact_used = 1;
+    } else {
+        throw_unless(error::exact_grant, payload_hash == 0);
+        throw_unless(error::over_per_action, amount <= per_action);
+        throw_unless(error::over_budget, spent + amount <= budget);
+        if (targets_root != 0) {
+            int leaf = string_hash(begin_cell().store_uint(0, 8).store_uint(32, 16).store_uint(target, 256)
+                .store_uint(sl, 16).store_slice(selector).end_cell().begin_parse());
+            throw_unless(error::target_not_allowed, merkle_verify(targets_root, leaf, body~load_ref()));
+        }
+        (_, int here) = parse_std_addr(my_address());
+        slice head = begin_cell().store_slice("tenzro/agent-act/v1").store_uint(CHAIN, 256).store_uint(here, 256)
+            .store_uint(seq, 64).store_uint(nonce, 64).end_cell().begin_parse();
+        digest = sha256_2(head, action);
+        int need = amount > cosign ? 2 : 1;
+        ;; Signers: each a cell of r, s (256 each) with refs: the key
+        ;; (x, y; 256 each), the operator DID (bytes) and the key's proof.
+        slice signers = body~load_ref().begin_parse();
+        int first_op = -1;
+        repeat (need) {
+            throw_unless(error::cosign_required, signers.slice_refs() > 0);
+            slice e = signers~load_ref().begin_parse();
+            int r = e~load_uint(256);
+            int s = e~load_uint(256);
+            throw_unless(error::high_s, s <= P256_HALF_N);
+            slice k = e~load_ref().begin_parse();
+            int x = k~load_uint(256);
+            int y = k~load_uint(256);
+            slice op = e~load_ref().begin_parse();
+            cell key_proof = e~load_ref();
+            slice sig = begin_cell().store_uint(r, 256).store_uint(s, 256).end_cell().begin_parse();
+            throw_unless(error::bad_signature, p256_check(digest, sig, compress(x, y)));
+            int leaf = sha256_2(begin_cell().store_uint(0, 8).store_uint(4, 8).store_uint(x, 256).store_uint(y, 256)
+                .end_cell().begin_parse(), op);
+            throw_unless(error::key_not_in_root, merkle_verify(keys_root, leaf, key_proof));
+            int op_hash = string_hash(op);
+            throw_if(error::cosign_required, op_hash == first_op);
+            first_op = op_hash;
+        }
+    }
+    cell counters2 = begin_cell().store_uint(spent + amount, 128).store_uint(nonce + 1, 64).store_uint(exact_used, 1).end_cell();
+    cell roots2 = begin_cell().store_uint(keys_root, 256).store_uint(targets_root, 256).store_uint(payload_hash, 256)
+        .store_ref(counters2).end_cell();
+    save_account(agent, tree_key, begin_cell()
+        .store_uint(seq, 64).store_uint(void, 1).store_uint(not_before, 64).store_uint(not_after, 64)
+        .store_uint(budget, 128).store_uint(per_action, 128).store_uint(cosign, 128).store_uint(relay_cap, 128)
+        .store_ref(roots2).end_cell());
+    if (call) {
+        cell call_body = body~load_ref();
+        throw_unless(error::payload_mismatch, cell_hash(call_body) == data.preload_uint(256));
+        ;; Bounceable: a refused call returns the amount to this account.
+        send_raw_message(begin_cell().store_uint(0x18, 6).store_uint(4, 3).store_int(0, 8).store_uint(target, 256)
+            .store_coins(amount).store_uint(0, 1 + 4 + 4 + 64 + 32 + 1).store_uint(1, 1).store_ref(call_body).end_cell(), 1);
+    } else {
+        send_raw_message(begin_cell().store_uint(0x10, 6).store_uint(4, 3).store_int(0, 8).store_uint(target, 256)
+            .store_coins(amount).store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1).end_cell(), 1);
+    }
+    if (refund > 0) {
+        send_raw_message(begin_cell().store_uint(0x10, 6).store_slice(sender).store_coins(refund)
+            .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1).end_cell(), 1);
+    }
+    emit_log(begin_cell().store_uint(log::acted, 8).store_uint(seq, 64).store_uint(nonce, 64).store_uint(digest, 256)
+        .store_uint(amount, 128));
+}
+
+() recv_internal(int balance, int value, cell in_msg, slice body) impure {
+    slice cs = in_msg.begin_parse();
+    int flags = cs~load_uint(4);
+    if ((flags & 1) | body.slice_empty?()) {
+        return ();
+    }
+    slice sender = cs~load_msg_addr();
+    int op = body~load_uint(32);
+    if (op == op::state_root) {
+        (int wc, int id) = parse_std_addr(sender);
+        throw_unless(error::not_finality, (wc == 0) & (id == FINALITY));
+        body~skip_bits(64);
+        int index = body~load_uint(64);
+        int root = body~load_uint(256);
+        body~skip_bits(64);
+        slice payload = body~load_ref().begin_parse();
+        throw_unless(error::malformed, payload~load_uint(32) == op::sync);
+        install(index, root, payload);
+        return ();
+    }
+    if (op == op::act) {
+        act(sender, body, 0);
+        return ();
+    }
+    if (op == op::act_exact) {
+        act(sender, body, -1);
+        return ();
+    }
+    ;; Anything else is a deposit.
+}
+
+int get_nonce() method_id {
+    var (_, _, state) = load_account();
+    if (null?(state)) {
+        return 0;
+    }
+    slice counters = state.begin_parse().preload_ref().begin_parse().preload_ref().begin_parse();
+    counters~skip_bits(128);
+    return counters~load_uint(64);
+}
+
+int get_spent() method_id {
+    var (_, _, state) = load_account();
+    if (null?(state)) {
+        return 0;
+    }
+    return state.begin_parse().preload_ref().begin_parse().preload_ref().begin_parse().preload_uint(128);
+}
+
+;; The digest serving nodes sign for `action` as the account's next action.
+int get_action_digest(cell action) method_id {
+    var (_, _, state) = load_account();
+    slice st = state.begin_parse();
+    int seq = st.preload_uint(64);
+    slice counters = st.preload_ref().begin_parse().preload_ref().begin_parse();
+    counters~skip_bits(128);
+    int nonce = counters~load_uint(64);
+    (_, int here) = parse_std_addr(my_address());
+    slice head = begin_cell().store_slice("tenzro/agent-act/v1").store_uint(CHAIN, 256).store_uint(here, 256)
+        .store_uint(seq, 64).store_uint(nonce, 64).end_cell().begin_parse();
+    return sha256_2(head, action.begin_parse());
+}
+
+int get_seq() method_id {
+    var (_, _, state) = load_account();
+    return null?(state) ? 0 : state.begin_parse().preload_uint(64);
+}

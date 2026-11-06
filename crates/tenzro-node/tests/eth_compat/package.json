@@ -1,0 +1,14 @@
+{
+  "name": "tenzro-eth-compat",
+  "private": true,
+  "type": "module",
+  "description": "Drives the node's eth_* JSON-RPC with ethers v6 and viem the way a wallet does",
+  "scripts": {
+    "compat": "node compat.mjs"
+  },
+  "dependencies": {
+    "@ethereumjs/trie": "6.2.1",
+    "ethers": "6.17.0",
+    "viem": "2.57.3"
+  }
+}

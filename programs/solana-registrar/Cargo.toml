@@ -1,0 +1,11 @@
+# The Tenzro registrar program for Solana and its tests. A workspace of its
+# own: the program builds with `cargo build-sbf`, and nothing here is part of
+# the node's workspace.
+[workspace]
+members = ["program", "tests"]
+resolver = "2"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,14 @@
+[package]
+name = "TenzroBridge"
+version = "1.0.0"
+
+[addresses]
+tenzro_bridge = "_"
+
+[dev-addresses]
+tenzro_bridge = "0xcafe"
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-framework.git"
+rev = "04611dd2cec1f5b7ef21c2cc151e05c587a2ce19"
+subdir = "aptos-framework"

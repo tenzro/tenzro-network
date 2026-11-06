@@ -1,0 +1,35 @@
+[package]
+name = "tenzro-settlement-lock-solana"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Tenzro settlement-plan legs on Solana: held until a proven Tenzro decision releases or refunds them"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Build the library without the program entrypoint (for tests that link it).
+no-entrypoint = []
+
+[dependencies]
+solana-program = "3"
+tenzro-finality-verifier = { path = "../../finality-verifier" }
+tenzro-finality-solana = { path = "../../solana", features = ["no-entrypoint"] }
+
+[dev-dependencies]
+hex = "0.4"
+serde_json = "1"
+mollusk-svm = "0.15"
+mollusk-svm-programs-token = "0.15"
+solana-account = "4"
+# The runtime release the harness was built against.
+solana-program-runtime = "=4.2.2"
+solana-bpf-loader-program = "=4.2.2"
+solana-svm-callback = "=4.2.2"
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))', 'cfg(feature, values("custom-heap", "custom-panic"))'] }

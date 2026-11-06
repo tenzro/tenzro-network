@@ -1,0 +1,40 @@
+[package]
+name = "tenzro-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Gossip messages, topics and validation for Tenzro Network, carried over iroh-gossip"
+documentation = "https://docs.rs/tenzro-network"
+readme = "README.md"
+keywords = ["tenzro", "iroh", "p2p", "gossip", "nat-traversal"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+tenzro-iroh = { workspace = true }
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+iroh = { workspace = true }
+prometheus-client = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,4785 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 1328,
+        "default_num_frames": null,
+        "default_steps": 50,
+        "default_width": 1328,
+        "description": "Qwen-Image 2512 text-to-image MMDiT with strong text rendering",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "qwen-image",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Qwen/Qwen-Image-2512",
+        "id": "qwen-image",
+        "kinds": [
+          "text2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1664,
+        "min_vram_gb": 48,
+        "name": "Qwen-Image",
+        "parameters": "20.4B",
+        "pipeline_class": "QwenImagePipeline",
+        "size_bytes": 57704595735,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 1328,
+        "default_num_frames": null,
+        "default_steps": 50,
+        "default_width": 1328,
+        "description": "Qwen-Image 2512 text-to-image, Q5_K_M GGUF transformer",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "qwen-image",
+        "gguf_file": "qwen-image-2512-Q5_K_M.gguf",
+        "gguf_repo": "unsloth/Qwen-Image-2512-GGUF",
+        "hf_repo": "Qwen/Qwen-Image-2512",
+        "id": "qwen-image-gguf",
+        "kinds": [
+          "text2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1664,
+        "min_vram_gb": 18,
+        "name": "Qwen-Image 2512 (GGUF Q5_K_M)",
+        "parameters": "20.4B",
+        "pipeline_class": "QwenImagePipeline",
+        "size_bytes": 15004000000,
+        "status": "planned",
+        "transformer_class": "QwenImageTransformer2DModel"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "id": "nvidia-open-model",
+      "name": "NVIDIA Open Model License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 1024,
+        "description": "Qwen-Image distilled to four steps, guidance disabled",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "qwen-image",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "nvidia/Qwen-Image-Flash",
+        "id": "qwen-image-flash",
+        "kinds": [
+          "text2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1024,
+        "min_vram_gb": 48,
+        "name": "Qwen-Image-Flash",
+        "parameters": "20.4B",
+        "pipeline_class": "QwenImagePipeline",
+        "size_bytes": 57708362811,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "cf1ecd104ea090855d60d8cec0895c1e9d6ee41b2f87e231b678beecd1cf7809",
+        "size": 447
+      },
+      {
+        "path": "processor/added_tokens.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
+        "size": 707
+      },
+      {
+        "path": "processor/chat_template.jinja",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "3636d0f0bd6bef02654cdffdc447b79cb2cef8ab02cc75267345946291a489e4",
+        "size": 5292
+      },
+      {
+        "path": "processor/merges.txt",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "size": 1671853
+      },
+      {
+        "path": "processor/preprocessor_config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "93585062a80db5e8ca038efc7726a3e6411d9db948472d81d63c6303993be8c5",
+        "size": 782
+      },
+      {
+        "path": "processor/special_tokens_map.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
+        "size": 613
+      },
+      {
+        "path": "processor/tokenizer.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "size": 11422654
+      },
+      {
+        "path": "processor/tokenizer_config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "81ec7bb9530159b326c0bef1d0b6c33d392090524014ea3f0123a3c1eb9c2af5",
+        "size": 5445
+      },
+      {
+        "path": "processor/video_preprocessor_config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "59c5c9eb52182eb14c06ffb10ca9effd29adce5f238a95de23ca14a38dbd2cb1",
+        "size": 817
+      },
+      {
+        "path": "processor/vocab.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "size": 2776833
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "5895f3a167c14a967fe9ac70c64924ae5acc79799e0679fd12907e594a713cd1",
+        "size": 485
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "6001331949f7f86ab6d791a80b12246d4f8da5159fa08c3e62368a39f36d63a9",
+        "size": 1517
+      },
+      {
+        "path": "text_encoder/generation_config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "4d9818c3d27895c0058828a5f68bc7a4de80c3ae1bcdac90936ce24178063f59",
+        "size": 213
+      },
+      {
+        "path": "text_encoder/model-00001-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "dde00291b5f7fb92013895310a3da0ddba78674df9f10d505d375243dc01fc6f",
+        "size": 4998056552
+      },
+      {
+        "path": "text_encoder/model-00002-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "9047faccc0a6d98496a52d55f27be1c94a9c259d1e283fbea0128d054a948d42",
+        "size": 4915962464
+      },
+      {
+        "path": "text_encoder/model-00003-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "8c54187654c0176b73ae73785bf791dc9a14c9df7fb4310083a09d42048cb57e",
+        "size": 4915962496
+      },
+      {
+        "path": "text_encoder/model-00004-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "5311532aaaeae3259eb6a7b2c600636be1159adf7ded35f53579f7d0e7d43cdd",
+        "size": 2704357976
+      },
+      {
+        "path": "text_encoder/model.safetensors.index.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "859146bff8db1d617fca8b457a5223edff963bb70076b3645f2189fe0540a147",
+        "size": 67795
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "56ae3281c4e6c2d1aa3658252d187488071815fd79bef15808bb0205fc1a2241",
+        "size": 370
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "9e6bc2d641e67bf277895ea8777141044a38f3edb7101bc469b2961dd7c36b4b",
+        "size": 9968332504
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "3aaf234dcbe128530479735854a346b5e3e66283b7c11db56f836bbd1c13ebaa",
+        "size": 4261951904
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "17987f6623b1c814d0ef55a137d99142b7b3b040eb1bf241b5575dd35af803a2",
+        "size": 30283
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "9785d527b278cb8b210e9f48a8028d92a4190968ce7e24c8fc85d9d1b82f6ba2",
+        "size": 2079
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": "d26bb61231c349cf6b7896fa83353113880e1ba3",
+        "sha256": "a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417",
+        "size": 1350989512
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "conditions": "Research and evaluation use only; commercial use needs a separate licence from the licensor. Redistribution must include the agreement and the notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\"; models trained or improved with it must state \"Built with Qwen\".",
+      "id": "qwen-research",
+      "name": "Qwen Research License Agreement (non-commercial)",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 2048,
+        "default_num_frames": null,
+        "default_steps": 40,
+        "default_width": 2048,
+        "description": "Qwen-Image-2.1 unified text-to-image and multi-reference editing, 7B DiT. Qwen Research License: non-commercial, so never charged for",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "qwen-image",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Qwen/Qwen-Image-2.1",
+        "id": "qwen-image-2.1",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2752,
+        "min_vram_gb": 48,
+        "name": "Qwen-Image-2.1",
+        "parameters": "7B",
+        "pipeline_class": "QwenImage21Pipeline",
+        "size_bytes": 33131601593,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "5ba11ceee68457ad6a48b899b8c9493e347f4685e11e5eeca952a13f16549e35",
+        "size": 516
+      },
+      {
+        "path": "processor/tokenizer.json",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa",
+        "size": 11421896
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "7ee767e37bae4af31d4eb935e125bb20a2237eeecafd22af6610093865c6f587",
+        "size": 485
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "4a49f14a1594fd988ab301e491ac522cd9b0e8fd1c9232b806c54568f348c1fb",
+        "size": 3146
+      },
+      {
+        "path": "text_encoder/model-00001-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "d725335e4ea2399be706469e4b8807716a8fa64bd03468252e9f7acf2415fee4",
+        "size": 4968243304
+      },
+      {
+        "path": "text_encoder/model-00002-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "b1830db6908dcc76df3a71492acbcf2b8cac130114cf1f3c2d9edae8de8c6de3",
+        "size": 4991495816
+      },
+      {
+        "path": "text_encoder/model-00003-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "09c1807c6d00d7cab94f7db39d4c02ebb8537225ccde383861ac48db97945aa6",
+        "size": 4932751040
+      },
+      {
+        "path": "text_encoder/model-00004-of-00004.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "5dd068336d14d45ffb43cef374d286cc6ba9d8741b028f90a7d040d847961f4a",
+        "size": 1691924384
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "43c02875ed3e0d4c1b3a1007b34505d0bd2c1607fc90b2107c5e39c53d187113",
+        "size": 362
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00005.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "2a0c30c9ba44a5f11c21ca139e37951430bbde814ff4e0b5b1a68b80530e7a1a",
+        "size": 9973578592
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00005.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "54ec249b07b4376e19cf16b764054f03ca03ae2cfbd9939453e2085f4e9bd259",
+        "size": 9987326072
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00003-of-00005.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "c55157843525653161e8f6af5acc670ba3aceff04284f7cf657199d24d065e16",
+        "size": 9987307440
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00004-of-00005.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "ffcfb5a4895702635890a67bad183591e0ae515d794bdcb26e217b27a7f6d12d",
+        "size": 9930685712
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00005-of-00005.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "2b2556b736629e10a5a0dfa14606f2057f4f81c2ba53f94103682c7ac42d4940",
+        "size": 982130472
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "c448160dba5ce79c965cb075ee02e18d1c42eb6424f787e5869790d577b56a65",
+        "size": 730
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "Qwen/Qwen-Image-Edit-2511",
+        "revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+        "sha256": "0c8bc8b758c649abef9ea407b95408389a3b2f610d0d10fcb054fe171d0a8344",
+        "size": 253806966
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 1328,
+        "default_num_frames": null,
+        "default_steps": 40,
+        "default_width": 1328,
+        "description": "Qwen-Image-Edit instruction-driven image editing, multi-reference",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "qwen-image",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Qwen/Qwen-Image-Edit-2511",
+        "id": "qwen-image-edit",
+        "kinds": [
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1664,
+        "min_vram_gb": 64,
+        "name": "Qwen-Image-Edit 2511",
+        "parameters": "20.4B",
+        "pipeline_class": "QwenImageEditPlusPipeline",
+        "size_bytes": 57710676933,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "18a90e1bc117a29a8b7961bb200c86ff0b9704609e87c7171511dc724fcdc9d3",
+        "size": 467
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "3b979ab0956e4f5e8d02ec409ac6a4ece1555191d15bd10788fdc85fea5d13fc",
+        "size": 173
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "size": 726
+      },
+      {
+        "path": "text_encoder/model-00001-of-00003.safetensors",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "328a91d3122359d5547f9d79521205bc0a46e1f79a792dfe650e99fc2d651223",
+        "size": 3957900840
+      },
+      {
+        "path": "text_encoder/model-00002-of-00003.safetensors",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "6cd087b316306a68c562436b5492edbcf6e16c6dba3a1308279caa5a58e21ca5",
+        "size": 3987450520
+      },
+      {
+        "path": "text_encoder/model-00003-of-00003.safetensors",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "7ca841ee75b9c61267c0c6148fd8d096d3d21b6d3e161256a9b878154f91fc52",
+        "size": 99630640
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "size": 11422654
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "06d49d1ae533f825c4704cc616fc8bc7826e9d449dde292cc7a95163c69af24a",
+        "size": 473
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "95facd593e2549e8252acb571c653d57f7ddb7f1060d4e81712f152555a88804",
+        "size": 9973693184
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "a4bbe43ee184a1fb5af4b412d27555f532893bdc3165b1149e304ed82b5d7015",
+        "size": 9973714824
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "aba4e37a590e63210878160a718d916d80398f4e1f78ab6c9b2b2a00d92769fa",
+        "size": 4672282880
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "e80af1e64a71883a9d10c3159d2e493e5934508da57852f6a180ae6ae63b14bd",
+        "size": 805
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "Tongyi-MAI/Z-Image-Turbo",
+        "revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+        "sha256": "f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3",
+        "size": 167666902
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 0.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 9,
+        "default_width": 1024,
+        "description": "Z-Image Turbo few-step text-to-image, 9 steps without guidance",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "z-image",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Tongyi-MAI/Z-Image-Turbo",
+        "id": "z-image-turbo",
+        "kinds": [
+          "text2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 16,
+        "name": "Z-Image Turbo",
+        "parameters": "6.2B",
+        "pipeline_class": "ZImagePipeline",
+        "size_bytes": 32899667397,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "51a76cb1cf3ed37423a1128c79c22faee8e6fbe7f5aaeb737f0a258930dbaac0",
+        "size": 446
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "067afb012cef64553a763447d1efd93daeffcc0123ca7e25b09f8de20b90762e",
+        "size": 486
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "214b4c29a0d975e9fddf9994a5673f22cb2c4c5750352f9227c2c3251ebeab40",
+        "size": 1536
+      },
+      {
+        "path": "text_encoder/model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "8c0506e7f4936fa7e26183a4fd8da4e2bdbc5990ba64ae441f965d51228f36ea",
+        "size": 4967215360
+      },
+      {
+        "path": "text_encoder/model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "82f2bd839378541b0557bfabaf37c7d3d637071fdcb73302dedd7cf61162ce07",
+        "size": 3077766632
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "size": 11422654
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "09733c74a3da6d17dd0a0472a091a8950c7c6935889c32c16cc800ede05029de",
+        "size": 541
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "9f29f9edcfdae452a653ffb51a534ca4decd389952c225724ff3b94042612a6e",
+        "size": 7751109744
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948",
+        "size": 821
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+        "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+        "size": 168120878
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 1024,
+        "description": "FLUX.2 klein 4B text-to-image and editing, runs on consumer GPUs",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/FLUX.2-klein-4B",
+        "id": "flux2-klein-4b",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 12,
+        "name": "FLUX.2 klein 4B",
+        "parameters": "3.9B",
+        "pipeline_class": "Flux2KleinPipeline",
+        "size_bytes": 23740007447,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "de1fef01845f0af3e1e2f2581cd5e86f2dfa4a4776f7f0b26b4c77feac4ee70f",
+        "size": 422
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "067afb012cef64553a763447d1efd93daeffcc0123ca7e25b09f8de20b90762e",
+        "size": 486
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "214b4c29a0d975e9fddf9994a5673f22cb2c4c5750352f9227c2c3251ebeab40",
+        "size": 1536
+      },
+      {
+        "path": "text_encoder/model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "8c0506e7f4936fa7e26183a4fd8da4e2bdbc5990ba64ae441f965d51228f36ea",
+        "size": 4967215360
+      },
+      {
+        "path": "text_encoder/model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "82f2bd839378541b0557bfabaf37c7d3d637071fdcb73302dedd7cf61162ce07",
+        "size": 3077766632
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "size": 11422654
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "c8a88c1433f24e52c01f46766c9f519e76d91d1c00bfb43fe0db2e4ed3c84d70",
+        "size": 531
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "e109674697ffa1a3983126e32512f5428a9442bd8df59f9c95566ee90a473bb6",
+        "size": 7751109744
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948",
+        "size": 821
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+        "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+        "size": 168120878
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 28,
+        "default_width": 1024,
+        "description": "FLUX.2 klein base 4B — undistilled text-to-image and editing",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/FLUX.2-klein-base-4B",
+        "id": "flux2-klein-base-4b",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 12,
+        "name": "FLUX.2 klein base 4B",
+        "parameters": "3.9B",
+        "pipeline_class": "Flux2KleinPipeline",
+        "size_bytes": 23740007506,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "bfl-flux2",
+      "name": "FLUX.2 Non-Commercial / BFL custom",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 28,
+        "default_width": 1024,
+        "description": "FLUX.2 dev — 32B flagship text-to-image and editing",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/FLUX.2-dev",
+        "id": "flux2-dev",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 4096,
+        "min_vram_gb": 80,
+        "name": "FLUX.2 dev",
+        "parameters": "32B",
+        "pipeline_class": "Flux2Pipeline",
+        "size_bytes": 177640374395,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "bfl-flux2",
+      "name": "FLUX.2 Non-Commercial / BFL custom",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 1024,
+        "description": "FLUX.2 klein 9B — distilled few-step generation and editing",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/FLUX.2-klein-9B",
+        "id": "flux2-klein-9b",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 24,
+        "name": "FLUX.2 klein 9B",
+        "parameters": "9B",
+        "pipeline_class": "Flux2KleinPipeline",
+        "size_bytes": 52888736795,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "id": "bfl-flux2",
+      "name": "FLUX.2 Non-Commercial / BFL custom",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 1024,
+        "description": "FLUX.2 klein 9B, Q8_0 — near-lossless at under half the bf16 footprint",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": "flux-2-klein-9b-Q8_0.gguf",
+        "gguf_repo": "unsloth/FLUX.2-klein-9B-GGUF",
+        "hf_repo": "black-forest-labs/FLUX.2-klein-9B",
+        "id": "flux2-klein-9b-gguf-q8",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 14,
+        "name": "FLUX.2 klein 9B (GGUF Q8_0)",
+        "parameters": "9B (Q8_0)",
+        "pipeline_class": "Flux2KleinPipeline",
+        "size_bytes": 10000000000,
+        "status": "planned",
+        "transformer_class": "Flux2Transformer2DModel"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "id": "bfl-flux2",
+      "name": "FLUX.2 Non-Commercial / BFL custom",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 1024,
+        "description": "FLUX.2 klein 9B, Q4_K_M — runs beside a video model on one box",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": "flux-2-klein-9b-Q4_K_M.gguf",
+        "gguf_repo": "unsloth/FLUX.2-klein-9B-GGUF",
+        "hf_repo": "black-forest-labs/FLUX.2-klein-9B",
+        "id": "flux2-klein-9b-gguf-q4",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 10,
+        "name": "FLUX.2 klein 9B (GGUF Q4_K_M)",
+        "parameters": "9B (Q4_K_M)",
+        "pipeline_class": "Flux2KleinPipeline",
+        "size_bytes": 5900000000,
+        "status": "planned",
+        "transformer_class": "Flux2Transformer2DModel"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "bfl-flux2",
+      "name": "FLUX.2 Non-Commercial / BFL custom",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 28,
+        "default_width": 1024,
+        "description": "FLUX.2 klein base 9B — undistilled generation and editing",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/FLUX.2-klein-base-9B",
+        "id": "flux2-klein-base-9b",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 24,
+        "name": "FLUX.2 klein base 9B",
+        "parameters": "9B",
+        "pipeline_class": "Flux2KleinPipeline",
+        "size_bytes": 52888736752,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "bfl-flux2",
+      "name": "FLUX.2 Non-Commercial / BFL custom",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 1024,
+        "description": "FLUX.2 klein 9B KV — few-step generation and editing",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/FLUX.2-klein-9b-kv",
+        "id": "flux2-klein-9b-kv",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 24,
+        "name": "FLUX.2 klein 9B KV",
+        "parameters": "9B",
+        "pipeline_class": "Flux2KleinPipeline",
+        "size_bytes": 52886252700,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "modular_model_index.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "7628112b0d8caade9f408def94c9e9d24346068fec2f6c87eb568924d78ea48c",
+        "size": 2115
+      },
+      {
+        "path": "text_encoder/chat_template.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4",
+        "size": 5502
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
+        "size": 1505
+      },
+      {
+        "path": "text_encoder/generation_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44",
+        "size": 269
+      },
+      {
+        "path": "text_encoder/merges.txt",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+        "size": 1671839
+      },
+      {
+        "path": "text_encoder/model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
+        "size": 4967229296
+      },
+      {
+        "path": "text_encoder/model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
+        "size": 3908490048
+      },
+      {
+        "path": "text_encoder/model.safetensors.index.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b",
+        "size": 64742
+      },
+      {
+        "path": "text_encoder/preprocessor_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        "size": 390
+      },
+      {
+        "path": "text_encoder/tokenizer.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "size": 7032403
+      },
+      {
+        "path": "text_encoder/tokenizer_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+        "size": 10868
+      },
+      {
+        "path": "text_encoder/video_preprocessor_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+        "size": 385
+      },
+      {
+        "path": "text_encoder/vocab.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "size": 2776833
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "e748b382508f3171d1f4039688b23d1f809aebe4507b3ed5a29bca01b4b58877",
+        "size": 436
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "4f01de41470090586d7a25aa4aec93987724eae45db45b68de2b3f566f438a8b",
+        "size": 9907529352
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "6f6217ab2c7ce5ef177ec202f79d4c2ddab78111c4645030c8828ec615d5f02c",
+        "size": 1189878064
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "cc3ba9b73dc3f10ff877dea398c1d48455a4b2164da5cbb7d92b4bb4b66040cc",
+        "size": 37951
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "66564b3cd3f3f3ce5ce3cd4df72f1de883b242c7f338e27d420fe5ddcb0a6ed9",
+        "size": 808
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
+        "size": 336213556
+      }
+    ],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "text encoder (Qwen3-VL-4B-Instruct)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "conditions": "Non-commercial and non-production use (research, testing, evaluation) is granted to anyone. Commercial use of outputs, and production use solely to generate them, is granted only to a Qualifying User: the licensee together with its affiliates below US$5,000,000 gross annualized revenue. Any other commercial use, including commercial fine-tuning or distribution, needs a separate licence from Black Forest Labs (https://bfl.ai/licensing). Commercial output use requires content filtering or review of outputs, and AI-generation disclosures where the law requires them. The model, its derivatives and its outputs may not be used to improve another model with a similar function, nor for military, surveillance or biometric-processing purposes. A distributed copy must carry the licence and its attribution notice. Full text: https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+      "id": "flux-kommunity-1.0",
+      "name": "FLUX Kommunity License v1.0",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 16,
+        "default_width": 1024,
+        "description": "FLUX 3 Image Klein 5.6B, distilled, bfloat16: 16 flow-map steps, no guidance, 1024x1024 by default, up to 4 MP. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet. Vendor peak memory at 1024x1024: 31 GB.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/flux-3-image-klein",
+        "id": "flux-3-image-klein",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 31,
+        "name": "FLUX 3 Image Klein",
+        "parameters": "5.6B",
+        "pipeline_class": "Flux3DistilledModularPipeline",
+        "size_bytes": 20320946362,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "variants/fp8r/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "3f8fdaf707b6f4de023f35d253db58077bfb36df746331fcec93fc570a744811",
+        "size": 830
+      },
+      {
+        "path": "variants/fp8r/hf_quant_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "6179a2d069688ca3331966910cf1968f56bca81c8266ff3a3c3537a108260631",
+        "size": 1438
+      },
+      {
+        "path": "variants/fp8r/manifest.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "cc8ca26b9f9c7b59167c0ca3f77d5a13a95d5c8008af8e5f9d6f98efb2d6e65b",
+        "size": 1872
+      },
+      {
+        "path": "variants/fp8r/model.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "30054053f630725b488aead9a81b422793cee18027856a16bd17b902ad612018",
+        "size": 6270949144
+      }
+    ],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "text encoder (Qwen3-VL-4B-Instruct)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "conditions": "Non-commercial and non-production use (research, testing, evaluation) is granted to anyone. Commercial use of outputs, and production use solely to generate them, is granted only to a Qualifying User: the licensee together with its affiliates below US$5,000,000 gross annualized revenue. Any other commercial use, including commercial fine-tuning or distribution, needs a separate licence from Black Forest Labs (https://bfl.ai/licensing). Commercial output use requires content filtering or review of outputs, and AI-generation disclosures where the law requires them. The model, its derivatives and its outputs may not be used to improve another model with a similar function, nor for military, surveillance or biometric-processing purposes. A distributed copy must carry the licence and its attribution notice. Full text: https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+      "id": "flux-kommunity-1.0",
+      "name": "FLUX Kommunity License v1.0",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 16,
+        "default_width": 1024,
+        "description": "FLUX 3 Image Klein 5.6B, distilled, FP8 transformer (variants/fp8r) with the bfloat16 entry's text encoder and autoencoder. Float8 weights with per-row scales. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet. Vendor peak memory at 1024x1024: 26 GB.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/flux-3-image-klein",
+        "id": "flux-3-image-klein-fp8",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 26,
+        "name": "FLUX 3 Image Klein FP8",
+        "parameters": "5.6B",
+        "pipeline_class": "Flux3DistilledModularPipeline",
+        "size_bytes": 15494453843,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "flux-3-image-klein",
+        "parts": [
+          "modular_model_index.json",
+          "text_encoder",
+          "vae"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "variants/nvfp4/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "4ec70789b865b7168fe800d45c8a57a527b6707a2c3169af061bdd3fd4f3d0c2",
+        "size": 831
+      },
+      {
+        "path": "variants/nvfp4/hf_quant_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "1a7c401b5f194d62763e42d9848d6c44c109b7e6abc6371611c71538836937d1",
+        "size": 2784
+      },
+      {
+        "path": "variants/nvfp4/manifest.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "a1001d62704bcc234fd07b131487b1452997d744e57603bca78f40a7d1725542",
+        "size": 3974
+      },
+      {
+        "path": "variants/nvfp4/model.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "30b110b0675249cf0461247b4613240312c8064ccc4ef486f4d025c9ff65fb83",
+        "size": 5277674144
+      }
+    ],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "text encoder (Qwen3-VL-4B-Instruct)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "conditions": "Non-commercial and non-production use (research, testing, evaluation) is granted to anyone. Commercial use of outputs, and production use solely to generate them, is granted only to a Qualifying User: the licensee together with its affiliates below US$5,000,000 gross annualized revenue. Any other commercial use, including commercial fine-tuning or distribution, needs a separate licence from Black Forest Labs (https://bfl.ai/licensing). Commercial output use requires content filtering or review of outputs, and AI-generation disclosures where the law requires them. The model, its derivatives and its outputs may not be used to improve another model with a similar function, nor for military, surveillance or biometric-processing purposes. A distributed copy must carry the licence and its attribution notice. Full text: https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+      "id": "flux-kommunity-1.0",
+      "name": "FLUX Kommunity License v1.0",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 16,
+        "default_width": 1024,
+        "description": "FLUX 3 Image Klein 5.6B, distilled, NVFP4 transformer (variants/nvfp4) with the bfloat16 entry's text encoder and autoencoder. 4-bit NVFP4 weights, which need a GPU with FP4 tensor cores. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet. Vendor peak memory at 1024x1024: 25 GB.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/flux-3-image-klein",
+        "id": "flux-3-image-klein-nvfp4",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 25,
+        "name": "FLUX 3 Image Klein NVFP4",
+        "parameters": "5.6B",
+        "pipeline_class": "Flux3DistilledModularPipeline",
+        "size_bytes": 14501182292,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "flux-3-image-klein",
+        "parts": [
+          "modular_model_index.json",
+          "text_encoder",
+          "vae"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "modular_model_index.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "a4587f37dba1d381808a8a7166a2b985a02c3b4e0c459fd542309f18302352af",
+        "size": 2117
+      },
+      {
+        "path": "text_encoder/chat_template.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4",
+        "size": 5502
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
+        "size": 1505
+      },
+      {
+        "path": "text_encoder/generation_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44",
+        "size": 269
+      },
+      {
+        "path": "text_encoder/merges.txt",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+        "size": 1671839
+      },
+      {
+        "path": "text_encoder/model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
+        "size": 4967229296
+      },
+      {
+        "path": "text_encoder/model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
+        "size": 3908490048
+      },
+      {
+        "path": "text_encoder/model.safetensors.index.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b",
+        "size": 64742
+      },
+      {
+        "path": "text_encoder/preprocessor_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        "size": 390
+      },
+      {
+        "path": "text_encoder/tokenizer.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "size": 7032403
+      },
+      {
+        "path": "text_encoder/tokenizer_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+        "size": 10868
+      },
+      {
+        "path": "text_encoder/video_preprocessor_config.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+        "size": 385
+      },
+      {
+        "path": "text_encoder/vocab.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "size": 2776833
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "bdebcf6b591b456742fe579f65978fd7bcffa459ef003ad668edac393d37e7b5",
+        "size": 416
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "160026c6235e6a10842208d4f4077fd51018cdc525b57e69385a783d7a4d4b43",
+        "size": 9887081880
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "1b4a893a94561112c9cfc2d69f4043d6686e012b050a9c7149d064e23d92413a",
+        "size": 1189878064
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "16253e59b96211abaf36f46a3d3b6e175f3532e0118028b9d40b3bfbe4561907",
+        "size": 37747
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "66564b3cd3f3f3ce5ce3cd4df72f1de883b242c7f338e27d420fe5ddcb0a6ed9",
+        "size": 808
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein-base",
+        "revision": "3f7fa5ee22ca1d5a5cc095ac7cc96e6a173b4c86",
+        "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
+        "size": 336213556
+      }
+    ],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "text encoder (Qwen3-VL-4B-Instruct)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "conditions": "Non-commercial and non-production use (research, testing, evaluation) is granted to anyone. Commercial use of outputs, and production use solely to generate them, is granted only to a Qualifying User: the licensee together with its affiliates below US$5,000,000 gross annualized revenue. Any other commercial use, including commercial fine-tuning or distribution, needs a separate licence from Black Forest Labs (https://bfl.ai/licensing). Commercial output use requires content filtering or review of outputs, and AI-generation disclosures where the law requires them. The model, its derivatives and its outputs may not be used to improve another model with a similar function, nor for military, surveillance or biometric-processing purposes. A distributed copy must carry the licence and its attribution notice. Full text: https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+      "id": "flux-kommunity-1.0",
+      "name": "FLUX Kommunity License v1.0",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 3.5,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 50,
+        "default_width": 1024,
+        "description": "FLUX 3 Image Klein Base 5.6B, undistilled, bfloat16: 50 steps at guidance 3.5, built for fine-tuning and research. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/flux-3-image-klein-base",
+        "id": "flux-3-image-klein-base",
+        "kinds": [
+          "text2image",
+          "image2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 31,
+        "name": "FLUX 3 Image Klein Base",
+        "parameters": "5.6B",
+        "pipeline_class": "Flux3ModularPipeline",
+        "size_bytes": 20300498668,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 16,
+        "default_guidance_scale": 4.0,
+        "default_height": 720,
+        "default_num_frames": 81,
+        "default_steps": 40,
+        "default_width": 1280,
+        "description": "Wan 2.2 text-to-video mixture-of-experts, 480P and 720P",
+        "distilled": false,
+        "expert_pair": {
+          "boundary_ratio": 0.875,
+          "high_noise_component": "transformer",
+          "low_noise_component": "transformer_2",
+          "min_vram_gb_per_expert": 48
+        },
+        "family": "wan2.2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        "id": "wan2.2-t2v-a14b",
+        "kinds": [
+          "text2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 80,
+        "name": "Wan 2.2 T2V A14B",
+        "parameters": "14.3B",
+        "pipeline_class": "WanPipeline",
+        "size_bytes": 126200628126,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 16,
+        "default_guidance_scale": 3.5,
+        "default_height": 720,
+        "default_num_frames": 81,
+        "default_steps": 40,
+        "default_width": 1280,
+        "description": "Wan 2.2 image-to-video mixture-of-experts, 480P and 720P",
+        "distilled": false,
+        "expert_pair": {
+          "boundary_ratio": 0.875,
+          "high_noise_component": "transformer",
+          "low_noise_component": "transformer_2",
+          "min_vram_gb_per_expert": 48
+        },
+        "family": "wan2.2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        "id": "wan2.2-i2v-a14b",
+        "kinds": [
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 80,
+        "name": "Wan 2.2 I2V A14B",
+        "parameters": "14.3B",
+        "pipeline_class": "WanImageToVideoPipeline",
+        "size_bytes": 126204155463,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 16,
+        "default_guidance_scale": 5.0,
+        "default_height": 720,
+        "default_num_frames": 81,
+        "default_steps": 40,
+        "default_width": 1280,
+        "description": "Wan 2.1 first-last-frame interpolation; bridges two stills into motion",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "wan2.1",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers",
+        "id": "wan2.1-flf2v-14b",
+        "kinds": [
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 60,
+        "name": "Wan 2.1 FLF2V 14B 720P",
+        "parameters": "14B",
+        "pipeline_class": "WanImageToVideoPipeline",
+        "size_bytes": 90110903694,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "6a72faeb564b0e894aea8fc4ef27241106eb739e8584e869b61589a65473add7",
+        "size": 499
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "571a3eed68bcd943a61b9fea8efa9e141472216ada59f928c8b5128ce24b32e0",
+        "size": 820
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "a2bcb24699f6c009a2427432bdd483ef8b2b42a712abc9503759cdc77d171f07",
+        "size": 855
+      },
+      {
+        "path": "text_encoder/model-00001-of-00003.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "a8e861969c7433e707cc5a74065d795d36cca07ec96eb6763eb4083df7248f58",
+        "size": 4935812536
+      },
+      {
+        "path": "text_encoder/model-00002-of-00003.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "d57d948ece4837d850b7a859a4415121d57cacf8b9ee1d4db200c67f592902d7",
+        "size": 4983103192
+      },
+      {
+        "path": "text_encoder/model-00003-of-00003.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "0da9ee284e21d1406df708788db1d502d95d75f69faa25cd26151bf8829b7c5f",
+        "size": 1442935480
+      },
+      {
+        "path": "text_encoder/model.safetensors.index.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "31c4c7bcce679eaa0dd4667462394ddb013dc2f748e0bffc893dc9146a320dab",
+        "size": 22476
+      },
+      {
+        "path": "tokenizer/special_tokens_map.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "456b58fd240a06c743a7c2cf8008bec501240d68ebd1fc4018ea569505fea270",
+        "size": 7079
+      },
+      {
+        "path": "tokenizer/spiece.model",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458",
+        "size": 4548313
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "20a46ac256746594ed7e1e3ef733b83fbc5a6f0922aa7480eda961743de080ef",
+        "size": 16837459
+      },
+      {
+        "path": "tokenizer/tokenizer_config.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "1d8d2a216bf8e70ac15b7ddcea566c4dd0433c024b39a58ca5e4c66bd78defbd",
+        "size": 61758
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "dc00d9866e72cf77db6b531aaa33be4dc7148fef9338442bd0ae9181f7075e9b",
+        "size": 495
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00005.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "511bec832a201caa410d09c5ce7dbbf8ad2708c345d82038f684fc74cce982be",
+        "size": 4978254344
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00005.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "7c42724912b1911429125dc50c0e9a49ccbada5a601b657d4ed2e15e7597c193",
+        "size": 4846784976
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00003-of-00005.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "e9c3d0c76de786566382f8258101fea973ae37681c6e9fe0e5fe1fb93b806424",
+        "size": 4972658392
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00004-of-00005.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "a331121771790939678db6f585553fd5184609f7d02593c699a4d241b0d834c5",
+        "size": 4846785080
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00005-of-00005.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "78b655685c47efdb2349f36826bb101264e9f212a16325d584aeb5f53c88e719",
+        "size": 354751840
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "d6c1f72d86fbddef8fb5ef1c03f5b56b2bfdb6ae58032db98c6019fd1dae9021",
+        "size": 73297
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "d996c340fe9a7df5d7371f76a7d8d6956f6c98256080074d8434fa5eeac11360",
+        "size": 1701
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "revision": "b8fff7315c768468a5333511427288870b2e9635",
+        "sha256": "62cd18f19438e35b32ac63020e2852f566e9b02f46b6cdbd87972a356e3c6f4b",
+        "size": 2818777808
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 5.0,
+        "default_height": 704,
+        "default_num_frames": 121,
+        "default_steps": 50,
+        "default_width": 1280,
+        "description": "Wan 2.2 hybrid text/image-to-video at 720P 24fps on a single 24 GB GPU; also rolls forward as a prompt-driven world session",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "wan2.2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+        "id": "wan2.2-ti2v-5b",
+        "kinds": [
+          "text2video",
+          "image2video",
+          "world_model"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 48,
+        "name": "Wan 2.2 TI2V 5B",
+        "parameters": "5.0B",
+        "pipeline_class": "WanPipeline",
+        "size_bytes": 34203021834,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "Skywork/Matrix-Game-3.0",
+        "revision": "382aa382a03cec057360755aa72c7735025770bb",
+        "sha256": "290d1a30576746a0d2a10005d00fc0a21c2d4f87fa4dce1a110a0bd7454e3797",
+        "size": 46
+      },
+      {
+        "path": "base_distilled_model/config.json",
+        "repo": "Skywork/Matrix-Game-3.0",
+        "revision": "382aa382a03cec057360755aa72c7735025770bb",
+        "sha256": "de2a94c2e7f4804a9228563efcdaf0938c73aa5ea48ba152e98de86d3178e7b9",
+        "size": 1057
+      },
+      {
+        "path": "base_distilled_model/diffusion_pytorch_model.safetensors",
+        "repo": "Skywork/Matrix-Game-3.0",
+        "revision": "382aa382a03cec057360755aa72c7735025770bb",
+        "sha256": "437acb9b90304907ccdf8a173471e58858f925ee817e21c03a4220658a05c1e4",
+        "size": 25879807104
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "components": [
+        {
+          "covers": "reference inference code",
+          "name": "MIT",
+          "tier": "permissive"
+        },
+        {
+          "covers": "text encoder, tokenizer, autoencoder and scheduler (Wan 2.2 TI2V 5B)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "name": "Apache-2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 704,
+        "default_num_frames": 57,
+        "default_steps": 3,
+        "default_width": 1280,
+        "description": "Matrix-Game 3.0 interactive world model: keyboard and mouse actions drive a memory-augmented 720P rollout from a first frame, step-distilled to 3 steps without guidance",
+        "distilled": true,
+        "expert_pair": null,
+        "family": "matrix-game",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Skywork/Matrix-Game-3.0",
+        "id": "matrix-game-3",
+        "kinds": [
+          "world_model"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 32,
+        "name": "Matrix-Game 3.0",
+        "parameters": "6.5B",
+        "pipeline_class": "MatrixGame3I2VPipeline",
+        "size_bytes": 56602599084,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "wan2.2-ti2v-5b",
+        "parts": [
+          "scheduler",
+          "text_encoder",
+          "tokenizer",
+          "vae"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "distilled-1.1/ltx-2.3-22b-distilled-1.1-UD-Q5_K_M.gguf",
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "sha256": "d62cef1062b85476d3ff745d6d8522bc2a15a045456751a5529c6f2746adb0c8",
+        "size": 18208192032
+      },
+      {
+        "path": "text_encoders/ltx-2.3-22b-distilled_embeddings_connectors.safetensors",
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "sha256": "c61cbb396e2a8175d8b2da51f0fdac885a4ccd22c9f64dafa5aa2c455dc8a507",
+        "size": 2312144712
+      },
+      {
+        "path": "vae/ltx-2.3-22b-distilled_video_vae.safetensors",
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "sha256": "e68d6d8f8a42942ac9b862cc315beb3bc30805a8876c7ad63ba5bf7a2b8e168a",
+        "size": 1452256522
+      },
+      {
+        "path": "vae/ltx-2.3-22b-distilled_audio_vae.safetensors",
+        "repo": "unsloth/LTX-2.3-GGUF",
+        "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+        "sha256": "3cd6a6eb8cb28f5ecc12f1f3126952b2a3d2b0b42ad3270e63cefafafe0d9b57",
+        "size": 364853140
+      },
+      {
+        "path": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+        "repo": "Lightricks/LTX-2.3",
+        "revision": "3c6a4e66e5d0a684231950b9c74dd4ded7b6fadc",
+        "sha256": "5f416311fa8172b65af67530758964708d29a317b830d689a51143b7f91913ed",
+        "size": 995743560
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "fb4508a46270e0af2778cd72c191f290984e6a5fa8f155895544507d3803dbe9",
+        "size": 2960
+      },
+      {
+        "path": "text_encoder/model-00001-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "cbc6e8132e4998652d4c8c219f0ca8da10a143606c806c8728a7513d49bbcdb3",
+        "size": 1685223128
+      },
+      {
+        "path": "text_encoder/model-00002-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "b95e7ab472b88860e53c71ef078fe8ba4c85e3727b8f0a0bcc130c1f4a2b9ab9",
+        "size": 4987027384
+      },
+      {
+        "path": "text_encoder/model-00003-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "3731e7c18280d0e9dcbcfadaecaeb8b81fa7f7f15e702ea3d1b4f8eb1b5919f7",
+        "size": 4844749824
+      },
+      {
+        "path": "text_encoder/model-00004-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "e9d1ce8b472f2cc6d70c7885388f50fb3a5f233cf1d4784f6a4be1732547a74c",
+        "size": 4954909736
+      },
+      {
+        "path": "text_encoder/model-00005-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "cb478659a67b2e34a920f237387a1d7a8208325aa2fc285198a97603f15af1e6",
+        "size": 4907664584
+      },
+      {
+        "path": "text_encoder/model-00006-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "a190581d871980f9309f40d5c2b4db99d76737d7ed743d531bac95443f6b7145",
+        "size": 4954909792
+      },
+      {
+        "path": "text_encoder/model-00007-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "c347de789ff34be642e4fe7ab8e142ca5e3d833d70cb9ec5127a86af0e2ecfed",
+        "size": 4907664584
+      },
+      {
+        "path": "text_encoder/model-00008-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "2ec7525b89b083d774f4abbdd1f2d7ee190f0475658875cf700530a2faa84a4f",
+        "size": 4954909792
+      },
+      {
+        "path": "text_encoder/model-00009-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "2b0117ecf1d83691bb875c66a9f2b47e450a87fdfe90915bc7b9e9946c37a650",
+        "size": 4907664584
+      },
+      {
+        "path": "text_encoder/model-00010-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "d9f665a743589231adb812c61c9d8e295c9a68c31d3e87976ae032f1de4e46b6",
+        "size": 4954909792
+      },
+      {
+        "path": "text_encoder/model-00011-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "999bf4706d4f616e558eec486667fc2b66f8d0f9c106e1d1f802458fb349b0db",
+        "size": 2689808472
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+        "size": 33384568
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "components": [
+        {
+          "conditions": "Use is subject to the Gemma Prohibited Use Policy; anyone the model or its outputs are distributed to must be bound by the same use restrictions and given a copy of the terms, with the notice that Gemma is provided under and subject to the Gemma Terms of Use.",
+          "covers": "text encoder (Gemma 3)",
+          "id": "gemma",
+          "name": "Gemma Terms of Use",
+          "tier": "commercial_custom"
+        }
+      ],
+      "conditions": "Free for entities with annual revenue below USD 10,000,000; at or above it commercial use needs a paid Commercial Use Agreement with Lightricks. For commercial use the model and its outputs may not train, improve or fine-tune another model (other than Derivatives of LTX-2) nor build a product that competes with the licensor's. Recipients must be given a copy of the agreement, and modified files must carry prominent notices.",
+      "id": "ltx-open-weights",
+      "name": "LTX-2 Community License Agreement",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 512,
+        "default_num_frames": 121,
+        "default_steps": 8,
+        "default_width": 768,
+        "description": "LTX-2.3 22B distilled text-to-video with a synchronized soundtrack: Q5_K_M transformer, 8-step distilled schedule at half size, latent upsampling and a 3-step refinement, no guidance",
+        "distilled": true,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "ltx2",
+        "gguf_file": "distilled-1.1/ltx-2.3-22b-distilled-1.1-UD-Q5_K_M.gguf",
+        "gguf_repo": "unsloth/LTX-2.3-GGUF",
+        "hf_repo": "Lightricks/LTX-2.3",
+        "id": "ltx-2.3-22b-distilled-gguf",
+        "kinds": [
+          "text2video"
+        ],
+        "latent_upsampler": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+        "max_resolution": 1280,
+        "min_vram_gb": 48,
+        "name": "LTX-2.3 22B Distilled (GGUF Q5_K_M)",
+        "parameters": "22B",
+        "pipeline_class": "LTX2Pipeline",
+        "size_bytes": 72116019166,
+        "status": "native",
+        "transformer_class": "LTX2VideoTransformer3DModel"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "ltx-2.3-22b-dev.safetensors",
+        "repo": "Lightricks/LTX-2.3",
+        "revision": "3c6a4e66e5d0a684231950b9c74dd4ded7b6fadc",
+        "sha256": "7ab7225325bc403448ea84b6db2269811a880e5118cd2ee2b6282a93d585016f",
+        "size": 46149344974
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "fb4508a46270e0af2778cd72c191f290984e6a5fa8f155895544507d3803dbe9",
+        "size": 2960
+      },
+      {
+        "path": "text_encoder/model-00001-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "cbc6e8132e4998652d4c8c219f0ca8da10a143606c806c8728a7513d49bbcdb3",
+        "size": 1685223128
+      },
+      {
+        "path": "text_encoder/model-00002-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "b95e7ab472b88860e53c71ef078fe8ba4c85e3727b8f0a0bcc130c1f4a2b9ab9",
+        "size": 4987027384
+      },
+      {
+        "path": "text_encoder/model-00003-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "3731e7c18280d0e9dcbcfadaecaeb8b81fa7f7f15e702ea3d1b4f8eb1b5919f7",
+        "size": 4844749824
+      },
+      {
+        "path": "text_encoder/model-00004-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "e9d1ce8b472f2cc6d70c7885388f50fb3a5f233cf1d4784f6a4be1732547a74c",
+        "size": 4954909736
+      },
+      {
+        "path": "text_encoder/model-00005-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "cb478659a67b2e34a920f237387a1d7a8208325aa2fc285198a97603f15af1e6",
+        "size": 4907664584
+      },
+      {
+        "path": "text_encoder/model-00006-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "a190581d871980f9309f40d5c2b4db99d76737d7ed743d531bac95443f6b7145",
+        "size": 4954909792
+      },
+      {
+        "path": "text_encoder/model-00007-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "c347de789ff34be642e4fe7ab8e142ca5e3d833d70cb9ec5127a86af0e2ecfed",
+        "size": 4907664584
+      },
+      {
+        "path": "text_encoder/model-00008-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "2ec7525b89b083d774f4abbdd1f2d7ee190f0475658875cf700530a2faa84a4f",
+        "size": 4954909792
+      },
+      {
+        "path": "text_encoder/model-00009-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "2b0117ecf1d83691bb875c66a9f2b47e450a87fdfe90915bc7b9e9946c37a650",
+        "size": 4907664584
+      },
+      {
+        "path": "text_encoder/model-00010-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "d9f665a743589231adb812c61c9d8e295c9a68c31d3e87976ae032f1de4e46b6",
+        "size": 4954909792
+      },
+      {
+        "path": "text_encoder/model-00011-of-00011.safetensors",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "999bf4706d4f616e558eec486667fc2b66f8d0f9c106e1d1f802458fb349b0db",
+        "size": 2689808472
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "Lightricks/LTX-2",
+        "revision": "dfcc2108383fe1aaa0584bdf55d368a4bdadd90c",
+        "sha256": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+        "size": 33384568
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "components": [
+        {
+          "conditions": "Use is subject to the Gemma Prohibited Use Policy; anyone the model or its outputs are distributed to must be bound by the same use restrictions and given a copy of the terms, with the notice that Gemma is provided under and subject to the Gemma Terms of Use.",
+          "covers": "text encoder (Gemma 3)",
+          "id": "gemma",
+          "name": "Gemma Terms of Use",
+          "tier": "commercial_custom"
+        }
+      ],
+      "conditions": "Free for entities with annual revenue below USD 10,000,000; at or above it commercial use needs a paid Commercial Use Agreement with Lightricks. For commercial use the model and its outputs may not train, improve or fine-tune another model (other than Derivatives of LTX-2) nor build a product that competes with the licensor's. Recipients must be given a copy of the agreement, and modified files must carry prominent notices.",
+      "id": "ltx-open-weights",
+      "name": "LTX-2 Community License Agreement",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 3.0,
+        "default_height": 512,
+        "default_num_frames": 121,
+        "default_steps": 30,
+        "default_width": 768,
+        "description": "LTX-2.3 22B text-to-video with a synchronized soundtrack, 30 steps with prompt, spatio-temporal and modality guidance, in bf16",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "ltx2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Lightricks/LTX-2.3",
+        "id": "ltx-2.3-22b-dev",
+        "kinds": [
+          "text2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 80,
+        "name": "LTX-2.3 22B Dev",
+        "parameters": "22B",
+        "pipeline_class": "LTX2Pipeline",
+        "size_bytes": 94932174174,
+        "status": "native",
+        "transformer_class": "LTX2VideoTransformer3DModel"
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "ltx-open-weights",
+      "name": "LTX-2.x Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 512,
+        "default_num_frames": 121,
+        "default_steps": 8,
+        "default_width": 768,
+        "description": "LTX-2.5 22B distilled text-to-video with a synchronized audio branch. Unverified: catalogued from the model card, never run here.",
+        "distilled": true,
+        "expert_pair": null,
+        "family": "ltx2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Lightricks/LTX-2.5",
+        "id": "ltx-2.5-22b-distilled",
+        "kinds": [
+          "text2video"
+        ],
+        "latent_upsampler": "latent_upsampler",
+        "max_resolution": 1280,
+        "min_vram_gb": 48,
+        "name": "LTX-2.5 22B Distilled (bf16)",
+        "parameters": "22B",
+        "pipeline_class": "LTX2Pipeline",
+        "size_bytes": 200900000000,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "ltx-open-weights",
+      "name": "LTX-2.x Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 4.0,
+        "default_height": 512,
+        "default_num_frames": 121,
+        "default_steps": 40,
+        "default_width": 768,
+        "description": "LTX-2.5 22B dev text-to-video, the full trainable transformer with a synchronized audio branch. Unverified: catalogued from the model card and the pinned diffusers signature, never run here.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "ltx2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Lightricks/LTX-2.5",
+        "id": "ltx-2.5-22b-dev",
+        "kinds": [
+          "text2video"
+        ],
+        "latent_upsampler": "latent_upsampler",
+        "max_resolution": 1280,
+        "min_vram_gb": 80,
+        "name": "LTX-2.5 22B Dev (bf16)",
+        "parameters": "22B",
+        "pipeline_class": "LTX2Pipeline",
+        "size_bytes": 200900000000,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "ltx-open-weights",
+      "name": "LTX-2.x Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 4.0,
+        "default_height": 512,
+        "default_num_frames": 121,
+        "default_steps": 40,
+        "default_width": 768,
+        "description": "LTX-2.5 22B dev text-to-video, comfy-int8 transformer with the matching int8 text encoder. Same weights repo as the bf16 entry; the smaller serving set is what lets it share a node with the LLM tier. Unverified: catalogued from the files on disk, never rendered here.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "ltx2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Lightricks/LTX-2.5",
+        "id": "ltx-2.5-22b-dev-int8",
+        "kinds": [
+          "text2video"
+        ],
+        "latent_upsampler": "latent_upsampler",
+        "max_resolution": 1280,
+        "min_vram_gb": 44,
+        "name": "LTX-2.5 22B Dev (comfy-int8)",
+        "parameters": "22B",
+        "pipeline_class": "LTX2Pipeline",
+        "size_bytes": 200900000000,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "id": "ltx-open-weights",
+      "name": "LTX-2.x Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 512,
+        "default_num_frames": 121,
+        "default_steps": 8,
+        "default_width": 768,
+        "description": "LTX-2.5 22B distilled text-to-video, nvfp4 transformer. Lightricks ships nvfp4 for the distilled transformer only, so there is no dev equivalent. Fixed 8-step, CFG 1.0 schedule inherited from the distilled checkpoint; raising either fights the distillation. Unverified: catalogued from the files on disk, never rendered here.",
+        "distilled": true,
+        "expert_pair": null,
+        "family": "ltx2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "Lightricks/LTX-2.5",
+        "id": "ltx-2.5-22b-distilled-nvfp4",
+        "kinds": [
+          "text2video"
+        ],
+        "latent_upsampler": "latent_upsampler",
+        "max_resolution": 1280,
+        "min_vram_gb": 41,
+        "name": "LTX-2.5 22B Distilled (nvfp4)",
+        "parameters": "22B",
+        "pipeline_class": "LTX2Pipeline",
+        "size_bytes": 200900000000,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Creative Commons (see repo LICENSE)",
+      "tier": "attribution"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1,
+        "default_num_frames": null,
+        "default_steps": 30,
+        "default_width": 1,
+        "description": "MiniMax-Music3 2B text-to-music: 32 kHz stereo, up to five minutes, prompt plus optional lyrics. Unverified: catalogued from the model card, never run here.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "minimax-music",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "MiniMaxAI/MiniMax-Music3",
+        "id": "minimax-music3",
+        "kinds": [
+          "text2audio"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1,
+        "min_vram_gb": 24,
+        "name": "MiniMax-Music3 2B (text-to-music)",
+        "parameters": "2B",
+        "pipeline_class": "ModularPipeline",
+        "size_bytes": 57400000000,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "condition_encoder/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "76e9eeba7b3248500cd0f5fb7ecd66129af0c9ea98ffb762bd8879753595233b",
+        "size": 502
+      },
+      {
+        "path": "condition_encoder/diffusion_pytorch_model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "ca111ca95858c8d3c3678c986dda03df20778c0de009f57109c1052866d522b2",
+        "size": 1218676312
+      },
+      {
+        "path": "model_index.json",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "26f44f97c4908851f19dbff6c25c6dfcbe17b9c74c152cc0535c47b82b80a250",
+        "size": 491
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "173036e3885cdd41b7af2d2918d4bfb316d789b2ebc17f4534b2d3d2aa824fa2",
+        "size": 484
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "c55e1b1f5e665d7c65661a6c278cbdd31c48a31565fa4218c06cd56078224ddc",
+        "size": 1354
+      },
+      {
+        "path": "text_encoder/model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd",
+        "size": 1191586416
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+        "size": 11423705
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "6b6753b2833681bb0ad3363be71cafaa2b0a751146bbeb4e8ae485a407fa5775",
+        "size": 1303
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "814723a63ba0b11dc4a7e8a5d43b8107c947fcdb5ab1e30c65469252272b35d7",
+        "size": 4986971904
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "38ab6a8443be10b3c4bb0b784a5b78d471358d1b4982c139cb7893c455670b67",
+        "size": 3350889672
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "164a21874900efa4813175f812a7816408551b8c5ac38f2deb65347acb2fc3eb",
+        "size": 438
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0",
+        "sha256": "da17edb604c40deaf09e9b24974e590d1ca83a374070e5d0884cfa4bed9a99b0",
+        "size": 337431388
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 1.0,
+        "default_height": 1,
+        "default_num_frames": null,
+        "default_steps": 8,
+        "default_width": 1,
+        "description": "ACE-Step v1.5 XL Turbo text-to-music: 48 kHz stereo, prompt plus optional lyrics, guidance-distilled to 8 steps.",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "acestep",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+        "id": "acestep-v15-xl-turbo",
+        "kinds": [
+          "text2audio"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1,
+        "min_vram_gb": 20,
+        "name": "ACE-Step v1.5 XL Turbo (text-to-music)",
+        "parameters": "5B",
+        "pipeline_class": "AceStepPipeline",
+        "size_bytes": 11105348328,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "condition_encoder/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "76e9eeba7b3248500cd0f5fb7ecd66129af0c9ea98ffb762bd8879753595233b",
+        "size": 502
+      },
+      {
+        "path": "condition_encoder/diffusion_pytorch_model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "ca111ca95858c8d3c3678c986dda03df20778c0de009f57109c1052866d522b2",
+        "size": 1218676312
+      },
+      {
+        "path": "model_index.json",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "462e7e6fe6be7e1a4376ce7494f3f581faf0d73e2a2f5fb47d161ef1428684e8",
+        "size": 650
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "173036e3885cdd41b7af2d2918d4bfb316d789b2ebc17f4534b2d3d2aa824fa2",
+        "size": 484
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "c55e1b1f5e665d7c65661a6c278cbdd31c48a31565fa4218c06cd56078224ddc",
+        "size": 1354
+      },
+      {
+        "path": "text_encoder/model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd",
+        "size": 1191586416
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+        "size": 11423705
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "e439da129abf783fdf01d167bc5350d1496dd83f3973eb4d8e1dfb2beeb72b93",
+        "size": 1303
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "ff703cdc1db9d1db0883347ba906f4eb28f23f6bd8d9bc63c9471072dfb39f24",
+        "size": 4986971904
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "2b9c9d3bc5f63cd24b862fe76ed93f21b6848df0c8969615e5c86c0115669465",
+        "size": 3350889672
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "164a21874900efa4813175f812a7816408551b8c5ac38f2deb65347acb2fc3eb",
+        "size": 438
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "revision": "4bf7b60a63b27144f539f980927eeb89f5f912b0",
+        "sha256": "da17edb604c40deaf09e9b24974e590d1ca83a374070e5d0884cfa4bed9a99b0",
+        "size": 337431388
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 7.0,
+        "default_height": 1,
+        "default_num_frames": null,
+        "default_steps": 50,
+        "default_width": 1,
+        "description": "ACE-Step v1.5 XL SFT text-to-music: 48 kHz stereo, the supervised fine-tune, 50 steps at guidance 7.0.",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "acestep",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "ACE-Step/acestep-v15-xl-sft-diffusers",
+        "id": "acestep-v15-xl-sft",
+        "kinds": [
+          "text2audio"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1,
+        "min_vram_gb": 20,
+        "name": "ACE-Step v1.5 XL SFT (text-to-music)",
+        "parameters": "5B",
+        "pipeline_class": "AceStepPipeline",
+        "size_bytes": 11525444341,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "condition_encoder/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "76e9eeba7b3248500cd0f5fb7ecd66129af0c9ea98ffb762bd8879753595233b",
+        "size": 502
+      },
+      {
+        "path": "condition_encoder/diffusion_pytorch_model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "fce7eb21fbc46733ec9047c141e88e0aaaa4dfe1c5bfd8c28707435e5b83d1c2",
+        "size": 1218676312
+      },
+      {
+        "path": "model_index.json",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "462e7e6fe6be7e1a4376ce7494f3f581faf0d73e2a2f5fb47d161ef1428684e8",
+        "size": 650
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "173036e3885cdd41b7af2d2918d4bfb316d789b2ebc17f4534b2d3d2aa824fa2",
+        "size": 484
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "c55e1b1f5e665d7c65661a6c278cbdd31c48a31565fa4218c06cd56078224ddc",
+        "size": 1354
+      },
+      {
+        "path": "text_encoder/model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd",
+        "size": 1191586416
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+        "size": 11423705
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "e439da129abf783fdf01d167bc5350d1496dd83f3973eb4d8e1dfb2beeb72b93",
+        "size": 1303
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "04e9876c702eaee95b754bd9be274ec51269e30cc5335767e657a5481414bfc4",
+        "size": 4986971904
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "79a5f07a1a9c3bbf13ac6c6a6afccea204ac87e129674e64b81dd8f653be5350",
+        "size": 3350889672
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "164a21874900efa4813175f812a7816408551b8c5ac38f2deb65347acb2fc3eb",
+        "size": 438
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "revision": "8f40447d21ee59ad4dcee6c99ce248027410bfec",
+        "sha256": "da17edb604c40deaf09e9b24974e590d1ca83a374070e5d0884cfa4bed9a99b0",
+        "size": 337431388
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 7.0,
+        "default_height": 1,
+        "default_num_frames": null,
+        "default_steps": 50,
+        "default_width": 1,
+        "description": "ACE-Step v1.5 XL Base text-to-music: 48 kHz stereo, the un-fine-tuned base for adaptation, 50 steps at guidance 7.0.",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "acestep",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "ACE-Step/acestep-v15-xl-base-diffusers",
+        "id": "acestep-v15-xl-base",
+        "kinds": [
+          "text2audio"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1,
+        "min_vram_gb": 20,
+        "name": "ACE-Step v1.5 XL Base (text-to-music)",
+        "parameters": "5B",
+        "pipeline_class": "AceStepPipeline",
+        "size_bytes": 11525444333,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "audio_scheduler/scheduler_config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "804780f7133477067bd6bbfbc02dc8b3cf9feeb400f97c08f5b1d5f6cbab3840",
+        "size": 96
+      },
+      {
+        "path": "audio_vae/config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+        "size": 2271
+      },
+      {
+        "path": "audio_vae/diffusion_pytorch_model.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+        "size": 605429340
+      },
+      {
+        "path": "model_index.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2",
+        "size": 2936
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "8fa6c3aa70dc9e691e1a6df899fd1b6f75f70481a27cee6e18a303817075c304",
+        "size": 97
+      },
+      {
+        "path": "text_encoder/chat_template.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+        "size": 5499
+      },
+      {
+        "path": "text_encoder/config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "d2dd0c60d01b9e195d9447c52da61c7302d28828524914c044d9c6e1b81d0427",
+        "size": 1474
+      },
+      {
+        "path": "text_encoder/merges.txt",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+        "size": 1671839
+      },
+      {
+        "path": "text_encoder/model-00001-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb",
+        "size": 4932328944
+      },
+      {
+        "path": "text_encoder/model-00002-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa",
+        "size": 4875990528
+      },
+      {
+        "path": "text_encoder/model-00003-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940",
+        "size": 4875990552
+      },
+      {
+        "path": "text_encoder/model-00004-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00005-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00006-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00007-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00008-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00009-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00010-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00011-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00012-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00013-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c",
+        "size": 4875990584
+      },
+      {
+        "path": "text_encoder/model-00014-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b",
+        "size": 3270697008
+      },
+      {
+        "path": "text_encoder/model.safetensors.index.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a",
+        "size": 97831
+      },
+      {
+        "path": "text_encoder/preprocessor_config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        "size": 390
+      },
+      {
+        "path": "text_encoder/tokenizer.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "size": 7032403
+      },
+      {
+        "path": "text_encoder/tokenizer_config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+        "size": 11003
+      },
+      {
+        "path": "text_encoder/video_preprocessor_config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+        "size": 385
+      },
+      {
+        "path": "text_encoder/vocab.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "size": 2776833
+      },
+      {
+        "path": "tokenizer/merges.txt",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+        "size": 1671839
+      },
+      {
+        "path": "tokenizer/tokenizer.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "size": 7032403
+      },
+      {
+        "path": "tokenizer/tokenizer_config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+        "size": 11003
+      },
+      {
+        "path": "tokenizer/vocab.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+        "size": 2776833
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae",
+        "size": 546
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "2d847200c45c09dd7f973c1b096663068408ef851ee0b3711d059b6dc5dcd028",
+        "size": 4825958704
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "2c4d362eddd2802180ac9c744849eb9ba8d9c8b984bdf9822cb02ed004b29184",
+        "size": 4702158032
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "949c5aafbbfa5654da730a6a7fafd75adb164d0857b095a30e8bb6d390887d69",
+        "size": 4933368192
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "eef7616790105ee839766bb2027203bf2c0d87c6aa038dca84145a8675f5ce28",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "43fdf42d638e8bc6745f713fae80c93bb301807a1a5ae7249344ce28e202a494",
+        "size": 4702158080
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "6442510b34d173653f0cce5c964b935395a8f7accf0b9cc0aa31aec59805239d",
+        "size": 4933368232
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "29f48f535c91dac76496ca821eeb16ca24bc4caf3f0cae8b920a89b1f966da6d",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "c711b096c764bd60f0b8b6ad49518bfab6d614fb788c725add8741c0674a4cd8",
+        "size": 4702158080
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "44428defe3976cbb87635ad200b958199e739986697cd29fdf27aeb7294b5944",
+        "size": 4933368232
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "3d44939c374c9da382e9c6877e1946adf7b84e08c7a881c068f228d6849411c9",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "224d24430b58127a5577721084e0e704a0e74ec96dd7c35bc6fc0994ebd87c33",
+        "size": 4702158080
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "48fa2bd8fe134eef565ab2464f1c2589a6657cba0d14283dfc06b532f8961f3c",
+        "size": 4933368232
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "be5b4b1809f9d546ffd4b3fcf41e5c1e02b819125caa6bc105c109b04c051bd3",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "8fbd5e6c1fb1df7ce988ca90f3d59e7610e465c7517e4b344eda4a214ba4b97d",
+        "size": 4644161920
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e",
+        "size": 64488
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+        "size": 2011
+      },
+      {
+        "path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+        "size": 5061033024
+      },
+      {
+        "path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+        "size": 4955986528
+      },
+      {
+        "path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+        "size": 398539336
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors.index.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+        "size": 74228
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "conditions": "Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States; the works and their outputs may not be used, distributed or displayed outside it. Enforced per request through the licence's territorial grant.",
+      "id": "minimax-h3-community",
+      "name": "MiniMax H3 Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 768,
+        "default_num_frames": 240,
+        "default_steps": 50,
+        "default_width": 1344,
+        "description": "MiniMax H3 omni-modal text-to-video and first-frame-to-video with native stereo audio, 768p short edge, 5-15s. Licence excludes the EU, UK, South Korea and the USA, including outputs",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "minimax-h3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "MiniMaxAI/MiniMax-H3",
+        "id": "minimax-h3",
+        "kinds": [
+          "text2video",
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1344,
+        "min_vram_gb": 144,
+        "name": "MiniMax H3 (Hailuo 3.0) H3-Base",
+        "parameters": "H3-Base + Qwen3-VL-32B text encoder",
+        "pipeline_class": "MiniMaxH3ModularPipeline",
+        "size_bytes": 144039641724,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "transformer_ref/config.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae",
+        "size": 546
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00001-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "7a3fcad885f51560e550b2e84c9a8d8b35e62996cfd9076937e992bd23478df9",
+        "size": 4825958704
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00002-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "1638ae1dc8ae26c4ba43ad28a6d851ad8983847324bb2b468719c7c81f219706",
+        "size": 4702158032
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00003-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "1ef3c4954ffe5a664c2e3028e2a3241190d9c159dce6ba1136002c6af1db5353",
+        "size": 4933368192
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00004-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "12d92f2975cfd5c5b786126385c52e5bf64884d4b4d6e60c3ef5d857c3f7469f",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00005-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "304d41ce03d59ac94bceb055935bf4e034df0badf8b0df4ded327c08a288a4cc",
+        "size": 4702158080
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00006-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "12a134b7c76d86edbe8fa2dc315f6cdaf4e1aca1b6ea4dfe4cad92df03d42eeb",
+        "size": 4933368232
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00007-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "b96395261359937c00fb42f4eb29306dc59b1a3368eeba52af4fb66e3e142c69",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00008-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "1897a6bf3b4fc834bb82d73ca02a7afc7d38c07f50ec5382cd54cd2f91b604d1",
+        "size": 4702158080
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00009-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "edfb38235adc96b99f55a401849befce59075a745e99c2d8c63ff358dd36443d",
+        "size": 4933368232
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00010-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "f8710775cf3413670edd7e23861b650a3431a71a6cc14cb1080623ab6b052385",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00011-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "9e18acc09f84edb5b34df9628efa15cfcab8bb76e8e20c1c2e979a107a0f7215",
+        "size": 4702158080
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00012-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "ea2e18228f8bdba1a4e0f32b155e4586df055997c45356213d05b971ba13e2f4",
+        "size": 4933368232
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00013-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "1e12083b1875678f7414ff55b09cd8bb1c30b861243f9bb7ff1e75b6ad3f1bdc",
+        "size": 4567069608
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model-00014-of-00014.safetensors",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "b340f44b5690cc745d48ae399381ec15b26a4fe25d483f677ccb4960dadb50d4",
+        "size": 4644161920
+      },
+      {
+        "path": "transformer_ref/diffusion_pytorch_model.safetensors.index.json",
+        "repo": "MiniMaxAI/MiniMax-H3",
+        "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e",
+        "size": 64488
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "conditions": "Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States; the works and their outputs may not be used, distributed or displayed outside it. Enforced per request through the licence's territorial grant.",
+      "id": "minimax-h3-community",
+      "name": "MiniMax H3 Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 768,
+        "default_num_frames": 240,
+        "default_steps": 50,
+        "default_width": 1344,
+        "description": "MiniMax H3 reference-image-to-video with native stereo audio, 768p short edge, 5-15s. Licence excludes the EU, UK, South Korea and the USA, including outputs",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "minimax-h3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "MiniMaxAI/MiniMax-H3",
+        "id": "minimax-h3-ref2va",
+        "kinds": [
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1344,
+        "min_vram_gb": 144,
+        "name": "MiniMax H3 Ref2VA",
+        "parameters": "H3 reference transformer + Qwen3-VL-32B text encoder",
+        "pipeline_class": "MiniMaxH3ModularPipeline",
+        "size_bytes": 144039641724,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "minimax-h3",
+        "parts": [
+          "audio_scheduler",
+          "audio_vae",
+          "model_index.json",
+          "scheduler",
+          "text_encoder",
+          "tokenizer",
+          "vae"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "conditions": "Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States; the works and their outputs may not be used, distributed or displayed outside it. Enforced per request through the licence's territorial grant.",
+      "id": "minimax-h3-community",
+      "name": "MiniMax H3 Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 768,
+        "default_num_frames": 240,
+        "default_steps": 50,
+        "default_width": 1344,
+        "description": "MiniMax H3 text-to-video and first-frame-to-video, transformer and prompt encoder quantised to 8 bits at load from the bf16 weights, 768p short edge, 5-15s. Licence excludes the EU, UK, South Korea and the USA, including outputs",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "minimax-h3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "MiniMaxAI/MiniMax-H3",
+        "id": "minimax-h3-int8",
+        "kinds": [
+          "text2video",
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "load_int8": true,
+        "max_resolution": 1344,
+        "min_vram_gb": 78,
+        "name": "MiniMax H3 (Hailuo 3.0) H3-Base (int8)",
+        "parameters": "H3-Base + Qwen3-VL-32B text encoder, 8-bit blocks quantised at load",
+        "pipeline_class": "MiniMaxH3ModularPipeline",
+        "size_bytes": 144039641724,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "minimax-h3",
+        "parts": [
+          "audio_scheduler",
+          "audio_vae",
+          "model_index.json",
+          "scheduler",
+          "text_encoder",
+          "tokenizer",
+          "transformer",
+          "vae"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "at": "transformer_ref/minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
+        "path": "diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
+        "repo": "Comfy-Org/MiniMax-H3",
+        "revision": "e5eb578a89295337b8ff433a035929ce0279e0b6",
+        "sha256": "f86f2f79ebd2d76eb8eeb46091e83982e6ff51d255747e7b16e92834b392b8e9",
+        "size": 20958205608
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "conditions": "Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States; the works and their outputs may not be used, distributed or displayed outside it. Enforced per request through the licence's territorial grant.",
+      "id": "minimax-h3-community",
+      "name": "MiniMax H3 Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 768,
+        "default_num_frames": 240,
+        "default_steps": 50,
+        "default_width": 1344,
+        "description": "MiniMax H3 reference-image-to-video, float8 weights of the pruned reference transformer. Licence excludes the EU, UK, South Korea and the USA, including outputs",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "minimax-h3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "unsloth/MiniMax-H3-FP8",
+        "id": "minimax-h3-ref2va-fp8",
+        "kinds": [
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1344,
+        "min_vram_gb": 120,
+        "name": "MiniMax H3 Ref2VA (FP8)",
+        "parameters": "H3 Ref2VA pruned, float8 e4m3 scaled (dequantised to bf16 at load) + Qwen3-VL-32B text encoder",
+        "pipeline_class": "MiniMaxH3ModularPipeline",
+        "size_bytes": 98717278628,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "minimax-h3",
+        "parts": [
+          "audio_scheduler",
+          "audio_vae",
+          "model_index.json",
+          "scheduler",
+          "text_encoder",
+          "tokenizer",
+          "vae"
+        ]
+      },
+      {
+        "entry": "minimax-h3-ref2va",
+        "parts": [
+          "transformer_ref/config.json"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "at": "transformer/minimax_h3_fl2va_pruned-Q4_K.gguf",
+        "path": "minimax_h3_fl2va_pruned-Q4_K.gguf",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10",
+        "size": 11420663904
+      },
+      {
+        "at": "text_encoder/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+        "path": "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+        "size": 18218065024
+      },
+      {
+        "at": "audio_vae/minimax_h3_audio_vae_fp32.safetensors",
+        "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+        "size": 605254808
+      },
+      {
+        "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        "size": 5207808496
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "conditions": "Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States; the works and their outputs may not be used, distributed or displayed outside it. Enforced per request through the licence's territorial grant.",
+      "id": "minimax-h3-community",
+      "name": "MiniMax H3 Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 768,
+        "default_num_frames": 240,
+        "default_steps": 50,
+        "default_width": 1344,
+        "description": "MiniMax H3 first-and-last-frame to video, Q4_K. Licence excludes the EU, UK, South Korea and the USA, including outputs",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "minimax-h3",
+        "gguf_file": "minimax_h3_fl2va_pruned-Q4_K.gguf",
+        "gguf_repo": "unsloth/MiniMax-H3-GGUF",
+        "hf_repo": "MiniMaxAI/MiniMax-H3",
+        "id": "minimax-h3-fl2va-gguf",
+        "kinds": [
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1344,
+        "min_vram_gb": 44,
+        "name": "MiniMax H3 FL2VA (GGUF Q4_K)",
+        "parameters": "H3 FL2VA pruned Q4_K + Qwen3-VL-32B Q4_K_M",
+        "pipeline_class": "MiniMaxH3ModularPipeline",
+        "size_bytes": 35463290805,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "minimax-h3",
+        "parts": [
+          "audio_scheduler",
+          "audio_vae/config.json",
+          "scheduler",
+          "text_encoder/config.json",
+          "tokenizer",
+          "transformer/config.json",
+          "vae/config.json"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "at": "transformer_ref/minimax_h3_ref2va_pruned-Q4_K.gguf",
+        "path": "minimax_h3_ref2va_pruned-Q4_K.gguf",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "2fa5840021cf6967843eaeefde9aaa277e540de02986d5ee3d5b0e6a7a8c9dec",
+        "size": 11381096544
+      },
+      {
+        "at": "text_encoder/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+        "path": "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+        "size": 18218065024
+      },
+      {
+        "at": "audio_vae/minimax_h3_audio_vae_fp32.safetensors",
+        "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+        "size": 605254808
+      },
+      {
+        "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+        "repo": "unsloth/MiniMax-H3-GGUF",
+        "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        "size": 5207808496
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "conditions": "Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States; the works and their outputs may not be used, distributed or displayed outside it. Enforced per request through the licence's territorial grant.",
+      "id": "minimax-h3-community",
+      "name": "MiniMax H3 Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 1.0,
+        "default_height": 768,
+        "default_num_frames": 240,
+        "default_steps": 50,
+        "default_width": 1344,
+        "description": "MiniMax H3 reference-image-to-video, Q4_K. Licence excludes the EU, UK, South Korea and the USA, including outputs",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "minimax-h3",
+        "gguf_file": "minimax_h3_ref2va_pruned-Q4_K.gguf",
+        "gguf_repo": "unsloth/MiniMax-H3-GGUF",
+        "hf_repo": "MiniMaxAI/MiniMax-H3",
+        "id": "minimax-h3-ref2va-gguf",
+        "kinds": [
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1344,
+        "min_vram_gb": 44,
+        "name": "MiniMax H3 Ref2VA (GGUF Q4_K)",
+        "parameters": "H3 Ref2VA pruned Q4_K + Qwen3-VL-32B Q4_K_M",
+        "pipeline_class": "MiniMaxH3ModularPipeline",
+        "size_bytes": 35423723445,
+        "status": "planned",
+        "transformer_class": null
+      }
+    },
+    "requires": [
+      {
+        "entry": "minimax-h3",
+        "parts": [
+          "audio_scheduler",
+          "audio_vae/config.json",
+          "scheduler",
+          "text_encoder/config.json",
+          "tokenizer",
+          "vae/config.json"
+        ]
+      },
+      {
+        "entry": "minimax-h3-ref2va",
+        "parts": [
+          "transformer_ref/config.json"
+        ]
+      }
+    ]
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "6e0a5c43411271246ee0446dc644ac38eaf72958ca4dc2fb59c2fb3e3893420e",
+        "size": 555
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "a41e41fdf4c81536831a9f20a30ff34326df9871d796f54896d857ad53ff8b53",
+        "size": 889
+      },
+      {
+        "path": "text_tokenizer/chat_template.jinja",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "7120ee6666468d4e9b2dc11e133ac5c2fa765fa5907706bf0f906270aa5510c8",
+        "size": 12158
+      },
+      {
+        "path": "text_tokenizer/tokenizer.json",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "4dc692a99dca6d92a44e9529ffb53541eb79bb260eec7281bc51268c05d7311c",
+        "size": 17077500
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "8c3c0945e7e66b2f59cbac80aace9db04edb4230fa0931bf64d4c12f51cbc81f",
+        "size": 1075
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "116134e5492c514df79a2f07214e577c397aa961387dbe1c5dda488e7994ff6b",
+        "size": 5000040072
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "3b4c0aafe2705c900ac7bc743085a8e9e09c906624331bc2baa21e172e5d48e4",
+        "size": 1739335512
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "2af4752d63e8b308b8bfd29798ec6663886583ab228d7c643f559612c54df1ca",
+        "size": 1755
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "nvidia/Cosmos3-Edge",
+        "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+        "sha256": "230496cb59ff85bc9c040487737c4062480cb61c71e697b197b4c30142f2a0da",
+        "size": 1409400600
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "OpenMDW-1.1",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": 24,
+        "default_guidance_scale": 5.0,
+        "default_height": 480,
+        "default_num_frames": 121,
+        "default_steps": 50,
+        "default_width": 832,
+        "description": "NVIDIA Cosmos3 Edge world foundation model, 4B, image-to-video at 480p/121 frames. Ungated, commercial use permitted. Takes JSON-structured prompts rather than plain text",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "cosmos3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "nvidia/Cosmos3-Edge",
+        "id": "cosmos3-edge",
+        "kinds": [
+          "text2video",
+          "image2video"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 24,
+        "name": "NVIDIA Cosmos3 Edge",
+        "parameters": "4B",
+        "pipeline_class": "Cosmos3OmniPipeline",
+        "size_bytes": 17200000000,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "config.json",
+        "repo": "deepseek-community/Janus-Pro-1B",
+        "revision": "1655280bb75959cc1cb85529a2a8b26e7016072e",
+        "sha256": "931a5d566cbaed44fe0114412755c7b1efe76bf8e30c7d04ee3e337b121805aa",
+        "size": 1939
+      },
+      {
+        "path": "generation_config.json",
+        "repo": "deepseek-community/Janus-Pro-1B",
+        "revision": "1655280bb75959cc1cb85529a2a8b26e7016072e",
+        "sha256": "cb3fe41f2dbb0cf759909e9346b01cbd946d27a4a27c56d54d1fed02db0869be",
+        "size": 233
+      },
+      {
+        "path": "model.safetensors",
+        "repo": "deepseek-community/Janus-Pro-1B",
+        "revision": "1655280bb75959cc1cb85529a2a8b26e7016072e",
+        "sha256": "9d1a416f95fb58d6e02858623c9c676003d66006d51fb5d5cc93348ba78cb942",
+        "size": 4153396574
+      },
+      {
+        "path": "Janus-Pro-1B.f16.gguf",
+        "repo": "mradermacher/Janus-Pro-1B-GGUF",
+        "revision": "63b2ef6b2e2e84b4624d0ea1c65efbcac5abd801",
+        "sha256": "05c0b2d7dd2e79c16f83f46a6e336cf1ea408cfef50a8324f2d55573f43e0a22",
+        "size": 3309498240
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "conditions": "The weights are under the DeepSeek License, whose use-based restrictions (its Attachment A) bind every use and every downstream recipient; the code is MIT.",
+      "id": "deepseek-model",
+      "name": "DeepSeek License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 5.0,
+        "default_height": 384,
+        "default_num_frames": null,
+        "default_steps": 576,
+        "default_width": 384,
+        "description": "DeepSeek Janus-Pro 1B unified model: its language backbone writes a 24x24 grid of image tokens under classifier-free guidance, one token per step, and a VQ decoder turns the grid into a 384x384 image. The backbone runs from a GGUF of its language model (f16), the image head and decoder from the checkpoint.",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "janus",
+        "gguf_file": "Janus-Pro-1B.f16.gguf",
+        "gguf_repo": "mradermacher/Janus-Pro-1B-GGUF",
+        "hf_repo": "deepseek-community/Janus-Pro-1B",
+        "id": "janus-pro-1b",
+        "kinds": [
+          "text2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 384,
+        "min_vram_gb": 8,
+        "name": "Janus-Pro 1B",
+        "parameters": "2.1B",
+        "pipeline_class": "JanusProPipeline",
+        "size_bytes": 7462896986,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "conditions": "Licensed only outside the European Union, the United Kingdom and South Korea, for the weights and their outputs; a licensee above 100 million monthly active users needs Tencent's separate grant; outputs may not train other models.",
+      "id": "tencent-hunyuan-community",
+      "name": "Tencent Hunyuan Community License",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 5.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 50,
+        "default_width": 1024,
+        "description": "Tencent HunyuanImage 3.0: an 80B Mixture-of-Experts language backbone that denoises the image in its own token sequence (in-sequence flow matching) with a 3D-convolution autoencoder. Needs a large host: the weights are about 169 GB at bf16 and still about 45 GB at 4 bits, beyond a 16 GB GPU, so it is not served generally; the native port is checked against the reference at a tiny configuration only.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "hunyuan-image3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "tencent/HunyuanImage-3.0",
+        "id": "hunyuan-image-3.0",
+        "kinds": [
+          "text2image"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 2048,
+        "min_vram_gb": 192,
+        "name": "HunyuanImage 3.0",
+        "parameters": "80B (13B active)",
+        "pipeline_class": "HunyuanImage3Pipeline",
+        "size_bytes": 168661988241,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "conditions": "Territory is worldwide excluding the European Union, the United Kingdom and South Korea; the works and their outputs may not be used, distributed or displayed outside it. Enforced per request through the licence's territorial grant.",
+      "id": "tencent-hunyuan3d-2.1-community",
+      "name": "Tencent Hunyuan 3D 2.1 Community License",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 5.0,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 30,
+        "default_voxel_resolution": 512,
+        "default_width": 1024,
+        "description": "Tencent Hunyuan3D 2.1 image-to-3D with PBR texture synthesis. Ungated on the Hub but non-commercial: enrollment refuses it until the operator sets --accept-non-commercial. Loads through `hy3dgen`",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "hunyuan3d",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "tencent/Hunyuan3D-2.1",
+        "id": "hunyuan3d-2.1",
+        "kinds": [
+          "image23d"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1024,
+        "min_vram_gb": 24,
+        "name": "Hunyuan3D 2.1",
+        "parameters": "3.3B",
+        "pipeline_class": "Hunyuan3DDiTFlowMatchingPipeline",
+        "size_bytes": 13400000000,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "pipeline.json",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "222c359ab1ed9bc6735a640a34f95d47f8681b9bc4aaa101bfb80274676253c6",
+        "size": 4186
+      },
+      {
+        "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.json",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "6cdfb636854f60ffcadd8c49244169cd449f34c5ccdb55b5ff7c04678f9c399e",
+        "size": 467
+      },
+      {
+        "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "ca01377c485bec418076d38ee80166d32dc776d744f2553b835cba1e97a7abf6",
+        "size": 2584426920
+      },
+      {
+        "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "ddbd7a1d34ce9a8e7af2f6ef9ae686d9ab49f69e62dacb98d8409b511cdbd5e2",
+        "size": 458
+      },
+      {
+        "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "ec5e0917ef9b7e25ad51dffc7d19687a42019871f94239f2fa7f86264c55b70f",
+        "size": 2584574424
+      },
+      {
+        "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.json",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "3093796257a62f838d2e5578ac4580ca3b7d88d10b87d348065d3fdfcc4c2077",
+        "size": 458
+      },
+      {
+        "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "8371aa1c5d13be79dcd5ddfd2cf3835e902e204dc34427169a1c702828e1a94d",
+        "size": 2584672728
+      },
+      {
+        "path": "ckpts/shape_dec_next_dc_f16c32_fp16.json",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "5f1b856dffce79466fb18f5f0eefc08f08c673b24b3c05b20359c0b6d318a209",
+        "size": 678
+      },
+      {
+        "path": "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581",
+        "size": 948490494
+      },
+      {
+        "path": "ckpts/tex_dec_next_dc_f16c32_fp16.json",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "22074e4ab5b28e2b72d33a3fe61bf416134b89e12d0fc5c729f37da75da0c4d1",
+        "size": 705
+      },
+      {
+        "path": "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+        "repo": "microsoft/TRELLIS.2-4B",
+        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+        "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c",
+        "size": 948458812
+      },
+      {
+        "at": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.json",
+        "path": "ckpts/ss_dec_conv3d_16l8_fp16.json",
+        "repo": "microsoft/TRELLIS-image-large",
+        "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
+        "sha256": "646781293f1cda74720de85d1cef50a957fb4aebd9a4bd014e454e32f2330ac5",
+        "size": 245
+      },
+      {
+        "at": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+        "path": "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+        "repo": "microsoft/TRELLIS-image-large",
+        "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
+        "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a",
+        "size": 147591972
+      },
+      {
+        "at": "facebook/dinov3-vitl16-pretrain-lvd1689m/config.json",
+        "path": "config.json",
+        "repo": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+        "revision": "ea8dc2863c51be0a264bab82070e3e8836b02d51",
+        "sha256": "135ecd23e34a70b6fbed8b083fdecb319b7e3a54e3d849258bbe4ddcf1783bb5",
+        "size": 745
+      },
+      {
+        "at": "facebook/dinov3-vitl16-pretrain-lvd1689m/model.safetensors",
+        "path": "model.safetensors",
+        "repo": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+        "revision": "ea8dc2863c51be0a264bab82070e3e8836b02d51",
+        "sha256": "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179",
+        "size": 1212559808
+      }
+    ],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "image encoder (DINOv3 ViT-L/16)",
+          "id": "dinov3",
+          "name": "DINOv3 License",
+          "tier": "commercial_custom"
+        }
+      ],
+      "name": "MIT",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 7.5,
+        "default_height": 1024,
+        "default_num_frames": null,
+        "default_steps": 12,
+        "default_voxel_resolution": 512,
+        "default_width": 1024,
+        "description": "Microsoft TRELLIS.2 image-to-3D: the object on a transparent background in, a GLB mesh with PBR materials out, built on the 512³ surface path (the 1024 and 1536 paths are not served). Its DINOv3 image encoder is gated behind Meta's DINOv3 License, so the entry is gated: the operator accepts dinov3 and the encoder comes from network providers or the operator's own origin credential.",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "trellis2",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "microsoft/TRELLIS.2-4B",
+        "id": "trellis2-4b",
+        "kinds": [
+          "image23d"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1536,
+        "min_vram_gb": 16,
+        "name": "TRELLIS.2 4B",
+        "parameters": "4B",
+        "pipeline_class": "Trellis2ImageTo3DPipeline",
+        "size_bytes": 11010783100,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "text encoder (Qwen3-VL-4B-Instruct)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "conditions": "Non-commercial and non-production use (research, testing, evaluation) is granted to anyone. Commercial use of outputs, and production use solely to generate them, is granted only to a Qualifying User: the licensee together with its affiliates below US$5,000,000 gross annualized revenue. Any other commercial use, including commercial fine-tuning or distribution, needs a separate licence from Black Forest Labs (https://bfl.ai/licensing). Commercial output use requires content filtering or review of outputs, and AI-generation disclosures where the law requires them. The model, its derivatives and its outputs may not be used to improve another model with a similar function, nor for military, surveillance or biometric-processing purposes. A distributed copy must carry the licence and its attribution notice. Full text: https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md The licence defines production robotic and control uses as Robotics Uses and names non-commercial Robotics Uses in its grant (Sections 1.f and 2.a).",
+      "id": "flux-kommunity-1.0",
+      "name": "FLUX Kommunity License v1.0",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 3.0,
+        "default_height": 256,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 512,
+        "description": "FLUX 3 world-action base model: jointly denoises observation video and an action chunk, text from a Qwen3-VL-4B encoder. Needs a per-embodiment head before it drives a robot. Under the FLUX Kommunity License: a node serves it once its operator has accepted flux-kommunity-1.0; the weights are gated at their origin.",
+        "distilled": false,
+        "expert_pair": null,
+        "family": "flux3-action",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/flux-3-action-base",
+        "id": "flux-3-action-base",
+        "kinds": [
+          "action_policy"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1024,
+        "min_vram_gb": 32,
+        "name": "FLUX 3 Action base",
+        "parameters": "7B",
+        "pipeline_class": "Flux3ActionPipeline",
+        "size_bytes": 25370787940,
+        "status": "planned",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "text_encoder/config.json",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
+        "size": 1505
+      },
+      {
+        "path": "text_encoder/model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
+        "size": 4967229296
+      },
+      {
+        "path": "text_encoder/model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
+        "size": 3908490048
+      },
+      {
+        "path": "text_encoder/tokenizer.json",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "size": 7032403
+      },
+      {
+        "path": "text_encoder/tokenizer_config.json",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+        "size": 10868
+      },
+      {
+        "path": "video_vae.safetensors",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "db1c3211548371cf42c7230d52b5a99df5072f246d6bdfdc8fee99208ef58f01",
+        "size": 2508132617
+      },
+      {
+        "path": "config.json",
+        "repo": "black-forest-labs/flux-3-action-so101",
+        "revision": "0713a7af6768562e618e81d534372c6795d41b2e",
+        "sha256": "f10e9a66e1448e9b4d1a87508e538b30b8a4be0232493b7b39d90eae21a11186",
+        "size": 2920
+      },
+      {
+        "path": "model.safetensors",
+        "repo": "black-forest-labs/flux-3-action-so101",
+        "revision": "0713a7af6768562e618e81d534372c6795d41b2e",
+        "sha256": "0f57664573dde660590060d81b2a0b336fc674f06e0494de9307e52f43b6fd01",
+        "size": 13894196280
+      },
+      {
+        "path": "policy_preprocessor.json",
+        "repo": "black-forest-labs/flux-3-action-so101",
+        "revision": "0713a7af6768562e618e81d534372c6795d41b2e",
+        "sha256": "4c6fb125252845fe64258ce4cfac8d6f29297be77d285abf862f0b894b55ae76",
+        "size": 1574
+      },
+      {
+        "path": "policy_preprocessor_step_3_flux3_observation_history_normalizer.safetensors",
+        "repo": "black-forest-labs/flux-3-action-so101",
+        "revision": "0713a7af6768562e618e81d534372c6795d41b2e",
+        "sha256": "fb0b16f0b7909cb2604c089e1fdda2caf34d7ea168574594a5f5cf673d326d97",
+        "size": 360
+      }
+    ],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "text encoder (Qwen3-VL-4B-Instruct)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "conditions": "Non-commercial and non-production use (research, testing, evaluation) is granted to anyone. Commercial use of outputs, and production use solely to generate them, is granted only to a Qualifying User: the licensee together with its affiliates below US$5,000,000 gross annualized revenue. Any other commercial use, including commercial fine-tuning or distribution, needs a separate licence from Black Forest Labs (https://bfl.ai/licensing). Commercial output use requires content filtering or review of outputs, and AI-generation disclosures where the law requires them. The model, its derivatives and its outputs may not be used to improve another model with a similar function, nor for military, surveillance or biometric-processing purposes. A distributed copy must carry the licence and its attribution notice. Full text: https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md The licence defines production robotic and control uses as Robotics Uses and names non-commercial Robotics Uses in its grant (Sections 1.f and 2.a).",
+      "id": "flux-kommunity-1.0",
+      "name": "FLUX Kommunity License v1.0",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "action": {
+          "action_dim": 6,
+          "cameras": 2,
+          "chunk_len": 42,
+          "control_hz": 30,
+          "embodiment": "so101",
+          "state_dim": 6
+        },
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 3.0,
+        "default_height": 256,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 512,
+        "description": "FLUX 3 world-action policy for the SO-101 arm: two cameras side by side on a 256x512 canvas, 42-step delta-action chunks at 30 Hz, 4 Euler steps. Under the FLUX Kommunity License: a node serves it once its operator has accepted flux-kommunity-1.0; the weights are gated at their origin.",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "flux3-action",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/flux-3-action-so101",
+        "id": "flux-3-action-so101",
+        "kinds": [
+          "action_policy"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1024,
+        "min_vram_gb": 32,
+        "name": "FLUX 3 Action SO-101",
+        "parameters": "7B",
+        "pipeline_class": "Flux3ActionPipeline",
+        "size_bytes": 25285097871,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "text_encoder/config.json",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
+        "size": 1505
+      },
+      {
+        "path": "text_encoder/model-00001-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
+        "size": 4967229296
+      },
+      {
+        "path": "text_encoder/model-00002-of-00002.safetensors",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
+        "size": 3908490048
+      },
+      {
+        "path": "text_encoder/tokenizer.json",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+        "size": 7032403
+      },
+      {
+        "path": "text_encoder/tokenizer_config.json",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
+        "size": 10868
+      },
+      {
+        "path": "video_vae.safetensors",
+        "repo": "black-forest-labs/flux-3-action-base",
+        "revision": "99bc185b6ea58c496ffae14c0fce9cc29be1a045",
+        "sha256": "db1c3211548371cf42c7230d52b5a99df5072f246d6bdfdc8fee99208ef58f01",
+        "size": 2508132617
+      },
+      {
+        "path": "config.json",
+        "repo": "black-forest-labs/flux-3-action-droid",
+        "revision": "d84c80adc0721780245aabb75e45d4164ead7b97",
+        "sha256": "b4cd20f7e5d2b9a735a989a66d4f4961c852e2237ff23f84b9f60b2801322f9c",
+        "size": 2100
+      },
+      {
+        "path": "model.safetensors",
+        "repo": "black-forest-labs/flux-3-action-droid",
+        "revision": "d84c80adc0721780245aabb75e45d4164ead7b97",
+        "sha256": "951be04674795b70e9e98d2a85c83c92503a7b6f6c31fd6fd94bc12527b19def",
+        "size": 13894173232
+      },
+      {
+        "path": "policy_preprocessor.json",
+        "repo": "black-forest-labs/flux-3-action-droid",
+        "revision": "d84c80adc0721780245aabb75e45d4164ead7b97",
+        "sha256": "45fcc2598ad264ebab8568f61b647d3cc863cc3c8d060229e8d18009493f1188",
+        "size": 1979
+      }
+    ],
+    "gated": true,
+    "licence": {
+      "components": [
+        {
+          "covers": "text encoder (Qwen3-VL-4B-Instruct)",
+          "name": "Apache-2.0",
+          "tier": "permissive"
+        }
+      ],
+      "conditions": "Non-commercial and non-production use (research, testing, evaluation) is granted to anyone. Commercial use of outputs, and production use solely to generate them, is granted only to a Qualifying User: the licensee together with its affiliates below US$5,000,000 gross annualized revenue. Any other commercial use, including commercial fine-tuning or distribution, needs a separate licence from Black Forest Labs (https://bfl.ai/licensing). Commercial output use requires content filtering or review of outputs, and AI-generation disclosures where the law requires them. The model, its derivatives and its outputs may not be used to improve another model with a similar function, nor for military, surveillance or biometric-processing purposes. A distributed copy must carry the licence and its attribution notice. Full text: https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md The licence defines production robotic and control uses as Robotics Uses and names non-commercial Robotics Uses in its grant (Sections 1.f and 2.a).",
+      "id": "flux-kommunity-1.0",
+      "name": "FLUX Kommunity License v1.0",
+      "tier": "commercial_custom"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "action": {
+          "action_dim": 8,
+          "cameras": 3,
+          "chunk_len": 32,
+          "control_hz": 15,
+          "embodiment": "droid",
+          "state_dim": 8
+        },
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 4.0,
+        "default_height": 544,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 736,
+        "description": "FLUX 3 world-action policy for the DROID platform: three cameras on a 544x736 canvas, 32-step absolute-action chunks at 15 Hz, 4 UniPC steps. Under the FLUX Kommunity License: a node serves it once its operator has accepted flux-kommunity-1.0; the weights are gated at their origin.",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "flux3-action",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "black-forest-labs/flux-3-action-droid",
+        "id": "flux-3-action-droid",
+        "kinds": [
+          "action_policy"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1024,
+        "min_vram_gb": 32,
+        "name": "FLUX 3 Action DROID",
+        "parameters": "7B",
+        "pipeline_class": "Flux3ActionPipeline",
+        "size_bytes": 25285074048,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [
+      {
+        "path": "model_index.json",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "6e0a5c43411271246ee0446dc644ac38eaf72958ca4dc2fb59c2fb3e3893420e",
+        "size": 555
+      },
+      {
+        "path": "scheduler/scheduler_config.json",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "6b04159c2b2116e9055d52d776e3e15f5923e8251aa3a8d43215d7040cc30505",
+        "size": 888
+      },
+      {
+        "path": "text_tokenizer/chat_template.jinja",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "7120ee6666468d4e9b2dc11e133ac5c2fa765fa5907706bf0f906270aa5510c8",
+        "size": 12158
+      },
+      {
+        "path": "text_tokenizer/tokenizer.json",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "4dc692a99dca6d92a44e9529ffb53541eb79bb260eec7281bc51268c05d7311c",
+        "size": 17077500
+      },
+      {
+        "path": "transformer/config.json",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "9d8f50a1d9ddef654c02980918e855ae116e2765e2bea718794e0f6d14a3615f",
+        "size": 1079
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "99b0ff1f9dbdcb497fac16cbc0ebe33dee19653b4c182fa0d474433dcc845206",
+        "size": 5000041944
+      },
+      {
+        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "1842fefdacd0dcbb8ab543b59848a0b696e0c9634676bc76db9e0c971fe328d5",
+        "size": 1748779008
+      },
+      {
+        "path": "vae/config.json",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "2af4752d63e8b308b8bfd29798ec6663886583ab228d7c643f559612c54df1ca",
+        "size": 1755
+      },
+      {
+        "path": "vae/diffusion_pytorch_model.safetensors",
+        "repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "revision": "a7c7288f9b6ac1684e993007b0f9703dd26e58ef",
+        "sha256": "230496cb59ff85bc9c040487737c4062480cb61c71e697b197b4c30142f2a0da",
+        "size": 1409400600
+      }
+    ],
+    "gated": false,
+    "licence": {
+      "name": "OpenMDW-1.1",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "media-gen",
+      "spec": {
+        "action": {
+          "action_dim": 10,
+          "cameras": 1,
+          "chunk_len": 32,
+          "control_hz": 15,
+          "embodiment": "droid_lerobot",
+          "state_dim": 8
+        },
+        "config_repo": null,
+        "default_fps": null,
+        "default_guidance_scale": 3.0,
+        "default_height": 544,
+        "default_num_frames": null,
+        "default_steps": 4,
+        "default_width": 736,
+        "description": "NVIDIA Cosmos3 Edge world-action policy for the DROID platform: one observation image plus an instruction to a 32-step action chunk (10 values per step: end-effector pose and gripper) with its rollout frames, at 15 Hz. Ungated, commercial use permitted; the commercially servable policy entry. Observation canvases are the action resolution-tier canvases, for example 256x256 (tier 256) or 736x544 (tier 480).",
+        "distilled": false,
+        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "expert_pair": null,
+        "family": "cosmos3",
+        "gguf_file": null,
+        "gguf_repo": null,
+        "hf_repo": "nvidia/Cosmos3-Edge-Policy-DROID",
+        "id": "cosmos3-edge-policy-droid",
+        "kinds": [
+          "action_policy"
+        ],
+        "latent_upsampler": null,
+        "max_resolution": 1280,
+        "min_vram_gb": 24,
+        "name": "NVIDIA Cosmos3 Edge Policy DROID",
+        "parameters": "4B",
+        "pipeline_class": "Cosmos3OmniPipeline",
+        "size_bytes": 8175303329,
+        "status": "native",
+        "transformer_class": null
+      }
+    }
+  }
+]

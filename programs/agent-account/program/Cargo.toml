@@ -1,0 +1,25 @@
+[package]
+name = "tenzro-svm-agent-account"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Tenzro agent accounts on Solana: grants proven under Tenzro finality, actions signed by serving nodes' P-256 keys"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Build the library without the program entrypoint (for tests that link it).
+no-entrypoint = []
+
+[dependencies]
+solana-program = "3"
+tenzro-finality-verifier = { path = "../../../contracts/finality-verifier" }
+tenzro-finality-solana = { path = "../../../contracts/solana", features = ["no-entrypoint"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("custom-heap", "custom-panic"))',
+  'cfg(target_os, values("solana"))',
+] }

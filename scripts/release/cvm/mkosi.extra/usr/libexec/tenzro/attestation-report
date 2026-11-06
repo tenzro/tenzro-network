@@ -1,0 +1,33 @@
+#!/bin/sh
+# Print what the node attests to the serial console, so an operator can read
+# it without logging in: the detected TEE, the measurement registers of a
+# fresh report, the report itself and the firmware's boot event logs (both
+# gzip-compressed, base64, in tagged lines ending with "<tag> END").
+set -u
+rpc() {
+    curl -sf --max-time 180 -H 'content-type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" http://127.0.0.1:8545
+}
+emit() {
+    base64 -w 0 | fold -w 120 | sed "s/^/$1 /"
+    echo
+    echo "$1 END"
+}
+i=0
+until rpc tenzro_detectTee '{}' >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -gt 180 ] || systemctl -q is-failed tenzro-node.service tenzro-tpm-provision.service; then
+        echo "TENZRO-REPORT the node RPC did not answer"
+        journalctl -b -o cat --no-pager -n 40 -u tenzro-tpm-provision -u tenzro-node | sed 's/^/TENZRO-LOG /'
+        exit 1
+    fi
+    sleep 5
+done
+echo "TENZRO-DETECT $(rpc tenzro_detectTee '{}' | jq -c .result)"
+att=$(rpc tenzro_getTeeAttestation '{}')
+echo "TENZRO-MEASUREMENTS $(echo "$att" | jq -c '{vendor: .result.vendor, measurements: .result.measurements, error: .error}')"
+echo "$att" | jq -r '.result.report_hex // empty' | gzip -9n | emit TENZRO-REPORT
+for log in /sys/firmware/acpi/tables/data/CCEL /sys/kernel/security/tpm0/binary_bios_measurements; do
+    [ -r "$log" ] && gzip -9nc "$log" | emit "TENZRO-EVENTLOG-$(basename "$log")"
+done
+exit 0

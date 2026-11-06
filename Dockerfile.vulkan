@@ -1,0 +1,143 @@
+# Vulkan build of tenzro-node: llama.cpp's Vulkan backend serves models on
+# AMD, Intel and NVIDIA GPUs through the GPU driver's Vulkan support. ONNX
+# Runtime has no Vulkan provider, so this build does not serve ONNX models on
+# an NVIDIA or AMD GPU (the CUDA and ROCm builds do).
+#
+# Built by scripts/release/build-linux.sh <arch> vulkan, on the same pinned
+# Ubuntu 24.04 image as the CPU build (glibc 2.39 floor; the prebuilt ONNX Runtime
+# needs glibc 2.38 or newer). The ggml shaders
+# are compiled at build time with glslc. The binary links the Vulkan loader
+# (libvulkan.so.1); the driver is found at runtime.
+
+# Stage 1: Build
+FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    protobuf-compiler \
+    git \
+    ca-certificates \
+    curl \
+    libvulkan-dev \
+    glslc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (the workspace rust-toolchain.toml selects the channel;
+# rustup syncs it on the first cargo invocation)
+# rustup-init is a fixed release, checked against its published sha256; any
+# other file fails the build.
+ARG RUSTUP_VERSION=1.29.1
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64) t=x86_64-unknown-linux-gnu; sum=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;; \
+      aarch64) t=aarch64-unknown-linux-gnu; sum=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;; \
+      *) echo "no pinned rustup-init for $(uname -m)"; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${t}/rustup-init"; \
+    echo "${sum}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --default-toolchain 1.99.1 --profile minimal; \
+    rm /tmp/rustup-init
+ENV PATH=/root/.cargo/bin:$PATH
+
+# ggml's Vulkan backend needs newer Vulkan and SPIR-V headers than Ubuntu 24.04
+# ships (1.3.275). Both are header-only; they are installed under /usr/local
+# from the Khronos repositories at pinned commits (Vulkan SDK 1.4.363.0). The
+# loader stays the distribution's libvulkan.so.1, whose ABI is stable.
+ARG VULKAN_HEADERS_COMMIT=6802bb4733b63ed5efd3adb308a6c885ef180ea1
+ARG SPIRV_HEADERS_COMMIT=496543121ce6419f23d6fa5d7194ba66c36212d2
+RUN set -e; for repo in Vulkan-Headers:$VULKAN_HEADERS_COMMIT SPIRV-Headers:$SPIRV_HEADERS_COMMIT; do \
+        name=${repo%%:*}; commit=${repo#*:}; \
+        git init -q /tmp/$name; \
+        git -C /tmp/$name fetch -q --depth 1 https://github.com/KhronosGroup/$name "$commit"; \
+        git -C /tmp/$name checkout -q FETCH_HEAD; \
+        cmake -S /tmp/$name -B /tmp/$name/build -DCMAKE_INSTALL_PREFIX=/usr/local >/dev/null; \
+        cmake --install /tmp/$name/build >/dev/null; \
+        rm -rf /tmp/$name; \
+    done
+
+WORKDIR /build
+# The commit time (build-linux.sh passes it), for every tool that stamps a date.
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+# Force clang as the C/C++ compiler (required by llama-cpp-sys-2 which uses clang-specific flags)
+ENV CC=clang
+ENV CXX=clang++
+
+# ggml defaults to -march=native, which would pin the binary to whatever CPU
+# the build host happens to have. The fleet is heterogeneous, so build for the
+# baseline instruction set instead.
+ENV CMAKE_ARGS="-DGGML_NATIVE=OFF"
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY tools/ tools/
+COPY sdk/tenzro-ts-sdk/native/ sdk/tenzro-ts-sdk/native/
+COPY sdk/tenzro-py/native/ sdk/tenzro-py/native/
+# vendor/* subtrees (erc8004-evm, erc8004-solana, erc8004-atom)
+# are source artifacts for regenerate.sh, not build-time
+# dependencies — they're copied here because COPY vendor/ is a single layer
+# and the cost is negligible vs. surgical sub-copies.
+COPY vendor/ vendor/
+
+# Build tenzro-node with the Vulkan backend, then tenzro-cli in its own run so
+# the GPU feature does not unify into the CLI, which serves no model.
+RUN cargo build --release --locked -p tenzro-node --features tenzro-node/vulkan && \
+    cargo build --release --locked -p tenzro-cli
+
+
+# Stage 2: Runtime
+FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3t64 \
+    curl \
+    libstdc++6 \
+    libgomp1 \
+    libvulkan1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro
+
+# Copy binaries from builder
+COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
+COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+
+# Create data directories
+# One root for everything on the persistent volume. `TENZRO_HOME` moves the
+# shared model store, the HuggingFace cache, and any per-instance data dir
+# onto /data/tenzro, which is the mounted volume. Keeping weights off the
+# container's ephemeral layer means a restart does not re-download them.
+#
+# `--data-dir /data/tenzro` stays pinned in CMD below. That is the documented
+# escape hatch, and it is used here deliberately: the chain database lives at
+# /data/tenzro/db rather than under /data/tenzro/instances/default.
+ENV TENZRO_HOME=/data/tenzro
+RUN mkdir -p /data/tenzro/models /data/tenzro/hf /config && chown -R tenzro:tenzro /data /config
+
+USER tenzro
+WORKDIR /home/tenzro
+
+# Expose ports
+# P2P, JSON-RPC, Web API, Metrics, MCP, A2A
+EXPOSE 9000 8545 8080 9090 3001 3002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/verify/health || exit 1
+
+# Default entrypoint
+ENTRYPOINT ["tenzro-node"]
+
+# Default args (override with docker run args)
+CMD ["--data-dir", "/data/tenzro", "--log-level", "info"]

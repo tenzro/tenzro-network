@@ -1,0 +1,16 @@
+: keep-alive
+
+id: 0f3a:0
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+id: 0f3a:1
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}
+
+id: 0f3a:2
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b",
+data: "choices":[{"index":0,"delta":{"content":"lo, wörld 世界"},"finish_reason":null}]}
+
+id: 0f3a:3
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1760000000,"model":"qwen3.5-4b","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"eos"}],"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9},"cost_wei":"1500","generation_time_ms":12,"tokens_per_second":333.3,"seed":7}
+
+data: [DONE]

@@ -1,0 +1,34 @@
+[package]
+name = "tenzro-device-key-node"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Node.js binding over tenzro-device-key: read the public key, sign a digest, and attest a TPM or Secure Enclave key. The private key never leaves the hardware."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The N-API glue, on only for the addon build (`npm run build`). Test
+# binaries are not loaded by Node and have no N-API symbols to link against;
+# on by default it reached every test binary of a workspace build that links
+# this crate, the Python binding's among them.
+default = []
+node = ["dep:napi", "dep:napi-derive"]
+
+[dependencies]
+tenzro-device-key = { path = "../../../crates/tenzro-device-key" }
+napi = { version = "2", default-features = false, features = ["napi6"], optional = true }
+napi-derive = { version = "2", optional = true }
+
+[dev-dependencies]
+p256 = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
+
+[lints]
+workspace = true

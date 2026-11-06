@@ -1,0 +1,103 @@
+# AMD ROCm/HIP image variant. Builds tenzro-node with GPU acceleration:
+#   - llama.cpp HIP backend for LLM inference (feature `tenzro-node/rocm`)
+#   - ONNX Runtime falls back to CPU for the non-LLM modalities (there is no
+#     ROCm ONNX execution-provider feature wired in tenzro-model)
+#
+# Run with the AMD container runtime:
+#   docker run --device /dev/kfd --device /dev/dri --group-add video ...
+# The CPU image is built from ./Dockerfile and is unchanged by this file.
+
+# Stage 1: Build
+FROM rocm/dev-ubuntu-24.04:7.2.4-complete@sha256:92f309c51b52cef8762867848f1529dee821624f23cd5df38455e819538f762f AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    protobuf-compiler \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (the workspace rust-toolchain.toml selects the channel;
+# rustup syncs it on the first cargo invocation)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain 1.99.1 --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
+
+WORKDIR /build
+
+# ROCm's hipcc drives the ggml HIP kernels; the rest of the C/C++ tree uses
+# clang (llama-cpp-sys-2 relies on clang-specific flags).
+ENV CC=clang
+ENV CXX=clang++
+ENV ROCM_PATH=/opt/rocm
+
+# Target GPU architectures for the ggml HIP kernels (CMAKE_HIP_ARCHITECTURES).
+# gfx90a = MI210/MI250, gfx942 = MI300X/MI325X, gfx1100 = RX 7900 XTX / RDNA3,
+# gfx1201 = RDNA4. "native" is unusable: the build container has no GPU.
+ENV AMDGPU_TARGETS="gfx90a;gfx942;gfx1100;gfx1201"
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY tools/ tools/
+COPY vendor/ vendor/
+
+# Build tenzro-node (llama.cpp HIP backend), then tenzro-cli on its own so the
+# GPU feature does not unify into the CLI, which serves no model.
+RUN cargo build --release --locked -p tenzro-node --features tenzro-node/rocm && \
+    cargo build --release --locked -p tenzro-cli
+
+
+# Stage 2: Runtime
+FROM rocm/dev-ubuntu-24.04:7.2.4-complete@sha256:92f309c51b52cef8762867848f1529dee821624f23cd5df38455e819538f762f AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3t64 \
+    curl \
+    libstdc++6 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user, added to the render/video groups so it can reach
+# /dev/kfd and /dev/dri when the device nodes are passed in at `docker run`.
+RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro \
+    && usermod -aG video,render tenzro
+
+# Copy binaries from builder
+COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
+COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+
+# Create data directories
+# One root for everything on the persistent volume. `TENZRO_HOME` moves the
+# shared model store, the HuggingFace cache, and any per-instance data dir
+# onto /data/tenzro, which is the mounted volume. Keeping weights off the
+# container's ephemeral layer means a restart does not re-download them.
+#
+# `--data-dir /data/tenzro` stays pinned in CMD below. That is the documented
+# escape hatch, and it is used here deliberately: the chain database lives at
+# /data/tenzro/db rather than under /data/tenzro/instances/default.
+ENV TENZRO_HOME=/data/tenzro
+RUN mkdir -p /data/tenzro/models /data/tenzro/hf /config && chown -R tenzro:tenzro /data /config
+
+USER tenzro
+WORKDIR /home/tenzro
+
+# Expose ports
+# P2P, JSON-RPC, Web API, Metrics, MCP, A2A
+EXPOSE 9000 8545 8080 9090 3001 3002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/verify/health || exit 1
+
+# Default entrypoint
+ENTRYPOINT ["tenzro-node"]
+
+# Default args (override with docker run args)
+CMD ["--data-dir", "/data/tenzro", "--log-level", "info"]

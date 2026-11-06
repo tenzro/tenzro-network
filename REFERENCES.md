@@ -1,0 +1,78 @@
+# References
+
+Tenzro Network is an original, compositional implementation. It builds on open
+standards, published research, and open-source software. This file records the
+prior art the protocol composes, so the lineage of each design is legible.
+
+The presence of a reference here means the corresponding public work informed a
+design decision. It does not imply any code was copied; components that ship code
+are credited in [NOTICE](NOTICE) under their own licenses.
+
+## Consensus
+
+- DAG-based BFT consensus (Narwhal, Bullshark, Mysticeti, Sailfish) — ordering
+  from a round-based DAG, and the Sailfish commit rule with no-vote
+  certificates.
+- Signature-free optimistic reliable broadcast.
+- Periodic transferable checkpoints (Casper FFG, Algorand state proofs).
+- Block-STM — optimistic parallel transaction execution with MVCC and
+  deterministic re-execution.
+- Reputation-weighted proposer election.
+
+## Cryptography and proofs
+
+- Plonky3 — STARK proving over small fields (KoalaBear), with Poseidon2 hashing
+  and FRI commitments.
+- FIPS 203 (ML-KEM), FIPS 204 (ML-DSA), FIPS 205 (SLH-DSA) — post-quantum
+  key encapsulation and signatures.
+- RFC 9381 — ECVRF (Edwards25519, SHA-512, TAI).
+- RFC 9180 — HPKE, used for sealed-shard key wrapping.
+
+## Distributed training
+
+- Data-parallel low-communication training with periodic outer synchronization
+  (DiLoCo-family methods), and the open reference implementations thereof.
+- Gradient quantization and sparsification for communication-efficient outer
+  synchronization.
+- TOPLOC-class activation commitments for verifiable inference and training.
+- Byzantine-robust aggregation (trimmed mean, coordinate-wise median, Krum).
+- Witness-committee coordination with idempotent on-chain finalization and
+  no-endorsement certificates, as used by production decentralized-training
+  protocols.
+
+## Payments and identity
+
+- W3C Decentralized Identifiers (DID) and Verifiable Credentials.
+- ERC-8004 — trustless agent registries.
+- ERC-4337 / ERC-7579 — account abstraction and modular smart-account validators.
+- EIP-7702 — set-code authorizations.
+- EIP-1559 — fee market.
+- Permit2 — signature-based token transfers.
+- x402 and the Machine Payments Protocol (MPP) — HTTP 402 payment flows.
+- x402-rs — reference pattern for the self-hosted EIP-3009 / Permit2 facilitator.
+- EIP-3009 — `transferWithAuthorization` meta-transactions (gasless USDC transfers).
+- AP2 — agent payment mandates.
+
+## Model routing
+
+- LLM request routers that learn from preference data which queries need a
+  stronger model, and the open reference implementations thereof (RouteLLM).
+  Tenzro's meta-router differs in shape: it routes over an open catalog rather
+  than a fixed model pair, and learns from routing outcomes rather than an
+  offline preference corpus.
+- Sequential (online) k-means for streaming vector clustering.
+- Laplace / Beta(1,1) smoothing for rate estimates over small samples.
+- UCB1 — upper-confidence-bound action selection, adapted to give unobserved
+  model/cluster pairs a bounded exploration allowance.
+- Reciprocal rank fusion for merging ranked result lists.
+
+## Transport and data availability
+
+- iroh / iroh-blobs — QUIC-native content-addressed transfer, BLAKE3-verified.
+- Erasure-coded data availability.
+- Pkarr — DNS-over-DHT discovery.
+
+## Trusted execution
+
+- Intel TDX, AMD SEV-SNP, AWS Nitro, and NVIDIA GPU confidential computing
+  attestation formats and certificate chains.

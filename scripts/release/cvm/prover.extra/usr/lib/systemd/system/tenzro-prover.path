@@ -1,0 +1,9 @@
+[Unit]
+Description=Wrap finality receipts placed in the prover inbox
+Documentation=https://tenzro.com/docs/node/confidential-vm
+
+[Path]
+PathExistsGlob=/var/lib/tenzro-prover/inbox/*.receipt
+
+[Install]
+WantedBy=multi-user.target

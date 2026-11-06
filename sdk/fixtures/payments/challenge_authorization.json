@@ -1,0 +1,24 @@
+{
+  "description": "The message a payer signs (context tenzro/payment/authorization) to answer a challenge the node issued, quoted (quote_digest, usd_e6), with a developer margin the payer signs (app_wallet, margin_bps) and metered (max_amount above the amount, recorded as upto_max). The pay endpoints take the signed credential as {\"credential\": ...}.",
+  "challenge": {
+    "challenge_id": "c0ffee00-0000-4000-8000-000000000003",
+    "protocol": "mpp",
+    "resource": "/api/inference/gemma4-9b",
+    "amount": 1000,
+    "asset": "TNZO",
+    "recipient": "0909090909090909090909090909090909090909090909090909090909090909",
+    "chain": "tenzro",
+    "expires_at": "2026-10-05T12:00:00Z",
+    "extra": {
+      "chain_id": 1337,
+      "quote_digest": "abababababababababababababababababababababababababababababababab",
+      "usd_e6": 1500000,
+      "app_wallet": "0707070707070707070707070707070707070707070707070707070707070707",
+      "margin_bps": 150
+    }
+  },
+  "public_key": "42424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242",
+  "max_amount": "2500",
+  "payer_address": "6405598c5125a09ad7f4cff77b8fca1c704e1d9a000000000000000000000000",
+  "message": "74656e7a726f2f7061796d656e742d617574686f72697a6174696f6e39050000000000002400000063306666656530302d303030302d343030302d383030302d3030303030303030303030336405598c5125a09ad7f4cff77b8fca1c704e1d9a0000000000000000000000000909090909090909090909090909090909090909090909090909090909090909c409000000000000000000000000000004000000544e5a4fbc93e09b3f914727750b9cbef03821e99068ea9250649e3415145b6579db4c13abababababababababababababababababababababababababababababababab60e316000000000001070707070707070707070707070707070707070707070707070707070707070796000000"
+}

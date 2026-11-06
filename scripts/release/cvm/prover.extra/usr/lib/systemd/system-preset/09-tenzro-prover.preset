@@ -1,0 +1,3 @@
+enable tenzro-prover-image.service
+enable tenzro-prover-fetch.service
+enable tenzro-prover.path

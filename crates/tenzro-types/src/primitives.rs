@@ -1,0 +1,1097 @@
+//! Core primitive types for Tenzro Network
+//!
+//! This module defines the fundamental building blocks used throughout
+//! the Tenzro Network blockchain.
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// A 32-byte hash value used throughout Tenzro Network
+///
+/// Hashes are used for block hashes, transaction hashes, Merkle roots,
+/// and other cryptographic commitments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Hash(pub [u8; 32]);
+
+impl Hash {
+    /// Creates a new Hash from a 32-byte array
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the hash as a byte slice
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Creates a Hash from a byte slice
+    ///
+    /// Returns None if the slice is not exactly 32 bytes
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(bytes);
+            Some(Self(arr))
+        } else {
+            None
+        }
+    }
+
+    /// Returns a zero hash (all zeros)
+    pub fn zero() -> Self {
+        Self([0u8; 32])
+    }
+
+    /// Combines two hashes using SHA-256
+    ///
+    /// This method is collision-resistant, unlike XOR-based combination.
+    /// It concatenates the two hashes and returns the SHA-256 hash of the result.
+    pub fn combine(&self, other: &Hash) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.0);
+        hasher.update(other.0);
+        let result = hasher.finalize();
+        Self(result.into())
+    }
+}
+
+impl fmt::Display for Hash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+impl From<[u8; 32]> for Hash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl Default for Hash {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+/// An address on Tenzro Network
+///
+/// Addresses are derived from public keys and identify accounts,
+/// smart contracts, and other entities on the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Address(pub [u8; 32]);
+
+impl Address {
+    /// Creates a new Address from a 32-byte array
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the address as a byte slice
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Creates an Address from a byte slice
+    ///
+    /// Returns None if the slice is not exactly 32 bytes
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(bytes);
+            Some(Self(arr))
+        } else {
+            None
+        }
+    }
+
+    /// Returns a zero address (all zeros)
+    pub fn zero() -> Self {
+        Self([0u8; 32])
+    }
+
+    /// The EVM address of this account: its first 20 bytes, when the last
+    /// twelve are zero. A key-derived account is always of that form, and
+    /// the EVM and the SVM both name the one ledger account with it. Any other 32-byte key has no EVM address.
+    pub fn evm_address(&self) -> Option<[u8; 20]> {
+        if self.0[20..].iter().any(|b| *b != 0) {
+            return None;
+        }
+        let mut out = [0u8; 20];
+        out.copy_from_slice(&self.0[..20]);
+        Some(out)
+    }
+
+    /// Encodes the address as a base58 string
+    pub fn to_base58(&self) -> String {
+        bs58::encode(&self.0).into_string()
+    }
+
+    /// Decodes an address from a base58 string
+    pub fn from_base58(s: &str) -> Result<Self, bs58::decode::Error> {
+        let bytes = bs58::decode(s).into_vec()?;
+        Self::from_bytes(&bytes).ok_or(bs58::decode::Error::BufferTooSmall)
+    }
+
+    /// Parse an address from any textual form this workspace emits.
+    ///
+    /// An address leaves the node rendered two different ways, and both end up
+    /// pasted back into RPC parameters by real callers:
+    ///
+    /// - **hex** — `to_hex()`, `hex::encode`, and every `"address": format!("0x{}", …)`
+    ///   JSON field. 20-byte EIP-55 and 32-byte forms both land here.
+    /// - **base58** — the [`fmt::Display`] impl, which is what `display_address`
+    ///   carries and what a dozen `"address"`/`"wallet_address"` fields built with
+    ///   `format!("{}", addr)` emit.
+    ///
+    /// `tenzro join` shows the operator a base58 wallet address; an RPC that
+    /// accepted only hex would answer `-32602 Invalid address` for an address
+    /// the node had printed itself moments earlier. A caller copying a value out of one
+    /// RPC response and into the next must not have to know which renderer
+    /// produced it.
+    ///
+    /// Hex wins the ambiguity. A 40- or 64-character all-hex-digit string is
+    /// treated as hex even though it may also be legal base58, because hex is
+    /// the canonical machine form; base58 addresses are 43-44 characters and so
+    /// do not collide in practice.
+    pub fn parse(s: &str) -> Result<Self, crate::error::TenzroError> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(crate::error::TenzroError::InvalidAddress(
+                "address is empty".to_string(),
+            ));
+        }
+
+        let unprefixed = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+        let looks_hex = trimmed.starts_with("0x")
+            || ((unprefixed.len() == 40 || unprefixed.len() == 64)
+                && unprefixed.chars().all(|c| c.is_ascii_hexdigit()));
+
+        if looks_hex {
+            return Self::from_hex(trimmed);
+        }
+
+        Self::from_base58(trimmed).map_err(|e| {
+            crate::error::TenzroError::InvalidAddress(format!(
+                "{trimmed:?} is neither a hex address (20 or 32 bytes, with or \
+                 without 0x) nor a base58 address: {e}"
+            ))
+        })
+    }
+
+    /// Validates that a hex string is properly formatted
+    ///
+    /// Returns true if the string is valid hexadecimal (with or without 0x prefix)
+    pub fn is_valid_hex(s: &str) -> bool {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    /// Creates an address from a hex string, with or without `0x`: 64 hex
+    /// characters (a full address) or 40 (a 20-byte address, widened
+    /// left-aligned). This is the one hex parser for every form the node
+    /// prints.
+    ///
+    /// EIP-55 encodes its checksum in the case of the hex letters, so only a
+    /// mixed-case 20-byte address carries one, and it must verify. An
+    /// all-lowercase or all-uppercase address has no checksum to check; it
+    /// is the form events and most tools print and is accepted as is.
+    pub fn from_hex(s: &str) -> Result<Self, crate::error::TenzroError> {
+        let unprefixed = s.strip_prefix("0x").unwrap_or(s);
+        if unprefixed.len() == 40 {
+            let has_upper = unprefixed.chars().any(|c| c.is_ascii_uppercase());
+            let has_lower = unprefixed.chars().any(|c| c.is_ascii_lowercase());
+            if !(has_upper && has_lower) {
+                let bytes = hex::decode(unprefixed).map_err(|e| {
+                    crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {e}"))
+                })?;
+                let mut addr = [0u8; 32];
+                addr[..20].copy_from_slice(&bytes);
+                return Ok(Self(addr));
+            }
+        }
+        Self::from_hex_checksummed(s)
+    }
+
+    /// Creates an address from a hex string with EIP-55 checksum validation
+    ///
+    /// For Ethereum-style addresses (20 bytes), this validates the EIP-55 mixed-case
+    /// checksum. The hex string should be 40 characters (or 42 with 0x prefix).
+    ///
+    /// A 20-byte address is widened into the 32-byte [`Address`] **left-aligned**
+    /// — the 20 significant bytes lead and the trailing 12 are zero. That is the
+    /// one widening this workspace uses: the token ledger's `balance:` key is
+    /// built that way by `tenzro_token`'s RocksDB backend and reproduced by
+    /// `tenzro_vm::state_adapter::tnzo_balance_key` for raw EVM addresses, the
+    /// node's `parse_address` produces it, and every 20-byte
+    /// `tenzro_crypto::Address` in the wallet, consensus, agent and network
+    /// crates is widened with `addr_bytes[..20].copy_from_slice(..)`.
+    ///
+    /// This function used to right-align instead (EVM's `0x00 × 12 || addr20`
+    /// word), which meant a caller who passed a 40-hex address got a key no
+    /// other part of the system ever writes: balances read 0, credits landed
+    /// somewhere unreachable, and nothing errored. Right-aligned EVM *words*
+    /// are still built where ABI encoding genuinely needs one, but they are
+    /// produced from raw 20-byte arrays at the encoding site, never by parsing
+    /// an address here.
+    pub fn from_hex_checksummed(s: &str) -> Result<Self, crate::error::TenzroError> {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+
+        // For 20-byte Ethereum addresses, validate EIP-55 checksum
+        if s.len() == 40 {
+            // Decode the hex
+            let bytes = hex::decode(s).map_err(|e| {
+                crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {}", e))
+            })?;
+
+            // Compute Keccak-256 hash of the lowercase address
+            use sha3::{Digest, Keccak256};
+            let mut hasher = Keccak256::new();
+            hasher.update(s.to_lowercase().as_bytes());
+            let hash = hasher.finalize();
+
+            // Verify checksum (mixed case encoding)
+            for (i, c) in s.chars().enumerate() {
+                if c.is_alphabetic() {
+                    let hash_byte = hash[i / 2];
+                    let hash_nibble = if i % 2 == 0 {
+                        hash_byte >> 4
+                    } else {
+                        hash_byte & 0x0f
+                    };
+
+                    let should_be_uppercase = hash_nibble >= 8;
+                    if c.is_uppercase() != should_be_uppercase {
+                        return Err(crate::error::TenzroError::InvalidAddress(
+                            "Invalid EIP-55 checksum".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // Widen to 32 bytes left-aligned, matching the ledger key.
+            let mut addr = [0u8; 32];
+            addr[..20].copy_from_slice(&bytes);
+            Ok(Self(addr))
+        } else if s.len() == 64 {
+            // 32-byte address (full Tenzro address)
+            let bytes = hex::decode(s).map_err(|e| {
+                crate::error::TenzroError::InvalidAddress(format!("Invalid hex: {}", e))
+            })?;
+            let mut addr = [0u8; 32];
+            addr.copy_from_slice(&bytes);
+            Ok(Self(addr))
+        } else {
+            Err(crate::error::TenzroError::InvalidAddress(format!(
+                "Invalid address length: expected 40 or 64 hex chars, got {}",
+                s.len()
+            )))
+        }
+    }
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_base58())
+    }
+}
+
+impl From<[u8; 32]> for Address {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl Default for Address {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+/// A cryptographic signature on Tenzro Network
+///
+/// Signatures are used to prove ownership and authorize transactions.
+///
+/// Both `bytes` and `public_key` are bounded at deserialization time to
+/// `MAX_SIGNATURE_BYTES` and `MAX_PUBLIC_KEY_BYTES` respectively, to protect
+/// against OOM via untrusted payloads (HIGH #69 in the production audit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Signature {
+    /// The signature bytes
+    #[serde(deserialize_with = "crate::validation::bounded_signature_bytes")]
+    pub bytes: Vec<u8>,
+    /// The public key used to verify the signature
+    #[serde(deserialize_with = "crate::validation::bounded_public_key_bytes")]
+    pub public_key: Vec<u8>,
+}
+
+impl Signature {
+    /// Creates a new Signature
+    pub fn new(bytes: Vec<u8>, public_key: Vec<u8>) -> Self {
+        Self { bytes, public_key }
+    }
+}
+
+/// The height of a block in the Tenzro Network blockchain
+///
+/// Block height starts at 0 for the genesis block and increments by 1 for each block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BlockHeight(pub u64);
+
+impl BlockHeight {
+    /// Creates a new BlockHeight
+    pub fn new(height: u64) -> Self {
+        Self(height)
+    }
+
+    /// Returns the genesis block height (0)
+    pub fn genesis() -> Self {
+        Self(0)
+    }
+
+    /// Returns the next block height
+    pub fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    /// Returns the previous block height, or None if this is the genesis block
+    pub fn prev(self) -> Option<Self> {
+        if self.0 > 0 {
+            Some(Self(self.0 - 1))
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for BlockHeight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u64> for BlockHeight {
+    fn from(height: u64) -> Self {
+        Self(height)
+    }
+}
+
+impl Default for BlockHeight {
+    fn default() -> Self {
+        Self::genesis()
+    }
+}
+
+impl BlockHeight {
+    /// Returns the height as a u64
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+}
+
+impl std::ops::Add<u64> for BlockHeight {
+    type Output = Self;
+
+    fn add(self, rhs: u64) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl std::ops::Sub<u64> for BlockHeight {
+    type Output = Self;
+
+    fn sub(self, rhs: u64) -> Self::Output {
+        Self(self.0.saturating_sub(rhs))
+    }
+}
+
+/// A transaction nonce for replay protection
+///
+/// The nonce ensures that each transaction from an account is unique
+/// and prevents replay attacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Nonce(pub u64);
+
+impl Nonce {
+    /// Creates a new Nonce
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the initial nonce (0)
+    pub fn initial() -> Self {
+        Self(0)
+    }
+
+    /// Returns the next nonce
+    pub fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
+impl fmt::Display for Nonce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u64> for Nonce {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// A timestamp representing Unix time in milliseconds
+///
+/// Used for block timestamps and time-based operations.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+pub struct Timestamp(pub i64);
+
+impl Timestamp {
+    /// Creates a new Timestamp
+    pub fn new(millis: i64) -> Self {
+        Self(millis)
+    }
+
+    /// Returns the current timestamp
+    pub fn now() -> Self {
+        Self(chrono::Utc::now().timestamp_millis())
+    }
+
+    /// Returns the timestamp as milliseconds since Unix epoch
+    pub fn as_millis(&self) -> i64 {
+        self.0
+    }
+
+    /// Returns the timestamp as seconds since Unix epoch
+    pub fn as_secs(&self) -> i64 {
+        self.0 / 1000
+    }
+}
+
+impl From<Timestamp> for std::time::SystemTime {
+    fn from(ts: Timestamp) -> Self {
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(ts.0 as u64)
+    }
+}
+
+impl fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<i64> for Timestamp {
+    fn from(millis: i64) -> Self {
+        Self(millis)
+    }
+}
+
+/// The chain identifier for Tenzro Network
+///
+/// Used to prevent cross-chain replay attacks and identify the network.
+///
+/// Deserialization enforces the EIP-2294 range `[1, (u64::MAX / 2) - 36]`
+/// to reject obviously-bad chain ids early (HIGH #70 in the production audit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct ChainId(pub u64);
+
+impl<'de> Deserialize<'de> for ChainId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        let chain = ChainId(value);
+        crate::validation::validate_chain_id(chain).map_err(serde::de::Error::custom)?;
+        Ok(chain)
+    }
+}
+
+impl ChainId {
+    /// Mainnet chain ID
+    pub const MAINNET: Self = Self(1);
+
+    /// Testnet chain ID
+    pub const TESTNET: Self = Self(1337);
+
+    /// Devnet chain ID
+    pub const DEVNET: Self = Self(31337);
+
+    /// Creates a new ChainId without validation.
+    ///
+    /// Prefer [`ChainId::try_new`] when constructing from untrusted input.
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Creates a new ChainId, returning an error if `id` is outside the
+    /// allowed range `[CHAIN_ID_MIN, CHAIN_ID_MAX]`.
+    ///
+    /// The upper bound (`(u64::MAX / 2) - 36`) follows EIP-2294 to avoid
+    /// overflow when combined with EIP-155 transaction signing.
+    pub fn try_new(id: u64) -> Result<Self, crate::error::TenzroError> {
+        let chain = Self(id);
+        crate::validation::validate_chain_id(chain)?;
+        Ok(chain)
+    }
+
+    /// Returns the mainnet chain ID
+    pub fn mainnet() -> Self {
+        Self::MAINNET
+    }
+
+    /// Returns the testnet chain ID
+    pub fn testnet() -> Self {
+        Self::TESTNET
+    }
+
+    /// Returns the devnet chain ID
+    pub fn devnet() -> Self {
+        Self::DEVNET
+    }
+
+    /// Returns the inner u64 chain id.
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// Validates that the chain ID is within the allowed range.
+    ///
+    /// Allowed range follows EIP-2294: `[1, (u64::MAX / 2) - 36]`.
+    pub fn is_valid(&self) -> bool {
+        crate::validation::validate_chain_id(*self).is_ok()
+    }
+}
+
+impl fmt::Display for ChainId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u64> for ChainId {
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+/// Serde adapter for `u128` fields that may carry values larger than
+/// `u64::MAX` (e.g. base-unit token amounts at 10^18 precision).
+///
+/// `serde_json`'s default number deserializer falls through `u64 → i64 →
+/// f64` and refuses values exceeding `u64::MAX` (~1.84×10^19) — which
+/// breaks reference templates whose delegation caps are denominated in
+/// 10^18-base-unit TNZO (e.g. `5_000_000_000_000_000_000_000`).
+///
+/// This adapter accepts both:
+///   - JSON numbers (any integer up to `u128::MAX` that fits in a
+///     `serde_json::Number`)
+///   - JSON strings (decimal digits only, no sign, no underscores)
+///
+/// On serialization it emits a number when the value fits `u64` and a
+/// decimal string otherwise, preserving readability for typical small
+/// values while remaining lossless for large ones.
+///
+/// Apply via `#[serde(with = "u128_serde")]` on a `u128` field.
+pub mod u128_serde {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        // Only self-describing formats get the number-or-string treatment.
+        //
+        // Choosing the representation from the *value* means the encoded layout
+        // is value-dependent. JSON can cope — the decoder sees a token type and
+        // dispatches. A fixed-layout format like bincode cannot: the decoder
+        // has only the schema to go on, so a field that is sometimes a u64 and
+        // sometimes a string is undecodable. Emitting the native 16-byte u128
+        // there keeps the layout constant, which is what such formats require.
+        if !serializer.is_human_readable() {
+            return serializer.serialize_u128(*value);
+        }
+        if *value <= u64::MAX as u128 {
+            serializer.serialize_u64(*value as u64)
+        } else {
+            // Beyond u64 a JSON number cannot round-trip through the usual
+            // f64-backed parsers without precision loss, so widen to a string.
+            serializer.serialize_str(&value.to_string())
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+        struct U128Visitor;
+
+        impl<'de> Visitor<'de> for U128Visitor {
+            type Value = u128;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a non-negative integer or decimal string fitting in u128")
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<u128, E> {
+                Ok(v as u128)
+            }
+
+            fn visit_u128<E: de::Error>(self, v: u128) -> Result<u128, E> {
+                Ok(v)
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<u128, E> {
+                if v < 0 {
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
+                } else {
+                    Ok(v as u128)
+                }
+            }
+
+            fn visit_i128<E: de::Error>(self, v: i128) -> Result<u128, E> {
+                if v < 0 {
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
+                } else {
+                    Ok(v as u128)
+                }
+            }
+
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<u128, E> {
+                s.parse::<u128>()
+                    .map_err(|e| E::custom(format!("invalid u128 string {s:?}: {e}")))
+            }
+
+            fn visit_string<E: de::Error>(self, s: String) -> Result<u128, E> {
+                self.visit_str(&s)
+            }
+
+            /// serde_json routes any JSON integer literal that exceeds `u64` to
+            /// `visit_f64` under `deserialize_any` — `5000000000000000000000`
+            /// arrives here as `5e21`, not through `visit_u128`.
+            ///
+            /// Refuse it. An `f64` carries 53 bits of mantissa, so beyond 2^53
+            /// it cannot represent every integer: `5000000000000000000001`
+            /// parses to the same `5e21` and would decode as
+            /// `5000000000000000000000`. These fields carry billable work units
+            /// and token amounts, where silently rounding is far worse than
+            /// refusing, and the caller cannot tell it happened.
+            ///
+            /// There is no loss of expressiveness — `serialize` above emits a
+            /// quoted decimal string above `u64::MAX`, so anything this crate
+            /// produces round-trips. Only hand-written JSON with a bare oversized
+            /// integer lands here, and the message says how to fix it.
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<u128, E> {
+                Err(E::custom(format!(
+                    "JSON number {v} exceeds u64 and was parsed as floating point, \
+                     which cannot represent it exactly; quote it as a decimal \
+                     string (e.g. \"{}\") to preserve precision",
+                    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 {
+                        format!("{v:.0}")
+                    } else {
+                        "<integer>".to_string()
+                    }
+                )))
+            }
+        }
+
+        // `deserialize_any` requires the format to be self-describing. bincode
+        // and other fixed-layout formats return
+        // `DeserializeAnyNotSupported` for it, which is how a `BillableUnits`
+        // (whose `pixel_steps` uses this module) failed to decode from RocksDB
+        // and silently hydrated as empty.
+        //
+        // Ask the format which it is, and pair each branch with the matching
+        // arm of `serialize` above.
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(U128Visitor)
+        } else {
+            deserializer.deserialize_u128(U128Visitor)
+        }
+    }
+}
+
+/// Serde adapter for a `u64` that a human-readable format may carry as a
+/// number or as a decimal string: TOML integers stop at `i64::MAX`, so a
+/// genesis file writes a larger identifier (a CCIP chain selector) as a
+/// string. It is written as a number; fixed-layout formats carry it natively.
+pub mod u64_serde {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(*value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        struct U64Visitor;
+        impl Visitor<'_> for U64Visitor {
+            type Value = u64;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a u64 as a number or a decimal string")
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
+                Ok(v)
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
+                u64::try_from(v).map_err(|_| E::custom("a negative identifier"))
+            }
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<u64, E> {
+                s.parse()
+                    .map_err(|_| E::custom(format!("'{s}' is not a u64")))
+            }
+        }
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(U64Visitor)
+        } else {
+            deserializer.deserialize_u64(U64Visitor)
+        }
+    }
+}
+
+/// Serde adapter for `serde_json::Value` fields that have to survive a
+/// non-self-describing format. Apply via
+/// `#[serde(with = "tenzro_types::primitives::json_value_serde")]`.
+///
+/// `serde_json::Value` deserializes by calling `deserialize_any` — it has to,
+/// since the shape is only known from the data. bincode and other fixed-layout
+/// formats cannot answer that, so a struct carrying a bare `Value` *encodes*
+/// happily and then fails to decode with:
+///
+/// ```text
+/// Bincode does not support the serde::Deserializer::deserialize_any method
+/// ```
+///
+/// which is silent until something tries to read the row back.
+///
+/// Human-readable formats embed the value inline exactly as before, so JSON
+/// output is unchanged. Everything else carries it as its JSON text, which has
+/// a definite layout bincode can length-prefix.
+pub mod json_value_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(value: &Value, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            value.serialize(serializer)
+        } else {
+            serializer.serialize_str(&value.to_string())
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Value, D::Error> {
+        if deserializer.is_human_readable() {
+            Value::deserialize(deserializer)
+        } else {
+            let text = String::deserialize(deserializer)?;
+            serde_json::from_str(&text).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+/// `Option<u128>` adapter mirroring [`u128_serde`] semantics. Apply via
+/// `#[serde(default, with = "u128_serde_opt")]` on an `Option<u128>` field.
+///
+/// Accepts JSON `null`/missing → `None`, JSON number or decimal string → `Some`.
+/// Serializes `None` as `null`, `Some(v)` as a number when it fits `u64`,
+/// otherwise as a decimal string.
+pub mod u128_serde_opt {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<u128>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        // Same split as `u128_serde::serialize` — see the reasoning there.
+        // Non-self-describing formats need `Option` encoded as their own
+        // native option representation with a fixed-layout payload.
+        if !serializer.is_human_readable() {
+            return match value {
+                None => serializer.serialize_none(),
+                Some(v) => serializer.serialize_some(&U128Native(*v)),
+            };
+        }
+        match value {
+            None => serializer.serialize_none(),
+            Some(v) if *v <= u64::MAX as u128 => serializer.serialize_u64(*v as u64),
+            Some(v) => serializer.serialize_str(&v.to_string()),
+        }
+    }
+
+    /// Newtype that always serializes as a native `u128`, used for the
+    /// non-human-readable `Some(_)` payload so the layout never varies.
+    struct U128Native(u128);
+
+    impl serde::Serialize for U128Native {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_u128(self.0)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u128>, D::Error> {
+        struct OptU128Visitor;
+
+        impl<'de> Visitor<'de> for OptU128Visitor {
+            type Value = Option<u128>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("null, a non-negative integer, or a decimal string fitting in u128")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Option<u128>, E> {
+                Ok(None)
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Option<u128>, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D2: Deserializer<'de>>(
+                self,
+                deserializer: D2,
+            ) -> Result<Option<u128>, D2::Error> {
+                super::u128_serde::deserialize(deserializer).map(Some)
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Option<u128>, E> {
+                Ok(Some(v as u128))
+            }
+
+            fn visit_u128<E: de::Error>(self, v: u128) -> Result<Option<u128>, E> {
+                Ok(Some(v))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<u128>, E> {
+                if v < 0 {
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
+                } else {
+                    Ok(Some(v as u128))
+                }
+            }
+
+            fn visit_i128<E: de::Error>(self, v: i128) -> Result<Option<u128>, E> {
+                if v < 0 {
+                    Err(E::custom(format!(
+                        "negative integer {v} is not a valid u128"
+                    )))
+                } else {
+                    Ok(Some(v as u128))
+                }
+            }
+
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<Option<u128>, E> {
+                s.parse::<u128>()
+                    .map(Some)
+                    .map_err(|e| E::custom(format!("invalid u128 string {s:?}: {e}")))
+            }
+
+            fn visit_string<E: de::Error>(self, s: String) -> Result<Option<u128>, E> {
+                self.visit_str(&s)
+            }
+        }
+
+        // See `u128_serde::deserialize` — `deserialize_any` is unavailable on
+        // fixed-layout formats, so pair each branch with its `serialize` arm.
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(OptU128Visitor)
+        } else {
+            deserializer.deserialize_option(OptU128Visitor)
+        }
+    }
+}
+
+#[cfg(test)]
+mod u128_serde_tests {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct Wrap {
+        #[serde(with = "super::u128_serde")]
+        v: u128,
+    }
+
+    #[test]
+    fn round_trips_small_value_as_number() {
+        let w = Wrap { v: 42 };
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"v":42}"#);
+        let back: Wrap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn round_trips_large_value_as_string() {
+        let w = Wrap {
+            v: 5_000_000_000_000_000_000_000u128,
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"v":"5000000000000000000000"}"#);
+        let back: Wrap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn rejects_large_raw_number_rather_than_rounding_it() {
+        // serde_json parses a bare integer literal above u64::MAX as f64, so
+        // this arrives as 5e21. Accepting it would mean accepting silent
+        // rounding: `5000000000000000000001` parses to the *same* f64 and
+        // would decode as ...000. These fields carry billable units and token
+        // amounts, so the decode is refused instead.
+        let json = r#"{"v":5000000000000000000000}"#;
+        let err = serde_json::from_str::<Wrap>(json)
+            .expect_err("bare integer above u64::MAX must not decode via f64");
+        assert!(
+            err.to_string().contains("quote it as a decimal string"),
+            "error should tell the producer how to fix it, got: {err}"
+        );
+
+        // The supported spelling for the same value, which is also what
+        // `serialize` emits above u64::MAX.
+        let quoted = r#"{"v":"5000000000000000000000"}"#;
+        let back: Wrap = serde_json::from_str(quoted).unwrap();
+        assert_eq!(back.v, 5_000_000_000_000_000_000_000u128);
+    }
+
+    #[test]
+    fn deserializes_string_at_u64_boundary() {
+        let json = r#"{"v":"18446744073709551616"}"#; // u64::MAX + 1
+        let back: Wrap = serde_json::from_str(json).unwrap();
+        assert_eq!(back.v, (u64::MAX as u128) + 1);
+    }
+
+    #[test]
+    fn rejects_negative_string() {
+        let json = r#"{"v":"-1"}"#;
+        assert!(serde_json::from_str::<Wrap>(json).is_err());
+    }
+
+    #[test]
+    fn rejects_negative_number() {
+        let json = r#"{"v":-1}"#;
+        assert!(serde_json::from_str::<Wrap>(json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod address_widening_tests {
+    use super::Address;
+
+    /// The whole system keys a 20-byte address into the 32-byte [`Address`]
+    /// left-aligned: `tenzro_token`'s `balance:` key, the node's
+    /// `parse_address`, `tenzro_vm::state_adapter::tnzo_balance_key`, and every
+    /// `addr_bytes[..20].copy_from_slice(..)` in the wallet, consensus, agent
+    /// and network crates. `from_hex` widened the other way — EVM's
+    /// right-aligned word — so any caller passing a 40-hex address addressed an
+    /// account nothing else in the system writes to, silently.
+    #[test]
+    fn a_20_byte_address_is_widened_left_aligned() {
+        // EIP-55 checksummed form of a real 20-byte account.
+        let addr = Address::from_hex("0x3d0291C0fC59EdA83f2D9f5f00A09e12f3f6a067").unwrap();
+        assert_eq!(&addr.as_bytes()[..4], &[0x3d, 0x02, 0x91, 0xc0]);
+        assert_eq!(&addr.as_bytes()[17..20], &[0xf6, 0xa0, 0x67]);
+        assert_eq!(&addr.as_bytes()[20..], &[0u8; 12], "tail must be the pad");
+    }
+
+    /// A 20-byte address must reach the same key whether it arrives 40-hex or
+    /// already widened to 64-hex, or a client that widens before sending and
+    /// one that does not would address different accounts.
+    #[test]
+    fn the_40_and_64_hex_forms_of_one_address_agree() {
+        let short = Address::from_hex("0x3d0291C0fC59EdA83f2D9f5f00A09e12f3f6a067").unwrap();
+        let long = Address::from_hex(&hex::encode(short.as_bytes())).unwrap();
+        assert_eq!(short, long);
+    }
+
+    /// A full 32-byte address has no alignment to choose.
+    #[test]
+    fn a_32_byte_address_passes_through() {
+        let hex_str = "c846770be60288c0a768cd7fb817bb4c10583276c70658e248549f61edbe6f39";
+        let addr = Address::from_hex(hex_str).unwrap();
+        assert_eq!(hex::encode(addr.as_bytes()), hex_str);
+    }
+
+    /// The EIP-55 guard is what catches a mistyped or wrongly derived address
+    /// before it is used as an account key, and must survive the widening fix.
+    #[test]
+    fn a_bad_checksum_is_refused() {
+        assert!(Address::from_hex("0x3d0291c0FC59EdA83f2D9f5f00A09e12f3f6a067").is_err());
+    }
+
+    /// Every form the node prints parses to the same address through both
+    /// entry points: lowercase and uppercase 20-byte hex, the checksummed
+    /// form, and the full 32-byte form, with or without `0x`.
+    #[test]
+    fn every_printed_form_of_an_address_parses() {
+        let canonical = Address::from_hex("0x3d0291C0fC59EdA83f2D9f5f00A09e12f3f6a067").unwrap();
+        let full = hex::encode(canonical.as_bytes());
+        for form in [
+            "0x3d0291c0fc59eda83f2d9f5f00a09e12f3f6a067".to_string(),
+            "3d0291c0fc59eda83f2d9f5f00a09e12f3f6a067".to_string(),
+            "0x3D0291C0FC59EDA83F2D9F5F00A09E12F3F6A067".to_string(),
+            full.clone(),
+            format!("0x{full}"),
+        ] {
+            assert_eq!(Address::from_hex(&form).unwrap(), canonical, "{form}");
+            assert_eq!(Address::parse(&form).unwrap(), canonical, "{form}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod address_parse_tests {
+    use super::Address;
+
+    #[test]
+    fn base58_and_hex_name_the_same_address() {
+        let addr = Address::new([7u8; 32]);
+        let from_b58 = Address::parse(&addr.to_base58()).expect("base58 parses");
+        let from_hex = Address::parse(&format!("0x{}", hex::encode(addr.0))).expect("hex parses");
+        assert_eq!(from_b58, addr);
+        assert_eq!(from_hex, addr);
+    }
+
+    #[test]
+    fn a_wallets_display_address_is_accepted_by_rpc() {
+        // `tenzro join` prints the base58 Display form; an operator passing it
+        // to an RPC must not get "-32602 Invalid address" for an address the
+        // node itself printed.
+        let displayed = format!("{}", Address::new([3u8; 32]));
+        assert!(
+            Address::parse(&displayed).is_ok(),
+            "the address form the CLI displays must be accepted as a parameter"
+        );
+    }
+
+    #[test]
+    fn a_lowercase_evm_address_has_no_checksum_to_fail() {
+        // EIP-55 puts the checksum in the letter case, so an all-lowercase
+        // address carries none. Rejecting it refuses the form nearly every
+        // tool prints.
+        let lower = "0xd30cb495438fec31b14db1c14e9886ffa17350b8";
+        let parsed = Address::parse(lower).expect("all-lowercase 20-byte address parses");
+        assert_eq!(&parsed.0[..20], &hex::decode(&lower[2..]).unwrap()[..]);
+        assert_eq!(
+            &parsed.0[20..],
+            &[0u8; 12],
+            "20-byte widening is left-aligned"
+        );
+        assert!(Address::parse(&lower.to_uppercase().replace("0X", "0x")).is_ok());
+    }
+
+    #[test]
+    fn garbage_is_still_refused_and_says_both_forms() {
+        let err = Address::parse("not-an-address").unwrap_err().to_string();
+        assert!(err.contains("hex") && err.contains("base58"), "got: {err}");
+        assert!(Address::parse("").is_err());
+    }
+}

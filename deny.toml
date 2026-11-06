@@ -1,0 +1,91 @@
+# cargo-deny policy, run by scripts/supply-chain/check-pins.sh (every check), release.sh and the scheduled
+# suite's supply-chain stage (scripts/testnet/stage-security.sh):
+#   cargo deny --locked check advisories licenses bans sources
+
+[graph]
+all-features = false
+exclude-dev = false
+
+[advisories]
+# Every RustSec advisory in the lockfile fails the check unless listed here
+# with a reason. The full reason and the condition that re-opens each one are
+# in .cargo/audit.toml; this list and that one name the same advisories
+# (scripts/testnet/security/test_security_programme.py checks it). Unmaintained crates fail too, for workspace members' direct
+# dependencies; transitive ones are reported.
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+    # bincode 1.x: unmaintained; it is the storage encoding of identity and
+    # ledger records across the workspace, and moving off it is a data-format
+    # migration, not a dependency bump.
+    { id = "RUSTSEC-2025-0141", reason = "bincode is the on-disk record encoding; replacement is a format migration" },
+    # rsa: timing side channel with no fixed release; reached only through
+    # transitive dependencies, never for keys this node holds.
+    { id = "RUSTSEC-2023-0071", reason = "no fixed rsa release; not used for this node's keys" },
+    # hickory-proto 0.25: NSEC3 validation loop with no fixed 0.25 release;
+    # the node's own resolver is hickory 0.26, this copy is transitive.
+    { id = "RUSTSEC-2026-0118", reason = "no fixed release; transitive copy, DNSSEC validation not enabled" },
+    # tracing-subscriber 0.2: ANSI escapes in formatted logs. The only copy is
+    # ark-relations' optional constraint-trace layer (via risc0-groth16), which
+    # nothing here installs; the node logs through tracing-subscriber 0.3.
+    { id = "RUSTSEC-2025-0055", reason = "0.2 copy only behind ark-relations' constraint-trace layer, never installed" },
+    # crypto-bigint 0.5.5: secret-dependent branches, no fixed 0.5 release. It
+    # enters only through elliptic-curve 0.13 (k256 recovery over public
+    # transaction data, p521 attestation-chain verification); the 0.7 line
+    # under the signing stack is on a fixed release. The full decision and
+    # what would reopen it are in .cargo/audit.toml.
+    { id = "RUSTSEC-2026-0387", reason = "0.5.5 only under public-data verification; 0.7 line upgraded; see .cargo/audit.toml" },
+    # Yanked release candidates of the RustCrypto 0.14 stack that p256 and
+    # ml-dsa pin exactly; they move with those pins.
+    { crate = "der@0.8.0", reason = "pinned by the p256 / ml-dsa release candidates" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
+    "Unlicense",
+]
+# libfuzzer-sys bundles LLVM's libFuzzer sources, which carry the NCSA licence
+# (permissive, BSD-style). It is reached only by the fuzz crates, which are
+# never part of a release build.
+exceptions = [
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
+
+[bans]
+multiple-versions = "warn"
+# Git dependencies pinned by `rev` have no version requirement and count as
+# wildcards; `[sources]` below is what restricts where they may come from.
+wildcards = "warn"
+allow-wildcard-paths = true
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Pinned by revision in the workspace manifest (OpenShell: the sandbox runtime the OpenShell authority module drives).
+allow-git = [
+    "https://github.com/Plonky3/Plonky3",
+    "https://github.com/Praecise/praecise-engine",
+    "https://github.com/NVIDIA/OpenShell.git",
+]

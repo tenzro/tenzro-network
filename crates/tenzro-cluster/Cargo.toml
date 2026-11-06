@@ -1,0 +1,29 @@
+[package]
+name = "tenzro-cluster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Engine-agnostic local-network cluster substrate for Tenzro Network — verified cluster membership, reachability tiers, probed link-cost graph, deterministic nearest-neighbour stage ordering, and HRW rendezvous placement shared by model, storage, and database serving"
+
+[features]
+# Builders for signed membership lists with software keys, for other crates' tests.
+test-support = ["dep:p256", "dep:serde_json", "dep:base64"]
+
+[dependencies]
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tenzro-types = { workspace = true }
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }
+p256 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+p256 = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+
+[lints]
+workspace = true

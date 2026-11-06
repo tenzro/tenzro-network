@@ -1,0 +1,29 @@
+{
+  "name": "@tenzro/device-key-darwin-x64",
+  "version": "0.1.1",
+  "description": "Prebuilt @tenzro/device-key binary for darwin-x64",
+  "homepage": "https://tenzro.com/docs/hardware-rooted-keys",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenzro/tenzro-sdk-typescript.git",
+    "directory": "native"
+  },
+  "license": "Apache-2.0",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "device-key.darwin-x64.node",
+  "files": [
+    "device-key.darwin-x64.node",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prepack": "node -e \"require('fs').accessSync('device-key.darwin-x64.node')\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,324 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; Tenzro settlement-plan legs on TON.
+;;
+;; One lock holds legs of one asset: TON itself, or one jetton whose master
+;; is fixed in the lock's data. A payer locks an amount as leg `index` of
+;; plan `plan_id`, payable to a recipient: TON with `lock`, a jetton by a
+;; standard jetton transfer to this contract whose forward payload is
+;; plan_id (256), index (8), recipient (256). The lock learns its jetton
+;; wallet from its master (`learn_wallet`, answered by the master's
+;; `take_wallet_address`) and accepts notifications only from that wallet.
+;;
+;; A leg settles once, on the plan's decision proven under the state root of
+;; a final checkpoint: a relayer asks Tenzro's finality client on TON to
+;; report the root to this contract, with the plan id, leg index, decision
+;; and state proof as payload; the lock accepts the report only from that
+;; client. A commit pays the recipient, an abort refunds the payer. Without
+;; a proven decision the payer reclaims the leg only after the escape
+;; horizon (`escape`). No key holds any authority here. Events go out as
+;; external messages.
+;;
+;; Every lock, release and refund folds into a running reconciliation hash;
+;; `checkpoint` logs it with the entry count, for Tenzro to compare with its
+;; own books.
+;;
+;; The decision commitment at `decision:<plan_id>` is
+;; version (8) = 1, outcome (8: 1 commit, 2 abort), decided_at_ms (64), plan_id (256).
+
+const int op::lock = 0x1e7c9a52;
+const int op::learn_wallet = 0x3d5f8b11;
+const int op::escape = 0x6b2e0f47;
+const int op::checkpoint = 0x5c1a3e29;
+const int op::state_root = 0x2b7f4c93;
+const int op::transfer = 0x0f8a7ea5;
+const int op::transfer_notification = 0x7362d09c;
+const int op::provide_wallet_address = 0x2c76b973;
+const int op::take_wallet_address = 0xd1735400;
+;; Locked: tag (8) = 0x61, plan_id (256), leg_id (256), index (8), payer (256),
+;; ref: recipient (256), amount (coins), escape_at (64, seconds), asset (256:
+;; the jetton master's account id, 0 for TON). Tenzro proves this log.
+const int log::locked = 0x61;
+const int log::released = 0x62;
+const int log::refunded = 0x63;
+;; Accumulator: tag (8) = 0x64, count (64), acc (256). Tenzro proves this log.
+const int log::accumulator = 0x64;
+
+const int error::not_finality = 500;
+const int error::malformed = 501;
+const int error::already_locked = 502;
+const int error::not_locked = 503;
+const int error::bad_amount = 504;
+const int error::unproven = 505;
+const int error::too_early = 506;
+const int error::wrong_asset = 507;
+const int error::not_wallet = 508;
+
+const int LOCKED = 1;
+const int RELEASED = 2;
+const int REFUNDED = 3;
+;; TON a leg brings for its own payout.
+const int PAYOUT_RESERVE = 100000000;
+;; TON sent with a jetton payout for both wallets' fees; the excess goes on
+;; to the payee.
+const int JETTON_PAYOUT_VALUE = 80000000;
+
+;; Data: finality (256), escape horizon in seconds (64), master (256, 0 for
+;; TON), wallet (256, 0 until learned), legs (dict leg id -> stage (8),
+;; payer (256), recipient (256), amount (coins), escape_at (64)), and in a
+;; reference the reconciliation entry count (64) and running hash (256).
+global int recon_count;
+global int recon_acc;
+
+(int, int, int, int, cell) load_lock() impure inline {
+    slice s = get_data().begin_parse();
+    var lock = (s~load_uint(256), s~load_uint(64), s~load_uint(256), s~load_uint(256), s~load_dict());
+    slice recon = s~load_ref().begin_parse();
+    recon_count = recon~load_uint(64);
+    recon_acc = recon~load_uint(256);
+    return lock;
+}
+
+() save_lock(int finality, int horizon, int master, int wallet, cell legs) impure inline {
+    set_data(begin_cell().store_uint(finality, 256).store_uint(horizon, 64).store_uint(master, 256).store_uint(wallet, 256)
+        .store_dict(legs).store_ref(begin_cell().store_uint(recon_count, 64).store_uint(recon_acc, 256).end_cell()).end_cell());
+}
+
+;; Fold one entry into the running reconciliation hash:
+;; sha256(domain || acc || plan_id || leg_id || kind || amount), the amount
+;; as a 32-byte big-endian word.
+() record(int plan_id, int id, int kind, int amount) impure inline {
+    slice head = begin_cell().store_slice("tenzro/settlement/recon/v1").store_uint(recon_acc, 256).store_uint(plan_id, 256)
+        .end_cell().begin_parse();
+    slice tail = begin_cell().store_uint(id, 256).store_uint(kind, 8).store_uint(amount, 256).end_cell().begin_parse();
+    recon_acc = sha256_2(head, tail);
+    recon_count += 1;
+}
+
+builder std_addr(int id) inline {
+    return begin_cell().store_uint(4, 3).store_int(0, 8).store_uint(id, 256);
+}
+
+() emit_log(builder body) impure inline {
+    send_raw_message(begin_cell().store_uint(3, 2).store_uint(0, 4).store_uint(0, 64 + 32 + 1).store_uint(1, 1)
+        .store_ref(body.end_cell()).end_cell(), 0);
+}
+
+() send(int flags, int to, int value, cell body, int mode) impure inline {
+    send_raw_message(begin_cell().store_uint(flags, 6).store_builder(std_addr(to)).store_coins(value)
+        .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1).store_uint(1, 1).store_ref(body).end_cell(), mode);
+}
+
+;; The id Tenzro gives leg `index` of `plan_id`.
+int leg_id(int plan_id, int index) inline {
+    return string_hash(begin_cell().store_slice("tenzro/plan/leg/v1").store_uint(plan_id, 256).store_uint(index, 8)
+        .end_cell().begin_parse());
+}
+
+int hex_digit(int n) inline {
+    return n < 10 ? 48 + n : 87 + n;
+}
+
+;; The hex of the hex of the 16 bytes of `half`.
+slice hex_hex(int half) {
+    builder b = begin_cell();
+    int i = 15;
+    repeat (16) {
+        int byte = (half >> (8 * i)) & 255;
+        int hi = hex_digit(byte >> 4);
+        int lo = hex_digit(byte & 15);
+        b = b.store_uint(hex_digit(hi >> 4), 8).store_uint(hex_digit(hi & 15), 8)
+            .store_uint(hex_digit(lo >> 4), 8).store_uint(hex_digit(lo & 15), 8);
+        i -= 1;
+    }
+    return b.end_cell().begin_parse();
+}
+
+;; The state tree key of `decision:<plan_id>`: VM system storage, keyed by
+;; the hex of the record key.
+int decision_tree_key(int plan_id) {
+    slice prefix = begin_cell().store_slice("tenzro.state-trie.key").store_uint(0x0500, 16)
+        .store_slice("statestorage:ffffffffffffffffffffffffffffffffffffffff:6465636973696f6e3a").end_cell().begin_parse();
+    return sha256_3(prefix, hex_hex(plan_id >> 128), hex_hex(plan_id & ((1 << 128) - 1)));
+}
+
+(cell, ()) ~add_leg(cell legs, int horizon, int master, int plan_id, int index, int payer, int recipient, int amount) impure {
+    int id = leg_id(plan_id, index);
+    (_, int found) = legs.udict_get_slice?(256, id);
+    throw_if(error::already_locked, found);
+    throw_unless(error::bad_amount, amount > 0);
+    int escape_at = now() + horizon;
+    legs = legs.udict_set(256, id, begin_cell().store_uint(LOCKED, 8).store_uint(payer, 256).store_uint(recipient, 256)
+        .store_coins(amount).store_uint(escape_at, 64).end_cell().begin_parse());
+    record(plan_id, id, LOCKED, amount);
+    emit_log(begin_cell().store_uint(log::locked, 8).store_uint(plan_id, 256).store_uint(id, 256).store_uint(index, 8)
+        .store_uint(payer, 256).store_ref(begin_cell().store_uint(recipient, 256).store_coins(amount).store_uint(escape_at, 64)
+        .store_uint(master, 256).end_cell()));
+    return (legs, ());
+}
+
+;; Pay `amount` of the lock's asset to account `to`.
+() pay(int master, int wallet, int to, int amount) impure {
+    if (master == 0) {
+        send(0x10, to, amount, begin_cell().end_cell(), 1);
+    } else {
+        send(0x18, wallet, JETTON_PAYOUT_VALUE, begin_cell().store_uint(op::transfer, 32).store_uint(0, 64).store_coins(amount)
+            .store_builder(std_addr(to)).store_builder(std_addr(to)).store_uint(0, 1).store_coins(0).store_uint(0, 1).end_cell(), 1);
+    }
+}
+
+;; Move leg `id` of `plan_id` to `stage`, paying its recipient or payer.
+(cell, ()) ~settle_leg(cell legs, int master, int wallet, int plan_id, int id, int stage, int escaped) impure {
+    (slice leg, int found) = legs.udict_get_slice?(256, id);
+    throw_unless(error::not_locked, found);
+    throw_unless(error::not_locked, leg~load_uint(8) == LOCKED);
+    int payer = leg~load_uint(256);
+    int recipient = leg~load_uint(256);
+    int amount = leg~load_coins();
+    int escape_at = leg~load_uint(64);
+    legs = legs.udict_set(256, id, begin_cell().store_uint(stage, 8).store_uint(payer, 256).store_uint(recipient, 256)
+        .store_coins(amount).store_uint(escape_at, 64).end_cell().begin_parse());
+    int to = stage == RELEASED ? recipient : payer;
+    pay(master, wallet, to, amount);
+    record(plan_id, id, stage, amount);
+    emit_log(begin_cell().store_uint(stage == RELEASED ? log::released : log::refunded, 8).store_uint(plan_id, 256).store_uint(id, 256)
+        .store_uint(to, 256).store_coins(amount).store_uint(escaped, 1));
+    return (legs, ());
+}
+
+() recv_internal(int balance, int value, cell in_msg, slice body) impure {
+    slice cs = in_msg.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) {
+        return ();
+    }
+    (int wc, int sender) = parse_std_addr(cs~load_msg_addr());
+    if (body.slice_empty?()) {
+        return ();
+    }
+    int op = body~load_uint(32);
+    int query_id = body~load_uint(64);
+    var (finality, horizon, master, wallet, legs) = load_lock();
+
+    if (op == op::lock) {
+        throw_unless(error::wrong_asset, master == 0);
+        throw_unless(error::malformed, wc == 0);
+        int plan_id = body~load_uint(256);
+        int index = body~load_uint(8);
+        int amount = body~load_coins();
+        int recipient = body~load_uint(256);
+        throw_unless(error::bad_amount, value >= amount + PAYOUT_RESERVE);
+        legs~add_leg(horizon, master, plan_id, index, sender, recipient, amount);
+        save_lock(finality, horizon, master, wallet, legs);
+        return ();
+    }
+
+    if (op == op::transfer_notification) {
+        throw_unless(error::not_wallet, (wc == 0) & (wallet != 0) & (sender == wallet));
+        int amount = body~load_coins();
+        (int from_wc, int from) = parse_std_addr(body~load_msg_addr());
+        slice payload = body~load_uint(1) ? body~load_ref().begin_parse() : body;
+        int ok = (from_wc == 0) & (payload.slice_bits() >= 256 + 8 + 256) & (value >= PAYOUT_RESERVE) & (amount > 0);
+        if (ok) {
+            int plan_id = payload~load_uint(256);
+            int index = payload~load_uint(8);
+            (_, int found) = legs.udict_get_slice?(256, leg_id(plan_id, index));
+            ok = ~ found;
+            if (ok) {
+                legs~add_leg(horizon, master, plan_id, index, from, payload~load_uint(256), amount);
+                save_lock(finality, horizon, master, wallet, legs);
+            }
+        }
+        if (~ ok) {
+            ;; Not a leg: the jettons go back to whoever sent them.
+            send(0x18, wallet, 0, begin_cell().store_uint(op::transfer, 32).store_uint(query_id, 64).store_coins(amount)
+                .store_builder(std_addr(from)).store_builder(std_addr(from)).store_uint(0, 1).store_coins(0).store_uint(0, 1).end_cell(), 64);
+        }
+        return ();
+    }
+
+    if (op == op::learn_wallet) {
+        throw_unless(error::wrong_asset, (master != 0) & (wallet == 0));
+        send(0x18, master, 0, begin_cell().store_uint(op::provide_wallet_address, 32).store_uint(query_id, 64)
+            .store_slice(my_address()).store_uint(0, 1).end_cell(), 64);
+        return ();
+    }
+
+    if (op == op::take_wallet_address) {
+        throw_unless(error::wrong_asset, (wc == 0) & (master != 0) & (sender == master) & (wallet == 0));
+        (int wallet_wc, int learned) = parse_std_addr(body~load_msg_addr());
+        throw_unless(error::malformed, wallet_wc == 0);
+        save_lock(finality, horizon, master, learned, legs);
+        return ();
+    }
+
+    if (op == op::state_root) {
+        throw_unless(error::not_finality, (wc == 0) & (sender == finality));
+        body~skip_bits(64);
+        int root = body~load_uint(256);
+        slice p = body~load_ref().begin_parse();
+        int plan_id = p~load_uint(256);
+        int index = p~load_uint(8);
+        slice decision = p~load_ref().begin_parse();
+        cell proof = p~load_ref();
+        throw_unless(error::unproven, decision.slice_bits() == 42 * 8);
+        int leaf = string_hash(begin_cell().store_uint(0, 8).store_slice(decision).end_cell().begin_parse());
+        throw_unless(error::unproven, decision~load_uint(8) == 1);
+        int outcome = decision~load_uint(8);
+        decision~skip_bits(64);
+        throw_unless(error::unproven, (decision~load_uint(256) == plan_id) & ((outcome == 1) | (outcome == 2)));
+        throw_unless(error::unproven, verify_leaf(root, decision_tree_key(plan_id), leaf, proof));
+        legs~settle_leg(master, wallet, plan_id, leg_id(plan_id, index), outcome == 1 ? RELEASED : REFUNDED, 0);
+        save_lock(finality, horizon, master, wallet, legs);
+        return ();
+    }
+
+    if (op == op::checkpoint) {
+        emit_log(begin_cell().store_uint(log::accumulator, 8).store_uint(recon_count, 64).store_uint(recon_acc, 256));
+        return ();
+    }
+
+    if (op == op::escape) {
+        int plan_id = body~load_uint(256);
+        int index = body~load_uint(8);
+        int id = leg_id(plan_id, index);
+        (slice leg, int found) = legs.udict_get_slice?(256, id);
+        throw_unless(error::not_locked, found);
+        leg~skip_bits(8 + 256 + 256);
+        leg~load_coins();
+        throw_unless(error::too_early, now() >= leg~load_uint(64));
+        legs~settle_leg(master, wallet, plan_id, id, REFUNDED, 1);
+        save_lock(finality, horizon, master, wallet, legs);
+        return ();
+    }
+
+    throw(0xffff);
+}
+
+int get_leg_id(int plan_id, int index) method_id {
+    return leg_id(plan_id, index);
+}
+
+int get_decision_tree_key(int plan_id) method_id {
+    return decision_tree_key(plan_id);
+}
+
+;; The leg's stage (0 if none), payer, recipient, amount and escape time.
+(int, int, int, int, int) get_leg(int plan_id, int index) method_id {
+    var (_, _, _, _, legs) = load_lock();
+    (slice leg, int found) = legs.udict_get_slice?(256, leg_id(plan_id, index));
+    if (~ found) {
+        return (0, 0, 0, 0, 0);
+    }
+    return (leg~load_uint(8), leg~load_uint(256), leg~load_uint(256), leg~load_coins(), leg~load_uint(64));
+}
+
+;; The entries recorded and the running reconciliation hash over them.
+(int, int) get_reconciliation() method_id {
+    load_lock();
+    return (recon_count, recon_acc);
+}
+
+int get_wallet() method_id {
+    var (_, _, _, wallet, _) = load_lock();
+    return wallet;
+}

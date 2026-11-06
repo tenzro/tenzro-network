@@ -1,0 +1,29 @@
+{
+  "name": "@tenzro/device-key-win32-x64-msvc",
+  "version": "0.1.1",
+  "description": "Prebuilt @tenzro/device-key binary for win32-x64-msvc",
+  "homepage": "https://tenzro.com/docs/hardware-rooted-keys",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tenzro/tenzro-network.git",
+    "directory": "sdk/tenzro-ts-sdk/native/npm/win32-x64-msvc"
+  },
+  "license": "Apache-2.0",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "device-key.win32-x64-msvc.node",
+  "files": [
+    "device-key.win32-x64-msvc.node",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prepack": "node -e \"require('fs').accessSync('device-key.win32-x64-msvc.node')\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,102 @@
+[
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-segmentation",
+      "spec": {
+        "decoder_filename": "sam2_hiera_base_plus.decoder.onnx",
+        "description": "Meta SAM 2 base (community ONNX export) — previous-gen flagship",
+        "encoder_filename": "sam2_hiera_base_plus.encoder.onnx",
+        "family": "sam2",
+        "hf_repo": "vietanhdev/segment-anything-2-onnx-models",
+        "id": "sam2-base",
+        "input_size": 1024,
+        "min_ram_gb": 2,
+        "name": "SAM 2 base",
+        "size_bytes": 320000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-segmentation",
+      "spec": {
+        "decoder_filename": "sam2_hiera_large.decoder.onnx",
+        "description": "Meta SAM 2 large (community ONNX export) — high-fidelity",
+        "encoder_filename": "sam2_hiera_large.encoder.onnx",
+        "family": "sam2",
+        "hf_repo": "vietanhdev/segment-anything-2-onnx-models",
+        "id": "sam2-large",
+        "input_size": 1024,
+        "min_ram_gb": 4,
+        "name": "SAM 2 large",
+        "size_bytes": 900000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "NTU S-Lab License 1.0",
+      "tier": "non_commercial"
+    },
+    "model": {
+      "engine": "onnx-segmentation",
+      "spec": {
+        "decoder_filename": "edge_sam_3x_decoder.onnx",
+        "description": "EdgeSAM — ultra-compact 9.6M-param segmentation (research-only)",
+        "encoder_filename": "edge_sam_3x_encoder.onnx",
+        "family": "edgesam",
+        "hf_repo": "chongzhou/EdgeSAM",
+        "id": "edgesam",
+        "input_size": 1024,
+        "min_ram_gb": 1,
+        "name": "EdgeSAM",
+        "size_bytes": 38000000
+      }
+    }
+  },
+  {
+    "capabilities": [],
+    "capability_priors": {},
+    "components": [],
+    "gated": false,
+    "licence": {
+      "name": "Apache 2.0",
+      "tier": "permissive"
+    },
+    "model": {
+      "engine": "onnx-segmentation",
+      "spec": {
+        "decoder_filename": "sam_mask_decoder_single.onnx",
+        "description": "MobileSAM (community ONNX export) — compact mobile-optimized",
+        "encoder_filename": "mobile_sam_image_encoder.onnx",
+        "family": "mobilesam",
+        "hf_repo": "Acly/MobileSAM",
+        "id": "mobilesam",
+        "input_size": 1024,
+        "min_ram_gb": 1,
+        "name": "MobileSAM",
+        "size_bytes": 40000000
+      }
+    }
+  }
+]

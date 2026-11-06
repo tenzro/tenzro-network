@@ -1,0 +1,453 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; Tenzro's bridge contract on TON: the TEP-74 jetton master of TNZO.
+;;
+;; TNZO on TON is a standard jetton: holders keep it in TEP-74 jetton
+;; wallets (the reference wallet code, stored here and deployed per owner),
+;; and this contract is its master. It mints only against TNZO locked on
+;; Tenzro and counts every burn.
+;;
+;; A transfer to Tenzro is a standard jetton transfer to this contract's
+;; address whose forward payload is `send_to_tenzro#54e0a5d1
+;; recipient:uint256` and some forwarded TON to pay for the burn. This
+;; contract's own jetton wallet notifies it; it burns the received jettons
+;; through that wallet and sends an external outbound message whose body is
+;; the record Tenzro's TON light client reads: sequence, source and
+;; destination selectors, sender (the jetton owner's account id), token and
+;; endpoint in the body cell (960 bits), recipient and amount in its one
+;; reference (384 bits). If the forwarded TON does not cover the burn
+;; (`min_burn_value`), the jettons stay in this contract's wallet, which
+;; never sends them on, and leave the supply all the same. A notification
+;; with any other payload
+;; returns the jettons to their sender.
+;;
+;; A transfer from Tenzro is the record Tenzro stored for it, executed once
+;; the route's committee signed its digest: `threshold` distinct members,
+;; each recovered from a secp256k1 signature over Keccak-256 of the
+;; outbound domain, Tenzro's chain id, the route key and the record. It
+;; mints the amount to the recipient's jetton wallet (owner `0:recipient`).
+;;
+;; Tenzro draws each committee from its bonded attestors and numbers it with
+;; a set index. The committee this contract trusts hands it over to a later
+;; one by signing that committee's set index, members, threshold and expiry
+;; (`rotate_committee#6b1d2e47 set_index:uint32 threshold:uint8
+;; expires_at:uint64 ^members ^signatures`, members as 20-byte addresses,
+;; six per cell, chained through one reference); any relayer submits it, and
+;; it is accepted only for a higher set index. The contract stops trusting a
+;; committee at its expiry (Unix seconds), so a committee whose members may
+;; have left their bonds on Tenzro can never act here.
+;;
+;; Amounts are TNZO's smallest unit (18 decimals) throughout; a jetton
+;; amount is at most 2^120 - 1.
+
+const int op::send_to_tenzro = 0x54e0a5d1;
+const int op::execute = 0x8f2c6b3a;
+const int op::rotate_committee = 0x6b1d2e47;
+
+const int error::below_threshold = 101;
+const int error::wrong_route = 102;
+const int error::already_executed = 103;
+const int error::bad_amount = 104;
+const int error::malformed = 106;
+const int error::not_a_wallet = 108;
+const int error::bad_committee = 109;
+const int error::expired = 110;
+const int error::stale_set = 111;
+
+;; The forwarded TON below which a transfer to Tenzro is not burned through
+;; the wallet (the reference wallet needs about this much to burn).
+const int min_burn_value = 50000000;
+
+slice outbound_domain() asm "<b 0x74656e7a726f2f6272696467652f726f7574652d6f7574626f756e64 224 u, b> <s PUSHSLICE";
+slice committee_domain() asm "<b 0x74656e7a726f2f6272696467652f726f7574652d636f6d6d6974746565 232 u, b> <s PUSHSLICE";
+
+;; Storage:
+;;   sequence:uint64 chain_id:uint64 ton_selector:uint64 tenzro_selector:uint64 threshold:uint8
+;;   total_supply:Coins ^[route_key bytes]
+;;   ^[token:uint256 endpoint:uint256 set_index:uint32 expires_at:uint64 committee:dict executed:dict]
+;;   ^content ^jetton_wallet_code
+(int, int, int, int, int, int, slice, cell, cell, cell) load_store() inline {
+    slice ds = get_data().begin_parse();
+    (ds, int sequence) = ds.load_uint(64);
+    (ds, int chain_id) = ds.load_uint(64);
+    (ds, int ton_selector) = ds.load_uint(64);
+    (ds, int tenzro_selector) = ds.load_uint(64);
+    (ds, int threshold) = ds.load_uint(8);
+    (ds, int supply) = ds.load_coins();
+    (ds, cell key) = ds.load_ref();
+    (ds, cell route) = ds.load_ref();
+    (ds, cell content) = ds.load_ref();
+    (ds, cell wallet_code) = ds.load_ref();
+    return (sequence, chain_id, ton_selector, tenzro_selector, threshold, supply, key.begin_parse(), route, content, wallet_code);
+}
+
+() save_store(int sequence, int chain_id, int ton_selector, int tenzro_selector, int threshold, int supply, slice key, cell route, cell content, cell wallet_code) impure inline {
+    set_data(begin_cell()
+        .store_uint(sequence, 64)
+        .store_uint(chain_id, 64)
+        .store_uint(ton_selector, 64)
+        .store_uint(tenzro_selector, 64)
+        .store_uint(threshold, 8)
+        .store_coins(supply)
+        .store_ref(begin_cell().store_slice(key).end_cell())
+        .store_ref(route)
+        .store_ref(content)
+        .store_ref(wallet_code)
+        .end_cell());
+}
+
+slice basechain_address(int id) inline {
+    return begin_cell().store_uint(4, 3).store_int(0, 8).store_uint(id, 256).end_cell().begin_parse();
+}
+
+;; The digest the committee signs for `record` (body cell with its one
+;; reference).
+int outbound_digest(int chain_id, slice key, cell record) inline {
+    slice head = begin_cell().store_uint(chain_id, 64).store_uint(slice_bits(key) / 8, 64).end_cell().begin_parse();
+    slice r = record.begin_parse();
+    (r, cell tail) = r.load_ref();
+    return keccak_5(outbound_domain(), head, key, r, tail.begin_parse());
+}
+
+;; The digest the trusted committee signs to hand the contract over to
+;; committee `set_index`: Keccak-256 of the committee domain, Tenzro's chain
+;; id, the route key, the set index, the member count, the members, the
+;; threshold and the expiry. Returns the digest and the members as a
+;; dictionary.
+(int, cell) handover_digest(int chain_id, slice key, int set_index, cell members, int threshold, int expires_at) inline {
+    tuple parts = empty_tuple();
+    parts~tpush(committee_domain());
+    parts~tpush(begin_cell().store_uint(chain_id, 64).store_uint(slice_bits(key) / 8, 64).end_cell().begin_parse());
+    parts~tpush(key);
+    cell dict = new_dict();
+    int n = 0;
+    tuple chunks = empty_tuple();
+    slice m = members.begin_parse();
+    int more = -1;
+    while (more) {
+        throw_unless(error::bad_committee, (slice_bits(m) % 160 == 0) & (slice_bits(m) > 0));
+        chunks~tpush(m);
+        slice each = m;
+        while (slice_bits(each) > 0) {
+            (each, int addr) = each.load_uint(160);
+            (_, int dup) = dict.udict_get_slice?(160, addr);
+            throw_if(error::bad_committee, dup);
+            dict = dict.udict_set(160, addr, begin_cell().end_cell().begin_parse());
+            n += 1;
+        }
+        more = slice_refs(m);
+        if (more) {
+            m = m.preload_ref().begin_parse();
+        }
+    }
+    throw_unless(error::bad_committee, (n > 0) & (n < 256) & (threshold * 2 > n) & (threshold <= n));
+    parts~tpush(begin_cell().store_uint(set_index, 32).store_uint(n, 32).end_cell().begin_parse());
+    int i = 0;
+    while (i < chunks.tlen()) {
+        slice c = chunks.at(i);
+        parts~tpush(c.preload_bits(slice_bits(c)));
+        i += 1;
+    }
+    parts~tpush(begin_cell().store_uint(threshold, 32).store_uint(expires_at, 64).end_cell().begin_parse());
+    return (keccak_tuple(parts), dict);
+}
+
+;; Count the distinct committee members among the signatures (each 65
+;; bytes, `r || s || v`, chained through references).
+int signers(int digest, cell committee, cell sigs) inline {
+    cell seen = new_dict();
+    int count = 0;
+    slice s = sigs.begin_parse();
+    int more = -1;
+    while (more) {
+        (s, int r) = s.load_uint(256);
+        (s, int ss) = s.load_uint(256);
+        (s, int v) = s.load_uint(8);
+        if (v >= 27) { v -= 27; }
+        (int h, int x1, int x2, int ok) = ecrecover(digest, v, r, ss);
+        if (ok) {
+            slice key = begin_cell().store_uint(x1, 256).store_uint(x2, 256).end_cell().begin_parse();
+            int addr = keccak_1(key) & ((1 << 160) - 1);
+            (_, int member) = committee.udict_get_slice?(160, addr);
+            (_, int already) = seen.udict_get_slice?(160, addr);
+            if (member & (~ already)) {
+                seen = seen.udict_set(160, addr, begin_cell().end_cell().begin_parse());
+                count += 1;
+            }
+        }
+        more = slice_refs(s);
+        if (more) {
+            (_, cell next) = s.load_ref();
+            s = next.begin_parse();
+        }
+    }
+    return count;
+}
+
+() emit_record(int sequence, int ton_selector, int tenzro_selector, int sender, int token, int endpoint, int recipient, int amount) impure inline {
+    cell tail = begin_cell().store_uint(recipient, 256).store_uint(amount, 128).end_cell();
+    cell body = begin_cell()
+        .store_uint(sequence, 64)
+        .store_uint(ton_selector, 64)
+        .store_uint(tenzro_selector, 64)
+        .store_uint(sender, 256)
+        .store_uint(token, 256)
+        .store_uint(endpoint, 256)
+        .store_ref(tail)
+        .end_cell();
+    ;; ext_out_msg_info$11 src:addr_none dest:addr_none created_lt created_at
+    ;; init:nothing body:^Cell
+    cell msg = begin_cell()
+        .store_uint(3, 2)
+        .store_uint(0, 2)
+        .store_uint(0, 2)
+        .store_uint(0, 64 + 32)
+        .store_uint(0, 1)
+        .store_uint(1, 1)
+        .store_ref(body)
+        .end_cell();
+    send_raw_message(msg, 0);
+}
+
+;; A bounceable message to this contract's own jetton wallet carrying the
+;; rest of the inbound value.
+() to_own_wallet(cell wallet_code, cell body) impure inline {
+    slice wallet = calculate_user_jetton_wallet_address(my_address(), my_address(), wallet_code);
+    send_raw_message(begin_cell()
+        .store_uint(0x18, 6)
+        .store_slice(wallet)
+        .store_coins(0)
+        .store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+        .store_ref(body)
+        .end_cell(), 64);
+}
+
+;; The Tenzro recipient a transfer notification's forward payload names, or
+;; -1 when the payload is not `send_to_tenzro`.
+int tenzro_recipient(slice payload) inline {
+    if (slice_bits(payload) < 1) { return -1; }
+    (payload, int in_ref) = payload.load_uint(1);
+    if (in_ref) {
+        if (slice_refs(payload) < 1) { return -1; }
+        (_, cell c) = payload.load_ref();
+        payload = c.begin_parse();
+    }
+    if (slice_bits(payload) < 32 + 256) { return -1; }
+    (payload, int op) = payload.load_uint(32);
+    (payload, int recipient) = payload.load_uint(256);
+    if (op != op::send_to_tenzro) { return -1; }
+    return recipient;
+}
+
+() recv_internal(int balance, int value, cell in_msg, slice body) impure {
+    slice cs = in_msg.begin_parse();
+    (cs, int flags) = cs.load_uint(4);
+    (cs, slice sender) = cs.load_msg_addr();
+    (int sequence, int chain_id, int ton_selector, int tenzro_selector, int threshold, int supply, slice key, cell route, cell content, cell wallet_code) = load_store();
+
+    if (flags & 1) {
+        ;; A mint that bounced back was never credited; a burn of this
+        ;; contract's own wallet that bounced leaves those jettons locked
+        ;; there. Either way they are out of the supply.
+        body~skip_bits(32);
+        (body, int bounced_op) = body.load_uint(32);
+        if ((bounced_op == op::internal_transfer()) | (bounced_op == op::burn())) {
+            body~skip_bits(64);
+            (body, int amount) = body.load_coins();
+            save_store(sequence, chain_id, ton_selector, tenzro_selector, threshold, supply - amount, key, route, content, wallet_code);
+        }
+        return ();
+    }
+    if (slice_empty?(body)) { return (); }
+
+    slice rs = route.begin_parse();
+    (rs, int token) = rs.load_uint(256);
+    (rs, int endpoint) = rs.load_uint(256);
+    (rs, int set_index) = rs.load_uint(32);
+    (rs, int expires_at) = rs.load_uint(64);
+    (rs, cell committee) = rs.load_dict();
+    (rs, cell executed) = rs.load_dict();
+    (body, int op) = body.load_uint(32);
+
+    if (op == op::transfer_notification()) {
+        throw_unless(error::not_a_wallet, equal_slices(sender, calculate_user_jetton_wallet_address(my_address(), my_address(), wallet_code)));
+        (body, int query_id) = body.load_uint(64);
+        (body, int amount) = body.load_coins();
+        (body, slice from) = body.load_msg_addr();
+        int recipient = tenzro_recipient(body);
+        (int wc, int from_id) = parse_std_addr(from);
+        if ((recipient < 0) | (wc != 0) | (amount == 0)) {
+            ;; Not a transfer to Tenzro: return the jettons.
+            to_own_wallet(wallet_code, begin_cell()
+                .store_uint(op::transfer(), 32)
+                .store_uint(query_id, 64)
+                .store_coins(amount)
+                .store_slice(from)
+                .store_slice(from)
+                .store_uint(0, 1)
+                .store_coins(0)
+                .store_uint(0, 1)
+                .end_cell());
+            return ();
+        }
+        if (value < min_burn_value) {
+            ;; Too little TON to burn: the jettons stay locked in this
+            ;; contract's wallet, out of the supply.
+            supply -= amount;
+        } else {
+            to_own_wallet(wallet_code, begin_cell()
+                .store_uint(op::burn(), 32)
+                .store_uint(query_id, 64)
+                .store_coins(amount)
+                .store_slice(from)
+                .store_uint(0, 1)
+                .end_cell());
+        }
+        sequence += 1;
+        emit_record(sequence, ton_selector, tenzro_selector, from_id, token, endpoint, recipient, amount);
+        save_store(sequence, chain_id, ton_selector, tenzro_selector, threshold, supply, key, route, content, wallet_code);
+        return ();
+    }
+
+    if (op == op::burn_notification()) {
+        (body, int query_id) = body.load_uint(64);
+        (body, int amount) = body.load_coins();
+        (body, slice owner) = body.load_msg_addr();
+        (body, slice response) = body.load_msg_addr();
+        throw_unless(error::not_a_wallet, equal_slices(sender, calculate_user_jetton_wallet_address(owner, my_address(), wallet_code)));
+        save_store(sequence, chain_id, ton_selector, tenzro_selector, threshold, supply - amount, key, route, content, wallet_code);
+        if (response.preload_uint(2) != 0) {
+            send_raw_message(begin_cell()
+                .store_uint(0x10, 6)
+                .store_slice(response)
+                .store_coins(0)
+                .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+                .store_uint(op::excesses(), 32)
+                .store_uint(query_id, 64)
+                .end_cell(), 64 + 2);
+        }
+        return ();
+    }
+
+    if (op == op::execute) {
+        (body, cell record) = body.load_ref();
+        (body, cell sigs) = body.load_ref();
+        throw_if(error::expired, now() > expires_at);
+        int digest = outbound_digest(chain_id, key, record);
+        throw_unless(error::below_threshold, signers(digest, committee, sigs) >= threshold);
+        slice r = record.begin_parse();
+        throw_unless(error::malformed, (slice_bits(r) == 960) & (slice_refs(r) == 1));
+        (r, int seq) = r.load_uint(64);
+        (r, int source_selector) = r.load_uint(64);
+        (r, int dest_selector) = r.load_uint(64);
+        (r, int from) = r.load_uint(256);
+        (r, int rec_token) = r.load_uint(256);
+        (r, int rec_endpoint) = r.load_uint(256);
+        (r, cell tail) = r.load_ref();
+        slice t = tail.begin_parse();
+        throw_unless(error::malformed, (slice_bits(t) == 384) & (slice_refs(t) == 0));
+        (t, int recipient) = t.load_uint(256);
+        (t, int amount) = t.load_uint(128);
+        ;; The record names this contract: its account id is the route's ramp.
+        slice me = my_address();
+        (me, _) = me.load_uint(11);
+        (me, int here) = me.load_uint(256);
+        throw_unless(error::wrong_route, (source_selector == tenzro_selector) & (dest_selector == ton_selector) & (rec_token == token) & (rec_endpoint == here));
+        (_, int done) = executed.udict_get_slice?(64, seq);
+        throw_if(error::already_executed, done);
+        throw_unless(error::bad_amount, (amount > 0) & (amount < (1 << 120)));
+        executed = executed.udict_set(64, seq, begin_cell().end_cell().begin_parse());
+        cell new_route = begin_cell()
+            .store_uint(token, 256).store_uint(endpoint, 256).store_uint(set_index, 32).store_uint(expires_at, 64)
+            .store_dict(committee).store_dict(executed).end_cell();
+        save_store(sequence, chain_id, ton_selector, tenzro_selector, threshold, supply + amount, key, new_route, content, wallet_code);
+
+        ;; Mint to the recipient's jetton wallet, deploying it if needed; the
+        ;; executor gets the TON left over.
+        slice owner = basechain_address(recipient);
+        cell state_init = calculate_jetton_wallet_state_init(owner, my_address(), wallet_code);
+        send_raw_message(begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(calculate_jetton_wallet_address(state_init))
+            .store_coins(0)
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(state_init)
+            .store_ref(begin_cell()
+                .store_uint(op::internal_transfer(), 32)
+                .store_uint(seq, 64)
+                .store_coins(amount)
+                .store_slice(my_address())
+                .store_slice(sender)
+                .store_coins(0)
+                .store_uint(0, 1)
+                .end_cell())
+            .end_cell(), 64);
+        return ();
+    }
+
+    if (op == op::rotate_committee) {
+        (body, int next_index) = body.load_uint(32);
+        (body, int next_threshold) = body.load_uint(8);
+        (body, int next_expires) = body.load_uint(64);
+        (body, cell members) = body.load_ref();
+        (body, cell sigs) = body.load_ref();
+        throw_if(error::expired, now() > expires_at);
+        throw_unless(error::stale_set, next_index > set_index);
+        (int digest, cell next_committee) = handover_digest(chain_id, key, next_index, members, next_threshold, next_expires);
+        throw_unless(error::below_threshold, signers(digest, committee, sigs) >= threshold);
+        cell new_route = begin_cell()
+            .store_uint(token, 256).store_uint(endpoint, 256).store_uint(next_index, 32).store_uint(next_expires, 64)
+            .store_dict(next_committee).store_dict(executed).end_cell();
+        save_store(sequence, chain_id, ton_selector, tenzro_selector, next_threshold, supply, key, new_route, content, wallet_code);
+        return ();
+    }
+
+    throw(0xffff);
+}
+
+;; TEP-74: total supply, mintable, admin (none: only the committee mints),
+;; content, wallet code.
+(int, int, slice, cell, cell) get_jetton_data() method_id {
+    (_, _, _, _, _, int supply, _, _, cell content, cell wallet_code) = load_store();
+    return (supply, -1, begin_cell().store_uint(0, 2).end_cell().begin_parse(), content, wallet_code);
+}
+
+slice get_wallet_address(slice owner) method_id {
+    (_, _, _, _, _, _, _, _, _, cell wallet_code) = load_store();
+    return calculate_user_jetton_wallet_address(owner, my_address(), wallet_code);
+}
+
+int get_sequence() method_id {
+    (int sequence, _, _, _, _, _, _, _, _, _) = load_store();
+    return sequence;
+}
+
+int is_executed(int seq) method_id {
+    (_, _, _, _, _, _, _, cell route, _, _) = load_store();
+    slice rs = route.begin_parse();
+    rs~skip_bits(256 + 256 + 32 + 64);
+    (rs, _) = rs.load_dict();
+    (rs, cell executed) = rs.load_dict();
+    (_, int done) = executed.udict_get_slice?(64, seq);
+    return done;
+}
+
+int get_outbound_digest(cell record) method_id {
+    (_, int chain_id, _, _, _, _, slice key, _, _, _) = load_store();
+    return outbound_digest(chain_id, key, record);
+}
+
+int get_handover_digest(int set_index, cell members, int threshold, int expires_at) method_id {
+    (_, int chain_id, _, _, _, _, slice key, _, _, _) = load_store();
+    (int digest, _) = handover_digest(chain_id, key, set_index, members, threshold, expires_at);
+    return digest;
+}
+
+;; The trusted committee's set index and expiry (Unix seconds).
+(int, int) get_committee_set() method_id {
+    (_, _, _, _, _, _, _, cell route, _, _) = load_store();
+    slice rs = route.begin_parse();
+    rs~skip_bits(512);
+    (rs, int set_index) = rs.load_uint(32);
+    (rs, int expires_at) = rs.load_uint(64);
+    return (set_index, expires_at);
+}

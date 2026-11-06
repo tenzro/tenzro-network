@@ -1,0 +1,56 @@
+[package]
+name = "tenzro-bridge"
+build = "build.rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tenzro Network bridge: governed routes (CCIP-compatible envelope, IBC, Bitcoin deposits, bridge contracts) under one set of rules"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+bech32 = "0.11"
+tenzro-wallet = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+parking_lot = { workspace = true }
+k256 = { workspace = true, features = ["schnorr"] }
+hmac = "0.12"
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+base64 = "0.22"
+bs58 = { workspace = true }
+# IBC client/consensus state wire encoding.
+# Ethereum light client: sync-committee BLS signatures and receipt tries.
+blst = "0.3"
+rlp = { workspace = true }
+# Tendermint and Stellar validator signatures.
+ed25519-dalek = { workspace = true }
+# Bitcoin proof-of-work targets and chainwork.
+ethnum = "1.5"
+# Sui digests.
+blake2 = "0.10"
+
+[features]
+# Exposes the Tendermint light-client fixtures (signing validators, ICS-23
+# store proofs) to other crates' tests.
+test-support = []
+
+[dev-dependencies]
+bech32 = "0.11"
+# Runs the published CCIP contracts on a Tenzro EVM in the route tests.
+tenzro-vm = { workspace = true }
+tenzro-wallet = { workspace = true, features = ["test-signer"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

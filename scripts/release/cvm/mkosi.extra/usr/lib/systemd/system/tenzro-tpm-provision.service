@@ -1,0 +1,19 @@
+[Unit]
+Description=Provision the Tenzro node's keys in this machine's TPM
+Documentation=https://tenzro.com/docs/node/confidential-vm
+Before=tenzro-node.service
+ConditionPathExists=!/var/lib/tenzro/tpm-provisioned
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=TENZRO_HOME=/var/lib/tenzro
+Environment=TENZRO_DEVICE_KEY_DIR=/var/lib/tenzro/device-key
+ExecStart=/usr/bin/tenzro-node tpm provision
+ExecStartPost=/usr/bin/touch /var/lib/tenzro/tpm-provisioned
+
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

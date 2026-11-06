@@ -1,0 +1,66 @@
+{
+  "bridge_outbound": [
+    {
+      "args": {
+        "target_chain": "Base",
+        "recipient": "0xAbCd",
+        "amount": "1500000",
+        "asset": "usdc"
+      },
+      "fields": {
+        "op": {
+          "outbound": {
+            "target_chain": "base",
+            "recipient": "abcd",
+            "amount": "1500000",
+            "asset": "USDC"
+          }
+        }
+      }
+    },
+    {
+      "args": {
+        "target_chain": "ethereum",
+        "recipient": "0x0102030405060708090a0b0c0d0e0f1011121314",
+        "amount": "7",
+        "asset": null
+      },
+      "fields": {
+        "op": {
+          "outbound": {
+            "target_chain": "ethereum",
+            "recipient": "0102030405060708090a0b0c0d0e0f1011121314",
+            "amount": "7",
+            "asset": null
+          }
+        }
+      }
+    }
+  ],
+  "payment_refund": [
+    {
+      "args": {
+        "pay_ref": "0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        "amount": "250"
+      },
+      "op": {
+        "refund": {
+          "pay_ref": "abababababababababababababababababababababababababababababababab",
+          "amount": "250"
+        }
+      }
+    }
+  ],
+  "payment_set_split": [
+    {
+      "args": {
+        "rule": null
+      },
+      "op": {
+        "set_split": {
+          "rule": null
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+[package]
+name = "tenzro-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cryptographic primitives for Tenzro Network — Ed25519, Secp256k1, ML-DSA-65, VRF, MPC threshold signing"
+documentation = "https://docs.rs/tenzro-crypto"
+readme = "README.md"
+keywords = ["tenzro", "cryptography", "ed25519", "ml-dsa", "post-quantum"]
+categories = ["cryptography", "no-std"]
+
+[dependencies]
+tenzro-types = { workspace = true }
+ed25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }
+k256 = { workspace = true }
+p256 = { workspace = true }
+# `signature` 3.x is the trait crate implemented by ecdsa 0.17-rc.18.
+# ed25519-dalek 2.x still re-exports `signature` 2.x via its public API, so
+# the v3 traits must be imported under disambiguating aliases at k256/p256
+# call sites (see `signatures.rs`).
+signature = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+hkdf = "0.12"
+aes-gcm = { workspace = true }
+x25519-dalek = { workspace = true }
+ml-kem = { workspace = true }
+libcrux-ml-kem = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+
+# Post-quantum signature (NIST FIPS 204).
+ml-dsa = { workspace = true }
+libcrux-ml-dsa = { workspace = true }
+tracing = { workspace = true }
+getrandom = { workspace = true }
+
+# getrandom 0.4 provides `SysRng: TryCryptoRng` over `rand_core 0.10`, which
+# is the `CryptoRng` flavour that `ecdsa 0.17-rc.18`'s
+# `SigningKey::random(&mut R: CryptoRng + ?Sized)` consumes — that ecdsa pulls
+# `signature 3.0.0`, and `signature 3.0.0` pulls `rand_core ^0.10`. Lift via
+# `.unwrap_err()` at the call site to get `CryptoRng` from `TryCryptoRng`.
+# Renamed for clarity vs the `getrandom = "0.3"` workspace pin (which is the
+# one TLS uses).
+getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["std"] }
+
+[features]
+# In-memory P-256 keys for other crates' tests. Enable it only from
+# `[dev-dependencies]`: no release build may hold a P-256 key in software.
+test-keys = []
+
+[dev-dependencies]
+serde_json = "1.0"
+criterion = { workspace = true }
+
+[[bench]]
+name = "crypto_benchmarks"
+harness = false
+
+[lints]
+workspace = true

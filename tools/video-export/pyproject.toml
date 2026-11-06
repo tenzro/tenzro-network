@@ -1,0 +1,32 @@
+[project]
+name = "tenzro-video-export"
+version = "0.1.0"
+description = "ONNX export harness for video encoder foundation models targeted by Tenzro Network"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tenzro Network Contributors" }]
+
+dependencies = [
+    # Pinned to versions known to handle V-JEPA 2 / VideoMAE export. Both
+    # rely on torch.onnx.export with custom ops (3D conv stem in V-JEPA,
+    # tube masking in VideoMAE), so torch/onnx ABI churn is high-risk —
+    # update with care.
+    "torch>=2.4,<2.7",
+    "transformers>=4.45,<4.50",
+    "onnx>=1.16,<1.18",
+    "onnxruntime>=1.19,<1.22",
+    "numpy>=1.26,<2.2",
+    "tomli>=2.0; python_version<'3.11'",
+    "huggingface_hub>=0.25,<0.30",
+]
+
+[project.scripts]
+video-export = "export:main"
+video-verify = "verify:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["export", "verify"]
