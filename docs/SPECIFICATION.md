@@ -1201,7 +1201,7 @@ Every node profiles its own hardware once at startup, with no operator configura
 - **System memory** from `/proc/meminfo` on Linux and `sysctl hw.memsize` on macOS.
 - **NVIDIA GPUs** via `nvidia-smi` (name, VRAM, compute capability per device) plus an NVLink probe (`nvidia-smi nvlink --status`) that distinguishes NVLink-connected multi-GPU machines from PCIe-only ones.
 - **AMD GPUs** via `rocm-smi` (name, VRAM) paired with `rocminfo` gfx target discovery.
-- **Apple Silicon** is treated as a unified-memory device: the GPU-usable budget is approximately three quarters of system RAM, matching the Metal working-set limit.
+- **Apple Silicon** is treated as a unified-memory device.
 - **Coherent CPU/GPU parts on Linux** are recognized structurally rather than by model name: a host with exactly one accelerator whose reported memory falls within an eighth of system RAM is holding one physical pool, and its memory is counted once. Parts whose device memory is a genuinely separate pool — including those bridged to host memory over a coherent interconnect — fall outside the test and keep the discrete accounting.
 
 Probe failures degrade to coarser answers — a machine where `nvidia-smi` is absent simply reports no NVIDIA devices; it never errors. A `detected` flag records whether the profile came from a real probe: hardware claims are only ever produced by the node's own detection, never typed in by an operator.
