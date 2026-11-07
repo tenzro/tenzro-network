@@ -1420,7 +1420,7 @@ The forward travels over the `tenzro/infer` ALPN on the node's iroh endpoint. Th
 
 ### Billing
 
-Cost calculation is identical for both shapes: `input_tokens × input_price + output_tokens × output_price`. Tool-use response tokens (the `tool_use` blocks themselves) count as output tokens. Cached input tokens are billed at a discounted rate (10% of the normal rate by design).
+Cost calculation is identical for both shapes: `input_tokens × input_price + output_tokens × output_price`. Tool-use response tokens (the `tool_use` blocks themselves) count as output tokens.
 
 Settlement runs on the node the request arrived at, before the response is returned. With a `caller_address` and non-zero cost, that node either accepts a channel voucher (when `channel_voucher` is supplied) or executes a direct on-chain transfer. A rejected debit or transfer fails the request with `-32023` and persists an unpaid-settlement marker keyed in `data.unpaid_key` — settlement failure is never a silent free inference. The outcome is reported in the response `settlement` field.
 
