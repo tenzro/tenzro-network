@@ -155,7 +155,9 @@ and the archive's SHA-256 before it installs anything, needs no `sudo`, and puts
 screen looks like, and what to do on a machine without a TPM, a GPU or the
 public network are in [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
 Verified on the 0.2.1 packages: the Windows MSI, the macOS package (arm64) and the Linux arm64 install script. Linux x86_64
-and the `.deb` and `.rpm` packages have not been verified end to end.
+and the `.deb` and `.rpm` packages have not been verified end to end. See
+[docs/HARDWARE-COVERAGE.md](docs/HARDWARE-COVERAGE.md) for which platforms each
+release archive is built and verified for.
 
 ### Verify a release yourself
 

@@ -2,6 +2,15 @@
 
 Get a Tenzro Network node up and running in minutes.
 
+## Easiest path
+
+Download the package for your platform from [downloads.tenzro.com](https://downloads.tenzro.com),
+install it, open a new terminal, and run `tenzro`. The first-run screen detects
+your hardware, sets up keys, and starts the node. See the main
+[README](../../README.md) and [Getting Started](../../docs/GETTING-STARTED.md).
+
+The rest of this guide covers building `tenzro-node` from source and running it directly.
+
 ## Prerequisites
 
 - Rust 1.70+ (install from https://rustup.rs)
@@ -32,7 +41,7 @@ cargo build --release -p tenzro-node
 
 Output:
 ```
-tenzro-node 0.1.0
+tenzro-node 0.2.0
 ```
 
 ## Running Your First Node

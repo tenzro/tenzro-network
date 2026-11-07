@@ -230,7 +230,8 @@ To point the CLI at a particular node, most commands take `--rpc <url>` (`join`,
 | NVIDIA GPU, CPU build | installer note: "an NVIDIA GPU is present, but this release's x86_64 Linux build is CPU-only; the GPU is not used" | none today: the published Linux x86_64 build is CPU-only |
 | glibc older than 2.39 (Debian 12, Ubuntu 22.04) | "this system's glibc is too old ... needs glibc 2.39 or newer and this machine has 2.36" | Ubuntu 24.04, Debian 13, Fedora 40 or newer, or a container based on one |
 | Alpine (musl) | "this Linux uses musl libc" | use a glibc image |
-| Linux arm64 with glibc older than 2.39 (Raspberry Pi OS Bookworm has 2.36) | "this system's glibc is too old ... needs glibc 2.39 or newer" | Ubuntu 24.04, Debian 13 (or Raspberry Pi OS based on it), or a container based on one |
+| Linux arm64 without an NVIDIA GPU (Raspberry Pi) | installer picks `tenzro-node-linux-aarch64-cpu.tar.gz` on Trixie-class glibc, `tenzro-node-linux-aarch64-cpu-bookworm.tar.gz` on Bookworm-class glibc | both archives install-gate pass; the Bookworm archive also starts correctly under qemu-user emulation of a Cortex-A72 and a Cortex-A76 — see [docs/LINUX-AARCH64-SUPPORT.md](LINUX-AARCH64-SUPPORT.md) |
+| Jetson (NVIDIA GPU, arm64) | installer picks `tenzro-node-linux-aarch64-cuda-orin.tar.gz` on a Jetson Orin device tree, `tenzro-node-linux-aarch64-cuda.tar.gz` on Jetson Thor | both archives install-gate pass on JetPack 7.x; Jetson Orin on JetPack 6.x (Ubuntu 22.04, glibc 2.35, CUDA 12.6) has no archive in 0.2.1 — see [docs/LINUX-AARCH64-SUPPORT.md](LINUX-AARCH64-SUPPORT.md) |
 | Windows without an NVIDIA GPU | installer note that the Windows build is the CUDA build | the CLI is installed; GPU features will not work |
 
 ### When the public network is unreachable
@@ -253,11 +254,14 @@ On a machine with neither a TPM nor a network, there is nothing to run yet besid
 
 ### The doctor checklist
 
-`tenzro doctor` runs the machine checks for you (see [CLI.md](CLI.md)). To run them by hand, go in order and stop at the first that fails; each line says what to do.
+Run `tenzro doctor` (see [CLI.md](CLI.md)). It reports the machine's hardware key store (TPM or Secure
+Enclave), whether setup is needed, whether a node is running, free disk space, and names the one thing
+to do next if anything blocks Tenzro. For a manual walk-through, run these in order and stop at the
+first that fails; each line says what to do.
 
 ```bash
-tenzro version && tenzro-node --version          # both 0.2.0; if "command not found": export PATH="$HOME/.local/bin:$PATH"
-command -v tenzro                                # prints ~/.local/bin/tenzro (another path = an older copy shadows it)
+tenzro version && tenzro-node --version          # tenzro 0.2.1, tenzro-node 0.2.0; if "command not found": export PATH="$HOME/.local/bin:$PATH"
+command -v tenzro                                # should be ~/.local/bin/tenzro (another path = an older copy shadows it)
 tenzro-node hardware                             # build: CPU|CUDA, gpus, startup: ok
 getconf GNU_LIBC_VERSION                         # Linux: 2.39 or newer
 ls -l /dev/tpmrm0 && id -nG | tr ' ' '\n' | grep -x tss   # Linux: TPM device present, you are in the tss group
@@ -281,6 +285,9 @@ Remove: `curl -fsSL https://downloads.tenzro.com/install.sh | sh -s -- --uninsta
 and the profile block if it added one. It leaves `~/.tenzro` itself (settings, node data) alone.
 
 ### What is verified, and what is not
+
+See [docs/HARDWARE-COVERAGE.md](HARDWARE-COVERAGE.md) for the platforms each release archive is built
+and install-tested for.
 
 Verified by running the scripts: Ubuntu 24.04 and Fedora 42 (x86_64, rootless containers, installer run as a normal user):
 install, update, uninstall, `--dry-run`, `--from` (offline), `--modify-path`; refusals for a tampered archive, a truncated

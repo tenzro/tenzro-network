@@ -21,6 +21,9 @@ open a direct path first. Validators should have it; other nodes benefit.
 | `443` | TCP | outbound | Relays (HTTPS) | Yes, unless every peer is reachable directly |
 | `8545` | TCP | loopback only | JSON-RPC and the admin page | Never open it to the network |
 
+Firewall rules per role and the settings for a public RPC are in
+[operations/HARDENED-PROFILE.md](operations/HARDENED-PROFILE.md).
+
 Change the UDP port with `[iroh] bind_addr` in the node config. The node
 binds it on IPv4 (`0.0.0.0`) and IPv6 (`[::]`) at once.
 

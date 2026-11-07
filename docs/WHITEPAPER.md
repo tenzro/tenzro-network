@@ -407,7 +407,7 @@ an operator may instead elect to keep the inbound asset. What is not permitted i
 silently crediting a payee an asset they did not choose — a payee who declared
 TNZO receives TNZO or the payment is **refused**, because handing them something
 else would be a substitution nobody agreed to. The preference belongs to the
-payee and is authorised by their own identity key, not by an administrator of the
+payee and is authorized by their own identity key, not by an administrator of the
 node hosting them, so a shared node's operator cannot change how their tenants
 get paid.
 

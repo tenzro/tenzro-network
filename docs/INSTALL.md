@@ -43,7 +43,7 @@ cosign verify-blob --key tenzro-release.pub --insecure-ignore-tlog=true --signat
 sha256sum -c SHA256SUMS --ignore-missing        # macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-Do this first. The installers themselves are not signed with an operating-system code-signing
+Do this first. The installers are not signed with an operating-system code-signing
 certificate (see "Unsigned installers" below), so the release signature is what proves the file is ours.
 
 #### Linux

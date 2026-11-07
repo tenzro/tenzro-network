@@ -180,7 +180,8 @@ serves GPU providers.
 One `tenzro-node` source builds for three tiers. A tier is a build (which
 cargo features are compiled in) and a resource preset (what the node takes of
 the machine at run time). The build decides which roles a node can fill; the
-preset only sizes it.
+preset only sizes it. See [docs/HARDWARE-COVERAGE.md](HARDWARE-COVERAGE.md)
+for which specific platforms each release archive is built and tested for.
 
 | Tier | Machines | Build | Roles it refuses |
 |---|---|---|---|
