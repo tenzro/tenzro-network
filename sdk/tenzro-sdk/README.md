@@ -1,25 +1,21 @@
-_This is a synced mirror of [tenzro-network](https://github.com/tenzro/tenzro-network)'s `sdk/tenzro-sdk`. Fixes and features belong upstream; this repo exists so `cargo add tenzro-sdk` has a home with its own issues, CI and docs.rs._
-
 # Tenzro SDK for Rust
 
 [![Crates.io](https://img.shields.io/crates/v/tenzro-sdk)](https://crates.io/crates/tenzro-sdk)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Docs](https://img.shields.io/docsrs/tenzro-sdk)](https://docs.rs/tenzro-sdk)
 
-The Rust SDK for [Tenzro Network](https://tenzro.com): a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, payments, agents and settlement.
+The official Tenzro SDK for Rust: a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, payments, agents and settlement.
 
-## Installation
+## Compatibility
+
+crates.io currently serves **0.7.0**: `TenzroClient::new(url)` plus `get_chain_id()`/`get_balance()` and the rest of the registry-era surface — it does not yet have the `network` module (`connect_to_network`, `NetworkOptions`) shown below, which lands with the next publish. `cargo add tenzro-sdk` installs 0.7.0 today; to build against the current source (this page), depend on the git repository instead:
 
 ```toml
 [dependencies]
-tenzro-sdk = "0.9"
+tenzro-sdk = { git = "https://github.com/tenzro/tenzro-sdk-rust" }
 ```
 
-or
-
-```bash
-cargo add tenzro-sdk
-```
+Once 0.9.x publishes, switch to `cargo add tenzro-sdk` / `tenzro-sdk = "0.9"`.
 
 ### Core and capability features
 

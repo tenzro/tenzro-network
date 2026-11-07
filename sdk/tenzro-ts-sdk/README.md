@@ -1,14 +1,14 @@
-_This is a synced mirror of [tenzro-network](https://github.com/tenzro/tenzro-network)'s `sdk/tenzro-ts-sdk`. Fixes and features belong upstream; this repo exists so `npm install tenzro-sdk` has a home with its own issues and CI._
-
-**Known test limitation**: `npm test` runs the full test suite as-is (354 of 393 individual tests pass; `npm run build` and the examples typecheck cleanly). 16 test files (agent-accounts, amounts, ap2-terms, challenge-payment, did-envelope, eip7702, event-proof, governance-receipt, hybrid-payer, keystore, nft-abi, openshell, payment-abstraction, payment-ops, settle, web-payments) fail here because they read fixture files from `../fixtures/` relative to the monorepo's `sdk/` layout, which this standalone mirror doesn't include. This is a structural gap in the mirror, not a bug in the SDK itself — fixing it means either vendoring `sdk/fixtures/` into this repo or rewriting those tests to be self-contained, neither done yet.
-
 # Tenzro SDK for TypeScript
 
 [![npm](https://img.shields.io/npm/v/tenzro-sdk)](https://www.npmjs.com/package/tenzro-sdk)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-tenzro.com-blue)](https://tenzro.com/docs/sdk)
 
-The TypeScript SDK for [Tenzro Network](https://tenzro.com): a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, payments, agents and settlement. It runs in Node.js 18+, browsers and edge runtimes.
+The official Tenzro SDK for TypeScript: a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, payments, agents and settlement. It runs in Node.js 18+, browsers and edge runtimes.
+
+## Compatibility
+
+The npm registry currently serves **0.7.0**: `TenzroClient` built directly from an endpoint and chain id (`new TenzroClient({ endpoint, chainId })`), with 60+ methods (`getChainId`, `getBalance`, `getStatus`, `sendTransaction`, and the rest) — it does not yet have `connectToNetwork` or the hardware-signer helpers used below, which land with the next publish. This page describes the current source; for code that matches what `npm install tenzro-sdk` gives you today, see [tenzro-sdk-typescript](https://github.com/tenzro/tenzro-sdk-typescript)'s quickstart.
 
 ## Installation
 

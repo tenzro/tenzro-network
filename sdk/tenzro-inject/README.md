@@ -1,8 +1,6 @@
-_This is a synced mirror of [tenzro-network](https://github.com/tenzro/tenzro-network)'s `sdk/tenzro-inject`. Fixes and features belong upstream; this repo exists so `@tenzro/inject` has its own issues and CI._
-
 # @tenzro/inject
 
-Browser-extension provider for Tenzro. Installs `window.tenzro` and announces itself via EIP-6963 (EVM façade), Wallet Standard (SVM façade), and a CAIP-25/27 multichain core.
+The official Tenzro injected provider for browser extensions and dApps. Installs `window.tenzro` and announces itself via EIP-6963 (EVM façade), Wallet Standard (SVM façade), and a CAIP-25/27 multichain core.
 
 ## What it gives you
 

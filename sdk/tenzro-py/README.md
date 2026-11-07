@@ -1,8 +1,6 @@
-_This is a synced mirror of [tenzro-network](https://github.com/tenzro/tenzro-network)'s `sdk/tenzro-py`. Fixes and features belong upstream; this repo exists so the `tenzro` package has a home with its own issues and CI._ **Note:** not yet published to PyPI — install from this repo (`pip install git+https://github.com/tenzro/tenzro-sdk-python`) until it is.
-
 # Tenzro SDK for Python
 
-The `tenzro` package talks to a Tenzro node and signs with the machine's
+The official Tenzro SDK for Python. The `tenzro` package talks to a Tenzro node and signs with the machine's
 hardware. It carries:
 
 - **Every RPC method the node serves**, one typed method each, on a synchronous
@@ -31,13 +29,16 @@ hardware. It carries:
 
 ## Install
 
+Not yet published to PyPI — install from source until it is:
+
 ```sh
-pip install tenzro            # RPC, builders, verification
-pip install "tenzro[device]"  # plus the TPM / Secure Enclave signer
+pip install git+https://github.com/tenzro/tenzro-sdk-python            # RPC, builders, verification
+pip install "tenzro[device] @ git+https://github.com/tenzro/tenzro-sdk-python"  # plus the TPM / Secure Enclave signer
 ```
 
 Python 3.10 or newer. Without the `device` extra (or without key hardware) the
-SDK reads, builds and verifies, and refuses to sign.
+SDK reads, builds and verifies, and refuses to sign. Once published, these
+become `pip install tenzro` / `pip install "tenzro[device]"`.
 
 ## Quickstart
 

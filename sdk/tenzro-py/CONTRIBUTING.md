@@ -1,10 +1,8 @@
 # Contributing
 
-This repository is a synced mirror of the `sdk/tenzro-py/` directory in
-[tenzro-network](https://github.com/tenzro/tenzro-network). Its content is
-replaced from upstream, so changes made only here will be overwritten.
+Issues and pull requests are welcome in this repository.
 
-- For code changes, make them under `sdk/tenzro-py/` in tenzro-network.
-- Bug reports and feature requests are welcome as issues in this repository.
+- Bug reports and feature requests: open an issue here.
+- Code changes: open a PR here; maintainers land it upstream in `sdk/tenzro-py/` (tenzro-network) as part of review, so a change here and the monorepo stay in sync.
 - The package name is `tenzro` and it needs Python 3.10 or newer.
 - Report security problems privately; see [SECURITY.md](SECURITY.md).
