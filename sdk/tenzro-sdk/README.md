@@ -112,7 +112,7 @@ A node's access policy may ask callers to sign in. `client.access().challenge(..
 
 ## Agents
 
-An agent acts for a root (a person's passkey or an organisation) within Terms
+An agent acts for a root (a person's passkey or an organization) within Terms
 the root signs. `client.auth()` delegates an agent under Terms and updates
 them, and the agent calls `agent_act` on its serving node for each action; an
 action the Terms reserve for the root carries the root's step-up.

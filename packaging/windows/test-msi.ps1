@@ -13,7 +13,8 @@ param(
     [Parameter(Mandatory)][string]$Msi,
     [string]$UpgradeMsi = '',
     [string]$InstallDir = 'C:\tmp\tz-msi-test\',
-    [string]$LogDir = ''
+    [string]$LogDir = '',
+    [string]$Version = '0.2.1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -147,7 +148,7 @@ try {
     Check 'where tenzro resolves to the install folder' ($r.Rc -eq 0 -and $r.Out -like "$InstallDir*")
     $r = Run-Fresh 'tenzro --version'
     Write-Host "tenzro --version -> $($r.Out)"
-    Check 'tenzro --version prints tenzro 0.2.0' ($r.Rc -eq 0 -and $r.Out -match '^tenzro 0\.2\.0')
+    Check "tenzro --version prints tenzro $Version" ($r.Rc -eq 0 -and $r.Out -match ('^tenzro ' + [regex]::Escape($Version)))
     $r = Run-Fresh 'tenzro setup --help'
     Write-Host "tenzro setup --help (first lines):"; ($r.Out -split "`r?`n" | Select-Object -First 6) | ForEach-Object { Write-Host "  $_" }
     Check 'tenzro setup --help exits 0' ($r.Rc -eq 0)
@@ -186,7 +187,7 @@ try {
     $a = Get-PathRaw 'machine'
     Check 'machine PATH untouched' ($a.Value -eq $snapM.Value)
     $r = Run-Fresh 'tenzro --version'
-    Check 'new terminal: tenzro --version works via user PATH' ($r.Rc -eq 0 -and $r.Out -match '^tenzro 0\.2\.0') $r.Out
+    Check 'new terminal: tenzro --version works via user PATH' ($r.Rc -eq 0 -and $r.Out -match ('^tenzro ' + [regex]::Escape($Version))) $r.Out
     $rc = Run-Msi 'usr-uninstall' "/x `"$Msi`""
     Check 'uninstall by package path: exit code 0' ($rc -eq 0) "rc=$rc"
     Verify-Removed 'user mode uninstall'

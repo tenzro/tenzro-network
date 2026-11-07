@@ -236,7 +236,7 @@ it never admits or excludes anyone, and no role is closed to level 0. The
 chain derives the level at every reward epoch close from attestation evidence
 already in state, never from what a participant declares: level 1 is a
 machine identity whose TPM endorsement certificate chains to a manufacturer
-root governance recognises, that is not revoked, whose TPM backs no other
+root governance recognizes, that is not revoked, whose TPM backs no other
 live identity, and that proved this epoch it still holds the TPM; everything
 else is level 0. Level 2 is level 1 where the same TPM holds the identity's
 enrolled ML-DSA key: the machine's admitted attestation key certifies it
@@ -245,7 +245,7 @@ TPM and unable to leave it, over a statement naming the identity and the key,
 and the certification is sent as a `HardwareProof`. Level 3 is level 2 where
 that key is a restricted ML-DSA attestation key, or level 1 with a second,
 independent hardware scheme proven in the same epoch: an NVIDIA GPU whose
-per-device certificate chain ends at a GPU device root governance recognises
+per-device certificate chain ends at a GPU device root governance recognizes
 signs the epoch's GPU challenge in an SPDM measurement report, sent as a
 `HardwareProof`. One GPU counts for one live identity. Enrolling a different
 ML-DSA key leaves the earlier certification matching nothing, so the level
@@ -540,7 +540,7 @@ a change that way waits out the grace window.
 | `reward.availability_readiness_cold_bps` | 10000 | 0 | 10000 | down | Availability reward multiplier, bps, for a subject that declared ReadinessTier::Cold (a DeclareReadinessTier transaction signed by the account that owns its bond or stake). Genesis 100%: the tier changes no payout until governance sets it apart from Warm. |
 | `reward.availability_readiness_cool_bps` | 10000 | 0 | 10000 | down | Availability reward multiplier, bps, for a subject that declared ReadinessTier::Cool. Genesis 100%. |
 | `reward.availability_readiness_warm_bps` | 10000 | 0 | 10000 | down | Availability reward multiplier, bps, for ReadinessTier::Warm -- the default tier for any subject that has never declared one. Genesis 100%. |
-| `reward.availability_require_hardware_binding` | 0 | 0 | 1 | up | Whether the availability reward is paid at all: while zero (genesis) it pays nothing, whatever its cap, decay, demand offset or readiness tiers, because nothing ties a verdict to a real machine. Set, a verified-available verdict pays only when the subject's provider_did is a machine identity with a TPM endorsement chaining to a recognised root (the check validator admission uses). |
+| `reward.availability_require_hardware_binding` | 0 | 0 | 1 | up | Whether the availability reward is paid at all: while zero (genesis) it pays nothing, whatever its cap, decay, demand offset or readiness tiers, because nothing ties a verdict to a real machine. Set, a verified-available verdict pays only when the subject's provider_did is a machine identity with a TPM endorsement chaining to a recognized root (the check validator admission uses). |
 | `reward.sla_challenge_energy_budget_bps` | 0 | 0 | 1000 | neither | Most of the bonded compute fleet's own daily energy the SLA probe cadence may spend on challenges, bps. Zero disables the check. |
 | `rewards.base_liquid_bps` | 10000 | 0 | 10000 | neither | Share of a validator's running-cost base paid liquid when it claims, bps; the base is the operator's and is split before the rest of the claim. |
 | `rewards.claim_liquid_bps` | 2500 | 0 | 10000 | neither | Share of a reward claim paid liquid, bps; the rest vests. |
@@ -630,14 +630,14 @@ a change that way waits out the grace window.
 | `treasury.max_period_outflow_bps` | 300 | 1 | 10000 | down | Most the treasury pays out within one outflow period, bps of its balance when the period began. |
 | `treasury.max_proposal_outflow_bps` | 200 | 1 | 10000 | down | Most one proposal pays out of the treasury, bps of the treasury balance when it enacts. |
 | `treasury.max_sale_tnzo_epoch` | 10000 | 1 | 10000000 | neither | Most the running-cost reserve pays out in one epoch, whole TNZO, however much volume the reports show. A ceiling wash trading cannot raise. |
-| `treasury.month_epochs` | 720 | 1 | 8760 | neither | Epochs one treasury accounting month spans: the window realised revenue, paid running costs and the reserve target are measured over. |
+| `treasury.month_epochs` | 720 | 1 | 8760 | neither | Epochs one treasury accounting month spans: the window realized revenue, paid running costs and the reserve target are measured over. |
 | `treasury.outflow_period_ms` | 2592000000 | 3600000 | 31536000000 | up | Length of a treasury outflow period, ms. |
 | `treasury.payment_ttl_epochs` | 720 | 1 | 8760 | neither | Epochs an enacted running-cost payment stays payable; what the reserve's caps have not paid by then lapses, so a payment sized at one price is never paid out at a much later one. |
 | `treasury.proposal_outflow_exception_bps` | 0 | 0 | 500 | down | Basis points of the period's opening stable holdings one stable sponsorship payment may use above the period outflow limit when its proposal asks for the exception. The yearly USD caps and the per-proposal limit still bind. 0 disables the exception. |
 | `treasury.reserve_drawdown_bps` | 300 | 0 | 10000 | neither | Share of the running-cost reserve's balance running-cost payments may draw in a trailing month beyond the revenue share, bps. |
-| `treasury.reserve_fill_share_bps` | 5000 | 0 | 10000 | neither | Share of the fee revenue the treasury realised since the last epoch boundary that moves into the running-cost reserve at the boundary, while the reserve is under its target and only as far as the target, bps. |
+| `treasury.reserve_fill_share_bps` | 5000 | 0 | 10000 | neither | Share of the fee revenue the treasury realized since the last epoch boundary that moves into the running-cost reserve at the boundary, while the reserve is under its target and only as far as the target, bps. |
 | `treasury.reserve_target_months` | 12 | 0 | 120 | neither | The running-cost reserve's target, in months of observed running cost: the larger of what the reserve paid over the trailing month and what that month's revenue share allowed. |
-| `treasury.running_cost_revenue_share_bps` | 3000 | 0 | 10000 | neither | Share of the trailing month's realised fee revenue running-cost payments may use in that month, bps. |
+| `treasury.running_cost_revenue_share_bps` | 3000 | 0 | 10000 | neither | Share of the trailing month's realized fee revenue running-cost payments may use in that month, bps. |
 | `treasury.sale_volume_share_bps` | 500 | 0 | 10000 | neither | Most the running-cost reserve pays out in one epoch, bps of the TNZO the market traded in an epoch as the validators' volume reports observe it; no recent report, no payout. |
 | `treasury.sponsorship_grants_yearly_max_tnzo` | 0 | 0 | 1000000000 | down | Most treasury TNZO sponsorship and grants may pay out together in a 365-day period, whole TNZO. 0 disables both. |
 | `treasury.sponsorship_grants_yearly_max_usd` | 0 | 0 | 1000000000 | down | Most sponsorship and grants may pay together in stable assets in a 365-day period, whole US dollars. 0 disables both. |

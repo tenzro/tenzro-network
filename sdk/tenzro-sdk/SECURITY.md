@@ -7,7 +7,7 @@ request or discussion for an unpatched vulnerability.
 
 - Email **eng@tenzro.com**, or
 - use GitHub private vulnerability reporting ("Report a vulnerability" under
-  the Security tab) on the affected repository in the `tenzro` organisation.
+  the Security tab) on the affected repository in the `tenzro` organization.
 
 Include what you found, how to reproduce it, the version or commit, and the
 impact you expect. We acknowledge each report, keep you informed while we work

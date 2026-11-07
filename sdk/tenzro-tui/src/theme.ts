@@ -1,6 +1,6 @@
 // One palette, matching the Tenzro site: a near-black ground (the terminal's
 // own) and a single periwinkle accent. Status is always a word first and a
-// colour second, so NO_COLOR and monochrome terminals lose nothing.
+// color second, so NO_COLOR and monochrome terminals lose nothing.
 
 export interface Theme {
   color: boolean;
@@ -14,7 +14,7 @@ export interface Theme {
 
 export function colorEnabled(env: NodeJS.ProcessEnv = process.env, flagNoColor = false): boolean {
   if (flagNoColor) return false;
-  // https://no-color.org: present and non-empty disables colour.
+  // https://no-color.org: present and non-empty disables color.
   if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return false;
   if (env.TERM === "dumb") return false;
   return true;

@@ -46,7 +46,7 @@ with OpenShell 0.1.5 (`openshell` and `openshell-gateway`, the release
    ```
 
    The TPM's endorsement certificate has to chain to a manufacturer root the
-   network recognises (`[economy] tpm_endorsement_roots_pem` in its genesis).
+   network recognizes (`[economy] tpm_endorsement_roots_pem` in its genesis).
 
 2. Delegate the agent. Its controller (the root) bonds it and approves its
    Terms, served by that node. A machine root does it with its own hardware

@@ -160,7 +160,7 @@ credential is signed by its issuer's hardware key or passkey with an
 `ecdsa-jcs-2019` Data Integrity proof, the issuer's DID must derive from that
 key, and revocation is a Bitstring Status List entry signed by the same
 issuer. Any issuer may issue; relying parties decide which issuers they
-recognise in their own trust lists. The credential model, revocation and
+recognize in their own trust lists. The credential model, revocation and
 trust lists are specified in [TRUST.md](TRUST.md).
 
 ---

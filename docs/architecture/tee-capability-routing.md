@@ -70,7 +70,7 @@ This separates advertised capability (cheap, gossipped, freshness-bounded) from 
 
 ## Relationship to consensus
 
-TEE attestation does not enter consensus. The leader schedule is seats times observed behaviour only; attestation is a reputation signal outside the protocol.
+TEE attestation does not enter consensus. The leader schedule is seats times observed behavior only; attestation is a reputation signal outside the protocol.
 
 In particular:
 

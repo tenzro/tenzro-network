@@ -21,7 +21,7 @@ Node 22 or newer (ink 8 requires it).
     --api <url>        node REST endpoint, when it is not the default for --rpc
     --address <0x...>  account for the Wallet screen (default $TENZRO_ADDRESS, else the node's payee)
     --plain            one text report, then exit (automatic when output is not a terminal)
-    --no-color         no colour (NO_COLOR is honoured as well)
+    --no-color         no color (NO_COLOR is honored as well)
 
 `--plain` exits 0 when the node is OK and 1 otherwise, so scripts can use it.
 
@@ -39,7 +39,7 @@ Tab and Shift-Tab (or Right and Left) change screen. Up/Down or j/k move in a li
 r refreshes now (it also refreshes every 5 s). ? shows the help overlay. Esc closes
 it or cancels an edit. q or Ctrl-C quits and restores the terminal.
 
-The header always shows one status word: OK, WATCH, DOWN or UNKNOWN. Colour is a
+The header always shows one status word: OK, WATCH, DOWN or UNKNOWN. Color is a
 second channel only; with NO_COLOR the words, bold and reverse video carry the
 meaning. When the node stops answering, the last values stay on screen marked STALE.
 The console needs a window of at least 80x24 and says so below that.
@@ -50,7 +50,7 @@ The console needs a window of at least 80x24 and says so below that.
 
 Unit tests cover formatting, the key table (a key bound twice fails the build) and
 the screens at 80x24 and 120x40 (navigation, scrolling, help, account entry, node
-down, stale data, too-small window, no colour codes without colour).
+down, stale data, too-small window, no color codes without color).
 
 ## Not yet here
 

@@ -734,7 +734,7 @@ rules every node applies at each epoch boundary from chain state and
 governed parameters (`crates/tenzro-vm/src/native/treasury_reserve.rs`):
 
 - **Filling.** `treasury.reserve_fill_share_bps` of the fee revenue the
-  treasury realised since the last boundary moves into the reserve, while
+  treasury realized since the last boundary moves into the reserve, while
   the reserve is under its target and only as far as the target.
 - **Target.** `treasury.reserve_target_months` months of observed running
   cost: the larger of what the reserve paid over the trailing month
@@ -743,7 +743,7 @@ governed parameters (`crates/tenzro-vm/src/native/treasury_reserve.rs`):
 - **Spending.** A `running_cost_payment` proposal, once enacted, joins a
   queue that is paid in order at epoch boundaries. Over any trailing month
   the reserve pays at most `treasury.running_cost_revenue_share_bps` of the
-  month's realised fee revenue plus `treasury.reserve_drawdown_bps` of its
+  month's realized fee revenue plus `treasury.reserve_drawdown_bps` of its
   own balance, and never more than it holds. A payment the caps do not yet
   cover waits in the queue for `treasury.payment_ttl_epochs`; what is still
   unpaid then lapses, so a payment sized at one price is never paid out at a
@@ -896,7 +896,7 @@ This is the default (`payments.metered_settlement = true`). It applies to
 TNZO-priced challenges, because `cost_wei` is denominated in TNZO. A response
 that reports no cost, such as a stream whose client did not ask for usage,
 settles at the amount the agent declared in its credential. An operator who
-sets `metered_settlement = false` gets that behaviour for every request: the
+sets `metered_settlement = false` gets that behavior for every request: the
 declared amount, settled before the call runs.
 
 A call below the network's micro-settlement floor should not settle on its own

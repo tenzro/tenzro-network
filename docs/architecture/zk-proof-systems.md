@@ -185,13 +185,13 @@ statement hash is SHA3-256 (Keccak-f[1600]).
 
 - The Ethereum Foundation's Poseidon cryptanalysis initiative found that
   Poseidon2 "did not hold as cleanly" as expected in its first phase, and on
-  2026-08-13 the Ethereum roadmap dropped Poseidon for L1 in favour of
+  2026-08-13 the Ethereum roadmap dropped Poseidon for L1 in favor of
   SHA-256/BLAKE-class hashes ("hash-friendly SNARKs, not SNARK-friendly
   hashes"). A full-round Poseidon1 KoalaBear collision exists in a model where
   the attacker chooses the MDS matrix (ePrint 2026/1760); default Plonky3
   Poseidon2 is not directly affected.
 - A STARK's soundness reduces to the collision resistance and random-oracle
-  behaviour of its commitment and transcript hash. Using SHA-256 and BLAKE3
+  behavior of its commitment and transcript hash. Using SHA-256 and BLAKE3
   there rests soundness on hashes with long public cryptanalysis. Using a
   different hash in each system means a break in one leaves the other standing.
 - The statement hash is SHA3-256 because the identity commitment is a

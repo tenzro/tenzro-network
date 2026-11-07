@@ -120,7 +120,7 @@ Stake decides; holders can delay and contest, and human roots can delay.
   (default 30 days) at `veto.block_bps`. The stretch never shrinks.
 - At `veto.block_bps` (default 10%) the proposal becomes `contested` and is
   voted again on the `ratify` track: a fresh tally over the same electorate,
-  three quarters in favour, and a thirty-day timelock that replaces any
+  three quarters in favor, and a thirty-day timelock that replaces any
   earlier stretch. A Ratify vote is neither contested nor stretched again.
 - `GovernanceVetoWithdraw { proposal_id, holder }` returns a lock in full to
   its holder once the proposal is decided: executed, vetoed, rejected, or

@@ -45,7 +45,7 @@ except where they widen an attack surface.
    admit only the operator DID and policy admins; everything an open policy
    admits must be safe for anonymous callers.
 3. **Bridge inbound** (`tenzro-bridge::route`). Deliveries originate on
-   foreign chains. One framework applies every defence on every route:
+   foreign chains. One framework applies every defense on every route:
    strict canonical decoding, committee (and blessing committee) quorum
    over a digest binding chain id, route, nonce and expiry, single-use
    nonces in consensus state, the circuit breaker, caps, and the supply
@@ -84,7 +84,7 @@ except where they widen an attack surface.
   on chain once and slashed 5% (15% when correlated) into the
   insurance pool in consensus state.
 - Leader-selection bias: the schedule is seats times observed
-  behaviour, seeded from the committed prefix; no self-reported value
+  behavior, seeded from the committed prefix; no self-reported value
   (including TEE attestation) enters it, and stake split across many
   validators earns no extra seats.
 

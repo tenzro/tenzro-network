@@ -6,7 +6,7 @@ Unified identity protocol for humans and machines on the Tenzro Network.
 
 **tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing an identity system in which humans and AI agents are represented by the same identity type and hold the same rights to act. The crate supports W3C DID Documents, certifications and KYC as signed credentials kept in the trust ledger (`tenzro-trust`, see `docs/TRUST.md`), fine-grained delegation scopes, cascading revocation, and automatic hardware-rooted wallet provisioning for every identity.
 
-The protocol recognises **three identity classes** under the `did:tenzro:` namespace:
+The protocol recognizes **three identity classes** under the `did:tenzro:` namespace:
 
 - **Human** — `did:tenzro:human:{uuid}`, controls zero or more delegated agents
 - **Delegated agent** — `did:tenzro:machine:{controller}:{uuid}`, machine under a human controller; its authority is only its consensus Terms
@@ -22,7 +22,7 @@ The protocol recognises **three identity classes** under the `did:tenzro:` names
 - **DelegationEntry** — Delegation record with grantor, grantee, scope, and revocation status
 - **DidDocument** — W3C DID Document export/import for interoperability via `identity_to_did_document()` and `extract_public_keys_from_document()`
 - **WalletBinder** — Automatic hardware-rooted wallet provisioning for every identity
-- **KycTier** — Verification levels: Unverified (0), Basic (1), Enhanced (2), Full (3) — derived for each relying party from the KYC certifications it recognises; no identity carries a tier of its own
+- **KycTier** — Verification levels: Unverified (0), Basic (1), Enhanced (2), Full (3) — derived for each relying party from the KYC certifications it recognizes; no identity carries a tier of its own
 
 ## Features
 
@@ -32,7 +32,7 @@ The protocol recognises **three identity classes** under the `did:tenzro:` names
 - **Delegation Enforcement:** Fine-grained permission scopes with `enforce_operation()` returning typed `DelegationViolation` errors
 - **Cascading Revocation:** Revocations are decided in consensus; `revoke_from_chain()` mirrors each one and revokes the controlled machines the registry records
 - **Right to Erasure (GDPR Article 17):** Two-phase flow — `revoke_identity` propagates the status change, then `forget_identity` hard-deletes from `CF_IDENTITIES` and the in-memory registry. The DID must already be in `Revoked` status. Surfaced as `tenzro_forgetIdentity` RPC, MCP `forget_identity` tool, and CLI `tenzro identity forget <did>`.
-- **KYC from credentials:** a KYC tier is what a relying party concludes from the certifications issued by the issuers it recognises; any issuer can certify, and none is privileged
+- **KYC from credentials:** a KYC tier is what a relying party concludes from the certifications issued by the issuers it recognizes; any issuer can certify, and none is privileged
 - **Auto-Provisioned Wallets:** Every identity gets a hardware-rooted wallet via `WalletBinder`
 - **Write-Through Persistence:** RocksDB storage via `KvStore` trait with `CF_IDENTITIES` column family
 - **ERC-8004 Trustless Agents Registry (EVM):** The `erc8004` adapter module drives the ERC-8004 (Jan 2026 revision) semantic on the EVM from one TDIP `register_machine_with_fee` write. The TDIP `IdentityData::Machine.erc8004_agent_id` field captures the allocation (sequential `uint256`, 1-indexed, server-allocated). Reverse DID → id lookup via `OnChainAgentRegistry::lookup_agent_id_by_did`.
@@ -93,7 +93,7 @@ All features confirmed (85 passing tests):
 
 1. **Delegation Enforcement**: `enforce_operation()` returns typed `DelegationViolation` specifying max_value, protocol, chain, or time_bound violations
 2. **Local Resolution**: DIDs resolve from the node's own state; there is no upstream resolver
-3. **KYC from credentials**: tiers are derived per relying party from the KYC certifications it recognises
+3. **KYC from credentials**: tiers are derived per relying party from the KYC certifications it recognizes
 4. **Revocation from consensus**: `revoke_from_chain()` applies the `IdentityRevoked` log every node re-executed
 5. **RocksDB Persistence**: Write-through to `CF_IDENTITIES` via `KvStore` trait, JSON serialization for identity records
 

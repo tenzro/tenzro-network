@@ -202,7 +202,7 @@ export function assess(i: SponsorshipInputs): Assessment {
     add(
       "Hardware endorsement",
       "fail",
-      "A Secure Enclave has no TPM endorsement certificate, and operator approval requires one that chains to a recognised root. A Mac cannot be approved today.",
+      "A Secure Enclave has no TPM endorsement certificate, and operator approval requires one that chains to a recognized root. A Mac cannot be approved today.",
     );
   } else if (i.platform === "tpm") {
     add(

@@ -90,7 +90,7 @@ node dist/src/cli.js --rpc http://127.0.0.1:8545
 Five screens, switched with 1 to 5 or Tab: Overview, Wallet, Models,
 Validators and Governance. r refreshes, ? shows the help, q quits. The header
 shows one status word (OK, WATCH, DOWN or UNKNOWN); `NO_COLOR` or `--no-color`
-removes colour and the words still carry the meaning. Without a terminal, or
+removes color and the words still carry the meaning. Without a terminal, or
 with `--plain`, it prints one text report and exits 0 when the node is OK and 1
 otherwise. See [tenzro-tui/README.md](tenzro-tui/README.md).
 

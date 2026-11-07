@@ -357,7 +357,7 @@ export class AuthClient {
 	/**
 	 * The agent's next cumulative voucher on a channel its wallet funded,
 	 * signed by the serving node with its hardware key for the agent. The
-	 * node signs only a voucher the ledger would honour now.
+	 * node signs only a voucher the ledger would honor now.
 	 */
 	async agentVoucher(channelId: string, cumulativeAmount: string): Promise<AgentVoucherResult> {
 		return this.rpc.call<AgentVoucherResult>("tenzro_agentVoucher", {
@@ -1000,7 +1000,7 @@ export interface OAuthDiscovery {
 	 */
 	dpop_signing_alg_values_supported: string[];
 	/**
-	 * RFC 9396 RAR `type` values the AS recognises: `transfer`,
+	 * RFC 9396 RAR `type` values the AS recognizes: `transfer`,
 	 * `create_escrow`, `discharge_escrow`, `inference`, `stake`, `vote`,
 	 * `contract`, `register_identity`, `resource_invocation`.
 	 */

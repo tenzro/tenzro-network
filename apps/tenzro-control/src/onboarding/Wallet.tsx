@@ -23,7 +23,7 @@ export function Wallet({
   async function create() {
     const name = displayName.trim();
     if (!name) {
-      setError("Give this identity a name so you can recognise it later.");
+      setError("Give this identity a name so you can recognize it later.");
       return;
     }
     setBusy(true);

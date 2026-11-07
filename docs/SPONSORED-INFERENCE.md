@@ -133,7 +133,7 @@ No key, no account and no signature are needed. Over HTTP:
 ```sh
 curl -s http://127.0.0.1:8545 -H 'content-type: application/json' -d '{
   "jsonrpc": "2.0", "id": 1, "method": "tenzro_sponsoredInference",
-  "params": [{ "model": "qwen3-0.6b", "input": "Name one primary colour.",
+  "params": [{ "model": "qwen3-0.6b", "input": "Name one primary color.",
                "sponsor": "did:tenzro:machine:...", "max_tokens": 16 }]
 }'
 ```
@@ -142,7 +142,7 @@ With the CLI:
 
 ```sh
 tenzro inference sponsored --model qwen3-0.6b --sponsor did:tenzro:machine:... \
-  --max-tokens 16 --rpc http://127.0.0.1:8545 "Name one primary colour."
+  --max-tokens 16 --rpc http://127.0.0.1:8545 "Name one primary color."
 ```
 
 With the SDKs:
@@ -151,14 +151,14 @@ With the SDKs:
 import { TenzroClient } from "tenzro-sdk";
 const node = new TenzroClient({ endpoint: "http://127.0.0.1:8545", chainId: 1337 });
 const r = await node.sponsoredInference({
-  model: "qwen3-0.6b", input: "Name one primary colour.", sponsor, max_tokens: 16,
+  model: "qwen3-0.6b", input: "Name one primary color.", sponsor, max_tokens: 16,
 });
 ```
 
 ```rust
 let node = tenzro_sdk::TenzroClient::new("http://127.0.0.1:8545").await?;
 let r = node
-    .sponsored_inference("qwen3-0.6b", "Name one primary colour.", sponsor, Some(16))
+    .sponsored_inference("qwen3-0.6b", "Name one primary color.", sponsor, Some(16))
     .await?;
 ```
 
@@ -166,7 +166,7 @@ let r = node
 from tenzro import RpcClient
 
 with RpcClient("http://127.0.0.1:8545") as node:
-    r = node.sponsored_inference([{"model": "qwen3-0.6b", "input": "Name one primary colour.",
+    r = node.sponsored_inference([{"model": "qwen3-0.6b", "input": "Name one primary color.",
                                    "sponsor": sponsor, "max_tokens": 16}])
 ```
 

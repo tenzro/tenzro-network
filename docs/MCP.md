@@ -206,7 +206,7 @@ As the agent (its access token), issue a grant on another chain: a budget of one
 
 ### `agent_voucher`
 
-As the calling delegated agent, have this serving node sign the agent's next cumulative voucher on a channel its wallet funded. The node signs only a voucher the ledger would honour now: this machine assigned in the agent's current terms, the agent not revoked or quarantined, the amount within the lock its terms counted at open.
+As the calling delegated agent, have this serving node sign the agent's next cumulative voucher on a channel its wallet funded. The node signs only a voucher the ledger would honor now: this machine assigned in the agent's current terms, the agent not revoked or quarantined, the amount within the lock its terms counted at open.
 
 **Input.**
 
@@ -4777,7 +4777,7 @@ Or `{ challenge }` → the audit, plus whether each seat's key is the one this n
 
 ### `autotune_decisions`
 
-What the controller has decided, and why. A node that changes its own configuration and cannot say why is one an operator has to reverse-engineer during an incident. Each entry carries the action, the reasoning citing the measurements it acted on, and whether it was actually applied — an observing-only node records its proposals so the behaviour can be watched before it is trusted.
+What the controller has decided, and why. A node that changes its own configuration and cannot say why is one an operator has to reverse-engineer during an incident. Each entry carries the action, the reasoning citing the measurements it acted on, and whether it was actually applied — an observing-only node records its proposals so the behavior can be watched before it is trusted.
 
 **Access.** Read-only. **Calls.** [`tenzro_autotuneDecisions`](RPC.md#tenzro_autotunedecisions).
 

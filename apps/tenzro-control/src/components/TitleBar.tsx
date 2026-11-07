@@ -4,7 +4,7 @@ import { platform } from "@tauri-apps/plugin-os";
 import { cn } from "@/lib/cn";
 
 /// Minimize / maximize / close glyphs drawn to the exact Windows 11 caption
-/// button spec (10x10 hairline, centred in a 46x32 hit target) rather than
+/// button spec (10x10 hairline, centered in a 46x32 hit target) rather than
 /// reused from the Phosphor set used everywhere else — Phosphor's rounded
 /// weights read as an obviously-not-native window control at this size, and
 /// this is the one place the app borrows the host OS's own shape language

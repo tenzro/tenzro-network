@@ -379,7 +379,7 @@ Validators sign checkpoints with a hardware-held composite ML-DSA-65 + P-256 key
 - **Governance weight**, stake-weighted (section 16).
 - **High-trust role eligibility:** high-value bridge duties (Hyperlane Tenzro-set ISM, Wormhole Guardian-quorum when configured, a seat on a bridge route committee drawn from bonded attestors); AP2 high-value mandate validation.
 
-**TEE is an optional capability, not a gate.** Hardware attestation through any supported vendor (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC, Intel Tiber) is a reputation signal. It never changes the leader-selection draw, which is seats times observed behaviour only.
+**TEE is an optional capability, not a gate.** Hardware attestation through any supported vendor (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC, Intel Tiber) is a reputation signal. It never changes the leader-selection draw, which is seats times observed behavior only.
 
 ### Service roles are bonded but carry no consensus weight
 

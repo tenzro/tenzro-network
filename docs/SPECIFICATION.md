@@ -308,7 +308,7 @@ The genesis configuration names the first Tier 3 RPC provider as validator-0: th
 
 ### 3.5 Leader Schedule
 
-The leader of each round is drawn from a distribution weighted by seats times observed behaviour (a validator whose leader slots commit keeps full weight; one that misses them drops to the floor). The schedule is a function of the committed prefix: it changes only at checkpoints and draws its seed from the ordering digest of the checkpoint two back, so no validator can grind it and every validator evaluates the commit rule against the same leader. No self-reported value, and no VRF or BLS key, enters the draw.
+The leader of each round is drawn from a distribution weighted by seats times observed behavior (a validator whose leader slots commit keeps full weight; one that misses them drops to the floor). The schedule is a function of the committed prefix: it changes only at checkpoints and draws its seed from the ordering digest of the checkpoint two back, so no validator can grind it and every validator evaluates the commit rule against the same leader. No self-reported value, and no VRF or BLS key, enters the draw.
 
 ### 3.6 Checkpoints, Certificates and Accountability
 
@@ -1162,7 +1162,7 @@ Providers that consistently fail health checks or deliver incorrect results are 
 
 ### 10.5 Model Downloads
 
-`HfArtifactDownloader` fetches model weights from peers over iroh blobs first and falls back to the Hugging Face Hub, reporting progress (bytes downloaded, total size, percentage). Every downloaded or served model is recorded as a content-addressed manifest in the trust ledger, and downloads and loads are checked against the SHA-256 in the model's catalog entry and the model's verified manifest. The catalog is published data: signed entries from the publishers the operator's catalog trust list recognises ([TRUST.md](TRUST.md#model-catalog)).
+`HfArtifactDownloader` fetches model weights from peers over iroh blobs first and falls back to the Hugging Face Hub, reporting progress (bytes downloaded, total size, percentage). Every downloaded or served model is recorded as a content-addressed manifest in the trust ledger, and downloads and loads are checked against the SHA-256 in the model's catalog entry and the model's verified manifest. The catalog is published data: signed entries from the publishers the operator's catalog trust list recognizes ([TRUST.md](TRUST.md#model-catalog)).
 
 The HuggingFace Hub backend (`hf-hub`) is wired in by default; providers register a model by pointing at a HuggingFace repository and the node downloads the GGUF weights, ONNX exports, or safetensors archives directly.
 
@@ -1202,7 +1202,7 @@ Every node profiles its own hardware once at startup, with no operator configura
 - **NVIDIA GPUs** via `nvidia-smi` (name, VRAM, compute capability per device) plus an NVLink probe (`nvidia-smi nvlink --status`) that distinguishes NVLink-connected multi-GPU machines from PCIe-only ones.
 - **AMD GPUs** via `rocm-smi` (name, VRAM) paired with `rocminfo` gfx target discovery.
 - **Apple Silicon** is treated as a unified-memory device: the GPU-usable budget is approximately three quarters of system RAM, matching the Metal working-set limit.
-- **Coherent CPU/GPU parts on Linux** are recognised structurally rather than by model name: a host with exactly one accelerator whose reported memory falls within an eighth of system RAM is holding one physical pool, and its memory is counted once. Parts whose device memory is a genuinely separate pool — including those bridged to host memory over a coherent interconnect — fall outside the test and keep the discrete accounting.
+- **Coherent CPU/GPU parts on Linux** are recognized structurally rather than by model name: a host with exactly one accelerator whose reported memory falls within an eighth of system RAM is holding one physical pool, and its memory is counted once. Parts whose device memory is a genuinely separate pool — including those bridged to host memory over a coherent interconnect — fall outside the test and keep the discrete accounting.
 
 Probe failures degrade to coarser answers — a machine where `nvidia-smi` is absent simply reports no NVIDIA devices; it never errors. A `detected` flag records whether the profile came from a real probe: hardware claims are only ever produced by the node's own detection, never typed in by an operator.
 
@@ -1473,7 +1473,7 @@ AgentRuntimeConfig {
 
 ### 12.1 Overview
 
-Tenzro Decentralized Identity Protocol (TDIP) provides a unified decentralized identity system for the Tenzro Network. The protocol recognises **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — all under a single `did:tenzro:` namespace.
+Tenzro Decentralized Identity Protocol (TDIP) provides a unified decentralized identity system for the Tenzro Network. The protocol recognizes **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — all under a single `did:tenzro:` namespace.
 
 Every identity receives an auto-provisioned permissionless wallet (its classical key held in the identity's own hardware — passkey for humans, TPM 2.0 / Secure Enclave for machines), a set of verifiable credentials, and W3C DID Document representation.
 

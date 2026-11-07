@@ -14,7 +14,7 @@ verified-work releases listed at the end, which carry their own caps.
 
 - `approve_operator` records a validator or provider with the criteria it was
   approved on. The chain checks the operator's machine identity holds a TPM
-  endorsement a recognised root signs and counts its verified-available hours
+  endorsement a recognized root signs and counts its verified-available hours
   in the history named. The region and the independence declaration are
   stored as stated, with a link to the public statement.
 - `approve_grantee` records a developer, contributor or community grantee
@@ -118,7 +118,7 @@ governance-sponsored stake from `tenzro_getSponsoredBond`; and an approval
 proposal in flight from `tenzro_listProposals`. The node has no read for the
 TPM endorsement chain, which the chain checks when the proposal is enacted, so
 `check` states what the platform makes of it: a Secure Enclave has no TPM
-endorsement certificate and a Jetson's firmware TPM has no recognised root, so
+endorsement certificate and a Jetson's firmware TPM has no recognized root, so
 neither can be approved today.
 
 `apply` runs the same check, writes the result to

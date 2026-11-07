@@ -609,7 +609,7 @@ proposal named. Governance sets it to 0 to open admission. The machine needs a T
 `tenzro-node tpm provision` (§4.6), or its key held in another machine's TPM
 through a key holder (`--tpm-key-holder`; see [NODE.md](NODE.md#raspberry-pi-and-other-edge-devices) for its
 limits): a node with none of these refuses to start. The
-flow, and the behaviours that surprise first-time operators:
+flow, and the behaviors that surprise first-time operators:
 
 1. **You join as a non-voting (verify-only) node first.** Start with the
    network's `genesis.toml`; its validators are your boot identities (add more

@@ -1188,7 +1188,7 @@ This node's ML-DSA-65 key for an agent (`agent_did`) and its proof of possession
 
 ### `tenzro_agentVoucher`
 
-As the calling delegated agent, have this serving node sign the agent's next cumulative voucher on a channel its wallet funded. The node signs only a voucher the ledger would honour now: this machine assigned in the agent's current terms, the agent not revoked or quarantined, the amount within the lock its terms counted at open.
+As the calling delegated agent, have this serving node sign the agent's next cumulative voucher on a channel its wallet funded. The node signs only a voucher the ledger would honor now: this machine assigned in the agent's current terms, the agent not revoked or quarantined, the amount within the lock its terms counted at open.
 
 **Access.** Owner: any caller reaches the handler, which checks a proof from the owner of what is changed (a signed DID envelope, an address signature, a passkey assertion or a DPoP-bound access token).
 
@@ -1289,7 +1289,7 @@ Or `{ challenge }` → the audit, plus whether each seat's key is the one this n
 
 ### `tenzro_autotuneDecisions`
 
-What the controller has decided, and why. A node that changes its own configuration and cannot say why is one an operator has to reverse-engineer during an incident. Each entry carries the action, the reasoning citing the measurements it acted on, and whether it was actually applied — an observing-only node records its proposals so the behaviour can be watched before it is trusted.
+What the controller has decided, and why. A node that changes its own configuration and cannot say why is one an operator has to reverse-engineer during an incident. Each entry carries the action, the reasoning citing the measurements it acted on, and whether it was actually applied — an observing-only node records its proposals so the behavior can be watched before it is trusted.
 
 **Access.** Open: a read or stateless computation; no credentials needed beyond the node's access policy for the surface.
 

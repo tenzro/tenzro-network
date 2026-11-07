@@ -167,7 +167,7 @@ per-payment approval.
   against the Terms' limits when it opens. Vouchers on it are signed by a
   serving node the Terms assign, with its key for the agent
   (`tenzro_agentVoucher`, CLI `tenzro payment agent-voucher`). The ledger
-  honours such a voucher only while the node is still assigned, and only if
+  honors such a voucher only while the node is still assigned, and only if
   it was signed before the agent's revocation, quarantine or expiry and not
   dated more than `payments.voucher_freshness_ms` (60 s) ahead of block time.
 - **Assets other than TNZO**: listed in the Terms' `asset_limits` with a

@@ -927,7 +927,7 @@ agentAct(action: AgentActRequest): Promise<AgentActResult>
 
 #### `agentVoucher`
 
-The agent's next cumulative voucher on a channel its wallet funded, signed by the serving node with its hardware key for the agent. The node signs only a voucher the ledger would honour now.
+The agent's next cumulative voucher on a channel its wallet funded, signed by the serving node with its hardware key for the agent. The node signs only a voucher the ledger would honor now.
 
 ```ts
 agentVoucher(channelId: string, cumulativeAmount: string): Promise<AgentVoucherResult>

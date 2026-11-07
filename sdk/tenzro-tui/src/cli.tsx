@@ -17,7 +17,7 @@ Usage: tenzro-tui [options]
   --api <url>        node REST endpoint, when it is not derived from --rpc
   --address <0x...>  the account the Wallet screen shows (default: $TENZRO_ADDRESS, else the node's payee)
   --plain            print one text report and exit; used automatically when output is not a terminal
-  --no-color         no colour (NO_COLOR is honoured too)
+  --no-color         no color (NO_COLOR is honored too)
   -h, --help         this help
   -V, --version      version
 

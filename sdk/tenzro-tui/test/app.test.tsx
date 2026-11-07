@@ -184,7 +184,7 @@ test("below 80x24 it says so instead of drawing garbage", async () => {
   r.unmount();
 });
 
-test("without colour no colour codes are written (bold and reverse remain)", async () => {
+test("without color no color codes are written (bold and reverse remain)", async () => {
   const r = mount(healthy, 80, 24, false);
   await tick();
   r.stdin.write("4");
@@ -195,10 +195,10 @@ test("without colour no colour codes are written (bold and reverse remain)", asy
   r.unmount();
 });
 
-test("with colour the accent is the site periwinkle", async () => {
+test("with color the accent is the site periwinkle", async () => {
   const r = mount(healthy, 80, 24, true);
   await tick();
-  assert.match(r.lastFrame() ?? "", /\u001b\[(3[0-7]|38;)/, "colour codes are written when the theme has colour");
+  assert.match(r.lastFrame() ?? "", /\u001b\[(3[0-7]|38;)/, "color codes are written when the theme has color");
   r.unmount();
 });
 

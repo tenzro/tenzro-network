@@ -7,7 +7,7 @@ request or discussion for an unpatched vulnerability.
 
 - Email **eng@tenzro.com**, or
 - use GitHub private vulnerability reporting ("Report a vulnerability" under
-  the Security tab) on the affected repository in the `tenzro` organisation.
+  the Security tab) on the affected repository in the `tenzro` organization.
 
 Include what you found, how to reproduce it, the version or commit, and the
 impact you expect. We acknowledge each report, keep you informed while we work
@@ -23,7 +23,7 @@ surfaces the node serves, and tenzro.com.
 
 ## How the code is checked
 
-Every commit to the main line goes through a standing programme on the project's own build hosts:
+Every commit to the main line goes through a standing program on the project's own build hosts:
 
 - **Daily advisory gate.** The workspace lockfile is checked with `cargo-deny` against RustSec, and every lockfile the project builds from is checked against OSV for advisories published only on GitHub. Each accepted advisory is scoped to its lockfiles and recorded with its decision in `.cargo/audit.toml`. The release script stops on `scripts/supply-chain/advisory-gate.sh`: a lockfile that pulls in a vulnerable or unsound crate without a recorded decision is not released.
 - **Nightly fuzzing.** Every decoder a peer can reach has a coverage-guided fuzz target (`fuzz/`): consensus frames, gossip, transactions, JSON-RPC, settlement plans and channels, bridge deliveries and proofs, iroh streams, identity documents, access tokens, HTTP signatures, x402 payloads, TEE and TPM evidence, proofs and finality journals, A2A and MCP client messages, and a differential check of two ML-DSA-65 verifiers. The targets run every night in a network namespace with only a loopback. A crash is fixed red then green, and its input is replayed on every later pass.

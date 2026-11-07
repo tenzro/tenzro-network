@@ -27,7 +27,7 @@ Nothing is compiled in. A model is a `CatalogEntry`:
 
 A publisher signs entries and publishes them as `TenzroCatalogEntry` trust
 records (`tenzro-trust`). A node serves the entries of the publishers its
-operator's catalog trust list recognises, builds them into a `Catalog`
+operator's catalog trust list recognizes, builds them into a `Catalog`
 (`Catalog::build` refuses malformed entries, a downloaded file without a hash,
 and two entries that hash one file differently) and installs it in the
 process-wide `store`. The accessors (`get_model_catalog`, `get_model_by_id`,

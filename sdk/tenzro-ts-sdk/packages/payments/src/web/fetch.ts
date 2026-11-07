@@ -3,7 +3,7 @@
  * requirements and retrying, and keeps paying a path it has paid before
  * without another 402 round trip. A delegated agent pays from a channel its
  * wallet funded; its serving node signs each voucher with its hardware key
- * for the agent, and the ledger honours it only within the agent's Terms.
+ * for the agent, and the ledger honors it only within the agent's Terms.
  */
 import type { RpcClient } from "@tenzro/core";
 import {

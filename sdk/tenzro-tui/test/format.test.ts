@@ -36,7 +36,7 @@ test("plainError says what to do when the node is down", () => {
   assert.match(plainError(new Error("timed out"), "u"), /did not answer/);
 });
 
-test("NO_COLOR and TERM=dumb switch colour off", () => {
+test("NO_COLOR and TERM=dumb switch color off", () => {
   assert.equal(colorEnabled({}, false), true);
   assert.equal(colorEnabled({ NO_COLOR: "1" }, false), false);
   assert.equal(colorEnabled({ NO_COLOR: "" }, false), true);

@@ -39,6 +39,10 @@ on:
         description: 'pkg only: SHA-256 of tenzro-node-macos-x86_64-cpu.tar.gz in the signed SHA256SUMS'
         required: false
         default: ''
+      pkg_version:
+        description: 'pkg only: package version (default: the workspace version)'
+        required: false
+        default: ''
       public_commit:
         description: 'pkg only: public source commit recorded in the package'
         required: false
@@ -262,6 +266,7 @@ jobs:
       SHA_ARM: ${{ inputs.sha_aarch64 }}
       SHA_X86: ${{ inputs.sha_x86_64 }}
       PUBLIC_COMMIT: ${{ inputs.public_commit }}
+      TENZRO_VERSION: ${{ inputs.pkg_version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

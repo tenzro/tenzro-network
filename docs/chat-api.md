@@ -483,7 +483,7 @@ Image embedding has no route of its own by design. An image reaches a vision enc
 
 ### Request parameters
 
-The standard OpenAI sampling fields are honoured on the local serving path and forwarded verbatim on the network path.
+The standard OpenAI sampling fields are honored on the local serving path and forwarded verbatim on the network path.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
@@ -737,7 +737,7 @@ When the request targets a network model, the node forwards the upstream SSE str
 
 ### Generation stats lookup
 
-The counts and cost of a generation ride on the response that carried it. A streamed caller frequently never reads them: the terminal chunk arrives after the text the caller was waiting for, and closing the connection there is ordinary client behaviour. `GET /tenzro/generation?id=<completion_id>` resolves the completion id the caller already holds back to what was recorded when the generation finished.
+The counts and cost of a generation ride on the response that carried it. A streamed caller frequently never reads them: the terminal chunk arrives after the text the caller was waiting for, and closing the connection there is ordinary client behavior. `GET /tenzro/generation?id=<completion_id>` resolves the completion id the caller already holds back to what was recorded when the generation finished.
 
 ```
 GET /tenzro/generation?id=chatcmpl-9f3c8a1e-…

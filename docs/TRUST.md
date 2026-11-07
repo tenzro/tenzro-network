@@ -34,7 +34,7 @@ A credential is a VC 2.0 document (`type: ["VerifiableCredential", "TenzroTrustC
 - `issuer`: any DID;
 - `validFrom` and `validUntil`: both required, at most five years apart;
 - `credentialSubject`: `{ "id": <subject>, "claim": { "kind", "scheme", "grade"?, "score"?, "scope"?, "evidence"? } }`, where `kind` is
-  `certification`, `rating`, `evaluation`, `safety-scan` or `policy-conformance`, `scheme` names the standard, benchmark or programme,
+  `certification`, `rating`, `evaluation`, `safety-scan` or `policy-conformance`, `scheme` names the standard, benchmark or program,
   `score` is 0-10000, and `evidence` lists `{ uri, sha256 }` references to the report;
 - `credentialStatus`: a `BitstringStatusListEntry` for revocation in the issuer's own list, `tenzro:status:<issuer DID>`.
 

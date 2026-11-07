@@ -24,7 +24,7 @@ export function Heading({ children }: { children: React.ReactNode }) {
 
 export type Tone = "ok" | "warn" | "bad" | "plain";
 
-/** A status is always its word; colour is the second channel. */
+/** A status is always its word; color is the second channel. */
 export function Word({ tone, children }: { tone: Tone; children: React.ReactNode }) {
   const t = useTheme();
   const color = tone === "ok" ? t.ok : tone === "warn" ? t.warn : tone === "bad" ? t.bad : undefined;
@@ -72,7 +72,7 @@ export interface Column<R> {
 
 /**
  * A list with a header, one highlighted row and a scrolling window. The
- * highlighted row is marked with ">" and reverse video, so it reads without colour.
+ * highlighted row is marked with ">" and reverse video, so it reads without color.
  */
 export function Table<R>({ columns: wanted, rows, selected, height, empty, width }: { columns: Column<R>[]; rows: R[]; selected: number; height: number; empty: string; width: number }) {
   const t = useTheme();

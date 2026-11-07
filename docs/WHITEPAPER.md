@@ -174,7 +174,7 @@ Every 500 ms of ordered history, validators sign a checkpoint (height range, blo
 
 ### Leader schedule
 
-Stake is apportioned into seats, with no one-seat floor, so splitting stake across validators buys no weight. The leader of each round is drawn by seats times observed behaviour, from a seed taken from the committed prefix, so no validator can grind it. No VRF or BLS key and no self-reported value (including TEE attestation, which is a reputation signal only) enters the draw.
+Stake is apportioned into seats, with no one-seat floor, so splitting stake across validators buys no weight. The leader of each round is drawn by seats times observed behavior, from a seed taken from the committed prefix, so no validator can grind it. No VRF or BLS key and no self-reported value (including TEE attestation, which is a reputation signal only) enters the draw.
 
 ### Stake-weighted consensus, decoupled from service
 
@@ -211,7 +211,7 @@ The Tenzro Decentralized Identity Protocol (TDIP) defines a single identity mode
 - **Autonomous agent** — `did:tenzro:machine:{uuid}`. An agent that owns itself. Same permissionless wallet — the signing key lives in its own TPM or Secure Enclave — same A2A surface, but no controller. Used for self-funded autonomous services.
 - **Institution** — `did:tenzro:institution:{lei}:{uuid}`. A legal entity anchored to its GLEIF Legal Entity Identifier (ISO 17442). The 20-character LEI is validated with ISO 7064 Mod 97-10 check digits at registration and at every transaction that consults the identity. One legal entity can hold many institution identities (one per desk, fund, or subsidiary) without re-issuing LEIs — the trailing UUID disambiguates. Institutions carry a KYB tier, an optional vLEI ACDC credential id binding to the GLEIF vLEI Ecosystem Governance Framework, an ISO 3166-1 alpha-2 country code, and the set of machines the institution controls. KYB-Full institutions act as trust roots for tokenized RWA flows, and, bonded as attestors, can attest the reserves behind reserve-backed tokens.
 
-DIDs resolve through standard W3C DID Documents. Certifications, ratings and KYC are W3C VC 2.0 credentials any issuer signs with its hardware-derived DID; no issuer is privileged by the network, and each relying party names the issuers it recognises in its own trust list (see [TRUST.md](TRUST.md)).
+DIDs resolve through standard W3C DID Documents. Certifications, ratings and KYC are W3C VC 2.0 credentials any issuer signs with its hardware-derived DID; no issuer is privileged by the network, and each relying party names the issuers it recognizes in its own trust list (see [TRUST.md](TRUST.md)).
 
 A Universal Resolver-compatible HTTP surface (`/1.0/identifiers/{did}` and `/1.0/methods`) at the web verification API serves `did:tenzro:` and `did:pdis:` to any standards-compliant resolver driver — Vidos, Godiddy, the Spruce SDKs, browser wallet extensions — without a Tenzro-specific adapter. KERI compatibility is implemented for long-lived autonomous machine identities — every machine identity can publish a hash-chained Key Event Log with pre-rotation commitments so persistent control survives key compromise. Inception, rotation, and interaction events use a SAID prefix `S` (SHA-256, CESR code) and validate through the standard KERI rules.
 
@@ -599,7 +599,7 @@ The same provider binary runs on Apple Silicon, NVIDIA Ada / Hopper / Blackwell,
 
 ### Node tiers and release variants
 
-One `tenzro-node` source builds for every class of machine. The `inference` cargo feature carries the model engines and is on by default; the light build leaves it out (`--no-default-features`), keeps identity (including a remote-TPM client for a machine with no TPM of its own), payments, agents, RPC, MCP, A2A, storage and chain following, forwards inference calls to providers on the network, and refuses the `ai`, `compute` and `tee` roles at startup. `scripts/build-tier.sh` builds the variants: `edge` (the light build, optionally tuned for one processor and optimised for size), `validator` (the light build under the release profile) and `provider` (the standard build with a GPU backend). At run time `--tier auto|edge|validator|provider` sizes the store, buffers and threads to the machine. Measured on an aarch64 host, the light build is 86.8 MB stripped (62.2 MB size-optimised) against 132.4 MB for the standard build, and a light node held 130 to 210 MiB resident while idle. The full table is in [NODE.md](NODE.md#node-tiers).
+One `tenzro-node` source builds for every class of machine. The `inference` cargo feature carries the model engines and is on by default; the light build leaves it out (`--no-default-features`), keeps identity (including a remote-TPM client for a machine with no TPM of its own), payments, agents, RPC, MCP, A2A, storage and chain following, forwards inference calls to providers on the network, and refuses the `ai`, `compute` and `tee` roles at startup. `scripts/build-tier.sh` builds the variants: `edge` (the light build, optionally tuned for one processor and optimized for size), `validator` (the light build under the release profile) and `provider` (the standard build with a GPU backend). At run time `--tier auto|edge|validator|provider` sizes the store, buffers and threads to the machine. Measured on an aarch64 host, the light build is 86.8 MB stripped (62.2 MB size-optimized) against 132.4 MB for the standard build, and a light node held 130 to 210 MiB resident while idle. The full table is in [NODE.md](NODE.md#node-tiers).
 
 ### Hybrid jobs: edge orchestration and model ladders
 
@@ -904,7 +904,7 @@ These are not hypotheticals — every primitive named above is present in the cu
 - **A2A** — Agent-to-Agent protocol; the Google specification for inter-agent JSON-RPC with optional SSE.
 - **AP2** — Agent Payments Protocol; checkout / payment mandate validation for agent-initiated payments.
 - **BLS12-381** — Pairing-friendly elliptic curve exposed to EVM contracts through the EIP-2537 precompiles.
-- **BitVM2 / Clementine** — Trust-minimised two-way Bitcoin peg with optimistic challenge protocol.
+- **BitVM2 / Clementine** — Trust-minimized two-way Bitcoin peg with optimistic challenge protocol.
 - **EIP-1559** — Ethereum fee-market upgrade with base-fee burn.
 - **EIP-2537** — BLS12-381 precompiles.
 - **EIP-4361** — Sign-In with Ethereum message format; the SIWT canonical form follows the same shape.

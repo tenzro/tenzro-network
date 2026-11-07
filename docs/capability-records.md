@@ -338,7 +338,7 @@ Four signal classes survive, in rough order of cost:
 2. **Integrity of the driver stack** — hashing `libnvidia-ml` against
    known-good digests per driver version, which catches a preloaded fake NVML.
 3. **Device attestation** — identity and firmware only, per the ceiling above.
-4. **Observed behaviour under a verifier-chosen challenge** — a challenge the
+4. **Observed behavior under a verifier-chosen challenge** — a challenge the
    provider cannot precompute. Verifiable-matmul schemes (Freivalds plus a
    Merkle commitment, with the challenge vector secret until the commitment is
    made) and deterministic re-execution both work here; the latter has a useful
@@ -350,7 +350,7 @@ is broken in the literature, and zkML is hardware-blind by construction — it
 proves the function was computed, not which silicon computed it.
 
 **This is the strongest argument for the classification at the top of this
-document.** Attestation gives identity; only behaviour gives capability. So
+document.** Attestation gives identity; only behavior gives capability. So
 capability belongs in tier (a) — measured, with provenance and an expiry — and
 attestation, where available, belongs in tier (b) as a check on *identity*
 claims rather than as evidence of speed.

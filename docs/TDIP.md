@@ -14,7 +14,7 @@
 
 The Tenzro Decentralized Identity Protocol (TDIP) is the native identity standard for the Tenzro Network, providing a unified, W3C-compatible decentralized identity system for humans, machines, and autonomous AI agents. TDIP defines how identities are created, managed, delegated, verified, and revoked on the Tenzro Ledger.
 
-TDIP is designed for the AI age — where autonomous agents act on behalf of humans, conduct financial transactions, access intelligence services, and interact with other agents. Every identity on Tenzro is a TDIP identity. The protocol recognises **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — under fine-grained delegation scopes, verifiable credentials with inheritance, cascading revocation, and auto-provisioned wallets bound to the identity's own hardware key.
+TDIP is designed for the AI age — where autonomous agents act on behalf of humans, conduct financial transactions, access intelligence services, and interact with other agents. Every identity on Tenzro is a TDIP identity. The protocol recognizes **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — under fine-grained delegation scopes, verifiable credentials with inheritance, cascading revocation, and auto-provisioned wallets bound to the identity's own hardware key.
 
 ---
 
@@ -84,12 +84,12 @@ Human identities represent real users on the Tenzro Network. They are the root o
 
 | Tier | Level | Credential |
 |------|-------|-------------|
-| Unverified | 0 | No recognised KYC certification |
+| Unverified | 0 | No recognized KYC certification |
 | Basic | 1 | A `kyc` certification graded `basic` |
 | Enhanced | 2 | A `kyc` certification graded `enhanced` |
 | Full | 3 | A `kyc` certification graded `full` |
 
-No identity carries a tier of its own, and the node derives none: a tier is whatever a relying party concludes from the KYC certifications it recognises, off the node. Tiers are ordered and comparable, so an operation can require a minimum tier. See [TRUST.md](TRUST.md).
+No identity carries a tier of its own, and the node derives none: a tier is whatever a relying party concludes from the KYC certifications it recognizes, off the node. Tiers are ordered and comparable, so an operation can require a minimum tier. See [TRUST.md](TRUST.md).
 
 #### 3.1.1 Passkey accounts and multiple wallet providers
 
@@ -357,7 +357,7 @@ The VM refuses terms that hold all three, and the node refuses a machine-access 
 
 ## 7. Certifications and KYC
 
-Certifications, ratings and KYC are not stored on the identity. They are W3C VC 2.0 credentials that any issuer (a regulator, an auditor, a KYC provider, a community) signs with its own hardware-derived DID and submits with `tenzro_submitTrustRecord`; revocation is a signed Bitstring Status List entry. The network privileges no issuer: each relying party (a user, an app, a router, a token's compliance rules) names the issuers it recognises in its own trust list, and a credential from any other issuer counts for nothing to it. The credential model, the status lists and the trust lists are specified in [TRUST.md](TRUST.md).
+Certifications, ratings and KYC are not stored on the identity. They are W3C VC 2.0 credentials that any issuer (a regulator, an auditor, a KYC provider, a community) signs with its own hardware-derived DID and submits with `tenzro_submitTrustRecord`; revocation is a signed Bitstring Status List entry. The network privileges no issuer: each relying party (a user, an app, a router, a token's compliance rules) names the issuers it recognizes in its own trust list, and a credential from any other issuer counts for nothing to it. The credential model, the status lists and the trust lists are specified in [TRUST.md](TRUST.md).
 
 ---
 

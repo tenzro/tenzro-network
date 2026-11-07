@@ -462,7 +462,7 @@ class TenzroNativeProviderImpl implements TenzroNativeProvider {
 export interface TenzroMultichainProvider {
   /**
    * CAIP-25 `wallet_createSession`. The wallet may narrow `scopes` —
-   * always honour the scopes returned in the result, not the ones
+   * always honor the scopes returned in the result, not the ones
    * requested.
    */
   createSession(

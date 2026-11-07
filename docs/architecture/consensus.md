@@ -118,7 +118,7 @@ up needs, at most 256 per retry.
   same batch is ignored. A validator echoes a leader vertex only once it holds
   every carried batch under the author and sequence it is carried as, and
   fetches a missing one from the leader.
-- The leader schedule weights validators by seats and recent behaviour and is
+- The leader schedule weights validators by seats and recent behavior and is
   a function of the committed prefix: it changes only at checkpoints and draws
   its seed from the checkpoint two back.
 

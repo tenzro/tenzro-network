@@ -29,7 +29,7 @@ Who may use a node is one policy, `access.toml` in the node's data directory
   `storage`, `index`, `payments`, `identity`. Every
   JSON-RPC method has exactly one class, derived from its name and its gate in
   `rpc_gates.rs`.
-- Rules: `open`, `closed`, `paid`, `allow` (DIDs and organisations),
+- Rules: `open`, `closed`, `paid`, `allow` (DIDs and organizations),
   `credential` (a KYA credential from named issuers), `terms` (an agent acting
   under consensus Terms that permit the action), `tier` (signed in, with a rate
   and quota tier), and `all` / `any` / `not` to combine them.

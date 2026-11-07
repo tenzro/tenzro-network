@@ -94,7 +94,7 @@ session continuity or the MoE repair loop.
 - **Processor.** `scripts/build-tier.sh edge` builds for any aarch64 (or
   x86_64) machine. `--cpu cortex-a76` tunes it for a Pi 5; the result uses
   instructions a Pi 4 (Cortex-A72) does not have and does not run there.
-  `--cpu cortex-a72` builds for a Pi 4. `--size` optimises for size.
+  `--cpu cortex-a72` builds for a Pi 4. `--size` optimizes for size.
 - **C library.** A binary built on Ubuntu 24.04 (glibc 2.39) needs glibc
   2.38 or later: it runs on Raspberry Pi OS based on Debian 13 (glibc 2.41),
   not on Raspberry Pi OS Bookworm (glibc 2.36). For Bookworm, build on

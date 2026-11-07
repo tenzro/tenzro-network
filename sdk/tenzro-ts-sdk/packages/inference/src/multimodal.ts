@@ -188,7 +188,7 @@ export interface TextSegmentationCatalogEntry {
   [k: string]: unknown;
 }
 
-/** Box prompt for `textSegment` — centre plus extent, unlike the corner
+/** Box prompt for `textSegment` — center plus extent, unlike the corner
  * pairs the click-driven `segment` surface takes. */
 export interface TextSegmentBoxPrompt {
   cx: number;
