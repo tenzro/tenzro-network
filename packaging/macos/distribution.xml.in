@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Tenzro</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="license.txt" mime-type="text/plain"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false" rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
+    <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
+    <allowed-os-versions><os-version min="@MINOS@"/></allowed-os-versions>
+    <script>
+    function isAppleSilicon() { return system.sysctl('hw.optional.arm64') == '1'; }
+    function isIntel() { return system.sysctl('hw.optional.arm64') != '1'; }
+    </script>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.tenzro.node.metal"/>
+            <line choice="com.tenzro.node.cpu"/>
+        </line>
+    </choices-outline>
+    <choice id="default" visible="false"/>
+    <choice id="com.tenzro.node.metal" visible="false" enabled="false" start_selected="isAppleSilicon()" title="Tenzro for Apple silicon (Metal)">
+        <pkg-ref id="com.tenzro.node.metal"/>
+    </choice>
+    <choice id="com.tenzro.node.cpu" visible="false" enabled="false" start_selected="isIntel()" title="Tenzro for Intel (CPU)">
+        <pkg-ref id="com.tenzro.node.cpu"/>
+    </choice>
+    <pkg-ref id="com.tenzro.node.metal" version="@VERSION@" onConclusion="none">tenzro-metal.pkg</pkg-ref>
+    <pkg-ref id="com.tenzro.node.cpu" version="@VERSION@" onConclusion="none">tenzro-cpu.pkg</pkg-ref>
+</installer-gui-script>

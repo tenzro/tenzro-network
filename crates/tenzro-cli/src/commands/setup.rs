@@ -136,10 +136,34 @@ pub struct SetupCmd {
     /// Non-interactive: accept defaults, take everything else from flags.
     #[arg(long)]
     pub yes: bool,
+
+    /// Use the line-by-line wizard instead of the full-screen setup, even on
+    /// a terminal.
+    #[arg(long)]
+    pub plain: bool,
 }
 
 impl SetupCmd {
+    /// Whether this run should open the full-screen setup: a terminal, and
+    /// nothing asked for the line-by-line wizard or answered its questions.
+    pub fn wants_full_screen(&self) -> bool {
+        !self.plain
+            && !self.yes
+            && self.path.is_none()
+            && self.mode.is_none()
+            && self.roles.is_none()
+            && crate::tui::available()
+    }
+
     pub async fn execute(&self) -> Result<()> {
+        if self.wants_full_screen() {
+            let rpc = self.rpc.clone().unwrap_or_else(crate::tui::first_run_rpc);
+            let outcome = crate::tui::first_run(rpc).await?;
+            if let Some(text) = crate::tui::farewell(&outcome) {
+                println!("{text}");
+            }
+            return Ok(());
+        }
         wiz_intro();
 
         let interactive = !self.yes && std::io::IsTerminal::is_terminal(&std::io::stdin());
@@ -1301,6 +1325,11 @@ fn default_machine_name() -> String {
     }
 }
 
+/// This machine's name for the full-screen setup's defaults.
+pub(crate) fn hostname_for_tui() -> String {
+    hostname_lossy().unwrap_or_else(|| "tenzro".to_string())
+}
+
 fn hostname_lossy() -> Option<String> {
     std::fs::read_to_string("/etc/hostname")
         .ok()
@@ -1670,15 +1699,15 @@ fn wiz_outro(msg: &str) {
 /// renders to stderr, hence `for_stderr` on every style.
 fn wizard_theme() -> ColorfulTheme {
     ColorfulTheme {
-        prompt_prefix: style("◆".to_string()).for_stderr().cyan(),
+        prompt_prefix: style("◆".to_string()).for_stderr().color256(110),
         success_prefix: style("◇".to_string()).for_stderr().green(),
         error_prefix: style("▲".to_string()).for_stderr().red(),
-        active_item_prefix: style("❯".to_string()).for_stderr().cyan().bold(),
+        active_item_prefix: style("❯".to_string()).for_stderr().color256(110).bold(),
         inactive_item_prefix: style(" ".to_string()).for_stderr(),
-        active_item_style: Style::new().for_stderr().cyan(),
+        active_item_style: Style::new().for_stderr().color256(110),
         inactive_item_style: Style::new().for_stderr().dim(),
         hint_style: Style::new().for_stderr().dim(),
-        values_style: Style::new().for_stderr().cyan(),
+        values_style: Style::new().for_stderr().color256(110),
         ..ColorfulTheme::default()
     }
 }

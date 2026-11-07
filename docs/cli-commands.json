@@ -1063,6 +1063,13 @@
   "-h",
   "-v"
  ],
+ "tenzro completions": [
+  "--format",
+  "--help",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
  "tenzro contract": [
   "--format",
   "--help",
@@ -1356,6 +1363,14 @@
   "--format",
   "--help",
   "--rpc",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro doctor": [
+  "--format",
+  "--help",
+  "--json",
   "--verbose",
   "-h",
   "-v"
@@ -4966,6 +4981,7 @@
   "--network-name",
   "--operator",
   "--path",
+  "--plain",
   "--provision-tpm",
   "--roles",
   "--rpc",
@@ -5527,6 +5543,13 @@
   "--rpc",
   "--to",
   "--token-id",
+  "--verbose",
+  "-h",
+  "-v"
+ ],
+ "tenzro tpm": [
+  "--format",
+  "--help",
   "--verbose",
   "-h",
   "-v"

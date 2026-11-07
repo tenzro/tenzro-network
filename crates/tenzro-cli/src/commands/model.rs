@@ -270,19 +270,19 @@ impl ModelListCmd {
             }
 
             let availability = if is_serving {
-                format!("{}local{}", output::colors::GREEN, output::colors::RESET)
+                format!("{}local{}", output::colors::ok(), output::colors::reset())
             } else if is_downloaded {
                 format!(
                     "{}downloaded{}",
-                    output::colors::CYAN,
-                    output::colors::RESET
+                    output::colors::accent(),
+                    output::colors::reset()
                 )
             } else {
                 "downloadable".to_string()
             };
 
             let cost_str = if is_serving {
-                format!("{}free{}", output::colors::GREEN, output::colors::RESET)
+                format!("{}free{}", output::colors::ok(), output::colors::reset())
             } else {
                 "TNZO".to_string()
             };
@@ -1038,20 +1038,20 @@ impl ModelEndpointsCmd {
                         };
                         format!(
                             "{}network · {}…{}",
-                            output::colors::BLUE,
+                            output::colors::accent(),
                             short,
-                            output::colors::RESET
+                            output::colors::reset()
                         )
                     } else if location == "local" {
-                        format!("{}local{}", output::colors::CYAN, output::colors::RESET)
+                        format!("{}local{}", output::colors::accent(), output::colors::reset())
                     } else {
-                        format!("{}network{}", output::colors::BLUE, output::colors::RESET)
+                        format!("{}network{}", output::colors::accent(), output::colors::reset())
                     };
 
                     let status_colored = if status.to_lowercase() == "online" {
-                        format!("{}online{}", output::colors::GREEN, output::colors::RESET)
+                        format!("{}online{}", output::colors::ok(), output::colors::reset())
                     } else {
-                        format!("{}offline{}", output::colors::RED, output::colors::RESET)
+                        format!("{}offline{}", output::colors::bad(), output::colors::reset())
                     };
 
                     let load_str = if let Some(load) = endpoint.get("load") {

@@ -1,0 +1,23 @@
+Tenzro: first run
+=================
+
+The installer put two programs on your PATH and started nothing.
+
+  tenzro        the command line, the first-run setup and the console
+  tenzro-node   the node program (you start it yourself, or let `tenzro` set it up)
+
+Nothing is running, no service is enabled and nothing has joined the network.
+
+Open a terminal and run:  tenzro
+
+The first time, it checks this machine, asks what you want to do (use the network,
+provide compute, run a validator, or try a local chain) and walks you through it.
+After that it opens the console. If something does not work: tenzro doctor
+(the line-by-line wizard is still there: tenzro setup --plain).
+
+Your keys and data live in your home directory or the data directory you choose,
+never in the package. Removing the package does not delete them.
+
+Verify what you installed: the package file's SHA-256 is listed in SHA256SUMS, which is
+signed with the Tenzro release key (docs/VERIFY-DOWNLOAD.md). The binaries inside are the
+exact bytes of the signed release archive named in PACKAGE-INFO.

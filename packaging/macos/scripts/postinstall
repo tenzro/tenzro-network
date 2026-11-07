@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs the hardware check and records the result. It starts nothing, enables
+# nothing and never fails the installation.
+LIB=/usr/local/lib/tenzro
+/bin/echo "Tenzro installed. Nothing was started and nothing joined the network."
+"$LIB/bin/tenzro-check" > "$LIB/last-check.txt" 2>&1 || true
+/bin/cat "$LIB/last-check.txt"
+exit 0

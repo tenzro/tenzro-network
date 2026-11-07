@@ -6,10 +6,13 @@
 pub mod commands;
 pub mod config;
 pub mod dpop;
+pub mod endpoint;
+pub mod friendly;
 pub mod keystore;
 pub mod output;
 pub mod private_file;
 pub mod rpc;
+pub mod tui;
 pub mod units;
 
 // Re-export commonly used types

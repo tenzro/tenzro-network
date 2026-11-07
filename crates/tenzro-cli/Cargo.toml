@@ -1,6 +1,8 @@
 [package]
 name = "tenzro-cli"
-version.workspace = true
+# The CLI is released on its own line: 0.2.1 changes the CLI (full-screen setup and console, doctor,
+# completions, one --rpc) and no wire format, so the node and the shared crates stay at 0.2.0.
+version = "0.2.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -51,6 +53,8 @@ anyhow = { workspace = true }
 indicatif = { workspace = true }
 dialoguer = { workspace = true }
 console = { workspace = true }
+ratatui = { workspace = true }
+clap_complete = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }

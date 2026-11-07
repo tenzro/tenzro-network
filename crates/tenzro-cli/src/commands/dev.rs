@@ -18,7 +18,8 @@ use crate::output;
 /// Why `tenzro dev` refuses on a machine without a hardware key store.
 pub const NEEDS_HARDWARE: &str = "tenzro dev keeps every key in this machine's hardware key store \
      (a TPM 2.0 on Linux or Windows, the Secure Enclave on macOS), and none was found. \
-     Keys are never held in software or in files, so run it on a machine with a TPM or a Secure Enclave.";
+     Keys are never held in software or in files. Use a machine with a TPM 2.0 or a Mac, \
+     or use the public network with a passkey: tenzro setup --path network";
 
 /// Start a local single-validator chain for development
 #[derive(Debug, Parser)]
@@ -88,11 +89,19 @@ impl DevCmd {
         }
         output::print_info("Keys stay in this machine's hardware. Press Ctrl+C to stop.");
 
-        let status = tokio::process::Command::new("tenzro-node")
+        // The node installed beside this program first (an unpacked archive, or
+        // through the installer's links), then PATH.
+        let node = crate::commands::setup::locate_node_binary().ok_or_else(|| {
+            anyhow!(
+                "tenzro-node was not found next to tenzro or on PATH. \
+                 Install the Tenzro package for this machine; it puts both programs together."
+            )
+        })?;
+        let status = tokio::process::Command::new(node)
             .args(self.node_args(&client, &data_dir))
             .status()
             .await
-            .map_err(|e| anyhow!("starting tenzro-node: {e}. Is it installed?"))?;
+            .map_err(|e| anyhow!("starting tenzro-node: {e}"))?;
         if !status.success() {
             return Err(anyhow!("tenzro-node exited with {status}"));
         }

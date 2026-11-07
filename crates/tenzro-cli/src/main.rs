@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dialoguer::{Input, Select, theme::ColorfulTheme};
+use dialoguer::{Input, Select};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use tenzro_cli::{commands, output, rpc};
@@ -46,8 +46,24 @@ struct Cli {
     #[arg(long, global = true, default_value = "text")]
     format: String,
 
+    /// The node to talk to, for every command that does not take its own
+    /// `--rpc` (also `TENZRO_RPC`). Default: the endpoint `tenzro setup`
+    /// saved, else the node on this machine. Give it before the command:
+    /// `tenzro --rpc http://host:8545 status`.
+    #[arg(long, env = "TENZRO_RPC", value_name = "URL")]
+    rpc: Option<String>,
+
+    /// With no command: open the full-screen setup or console on a terminal.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+/// Print shell completions for `tenzro`
+#[derive(Debug, clap::Args)]
+struct CompletionsCmd {
+    /// The shell to print completions for
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,6 +140,15 @@ enum Command {
 
     /// Start a local single-validator chain for development, keys in this machine's hardware
     Dev(commands::dev::DevCmd),
+
+    /// Check this machine and the network, and say how to fix what is wrong
+    Doctor(commands::doctor::DoctorCmd),
+
+    /// Print shell completions: bash, zsh, fish, powershell or elvish
+    Completions(CompletionsCmd),
+
+    /// TPM commands of the node (provision, serve, key-holder, grant-request, grant-install, remote-check)
+    Tpm(commands::tpm::TpmCmd),
 
     /// Token management commands (create, query, cross-VM transfers)
     #[command(subcommand)]
@@ -438,26 +463,52 @@ struct VersionCmd {
     detailed: bool,
 }
 
-fn main() -> Result<()> {
+fn main() {
     // A model file's header is parsed by this executable re-run as a
     // locked-down child, which must lock itself down before any thread:
     // so before the async runtime starts.
     tenzro_model::parse_jail::enter_if_requested();
-    tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
-        .block_on(cli_main())
+        .build()
+        .map_err(anyhow::Error::from)
+        .and_then(|rt| rt.block_on(cli_main()));
+    if let Err(e) = result {
+        output::apply_color_policy();
+        eprintln!("{}", report_error(&e));
+        std::process::exit(1);
+    }
+}
+
+/// How an error is told: a connection failure as what / why / fix, anything
+/// else as the error and its causes.
+fn report_error(e: &anyhow::Error) -> String {
+    if let Some(u) = e
+        .chain()
+        .find_map(|c| c.downcast_ref::<tenzro_cli::friendly::Unreachable>())
+    {
+        return format!("{}✗{} {u}", output::colors::bad_stderr(), output::colors::reset_stderr());
+    }
+    format!("Error: {e:?}")
 }
 
 async fn cli_main() -> Result<()> {
-    // Check if running with no subcommand and stdout is a TTY — launch interactive mode
     use std::io::IsTerminal as _;
-    if std::env::args().count() == 1 && std::io::stdout().is_terminal() {
-        init_logging(false)?;
-        return run_interactive_mode().await;
-    }
-
     let cli = Cli::parse();
+    output::apply_color_policy();
+    tenzro_cli::endpoint::set_global(cli.rpc.clone());
+
+    let Some(command) = cli.command else {
+        // No command: on a terminal, the first-run setup or the console;
+        // anywhere else, the help.
+        if tenzro_cli::tui::available() {
+            return run_bare().await;
+        }
+        use clap::CommandFactory as _;
+        Cli::command().print_help()?;
+        println!();
+        std::process::exit(2);
+    };
 
     // Initialize logging
     init_logging(cli.verbose)?;
@@ -468,7 +519,7 @@ async fn cli_main() -> Result<()> {
     let no_banner = std::env::var("TENZRO_NO_BANNER")
         .map(|v| v == "1")
         .unwrap_or(false);
-    if !matches!(cli.command, Command::Version(_))
+    if !matches!(command, Command::Version(_) | Command::Completions(_) | Command::Doctor(_) | Command::Tpm(_))
         && !cli.verbose
         && !no_banner
         && std::io::stdout().is_terminal()
@@ -477,7 +528,7 @@ async fn cli_main() -> Result<()> {
     }
 
     // Execute command
-    match cli.command {
+    match command {
         Command::Join(cmd) => cmd.execute().await?,
         Command::Setup(cmd) => cmd.execute().await?,
         Command::Node(cmd) => cmd.execute().await?,
@@ -497,6 +548,12 @@ async fn cli_main() -> Result<()> {
         Command::Escrow(cmd) => cmd.execute().await?,
         Command::Duty(cmd) => cmd.execute().await?,
         Command::Dev(cmd) => cmd.execute().await?,
+        Command::Doctor(cmd) => cmd.execute().await?,
+        Command::Tpm(cmd) => cmd.execute().await?,
+        Command::Completions(cmd) => {
+            use clap::CommandFactory as _;
+            clap_complete::generate(cmd.shell, &mut Cli::command(), "tenzro", &mut std::io::stdout());
+        }
         Command::Token(cmd) => cmd.execute().await?,
         Command::Contract(cmd) => cmd.execute().await?,
         Command::Bridge(cmd) => cmd.execute().await?,
@@ -827,7 +884,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
 
     loop {
         // Print prompt
-        print!("{}> {}", output::colors::CYAN, output::colors::RESET);
+        print!("{}> {}", output::colors::accent(), output::colors::reset());
         io::stdout().flush()?;
 
         /*
@@ -939,15 +996,15 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                                         if role == "user" {
                                             println!(
                                                 "{}User:{} {}",
-                                                output::colors::CYAN,
-                                                output::colors::RESET,
+                                                output::colors::accent(),
+                                                output::colors::reset(),
                                                 content
                                             );
                                         } else if role == "assistant" {
                                             println!(
                                                 "{}Assistant:{} {}",
-                                                output::colors::GREEN,
-                                                output::colors::RESET,
+                                                output::colors::ok(),
+                                                output::colors::reset(),
                                                 content
                                             );
                                         }
@@ -1076,11 +1133,11 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                         "",
                         &format!(
                             "{}[{} in, {} out tokens | {:.1} tok/s | Free (local)]{}",
-                            output::colors::BOLD,
+                            output::colors::bold(),
                             input_tokens,
                             output_tokens,
                             tokens_per_second,
-                            output::colors::RESET
+                            output::colors::reset()
                         ),
                     );
                     println!();
@@ -1240,11 +1297,11 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                         "",
                         &format!(
                             "{}[{} in, {} out tokens | {}]{}",
-                            output::colors::BOLD,
+                            output::colors::bold(),
                             chat_response.input_tokens,
                             chat_response.output_tokens,
                             cost_str,
-                            output::colors::RESET
+                            output::colors::reset()
                         ),
                     );
                     if let Some(ref load) = chat_response.load {
@@ -1428,8 +1485,8 @@ fn execute_version(cmd: VersionCmd) -> Result<()> {
 
         println!(
             "{}Components:{}",
-            output::colors::BOLD,
-            output::colors::RESET
+            output::colors::bold(),
+            output::colors::reset()
         );
         output::print_field("  tenzro-types", env!("CARGO_PKG_VERSION"));
         output::print_field("  tenzro-crypto", env!("CARGO_PKG_VERSION"));
@@ -1442,38 +1499,70 @@ fn execute_version(cmd: VersionCmd) -> Result<()> {
     Ok(())
 }
 
-/// Interactive mode — activated when `tenzro` is run with no arguments on a TTY
+/// `tenzro` with no command on a terminal: the first-run setup when this
+/// machine has no settings yet, then the console. The console's `m` key opens
+/// the full command menu and comes back.
+async fn run_bare() -> Result<()> {
+    use tenzro_cli::tui;
+    if tui::is_first_run() {
+        let outcome = tui::first_run(tui::first_run_rpc()).await?;
+        match &outcome {
+            tui::Outcome::Quit => return Ok(()),
+            tui::Outcome::Finished { next } if next == "tenzro" => {}
+            tui::Outcome::Finished { .. } => {
+                if let Some(text) = tui::farewell(&outcome) {
+                    println!("{text}");
+                }
+                return Ok(());
+            }
+        }
+    }
+    loop {
+        let url = tenzro_cli::endpoint::resolve().0;
+        match tui::console(url).await? {
+            tui::Leave::Quit => return Ok(()),
+            tui::Leave::More => {
+                init_logging(false).ok();
+                if let Err(e) = run_interactive_mode().await {
+                    eprintln!("{}", report_error(&e));
+                }
+            }
+        }
+    }
+}
+
+/// The full command menu — reached from the console with `m`.
 async fn run_interactive_mode() -> Result<()> {
     println!();
     println!(
         "  {}████████╗███████╗███╗   ██╗███████╗██████╗  ██████╗ {}",
-        output::colors::CYAN,
-        output::colors::RESET
+        output::colors::accent(),
+        output::colors::reset()
     );
     println!(
         "  {}╚══██╔══╝██╔════╝████╗  ██║╚══███╔╝██╔══██╗██╔═══██╗{}",
-        output::colors::CYAN,
-        output::colors::RESET
+        output::colors::accent(),
+        output::colors::reset()
     );
     println!(
         "  {}   ██║   █████╗  ██╔██╗ ██║  ███╔╝ ██████╔╝██║   ██║{}",
-        output::colors::CYAN,
-        output::colors::RESET
+        output::colors::accent(),
+        output::colors::reset()
     );
     println!(
         "  {}   ██║   ██╔══╝  ██║╚██╗██║ ███╔╝  ██╔══██╗██║   ██║{}",
-        output::colors::CYAN,
-        output::colors::RESET
+        output::colors::accent(),
+        output::colors::reset()
     );
     println!(
         "  {}   ██║   ███████╗██║ ╚████║███████╗██║  ██║╚██████╔╝{}",
-        output::colors::CYAN,
-        output::colors::RESET
+        output::colors::accent(),
+        output::colors::reset()
     );
     println!(
         "  {}   ╚═╝   ╚══════╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝{}",
-        output::colors::CYAN,
-        output::colors::RESET
+        output::colors::accent(),
+        output::colors::reset()
     );
     println!();
 
@@ -1496,8 +1585,8 @@ async fn run_interactive_mode() -> Result<()> {
         let peers = info.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0);
         println!(
             "  {}Connected:{} {} | Block: {} | Peers: {}",
-            output::colors::GREEN,
-            output::colors::RESET,
+            output::colors::ok(),
+            output::colors::reset(),
             rpc.url(),
             height,
             peers
@@ -1505,8 +1594,8 @@ async fn run_interactive_mode() -> Result<()> {
     } else {
         println!(
             "  {}Not connected to a node{} ({})",
-            output::colors::YELLOW,
-            output::colors::RESET,
+            output::colors::warn(),
+            output::colors::reset(),
             rpc.url()
         );
     }
@@ -1525,7 +1614,7 @@ async fn run_interactive_mode() -> Result<()> {
             "Exit",
         ];
 
-        let selection = Select::with_theme(&ColorfulTheme::default())
+        let selection = Select::with_theme(output::prompt_theme())
             .with_prompt("What would you like to do?")
             .items(&categories)
             .default(0)
@@ -1562,14 +1651,14 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
         "Transaction history",
         "<- Back",
     ];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("Wallet & Tokens")
         .items(&options)
         .default(0)
         .interact()?;
     match sel {
         0 => {
-            let addr: String = Input::with_theme(&ColorfulTheme::default())
+            let addr: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Address (hex)")
                 .interact_text()?;
             let result: serde_json::Value = rpc
@@ -1581,10 +1670,10 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             output::print_field("Balance", &rpc::format_tnzo(wei));
         }
         1 => {
-            let to: String = Input::with_theme(&ColorfulTheme::default())
+            let to: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("To address")
                 .interact_text()?;
-            let amount: String = Input::with_theme(&ColorfulTheme::default())
+            let amount: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Amount (TNZO)")
                 .interact_text()?;
             let amount_float: f64 = amount.parse().unwrap_or(0.0);
@@ -1608,7 +1697,7 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             );
         }
         2 => {
-            let addr: String = Input::with_theme(&ColorfulTheme::default())
+            let addr: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Address")
                 .interact_text()?;
             let result: serde_json::Value = rpc
@@ -1641,7 +1730,7 @@ async fn models_menu(rpc: &rpc::RpcClient) -> Result<()> {
         "Discover models on network",
         "<- Back",
     ];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("AI Models & Inference")
         .items(&options)
         .default(0)
@@ -1675,10 +1764,10 @@ async fn models_menu(rpc: &rpc::RpcClient) -> Result<()> {
             }
         }
         1 => {
-            let model_id: String = Input::with_theme(&ColorfulTheme::default())
+            let model_id: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Model ID")
                 .interact_text()?;
-            let message: String = Input::with_theme(&ColorfulTheme::default())
+            let message: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Message")
                 .interact_text()?;
             let result: serde_json::Value = rpc.call("tenzro_chat", serde_json::json!({
@@ -1696,7 +1785,7 @@ async fn models_menu(rpc: &rpc::RpcClient) -> Result<()> {
             }
         }
         2 => {
-            let model_id: String = Input::with_theme(&ColorfulTheme::default())
+            let model_id: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Model ID to fetch and serve")
                 .interact_text()?;
             let result: serde_json::Value = rpc
@@ -1755,7 +1844,7 @@ async fn bridge_menu(rpc: &rpc::RpcClient) -> Result<()> {
         "Send TNZO to another chain",
         "<- Back",
     ];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("Bridge & Cross-Chain")
         .items(&options)
         .default(0)
@@ -1790,20 +1879,20 @@ async fn identity_menu(rpc: &rpc::RpcClient) -> Result<()> {
         "Set delegation scope",
         "<- Back",
     ];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("Identity & Credentials")
         .items(&options)
         .default(0)
         .interact()?;
     match sel {
         0 => {
-            let name: String = Input::with_theme(&ColorfulTheme::default())
+            let name: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Display name")
                 .interact_text()?;
             commands::identity::register_human(rpc.url(), &name).await?;
         }
         1 => {
-            let did: String = Input::with_theme(&ColorfulTheme::default())
+            let did: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("DID to resolve")
                 .interact_text()?;
             let result: serde_json::Value = rpc
@@ -1848,16 +1937,16 @@ async fn identity_menu(rpc: &rpc::RpcClient) -> Result<()> {
 
 async fn payments_menu(rpc: &rpc::RpcClient) -> Result<()> {
     let options = vec!["Create payment challenge", "<- Back"];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("Payments & Settlement")
         .items(&options)
         .default(0)
         .interact()?;
     if sel == 0 {
-        let resource: String = Input::with_theme(&ColorfulTheme::default())
+        let resource: String = Input::with_theme(output::prompt_theme())
             .with_prompt("Resource URI")
             .interact_text()?;
-        let amount: String = Input::with_theme(&ColorfulTheme::default())
+        let amount: String = Input::with_theme(output::prompt_theme())
             .with_prompt("Amount")
             .interact_text()?;
         let result: serde_json::Value = rpc.call("tenzro_createPaymentChallenge", serde_json::json!({
@@ -1882,7 +1971,7 @@ async fn security_menu(rpc: &rpc::RpcClient) -> Result<()> {
         "Create ZK proof",
         "<- Back",
     ];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("Security (Crypto, TEE, ZK)")
         .items(&options)
         .default(0)
@@ -1923,7 +2012,7 @@ async fn security_menu(rpc: &rpc::RpcClient) -> Result<()> {
 
 async fn developer_menu(rpc: &rpc::RpcClient) -> Result<()> {
     let options = vec!["Deploy contract", "Open network duties", "<- Back"];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("Developer")
         .items(&options)
         .default(0)
@@ -1966,7 +2055,7 @@ async fn network_menu(rpc: &rpc::RpcClient) -> Result<()> {
         "Peer count",
         "<- Back",
     ];
-    let sel = Select::with_theme(&ColorfulTheme::default())
+    let sel = Select::with_theme(output::prompt_theme())
         .with_prompt("Network & Governance")
         .items(&options)
         .default(0)
@@ -2209,4 +2298,91 @@ mod cli_documentation_tests {
 pub enum RelayCommand {
     /// Settle a report of an agent's account on another chain
     AgentAccount(commands::agent_accounts::RelayAgentAccountCmd),
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::*;
+    use clap::CommandFactory as _;
+    use tenzro_cli::tui::detect::{KeyRoot, Machine, Net, NodeBuild};
+    use tenzro_cli::tui::journey::{Action, Opts, Path, Prog, plan};
+
+    #[test]
+    fn the_command_tree_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn version_is_the_release() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.1");
+        let v = Cli::command().render_version();
+        assert!(v.contains("0.2.1"), "{v}");
+    }
+
+    #[test]
+    fn rpc_goes_before_the_command_and_every_old_spelling_still_parses() {
+        Cli::try_parse_from(["tenzro", "--rpc", "http://h:1", "status"]).unwrap();
+        let c = Cli::try_parse_from(["tenzro", "--rpc", "http://h:1"]).unwrap();
+        assert!(c.command.is_none() && c.rpc.as_deref() == Some("http://h:1"));
+        Cli::try_parse_from(["tenzro", "join", "--rpc", "http://h:1"]).unwrap();
+        Cli::try_parse_from(["tenzro", "setup", "--plain"]).unwrap();
+        Cli::try_parse_from(["tenzro", "doctor", "--json"]).unwrap();
+        Cli::try_parse_from(["tenzro", "completions", "bash"]).unwrap();
+        Cli::try_parse_from(["tenzro", "tpm", "provision"]).unwrap();
+        Cli::try_parse_from(["tenzro", "tpm", "key-holder", "--socket", "/x", "--provider", "a@b:1"]).unwrap();
+    }
+
+    /// Every `tenzro ...` command the first-run steps run is a command this
+    /// binary has, with arguments it accepts.
+    #[test]
+    fn every_command_the_setup_steps_run_parses() {
+        let mut m = Machine::blank();
+        m.root = KeyRoot::TpmReady;
+        m.node_binary = Some("/usr/bin/tenzro-node".into());
+        m.node_build = Some(NodeBuild { flavour: "cpu".into(), startup_ok: true, refusal: None });
+        let net = Net::Reachable { chain_id: "0x1".into() };
+        let o = Opts::defaults(&m, tenzro_cli::endpoint::PUBLIC_RPC);
+        let mut seen = 0;
+        for path in Path::ALL {
+            for delegated in [false, true] {
+                let o = Opts { delegated, ..o.clone() };
+                for s in &plan(path, &m, &net, &o).steps {
+                    if let Action::Exec { prog: Prog::Cli, args, .. } = &s.action {
+                        let mut argv = vec!["tenzro".to_string()];
+                        argv.extend(args.iter().cloned());
+                        Cli::command()
+                            .try_get_matches_from(argv.clone())
+                            .unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+                        seen += 1;
+                    }
+                    // The commands to run by hand parse too.
+                    for line in &s.manual {
+                        let words: Vec<&str> = line.split_whitespace().collect();
+                        if words.first() == Some(&"tenzro") && !line.contains('<') {
+                            Cli::command()
+                                .try_get_matches_from(words.clone())
+                                .unwrap_or_else(|e| panic!("{line}: {e}"));
+                            seen += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(seen >= 6, "only {seen} commands checked");
+    }
+
+    #[test]
+    fn a_connection_failure_is_reported_without_a_backtrace() {
+        use tenzro_cli::friendly::{Class, Unreachable, explain};
+        let u = Unreachable {
+            url: "https://rpc.tenzro.com".into(),
+            class: Class::Dns,
+            detail: String::new(),
+            explained: explain(Class::Dns, "https://rpc.tenzro.com"),
+        };
+        let e = anyhow::Error::new(u).context("read the model catalog");
+        let text = report_error(&e);
+        assert!(text.contains("Why:") && text.contains("Fix:") && text.contains("tenzro dev"));
+        assert!(!text.contains("Caused by"));
+    }
 }

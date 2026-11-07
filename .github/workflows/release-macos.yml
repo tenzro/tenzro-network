@@ -9,6 +9,10 @@ name: Release macOS
 #               refusal is reported, a crash fails the job)
 #   device-key  the @tenzro/device-key Node.js binding and the abi3 Python
 #               wheel of tenzro-device-key
+#   pkg         the unsigned installer package (packaging/macos): repackages the
+#               two signed archives named by source_run, refuses any archive whose
+#               SHA-256 differs from the one given, installs the package on the
+#               runner, checks it, uninstalls it, and uploads the .pkg
 # Started by hand; the jobs hold no secrets and only read the repository.
 
 on:
@@ -21,16 +25,33 @@ on:
       build:
         description: 'What to build'
         type: choice
-        options: [all, node, device-key]
+        options: [all, node, device-key, pkg]
         default: all
+      source_run:
+        description: 'pkg only: run id whose artifacts hold the signed macOS archives'
+        required: false
+        default: ''
+      sha_aarch64:
+        description: 'pkg only: SHA-256 of tenzro-node-macos-aarch64-metal.tar.gz in the signed SHA256SUMS'
+        required: false
+        default: ''
+      sha_x86_64:
+        description: 'pkg only: SHA-256 of tenzro-node-macos-x86_64-cpu.tar.gz in the signed SHA256SUMS'
+        required: false
+        default: ''
+      public_commit:
+        description: 'pkg only: public source commit recorded in the package'
+        required: false
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
 
   build:
-    if: inputs.build != 'device-key'
+    if: inputs.build == 'all' || inputs.build == 'node'
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +109,7 @@ jobs:
 
   check:
     needs: build
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (inputs.build == 'all' || inputs.build == 'node') }}
     strategy:
       fail-fast: false
       matrix:
@@ -171,7 +192,7 @@ jobs:
           if-no-files-found: error
 
   device-key:
-    if: inputs.build != 'node'
+    if: inputs.build == 'all' || inputs.build == 'device-key'
     strategy:
       fail-fast: false
       matrix:
@@ -229,4 +250,64 @@ jobs:
         with:
           name: device-key-${{ matrix.suffix }}
           path: ${{ runner.temp }}/device-key/*
+          if-no-files-found: error
+
+  pkg:
+    if: inputs.build == 'pkg'
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: ${{ inputs.source_run }}
+      SHA_ARM: ${{ inputs.sha_aarch64 }}
+      SHA_X86: ${{ inputs.sha_x86_64 }}
+      PUBLIC_COMMIT: ${{ inputs.public_commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch the signed archives and check their digests
+        run: |
+          set -euo pipefail
+          [ -n "$SOURCE_RUN" ] && [ -n "$SHA_ARM" ] && [ -n "$SHA_X86" ] || { echo "source_run, sha_aarch64 and sha_x86_64 are required"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/in"
+          for a in tenzro-node-macos-aarch64-metal tenzro-node-macos-x86_64-cpu; do
+            gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name "$a" --dir "$RUNNER_TEMP/in"
+          done
+          cd "$RUNNER_TEMP/in"
+          printf '%s  %s\n%s  %s\n' "$SHA_ARM" tenzro-node-macos-aarch64-metal.tar.gz "$SHA_X86" tenzro-node-macos-x86_64-cpu.tar.gz > expected.sha256
+          shasum -a 256 -c expected.sha256
+
+      - name: Build the package
+        run: |
+          set -euo pipefail
+          export RELEASE_COMMIT=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq .head_sha)
+          mkdir -p "$RUNNER_TEMP/pkg"
+          packaging/macos/build-pkg.sh "$RUNNER_TEMP/in/tenzro-node-macos-aarch64-metal.tar.gz" "$RUNNER_TEMP/in/tenzro-node-macos-x86_64-cpu.tar.gz" "$RUNNER_TEMP/pkg"
+          cd "$RUNNER_TEMP/pkg"
+          shasum -a 256 *.pkg | tee SHA256SUMS.pkg
+          ls -l
+          pkgutil --check-signature ./*.pkg || true
+
+      - name: Inspect the package (no install)
+        working-directory: ${{ runner.temp }}/pkg
+        run: |
+          pkgutil --payload-files tenzro-*-macos.pkg || true
+          mkdir x && pkgutil --expand tenzro-*-macos.pkg x/pkg
+          cat x/pkg/Distribution
+          ls x/pkg
+          for c in x/pkg/*.pkg; do echo "== $c"; ( cd "$c" && gzip -dc Payload | cpio -it 2>/dev/null | sed -n '1,40p' ); ls "$c/Scripts" 2>/dev/null; done
+
+      - name: Install, check, uninstall
+        run: packaging/macos/test-pkg.sh "$RUNNER_TEMP"/pkg/tenzro-*-macos.pkg
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tenzro-macos-pkg
+          path: |
+            ${{ runner.temp }}/pkg/*.pkg
+            ${{ runner.temp }}/pkg/SHA256SUMS.pkg
           if-no-files-found: error

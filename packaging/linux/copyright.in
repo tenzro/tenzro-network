@@ -1,0 +1,36 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Tenzro Network
+Upstream-Contact: Tenzro Network <eng@tenzro.com>
+Source: https://github.com/tenzro/tenzro-network
+Comment: The Rust dependencies compiled into the programs, with their licences,
+ are listed in the release's software bill of materials (sbom-<commit>.spdx.json).
+
+Files: *
+Copyright: Tenzro Network contributors
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0. The full text is in
+ /usr/share/doc/@PKG@/LICENSE and, on Debian systems,
+ /usr/share/common-licenses/Apache-2.0. Attribution notices are in
+ /usr/share/doc/@PKG@/NOTICE.
+
+Files: usr/lib/tenzro/lib/libonnxruntime*
+Comment: Only in packages that carry ONNX Runtime (the CUDA builds).
+ ONNX Runtime, Copyright (c) Microsoft Corporation, https://github.com/microsoft/onnxruntime
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy of
+ this software and associated documentation files (the "Software"), to deal in
+ the Software without restriction, including without limitation the rights to
+ use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ of the Software, and to permit persons to whom the Software is furnished to do
+ so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.

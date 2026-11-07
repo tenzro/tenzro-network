@@ -53,6 +53,9 @@ impl JoinCmd {
     /// a node that cannot start says why and what fixes it.
     async fn connect_error(&self, rpc_url: &str, e: anyhow::Error) -> anyhow::Error {
         if !(self.provider && self.rpc.is_none()) {
+            if e.downcast_ref::<crate::friendly::Unreachable>().is_some() {
+                return e;
+            }
             return anyhow::anyhow!("Cannot connect to {}: {}", rpc_url, e);
         }
         let hw = crate::commands::hardware::detect_hardware_profile().await;

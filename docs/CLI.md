@@ -2,7 +2,7 @@
 
 Every command `tenzro` accepts, generated from the binary.
 
-Generated from `tenzro 0.2.0` by `scripts/gen-cli-docs.sh`. Do not edit by
+Generated from `tenzro 0.2.1` by `scripts/gen-cli-docs.sh`. Do not edit by
 hand — `cargo test -p tenzro-cli` fails when this file and the binary
 disagree, and a hand edit is how they start to.
 
@@ -12,7 +12,7 @@ with [GUIDE.md](GUIDE.md).
 ```
 Tenzro Network CLI — AI-Native, Agentic, Tokenized Settlement Layer
 
-Usage: tenzro [OPTIONS] <COMMAND>
+Usage: tenzro [OPTIONS] [COMMAND]
 
 Commands:
   join            Join the Tenzro Network (one-click participate)
@@ -34,6 +34,9 @@ Commands:
   escrow          Escrow and payment channel commands
   duty            Network duties: work the chain pays the first prover for
   dev             Start a local single-validator chain for development, keys in this machine's hardware
+  doctor          Check this machine and the network, and say how to fix what is wrong
+  completions     Print shell completions: bash, zsh, fish, powershell or elvish
+  tpm             TPM commands of the node (provision, serve, key-holder, grant-request, grant-install, remote-check)
   token           Token management commands (create, query, cross-VM transfers)
   contract        Contract deployment commands
   bridge          Cross-chain bridge commands (quote, execute, status, routes)
@@ -97,6 +100,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+      --rpc <URL>        The node to talk to, for every command that does not take its own `--rpc` (also `TENZRO_RPC`). Default: the endpoint `tenzro setup` saved, else the node on this machine. Give it before the command: `tenzro --rpc http://host:8545 status` [env: TENZRO_RPC=]
   -h, --help             Print help
   -V, --version          Print version
 ```
@@ -2159,6 +2163,22 @@ Options:
   -h, --help                         Print help
 ```
 
+## `tenzro completions`
+
+```
+Print shell completions: bash, zsh, fish, powershell or elvish
+
+Usage: tenzro completions [OPTIONS] <SHELL>
+
+Arguments:
+  <SHELL>  The shell to print completions for [possible values: bash, elvish, fish, powershell, zsh]
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -h, --help             Print help
+```
+
 ## `tenzro contract`
 
 ```
@@ -2730,6 +2750,20 @@ Usage: tenzro discover profile [OPTIONS]
 
 Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -h, --help             Print help
+```
+
+## `tenzro doctor`
+
+```
+Check this machine and the network, and say how to fix what is wrong
+
+Usage: tenzro doctor [OPTIONS]
+
+Options:
+      --json             Print one JSON object for support instead of the checklist
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
   -h, --help             Print help
@@ -9483,6 +9517,8 @@ Options:
           After setup, install the node as a service, start it, and follow it until it has synced. On Linux this runs `sudo` for the systemd unit; on macOS it loads a launch agent. Interactive runs are asked instead
       --yes
           Non-interactive: accept defaults, take everything else from flags
+      --plain
+          Use the line-by-line wizard instead of the full-screen setup, even on a terminal
   -h, --help
           Print help
 ```
@@ -10465,6 +10501,22 @@ Options:
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
+```
+
+## `tenzro tpm`
+
+```
+TPM commands of the node (provision, serve, key-holder, grant-request, grant-install, remote-check)
+
+Usage: tenzro tpm [OPTIONS] [ARGS]...
+
+Arguments:
+  [ARGS]...  The arguments of `tenzro-node tpm`, for example: provision
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -h, --help             Print help
 ```
 
 ## `tenzro training`

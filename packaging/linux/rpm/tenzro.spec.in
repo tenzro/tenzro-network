@@ -1,0 +1,74 @@
+# The payload is the exact tree the .deb installs; nothing is rebuilt or stripped,
+# so the binaries are byte for byte those of the signed release archive.
+%global debug_package %{nil}
+%global _build_id_links none
+%global __os_install_post %{nil}
+%global __strip /bin/true
+%global _binary_payload w15.zstdio
+%global _source_date_epoch_from_changelog 0
+%define use_source_date_epoch_as_buildtime 1
+%define clamp_mtime_to_source_date_epoch 1
+%define _buildhost tenzro-packaging
+
+Name:           @PKG@
+Version:        @VERSION@
+Release:        @REV@
+Summary:        @SUMMARY@
+License:        Apache-2.0
+URL:            https://tenzro.com
+AutoReqProv:    no
+Requires:       libc.so.6(GLIBC_@GLIBC@)(64bit)
+Requires:       libstdc++.so.6(GLIBCXX_@GLIBCXX@)(64bit)
+Requires:       libgcc_s.so.1()(64bit)
+Provides:       tenzro = %{version}-%{release}
+Conflicts:      tenzro
+Conflicts:      @OTHER@
+
+%description
+Installs the tenzro command line and the tenzro-node program, a hardware check
+(tenzro-check) and the archive's own installer (tenzro-node-install).
+@BLURB@
+
+Nothing is started and nothing joins the network when the package is installed.
+Open a terminal and run: tenzro
+
+%prep
+%build
+
+%install
+mkdir -p %{buildroot}
+cp -a /payload/. %{buildroot}/
+
+%post
+echo
+if [ "$1" -gt 1 ]; then
+    echo "Tenzro was upgraded. Programs that are already running keep using the old version until you restart them; nothing was restarted."
+else
+    echo "Tenzro is installed. Nothing was started and nothing joined the network."
+fi
+/usr/lib/tenzro/bin/tenzro-check || true
+exit 0
+
+%postun
+if [ "$1" -eq 0 ]; then
+    echo
+    echo "Tenzro programs were removed. Your keys, wallet and node data were not touched."
+    if [ -e /etc/systemd/system/tenzro-node.service ]; then
+        echo "A tenzro-node service you set up is still defined. To stop and remove it:"
+        echo "  sudo systemctl disable --now tenzro-node && sudo rm /etc/systemd/system/tenzro-node.service"
+    fi
+fi
+exit 0
+
+%files
+%defattr(-,root,root,-)
+/usr/lib/tenzro
+/usr/bin/tenzro
+/usr/bin/tenzro-node
+/usr/bin/tenzro-check
+/usr/bin/tenzro-node-install
+/usr/share/doc/@PKG@
+
+%changelog
+* Fri Nov 06 2026 Tenzro Network <eng@tenzro.com> - @VERSION@-@REV@
+- Repackaging of the signed release archive.

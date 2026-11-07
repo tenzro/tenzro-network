@@ -1,0 +1,8 @@
+#!/bin/sh
+# Opens a Terminal window and runs tenzro: the first time it takes you through setup.
+exec /usr/bin/osascript <<'EOS'
+tell application "Terminal"
+    activate
+    do script "clear; /usr/local/bin/tenzro"
+end tell
+EOS

@@ -230,6 +230,11 @@ criteria = "safe-to-deploy"
 version = "1.4.0"
 criteria = "safe-to-run"
 
+[[exemptions.approx]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
 [[exemptions.arc-swap]]
 version = "1.9.1"
 criteria = "safe-to-deploy"
@@ -602,6 +607,11 @@ criteria = "safe-to-deploy"
 version = "2.11.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.bitflags]]
+version = "2.13.2"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
 [[exemptions.bitstream-io]]
 version = "4.10.0"
 criteria = "safe-to-deploy"
@@ -685,6 +695,11 @@ criteria = "safe-to-deploy"
 [[exemptions.bv]]
 version = "0.11.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.by_address]]
+version = "1.2.1"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.byte-slice-cast]]
 version = "1.2.3"
@@ -798,13 +813,33 @@ criteria = "safe-to-deploy"
 version = "4.6.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap]]
+version = "4.6.7"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
 [[exemptions.clap_builder]]
 version = "4.6.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap_builder]]
+version = "4.6.7"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.clap_complete]]
+version = "4.6.11"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
 [[exemptions.clap_derive]]
 version = "4.6.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.clap_derive]]
+version = "4.6.7"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.clap_lex]]
 version = "1.1.0"
@@ -953,6 +988,16 @@ criteria = "safe-to-deploy"
 [[exemptions.crossbeam-utils]]
 version = "0.8.21"
 criteria = "safe-to-deploy"
+
+[[exemptions.crossterm]]
+version = "0.29.0"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.crossterm_winapi]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.crunchy]]
 version = "0.2.4"
@@ -1826,6 +1871,11 @@ criteria = "safe-to-deploy"
 version = "0.17.11"
 criteria = "safe-to-deploy"
 
+[[exemptions.indoc]]
+version = "2.0.8"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
 [[exemptions.inout]]
 version = "0.1.4"
 criteria = "safe-to-deploy"
@@ -1837,6 +1887,11 @@ criteria = "safe-to-deploy"
 [[exemptions.inplace-vec-builder]]
 version = "0.1.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.instability]]
+version = "0.3.14"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.interpolate_name]]
 version = "0.2.4"
@@ -2030,6 +2085,11 @@ criteria = "safe-to-deploy"
 version = "0.24.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.kasuari]]
+version = "0.4.13"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
 [[exemptions.keccak]]
 version = "0.1.6"
 criteria = "safe-to-deploy"
@@ -2185,6 +2245,11 @@ criteria = "safe-to-deploy"
 [[exemptions.light-poseidon]]
 version = "0.4.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.line-clipping]]
+version = "0.3.8"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.linux-raw-sys]]
 version = "0.12.1"
@@ -2558,6 +2623,11 @@ criteria = "safe-to-deploy"
 version = "0.7.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.num_threads]]
+version = "0.1.8"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
 [[exemptions.objc]]
 version = "0.2.7"
 criteria = "safe-to-deploy"
@@ -2761,6 +2831,21 @@ criteria = "safe-to-deploy"
 [[exemptions.pairing]]
 version = "0.23.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.palette]]
+version = "0.7.7"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.palette_derive]]
+version = "0.7.7"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.palette_math]]
+version = "0.7.7"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.papaya]]
 version = "0.2.4"
@@ -3233,6 +3318,26 @@ criteria = "safe-to-deploy"
 [[exemptions.range-collections]]
 version = "0.4.6"
 criteria = "safe-to-deploy"
+
+[[exemptions.ratatui]]
+version = "0.30.2"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.ratatui-core]]
+version = "0.1.2"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.ratatui-crossterm]]
+version = "0.1.2"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.ratatui-widgets]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.rav1d]]
 version = "1.1.0"
@@ -3761,6 +3866,16 @@ criteria = "safe-to-deploy"
 [[exemptions.shell-words]]
 version = "1.1.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.signal-hook]]
+version = "0.3.18"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
+
+[[exemptions.signal-hook-mio]]
+version = "0.2.5"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.signal-hook-registry]]
 version = "1.4.8"
@@ -4689,6 +4804,11 @@ criteria = "safe-to-deploy"
 [[exemptions.unicode-properties]]
 version = "0.1.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.unicode-truncate]]
+version = "2.0.1"
+criteria = "safe-to-deploy"
+notes = "terminal interface of the tenzro CLI (0.2.1); not reviewed, review before the next release"
 
 [[exemptions.unicode_categories]]
 version = "0.1.1"

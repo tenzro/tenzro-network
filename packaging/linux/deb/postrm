@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+case "$1" in
+remove|purge)
+    echo
+    echo "Tenzro programs were removed. Your keys, wallet and node data were not touched."
+    if [ -e /etc/systemd/system/tenzro-node.service ]; then
+        echo "A tenzro-node service you set up is still defined. To stop and remove it:"
+        echo "  sudo systemctl disable --now tenzro-node && sudo rm /etc/systemd/system/tenzro-node.service"
+    fi
+    ;;
+esac
+exit 0

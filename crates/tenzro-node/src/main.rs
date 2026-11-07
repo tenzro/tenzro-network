@@ -2788,7 +2788,11 @@ fn parse_roles(roles: &str) -> Result<tenzro_types::RoleSet> {
 
 /// Print startup banner
 fn print_banner() {
-    println!(
+    const INNER: usize = 60;
+    let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
+    let pad_l = (INNER - version.chars().count()) / 2;
+    let pad_r = INNER - version.chars().count() - pad_l;
+    print!(
         r#"
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║
@@ -2800,11 +2804,11 @@ fn print_banner() {
 ║      ╚═╝   ╚══════╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝    ║
 ║                                                            ║
 ║        AI-Native Agentic Tokenized Settlement Layer       ║
-║                      Version 0.1.0                         ║
-║                                                            ║
-╚════════════════════════════════════════════════════════════╝
 "#
     );
+    println!("║{}{}{}║", " ".repeat(pad_l), version, " ".repeat(pad_r));
+    println!("║                                                            ║");
+    println!("╚════════════════════════════════════════════════════════════╝");
 }
 
 /// Print node information

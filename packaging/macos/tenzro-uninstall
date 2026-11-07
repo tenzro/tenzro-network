@@ -1,0 +1,23 @@
+#!/bin/sh
+# Remove the Tenzro programs installed by the .pkg. Your keys, wallet and node
+# data are NOT touched. Usage: sudo tenzro-uninstall
+set -eu
+if [ "$(id -u)" != 0 ]; then
+    echo "Run this with sudo:  sudo tenzro-uninstall" >&2
+    exit 1
+fi
+LIB=/usr/local/lib/tenzro
+for b in tenzro tenzro-node tenzro-check tenzro-uninstall; do
+    l=/usr/local/bin/$b
+    if [ -L "$l" ] && [ "$(readlink "$l")" = "../lib/tenzro/bin/$b" ]; then rm -f "$l"; echo "removed $l"; fi
+done
+rm -rf /Applications/Tenzro.app && echo "removed /Applications/Tenzro.app"
+for id in com.tenzro.node.metal com.tenzro.node.cpu; do
+    pkgutil --pkg-info "$id" >/dev/null 2>&1 && pkgutil --forget "$id" >/dev/null && echo "forgot receipt $id"
+done
+# This script lives in $LIB, so remove it last.
+rm -rf "$LIB" && echo "removed $LIB"
+for p in /Library/LaunchDaemons/*tenzro* "$HOME"/Library/LaunchAgents/*tenzro*; do
+    [ -e "$p" ] && echo "A service you set up is still defined: $p. Stop it with: launchctl unload $p"
+done
+echo "Your keys, wallet and node data were not touched."

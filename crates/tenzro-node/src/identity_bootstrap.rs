@@ -102,8 +102,12 @@ pub fn machine_signer() -> Option<&'static dyn HardwareSigner> {
 /// Why a node refuses to start on a machine with no hardware key store.
 pub const NO_HARDWARE_IDENTITY: &str = "this machine has no TPM 2.0 (Linux /dev/tpmrm0, Windows TPM \
      Base Services) or Secure Enclave (macOS), so it has no machine identity key. A Tenzro node runs \
-     only with its identity key in hardware; there is no keyless or software-key mode. Enable or \
-     install a TPM 2.0, run `tenzro-node tpm provision` as the node user, and start again.";
+     only with its identity key in hardware; there is no keyless or software-key mode. If the \
+     machine has a TPM, turn it on in the firmware settings (it may be called fTPM, PTT or Security \
+     Device), run `tenzro-node tpm provision` as the node user, and start again. If it has none (a \
+     Raspberry Pi, for example), keep the key in another machine's TPM: run `tenzro-node tpm \
+     key-holder` and start with --tpm-key-holder (docs/NODE.md, Raspberry Pi and other edge \
+     devices), or use the network with a passkey instead: tenzro setup --path network.";
 
 /// Refuses on a machine with no TPM 2.0 or Secure Enclave. Needs no
 /// configuration, so a node checks it before anything else.

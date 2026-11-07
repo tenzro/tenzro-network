@@ -1,0 +1,62 @@
+Windows installer: what you see when it is not code-signed
+==========================================================
+
+The Tenzro MSI is not Authenticode-signed. Its trust comes from the Tenzro
+release signature: verify the download against SHA256SUMS and its cosign
+signature (see docs/VERIFY-DOWNLOAD.md) before you run it. Windows prompts
+described below are a convenience layer only; they do not replace that check.
+
+What Windows shows for an unsigned MSI
+--------------------------------------
+User Account Control (UAC), when you double-click the MSI:
+  - The prompt asks: "Do you want to allow this app from an unknown publisher
+    to make changes to your device?" The shield banner is yellow/orange and the
+    publisher is shown as "Unknown", with the file path of the MSI.
+  - A signed MSI would show a blue banner with the verified publisher name.
+  - Choose Yes to continue. Installing needs administrator rights because the
+    package installs per machine (Program Files, system PATH option).
+
+SmartScreen:
+  - Only files that carry the Mark of the Web (the Zone.Identifier stream a
+    browser adds to a download) are checked. For an unsigned or unknown file
+    Windows shows "Windows protected your PC - Microsoft Defender SmartScreen
+    prevented an unrecognized app from starting". Select "More info", then
+    "Run anyway".
+  - An MSI that was copied from a verified archive without the Mark of the Web,
+    unblocked in File Properties (Unblock), or run from msiexec on the command
+    line does not show the SmartScreen page. UAC still appears.
+
+Command line (no prompts beyond UAC, no wizard):
+  msiexec /i tenzro-0.2.0-windows-x86_64-cuda.msi /qn ADDTOPATH=system
+  Properties: INSTALLFOLDER=<dir>, ADDTOPATH=system|user|none (default system).
+  Remove: msiexec /x <path-to-msi> /qn   (or Settings > Apps > Tenzro)
+
+What Authenticode signing would need
+------------------------------------
+  - A code-signing certificate from a public CA. OV (organisation validated)
+    builds SmartScreen reputation over time; EV (extended validation) used to
+    give instant reputation, but Microsoft changed this and EV no longer
+    guarantees an immediate SmartScreen pass. Neither removes the UAC
+    "unknown publisher" banner; a validly signed file shows the publisher.
+  - Since 2023 the CA/Browser Forum baseline requires the private key to live
+    on certified hardware (FIPS 140-2 level 2 / equivalent token) or a cloud
+    HSM; software key files are no longer issued.
+  - Options: Azure Trusted Signing (now called Artifact Signing; needs an Azure
+    subscription and identity validation, no hardware to buy), DigiCert or
+    Sectigo EV with a cloud HSM or token, SSL.com eSigner.
+  - Signing step: signtool sign /fd SHA256 /tr <timestamp-url> /td SHA256 ... on
+    the MSI (and ideally on tenzro.exe and tenzro-node.exe before packaging, which
+    would change the release binaries and their signed hashes), or the
+    cross-platform jsign equivalent. Always timestamp so the signature stays
+    valid after the certificate expires.
+
+Decision this implies for the project
+-----------------------------------
+Signing needs an account with a certificate authority or a cloud signing
+service. That puts one vendor into the trust path of Windows installs, which
+conflicts with the rule of no single-vendor account in the trust root. Until
+that is decided, the MSI ships unsigned and the verifiable chain is the Tenzro
+release signature. If the project decides to sign, the least invasive option is to sign
+only the MSI wrapper (the contained binaries and the archive hashes stay
+untouched) and to state clearly that the cosign signature remains the
+authority.

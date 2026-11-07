@@ -306,6 +306,10 @@ clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.17"
 dialoguer = "0.11"
 console = "0.15"
+# The full-screen setup and console (crates/tenzro-cli/src/tui). crossterm comes in through
+# ratatui, so the terminal backend is one version; no image, serde or widget extras.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+clap_complete = "4"
 
 # Web server
 axum = { version = "0.7", features = ["multipart"] }

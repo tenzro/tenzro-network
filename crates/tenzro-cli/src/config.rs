@@ -82,6 +82,13 @@ pub struct PersistedConfig {
     /// The stake a role is waiting on, while its account does not hold it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_stake: Option<PendingStake>,
+    /// Unix socket of the key holder this node signs through, when its keys
+    /// are in another machine's TPM. A path, not a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_holder_socket: Option<String>,
+    /// The label that key holder's grant was issued under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_holder_label: Option<String>,
 }
 
 /// Get the path to the config file: `~/.tenzro/config.json`

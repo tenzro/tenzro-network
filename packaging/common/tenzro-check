@@ -1,0 +1,186 @@
+#!/bin/sh
+# tenzro-check: say, in plain words, whether the Tenzro build installed here can
+# run on this machine, and what to do next.
+#
+# It is a check only. It starts no service, joins no network, creates no keys
+# and writes nothing outside a temporary directory that it removes. Run it
+# again whenever the hardware or the driver changes: tenzro-check
+#
+# Exit status: 0 the build can run here, 1 it cannot (the reason is printed),
+# 2 the node program is missing or no temporary directory could be made.
+#
+# TENZRO_NODE overrides the binary to check (used by the package tests).
+
+set -u
+
+# Follow symlinks (/usr/bin/tenzro-check -> /usr/lib/tenzro/bin/tenzro-check).
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case "$link" in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+here=$(cd "$(dirname "$self")" 2>/dev/null && pwd -P)
+root=$(dirname "$here")
+node=${TENZRO_NODE:-$here/tenzro-node}
+info=${TENZRO_PACKAGE_INFO:-$root/PACKAGE-INFO}
+
+flavour=""
+version=""
+cudart=""
+if [ -r "$info" ]; then
+    flavour=$(sed -n 's/^flavour=//p' "$info" | head -1)
+    version=$(sed -n 's/^version=//p' "$info" | head -1)
+    cudart=$(sed -n 's/^cuda_runtime=//p' "$info" | head -1)
+fi
+cuda_libs="the NVIDIA driver and the CUDA ${cudart:-12 or newer} runtime libraries (cudart, cublas, cufft) with cuDNN 9"
+os=$(uname -s)
+
+say() { printf '%s\n' "$*"; }
+
+if [ ! -x "$node" ]; then
+    say "tenzro-check: cannot find the node program ($node)."
+    exit 2
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/tenzro-check.XXXXXX") || exit 2
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# Run a command with a time limit; the node's own check ends well before it.
+limit() {
+    secs=$1; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+    elif command -v perl >/dev/null 2>&1; then
+        perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+TENZRO_DATA_DIR="$tmp/data" limit 60 "$node" hardware >"$tmp/out" 2>"$tmp/err"
+rc=$?
+
+field() { sed -n "s/^$1: //p" "$tmp/out" | head -1; }
+build=$(field build)
+gpus=$(field gpus)
+onnx=$(field onnx)
+startup=$(field startup)
+
+# Is there a GPU of a kind this build does not use?
+nvidia_gpu=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU '; then
+    nvidia_gpu=1
+fi
+if [ -r /proc/driver/nvidia/version ]; then nvidia_gpu=1; fi
+
+say ""
+say "Tenzro hardware check${version:+ (version $version)}"
+say "  package build : ${flavour:-unknown}"
+say "  binary reports: build=${build:-?} gpus=${gpus:-?} onnx=${onnx:-?} startup=${startup:-?}"
+say ""
+
+ready=0
+reason=""
+
+if [ -z "$build" ]; then
+    # The binary did not run far enough to answer.
+    if grep -qi 'GLIBC\|GLIBCXX\|version .* not found' "$tmp/err"; then
+        reason="This system's C library is older than this build needs. The package states the minimum it requires; use a newer release of your distribution."
+    elif grep -qi 'error while loading shared libraries\|cannot open shared object\|dyld\|Library not loaded' "$tmp/err"; then
+        reason="A library the program needs is missing: $(sed -n '1p' "$tmp/err")"
+        [ "$flavour" = cuda ] && reason="$reason. This CUDA build needs $cuda_libs."
+    elif [ "$rc" = 124 ] || [ "$rc" = 142 ]; then
+        reason="The check did not finish within 60 seconds."
+    else
+        reason="The program did not run on this machine (exit $rc): $(sed -n '1p' "$tmp/err")"
+    fi
+    say "NOT READY: $reason"
+    ready=2
+else
+    case "$flavour" in
+        cuda)
+            if [ "$build" != CUDA ]; then
+                reason="The package says CUDA but the program reports a $build build."
+            elif ! [ "${gpus:-0}" -ge 1 ] 2>/dev/null; then
+                if [ $nvidia_gpu = 1 ]; then
+                    reason="An NVIDIA GPU is present, but the program cannot use it (no usable GPU found). The driver or the CUDA runtime libraries are probably missing or too old; this build needs $cuda_libs."
+                else
+                    reason="This machine has no NVIDIA GPU that the program can use. This package is the CUDA build, which is meant for NVIDIA machines."
+                fi
+            else
+                case ",$onnx," in
+                    *,CUDA,*) ;;
+                    *) reason="ONNX Runtime will not use CUDA here (it reports: ${onnx:-nothing}). The CUDA runtime libraries are probably missing." ;;
+                esac
+            fi
+            if [ -z "$reason" ] && { [ "$rc" != 0 ] || [ "$startup" != ok ]; }; then
+                reason="The node would refuse to start here (startup: ${startup:-unknown})."
+            fi
+            if [ -n "$reason" ]; then
+                say "NOT READY: $reason"
+                say ""
+                say "What you can do:"
+                say "  - Install $cuda_libs, then run: tenzro-check"
+                say "  - Or use the CPU build, which runs everywhere but serves models on the CPU:"
+                say "      Debian/Ubuntu: sudo apt install tenzro-cpu     Fedora/RHEL: sudo dnf swap tenzro-cuda tenzro-cpu"
+                say "    (it replaces this package; your data and keys are not touched)."
+            else
+                ready=1
+                say "READY: this is the CUDA build and it found $gpus NVIDIA GPU(s) it can use."
+            fi
+            ;;
+        metal)
+            if [ "$build" != Metal ]; then
+                reason="The package says Metal but the program reports a $build build."
+            elif [ "$rc" != 0 ] || [ "$startup" != ok ]; then
+                reason="The node would refuse to start here (startup: ${startup:-unknown})."
+            fi
+            if [ -n "$reason" ]; then
+                say "NOT READY: $reason"
+            else
+                ready=1
+                say "READY: this is the Metal build and it can use this Mac's GPU."
+            fi
+            ;;
+        *)
+            # cpu, or unknown: the build must start.
+            if [ "$rc" != 0 ] || [ "$startup" != ok ]; then
+                reason="The node would refuse to start here (startup: ${startup:-unknown})."
+                say "NOT READY: $reason"
+            else
+                ready=1
+                say "READY: this is the CPU build and it runs on this machine."
+                if [ $nvidia_gpu = 1 ] && [ "$os" = Linux ]; then
+                    say "Note: this machine has an NVIDIA GPU, which the CPU build does not use. For GPU model serving install the CUDA build:"
+                    say "      Debian/Ubuntu: sudo apt install tenzro-cuda     Fedora/RHEL: sudo dnf swap tenzro-cpu tenzro-cuda"
+                fi
+            fi
+            ;;
+    esac
+fi
+
+if [ "$ready" != 1 ]; then
+    say ""
+    say "The program's own words:"
+    { sed 's/\x1b\[[0-9;]*m//g' "$tmp/out"; sed 's/\x1b\[[0-9;]*m//g' "$tmp/err"; } | grep -v '^$' | sed -n '1,12p' | sed 's/^/  | /'
+fi
+
+say ""
+if [ "$os" = Darwin ]; then
+    say "Identity keys: on a Mac with a Secure Enclave the node keeps its keys there and they cannot be exported."
+    say "A virtual machine without a Secure Enclave cannot run a validator node."
+    say ""
+fi
+say "Nothing is running and nothing has joined the network. The tenzro command is on your PATH."
+say "Next step: open a terminal and run:   tenzro"
+say "The first time it takes you through setup (use the network, provide compute, run a validator, or try a local chain);"
+say "after that it opens the console. For the line-by-line wizard: tenzro setup --plain"
+if [ "$os" = Darwin ]; then
+    say "To remove Tenzro: sudo tenzro-uninstall"
+else
+    say "To remove Tenzro: use your package manager (sudo apt remove tenzro-cpu / tenzro-cuda, or sudo dnf remove ...)."
+fi
+say ""
+
+[ "$ready" = 1 ] && exit 0
+exit 1

@@ -61,6 +61,11 @@ pub const RPC_ERR_FEE_FLOOR: i64 = -32012;
 impl RpcClient {
     /// Create a new RPC client
     pub fn new(rpc_url: &str) -> Self {
+        // A command that left its flag at the local default takes the
+        // endpoint chosen for the process (--rpc, TENZRO_RPC, or the one
+        // `tenzro setup` saved).
+        let resolved = crate::endpoint::for_command(rpc_url);
+        let rpc_url = resolved.as_str();
         // Derive API URL from RPC URL
         // localhost:8545 → localhost:8080
         // localhost:9944 → localhost:8080
@@ -139,7 +144,10 @@ impl RpcClient {
 
         let req = self.authorized(self.http.post(&self.rpc_url).json(&request), &self.rpc_url);
 
-        let response = req.send().await?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| crate::friendly::from_reqwest(&self.rpc_url, e))?;
 
         let body: JsonRpcResponse = response.json().await?;
 
@@ -197,7 +205,8 @@ impl RpcClient {
             .header("DPoP", proof)
             .json(&request)
             .send()
-            .await?;
+            .await
+            .map_err(|e| crate::friendly::from_reqwest(&self.rpc_url, e))?;
         let body: JsonRpcResponse = response.json().await?;
         if let Some(err) = body.error {
             anyhow::bail!("RPC error [{}]: {}", err.code, err.message);
@@ -284,7 +293,10 @@ impl RpcClient {
     pub async fn post_route(&self, path: &str, body: Vec<u8>) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.rpc_url.trim_end_matches('/'), path);
         let req = self.authorized(self.http.post(&url).body(body), &url);
-        let response = req.send().await?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| crate::friendly::from_reqwest(&self.rpc_url, e))?;
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
@@ -295,7 +307,12 @@ impl RpcClient {
 
     pub async fn api_get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.api_url, path);
-        let response = self.http.get(&url).send().await?;
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| crate::friendly::from_reqwest(&self.api_url, e))?;
         let body: T = response.json().await?;
         Ok(body)
     }
@@ -307,7 +324,13 @@ impl RpcClient {
         body: &Value,
     ) -> Result<T> {
         let url = format!("{}{}", self.api_url, path);
-        let response = self.http.post(&url).json(body).send().await?;
+        let response = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| crate::friendly::from_reqwest(&self.api_url, e))?;
         let result: T = response.json().await?;
         Ok(result)
     }

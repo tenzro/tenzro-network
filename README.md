@@ -141,16 +141,33 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 
 ## Quick Start
 
-### Download a release and verify it
+### Install
 
-Every release is a set of archives, a `SHA256SUMS` manifest and a cosign
-signature over it. Check both before you install:
+```bash
+curl -fsSL https://downloads.tenzro.com/install.sh | sh     # Linux and macOS
+irm https://downloads.tenzro.com/install.ps1 | iex          # Windows (PowerShell)
+tenzro
+```
+
+The installer picks the build for the machine, verifies the release signature
+and the archive's SHA-256 before it installs anything, needs no `sudo`, and puts
+`tenzro` and `tenzro-node` in `~/.local/bin`. What it checks, what each first-run
+screen looks like, and what to do on a machine without a TPM, a GPU or the
+public network are in [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
+Tested so far on Ubuntu 24.04 and Fedora 42 (x86_64); the arm64, macOS and
+Windows installs have not yet been run on real machines.
+
+### Verify a release yourself
+
+Every release is a set of archives, a `SHA256SUMS` manifest and a signature
+over it. Check both before you install by hand:
 
 ```bash
 cosign verify-blob --key tenzro-release.pub --insecure-ignore-tlog=true --signature SHA256SUMS.sig SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
+The key's fingerprint is `c88aaee70b3c0bf17a994bad44963a6a72359b2e1497df9a15a40ed099aeb72d`.
 Full steps for Linux, macOS and Windows, and what the key does and does not
 prove, are in [docs/VERIFY-DOWNLOAD.md](docs/VERIFY-DOWNLOAD.md).
 

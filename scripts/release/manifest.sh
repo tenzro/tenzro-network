@@ -69,9 +69,25 @@ for img in tenzro-node-image-*.tar; do
     printf '%s  %s\n' "$sha" "$img" >> SHA256SUMS.tmp
     images=$(jq -c --slurpfile e "$rec" '. + [$e[0]]' <<<"$images")
 done
+packages='[]'
+if [ -f packages.json ]; then
+    n=$(jq length packages.json)
+    for ((k = 0; k < n; k++)); do
+        rec=$(jq -c ".[$k]" packages.json)
+        pf=$(jq -r .file <<<"$rec")
+        [ -f "$pf" ] || { echo "REFUSING: packages.json lists $pf, which is not here"; exit 1; }
+        sha=$(release_sha256 < "$pf")
+        [ "$sha" = "$(jq -r .sha256 <<<"$rec")" ] || { echo "REFUSING: $pf does not match packages.json"; exit 1; }
+        while read -r sf ss; do
+            [ "$(release_sha256 < "$sf" 2>/dev/null)" = "$ss" ] || { echo "REFUSING: $pf was built from $sf with digest $ss, which is not the archive here"; exit 1; }
+        done < <(jq -r '.sources[] | "\(.file) \(.sha256)"' <<<"$rec")
+        printf '%s  %s\n' "$sha" "$pf" >> SHA256SUMS.tmp
+        packages=$(jq -c --argjson r "$rec" '. + [$r]' <<<"$packages")
+    done
+fi
 commits=$(jq -nr --argjson a "$records" --argjson i "$images" '[$a[].commit, $i[].commit] | unique | length')
 [ "$commits" = 1 ] || { echo "REFUSING: artifacts from $commits different commits"; exit 1; }
 mv SHA256SUMS.tmp SHA256SUMS
-jq --argjson i "$images" '{commit: .[0].commit, rust: .[0].rust, artifacts: ., images: $i}' <<<"$records" > matrix.json
-echo "manifest: ${#present[@]} artifact(s), $(jq '.images | length' matrix.json) image(s) at $(jq -r .commit matrix.json)"
+jq --argjson i "$images" --argjson p "$packages" '{commit: .[0].commit, rust: .[0].rust, artifacts: ., images: $i, packages: $p}' <<<"$records" > matrix.json
+echo "manifest: ${#present[@]} artifact(s), $(jq '.images | length' matrix.json) image(s), $(jq '.packages | length' matrix.json) package(s) at $(jq -r .commit matrix.json)"
 cat SHA256SUMS

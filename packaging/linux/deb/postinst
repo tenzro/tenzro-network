@@ -1,0 +1,16 @@
+#!/bin/sh
+# Runs the hardware check and prints the result. It enables, starts and changes
+# nothing, and never fails the installation.
+set -e
+case "$1" in
+configure)
+    echo
+    if [ -n "${2:-}" ]; then
+        echo "Tenzro was upgraded. Programs that are already running keep using the old version until you restart them; nothing was restarted."
+    else
+        echo "Tenzro is installed. Nothing was started and nothing joined the network."
+    fi
+    /usr/lib/tenzro/bin/tenzro-check || true
+    ;;
+esac
+exit 0
