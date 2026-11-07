@@ -176,17 +176,42 @@ esac
 if [ "$OSN" = macos ] && [ "$ARCHN" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then ARCHN=aarch64; fi
 
 GPU=none
+ORIN=0
 if [ "$OSN" = linux ]; then
     if { have nvidia-smi && nvidia-smi -L 2>/dev/null | grep -q '^GPU '; } || [ -e /proc/driver/nvidia/version ]; then GPU=nvidia; fi
     if have ldd && ldd --version 2>&1 | grep -qi musl; then
         fail "this Linux uses musl libc (Alpine, for example)" "the published Linux builds need glibc" "use a glibc distribution (Debian, Ubuntu, Fedora) or run Tenzro in a container based on one"
     fi
     LIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+    ORIN=0; [ "$ARCHN" = aarch64 ] && detect_orin "${TENZRO_FS_ROOT:-}" && ORIN=1
+    # A Jetson reaches its GPU through the Tegra driver: no nvidia-smi, no /proc/driver/nvidia.
+    [ "$ORIN" = 1 ] && GPU=nvidia
 elif [ "$ARCHN" = aarch64 ]; then GPU=metal
 fi
 HAS_TPM=unknown
 if [ "$OSN" = linux ]; then if [ -e /dev/tpmrm0 ]; then HAS_TPM=yes; else HAS_TPM=no; fi
 elif [ "$ARCHN" = aarch64 ]; then HAS_TPM=secure-enclave; fi
+
+# pick_pref OS ARCH GPU LIBC ORIN: the build kinds to try, best first, on a machine of this kind.
+# On aarch64 Linux the Ubuntu 24.04 builds need glibc 2.39; an older glibc (Raspberry Pi OS or Debian 12 Bookworm,
+# 2.36) takes the Bookworm CPU build, which is the only one built against glibc 2.36. A Jetson Orin (ORIN=1)
+# takes the Orin CUDA build first, since the general CUDA build carries no sm_87 ONNX Runtime kernels.
+# pick_pref begin
+detect_orin() {
+    for f in "$1/proc/device-tree/compatible" "$1/sys/firmware/devicetree/base/compatible"; do
+        [ -r "$f" ] && tr '\0' '\n' < "$f" 2>/dev/null | grep -qx 'nvidia,tegra234' && return 0
+    done
+    return 1
+}
+pick_pref() {
+    if [ "$1" = linux ] && [ "$3" = nvidia ]; then pp="cuda vulkan cpu"; else pp="cpu metal edge"; fi
+    if [ "$1" = linux ] && [ "$2" = aarch64 ]; then
+        if [ "$3" = nvidia ] && [ "$5" = 1 ]; then pp="cuda-orin $pp"; fi
+        if [ -n "$4" ] && [ "$(printf '%s\n%s\n' 2.39 "$4" | sort -V | head -1)" != 2.39 ]; then pp="cpu-bookworm"; fi
+    fi
+    echo "$pp"
+}
+# pick_pref end
 
 # ---------------------------------------------------------------- the signed list
 WORK=""
@@ -219,10 +244,13 @@ if [ -n "$TARGET" ]; then
 else
     cands=$(echo "$names" | grep "^tenzro-node-$OSN-$ARCHN-.*\.tar\.gz$" | sed 's/\.tar\.gz$//' || true)
     NAME=""
-    if [ "$GPU" = nvidia ]; then pref="cuda vulkan cpu"; else pref="cpu metal edge"; fi
+    pref=$(pick_pref "$OSN" "$ARCHN" "$GPU" "${LIBC:-}" "$ORIN")
     for p in $pref; do
         if echo "$cands" | grep -qx "tenzro-node-$OSN-$ARCHN-$p"; then NAME="tenzro-node-$OSN-$ARCHN-$p"; break; fi
     done
+    if [ -z "$NAME" ] && [ "$pref" = cpu-bookworm ]; then
+        fail "no build in this release fits glibc $LIBC on aarch64" "the aarch64 builds need glibc 2.39 (Ubuntu 24.04, Debian 13, Raspberry Pi OS Trixie) and this release publishes no Debian 12 build; this machine has glibc $LIBC" "use Raspberry Pi OS Trixie, Ubuntu 24.04 or newer, or a container based on one"
+    fi
     if [ -z "$NAME" ]; then
         if [ -n "$cands" ]; then
             fail "this release has no build that fits this machine" "for $OSN $ARCHN it publishes only: $(echo "$cands" | sed 's/^tenzro-node-//' | tr '\n' ' ') and that needs hardware this machine does not report (an NVIDIA GPU)" "use a machine with the matching GPU, build from source (README, Build from Source), or ask for a CPU build of this platform"

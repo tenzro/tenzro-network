@@ -22,12 +22,12 @@ cd "$DIST"
 
 name=${FILE%.tar.gz}
 case "$name" in
-    tenzro-node-linux-*-cpu) role=cpu ;;
+    tenzro-node-linux-*-cpu|tenzro-node-linux-*-cpu-bookworm) role=cpu ;;
     tenzro-node-linux-*-edge) role=edge ;;
-    tenzro-node-linux-*-cuda|tenzro-node-linux-*-vulkan) role=gpu ;;
+    tenzro-node-linux-*-cuda|tenzro-node-linux-*-cuda-orin|tenzro-node-linux-*-vulkan) role=gpu ;;
     *) echo "REFUSING: $FILE is not a Linux release archive"; exit 1 ;;
 esac
-arch=${name#tenzro-node-linux-}; arch=${arch%-*}
+arch=${name#tenzro-node-linux-}; arch=${arch%%-*}
 [ "$(uname -s)-$(uname -m)" = "Linux-$arch" ] || { echo "REFUSING: $FILE is for Linux $arch; this host is $(uname -s) $(uname -m)"; exit 1; }
 
 sha=$(release_sha256 < "$FILE")
