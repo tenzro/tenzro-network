@@ -27,21 +27,29 @@ CLI.
 | SDK | Install | Source and reference |
 | --- | --- | --- |
 | TypeScript | `npm install tenzro-sdk` (and `@tenzro/device-key` where a TPM or Secure Enclave signs) | `sdk/tenzro-ts-sdk`, [README](../sdk/tenzro-ts-sdk/README.md), [API.md](../sdk/tenzro-ts-sdk/API.md) |
-| Python | `pip install tenzro` (`tenzro[device]` for the hardware signer) | `sdk/tenzro-py`, [README](../sdk/tenzro-py/README.md) |
+| Python | not yet published to PyPI; install from this repository (`pip install ./sdk/tenzro-py`) until it ships | `sdk/tenzro-py`, [README](../sdk/tenzro-py/README.md) |
 | Rust | `cargo add tenzro-sdk` | `sdk/tenzro-sdk`, [README](../sdk/tenzro-sdk/README.md), docs.rs |
 
 Each SDK defaults to the preview network (chain id 13380, `https://rpc.tenzro.com`)
 and finds the staked RPC operators on chain; each also takes one endpoint,
-such as the local chain `tenzro dev` serves (chain id 1337, `http://127.0.0.1:8545`):
+such as the local chain `tenzro dev` serves (chain id 1337, `http://127.0.0.1:8545`).
+The snippets below are written against what each SDK's current published
+registry version actually exposes (TypeScript `tenzro-sdk` 0.7.0, Rust
+`tenzro-sdk` 0.7.0): a client built from an endpoint and chain id, not the
+newer network-auto-discovery helper (`connectToNetwork` / `connect_to_network`),
+which lands in a later registry release; building from this repository gets
+that helper today.
 
 ```typescript
-import { TenzroClient, connectToNetwork } from "tenzro-sdk";
-const preview = await connectToNetwork();
+import pkg from "tenzro-sdk";
+const { TenzroClient } = pkg;
+const preview = new TenzroClient({ endpoint: "https://rpc.tenzro.com", chainId: 13380 });
 const local = new TenzroClient({ endpoint: "http://127.0.0.1:8545", chainId: 1337 });
 console.log(await local.getChainId(), await local.getBalance("0x<32-byte account address>"));
 ```
 
 ```python
+# from source until the package is published (see the Install row above)
 from tenzro import NetworkRpcClient, RpcClient
 preview = NetworkRpcClient.connect()
 local = RpcClient("http://127.0.0.1:8545")
@@ -49,7 +57,7 @@ print(int(local.eth_chain_id(), 16), local.get_balance(["0x<32-byte account addr
 ```
 
 ```rust
-let preview = tenzro_sdk::network::connect_to_network(&tenzro_sdk::network::NetworkOptions::default()).await?;
+let preview = tenzro_sdk::TenzroClient::new("https://rpc.tenzro.com").await?;
 let local = tenzro_sdk::TenzroClient::new("http://127.0.0.1:8545").await?;
 println!("{} {}", local.get_chain_id().await?, local.get_balance(address).await?);
 ```
@@ -193,7 +201,9 @@ Continue below if you want to run a node locally.
 
 ---
 
-## 1. System Requirements
+## 1. System Requirements to build from source
+
+This guide is for building and running from source. To install a released binary instead of building, see [HARDWARE-COVERAGE.md](HARDWARE-COVERAGE.md) for the requirements of the release archive itself — the toolchain requirements below (for `cargo build`) are not the same as what a built binary needs to run.
 
 To install a release archive or package (no build):
 
@@ -212,14 +222,9 @@ To build from source:
 | CPU | x86-64-v3 (Haswell 2013+, Zen 1+) or aarch64 | 8+ cores |
 | RAM | 8 GB free during build | 16 GB |
 | Disk | 20 GB for `target/` | 50 GB (multi-profile + models) |
-| OS | Linux or macOS | Ubuntu 24.04 / current macOS |
-| Network | Open outbound 443 (crates.io, Hugging Face) | - |
-
-Both need:
-
-| Resource | Requirement |
-|----------|-------------|
-| Hardware key store | TPM 2.0 (Linux, Windows) or Secure Enclave (macOS), required to run a node |
+| OS (build toolchain) | Linux (glibc 2.31+), macOS 12+ | Ubuntu 22.04 / macOS 14+ |
+| Network | Open outbound 443 (crates.io, Hugging Face) | — |
+| Hardware key store | TPM 2.0 (Linux, Windows) or Secure Enclave (macOS), required to run a node | — |
 
 **A hardware key store is required.** `tenzro-node` refuses to start on a machine with no TPM 2.0 or Secure Enclave, or whose identity key does not open: it exits non-zero with a message naming what is missing. There is no keyless or software-key mode. A machine with no TPM of its own, such as a Raspberry Pi, keeps its identity key in another machine's TPM: that machine runs `tenzro-node tpm serve`, and the small one runs `tenzro-node tpm key-holder`, approved by the operator's passkey, and starts with `--tpm-key-holder` ([NODE.md](NODE.md#raspberry-pi-and-other-edge-devices)). Building needs no TPM; running does.
 

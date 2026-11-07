@@ -10,7 +10,16 @@
 #   EXPECT_NODE_SHA, EXPECT_CLI_SHA   sha256 of the binaries in the release archive
 #   EXPECT_REFUSED=1   the distribution is too old: the install must be refused, cleanly
 #   EXPECT_GATE    READY or "NOT READY": what tenzro-check must say here
+#   HIDE_GPU=1     hide every NVIDIA GPU signal from the programs (a cpu build on a GPU host): the
+#                  container needs CAP_SYS_ADMIN; /sys/class/drm, /proc/driver/nvidia, /dev/nvidia*
+#                  and nvidia-smi are masked, so the gate reads this as a machine without a GPU
 set -uo pipefail
+if [ "${HIDE_GPU:-}" = 1 ]; then
+    mount -t tmpfs tmpfs /sys/class/drm 2>/dev/null || echo "WARNING: could not hide /sys/class/drm"
+    [ -d /proc/driver/nvidia ] && mount -t tmpfs tmpfs /proc/driver/nvidia
+    for d in /dev/nvidia*; do [ -e "$d" ] && mount --bind /dev/null "$d"; done
+    for b in /usr/bin/nvidia-smi /usr/local/bin/nvidia-smi; do [ -e "$b" ] && mount --bind /dev/null "$b"; done
+fi
 fails=0
 ok() { echo "PASS: $*"; }
 bad() { echo "FAIL: $*"; fails=$((fails + 1)); }
@@ -67,6 +76,7 @@ verify_installed() {
     else ok "ldd: every library resolves"; fi
     if [ -d /usr/lib/tenzro/lib ]; then
         r=$(ldd /usr/lib/tenzro/bin/tenzro-node 2>&1 | awk '/libonnxruntime\.so/ {print $3}')
+        [ -n "$r" ] && r=$(readlink -f "$r")
         case "$r" in /usr/lib/tenzro/lib/*) ok "ONNX Runtime resolves through \$ORIGIN/../lib to $r" ;; *) bad "ONNX Runtime resolves to '$r'" ;; esac
     fi
     out=$(tenzro-check 2>&1); rc=$?

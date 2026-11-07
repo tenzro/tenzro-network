@@ -351,6 +351,11 @@ impl App {
                             self.select(p);
                         }
                     }
+                    Some(Offer::Finish) => {
+                        // Saves the settings so the next `tenzro` opens the console.
+                        let _ = crate::config::save_config(&crate::config::load_config());
+                        self.outcome = Some(Outcome::Finished { next: "tenzro".into() });
+                    }
                     None => self.stage = Stage::Choose,
                 }
             }
@@ -569,9 +574,9 @@ impl App {
             Line::from("  Tenzro is a network where people, AI agents and machines pay each other"),
             Line::from("  and share compute."),
             Line::from(""),
-            Line::from("  This takes about two minutes. It looks at this machine, asks you one"),
-            Line::from("  question, and walks you through setting up. Every step shows the exact"),
-            Line::from("  command before it runs, and your keys stay in your hardware."),
+            Line::from("  It looks at this machine, asks you one question, and walks you through"),
+            Line::from("  setting up. Every step shows the exact command before it runs, and"),
+            Line::from("  your keys stay in your hardware."),
             Line::from(""),
             Line::from(vec![Span::raw("  Press "), Span::styled("Enter", t.command()), Span::raw(" to begin.")]),
         ];

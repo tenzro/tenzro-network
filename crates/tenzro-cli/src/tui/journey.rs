@@ -190,6 +190,9 @@ pub enum Offer {
     SwitchTo(Path),
     /// Keep the keys in another machine's TPM.
     Delegate,
+    /// Nothing more can be done on this machine yet: save the settings and
+    /// open the console, so the first run ends instead of looping.
+    Finish,
 }
 
 impl Offer {
@@ -197,6 +200,7 @@ impl Offer {
         match self {
             Offer::SwitchTo(p) => format!("{}: {}", p.label(), p.blurb()),
             Offer::Delegate => "Keep this node's keys in another machine's TPM (a key holder)".into(),
+            Offer::Finish => "Finish for now: open the console (run tenzro setup again when the network is announced)".into(),
         }
     }
 }
@@ -516,7 +520,7 @@ fn network_down(path: Path, net: &Net, o: &Opts) -> Option<Plan> {
         "The network is not reachable yet.",
         &why,
         &["Come back and run tenzro again when the network is announced.", "Meanwhile you can try Tenzro on this machine: it runs its own local chain."],
-        vec![Offer::SwitchTo(Path::Local)],
+        vec![Offer::SwitchTo(Path::Local), Offer::Finish],
         path,
     ))
 }
@@ -688,6 +692,7 @@ fn plan_local(m: &Machine, o: &Opts) -> Plan {
         Err(mut b) => {
             if let Some(bl) = b.blocked.as_mut() {
                 bl.offers.retain(|x| *x != Offer::Delegate);
+                bl.offers.push(Offer::Finish);
             }
             b.path = Path::Local;
             return *b;
@@ -756,7 +761,7 @@ mod tests {
             let p = plan(path, &m, &Net::NotResolving, &opts(&m));
             let b = p.blocked.expect("blocked");
             assert!(b.why.contains("does not resolve"));
-            assert_eq!(b.offers, vec![Offer::SwitchTo(Path::Local)]);
+            assert_eq!(b.offers, vec![Offer::SwitchTo(Path::Local), Offer::Finish]);
         }
     }
 

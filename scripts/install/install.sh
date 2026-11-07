@@ -12,8 +12,9 @@
 #   4. unpacks to PREFIX/install/versions/, runs the binary's own hardware
 #      self-check and, on Linux, the archive's install gate in dry-run
 #   5. links tenzro and tenzro-node into BIN_DIR (default ~/.local/bin)
-# Nothing is installed unless 2 and 3 pass. No sudo. No shell file is edited
-# unless you say yes (or pass --modify-path).
+# Nothing is installed unless 2 and 3 pass. No sudo. If BIN_DIR is not on PATH one marked
+# block is added to your shell profile so a new terminal finds tenzro (no question asked;
+# opt out with --no-modify-path; --uninstall removes the block).
 #
 # This script itself is covered by TLS only. Its SHA-256 is published beside it
 # (install.sh.sha256). To avoid trusting it, follow the manual steps in
@@ -28,7 +29,7 @@
 #   --base-url URL     download site (default https://downloads.tenzro.com)
 #   --dry-run          detect, fetch and verify the signed list, change nothing
 #   --uninstall        remove what this script installed (keeps ~/.tenzro data)
-#   --modify-path      add BIN_DIR to your shell profile without asking
+#   --modify-path      add BIN_DIR to your shell profile (this is the default; no question is asked)
 #   --no-modify-path   never touch a shell profile, never ask
 #   -h, --help         this text
 set -eu
@@ -61,7 +62,7 @@ fail() {
 }
 
 # ---------------------------------------------------------------- arguments
-WANT_VERSION="" PREFIX="${TENZRO_HOME:-}" BIN_DIR="${TENZRO_BIN_DIR:-}" TARGET="" FROM="" DRY=0 UNINSTALL=0 PATHMODE=ask
+WANT_VERSION="" PREFIX="${TENZRO_HOME:-}" BIN_DIR="${TENZRO_BIN_DIR:-}" TARGET="" FROM="" DRY=0 UNINSTALL=0 PATHMODE=yes
 while [ $# -gt 0 ]; do
     case "$1" in
         --version) WANT_VERSION="${2:-}"; shift ;;
@@ -319,7 +320,7 @@ else
     out=$("$X/bin/tenzro" --version 2>&1) && rc=0 || rc=$?
     if [ "$rc" != 0 ]; then
         case "$out" in
-            *GLIBC_*) fail "the binary needs a newer glibc than this system has" "$(echo "$out" | head -1)" "use Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer, or a container based on one" ;;
+            *GLIBC*) fail "the binary needs a newer glibc than this system has" "this system has glibc ${LIBC:-unknown}; this build needs 2.39 or newer" "use Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer, or a container based on one" ;;
             *) fail "the downloaded binary does not run on this machine" "$(echo "$out" | head -1)" "check that this is the right CPU and operating system; use --target to choose another build" ;;
         esac
     fi

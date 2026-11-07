@@ -428,7 +428,10 @@ impl Console {
         if self.snap.status.is_stale() {
             right.push(Span::styled(" STALE ", t.status(Word::Watch)));
         }
-        ui::header(f, h, t, &format!("{}  {}", self.url, ui::clip(&reason, 40)), right);
+        let right_w = right.iter().map(|s| s.width() as u16).sum::<u16>().min(h.width / 2);
+        let prefix_w = " tenzro ".len() as u16 + 1 + self.url.len() as u16 + 2;
+        let reason_w = h.width.saturating_sub(right_w).saturating_sub(prefix_w) as usize;
+        ui::header(f, h, t, &format!("{}  {}", self.url, ui::clip(&reason, reason_w)), right);
         let [tabs, content] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
         let mut spans = Vec::new();
         for (i, (k, name)) in SCREENS.iter().enumerate() {

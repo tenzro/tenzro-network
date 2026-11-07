@@ -80,8 +80,8 @@ The Linux script needs no `sudo`; the download is 95 MB for the Linux x86_64 bui
 4. Unpacks to `~/.tenzro/install/versions/<archive>-<hash>/`, refusing paths that would escape that folder and files that
    are not executables for this system, then runs the binary's own hardware check (`tenzro-node hardware`) and, on
    Linux when `bash`, `file` and `readelf` are present, the archive's install gate in dry-run.
-5. Links `tenzro` and `tenzro-node` into `~/.local/bin`. If that folder is not on your `PATH` it offers to add it to your
-   shell profile (a marked block; nothing is edited without your yes, or `--modify-path`), and it never overwrites a
+5. Links `tenzro` and `tenzro-node` into `~/.local/bin`. If that folder is not on your `PATH` it adds it to your
+   shell profile (a marked block; so a new terminal finds `tenzro`; no question is asked, `--no-modify-path` opts out, `--uninstall` removes it), and it never overwrites a
    `tenzro` it did not create.
 
 Nothing is installed unless steps 2 and 3 pass. No part of the install needs administrator rights, and the

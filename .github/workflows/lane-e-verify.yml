@@ -1,0 +1,57 @@
+name: lane-e-verify
+# Verification only: installs the already built 0.2.1 macOS pkg (artifact of an earlier run)
+# on a clean runner and runs tenzro under a pty. Builds nothing, signs nothing, publishes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      pkg_run:
+        description: 'run id holding the tenzro-macos-pkg artifact'
+        default: '42351050433'
+  push:
+    branches: [lane-e-verify]
+    paths: ['.github/workflows/lane-e-verify.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/lane-e
+      - uses: actions/download-artifact@v4
+        with:
+          name: tenzro-macos-pkg
+          run-id: ${{ inputs.pkg_run || '42351050433' }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: pkgdl
+      - name: install and verify
+        shell: bash
+        run: |
+          set +e
+          ls -la pkgdl; shasum -a 256 pkgdl/*.pkg
+          echo "== pre"; command -v tenzro || echo "tenzro absent before install"
+          echo "== installer -pkg"
+          S=$(date +%s); sudo installer -pkg pkgdl/tenzro-0.2.1-macos.pkg -target / ; echo "installer rc=$? elapsed $(( $(date +%s)-S ))s"
+          ls -la /usr/local/bin | grep -i tenzro; ls /Applications | grep -i tenzro
+          echo "== new login shells"
+          for sh in bash zsh; do echo "-- $sh -l"; env -i HOME="$HOME" USER="$USER" $sh -lc 'command -v tenzro; tenzro --version'; done
+          echo "== non-tty"
+          env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/local/bin tenzro </dev/null > o.txt 2> e.txt; echo "rc=$?"; head -5 o.txt; head -3 e.txt
+          echo "== pty fresh HOME"
+          python3 -m venv v && v/bin/pip -q install pyte
+          P=.github/lane-e/ptyrun.py
+          export PATH=/usr/local/bin:$PATH
+          H1=$(mktemp -d); echo "-- welcome"; HOME=$H1 v/bin/python $P 5 '' -- tenzro
+          H2=$(mktemp -d); echo "-- after Enter (machine check)"; HOME=$H2 v/bin/python $P 7 '\r' -- tenzro
+          H3=$(mktemp -d); echo "-- after Enter Enter (question)"; HOME=$H3 v/bin/python $P 8 '\r\r' -- tenzro
+          H5=$(mktemp -d); echo '-- three Enters'; HOME=$H5 v/bin/python $P 12 '\r|\r|\r' -- tenzro | head -12
+          H4=$(mktemp -d); mkdir -p $H4/.tenzro; echo '{}' > $H4/.tenzro/config.json
+          echo "-- set-up HOME: console"; HOME=$H4 v/bin/python $P 5 '' -- tenzro
+          echo "== uninstall"
+          sudo tenzro-uninstall; echo "uninstall rc=$?"
+          ls -la /usr/local/bin | grep -i tenzro || echo "no tenzro links left"; ls /Applications | grep -i tenzro || echo "no app left"
+          ls /usr/local/lib/tenzro 2>&1 | head -3

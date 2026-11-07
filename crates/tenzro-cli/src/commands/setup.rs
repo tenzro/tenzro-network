@@ -1276,9 +1276,13 @@ pub(crate) fn has_secure_enclave(hw: &HardwareProfile) -> bool {
 /// surface is a node-side concern) just to test for a binary.
 pub(crate) fn which_on_path(bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    // On Windows a program is `name.exe`: try the bare name, then with the suffix.
+    let with_suffix = format!("{bin}{}", std::env::consts::EXE_SUFFIX);
     std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(bin);
-        candidate.is_file().then_some(candidate)
+        [bin, with_suffix.as_str()].into_iter().find_map(|n| {
+            let candidate = dir.join(n);
+            candidate.is_file().then_some(candidate)
+        })
     })
 }
 
@@ -1418,15 +1422,16 @@ fn machine_identity() -> Result<String> {
 /// The `tenzro-node` binary this CLI would run: a sibling of the current
 /// executable, else the first one on PATH.
 pub(crate) fn locate_node_binary() -> Option<PathBuf> {
+    let node_name = format!("tenzro-node{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("tenzro-node");
+        let candidate = dir.join(&node_name);
         if candidate.is_file() {
             return Some(candidate);
         }
     }
-    which_on_path("tenzro-node")
+    which_on_path(&node_name)
 }
 
 /// Resolve the `tenzro-node` binary path for service units: prefer a
@@ -1434,10 +1439,11 @@ pub(crate) fn locate_node_binary() -> Option<PathBuf> {
 /// via a plain name (systemd) or /usr/local/bin (launchd requires an
 /// absolute path).
 fn node_binary_path() -> String {
+    let node_name = format!("tenzro-node{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("tenzro-node");
+        let candidate = dir.join(&node_name);
         if candidate.exists() {
             return candidate.display().to_string();
         }

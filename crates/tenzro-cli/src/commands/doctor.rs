@@ -245,7 +245,11 @@ impl DoctorCmd {
             if failed == 0 {
                 println!("Nothing here blocks Tenzro.");
             } else {
-                println!("{failed} check(s) failed. Fix those first.");
+                let next = checks.iter().find(|c| c.level == Level::Fail).and_then(|c| c.fix.first());
+                match next {
+                    Some(f) => println!("{failed} check(s) failed. Next: {f}"),
+                    None => println!("{failed} check(s) failed. Fix those first."),
+                }
             }
         }
         if failed > 0 {

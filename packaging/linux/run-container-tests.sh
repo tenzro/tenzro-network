@@ -33,4 +33,10 @@ case "$mode" in
     expect-not-ready) args+=(-e "EXPECT_GATE=NOT READY") ;;
 esac
 [ "$flavour" = cuda ] && args+=(-e EXPECT_MISSING_CUDA=1)
-exec "$ctr" run --rm "${args[@]}" "${mounts[@]}" "$image" bash /test-inside.sh
+# GPU=hide: the cpu build on a GPU host must see no GPU; GPU=all: the cuda build needs the GPU visible.
+extra=()
+case "${GPU:-}" in
+    hide) args+=(-e HIDE_GPU=1); extra=(--cap-add SYS_ADMIN --security-opt apparmor=unconfined) ;;
+    all) extra=(--gpus all) ;;
+esac
+exec "$ctr" run --rm "${extra[@]}" "${args[@]}" "${mounts[@]}" "$image" bash /test-inside.sh

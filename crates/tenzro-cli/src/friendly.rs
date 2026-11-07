@@ -53,7 +53,7 @@ pub fn classify(is_timeout: bool, is_connect: bool, status: Option<u16>, chain: 
     if is_timeout || c.contains("timed out") || c.contains("deadline has elapsed") {
         return Class::Timeout;
     }
-    if c.contains("connection refused") || c.contains("os error 111") || c.contains("os error 61") {
+    if c.contains("connection refused") || c.contains("os error 111") || c.contains("os error 61") || c.contains("os error 10061") || c.contains("actively refused") {
         return Class::Refused;
     }
     if is_connect {
