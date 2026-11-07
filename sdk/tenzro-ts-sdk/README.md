@@ -1,3 +1,7 @@
+_This is a synced mirror of [tenzro-network](https://github.com/tenzro/tenzro-network)'s `sdk/tenzro-ts-sdk`. Fixes and features belong upstream; this repo exists so `npm install tenzro-sdk` has a home with its own issues and CI._
+
+**Known test limitation**: `npm test` runs the full test suite as-is (354 of 393 individual tests pass; `npm run build` and the examples typecheck cleanly). 16 test files (agent-accounts, amounts, ap2-terms, challenge-payment, did-envelope, eip7702, event-proof, governance-receipt, hybrid-payer, keystore, nft-abi, openshell, payment-abstraction, payment-ops, settle, web-payments) fail here because they read fixture files from `../fixtures/` relative to the monorepo's `sdk/` layout, which this standalone mirror doesn't include. This is a structural gap in the mirror, not a bug in the SDK itself — fixing it means either vendoring `sdk/fixtures/` into this repo or rewriting those tests to be self-contained, neither done yet.
+
 # Tenzro SDK for TypeScript
 
 [![npm](https://img.shields.io/npm/v/tenzro-sdk)](https://www.npmjs.com/package/tenzro-sdk)

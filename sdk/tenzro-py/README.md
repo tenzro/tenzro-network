@@ -1,3 +1,5 @@
+_This is a synced mirror of [tenzro-network](https://github.com/tenzro/tenzro-network)'s `sdk/tenzro-py`. Fixes and features belong upstream; this repo exists so the `tenzro` package has a home with its own issues and CI._ **Note:** not yet published to PyPI — install from this repo (`pip install git+https://github.com/tenzro/tenzro-sdk-python`) until it is.
+
 # Tenzro SDK for Python
 
 The `tenzro` package talks to a Tenzro node and signs with the machine's

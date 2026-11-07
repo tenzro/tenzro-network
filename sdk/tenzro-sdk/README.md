@@ -1,3 +1,5 @@
+_This is a synced mirror of [tenzro-network](https://github.com/tenzro/tenzro-network)'s `sdk/tenzro-sdk`. Fixes and features belong upstream; this repo exists so `cargo add tenzro-sdk` has a home with its own issues, CI and docs.rs._
+
 # Tenzro SDK for Rust
 
 [![Crates.io](https://img.shields.io/crates/v/tenzro-sdk)](https://crates.io/crates/tenzro-sdk)
