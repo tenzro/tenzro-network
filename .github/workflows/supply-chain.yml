@@ -36,3 +36,40 @@ jobs:
         run: scripts/supply-chain/advisory-gate.sh
       - name: cargo vet (every dependency audited or exempted on record)
         run: cargo vet --locked
+
+  git-pin-drift:
+    # Advisory only, weekly: compares every git+rev pin in Cargo.toml (the Praecise engine,
+    # Plonky3, and any future one) against its upstream default-branch head and opens an issue
+    # when something changed. Never fails this workflow and never touches a pin -- a human
+    # reviews the diff and bumps it in its own PR (scripts/supply-chain/git-pin-drift.sh).
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check every git-pinned dependency for drift
+        id: drift
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          out=$(scripts/supply-chain/git-pin-drift.sh 2>&1)
+          rc=$?
+          echo "$out"
+          {
+            echo "report<<DRIFT_EOF"
+            echo "$out"
+            echo "DRIFT_EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+          : "$rc" # 1 = drift found, 2 = check could not run; neither fails this job
+      - name: Open an issue if a pin has drifted
+        if: contains(steps.drift.outputs.report, 'RESULT: drift found')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "git-pin-drift: a pinned dependency has moved upstream ($(date -u +%Y-%m-%d))" \
+            --body "${{ steps.drift.outputs.report }}"

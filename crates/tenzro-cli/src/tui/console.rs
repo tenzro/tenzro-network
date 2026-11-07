@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
@@ -462,7 +463,7 @@ impl Console {
         Line::from(vec![Span::styled(format!(" {k:<14}"), self.theme.muted()), Span::raw(v)])
     }
 
-    fn down_notice(&self) -> Option<Vec<Line<'static>>> {
+    fn down_notice(&self, width: usize) -> Option<Vec<Line<'static>>> {
         let t = &self.theme;
         match &self.snap.status {
             Reading::Err { error, last: None, .. } => {
@@ -472,7 +473,11 @@ impl Console {
                     Line::from(""),
                 ];
                 for l in error.lines() {
-                    v.push(Line::from(format!(" {l}")));
+                    // Rows like "  Why: ..." keep their indent, and wrapped text lines up under the words after the label.
+                    let lead = l.chars().take_while(|c| *c == ' ').count() + 1;
+                    let body = l.trim_start();
+                    let label = body.find(": ").filter(|i| *i <= 4).map_or(0, |i| i + 2);
+                    v.extend(hang(vec![Span::raw(" ".repeat(lead))], lead + label, body, width, Style::default()));
                 }
                 v.push(Line::from(""));
                 v.push(Line::from(Span::styled(" This screen refreshes by itself; press r to try now.", t.muted())));
@@ -484,8 +489,8 @@ impl Console {
     }
 
     fn overview(&self, f: &mut Frame, area: Rect) {
-        if let Some(n) = self.down_notice() {
-            f.render_widget(Paragraph::new(n).wrap(Wrap { trim: false }), area);
+        if let Some(n) = self.down_notice(area.width as usize) {
+            f.render_widget(Paragraph::new(n), area);
             return;
         }
         let t = &self.theme;
@@ -656,24 +661,31 @@ impl Console {
     }
 
     fn health(&self, f: &mut Frame, area: Rect) {
-        if let Some(n) = self.down_notice() {
-            f.render_widget(Paragraph::new(n).wrap(Wrap { trim: false }), area);
+        if let Some(n) = self.down_notice(area.width as usize) {
+            f.render_widget(Paragraph::new(n), area);
             return;
         }
         let t = &self.theme;
         let s = self.snap.status.value().cloned().unwrap_or(Value::Null);
+        let width = area.width as usize;
         let line = |w: Word, label: &str, text: String| {
-            Line::from(vec![Span::styled(format!(" {:<8}", w.text()), t.status(w)), Span::styled(format!("{label:<14}"), t.bold()), Span::raw(text)])
+            hang(
+                vec![Span::styled(format!(" {:<8}", w.text()), t.status(w)), Span::styled(format!("{label:<14}"), t.bold())],
+                23,
+                &text,
+                width,
+                Style::default(),
+            )
         };
         let mut v = Vec::new();
         let peers = s.get("peer_count").and_then(Value::as_u64);
-        v.push(match peers {
+        v.extend(match peers {
             Some(0) => line(Word::Watch, "Peers", "none yet: the node cannot hear the network. Check the boot nodes and the firewall (tenzro-node doctor)".into()),
             Some(n) => line(Word::Ok, "Peers", n.to_string()),
             None => line(Word::Unknown, "Peers", "unknown".into()),
         });
         let height = s.get("block_height").and_then(Value::as_u64);
-        v.push(match (height, self.snap.syncing.value()) {
+        v.extend(match (height, self.snap.syncing.value()) {
             (_, Some(true)) => line(Word::Watch, "Sync", "catching up with the network".into()),
             (Some(0), _) if peers.unwrap_or(0) > 0 => line(Word::Ok, "Sync", "height 0 with peers is normal on a quiet chain; it moves at the next block".into()),
             (Some(h), _) => line(Word::Ok, "Sync", format!("at the tip, height {h}")),
@@ -684,17 +696,17 @@ impl Console {
             Some(Value::String(x)) => x.clone(),
             _ => String::new(),
         };
-        v.push(line(if roles.is_empty() { Word::Watch } else { Word::Ok }, "Roles", if roles.is_empty() { "none".into() } else { roles.clone() }));
+        v.extend(line(if roles.is_empty() { Word::Watch } else { Word::Ok }, "Roles", if roles.is_empty() { "none".into() } else { roles.clone() }));
         if roles.contains("alidator") {
             let vs = self.snap.validator_state.value();
             let st = vs.and_then(|x| x.get("status")).and_then(Value::as_str);
-            v.push(match st {
+            v.extend(match st {
                 Some("Active") => line(Word::Ok, "Validator", "active: your node votes".into()),
                 Some(other) => line(Word::Watch, "Validator", format!("{other}: not voting yet. Registration needs approval during the preview; see the validator steps in tenzro setup")),
                 None => line(Word::Action, "Validator", "not registered. Ask for admission at https://tenzro.com/join, then restart the node with --validator-self-stake (see the validator steps in tenzro)".into()),
             });
         }
-        v.push(match self.snap.grant.value() {
+        v.extend(match self.snap.grant.value() {
             Some(Grant::Valid) => line(Word::Ok, "Key holder", "the grant works. It ends at most 720 hours after install and is lost if the key holder restarts".into()),
             Some(Grant::Failed(why)) => line(Word::Action, "Key holder", format!("the grant does not work: {why}. Renew it: tenzro-node tpm grant-request, sign with the passkey, tenzro-node tpm grant-install")),
             Some(Grant::NotUsed) | None => line(Word::Ok, "Key", "kept in this machine's own hardware; there is no grant to expire".into()),
@@ -704,9 +716,52 @@ impl Console {
             Reading::Pending => "never".into(),
         };
         v.push(Line::from(""));
-        v.push(Line::from(Span::styled(format!(" Updated {age}. To stop cleanly: tenzro-node graceful-exit. To leave the validator set: tenzro validator exit."), t.muted())));
-        f.render_widget(Paragraph::new(v).wrap(Wrap { trim: false }), area);
+        v.extend(hang(
+            vec![Span::raw(" ")],
+            1,
+            &format!("Updated {age}. To stop cleanly: tenzro-node graceful-exit. To leave the validator set: tenzro validator exit."),
+            width,
+            t.muted(),
+        ));
+        f.render_widget(Paragraph::new(v), area);
     }
+}
+
+/// Wrap `text` to `width` columns after the `lead` spans, indenting every
+/// continuation line by `cont` columns (a hanging indent).
+fn hang(lead: Vec<Span<'static>>, cont: usize, text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let first: usize = lead.iter().map(|s| s.width()).sum();
+    let indent = cont;
+    let room = width.saturating_sub(first.max(indent)).max(10);
+    let mut rows: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        while word.chars().count() > room {
+            if !cur.is_empty() {
+                rows.push(std::mem::take(&mut cur));
+            }
+            rows.push(word.chars().take(room).collect());
+            word = word.chars().skip(room).collect();
+        }
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > room {
+            rows.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(&word);
+    }
+    if !cur.is_empty() || rows.is_empty() {
+        rows.push(cur);
+    }
+    let mut out = Vec::new();
+    for (i, r) in rows.into_iter().enumerate() {
+        let mut spans = if i == 0 { lead.clone() } else { vec![Span::raw(" ".repeat(indent))] };
+        spans.push(Span::styled(r, style));
+        out.push(Line::from(spans));
+    }
+    out
 }
 
 fn spawn_reader(
@@ -750,6 +805,18 @@ mod tests {
     use crate::tui::theme::Depth;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn hang_wraps_with_indent_and_never_exceeds_width() {
+        let lines = hang(vec![Span::raw(" Key       ")], 11, "kept in this machine's own hardware; there is no grant to expire", 40, Style::default());
+        assert!(lines.len() > 1);
+        for (i, l) in lines.iter().enumerate() {
+            assert!(l.width() <= 40, "{l:?}");
+            if i > 0 {
+                assert!(l.spans[0].content.starts_with("           "));
+            }
+        }
+    }
 
     fn screen(c: &Console, w: u16, h: u16) -> String {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();

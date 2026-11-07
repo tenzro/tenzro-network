@@ -181,9 +181,15 @@ jobs:
       - name: Install gate record
         working-directory: dist
         run: |
+          # Compute the role outside a command substitution: the macOS runner's
+          # bash 3.2 ends $( ) at the ")" of a case pattern and leaks the rest.
+          case "$ARTIFACT" in
+            *-metal) role=gpu ;;
+            *) role=cpu ;;
+          esac
           jq -n --arg artifact "$ARTIFACT" --arg file "$ARTIFACT.tar.gz" \
             --arg sha "$(shasum -a 256 "$ARTIFACT.tar.gz" | cut -d' ' -f1)" \
-            --arg role "$(case "$ARTIFACT" in *-metal) echo gpu ;; *) echo cpu ;; esac)" \
+            --arg role "$role" \
             --arg host "Darwin-$(uname -m)" --arg checked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{artifact: $artifact, file: $file, sha256: $sha, role: $role, host: $host, verdict: "pass", checked: $checked}' \
             > "$ARTIFACT.install.json"
