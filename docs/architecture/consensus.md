@@ -197,7 +197,7 @@ validator stopped mid-epoch rejoins its epoch.
 
 Every period the protocol keys on is a genesis parameter (`[time]` in the
 genesis file), validated at startup and committed in the genesis state root:
-`checkpoint_interval_ms` (500), `epoch_checkpoints` (7,200, about an hour),
+`checkpoint_interval_ms` (500), `epoch_checkpoints` (7,200, one hour),
 `handover_confirmations` (2), `announcement_lifetime_ms` (six hours),
 `compact_interval_ms` (60 s), `compact_handoff_ms` (90 s), `leader_slots`
 (2), `calendar_scale` (1) and `idle_round_interval_ms` (5 s; 1 s in the local

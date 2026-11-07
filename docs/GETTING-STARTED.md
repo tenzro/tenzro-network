@@ -1,22 +1,73 @@
 # Install Tenzro and run it for the first time
 
-One command installs the `tenzro` command line and the node. Then you run `tenzro`.
+Install it, run `tenzro`, and follow the screens. The first run checks your machine, asks whether you want to
+use the network, provide compute, run a validator or try a local chain, sets up your keys, starts the node and
+shows the console. You do not need to be an expert.
+
+## Easy path
+
+Native packages are pre-release and unsigned: your system may warn you the first time you open one. Windows shows
+"Unknown publisher" and macOS asks you to confirm. [INSTALL.md](INSTALL.md) says what you will see and how to check the
+download first.
+
+### Windows
+
+1. Download `tenzro-<version>-windows-x86_64-cuda.msi` from the release page and open it. Windows asks for administrator
+   rights; the installer adds `tenzro` to your PATH.
+2. Open a new terminal and run `tenzro`.
+
+The Windows installer is the CUDA build and needs an NVIDIA GPU with a current driver to serve models; the
+command line works without one.
+
+### macOS
+
+1. Download `tenzro-<version>-macos.pkg` and open it. One file serves Apple silicon and Intel.
+2. Open a new terminal and run `tenzro`.
+
+### Linux
+
+1. Run the install script. It needs no `sudo`.
 
 ```bash
 curl -fsSL https://downloads.tenzro.com/install.sh | sh
 ```
 
-Windows (PowerShell):
+2. Run `tenzro`. If the installer says `~/.local/bin` is not on your PATH, it prints the one line to run first.
+
+A fresh Ubuntu needs `curl` and `openssl` first (`sudo apt-get install -y curl openssl ca-certificates`).
+The `.deb` and `.rpm` packages are described in [INSTALL.md](INSTALL.md).
+
+### What `tenzro` does the first time
+
+On a machine with no Tenzro settings, `tenzro` opens a full-screen first run: a welcome, a check of this machine, and
+one question (use the network, provide compute, run a validator, or try a local chain). After setup, `tenzro` opens the
+console (Overview, Wallet, Models, Validators, Governance, Health); press `q` to leave it. Outside a terminal (a script
+or a pipe) `tenzro` prints the command list instead.
+
+Verified so far: the Windows MSI, the Linux arm64 install script and the macOS package each installed, started the
+first run and uninstalled cleanly (details in [What is verified](#what-is-verified-and-what-is-not)).
+
+### Update and remove
+
+Windows: "Apps > Installed apps > Tenzro", or `msiexec /x` on the MSI. macOS: `sudo tenzro-uninstall`. Linux script
+install: `curl -fsSL https://downloads.tenzro.com/install.sh | sh -s -- --uninstall`. Your keys and data in `~/.tenzro`
+are left alone.
+
+## Advanced and manual setup
+
+Everything below is for people who want the details: what the install script does, verifying a download by hand,
+Windows PowerShell, containers, edge devices such as a Raspberry Pi, the screens of the earlier command-line setup, and
+troubleshooting.
+
+Windows (PowerShell script, instead of the MSI):
 
 ```powershell
 irm https://downloads.tenzro.com/install.ps1 | iex
 ```
 
-It takes about a minute on an ordinary connection (the download is 95 MB for the Linux x86_64 build; the rest is
-under two seconds). It needs no `sudo`. A fresh Ubuntu needs `curl` and `openssl` first
-(`sudo apt-get install -y curl openssl ca-certificates`); Fedora and macOS already have them.
+The Linux script needs no `sudo`; the download is 95 MB for the Linux x86_64 build and the rest is under two seconds.
 
-## What the installer does
+### What the installer does
 
 1. Detects the system (Linux or macOS; x86_64 or arm64), the glibc version and whether an NVIDIA GPU is present, and
    picks the archive from the release's `SHA256SUMS`: CUDA build with an NVIDIA GPU, CPU build without, Metal build on
@@ -44,7 +95,7 @@ Options (`curl ... | sh -s -- <option>`): `--dry-run` (verify the signed list an
 The script itself is covered by TLS only: it is served from `downloads.tenzro.com`, and its SHA-256 is published beside
 it (`install.sh.sha256`). To trust nothing but the release key, use the manual steps below.
 
-### Verify it yourself instead
+##### Verify it yourself instead
 
 ```bash
 curl -fsSLO https://downloads.tenzro.com/SHA256SUMS
@@ -61,7 +112,7 @@ tar -xzf tenzro-node-linux-x86_64-cpu.tar.gz
 
 `cosign verify-blob` works as well; see [VERIFY-DOWNLOAD.md](VERIFY-DOWNLOAD.md).
 
-## First run, screen by screen
+### First run, screen by screen
 
 These screens were captured from the live release (0.2.0) in a clean Ubuntu 24.04 container run as a normal user, on a
 machine with no TPM and no GPU, where the public network name `rpc.tenzro.com` did not resolve. Colour is dropped here;
@@ -110,7 +161,7 @@ the last line is just `tenzro`.
   Exit
 ```
 
-That menu is for people who already have a node to talk to. A new user should run `tenzro setup` (screen 3) first.
+That menu is for people who already have a node to talk to. A new user runs `tenzro setup` (screen 3) first.
 Outside a terminal (a script, a pipe) `tenzro` prints the command list and exits 0.
 
 **3. `tenzro setup`.** The guided path. It detects the hardware, then asks one question: use the public network, run
@@ -156,7 +207,7 @@ Node Status:
   Next   The node is not answering. Start it with `tenzro setup --apply`, or check the service: `sudo systemctl status tenzro-node`.
 ```
 
-## Choose your path
+### Choose your path
 
 | You want to | Run | Needs |
 |---|---|---|
@@ -169,7 +220,7 @@ Node Status:
 To point the CLI at a particular node, most commands take `--rpc <url>` (`join`, `setup`); `tenzro model list` takes
 `--catalog-rpc <url>`. The default is `http://127.0.0.1:8545`, and `https://rpc.tenzro.com` for `join`.
 
-## Hardware: what you see and what to do
+### Hardware: what you see and what to do
 
 | Situation | What you see | What to do |
 |---|---|---|
@@ -179,10 +230,10 @@ To point the CLI at a particular node, most commands take `--rpc <url>` (`join`,
 | NVIDIA GPU, CPU build | installer note: "an NVIDIA GPU is present, but this release's x86_64 Linux build is CPU-only; the GPU is not used" | none today: the published Linux x86_64 build is CPU-only |
 | glibc older than 2.39 (Debian 12, Ubuntu 22.04) | "this system's glibc is too old ... needs glibc 2.39 or newer and this machine has 2.36" | Ubuntu 24.04, Debian 13, Fedora 40 or newer, or a container based on one |
 | Alpine (musl) | "this Linux uses musl libc" | use a glibc image |
-| Linux arm64 without an NVIDIA GPU (Raspberry Pi) | "this release has no build that fits this machine" | the published arm64 build is the CUDA build; none for a plain CPU yet |
+| Linux arm64 without an NVIDIA GPU (Raspberry Pi) | "this release has no build that fits this machine" | the published arm64 build is the CUDA build; none for a plain CPU |
 | Windows without an NVIDIA GPU | installer note that the Windows build is the CUDA build | the CLI is installed; GPU features will not work |
 
-## When the public network is unreachable
+### When the public network is unreachable
 
 At the time of the 0.2.0 release `rpc.tenzro.com` did not resolve from the test machine. Commands that need it fail
 with a connection error that names the address, for example:
@@ -200,13 +251,13 @@ nothing is listening on `127.0.0.1:8545`. What still works without any network:
 On a machine with neither a TPM nor a network, there is nothing to run yet besides reading the help; that is a limit of the
 0.2.0 binaries, not of the install.
 
-## The doctor checklist
+### The doctor checklist
 
-There is no `tenzro doctor` yet. Run these in order and stop at the first that fails; each line says what to do.
+`tenzro doctor` runs the machine checks for you (see [CLI.md](CLI.md)). To run them by hand, go in order and stop at the first that fails; each line says what to do.
 
 ```bash
 tenzro version && tenzro-node --version          # both 0.2.0; if "command not found": export PATH="$HOME/.local/bin:$PATH"
-command -v tenzro                                # should be ~/.local/bin/tenzro (another path = an older copy shadows it)
+command -v tenzro                                # prints ~/.local/bin/tenzro (another path = an older copy shadows it)
 tenzro-node hardware                             # build: CPU|CUDA, gpus, startup: ok
 getconf GNU_LIBC_VERSION                         # Linux: 2.39 or newer
 ls -l /dev/tpmrm0 && id -nG | tr ' ' '\n' | grep -x tss   # Linux: TPM device present, you are in the tss group
@@ -220,16 +271,16 @@ tenzro-node doctor                               # can peers reach this node (ru
 df -h ~                                          # about 300 MB for one install
 ```
 
-## Update, uninstall
+### Update, uninstall
 
 Update: run the installer again. It fetches the signed list, and if the archive it lists is already installed it
 downloads nothing; otherwise it installs the new version beside the old one, switches the `current` link and keeps the
-previous version. `tenzro update` does not exist yet.
+previous version. There is no `tenzro update` command.
 
 Remove: `curl -fsSL https://downloads.tenzro.com/install.sh | sh -s -- --uninstall` removes the links, `~/.tenzro/install`
 and the profile block if it added one. It leaves `~/.tenzro` itself (settings, node data) alone.
 
-## What is verified, and what is not
+### What is verified, and what is not
 
 Verified by running the scripts: Ubuntu 24.04 and Fedora 42 (x86_64, rootless containers, installer run as a normal user):
 install, update, uninstall, `--dry-run`, `--from` (offline), `--modify-path`; refusals for a tampered archive, a truncated
@@ -238,6 +289,7 @@ for musl); a macOS archive on Linux (refused, wrong system); missing `openssl` (
 parse under `dash` and `busybox sh`. `install.ps1` parses and its signature check verifies the real release and
 rejects a tampered signature and list under PowerShell 7 on Linux.
 
-Not verified: macOS (both architectures), Windows (the PowerShell script has not been run on Windows; the zip
-layout, junction, PATH and self-check steps are reviewed only), Linux arm64, and the NVIDIA GPU path
-(`nvidia-smi` detection and the CUDA archive).
+Verified on the 0.2.1 packages (first run on a real terminal, install, uninstall): the Windows 11 MSI, Linux
+arm64 through the install script (Ubuntu 24.04 container, GPU hidden) and the macOS package (arm64). Not verified: Linux
+x86_64 with the 0.2.1 archive, the `.deb` and `.rpm` packages, Windows Terminal as an app, macOS on Intel, and the
+NVIDIA GPU path (`nvidia-smi` detection and the CUDA archive).

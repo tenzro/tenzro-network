@@ -154,8 +154,8 @@ and the archive's SHA-256 before it installs anything, needs no `sudo`, and puts
 `tenzro` and `tenzro-node` in `~/.local/bin`. What it checks, what each first-run
 screen looks like, and what to do on a machine without a TPM, a GPU or the
 public network are in [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
-Tested so far on Ubuntu 24.04 and Fedora 42 (x86_64); the arm64, macOS and
-Windows installs have not yet been run on real machines.
+Verified on the 0.2.1 packages: the Windows MSI, the macOS package (arm64) and the Linux arm64 install script. Linux x86_64
+and the `.deb` and `.rpm` packages have not been verified end to end.
 
 ### Verify a release yourself
 

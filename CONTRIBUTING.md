@@ -33,7 +33,7 @@ Thank you for your interest in contributing to Tenzro Network! This document pro
 **Platform Support:**
 - Linux (x86_64, aarch64)
 - macOS (x86_64, aarch64)
-- Windows support is experimental
+- Windows (x86_64): MSI installer, pre-release and unsigned
 
 ### Clone the Repository
 
@@ -128,7 +128,7 @@ cargo build --features intel-tdx,amd-sev-snp
 3. **Error handling:**
    - Library crates: Use `thiserror` for custom error types
    - Binary crates: Use `anyhow` for error handling
-   - All public APIs should return `Result<T, CrateError>`
+   - All public APIs return `Result<T, CrateError>`
 
 4. **Serialization:**
    - Use `serde` + `serde_json` for APIs
@@ -340,7 +340,7 @@ cargo build --features intel-tdx,amd-sev-snp
 ### Integration Tests
 
 - Place integration tests in `tests/` directory at the crate root
-- Integration tests should test cross-module interactions
+- Integration tests test cross-module interactions
 
 ### Test Coverage
 
@@ -354,7 +354,7 @@ cargo build --features intel-tdx,amd-sev-snp
 
 ### Test Conventions
 
-- Test names should be descriptive: `test_wallet_creation_with_valid_threshold`
+- Test names are descriptive: `test_wallet_creation_with_valid_threshold`
 - Use `assert!`, `assert_eq!`, `assert_ne!` for assertions
 - Test both success and error cases
 - Test edge cases and boundary conditions
@@ -436,7 +436,7 @@ tenzro-zk -> types
 
 Create a new crate when:
 - The functionality is logically distinct and self-contained
-- It could be used independently of other parts of the system
+- It can be used independently of other parts of the system
 - It represents a major subsystem (e.g., consensus, storage, VM)
 - It needs different feature flags or platform support
 

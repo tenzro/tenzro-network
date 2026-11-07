@@ -86,7 +86,7 @@ Not applicable. Tenzro Ledger is a fresh network with no prior CAIP-2 registrati
 #   integer chain_id (EVM-compat): <chain-id>, set by the same genesis
 tenzro:bd7db8168a4fb61538147696bc857270
 
-# Tenzro Mainnet (TBD — populated at mainnet launch)
+# Tenzro Mainnet (assigned at mainnet launch)
 tenzro:<genesis_state_root[0..16] in lowercase hex>
 ```
 

@@ -413,7 +413,7 @@ get paid.
 
 ### Funding an agent across the fiat boundary
 
-Tenzro is **not a licensed provider and does not aim to be**. KYC, fiat
+Tenzro is **not a licensed provider**. KYC, fiat
 acceptance, card issuance and network settlement are each performed by a
 licensed party that already does them well. What Tenzro adds is the layer none
 of them occupy: a portable agent identity with enforceable delegation, so the

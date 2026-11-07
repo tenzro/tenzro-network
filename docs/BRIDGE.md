@@ -327,7 +327,7 @@ must pass the per-mint cap, the epoch limit and the inbound bucket, and an
 outbound transfer the per-mint cap and the outbound bucket.
 
 The limits exist so that even if a route's committee or signing keys were
-compromised, the most that could be minted before anyone reacts is bounded by
+compromised, the most that can be minted before anyone reacts is bounded by
 what governance chose to risk on that route.
 
 ## Carried assets: stablecoins over a route
@@ -853,7 +853,7 @@ Validators read only the aggregator consensus names; no operator setting
 chooses it. `tenzro_getReserveFeed` returns the installed feed.
 
 The reserve and the route's supply record are two views of the same number.
-They may differ only by what the route could have moved since the feed's
+They may differ only by what the route can have moved since the feed's
 round: one epoch's limit inbound, plus the lane's outbound bucket and what it
 refilled since the round. Each epoch, every validator reads the feed of every
 live route; a reserve outside that allowance is a finding against the route,

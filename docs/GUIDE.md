@@ -1118,7 +1118,7 @@ Every model a node downloads or serves is recorded in its trust ledger as a cont
 watch -n 1 'free -h && nproc && ps -eo pid,rss,comm --sort=-rss | head -20'
 ```
 
-A cold build compiles 32 workspace crates plus hundreds of dependencies and may take 20+ minutes on a laptop.
+A cold build compiles 32 workspace crates plus hundreds of dependencies and takes 20 minutes or more on a laptop.
 
 ### 9.14 Clean rebuild when everything is wedged
 

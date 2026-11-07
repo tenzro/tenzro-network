@@ -85,4 +85,4 @@ Route committees sign with secp256k1, because the counterparty contracts verifyi
 
 ## CAIP-2 namespace
 
-See `docs/caip2-namespace/`. `tenzro:` is not yet registered with ChainAgnostic; the strings are used as pre-registration identifiers.
+See `docs/caip2-namespace/`. `tenzro:` is not registered with ChainAgnostic; the strings are used as pre-registration identifiers.

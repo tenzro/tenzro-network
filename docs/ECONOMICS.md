@@ -93,7 +93,7 @@ on every on-chain settlement.
 
 ## Funding: Tenzro integrates providers, it does not become one
 
-Tenzro is **not a licensed provider and does not aim to be**. Every regulated
+Tenzro is **not a licensed provider**. Every regulated
 function at the fiat boundary — KYC, fiat acceptance, card issuance, network
 settlement — is performed by a licensed party that already does it well. What
 Tenzro adds is the layer none of them occupy: a portable agent identity with
@@ -258,7 +258,7 @@ Hyperlane, Axelar, Stargate, IBC Eureka, Hyperbridge and NEAR chain signatures,
 which is well over a hundred chains between them.
 
 Both identifier forms are accepted. The adapters route on names (`base`) while
-settlement uses CAIP-2 (`eip155:8453`), and a caller should not have to know
+settlement uses CAIP-2 (`eip155:8453`), and a caller does not need to know
 which this node happens to hold.
 
 RPC `tenzro_mirrorSettlement` (admin) takes the settlement's interaction record and keeps no copy; it returns the record with its confirmed secondary settlements folded in. With `from`: every mirror is a `Bridge`
@@ -373,7 +373,7 @@ describes.
 
 Ordered cheapest-first, which is also the order the router scans. Ethereum L1
 sits at the bottom deliberately: it is settlement for size, not frequency. It
-should never win a micropayment race, and it is chosen explicitly.
+never wins a micropayment race, and it is chosen explicitly.
 
 Routing returns exactly four answers, and they are kept distinct because they
 imply different remedies:
@@ -899,6 +899,6 @@ settles at the amount the agent declared in its credential. An operator who
 sets `metered_settlement = false` gets that behavior for every request: the
 declared amount, settled before the call runs.
 
-A call below the network's micro-settlement floor should not settle on its own
+A call below the network's micro-settlement floor does not settle on its own
 at all: open a micropayment channel and let per-call charges accrue (see
 "Which rail a payment settles on").

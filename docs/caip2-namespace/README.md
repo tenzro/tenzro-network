@@ -32,13 +32,13 @@ all of them in lockstep.
 | Testnet genesis state root | `bd7db8168a4fb61538147696bc8572700d644e6eb544d8c0469e816fd652036a`  |
 | Testnet CAIP-2 reference | `tenzro:bd7db8168a4fb61538147696bc857270` (first 16 bytes / 32 hex)   |
 | EVM chain ID             | `<chain-id>`, set by each network's genesis (`13380` on the preview network) |
-| Mainnet CAIP-2 reference | TBD — populated at mainnet launch                                     |
+| Mainnet CAIP-2 reference | Assigned at mainnet launch                                         |
 | Address width            | 32 bytes (hex `0x` + 64 chars OR 44-char base58btc)                   |
 | Native asset (slip44)    | `tenzro` (pre-registration; SLIP-44 PR pending)                       |
 | Token / NFT IDs          | 32-byte SHA-256 of `creator || nonce`                                 |
 | Wallet `rdns` (EIP-6963) | `com.tenzro.wallet`                                               |
 
-## Where the code does not yet follow these files
+## Where the code does not follow these files
 
 The node names the Tenzro chain by its chain id, while this namespace spec
 names it by its genesis root; the two must be reconciled before the namespace

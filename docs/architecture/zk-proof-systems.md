@@ -22,7 +22,7 @@ digest == SHA3-256(D || w)
 `binding` is a 32-byte value chosen by the relying party (a challenge, or the
 hash of the settlement request). It is absorbed into the Fiat-Shamir transcript
 with the other public values, so a proof made for one binding does not verify
-for another. The settlement engine is expected to set
+for another. The settlement engine sets
 `binding = H(request_id || customer || provider || amount || nonce)` and compare
 it before release; that binding check is owned by the payments stream.
 

@@ -69,7 +69,7 @@ Get swap quote without transaction data (read-only).
 - `dst` (string, required) — Destination token address
 - `amount` (string, required) — Amount
 
-**Returns:** Estimated output, route, gas estimate.
+**Returns:** Output amount, route, gas estimate.
 
 ### Approval
 

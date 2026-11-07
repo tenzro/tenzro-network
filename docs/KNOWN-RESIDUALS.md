@@ -43,7 +43,7 @@ When a node's identity key has no ML-DSA leg and the network starts to require
 it, the node stops signing and sets a health flag. The flag clears itself about
 half a second later, because the ticker clears it on any tick that finds nothing
 pending, and a node that is started after the activation moment never sets it.
-So the flag cannot be relied on to raise an alarm. Operators should watch for
+So the flag cannot be relied on to raise an alarm. Operators watch for
 the refusal line the node logs at start-up and when signing is first refused.
 Making the flag clear only after a signature the hardware really produced, and
 set at start, is post-launch work, with its test.

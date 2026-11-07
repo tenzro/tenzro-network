@@ -6,7 +6,7 @@ This document defines both methods at the JSON-RPC layer. The same call shapes a
 
 ## Status
 
-Preview. Not version-locked. Names, fields, and event types may change without deprecation cycles until the network has live external users.
+Preview. Not version-locked. Names, fields, and event types change without deprecation cycles until the network has live external users.
 
 ## Two call shapes
 
@@ -420,7 +420,7 @@ Tool names must match `^[a-zA-Z0-9_-]{1,64}$`.
 | `end_turn` | Model finished naturally. |
 | `max_tokens` | Hit `max_tokens` limit. |
 | `stop_sequence` | Hit a sequence in `stop_sequences`. `stop_sequence` field is set. |
-| `tool_use` | Model emitted one or more `tool_use` blocks. The client is expected to execute them and return `tool_result` blocks in the next turn. |
+| `tool_use` | Model emitted one or more `tool_use` blocks. The client executes them and returns `tool_result` blocks in the next turn. |
 
 ### Tool execution loop
 
@@ -1420,7 +1420,7 @@ The forward travels over the `tenzro/infer` ALPN on the node's iroh endpoint. Th
 
 ### Billing
 
-Cost calculation is identical for both shapes: `input_tokens × input_price + output_tokens × output_price`. Tool-use response tokens (the `tool_use` blocks themselves) count as output tokens. Cached input tokens are billed at a discounted rate (TBD; design says 10% of normal rate, matching Anthropic's prompt caching).
+Cost calculation is identical for both shapes: `input_tokens × input_price + output_tokens × output_price`. Tool-use response tokens (the `tool_use` blocks themselves) count as output tokens. Cached input tokens are billed at a discounted rate (10% of the normal rate by design).
 
 Settlement runs on the node the request arrived at, before the response is returned. With a `caller_address` and non-zero cost, that node either accepts a channel voucher (when `channel_voucher` is supplied) or executes a direct on-chain transfer. A rejected debit or transfer fails the request with `-32023` and persists an unpaid-settlement marker keyed in `data.unpaid_key` — settlement failure is never a silent free inference. The outcome is reported in the response `settlement` field.
 

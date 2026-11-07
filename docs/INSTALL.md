@@ -1,9 +1,26 @@
 # Install Tenzro
 
-One native installer per operating system gets you from download to a working `tenzro` command, with
-a plain-language hardware check, and ends by pointing you at the guided setup. Nothing starts by
-itself: no service is installed or enabled, nothing joins the network, and no key is created until
-you choose to in `tenzro setup`.
+Install it, run `tenzro`, done. The first run checks your machine, asks what you want to do (use the network, provide
+compute, run a validator or try a local chain), sets up your keys, starts the node and shows the console. The
+installer itself starts nothing: no service is installed or enabled, nothing joins the network, and no key is
+created until you choose to in the first run.
+
+Native packages are pre-release and unsigned (see "Unsigned installers" below).
+
+## Easy path
+
+| You use | Do this | Then |
+|---|---|---|
+| Windows 10 and 11 (x86-64) | Open `tenzro-<version>-windows-x86_64-cuda.msi` | Open a new terminal and run `tenzro` |
+| macOS 11 and newer | Open `tenzro-<version>-macos.pkg` | Open a new terminal and run `tenzro` |
+| Linux | Run `curl -fsSL https://downloads.tenzro.com/install.sh \| sh` | Run `tenzro` |
+
+Verified: the Windows MSI, the macOS package and the Linux arm64 install script (see
+[GETTING-STARTED.md](GETTING-STARTED.md)). Linux `.deb` and `.rpm` packages are described below.
+
+## Advanced and manual setup
+
+Package details, verifying a download by hand, silent installs and the manual archive path.
 
 | You use | Install | You get |
 |---|---|---|
@@ -16,7 +33,7 @@ Every installer repackages the exact files of the signed release archive it name
 records that archive's SHA-256 and the release commit). Nothing is rebuilt. The package files are
 listed in the release's signed `SHA256SUMS` next to the archives, so you verify them the same way.
 
-## 1. Verify, then install
+### 1. Verify, then install
 
 Verification is [docs/VERIFY-DOWNLOAD.md](VERIFY-DOWNLOAD.md). In short, in the folder holding the
 download and the release's `SHA256SUMS`, `SHA256SUMS.sig` and `tenzro-release.pub`:
@@ -26,10 +43,10 @@ cosign verify-blob --key tenzro-release.pub --insecure-ignore-tlog=true --signat
 sha256sum -c SHA256SUMS --ignore-missing        # macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
-Do this first. The installers themselves are not yet signed with an operating-system code-signing
+Do this first. The installers themselves are not signed with an operating-system code-signing
 certificate (see "Unsigned installers" below), so the release signature is what proves the file is ours.
 
-### Linux
+#### Linux
 
 ```bash
 # Debian, Ubuntu (24.04 or newer)
@@ -86,7 +103,7 @@ Run `tenzro-check` again whenever you change the driver or the hardware. It is a
 Remove: `sudo apt remove tenzro-cpu` (or `purge`), `sudo dnf remove tenzro-cpu`. If you set up a
 `tenzro-node` service later, removal tells you how to stop and remove that unit; it never stops a running node for you.
 
-### Windows
+#### Windows
 
 Double-click `tenzro-<version>-windows-x86_64-cuda.msi`, or from an elevated prompt:
 
@@ -110,7 +127,7 @@ Tenzro", or `msiexec /x tenzro-0.2.0-windows-x86_64-cuda.msi`; the PATH entry is
 build and needs an NVIDIA GPU with a current driver; on a machine without one the hardware check says so and
 tells you to use the command line only or another build.
 
-### macOS
+#### macOS
 
 Open `tenzro-<version>-macos.pkg` and follow the installer, or:
 
@@ -128,7 +145,7 @@ machine without a Secure Enclave cannot run a validator node.
 
 Remove: `sudo tenzro-uninstall`. It removes the programs, the launcher and the installer receipt; your keys and data are untouched.
 
-## 2. First run
+### 2. First run
 
 Whichever installer you used, the same three steps follow, in a terminal:
 
@@ -138,16 +155,16 @@ Whichever installer you used, the same three steps follow, in a terminal:
 3. When you are ready, `tenzro setup` offers to install and start the node as a service (`--apply`). That is the first
    moment anything runs in the background, and it is your choice.
 
-## 3. Manual, verified path (no installer)
+### 3. Manual, verified path (no installer)
 
 Every release archive can still be used directly: verify it ([VERIFY-DOWNLOAD.md](VERIFY-DOWNLOAD.md)), unpack it, and
 on Linux run `tenzro-node-install --sums SHA256SUMS --sig SHA256SUMS.sig --key tenzro-release.pub <archive>`, which
 checks the archive against the signed manifest, refuses a build that does not match the machine, and installs under
 `/usr/local`. On Windows and macOS, unpack the archive and put its `bin` directory on your PATH.
 
-## 4. Unsigned installers
+### 4. Unsigned installers
 
-The installers are not signed with an operating-system code-signing certificate yet. What you will see, and why it is
+The installers are not signed with an operating-system code-signing certificate. What you will see, and why it is
 safe to continue only after you verified the file as above:
 
 * **Windows**: opening the MSI shows a User Account Control prompt that names the publisher as "Unknown publisher"

@@ -54,7 +54,7 @@ _For context, see the [CAIP-2][] specification and `caip2.md`._
 | Network Name | Chain ID                             |
 | ------------ | ------------------------------------ |
 | Testnet      | tenzro:bd7db8168a4fb61538147696bc857270 |
-| Mainnet      | TBD                                  |
+| Mainnet      | Assigned at mainnet launch                                |
 
 ## Test Cases
 

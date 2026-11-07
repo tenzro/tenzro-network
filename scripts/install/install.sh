@@ -304,7 +304,7 @@ else
     if [ "$hrc" = 0 ] && [ "$hs" = ok ]; then
         row self-check "build $hb, $hg GPU(s), startup ok"
     elif [ "$OSN" = linux ]; then
-        fail "the node would not start on this machine" "its own hardware check said: $(echo "$hw" | tr '\n' ' ')" "run \`$X/bin/tenzro-node hardware\` for detail; this release may not match this hardware"
+        fail "the node would not start on this machine" "its own hardware check said: $(echo "$hw" | tr '\n' ' ')" "run \`$X/bin/tenzro-node hardware\` for detail"
     else
         note "note: the hardware self-check did not finish ($(echo "$hw" | tr '\n' ' ')); the CLI is installed anyway."
     fi

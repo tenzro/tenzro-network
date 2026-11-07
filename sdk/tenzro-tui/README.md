@@ -52,7 +52,7 @@ Unit tests cover formatting, the key table (a key bound twice fails the build) a
 the screens at 80x24 and 120x40 (navigation, scrolling, help, account entry, node
 down, stale data, too-small window, no color codes without color).
 
-## Not yet here
+## Not included
 
 Logs, a send flow, provider and validator actions, and a mouse. The package is
 private until `tenzro-sdk` 0.9.0 is on npm; it depends on the sibling SDK by path.

@@ -281,7 +281,7 @@ The Tenzro Ledger orders transactions with a signature-free DAG protocol and mak
 | Leader timeout | 1,000 ms | Wait for a round leader before timing out |
 | Checkpoint interval | 500 ms | Minimum segment time between checkpoints; votes are signed by a session key the hardware key certifies once per epoch |
 | Seat budget | 1,000 | Seats stake is apportioned into |
-| Epoch length | 7,200 checkpoints | About one hour at the checkpoint interval |
+| Epoch length | 7,200 checkpoints | One hour at the checkpoint interval |
 | Handover confirmations | 2 checkpoints | Checkpoints the old committee orders after the one ending its epoch |
 | Batch interval | 50 ms | How often a validator cuts its mempool share into a batch |
 

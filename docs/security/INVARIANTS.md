@@ -1,7 +1,7 @@
 # Security invariants
 
 Statements the implementation must uphold, with the code that enforces
-each one. An auditor should be able to falsify an invariant by pointing
+each one. An auditor can falsify an invariant by pointing
 at a code path that violates it; a fuzz target listed against an
 invariant exercises it mechanically (see `fuzz/README.md`).
 

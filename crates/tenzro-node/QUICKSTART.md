@@ -30,7 +30,7 @@ cargo build --release -p tenzro-node
 ./target/release/tenzro-node --version
 ```
 
-You should see:
+Output:
 ```
 tenzro-node 0.1.0
 ```
