@@ -230,7 +230,7 @@ To point the CLI at a particular node, most commands take `--rpc <url>` (`join`,
 | NVIDIA GPU, CPU build | installer note: "an NVIDIA GPU is present, but this release's x86_64 Linux build is CPU-only; the GPU is not used" | none today: the published Linux x86_64 build is CPU-only |
 | glibc older than 2.39 (Debian 12, Ubuntu 22.04) | "this system's glibc is too old ... needs glibc 2.39 or newer and this machine has 2.36" | Ubuntu 24.04, Debian 13, Fedora 40 or newer, or a container based on one |
 | Alpine (musl) | "this Linux uses musl libc" | use a glibc image |
-| Linux arm64 without an NVIDIA GPU (Raspberry Pi) | "this release has no build that fits this machine" | the published arm64 build is the CUDA build; none for a plain CPU |
+| Linux arm64 with glibc older than 2.39 (Raspberry Pi OS Bookworm has 2.36) | "this system's glibc is too old ... needs glibc 2.39 or newer" | Ubuntu 24.04, Debian 13 (or Raspberry Pi OS based on it), or a container based on one |
 | Windows without an NVIDIA GPU | installer note that the Windows build is the CUDA build | the CLI is installed; GPU features will not work |
 
 ### When the public network is unreachable

@@ -195,14 +195,31 @@ Continue below if you want to run a node locally.
 
 ## 1. System Requirements
 
+To install a release archive or package (no build):
+
+| Resource | Requirement |
+|----------|-------------|
+| OS | Linux x86_64 or aarch64 with glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40); macOS (Apple silicon or Intel); Windows x86_64 (CUDA build) |
+| Disk | Space for the archive plus the node data directory |
+| Network | Open outbound 443 |
+
+The glibc 2.39 floor is the highest `GLIBC_` symbol version in the released Linux binaries. Debian 12 and Ubuntu 22.04 are below it.
+
+To build from source:
+
 | Resource | Minimum | Recommended |
 |----------|---------|-------------|
 | CPU | x86-64-v3 (Haswell 2013+, Zen 1+) or aarch64 | 8+ cores |
 | RAM | 8 GB free during build | 16 GB |
 | Disk | 20 GB for `target/` | 50 GB (multi-profile + models) |
-| OS | Linux (glibc 2.31+), macOS 12+ | Ubuntu 22.04 / macOS 14+ |
-| Network | Open outbound 443 (crates.io, Hugging Face) | — |
-| Hardware key store | TPM 2.0 (Linux, Windows) or Secure Enclave (macOS), required to run a node | — |
+| OS | Linux or macOS | Ubuntu 24.04 / current macOS |
+| Network | Open outbound 443 (crates.io, Hugging Face) | - |
+
+Both need:
+
+| Resource | Requirement |
+|----------|-------------|
+| Hardware key store | TPM 2.0 (Linux, Windows) or Secure Enclave (macOS), required to run a node |
 
 **A hardware key store is required.** `tenzro-node` refuses to start on a machine with no TPM 2.0 or Secure Enclave, or whose identity key does not open: it exits non-zero with a message naming what is missing. There is no keyless or software-key mode. A machine with no TPM of its own, such as a Raspberry Pi, keeps its identity key in another machine's TPM: that machine runs `tenzro-node tpm serve`, and the small one runs `tenzro-node tpm key-holder`, approved by the operator's passkey, and starts with `--tpm-key-holder` ([NODE.md](NODE.md#raspberry-pi-and-other-edge-devices)). Building needs no TPM; running does.
 

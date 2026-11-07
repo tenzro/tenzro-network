@@ -108,7 +108,7 @@ Remove: `sudo apt remove tenzro-cpu` (or `purge`), `sudo dnf remove tenzro-cpu`.
 Double-click `tenzro-<version>-windows-x86_64-cuda.msi`, or from an elevated prompt:
 
 ```bat
-msiexec /i tenzro-0.2.0-windows-x86_64-cuda.msi
+msiexec /i tenzro-0.2.1-windows-x86_64-cuda.msi
 ```
 
 The wizard shows a licence page, an install folder (default `C:\Program Files\Tenzro`), a choice of how to
@@ -119,11 +119,11 @@ add Tenzro to your PATH (for all users, for you only, or not at all), and a fina
 Silent install for scripts and fleets (no final page, nothing launched):
 
 ```bat
-msiexec /i tenzro-0.2.0-windows-x86_64-cuda.msi /qn ADDTOPATH=system INSTALLFOLDER="C:\Tools\Tenzro"
+msiexec /i tenzro-0.2.1-windows-x86_64-cuda.msi /qn ADDTOPATH=system INSTALLFOLDER="C:\Tools\Tenzro"
 ```
 
 `ADDTOPATH` is `system`, `user` or `none`. The MSI is per-machine, so it asks for administrator rights; it installs no service, and the hardware check runs only when you tick the final box, choose "Tenzro hardware check" or type `tenzro-check`, never during the install itself. Uninstall from "Apps > Installed apps >
-Tenzro", or `msiexec /x tenzro-0.2.0-windows-x86_64-cuda.msi`; the PATH entry is removed with it. This is the CUDA
+Tenzro", or `msiexec /x tenzro-0.2.1-windows-x86_64-cuda.msi`; the PATH entry is removed with it. This is the CUDA
 build and needs an NVIDIA GPU with a current driver; on a machine without one the hardware check says so and
 tells you to use the command line only or another build.
 
@@ -132,7 +132,7 @@ tells you to use the command line only or another build.
 Open `tenzro-<version>-macos.pkg` and follow the installer, or:
 
 ```bash
-sudo installer -pkg tenzro-0.2.0-macos.pkg -target /
+sudo installer -pkg tenzro-0.2.1-macos.pkg -target /
 ```
 
 One file serves both kinds of Mac: Apple silicon gets the Metal build, Intel gets the CPU build. It installs
@@ -171,7 +171,7 @@ safe to continue only after you verified the file as above:
   instead of "Tenzro". A file downloaded with a browser also carries a web-origin mark, and Windows SmartScreen may
   show "Windows protected your PC": choose "More info", then "Run anyway". Neither prompt appears when you install
   with `msiexec` from a prompt on a file you copied locally.
-* **macOS**: Gatekeeper refuses a package from an unidentified developer: "tenzro-0.2.0-macos.pkg cannot be opened
+* **macOS**: Gatekeeper refuses a package from an unidentified developer: "tenzro-0.2.1-macos.pkg cannot be opened
   because it is from an unidentified developer". Open System Settings > Privacy & Security and choose "Open Anyway", or
   Control-click the file and choose Open, or run `sudo installer -pkg ... -target /` (the installer command does not
   apply Gatekeeper), or remove the download mark with `xattr -d com.apple.quarantine <file>`.

@@ -5,7 +5,7 @@
   "homepage": "https://tenzro.com/docs/hardware-rooted-keys",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tenzro/tenzro-sdk-typescript.git",
+    "url": "git+https://github.com/tenzro/tenzro-network.git",
     "directory": "native"
   },
   "license": "Apache-2.0",
