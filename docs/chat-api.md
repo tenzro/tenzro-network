@@ -1437,7 +1437,7 @@ Differential pricing for rich vs. simple is not implemented in this spec. If the
 ## Out of scope
 
 - **Logprobs.** No consumer is asking for them; can be added without a breaking change.
-- **Provider attestation in chat responses.** The verification API (`api.tenzro.com/verify/inference`) already attests inference results. Inlining attestations into every chat response is a separate workstream (would require TEE-served models and on-the-fly attestation generation).
+- **Provider attestation in chat responses.** The verification API (`api.tenzro.com/verify/inference`) attests inference results. Inlining attestations into every chat response is a separate workstream (would require TEE-served models and on-the-fly attestation generation).
 - **Function-calling other than `tools`.** OpenAI's `functions` API is not supported; use `tools`.
 - **Embeddings.** A separate RPC (`tenzro_textEmbed`) covers them.
 
