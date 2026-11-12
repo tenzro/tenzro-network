@@ -8,10 +8,10 @@ use crate::rpc::RpcClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// The deterministic CREATE2 address of the wTNZO ERC-20 pointer contract on EVM.
+/// The address of the wTNZO pointer precompile on the EVM (`0x1001`).
 /// All VMs (EVM, SVM) share the same underlying native TNZO balance via
 /// the Sei V2 pointer model -- this address is the EVM representation.
-pub const WTNZO_EVM_ADDRESS: &str = "0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93";
+pub const WTNZO_EVM_ADDRESS: &str = "0x0000000000000000000000000000000000001001";
 
 /// Token client for TNZO token registry and cross-VM operations
 ///

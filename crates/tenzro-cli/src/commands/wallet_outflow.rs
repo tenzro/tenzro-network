@@ -42,13 +42,46 @@ impl OutflowCommand {
             Self::Show(c) => c.execute().await,
             Self::Set(c) => c.execute().await,
             Self::Remove(c) => submit(c, OutflowRequest::Remove).await,
-            Self::CancelPending(c) => submit(c, OutflowRequest::CancelPending { approval: load_approval(c)? }).await,
+            Self::CancelPending(c) => {
+                submit(
+                    c,
+                    OutflowRequest::CancelPending {
+                        approval: load_approval(c)?,
+                    },
+                )
+                .await
+            }
             Self::Release(c) => {
                 let to = crate::keystore::address32(&c.to)?.to_vec();
-                submit(&c.common, OutflowRequest::RequestRelease { to, amount: parse_tnzo(&c.amount)? }).await
+                submit(
+                    &c.common,
+                    OutflowRequest::RequestRelease {
+                        to,
+                        amount: parse_tnzo(&c.amount)?,
+                    },
+                )
+                .await
             }
-            Self::CancelRelease(c) => submit(&c.common, OutflowRequest::CancelRelease { id: c.id, approval: load_approval(&c.common)? }).await,
-            Self::Claim(c) => submit(&c.common, OutflowRequest::ClaimRelease { id: c.id, approval: load_approval(&c.common)? }).await,
+            Self::CancelRelease(c) => {
+                submit(
+                    &c.common,
+                    OutflowRequest::CancelRelease {
+                        id: c.id,
+                        approval: load_approval(&c.common)?,
+                    },
+                )
+                .await
+            }
+            Self::Claim(c) => {
+                submit(
+                    &c.common,
+                    OutflowRequest::ClaimRelease {
+                        id: c.id,
+                        approval: load_approval(&c.common)?,
+                    },
+                )
+                .await
+            }
             Self::DelegateCheck(c) => c.execute().await,
             Self::ApprovalTarget(c) => c.execute().await,
         }
@@ -147,19 +180,32 @@ pub struct ApprovalTargetCmd {
 
 impl ApprovalTargetCmd {
     async fn execute(&self) -> Result<()> {
-        if !matches!(self.action.as_str(), "cancel_pending" | "cancel_release" | "claim_release") {
+        if !matches!(
+            self.action.as_str(),
+            "cancel_pending" | "cancel_release" | "claim_release"
+        ) {
             bail!("action is cancel_pending, cancel_release or claim_release");
         }
         let account = crate::keystore::address32(&self.account)?.to_vec();
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let v: serde_json::Value = rpc
-            .call("tenzro_getAccountOutflow", serde_json::json!({ "account": hex::encode(&account) }))
+            .call(
+                "tenzro_getAccountOutflow",
+                serde_json::json!({ "account": hex::encode(&account) }),
+            )
             .await?;
         let step = v.get("approval_step").and_then(|s| s.as_u64()).unwrap_or(0);
-        let bytes = tenzro_types::account_outflow_ui::approval_target(&account, &self.action, self.id, step);
+        let bytes = tenzro_types::account_outflow_ui::approval_target(
+            &account,
+            &self.action,
+            self.id,
+            step,
+        );
         output::print_field("Approval counter", &step.to_string());
         output::print_field("Guardian signs", &format!("0x{}", hex::encode(bytes)));
-        output::print_info("The approval is good for this one action only; once used the counter moves.");
+        output::print_info(
+            "The approval is good for this one action only; once used the counter moves.",
+        );
         Ok(())
     }
 }
@@ -179,13 +225,18 @@ impl DelegateCheckCmd {
         output::print_header("Delegation Target");
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let v: serde_json::Value = rpc
-            .call("tenzro_checkDelegateTarget", serde_json::json!({ "address": self.target }))
+            .call(
+                "tenzro_checkDelegateTarget",
+                serde_json::json!({ "address": self.target }),
+            )
             .await?;
         let status = tenzro_types::delegation_ui::DelegateStatus::from_rpc(&v)
             .ok_or_else(|| anyhow::anyhow!("the node did not answer the delegate check"))?;
         let warning = status.warning(&self.target);
         if warning.is_empty() {
-            output::print_success("This delegate is recognised (or the request clears a delegation).");
+            output::print_success(
+                "This delegate is recognised (or the request clears a delegation).",
+            );
         }
         for line in warning {
             output::print_warning(&line);
@@ -215,7 +266,11 @@ fn parse_tnzo(s: &str) -> Result<u128> {
         bail!("{s} is not an amount in TNZO");
     }
     let w: u128 = if whole.is_empty() { 0 } else { whole.parse()? };
-    let f: u128 = if frac.is_empty() { 0 } else { format!("{frac:0<18}").parse()? };
+    let f: u128 = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<18}").parse()?
+    };
     w.checked_mul(ONE_TNZO)
         .and_then(|x| x.checked_add(f))
         .ok_or_else(|| anyhow::anyhow!("{s} is too large"))
@@ -302,18 +357,15 @@ async fn submit(c: &Common, req: OutflowRequest) -> Result<()> {
         .clone()
         .try_into()
         .map_err(|_| anyhow::anyhow!("account is not 32 bytes"))?;
-    let result = crate::keystore::send_as_client(
-        &rpc,
-        &c.key_namespace,
-        to,
-        req.tx_type(&account),
-        GAS,
-    )
-    .await?;
+    let result =
+        crate::keystore::send_as_client(&rpc, &c.key_namespace, to, req.tx_type(&account), GAS)
+            .await?;
     output::print_success("Signed in hardware and submitted");
     output::print_field(
         "Transaction Hash",
-        &result.as_str().map_or_else(|| result.to_string(), str::to_string),
+        &result
+            .as_str()
+            .map_or_else(|| result.to_string(), str::to_string),
     );
     Ok(())
 }

@@ -106,6 +106,15 @@ def test_the_async_client_calls_the_same_method():
     assert seen[0][1]["method"] == "tenzro_getFinalizedBlock"
 
 
+def test_the_update_notice_read_sends_its_etag():
+    seen = []
+    answer = {"jsonrpc": "2.0", "id": 1, "result": {"unchanged": True, "etag": "ab"}}
+    client = RpcClient("http://node.test", transport=httpx.MockTransport(_transport(seen, answer)))
+    assert client.get_update_notice([{"if_none_match": "ab"}])["unchanged"] is True
+    assert seen[0][1]["method"] == "tenzro_getUpdateNotice"
+    assert seen[0][1]["params"] == [{"if_none_match": "ab"}]
+
+
 def test_the_package_exports_its_surface():
     for name in tenzro.__all__:
         assert hasattr(tenzro, name), name

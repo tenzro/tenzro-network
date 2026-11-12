@@ -27,7 +27,7 @@ CLI.
 | SDK | Install | Source and reference |
 | --- | --- | --- |
 | TypeScript | `npm install tenzro-sdk` (and `@tenzro/device-key` where a TPM or Secure Enclave signs) | `sdk/tenzro-ts-sdk`, [README](../sdk/tenzro-ts-sdk/README.md), [API.md](../sdk/tenzro-ts-sdk/API.md) |
-| Python | not yet published to PyPI; install from this repository (`pip install ./sdk/tenzro-py`) until it ships | `sdk/tenzro-py`, [README](../sdk/tenzro-py/README.md) |
+| Python | install from this repository (`pip install ./sdk/tenzro-py`) | `sdk/tenzro-py`, [README](../sdk/tenzro-py/README.md) |
 | Rust | `cargo add tenzro-sdk` | `sdk/tenzro-sdk`, [README](../sdk/tenzro-sdk/README.md), docs.rs |
 
 Each SDK defaults to the preview network (chain id 13380, `https://rpc.tenzro.com`)
@@ -109,18 +109,19 @@ Every application on Tenzro uses the same open surfaces, with no privileged buil
 Every release publishes the node and the CLI as the archives below, and the
 release page lists exactly the archives of that release. Each archive is a CPU
 build or a GPU build, and both are official; nobody has to build from source.
-A build that is not in the table (a CPU build for Linux aarch64 or Windows,
-a Vulkan build, the light edge build) is built from source with the matching
+A build that is not in the table (a Vulkan archive, the light edge build) is built from source with the matching
 script in `scripts/release/`; see [light-build.md](operations/light-build.md)
 for the light tier.
 
 | Platform | CPU build | GPU build |
 |---|---|---|
 | Linux x86_64 | `tenzro-node-linux-x86_64-cpu.tar.gz` | `tenzro-node-linux-x86_64-cuda.tar.gz` (NVIDIA) |
-| Linux aarch64 | | `tenzro-node-linux-aarch64-cuda.tar.gz` (NVIDIA) |
-| Windows x86_64 | | `tenzro-node-windows-x86_64-cuda.zip` (NVIDIA) |
+| Linux aarch64 | `tenzro-node-linux-aarch64-cpu.tar.gz` | `tenzro-node-linux-aarch64-cuda.tar.gz` (NVIDIA) |
+| Windows x86_64 | `tenzro-node-windows-x86_64-cpu.zip` | `tenzro-node-windows-x86_64-cuda.zip` (NVIDIA) |
 | macOS Apple silicon | | `tenzro-node-macos-aarch64-metal.tar.gz` |
 | macOS Intel | `tenzro-node-macos-x86_64-cpu.tar.gz` | |
+
+Installers for each platform (MSI, pkg, install script, deb, rpm) are described in [INSTALL.md](INSTALL.md).
 
 Each archive holds `bin/tenzro-node` and `bin/tenzro`. A Linux CUDA archive
 also holds `lib/` (ONNX Runtime with its CUDA providers); keep it beside
@@ -333,7 +334,7 @@ cargo build --release -p tenzro-node -p tenzro-cli
 ### 3.1 Build the full workspace (optional)
 
 ```bash
-cargo build            # debug, all 32 crates
+cargo build            # debug, all 36 crates
 cargo test --workspace # full test suite
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -376,7 +377,7 @@ cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/vulkan
 
 The runtime reports the compiled set and the active backend at startup via `HardwareInfo` (`compiled_backends` / `active_backend`).
 
-Prebuilt releases (archives and container images) come in these flavours only: Linux x86_64 and aarch64 as `cpu`, `cuda` and `vulkan`; macOS Apple silicon as `metal` and Intel as `cpu`; Windows as `cpu`, `cuda` and `vulkan`. Every other feature in the table, `rocm` included, is a source build: there is no prebuilt ROCm archive or image. On an AMD GPU, either run the `vulkan` release or build `--features tenzro-node/rocm` (or `Dockerfile.rocm`) yourself. See `docs/AI.md` §2.7 and `deploy/validator-deployment.md`.
+Prebuilt archives come in these flavours only: Linux x86_64 and aarch64 as `cpu` and `cuda`; macOS Apple silicon as `metal` and Intel as `cpu`; Windows as `cpu` and `cuda`. Container images for Linux x86_64 and aarch64 come as `cpu`, `cuda` and `vulkan`. Every other feature in the table, `rocm` included, is a source build: there is no prebuilt ROCm archive or image. On an AMD GPU, either run the `vulkan` container image or build `--features tenzro-node/rocm` (or `Dockerfile.rocm`) yourself. See `docs/AI.md` §2.7 and `deploy/validator-deployment.md`.
 
 > The `.cargo/config.toml` sets `CMAKE_ARGS="-DGGML_NATIVE=OFF"` to prevent Apple Clang breakage. On Linux, override with `CMAKE_ARGS="-DGGML_NATIVE=ON"` for max CPU SIMD detection.
 
@@ -453,8 +454,7 @@ To serve a model without announcing it to the network, register it with
 `tenzro visibility set private`) — the model answers local callers only,
 sends no announcements or heartbeats, and never appears in provider
 discovery. Distributing private weights to other nodes as encrypted shards
-(`tenzro model seal` / `install-sealed`) is covered in
-`docs/operators/OPERATOR_GUIDE.md` §17.
+is done with `tenzro model seal` and `install-sealed`.
 
 To download and run a specific model yourself, without the one-command
 `--provider` flow:
@@ -537,6 +537,12 @@ TPM-wrapped blobs (useless on any other chip) are kept in
 `~/.local/state/tenzro/device-keys` (or `TENZRO_DEVICE_KEY_DIR`). Machine
 attestation also needs the platform's endorsement key at `0x81010020`.
 
+If the chip stops answering, the node says so once, refuses normal commands at once
+instead of queueing behind the stuck one, keeps votes and blocks waiting for the chip,
+probes it on a doubling pause, and says so once when it answers again, without a
+restart. `tenzro-node doctor` and `tenzro_getNodeStatus` report the state as
+`healthy`, `degraded` or `stalled`.
+
 The node sends TPM commands through the kernel resource manager
 (`/dev/tpmrm0`), one at a time on a dedicated thread, and shares the chip
 politely with other processes. The `[tpm]` table bounds that use:
@@ -544,6 +550,9 @@ politely with other processes. The `[tpm]` table bounds that use:
 ```toml
 [tpm]
 call_timeout_secs = 10   # a command that takes longer fails with an error
+consensus_timeout_secs = 30  # the same for a vote or block signature, the longest budget
+breaker_trip_after = 3   # unanswered commands in a row before normal commands are held back
+breaker_cap_secs = 20    # the longest pause between probes of a stalled TPM
 signs_per_second = 30    # sustained TPM signatures
 quotes_per_second = 2    # sustained quotes and key certifications
 ```
@@ -833,6 +842,9 @@ tenzro auth onboard-human --display-name "Alice"
 # Check balance
 tenzro wallet balance
 
+# Register this CLI's own account on chain, once it holds TNZO
+tenzro identity register-account
+
 # List models
 tenzro model list
 
@@ -845,6 +857,8 @@ tenzro
 
 The CLI talks to `http://localhost:8545` by default. Point at the public network with `--rpc-url https://rpc.tenzro.com`.
 
+The commands that send a transaction sign as the CLI's own hardware account (namespace `client`). A network that requires a registered identity executes and reverts a transaction from an account that has none, so that account registers once, after it has been funded, with `tenzro identity register-account`. `tenzro wallet send` waits for the transfer to be executed and fails with the reason when it reverted; `--no-wait` returns as soon as the node has accepted it.
+
 ---
 
 ## 6. Configuration File (optional)
@@ -853,28 +867,19 @@ Create `~/.tenzro/config.toml` or pass with `--config path.toml`:
 
 ```toml
 data_dir = "/var/lib/tenzro"
-role = "validator"
+roles = ["Validator"]
 log_level = "info"
-
-[network]
-listen_addr = "/ip4/0.0.0.0/tcp/9000,/ip4/0.0.0.0/udp/9000/quic-v1"
+rpc_addr = "127.0.0.1:8545"
+mcp_addr = "127.0.0.1:3001"
+a2a_addr = "127.0.0.1:3002"
 
 [iroh]
 # Boot identities: omit to join through the genesis validators; set machine
 # identities here or via --boot-nodes for a private deployment.
 # boot = ["did:tenzro:machine:<id>@https://relay.example.org"]
-
-[rpc]
-addr = "127.0.0.1:8545"
-
-[mcp]
-addr = "127.0.0.1:3001"
-auth = "tiered"          # tiered | false | full
-
-[a2a]
-addr = "127.0.0.1:3002"
 ```
 
+The MCP auth mode is set by `TENZRO_MCP_AUTH` (`tiered` or `full`), not by the file.
 CLI flags override config file values.
 
 ### Running the relay role
@@ -1199,7 +1204,7 @@ RUST_LOG=tenzro_node=debug,tenzro_consensus=info \
 | `CMAKE_ARGS` | Pass flags to llama.cpp cmake (e.g., `-DGGML_NATIVE=ON`) |
 | `RUST_LOG` | Tracing filter (e.g., `debug`, `tenzro_consensus=trace`) |
 | `RUST_BACKTRACE=1` | Print backtrace on panic |
-| `TENZRO_MCP_AUTH` | `tiered` (default) / `false` / `full` |
+| `TENZRO_MCP_AUTH` | `tiered` (default) / `full` |
 | `TENZRO_BEARER_JWT` / `TENZRO_DPOP_PROOF` | An access token and a DPoP proof the SDKs forward when no credential is configured |
 | `OPENSSL_DIR` | OpenSSL install path (macOS with Homebrew) |
 

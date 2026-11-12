@@ -1282,7 +1282,11 @@ mod tests {
                 "{name}: the members together must hold the weights"
             );
             let plan = assign_layers(layers, &members);
-            assert_eq!(plan.len(), members.len(), "{name}: every member holds a range");
+            assert_eq!(
+                plan.len(),
+                members.len(),
+                "{name}: every member holds a range"
+            );
             let mut covered = 0u32;
             for st in plan.values() {
                 assert!(st.layer_count() > 0, "{name}");
@@ -1304,7 +1308,9 @@ mod tests {
         let e = crate::catalog::get_model_by_id("nemotron-3-ultra-550b-a55b-ud-iq1-m")
             .expect("the smallest Ultra build is in the registry");
         assert!(
-            e.hardware_tiers.iter().any(|t| t.nodes == 2 && t.memory_gb_per_node == 128),
+            e.hardware_tiers
+                .iter()
+                .any(|t| t.nodes == 2 && t.memory_gb_per_node == 128),
             "{:?}",
             e.hardware_tiers
         );
@@ -1315,7 +1321,10 @@ mod tests {
             .map(|i| member(i, 117.0, "c", MemberReachability::LocalDirect))
             .collect();
         assert_eq!(single_box_fit(model, nodes.iter()), None);
-        assert_eq!(should_cluster(model, nodes.iter(), false), FitDecision::ClusterRequired);
+        assert_eq!(
+            should_cluster(model, nodes.iter(), false),
+            FitDecision::ClusterRequired
+        );
         let gate = hardware_gate("c", weights_gib / 108.0, nodes.clone());
         assert_eq!(gate.admitted.len(), 2);
         assert!(gate.rejected.is_empty());

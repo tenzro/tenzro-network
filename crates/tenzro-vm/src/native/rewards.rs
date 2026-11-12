@@ -1449,6 +1449,26 @@ mod tests {
         assert_eq!((weight(1), weight(2), weight(3)), (8, 4, 1));
     }
 
+    /// A record for a checkpoint at or below the epoch's last recorded index
+    /// is refused and leaves the epoch's tally exactly as it was, whoever
+    /// proposed the block that carries it.
+    #[test]
+    fn a_record_at_or_below_the_recorded_index_changes_nothing() {
+        let mut state = genesis_state();
+        let cp = |index, anchor_round, signer| CheckpointSigners {
+            epoch: 0,
+            index,
+            anchor_round,
+            signers: vec![addr(signer)],
+        };
+        record_checkpoint_signers(&mut state, &cp(4, 9, 1)).unwrap();
+        let held = read_epoch_votes(&state, 0).unwrap();
+        for copy in [cp(4, 9, 2), cp(4, 12, 2), cp(3, 20, 2)] {
+            assert!(record_checkpoint_signers(&mut state, &copy).is_err());
+            assert_eq!(read_epoch_votes(&state, 0).unwrap(), held);
+        }
+    }
+
     /// A claim moves exactly the coupon total out of the pool: the liquid
     /// share to the claimant, the rest into escrow under a schedule that
     /// releases in full after the vesting period.

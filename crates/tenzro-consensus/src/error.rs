@@ -137,6 +137,15 @@ pub enum ConsensusError {
         pending: usize,
         cap: usize,
     },
+
+    /// The sender has no registered identity (or its identity was revoked),
+    /// so its transaction is not admitted. Node-local admission policy: the
+    /// transaction is not invalid, this node will not pool it.
+    #[error("Sender {sender} is not admitted: {reason}")]
+    SenderNotRegistered {
+        sender: String,
+        reason: &'static str,
+    },
 }
 
 impl From<tenzro_crypto::CryptoError> for ConsensusError {

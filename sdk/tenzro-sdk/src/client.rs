@@ -781,7 +781,10 @@ impl TenzroClient {
 
     /// The provider legs this node owes for calls it forwarded. `query`
     /// takes `status`, `provider`, `limit` and `cursor`, all optional.
-    pub async fn list_network_legs(&self, query: serde_json::Value) -> SdkResult<serde_json::Value> {
+    pub async fn list_network_legs(
+        &self,
+        query: serde_json::Value,
+    ) -> SdkResult<serde_json::Value> {
         self.rpc.call("tenzro_listNetworkLegs", query).await
     }
 

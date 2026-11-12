@@ -26,6 +26,8 @@ dashmap = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
+fs4 = { workspace = true }
+libc = { workspace = true }
 # 2D Reed-Solomon erasure coding for the committee data-availability store
 # (`da::redstuff`). Core, not feature-gated.
 reed-solomon-erasure = { workspace = true }
@@ -40,6 +42,11 @@ celestia-types = { workspace = true, optional = true }
 # for payload encoding on the wire).
 reqwest = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# What a file is and what its volume can do, for the hardlink accounting of
+# a snapshot (resources.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [features]
 default = []

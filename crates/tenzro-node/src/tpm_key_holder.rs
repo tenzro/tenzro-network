@@ -11,7 +11,6 @@
 //! holder and the same grant. A new holder, after a reboot, has a new
 //! transport key, which no earlier grant names.
 
-use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -29,7 +28,7 @@ use tenzro_device_key::remote::busy_retry_after;
 use crate::remote_tpm::{TransportGrant, now_ms, wrap_request};
 
 /// Carry a signing request to the provider.
-pub const OP_CALL: u8 = 1;
+pub const OP_CALL: u8 = tenzro_device_key::remote::HOLDER_OP_CALL;
 /// The holder's transport endpoint id and the end of its grant.
 pub const OP_ID: u8 = 2;
 /// Install a grant.
@@ -399,39 +398,7 @@ pub async fn serve(
 
 /// Sends one operation to the key holder at `socket` and returns its answer.
 pub fn request(socket: &Path, op: u8, payload: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| {
-        format!(
-            "the key holder at {} is not reachable: {e}",
-            socket.display()
-        )
-    })?;
-    let timeout = Some(REQUEST_TIMEOUT * 3);
-    stream
-        .set_read_timeout(timeout)
-        .and_then(|()| stream.set_write_timeout(timeout))
-        .map_err(|e| format!("key holder socket: {e}"))?;
-    let mut out = vec![op];
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
-    stream
-        .write_all(&out)
-        .map_err(|e| format!("key holder socket: {e}"))?;
-    let mut head = [0u8; 5];
-    stream
-        .read_exact(&mut head)
-        .map_err(|e| format!("the key holder did not answer: {e}"))?;
-    let len = u32::from_be_bytes(head[1..5].try_into().expect("four bytes")) as usize;
-    if len > MAX_FRAME {
-        return Err("the key holder's answer is too large".into());
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .map_err(|e| format!("the key holder did not answer: {e}"))?;
-    match head[0] {
-        STATUS_OK => Ok(body),
-        _ => Err(String::from_utf8_lossy(&body).into_owned()),
-    }
+    tenzro_device_key::remote::holder_request(socket, op, payload)
 }
 
 /// The key holder's transport endpoint id and the end of its grant (`None`
@@ -519,7 +486,10 @@ mod tests {
             clients: Default::default(),
             allowed_prefixes: vec![b"tenzro/".to_vec()],
             allow_prehash: false,
-            per_minute: 100,
+            // No test here is about the rate limit (the tests of the
+            // provider cover it), and one signs as fast as it can for the
+            // length of a reload.
+            per_minute: u32::MAX,
             derived_prefixes: vec!["tenzro/".into()],
         };
         Arc::new(InProcess(GrantedProvider::new(
@@ -693,5 +663,121 @@ mod tests {
             .unwrap();
         assert_eq!(id, holder.endpoint_id());
         assert!(grant.is_none());
+    }
+
+    fn node_for(socket: &Path, label: &str) -> RemoteConfig {
+        RemoteConfig {
+            label: label.into(),
+            key_holder: socket.to_path_buf(),
+        }
+    }
+
+    /// Onboarding a second device must not interrupt the first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_added_by_reload_works_and_the_signing_client_is_never_interrupted() {
+        let pk = TestPasskey::new(3);
+        let upstream = provider(&pk);
+        // The first device: already granted and signing.
+        let (a, a_sock, _d1) = boot(upstream.clone()).await;
+        install(&pk, &a_sock, &a.endpoint_id(), now_ms() + HOUR);
+        node_signs(node(&a_sock)).await.unwrap();
+
+        // The new device's holder asks for a grant under a label the provider
+        // has not enrolled yet: refused. This is the state in which, today,
+        // only a provider restart helps.
+        let (b, b_sock, _d2) = boot(upstream.clone()).await;
+        let grant2 =
+            serde_json::to_vec(&pk.grant(&b.endpoint_id(), "pi-2", now_ms() + HOUR)).unwrap();
+        request(&b_sock, OP_GRANT, &grant2).unwrap();
+        let err = node_signs(node_for(&b_sock, "pi-2")).await.unwrap_err();
+        assert!(err.to_string().contains("no enrolled passkey"), "{err}");
+
+        // The first device keeps signing, continuously, across the reload.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signing = {
+            let (stop, sock) = (stop.clone(), a_sock.clone());
+            tokio::spawn(async move {
+                let mut n = 0u32;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    node_signs(node(&sock))
+                        .await
+                        .expect("tpm-host sign interrupted");
+                    n += 1;
+                }
+                n
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        upstream
+            .0
+            .reload_clients(vec![pk.enrolment("pi-1"), pk.enrolment("pi-2")])
+            .unwrap();
+        // The new device signs with no provider restart, while the first device signs.
+        node_signs(node_for(&b_sock, "pi-2")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let signed = signing.await.unwrap();
+        assert!(
+            signed > 1,
+            "tpm-host signed {signed} times across the reload"
+        );
+        // The first device still uses the grant it installed before: no re-grant.
+        node_signs(node(&a_sock)).await.unwrap();
+        // The new device cannot use the first device's label.
+        assert!(node_signs(node_for(&b_sock, "pi-1")).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reload_can_remove_a_client_and_refuses_what_needs_a_restart() {
+        let pk = TestPasskey::new(3);
+        let upstream = provider(&pk);
+        let (a, a_sock, _d) = boot(upstream.clone()).await;
+        install(&pk, &a_sock, &a.endpoint_id(), now_ms() + HOUR);
+        node_signs(node(&a_sock)).await.unwrap();
+        // A list needing derived keys the provider has no root for: refused,
+        // nothing changes.
+        let mut derived = pk.enrolment("pi-1");
+        derived.derived = true;
+        assert!(upstream.0.reload_clients(vec![derived]).is_err());
+        node_signs(node(&a_sock)).await.unwrap();
+        // Removing the client takes effect at once.
+        upstream.0.reload_clients(Vec::new()).unwrap();
+        assert!(node_signs(node(&a_sock)).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bad_provider_file_leaves_the_running_list_alone() {
+        let pk = TestPasskey::new(3);
+        let upstream = provider(&pk);
+        let (a, a_sock, d) = boot(upstream.clone()).await;
+        install(&pk, &a_sock, &a.endpoint_id(), now_ms() + HOUR);
+        let file = d.join("provider.toml");
+        let entry = |label: &str| {
+            format!(
+                "{{ passkey_public_key = \"{}\", rp_id = \"{}\", label = \"{label}\" }}",
+                hex::encode(&pk.enrolment("x").public_key_xy),
+                pk.rp_id
+            )
+        };
+        std::fs::write(&file, "clients = [ not toml").unwrap();
+        assert!(crate::remote_tpm::reload_clients_from_file(&file, &upstream.0).is_err());
+        node_signs(node(&a_sock)).await.unwrap();
+        std::fs::write(
+            &file,
+            "clients = [{ passkey_public_key = \"00\", rp_id = \"x\", label = \"y\" }]",
+        )
+        .unwrap();
+        assert!(crate::remote_tpm::reload_clients_from_file(&file, &upstream.0).is_err());
+        node_signs(node(&a_sock)).await.unwrap();
+        std::fs::write(
+            &file,
+            format!("clients = [{}, {}]", entry("pi-1"), entry("pi-2")),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::remote_tpm::reload_clients_from_file(&file, &upstream.0).unwrap(),
+            2
+        );
+        node_signs(node(&a_sock)).await.unwrap();
     }
 }

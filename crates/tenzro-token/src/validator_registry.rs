@@ -102,6 +102,19 @@ pub const VALIDATOR_CONFIG_KEY: &str = "validator:config";
 /// the unified token storage.
 const REGISTRY_CF: &str = tenzro_storage::CF_TOKENS;
 /// Prefix of a validator's consensus key waiting for the next epoch.
+/// An undo record: the registry before a change, and when the record was
+/// written relative to the others.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UndoRecord {
+    seq: u64,
+    checkpoint: RegistryCheckpoint,
+}
+
+/// Registry rows holding a [`RegistryCheckpoint`] taken before a change that
+/// is still to be made final.
+const UNDO_PREFIX: &str = "valreg_undo:";
+/// The last sequence number given to an undo record.
+const UNDO_SEQ_KEY: &str = "valreg_undo_seq";
 const PENDING_KEY_PREFIX: &str = "valreg_pending_key:";
 /// Prefix of the epoch from which a seated key's scheme was no longer
 /// admitted.
@@ -454,6 +467,51 @@ pub struct RecoveryMember {
     pub self_stake: u128,
 }
 
+/// The registry state kept outside the entries and their index; see
+/// [`ValidatorRegistry::side_state`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrySide {
+    /// The registry configuration.
+    pub config: ValidatorRegistryConfig,
+    /// Key rotations waiting for the next epoch boundary.
+    pub pending_keys: Vec<(Address, (Vec<u8>, Vec<u8>))>,
+    /// First epoch at which a seated key's scheme was not admitted.
+    pub unadmitted_since: Vec<(Address, u64)>,
+}
+
+/// A registry as it stood at one moment; see [`ValidatorRegistry::checkpoint`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryCheckpoint {
+    entries: Vec<ValidatorRegistryEntry>,
+    side: RegistrySide,
+}
+
+impl RegistrySide {
+    /// The rows a registry hydrates these from, as (key, value) pairs of the
+    /// registry's column family.
+    pub fn storage_rows(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut rows = Vec::new();
+        if let Ok(v) = bincode::serialize(&self.config) {
+            rows.push((VALIDATOR_CONFIG_KEY.as_bytes().to_vec(), v));
+        }
+        for (address, key) in &self.pending_keys {
+            if let Ok(v) = bincode::serialize(key) {
+                rows.push((
+                    format!("{PENDING_KEY_PREFIX}{}", hex::encode(address.as_bytes())).into_bytes(),
+                    v,
+                ));
+            }
+        }
+        for (address, epoch) in &self.unadmitted_since {
+            rows.push((
+                format!("{UNADMITTED_PREFIX}{}", hex::encode(address.as_bytes())).into_bytes(),
+                epoch.to_be_bytes().to_vec(),
+            ));
+        }
+        rows
+    }
+}
+
 /// Permissionless validator registry.
 ///
 /// Concurrent in-memory state with optional write-through persistence.
@@ -469,6 +527,10 @@ pub struct ValidatorRegistry {
     pending_keys: DashMap<Address, (Vec<u8>, Vec<u8>)>,
     /// First epoch at which a seated key's scheme was not admitted.
     unadmitted_since: DashMap<Address, u64>,
+    /// The first write to the store that failed since it was last taken. The
+    /// registry keeps its change in memory either way; a caller that must
+    /// not let memory run ahead of disk checks it after the change.
+    storage_error: parking_lot::Mutex<Option<String>>,
 }
 
 impl ValidatorRegistry {
@@ -480,6 +542,7 @@ impl ValidatorRegistry {
             storage: None,
             pending_keys: DashMap::new(),
             unadmitted_since: DashMap::new(),
+            storage_error: parking_lot::Mutex::new(None),
         }
     }
 
@@ -492,11 +555,24 @@ impl ValidatorRegistry {
             storage: Some(storage),
             pending_keys: DashMap::new(),
             unadmitted_since: DashMap::new(),
+            storage_error: parking_lot::Mutex::new(None),
         };
         if let Err(e) = registry.load_from_storage() {
             warn!("Failed to hydrate validator registry: {}", e);
         }
         registry
+    }
+
+    fn note_failure(&self, what: String) {
+        let mut slot = self.storage_error.lock();
+        if slot.is_none() {
+            *slot = Some(what);
+        }
+    }
+
+    /// The first write to the store that failed since this was last called.
+    pub fn take_storage_error(&self) -> Option<String> {
+        self.storage_error.lock().take()
     }
 
     fn persist_entry(&self, entry: &ValidatorRegistryEntry) {
@@ -510,6 +586,7 @@ impl ValidatorRegistry {
                 Ok(data) => {
                     if let Err(e) = storage.put(REGISTRY_CF, key.as_bytes(), &data) {
                         warn!("Failed to persist validator {}: {}", entry.address, e);
+                        self.note_failure(format!("validator {}: {e}", entry.address));
                     }
                 }
                 Err(e) => warn!("Failed to serialize validator {}: {}", entry.address, e),
@@ -529,6 +606,7 @@ impl ValidatorRegistry {
                     if let Err(e) = storage.put(REGISTRY_CF, VALIDATOR_INDEX_KEY.as_bytes(), &data)
                     {
                         warn!("Failed to persist validator index: {}", e);
+                        self.note_failure(format!("validator index: {e}"));
                     }
                 }
                 Err(e) => warn!("Failed to serialize validator index: {}", e),
@@ -544,6 +622,7 @@ impl ValidatorRegistry {
                     if let Err(e) = storage.put(REGISTRY_CF, VALIDATOR_CONFIG_KEY.as_bytes(), &data)
                     {
                         warn!("Failed to persist validator config: {}", e);
+                        self.note_failure(format!("validator config: {e}"));
                     }
                 }
                 Err(e) => warn!("Failed to serialize validator config: {}", e),
@@ -611,7 +690,7 @@ impl ValidatorRegistry {
         Ok(())
     }
 
-    fn put_side(&self, key: String, value: Option<Vec<u8>>) {
+    fn put_side(&self, key: String, value: Option<Vec<u8>>) -> bool {
         if let Some(storage) = &self.storage {
             let r = match value {
                 Some(v) => storage.put(REGISTRY_CF, key.as_bytes(), &v),
@@ -619,8 +698,11 @@ impl ValidatorRegistry {
             };
             if let Err(e) = r {
                 warn!("Failed to persist validator registry record {}: {}", key, e);
+                self.note_failure(format!("record {key}: {e}"));
+                return false;
             }
         }
+        true
     }
 
     /// Replaces `address`'s consensus key with (`ml_dsa_pubkey`,
@@ -642,6 +724,11 @@ impl ValidatorRegistry {
             )));
         }
         drop(entry);
+        if self.key_in_use(&ml_dsa_pubkey, &p256_pubkey, address) {
+            return Err(TokenError::InvalidParameter(format!(
+                "the new consensus key of {address} is already registered to another validator"
+            )));
+        }
         let key = (ml_dsa_pubkey, p256_pubkey);
         self.put_side(
             format!("{PENDING_KEY_PREFIX}{}", hex::encode(address.as_bytes())),
@@ -649,6 +736,367 @@ impl ValidatorRegistry {
         );
         self.pending_keys.insert(*address, key);
         Ok(())
+    }
+
+    /// The registry state that is kept outside the entries and their index:
+    /// the configuration, the key rotations waiting for the next epoch, and
+    /// the first epoch at which each seated key's scheme was not admitted.
+    /// Sorted by address, so every node holding the same registry produces
+    /// the same value.
+    pub fn side_state(&self) -> RegistrySide {
+        let mut pending_keys: Vec<(Address, (Vec<u8>, Vec<u8>))> = self
+            .pending_keys
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        pending_keys.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut unadmitted_since: Vec<(Address, u64)> = self
+            .unadmitted_since
+            .iter()
+            .map(|e| (*e.key(), *e.value()))
+            .collect();
+        unadmitted_since.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        RegistrySide {
+            config: *self.config.read(),
+            pending_keys,
+            unadmitted_since,
+        }
+    }
+
+    /// Everything this registry holds, to put back with [`Self::restore`]
+    /// when a block that changed it is refused.
+    pub fn checkpoint(&self) -> RegistryCheckpoint {
+        RegistryCheckpoint {
+            entries: self.entries.iter().map(|e| e.value().clone()).collect(),
+            side: self.side_state(),
+        }
+    }
+
+    /// Puts the registry back as `checkpoint` held it, in memory and in the
+    /// store.
+    ///
+    /// The store is written in one batch before memory changes, so a failure
+    /// leaves both as they were (the registry as the block or boundary left
+    /// it, and its rows to match) and the same checkpoint can be tried again;
+    /// it is only borrowed.
+    pub fn restore(&self, checkpoint: &RegistryCheckpoint) -> std::result::Result<(), String> {
+        use tenzro_storage::WriteOp;
+        let _ = self.take_storage_error();
+        let RegistryCheckpoint { entries, side } = checkpoint.clone();
+        let keep: std::collections::HashSet<Address> = entries.iter().map(|e| e.address).collect();
+        let gone: Vec<Address> = self
+            .entries
+            .iter()
+            .map(|e| *e.key())
+            .filter(|a| !keep.contains(a))
+            .collect();
+        if let Some(storage) = self.storage.as_ref() {
+            let del = |key: String| WriteOp::Delete {
+                cf: REGISTRY_CF.to_string(),
+                key: key.into_bytes(),
+            };
+            let put = |key: String, value: Vec<u8>| WriteOp::Put {
+                cf: REGISTRY_CF.to_string(),
+                key: key.into_bytes(),
+                value,
+            };
+            let mut ops = Vec::new();
+            for address in &gone {
+                ops.push(del(format!(
+                    "{VALIDATOR_PREFIX}{}",
+                    hex::encode(address.as_bytes())
+                )));
+            }
+            for entry in &entries {
+                let bytes = bincode::serialize(entry).map_err(|e| e.to_string())?;
+                ops.push(put(
+                    format!(
+                        "{VALIDATOR_PREFIX}{}",
+                        hex::encode(entry.address.as_bytes())
+                    ),
+                    bytes,
+                ));
+            }
+            let index: Vec<String> = entries
+                .iter()
+                .map(|e| hex::encode(e.address.as_bytes()))
+                .collect();
+            ops.push(put(
+                VALIDATOR_INDEX_KEY.to_string(),
+                bincode::serialize(&index).map_err(|e| e.to_string())?,
+            ));
+            ops.push(put(
+                VALIDATOR_CONFIG_KEY.to_string(),
+                bincode::serialize(&side.config).map_err(|e| e.to_string())?,
+            ));
+            for e in self.pending_keys.iter() {
+                ops.push(del(format!(
+                    "{PENDING_KEY_PREFIX}{}",
+                    hex::encode(e.key().as_bytes())
+                )));
+            }
+            for (address, key) in &side.pending_keys {
+                ops.push(put(
+                    format!("{PENDING_KEY_PREFIX}{}", hex::encode(address.as_bytes())),
+                    bincode::serialize(key).map_err(|e| e.to_string())?,
+                ));
+            }
+            for e in self.unadmitted_since.iter() {
+                ops.push(del(format!(
+                    "{UNADMITTED_PREFIX}{}",
+                    hex::encode(e.key().as_bytes())
+                )));
+            }
+            for (address, epoch) in &side.unadmitted_since {
+                ops.push(put(
+                    format!("{UNADMITTED_PREFIX}{}", hex::encode(address.as_bytes())),
+                    epoch.to_be_bytes().to_vec(),
+                ));
+            }
+            storage
+                .write_batch(ops)
+                .map_err(|e| format!("the registry could not be written back: {e}"))?;
+        }
+        for address in gone {
+            self.entries.remove(&address);
+        }
+        for entry in entries {
+            self.entries.insert(entry.address, entry);
+        }
+        *self.config.write() = side.config;
+        self.pending_keys.clear();
+        for (address, key) in side.pending_keys {
+            self.pending_keys.insert(address, key);
+        }
+        self.unadmitted_since.clear();
+        for (address, epoch) in side.unadmitted_since {
+            self.unadmitted_since.insert(address, epoch);
+        }
+        Ok(())
+    }
+
+    /// Keeps `checkpoint` in the store under `tag`, before a change that is
+    /// only final once the block or epoch boundary it belongs to is committed.
+    /// A node that stops in between finds it again with
+    /// [`Self::recover_uncommitted`] and puts the registry back, so the change
+    /// is not applied twice when the block runs again.
+    ///
+    /// Returns whether the record is in the store. It is written before the
+    /// change it covers, in the same log, so a stop that keeps the change
+    /// keeps the record. When it is not written the failure is reported
+    /// ([`Self::take_storage_error`]) and the caller must not make the change.
+    /// Each record carries a sequence number from a durable counter, so
+    /// records are ordered by when they were written whatever their tags say.
+    pub fn write_undo(&self, tag: &str, checkpoint: &RegistryCheckpoint) -> bool {
+        use tenzro_storage::WriteOp;
+        let Some(storage) = self.storage.as_ref() else {
+            return true;
+        };
+        // A counter that cannot be read, or that is not a number, refuses the
+        // write: a wrong sequence number would order the records wrongly.
+        let last = match storage.get(REGISTRY_CF, UNDO_SEQ_KEY.as_bytes()) {
+            Ok(None) => 0,
+            Ok(Some(v)) => match <[u8; 8]>::try_from(v.as_slice()) {
+                Ok(b) => u64::from_be_bytes(b),
+                Err(_) => {
+                    self.note_failure("the undo sequence counter is not a number".to_string());
+                    return false;
+                }
+            },
+            Err(e) => {
+                self.note_failure(format!("the undo sequence counter: {e}"));
+                return false;
+            }
+        };
+        let seq = last + 1;
+        let record = UndoRecord {
+            seq,
+            checkpoint: checkpoint.clone(),
+        };
+        let bytes = match bincode::serialize(&record) {
+            Ok(b) => b,
+            Err(e) => {
+                self.note_failure(format!("undo record {tag}: {e}"));
+                return false;
+            }
+        };
+        let result = storage.write_batch(vec![
+            WriteOp::Put {
+                cf: REGISTRY_CF.to_string(),
+                key: UNDO_SEQ_KEY.as_bytes().to_vec(),
+                value: seq.to_be_bytes().to_vec(),
+            },
+            WriteOp::Put {
+                cf: REGISTRY_CF.to_string(),
+                key: format!("{UNDO_PREFIX}{tag}").into_bytes(),
+                value: bytes,
+            },
+        ]);
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                self.note_failure(format!("undo record {tag}: {e}"));
+                false
+            }
+        }
+    }
+
+    fn read_undo(&self, tag: &str) -> std::result::Result<Option<UndoRecord>, String> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(None);
+        };
+        let Some(bytes) = storage
+            .get(REGISTRY_CF, format!("{UNDO_PREFIX}{tag}").as_bytes())
+            .map_err(|e| format!("undo record {tag}: {e}"))?
+        else {
+            return Ok(None);
+        };
+        bincode::deserialize::<UndoRecord>(&bytes)
+            .map(Some)
+            .map_err(|e| format!("undo record {tag} does not decode: {e}"))
+    }
+
+    /// Puts the registry back as the undo record under `tag` held it. The
+    /// record is kept, so the change can be tried and undone again. Returns
+    /// whether there was a record.
+    pub fn restore_undo(&self, tag: &str) -> std::result::Result<bool, String> {
+        match self.read_undo(tag)? {
+            Some(record) => self.restore(&record.checkpoint).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// Whether an undo record is kept under `tag`. A store that cannot be
+    /// read is an error, not an answer: the caller must not go on as if there
+    /// were none.
+    pub fn has_undo(&self, tag: &str) -> std::result::Result<bool, String> {
+        match self.storage.as_ref() {
+            None => Ok(false),
+            Some(s) => s
+                .get(REGISTRY_CF, format!("{UNDO_PREFIX}{tag}").as_bytes())
+                .map(|v| v.is_some())
+                .map_err(|e| format!("undo record {tag}: {e}")),
+        }
+    }
+
+    /// The undo records that cannot be read, by tag.
+    pub fn unreadable_undo_tags(&self) -> Vec<String> {
+        self.undo_tags()
+            .into_iter()
+            .filter(|t| self.read_undo(t).is_err())
+            .collect()
+    }
+
+    /// Removes the undo records named, in one batch.
+    pub fn discard_undo_tags(&self, tags: &[String]) -> std::result::Result<usize, String> {
+        self.clear_undo_tags(tags)?;
+        Ok(tags.len())
+    }
+
+    /// Removes the undo record kept under `tag`.
+    pub fn clear_undo(&self, tag: &str) {
+        self.put_side(format!("{UNDO_PREFIX}{tag}"), None);
+    }
+
+    /// Removes every undo record whose tag starts with `prefix`.
+    pub fn clear_undo_prefix(&self, prefix: &str) {
+        for tag in self.undo_tags() {
+            if tag.starts_with(prefix) {
+                self.clear_undo(&tag);
+            }
+        }
+    }
+
+    fn clear_undo_tags(&self, tags: &[String]) -> std::result::Result<(), String> {
+        use tenzro_storage::WriteOp;
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(());
+        };
+        let ops = tags
+            .iter()
+            .map(|t| WriteOp::Delete {
+                cf: REGISTRY_CF.to_string(),
+                key: format!("{UNDO_PREFIX}{t}").into_bytes(),
+            })
+            .collect();
+        storage
+            .write_batch(ops)
+            .map_err(|e| format!("undo records could not be removed: {e}"))
+    }
+
+    /// The tags of the undo records in the store.
+    pub fn undo_tags(&self) -> Vec<String> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Vec::new();
+        };
+        let mut tags: Vec<String> = storage
+            .scan_prefix(REGISTRY_CF, UNDO_PREFIX.as_bytes())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, _)| {
+                String::from_utf8(k)
+                    .ok()
+                    .map(|k| k[UNDO_PREFIX.len()..].to_string())
+            })
+            .collect();
+        tags.sort();
+        tags
+    }
+
+    /// Each undo record's tag and write sequence number, `None` for a record
+    /// that cannot be read. For the operator command that inspects them.
+    pub fn undo_summaries(&self) -> Vec<(String, Option<u64>)> {
+        self.undo_tags()
+            .into_iter()
+            .map(|t| {
+                let seq = self.read_undo(&t).ok().flatten().map(|r| r.seq);
+                (t, seq)
+            })
+            .collect()
+    }
+
+    /// Removes every undo record, in one batch, without putting anything
+    /// back. The operator's way out of a start that fails on a record it
+    /// cannot read: the registry then stays as the last run left it, which
+    /// may include the changes of a block that never committed.
+    pub fn discard_all_undo(&self) -> std::result::Result<usize, String> {
+        let tags = self.undo_tags();
+        self.clear_undo_tags(&tags)?;
+        Ok(tags.len())
+    }
+
+    /// After a restart: for the undo records `is_uncommitted` names, puts the
+    /// registry back as the oldest of them (by write order) held it, then
+    /// removes every record in one batch, so a stop in the middle cannot
+    /// leave a newer record to be restored in its place. Returns how many
+    /// were not final.
+    ///
+    /// A record that cannot be read, or a registry that cannot be put back,
+    /// is an error and every record is kept: the node must not run on with
+    /// the state of a change that never committed. The operator command
+    /// `tenzro-node registry-undo` lists the records and, with `--discard`,
+    /// removes them.
+    pub fn recover_uncommitted(
+        &self,
+        is_uncommitted: impl Fn(&str) -> bool,
+    ) -> std::result::Result<usize, String> {
+        let mut pending: Vec<(u64, String, RegistryCheckpoint)> = Vec::new();
+        let mut all: Vec<String> = Vec::new();
+        for tag in self.undo_tags() {
+            all.push(tag.clone());
+            if is_uncommitted(&tag) {
+                let record = self
+                    .read_undo(&tag)?
+                    .ok_or_else(|| format!("undo record {tag} vanished"))?;
+                pending.push((record.seq, tag, record.checkpoint));
+            }
+        }
+        pending.sort_by_key(|(seq, ..)| *seq);
+        if let Some((_, _, oldest)) = pending.first() {
+            self.restore(oldest)?;
+        }
+        self.clear_undo_tags(&all)?;
+        Ok(pending.len())
     }
 
     /// The key rotation `address` has requested and the next epoch
@@ -740,6 +1188,25 @@ impl ValidatorRegistry {
         Ok(updated.self_stake)
     }
 
+    /// Whether another validator than `except` already holds this consensus
+    /// key (both legs).
+    pub fn key_in_use(&self, ml_dsa: &[u8], p256: &[u8], except: &Address) -> bool {
+        self.entries.iter().any(|e| {
+            e.key() != except && e.value().ml_dsa_pubkey == ml_dsa && e.value().p256_pubkey == p256
+        })
+    }
+
+    /// The validator holding this consensus key. Looked up in address order,
+    /// so the answer does not depend on how the registry's map iterates, even
+    /// for a registry that still holds the same key twice.
+    pub fn find_by_key(&self, ml_dsa: &[u8], p256: &[u8]) -> Option<ValidatorRegistryEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.value().ml_dsa_pubkey == ml_dsa && e.value().p256_pubkey == p256)
+            .map(|e| e.value().clone())
+            .min_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()))
+    }
+
     /// Returns all entries (snapshot).
     pub fn list(&self) -> Vec<ValidatorRegistryEntry> {
         self.entries.iter().map(|e| e.value().clone()).collect()
@@ -796,6 +1263,14 @@ impl ValidatorRegistry {
         metadata_uri: String,
     ) -> Result<()> {
         let cfg = *self.config.read();
+
+        // A consensus key belongs to one validator: a second registration of
+        // the same key is refused, so a key always names one address.
+        if self.key_in_use(&ml_dsa_pubkey, &p256_pubkey, &address) {
+            return Err(TokenError::InvalidParameter(format!(
+                "the consensus key of {address} is already registered to another validator"
+            )));
+        }
 
         // Per the canonical three-tier model: Tier 1 (resource-only)
         // registrations are admitted with `self_stake == 0` (or any
@@ -1465,8 +1940,15 @@ mod tests {
     }
 
     /// ML-DSA-65 key, P-256 key, node key.
+    ///
+    /// Each call gives a different ML-DSA-65 key: the registry holds one
+    /// validator per consensus key.
     fn make_keys() -> (Vec<u8>, Vec<u8>, [u8; 32]) {
-        (vec![0u8; ML_DSA_65_VK_LEN], p256_key(), [9u8; 32])
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut key = vec![0u8; ML_DSA_65_VK_LEN];
+        key[..8].copy_from_slice(&n.to_be_bytes());
+        (key, p256_key(), [9u8; 32])
     }
 
     /// A live validator can add to its stake.
@@ -1824,6 +2306,7 @@ mod tests {
         )
         .unwrap();
         // At the floor: admissible.
+        let (ck, pk, _) = make_keys();
         reg.register_candidate(
             ok,
             ck,
@@ -2422,5 +2905,442 @@ mod tests {
         let before = snapshot();
         reg.replace_active_set(&members, 12).unwrap();
         assert_eq!(before, snapshot());
+    }
+
+    #[test]
+    fn a_registry_restored_from_its_checkpoint_is_as_it_was() {
+        let reg = ValidatorRegistry::new();
+        let a = Address::new([7u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        reg.register_candidate(
+            a,
+            vec![0u8; 1952],
+            p256.clone(),
+            [0u8; 32],
+            a,
+            0,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        let before = reg.checkpoint();
+        let b = Address::new([8u8; 32]);
+        let mut p256_b = vec![9u8; 65];
+        p256_b[0] = 0x04;
+        reg.register_candidate(
+            b,
+            vec![1u8; 1952],
+            p256_b,
+            [1u8; 32],
+            b,
+            0,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        reg.request_key_rotation(&a, vec![2u8; 1952], vec![3u8; 65])
+            .unwrap();
+        assert_eq!(reg.list().len(), 2);
+        assert!(reg.pending_key(&a).is_some());
+
+        reg.restore(&before).unwrap();
+        assert_eq!(
+            reg.list().len(),
+            1,
+            "the entry the refused block added is gone"
+        );
+        assert!(reg.get(&b).is_none());
+        assert!(reg.pending_key(&a).is_none(), "so is its key rotation");
+    }
+
+    /// A store that stops accepting writes when told to.
+    struct Flaky {
+        inner: tenzro_storage::MemoryStore,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl Flaky {
+        fn check(&self) -> tenzro_storage::Result<()> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(tenzro_storage::StorageError::DatabaseError(
+                    "disk full".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl tenzro_storage::KvStore for Flaky {
+        fn get(&self, cf: &str, key: &[u8]) -> tenzro_storage::Result<Option<Vec<u8>>> {
+            self.inner.get(cf, key)
+        }
+        fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> tenzro_storage::Result<()> {
+            self.check()?;
+            self.inner.put(cf, key, value)
+        }
+        fn delete(&self, cf: &str, key: &[u8]) -> tenzro_storage::Result<()> {
+            self.check()?;
+            self.inner.delete(cf, key)
+        }
+        fn write_batch(&self, ops: Vec<tenzro_storage::WriteOp>) -> tenzro_storage::Result<()> {
+            self.check()?;
+            self.inner.write_batch(ops)
+        }
+        fn write_batch_sync(
+            &self,
+            ops: Vec<tenzro_storage::WriteOp>,
+        ) -> tenzro_storage::Result<()> {
+            self.check()?;
+            self.inner.write_batch_sync(ops)
+        }
+        fn get_keys_with_prefix(
+            &self,
+            cf: &str,
+            prefix: &[u8],
+        ) -> tenzro_storage::Result<Vec<Vec<u8>>> {
+            self.inner.get_keys_with_prefix(cf, prefix)
+        }
+    }
+
+    /// A write the store refuses is reported, and a restore that cannot write
+    /// reports it too while the checkpoint stays usable for another try.
+    #[test]
+    fn a_failed_write_is_reported_and_the_checkpoint_stays_usable() {
+        use std::sync::atomic::Ordering;
+        let store = Arc::new(Flaky {
+            inner: tenzro_storage::MemoryStore::new(),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        });
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        let a = Address::new([7u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        reg.register_candidate(a, vec![0u8; 1952], p256, [0u8; 32], a, 0, 0, String::new())
+            .unwrap();
+        assert!(reg.take_storage_error().is_none());
+        let checkpoint = reg.checkpoint();
+
+        store.fail.store(true, Ordering::SeqCst);
+        let b = Address::new([8u8; 32]);
+        let mut p256_b = vec![9u8; 65];
+        p256_b[0] = 0x04;
+        reg.register_candidate(
+            b,
+            vec![1u8; 1952],
+            p256_b,
+            [1u8; 32],
+            b,
+            0,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        assert!(
+            reg.take_storage_error().is_some(),
+            "the refused write is reported"
+        );
+
+        assert!(
+            reg.restore(&checkpoint).is_err(),
+            "a restore that cannot write says so"
+        );
+        store.fail.store(false, Ordering::SeqCst);
+        reg.restore(&checkpoint).unwrap();
+        assert_eq!(reg.list().len(), 1);
+        assert!(reg.take_storage_error().is_none());
+    }
+
+    /// A consensus key names one validator: registering it again under another
+    /// address is refused, and a lookup by key finds the same one every time.
+    #[test]
+    fn a_consensus_key_belongs_to_one_validator() {
+        let reg = ValidatorRegistry::new();
+        let a = Address::new([7u8; 32]);
+        let b = Address::new([8u8; 32]);
+        let mut p256 = vec![5u8; 65];
+        p256[0] = 0x04;
+        reg.register_candidate(
+            a,
+            vec![4u8; 1952],
+            p256.clone(),
+            [0u8; 32],
+            a,
+            0,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        let again = reg.register_candidate(
+            b,
+            vec![4u8; 1952],
+            p256.clone(),
+            [1u8; 32],
+            b,
+            0,
+            0,
+            String::new(),
+        );
+        assert!(again.is_err());
+        assert_eq!(reg.find_by_key(&[4u8; 1952], &p256).unwrap().address, a);
+        assert!(reg.find_by_key(&[9u8; 1952], &p256).is_none());
+    }
+
+    /// A block that stopped before it was committed is not applied twice: the
+    /// registry is put back as it was before the block, and a block that did
+    /// commit keeps its changes.
+    #[test]
+    fn a_stop_before_commit_leaves_the_registry_as_before_the_block() {
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        let a = Address::new([7u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        reg.register_candidate(a, vec![0u8; 1952], p256, [0u8; 32], a, 0, 0, String::new())
+            .unwrap();
+        let before = reg.get(&a).unwrap().self_stake;
+
+        let checkpoint = reg.checkpoint();
+        reg.write_undo("block:5", &checkpoint);
+        reg.increase_self_stake(&a, 1_000).unwrap();
+        let after = reg.get(&a).unwrap().self_stake;
+        assert_ne!(before, after);
+        let height_of = |tag: &str| {
+            tag.strip_prefix("block:")
+                .and_then(|h| h.parse::<u64>().ok())
+        };
+
+        // The node stops. Block 5 was committed: the change stays.
+        let kept = ValidatorRegistry::with_storage(store.clone());
+        assert_eq!(
+            kept.get(&a).unwrap().self_stake,
+            after,
+            "the change reached the disk"
+        );
+        assert_eq!(
+            kept.recover_uncommitted(|t| height_of(t).is_some_and(|h| h > 5)),
+            Ok(0)
+        );
+        assert_eq!(kept.get(&a).unwrap().self_stake, after);
+        assert!(kept.undo_tags().is_empty());
+
+        // The same stop, but block 5 was not committed: the change goes.
+        kept.write_undo("block:5", &checkpoint);
+        let restarted = ValidatorRegistry::with_storage(store.clone());
+        assert_eq!(
+            restarted.recover_uncommitted(|t| height_of(t).is_some_and(|h| h > 4)),
+            Ok(1)
+        );
+        assert_eq!(restarted.get(&a).unwrap().self_stake, before);
+        assert!(restarted.undo_tags().is_empty());
+    }
+
+    /// A node that started from a snapshot, or never stopped mid-block, holds
+    /// no undo records: recovery changes nothing.
+    #[test]
+    fn a_registry_without_undo_records_recovers_nothing() {
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        let a = Address::new([7u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        reg.register_candidate(a, vec![0u8; 1952], p256, [0u8; 32], a, 0, 0, String::new())
+            .unwrap();
+        let stake = reg.get(&a).unwrap().self_stake;
+        assert_eq!(reg.recover_uncommitted(|_| true), Ok(0));
+        assert_eq!(reg.get(&a).unwrap().self_stake, stake);
+        assert_eq!(reg.list().len(), 1);
+    }
+
+    /// An undo record the store refuses is reported, so the block that needed
+    /// it is refused instead of changing the registry without one.
+    #[test]
+    fn an_undo_record_that_cannot_be_written_is_reported() {
+        use std::sync::atomic::Ordering;
+        let store = Arc::new(Flaky {
+            inner: tenzro_storage::MemoryStore::new(),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        });
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        let checkpoint = reg.checkpoint();
+        assert!(reg.write_undo("block:9", &checkpoint));
+        assert!(reg.has_undo("block:9").unwrap());
+        store.fail.store(true, Ordering::SeqCst);
+        assert!(!reg.write_undo("block:10", &checkpoint));
+        assert!(reg.take_storage_error().is_some());
+        assert!(!reg.has_undo("block:10").unwrap());
+    }
+
+    /// A record that cannot be read stops recovery and is kept: the node does
+    /// not run on with the state of a change that never committed.
+    #[test]
+    fn a_record_that_cannot_be_read_stops_recovery_and_is_kept() {
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        assert!(reg.write_undo("block:7", &reg.checkpoint()));
+        store
+            .put(
+                REGISTRY_CF,
+                format!("{UNDO_PREFIX}block:7").as_bytes(),
+                b"torn",
+            )
+            .unwrap();
+        let result = reg.recover_uncommitted(|_| true);
+        assert!(result.is_err());
+        assert_eq!(
+            reg.undo_tags(),
+            vec!["block:7".to_string()],
+            "the record is kept"
+        );
+    }
+
+    /// Records are put in order by when they were written, whatever their
+    /// tags say: a boundary record written before a block record is older.
+    #[test]
+    fn undo_records_are_ordered_by_when_they_were_written() {
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        let a = Address::new([7u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        reg.register_candidate(a, vec![0u8; 1952], p256, [0u8; 32], a, 0, 0, String::new())
+            .unwrap();
+        let original = reg.get(&a).unwrap().self_stake;
+        // The boundary record comes first, the block record later.
+        assert!(reg.write_undo("boundary:9", &reg.checkpoint()));
+        reg.increase_self_stake(&a, 500).unwrap();
+        assert!(reg.write_undo("block:3", &reg.checkpoint()));
+        reg.increase_self_stake(&a, 500).unwrap();
+        assert_eq!(reg.recover_uncommitted(|_| true), Ok(2));
+        assert_eq!(
+            reg.get(&a).unwrap().self_stake,
+            original,
+            "back to the oldest record"
+        );
+    }
+
+    /// A restore that fails once leaves the registry and its rows as they were,
+    /// and succeeds when tried again.
+    #[test]
+    fn a_restore_that_fails_once_changes_nothing_and_succeeds_when_tried_again() {
+        use std::sync::atomic::Ordering;
+        let store = Arc::new(Flaky {
+            inner: tenzro_storage::MemoryStore::new(),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        });
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        let a = Address::new([7u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        reg.register_candidate(a, vec![0u8; 1952], p256, [0u8; 32], a, 0, 0, String::new())
+            .unwrap();
+        let checkpoint = reg.checkpoint();
+        let before = reg.get(&a).unwrap().self_stake;
+        reg.increase_self_stake(&a, 700).unwrap();
+        let after = reg.get(&a).unwrap().self_stake;
+
+        store.fail.store(true, Ordering::SeqCst);
+        assert!(reg.restore(&checkpoint).is_err());
+        assert_eq!(
+            reg.get(&a).unwrap().self_stake,
+            after,
+            "memory is as it was"
+        );
+        store.fail.store(false, Ordering::SeqCst);
+        let rows = ValidatorRegistry::with_storage(store.clone());
+        assert_eq!(rows.get(&a).unwrap().self_stake, after, "so are the rows");
+
+        reg.restore(&checkpoint).unwrap();
+        assert_eq!(reg.get(&a).unwrap().self_stake, before);
+        let rows = ValidatorRegistry::with_storage(store.clone());
+        assert_eq!(rows.get(&a).unwrap().self_stake, before);
+    }
+
+    /// When the store refuses the writes of a recovery, no record is removed,
+    /// so the next start restores the same record again.
+    #[test]
+    fn a_failed_recovery_keeps_every_record() {
+        use std::sync::atomic::Ordering;
+        let store = Arc::new(Flaky {
+            inner: tenzro_storage::MemoryStore::new(),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        });
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        assert!(reg.write_undo("block:1", &reg.checkpoint()));
+        assert!(reg.write_undo("block:2", &reg.checkpoint()));
+        store.fail.store(true, Ordering::SeqCst);
+        assert!(reg.recover_uncommitted(|_| true).is_err());
+        store.fail.store(false, Ordering::SeqCst);
+        assert_eq!(reg.undo_tags().len(), 2, "both records are still there");
+        assert_eq!(reg.recover_uncommitted(|_| true), Ok(2));
+        assert!(reg.undo_tags().is_empty());
+    }
+
+    /// The sequence number comes from a counter that only goes up, so writing a
+    /// record does not read the others.
+    #[test]
+    fn undo_sequence_numbers_only_go_up() {
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let reg = ValidatorRegistry::with_storage(store);
+        assert!(reg.write_undo("block:1", &reg.checkpoint()));
+        assert!(reg.write_undo("block:2", &reg.checkpoint()));
+        reg.clear_undo("block:2");
+        assert!(reg.write_undo("block:3", &reg.checkpoint()));
+        let seqs: Vec<_> = reg.undo_summaries();
+        assert_eq!(
+            seqs,
+            vec![
+                ("block:1".to_string(), Some(1)),
+                ("block:3".to_string(), Some(3))
+            ]
+        );
+    }
+
+    /// A genesis validator already in the registry, whatever became of it
+    /// since, is left alone and seeding reports so, so a node can always start
+    /// again.
+    #[test]
+    fn seeding_a_genesis_validator_again_is_always_a_no_op() {
+        let reg = ValidatorRegistry::new();
+        let a = Address::new([7u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        let seed = |reg: &ValidatorRegistry| {
+            reg.seed_genesis_active(
+                a,
+                vec![0u8; 1952],
+                p256.clone(),
+                [0u8; 32],
+                a,
+                10,
+                String::new(),
+            )
+        };
+        assert_eq!(seed(&reg).unwrap(), true);
+        assert_eq!(seed(&reg).unwrap(), false, "present and active");
+        reg.request_key_rotation(&a, vec![5u8; 1952], vec![4u8; 65])
+            .unwrap();
+        assert_eq!(seed(&reg).unwrap(), false, "with a rotation waiting");
+        reg.request_exit(&a).unwrap();
+        assert_eq!(seed(&reg).unwrap(), false, "leaving");
+        reg.compute_epoch_transition(1);
+        assert_eq!(reg.get(&a).unwrap().status, ValidatorRegistryStatus::Exited);
+        assert_eq!(seed(&reg).unwrap(), false, "exited");
+    }
+
+    /// A sequence counter that is not a number stops the write of a record
+    /// instead of restarting the numbers.
+    #[test]
+    fn a_bad_undo_counter_refuses_the_write() {
+        let store: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let reg = ValidatorRegistry::with_storage(store.clone());
+        assert!(reg.write_undo("block:1", &reg.checkpoint()));
+        store
+            .put(REGISTRY_CF, UNDO_SEQ_KEY.as_bytes(), b"bad")
+            .unwrap();
+        assert!(!reg.write_undo("block:2", &reg.checkpoint()));
+        assert!(reg.take_storage_error().is_some());
+        assert!(!reg.has_undo("block:2").unwrap());
     }
 }

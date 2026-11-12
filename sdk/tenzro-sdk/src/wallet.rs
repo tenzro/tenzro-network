@@ -19,6 +19,8 @@ use std::sync::Arc;
 /// canonical transaction hash, obtain the composite signature and submit it
 /// via `tenzro_sendRawTransaction`.
 #[async_trait]
+// The async_trait expansion already marks the returned future must_use.
+#[allow(clippy::double_must_use)]
 pub trait HybridSigner: Send + Sync {
     /// The hardware P-256 public key, `x || y`. It derives the account
     /// address ([`account_address`]).

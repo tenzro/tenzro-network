@@ -126,7 +126,7 @@ pub struct WalletSendCmd {
     /// Recipient address
     to: String,
 
-    /// Amount to send
+    /// Amount to send, in TNZO: `100`, `0.5`. Exact to 18 places.
     amount: String,
 
     /// Asset to send (TNZO, USDC, USDT)
@@ -149,9 +149,15 @@ pub struct WalletSendCmd {
     confirm_address: Option<String>,
 
     /// The amount again, in TNZO, to proceed with a transfer at or above the
-    /// governed step-up amount (`wallet.step_up_threshold_tnzo`).
+    /// governed step-up amount (`wallet.step_up_threshold_tnzo`). Without it
+    /// a terminal asks for the amount to be typed; a script must pass it.
     #[arg(long)]
     confirm_amount: Option<String>,
+
+    /// Return as soon as the node has accepted the transfer, without waiting
+    /// for it to be executed. Its receipt then says whether it took effect.
+    #[arg(long)]
+    no_wait: bool,
 }
 
 /// Evaluate the governed sending ceiling and step-up amount for `amount_wei`
@@ -214,13 +220,24 @@ pub(crate) async fn transfer_policy_check(
         tp::TransferDecision::Allow => Ok(()),
         tp::TransferDecision::Refuse { reason } => anyhow::bail!("{reason}; nothing was signed"),
         tp::TransferDecision::StepUp { reason } => {
+            use std::io::IsTerminal;
             output::print_warning(&reason);
-            match confirm_amount {
-                Some(c) if tp::amount_confirmation_matches(amount_wei, c) => Ok(()),
-                _ => anyhow::bail!(
-                    "confirm the amount with --confirm-amount; nothing was signed"
-                ),
+            let typed = match confirm_amount {
+                Some(c) => c.to_string(),
+                None if std::io::stdin().is_terminal() => {
+                    println!("Type the amount in TNZO again to continue:");
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    line
+                }
+                None => {
+                    anyhow::bail!("confirm the amount with --confirm-amount; nothing was signed")
+                }
+            };
+            if !tp::amount_confirmation_matches(amount_wei, &typed) {
+                anyhow::bail!("the amount typed does not match the transfer; nothing was signed");
             }
+            Ok(())
         }
     }
 }
@@ -311,6 +328,28 @@ pub(crate) fn require_recipient_confirmation(
     Ok(())
 }
 
+/// A TNZO transfer signed in hardware as the client account of
+/// `key_namespace`, after the recipient check and the transfer check that
+/// every send goes through. `amount` is decimal TNZO (`100`, `0.5`) and is
+/// converted to wei exactly.
+pub async fn send_tnzo(
+    rpc: &crate::rpc::RpcClient,
+    key_namespace: &str,
+    to: &str,
+    amount: &str,
+    confirm_address: Option<&str>,
+    confirm_amount: Option<&str>,
+) -> Result<serde_json::Value> {
+    let amount_wei = crate::units::parse_amount_wei(amount).map_err(|e| anyhow::anyhow!(e))?;
+    let to = crate::keystore::address32(to)?;
+    let (from_hex, _) = crate::keystore::client_account(key_namespace)?;
+    let assessment = recipient_check(rpc, &from_hex, to).await?;
+    require_recipient_confirmation(&assessment, confirm_address)?;
+    transfer_policy_check(rpc, &from_hex, amount_wei, confirm_amount).await?;
+    let tx_type = serde_json::json!({ "Transfer": { "amount": amount_wei.to_string() } });
+    crate::keystore::send_as_client(rpc, key_namespace, to, tx_type, 21_000).await
+}
+
 impl WalletSendCmd {
     /// A TNZO transfer signed in hardware as the client account and submitted
     /// pre-signed; the node never signs for it.
@@ -322,26 +361,48 @@ impl WalletSendCmd {
                 self.asset
             );
         }
-        let amount_float: f64 = self.amount.parse()?;
-        let amount_wei = (amount_float * 10f64.powi(18)) as u128;
-        let to = crate::keystore::address32(&self.to)?;
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
-        let (from_hex, _) = crate::keystore::client_account(&self.key_namespace)?;
-        let assessment = recipient_check(&rpc, &from_hex, to).await?;
-        require_recipient_confirmation(&assessment, self.confirm_address.as_deref())?;
-        transfer_policy_check(&rpc, &from_hex, amount_wei, self.confirm_amount.as_deref()).await?;
-        let tx_type = serde_json::json!({ "Transfer": { "amount": amount_wei.to_string() } });
-        let result =
-            crate::keystore::send_as_client(&rpc, &self.key_namespace, to, tx_type, 21_000).await?;
-        output::print_success("Transfer signed in hardware and submitted");
-        output::print_field(
-            "Transaction Hash",
-            &result
-                .as_str()
-                .map_or_else(|| result.to_string(), str::to_string),
-        );
-        Ok(())
+        let result = send_tnzo(
+            &rpc,
+            &self.key_namespace,
+            &self.to,
+            &self.amount,
+            self.confirm_address.as_deref(),
+            self.confirm_amount.as_deref(),
+        )
+        .await?;
+        report_transfer(&rpc, &result, !self.no_wait).await
     }
+}
+
+/// Says what became of a transfer the node answered with `answer`: its hash
+/// and, with `wait`, whether it was executed. A transfer that was executed
+/// and reverted is an error naming the reason, so a refused transfer is never
+/// reported as sent.
+pub async fn report_transfer(
+    rpc: &crate::rpc::RpcClient,
+    answer: &serde_json::Value,
+    wait: bool,
+) -> Result<()> {
+    output::print_success("Transfer signed in hardware and submitted");
+    let Some(tx_hash) = crate::keystore::submitted_hash(answer) else {
+        output::print_field("Transaction Hash", &answer.to_string());
+        return Ok(());
+    };
+    output::print_field("Transaction Hash", &tx_hash);
+    if !wait {
+        return Ok(());
+    }
+    let waited = crate::keystore::RECEIPT_WAIT;
+    match crate::keystore::await_receipt(rpc, &tx_hash, waited).await? {
+        Some(_) => output::print_success("Transfer executed"),
+        None => output::print_warning(&format!(
+            "The transfer was in no block after {} seconds. It may still be executed; its \
+             receipt (eth_getTransactionReceipt) says whether it took effect.",
+            waited.as_secs()
+        )),
+    }
+    Ok(())
 }
 
 /// Get transaction history for an address

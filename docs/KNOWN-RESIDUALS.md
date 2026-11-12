@@ -1,5 +1,17 @@
 # Known residuals
 
+## Batched sessions of hybrid models have no checkpoint
+
+At this revision of the open-source Praecise engine, a session served on the
+batch engine from a hybrid model (attention layers mixed with recurrent state)
+cannot have its cache copied out, so a turn takes no checkpoint. The node logs
+the engine's reason once per model. A successor that takes such a session over
+has nothing to import and answers from the conversation's messages, which it
+prefills in full: the reply is correct, but the first turn after a takeover is
+as slow as a first turn rather than prefilling only the new message. The
+migration test for batched sessions (`batch_session_migration`) fails for this
+reason until the engine can export the sequence.
+
 ## The participation roster at epoch close
 
 The count of consecutive epochs a validator has missed is kept in chain state

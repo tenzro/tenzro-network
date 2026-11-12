@@ -18,10 +18,10 @@ use tenzro_types::token::PolicyUpdate;
 
 const GAS: u128 = 10_000_000_000_000_000_000;
 const GAS_PRICE: u128 = 1_000_000_000;
-const CODE: [u8; 32] = [0xc0; 32];
-const HEIGHT: u64 = 5_000;
+pub(super) const CODE: [u8; 32] = [0xc0; 32];
+pub(super) const HEIGHT: u64 = 5_000;
 
-fn tx(from: &[u8], data: Vec<u8>, at_ms: i64) -> VmTransaction {
+pub(super) fn tx(from: &[u8], data: Vec<u8>, at_ms: i64) -> VmTransaction {
     let mut tx = VmTransaction::new(
         from.to_vec(),
         None,
@@ -38,9 +38,9 @@ fn tx(from: &[u8], data: Vec<u8>, at_ms: i64) -> VmTransaction {
     tx
 }
 
-struct Validator {
-    addr: Vec<u8>,
-    tpm: SoftTpm,
+pub(super) struct Validator {
+    pub(super) addr: Vec<u8>,
+    pub(super) tpm: SoftTpm,
 }
 
 /// A bonded validator whose account is a machine identity admitted with
@@ -99,7 +99,7 @@ fn validator(state: &mut StateAdapter, seed: u8, stake: u128) -> Validator {
     Validator { addr, tpm }
 }
 
-fn ready_data(v: &Validator, code: &[u8; 32], quoted_for: &[u8; 32]) -> Vec<u8> {
+pub(super) fn ready_data(v: &Validator, code: &[u8; 32], quoted_for: &[u8; 32]) -> Vec<u8> {
     let (ev, _) = evidence(&v.tpm, &upgrade_ready_digest(quoted_for, &v.addr));
     let mut data = SELECTOR_UPGRADE_READY.to_vec();
     data.extend_from_slice(code);
@@ -107,7 +107,7 @@ fn ready_data(v: &Validator, code: &[u8; 32], quoted_for: &[u8; 32]) -> Vec<u8> 
     data
 }
 
-fn upgrade(track: PolicyTrack) -> ProposalAction {
+pub(super) fn upgrade(track: PolicyTrack) -> ProposalAction {
     ProposalAction::PolicyUpdate {
         update: PolicyUpdate::ProtocolUpgrade {
             version: "2".into(),
@@ -119,7 +119,7 @@ fn upgrade(track: PolicyTrack) -> ProposalAction {
 }
 
 /// A protocol upgrade already through its vote and timelock.
-fn queued(state: &mut StateAdapter, id: [u8; 32], action: ProposalAction) {
+pub(super) fn queued(state: &mut StateAdapter, id: [u8; 32], action: ProposalAction) {
     let mut p = Proposal::open(
         hex::encode(id),
         Address::new([0x77; 32]),
@@ -133,14 +133,14 @@ fn queued(state: &mut StateAdapter, id: [u8; 32], action: ProposalAction) {
     store_proposal(state, &p).unwrap();
 }
 
-fn execute_data(id: &[u8; 32]) -> Vec<u8> {
+pub(super) fn execute_data(id: &[u8; 32]) -> Vec<u8> {
     let mut data = SELECTOR_GOVERNANCE_EXECUTE.to_vec();
     data.extend_from_slice(id);
     data
 }
 
 /// Three validators: 66%, 1% and 33% of bonded stake.
-fn network() -> (NativeExecutor, StateAdapter, Vec<Validator>) {
+pub(super) fn network() -> (NativeExecutor, StateAdapter, Vec<Validator>) {
     let mut state = StateAdapter::new();
     let vs = vec![
         validator(&mut state, 1, 66),

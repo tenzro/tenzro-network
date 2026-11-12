@@ -128,6 +128,12 @@ impl TenzroNetworkService {
         self.gossip.set_identities(identities);
     }
 
+    /// Turns on delivery from registered neighbours only; see
+    /// [`NetworkGossip::set_registered_only`].
+    pub fn set_gossip_registered_only(&self, on: bool) {
+        self.gossip.set_registered_only(on);
+    }
+
     /// Replaces the per-neighbour gossip budgets.
     pub fn set_gossip_limits(&self, limits: GossipLimits) {
         self.gossip.set_limits(limits);

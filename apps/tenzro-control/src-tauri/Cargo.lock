@@ -12389,6 +12389,7 @@ dependencies = [
  "tenzro-cert-stark",
  "tenzro-crypto",
  "tenzro-finality",
+ "tenzro-onboarding-types",
  "tenzro-storage",
  "tenzro-types",
  "thiserror 2.0.19",
@@ -12593,6 +12594,7 @@ dependencies = [
  "serde_json",
  "tenzro-crypto",
  "tenzro-device-key",
+ "tenzro-onboarding-types",
  "tenzro-storage",
  "tenzro-types",
  "thiserror 2.0.19",
@@ -12693,6 +12695,7 @@ dependencies = [
  "tenzro-crypto",
  "tenzro-device-key",
  "tenzro-iroh",
+ "tenzro-onboarding-types",
  "tenzro-types",
  "thiserror 2.0.19",
  "tokio",
@@ -12702,7 +12705,7 @@ dependencies = [
 
 [[package]]
 name = "tenzro-node"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -12756,6 +12759,7 @@ dependencies = [
  "tenzro-keystore-unlock",
  "tenzro-model",
  "tenzro-network",
+ "tenzro-onboarding-types",
  "tenzro-payments",
  "tenzro-settlement",
  "tenzro-storage",
@@ -12764,6 +12768,7 @@ dependencies = [
  "tenzro-token",
  "tenzro-trust",
  "tenzro-types",
+ "tenzro-update-notice",
  "tenzro-vm",
  "tenzro-wallet",
  "tenzro-zk",
@@ -12780,6 +12785,16 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "tenzro-onboarding-types"
+version = "0.2.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -12888,7 +12903,9 @@ dependencies = [
  "bincode",
  "bytes",
  "dashmap 6.2.1",
+ "fs4",
  "hex",
+ "libc",
  "parking_lot 0.12.5",
  "reed-solomon-erasure",
  "rocksdb",
@@ -13031,6 +13048,19 @@ dependencies = [
  "sha3 0.10.9",
  "thiserror 2.0.19",
  "uuid",
+]
+
+[[package]]
+name = "tenzro-update-notice"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "p256 0.14.0-rc.12",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

@@ -1832,7 +1832,9 @@ pub enum BridgeRouteError {
         committee: &'static str,
     },
     /// A member has no ML-DSA-65 verifying key.
-    #[error("{committee} member {address} has no ML-DSA-65 verifying key; both signature legs are mandatory")]
+    #[error(
+        "{committee} member {address} has no ML-DSA-65 verifying key; both signature legs are mandatory"
+    )]
     MissingPqKey {
         /// Which committee.
         committee: &'static str,

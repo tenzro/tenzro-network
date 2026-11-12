@@ -660,7 +660,7 @@ split that double-charged went unnoticed.
 persisted (`CF_TOKENS / economic_policy:current`), hydrated on boot, and changed
 only by governance proposal.
 
-- **Propose:** `tenzro governance propose --type economic_policy --policy-json '<policy>'`
+- **Propose:** `tenzro governance propose --action '<json>'` (or `--file`) with a `policy_update` action that carries the whole policy
 - **Read:** `tenzro governance economic-policy`, or the `tenzro_getEconomicPolicy` RPC
 - **Executor:** `ProposalType::EconomicPolicyUpdate` → `EconomicPolicyManager::apply`
 

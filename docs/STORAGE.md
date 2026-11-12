@@ -83,7 +83,7 @@ Every stored object is owned, and retrieval is gated. `ObjectDescriptor` carries
 
 Who may call what:
 
-- `tenzro_storageStoreObject` and `tenzro_storageSetPricing` are operator-only (node administrators): they place objects on this provider and set its rates. Payment needs no node method: the renter buys the storage claim on chain.
+- `tenzro_storageStoreObject`, `tenzro_storageRetrieveObject` and `tenzro_storageSetPricing` are operator-only (node administrators): they place and read back objects on this provider and set its rates. Payment needs no node method: the renter buys the storage claim on chain.
 
 **Confidential seal.** A sensitive object can additionally carry a `ConfidentialSeal`: encryption-at-rest with one wrapped data key per authorized DID (`hpke-x25519-hkdf-sha256-aes-256-gcm`). The descriptor records the wrapped-key envelopes; the node and client do the crypto. This is opt-in on top of the always-on access policy — a capability gate for every object, encryption-at-rest for sensitive data.
 

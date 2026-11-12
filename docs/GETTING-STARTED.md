@@ -260,7 +260,7 @@ to do next if anything blocks Tenzro. For a manual walk-through, run these in or
 first that fails; each line says what to do.
 
 ```bash
-tenzro version && tenzro-node --version          # tenzro 0.2.1, tenzro-node 0.2.0; if "command not found": export PATH="$HOME/.local/bin:$PATH"
+tenzro version && tenzro-node --version          # tenzro 0.2.1, tenzro-node 0.2.1; if "command not found": export PATH="$HOME/.local/bin:$PATH"
 command -v tenzro                                # should be ~/.local/bin/tenzro (another path = an older copy shadows it)
 tenzro-node hardware                             # build: CPU|CUDA, gpus, startup: ok
 getconf GNU_LIBC_VERSION                         # Linux: 2.39 or newer
@@ -277,9 +277,20 @@ df -h ~                                          # about 300 MB for one install
 
 ### Update, uninstall
 
-Update: run the installer again. It fetches the signed list, and if the archive it lists is already installed it
-downloads nothing; otherwise it installs the new version beside the old one, switches the `current` link and keeps the
-previous version. There is no `tenzro update` command.
+Update: `tenzro update`. It asks the release channel, shows what it found, installs a newer signed release beside the
+old one, restarts the node service that `tenzro setup` installed, and watches the node until the release has proved
+healthy. A release that does not stay healthy is rolled back by itself and the service is restarted onto the previous
+one. It asks before it installs; `--yes` skips the question and is needed where no terminal is attached. On a node that
+serves a staked role, and on a node that was started by hand, it installs the release, restarts nothing and prints the
+steps that remain. `--no-restart` does the same on any machine.
+
+The same update one step at a time: `tenzro update check`, then `tenzro update apply` (installs, restarts nothing),
+then restart the node, then `tenzro update verify`. `tenzro update rollback` puts the previous release back.
+On Windows `tenzro update` does not replace the running program: it says so and stops. Install a new release with its MSI.
+
+Running the installer again also updates. It fetches the signed list, and if the archive it lists is already installed
+it downloads nothing; otherwise it installs the new version beside the old one, switches the `current` link and keeps
+the previous version.
 
 Remove: `curl -fsSL https://downloads.tenzro.com/install.sh | sh -s -- --uninstall` removes the links, `~/.tenzro/install`
 and the profile block if it added one. It leaves `~/.tenzro` itself (settings, node data) alone.

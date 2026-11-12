@@ -112,7 +112,14 @@ fn no_origin_credential_ships_with_the_node() {
                 found.push(format!("{file}: names {var}"));
             }
         }
-        let is_config = !(file.ends_with(".rs") || file.ends_with(".md"));
+        // The onboarding entry-point list names each variable on an `env ` line
+        // without a value; that is a name, not a value given to it.
+        let names_only = file == "scripts/supply-chain/onboarding-entry-points.txt"
+            && text
+                .lines()
+                .filter(|l| l.contains(operator_var))
+                .all(|l| l.starts_with("env ") && !l.contains('='));
+        let is_config = !(file.ends_with(".rs") || file.ends_with(".md") || names_only);
         if is_config && text.contains(operator_var) {
             found.push(format!(
                 "{file}: sets {operator_var}; it is the operator's own, never shipped"

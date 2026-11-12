@@ -1,5 +1,5 @@
 //! Whether the machine economy grows itself: an aggregate daily model of
-//! app-mediated demand, endogenous provider supply and an owner bootstrap.
+//! app-mediated demand, endogenous provider supply and a funded bootstrap.
 //!
 //! This model does not execute transactions. It takes the protocol's fee
 //! rules as inputs (network take per class, settlement fee, gas, the reward
@@ -17,13 +17,13 @@
 //!   fees, same rules, its own elasticity.
 //! - **Supply** per class (GPU rental, inference hosting, storage) enters
 //!   after a lag while the expected margin is positive, and leaves while it
-//!   is negative. The owner runs a bootstrap supply and funds an agent swarm
-//!   until a set day. Consumer platforms buy inference for their own
-//!   products; a set share of their demand is related to the owner, served
-//!   by the owner's providers, pays fees, earns no rewards and is kept out of
-//!   the organic figures.
+//!   is negative. The bootstrap funder runs a bootstrap supply and funds an
+//!   agent swarm until a set day. Consumer platforms buy inference for their
+//!   own products; a set share of their demand is related to the bootstrap
+//!   funder, served by its providers, pays fees, earns no rewards and is kept
+//!   out of the organic figures.
 //! - **Outcome**: growth, stall or collapse; the day organic fees cover
-//!   provider costs and running costs; what the owner carried until then.
+//!   provider costs and running costs; what the bootstrap funder carried until then.
 
 use serde::Serialize;
 
@@ -86,7 +86,7 @@ pub struct ClassSpec {
     pub units_per_provider_day: f64,
     /// One provider's cost a day, USD, used or idle.
     pub cost_usd_day: f64,
-    /// Providers the owner runs at launch.
+    /// Providers the bootstrap funder runs at launch.
     pub bootstrap: f64,
     /// Settlement payments one unit takes at launch prices (streams claim
     /// hourly; sessions settle once); a payment carries a value, so it covers
@@ -154,8 +154,8 @@ pub struct Channel {
     pub batches_per_day: f64,
     /// The channel's own cost a month, USD (platform operations).
     pub cost_usd_month: f64,
-    /// Share of the channel's demand that is related to the owner and
-    /// served by the owner's providers: it pays providers and fees but earns
+    /// Share of the channel's demand that is related to the bootstrap funder
+    /// and served by its providers: it pays providers and fees but earns
     /// no rewards and is not counted as organic demand.
     pub related_share: f64,
 }
@@ -178,9 +178,9 @@ pub struct GrowthInputs {
     /// Rewards one settlement earns, share of its settlement fee (the
     /// protocol caps provider and activity rewards together at 90%).
     pub reward_share_of_fee: f64,
-    /// Owner-funded agent swarm, USD a day, until `bootstrap_days`.
+    /// Agent swarm paid for by the bootstrap funder, USD a day, until `bootstrap_days`.
     pub owner_swarm_usd_day: f64,
-    /// Day the owner stops funding the swarm and the bootstrap supply.
+    /// Day the bootstrap funder stops funding the swarm and the bootstrap supply.
     pub bootstrap_days: f64,
     /// Network running costs, USD a month.
     pub running_cost_usd_month: f64,
@@ -211,7 +211,7 @@ pub struct GrowthInputs {
     /// within the month's allowance: `revenue_share` of the trailing month's
     /// fee revenue plus `drawdown` of the reserve; the reserve fills with
     /// `fill_share` of new revenue up to `target_months` of observed cost.
-    /// What the allowance does not cover, the owner carries.
+    /// What the allowance does not cover, the bootstrap funder carries.
     pub reserve: ReserveRules,
     /// Buyers' routing fills the busiest providers first: a provider is
     /// either loaded to capacity or idle, a newcomer expects load only while
@@ -541,7 +541,7 @@ pub const PI_COST_USD_DAY: (f64, f64) = (0.073 + 0.018, 0.110 + 0.036 + 0.164);
 
 /// The channels at a stated split: resellers and third-party platforms hold the
 /// majority; consumer platforms (buying for their own products, half of it
-/// related to the owner) hold 15%. Elasticities are assumptions with these ranges: aggregators
+/// related to the bootstrap funder) hold 15%. Elasticities are assumptions with these ranges: aggregators
 /// that route by price (third-party platforms) 4-8, resellers 2-4, partners'
 /// deployments 1-2, direct developers 1.5-3.
 pub fn default_channels() -> Vec<Channel> {
@@ -584,9 +584,9 @@ pub struct YearPoint {
     pub year: u32,
     /// Organic demand the network served, USD a day.
     pub organic_usd_day: f64,
-    /// Owner-funded demand, USD a day.
+    /// Demand paid for by the bootstrap funder, USD a day.
     pub owner_usd_day: f64,
-    /// Related-party demand served by the owner's providers, USD a day.
+    /// Related-party demand served by the bootstrap funder's providers, USD a day.
     pub related_usd_day: f64,
     /// Harness authors' income, USD a day.
     pub author_usd_day: f64,
@@ -598,7 +598,7 @@ pub struct YearPoint {
     pub won_share: f64,
     /// Providers per class (inference, GPU, storage, Pi).
     pub providers: Vec<f64>,
-    /// Of them, owner-run.
+    /// Of them, run by the bootstrap funder.
     pub owner_providers: Vec<f64>,
     /// Mean provider margin per class, USD a month.
     pub margin_usd_month: Vec<f64>,
@@ -640,10 +640,10 @@ pub struct GrowthResult {
     /// growth, stall or collapse.
     pub outcome: String,
     /// First day from which, for 90 days, organic fees covered running
-    /// costs and the median non-owner provider covered its cost in every
+    /// costs and the median independent provider covered its cost in every
     /// class with demand; `None` if never.
     pub self_sustaining_day: Option<f64>,
-    /// What the owner carried: swarm spend, bootstrap providers' losses and
+    /// What the bootstrap funder carried: swarm spend, bootstrap providers' losses and
     /// running costs fees did not cover, USD.
     pub owner_carry_usd: f64,
     /// Year-end points.
@@ -760,7 +760,7 @@ pub fn run(i: &GrowthInputs) -> GrowthResult {
             };
             let gross = price * (1.0 + c.take + i.settlement_fee) + i.gas_usd * ppu + root_fee_unit;
             let capacity = n * c.units_per_provider_day;
-            // Units the owner's swarm buys, always on the network.
+            // Units the bootstrap funder's swarm buys, always on the network.
             let owner_units = if boot {
                 i.owner_swarm_usd_day * c.demand_mix / gross
             } else {
@@ -939,7 +939,7 @@ pub fn run(i: &GrowthInputs) -> GrowthResult {
             if m < 0.0 {
                 let out = i.exit_rate * (-m / c.cost_at(y)).min(1.0);
                 s.organic = (s.organic * (1.0 - out)).max(0.0);
-                // After the bootstrap the owner's providers face the same
+                // After the bootstrap the funder's providers face the same
                 // rule as anyone's.
                 if !boot {
                     s.owner = (s.owner * (1.0 - out)).max(0.0);
@@ -951,7 +951,7 @@ pub fn run(i: &GrowthInputs) -> GrowthResult {
         }
         // Running costs, paid by the chain's reserve rules: the reserve
         // fills with a share of new revenue up to its target, and pays at
-        // most the month's allowance; the owner carries the rest.
+        // most the month's allowance; the bootstrap funder carries the rest.
         let run_day = i.running_cost_usd_month / 30.44;
         let r = &i.reserve;
         rev_trail.push_back(fees.max(0.0));
@@ -1108,11 +1108,11 @@ pub fn run(i: &GrowthInputs) -> GrowthResult {
 }
 
 /// The least potential demand at launch, USD a day, whose run grows and
-/// sustains itself within a year of the owner stopping, searched between
+/// sustains itself within a year of the bootstrap funder stopping, searched between
 /// `lo` and `hi`; `None` when even `hi` does not.
 pub fn threshold(base: &GrowthInputs, lo: f64, hi: f64) -> Option<f64> {
-    // Turned on: it grows, and sustains itself within a year of the owner
-    // stopping.
+    // Turned on: it grows, and sustains itself within a year of the bootstrap
+    // funder stopping.
     let grows = |d: f64| {
         let mut i = base.clone();
         i.potential_usd_day = d;
@@ -1483,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn no_demand_collapses_once_the_owner_stops() {
+    fn no_demand_collapses_once_the_bootstrap_funder_stops() {
         let i = GrowthInputs {
             potential_usd_day: 0.0,
             owner_swarm_usd_day: 1_000.0,

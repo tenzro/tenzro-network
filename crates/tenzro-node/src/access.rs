@@ -1320,6 +1320,7 @@ pub fn page_routes(node: Arc<TenzroNode>) -> axum::Router {
         )
         .route("/access/policy", get(page_get_policy).put(page_put_policy))
         .route("/access/connectivity", get(page_get_connectivity))
+        .route("/access/tpm", get(page_get_tpm))
         .with_state(node)
 }
 
@@ -1371,6 +1372,25 @@ async fn page_get_connectivity(
         _ => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "the node's iroh endpoint is not up yet".to_string(),
+        ),
+    }
+}
+
+/// `GET /access/tpm`: how the TPM is answering (healthy, degraded or
+/// stalled, with the counters behind it), as JSON.
+async fn page_get_tpm(
+    axum::extract::State(node): axum::extract::State<Arc<TenzroNode>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
+) -> PageReply {
+    if let Err(reply) = page_admit(&node, peer, &headers) {
+        return reply;
+    }
+    match tenzro_device_key::tpm_health() {
+        Some(h) => (axum::http::StatusCode::OK, h.to_string()),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            "this platform has no TPM backend".to_string(),
         ),
     }
 }

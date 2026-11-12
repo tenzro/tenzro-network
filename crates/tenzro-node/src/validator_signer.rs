@@ -143,6 +143,8 @@ impl ValidatorSigner for HardwareValidatorSigner {
     }
 
     fn sign(&self, domain: &[u8], message: &[u8]) -> Result<CompositeSignature> {
+        // Votes and blocks go ahead of announcement signatures at the TPM.
+        let _priority = tenzro_device_key::tpm_exec::high_priority();
         let long = || ConsensusError::InvalidValidatorKey("domain longer than 255 bytes".into());
         match &self.legs {
             Legs::MlDsa65P256 { p256, root } => {

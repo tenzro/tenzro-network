@@ -44,5 +44,5 @@ who keep their own copy of `tenzro-release.pub` and are told of a changed key sh
 
 ## Rotation
 
-A second key on a second TPM is the planned successor. Archives signed with this key remain verifiable with
+Archives signed with this key remain verifiable with
 it after a rotation.

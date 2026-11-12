@@ -85,8 +85,8 @@ struct Cli {
     #[arg(long, value_name = "TIER", env = "TENZRO_TIER")]
     tier: Option<String>,
 
-    /// Async runtime worker threads. Omit for the tier's: 2, or 1 on a
-    /// one-core edge device.
+    /// Async runtime worker threads. Omit for the tier's: the core count,
+    /// 2 to 8 on a validator or provider, 1 to 2 on an edge device.
     #[arg(long, value_name = "N", env = "TENZRO_WORKER_THREADS")]
     worker_threads: Option<usize>,
 
@@ -232,6 +232,15 @@ struct Cli {
     /// Requires `--checkpoint-height` and `--checkpoint-hash`.
     #[arg(long = "state-sync-from", value_name = "ENDPOINT_ID[@IP:PORT]")]
     state_sync_from: Vec<String>,
+
+    /// Replay the chain from the local tip even on a role that would join by
+    /// snapshot. A node without the validator role restores the committed
+    /// state from a peer's snapshot by default when a weak-subjectivity
+    /// checkpoint is configured (`--checkpoint-height`/`--checkpoint-hash`
+    /// or genesis `[weak_subjectivity]`); a validator always replays.
+    /// Also settable as `state_sync = "off"` in the config file.
+    #[arg(long = "no-state-sync")]
+    no_state_sync: bool,
 
     /// Weak-subjectivity checkpoint: the hash (hex, with or without `0x`) of
     /// a finalized block the operator has verified out of band, at
@@ -468,6 +477,35 @@ enum Command {
         /// Copy rate, MiB per second (0 for unpaced).
         #[arg(long, default_value_t = 64)]
         rate_mb: u64,
+    },
+
+    /// List, or discard, the validator registry's undo records.
+    ///
+    /// A node that stops between a registry change and its commit puts the
+    /// registry back from these records at its next start. If a record
+    /// cannot be read the start fails and keeps them. This command, with the
+    /// node stopped, shows the chain tip and the records. `--discard --yes`
+    /// removes the unreadable ones; the readable ones too only with
+    /// `--force`. Nothing is put back: the registry stays as the last run
+    /// left it, which may include the changes of a block that never
+    /// committed. Prefer restoring from a snapshot.
+    #[command(name = "registry-undo")]
+    RegistryUndo {
+        /// The node's data directory.
+        #[arg(long, value_name = "DIR", env = "TENZRO_DATA_DIR")]
+        data_dir: Option<PathBuf>,
+
+        /// Remove the unreadable records.
+        #[arg(long, default_value_t = false)]
+        discard: bool,
+
+        /// With --discard, remove the readable records as well.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+
+        /// Confirm the removal.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
 
     /// Set who may use this node: the access wizard.
@@ -932,12 +970,15 @@ fn main() -> Result<()> {
     // A runtime host is started by re-running this executable as its
     // confinement launcher, which must confine itself while it is still
     // single-threaded: before the async runtime starts any thread.
+    // Before any thread exists: the arena cap applies to arenas opened later.
+    tenzro_node::malloc_tuning::limit_arenas(tenzro_node::malloc_tuning::MAX_ARENAS);
     praecise_host::sandbox::enter_if_requested();
     // A model file's header is parsed by this executable re-run as a
     // locked-down child, which must lock itself down before any thread.
     #[cfg(feature = "inference")]
     tenzro_model::parse_jail::enter_if_requested();
     let cli = Cli::parse();
+    tenzro_node::malloc_tuning::spawn_trimmer();
     let tuning = runtime_tuning(&cli)?;
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(cli.worker_threads.unwrap_or(tuning.worker_threads).max(1))
@@ -1372,7 +1413,7 @@ async fn run(mut cli: Cli) -> Result<()> {
 
     // GPU-wedge watchdog (validator-safe): every 60s, flag any model whose
     // in-flight work has been continuous for >10 min — the signature of a wedged
-    // decode that #46/#55 could not catch. Log-only: it never force-kills a
+    // decode that the other guards do not catch. Log-only: it never force-kills a
     // kernel or touches consensus; the loud WARN is the operator signal and the
     // router already steers away from an unhealthy provider.
     #[cfg(feature = "inference")]
@@ -1764,6 +1805,12 @@ async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
             dest,
             rate_mb,
         } => run_backup(data_dir, dest, rate_mb),
+        Command::RegistryUndo {
+            data_dir,
+            discard,
+            force,
+            yes,
+        } => run_registry_undo(data_dir, discard, force, yes).await,
         Command::Credentials { action } => run_credentials(action, config),
         Command::Tpm {
             action: TpmAction::Provision,
@@ -1932,7 +1979,11 @@ fn run_hardware(config: &NodeConfig) -> Result<()> {
         (Ok(names), None) => println!("onnx: {}", names.join(",")),
         (Err(e), None) => println!("onnx: refused ({e})"),
     }
-    let onnx = if runtime_unavailable.is_some() { Ok(Vec::new()) } else { onnx };
+    let onnx = if runtime_unavailable.is_some() {
+        Ok(Vec::new())
+    } else {
+        onnx
+    };
     // A build whose GPU backend has no ONNX Runtime provider (Vulkan) starts
     // and refuses ONNX models one by one; for every other build an ONNX
     // runtime that cannot use this machine's accelerator stops it.
@@ -2060,6 +2111,10 @@ fn configure_tpm(config: &NodeConfig) -> Result<()> {
     #[cfg(any(target_os = "linux", windows))]
     tenzro_device_key::tpm_exec::configure(tenzro_device_key::tpm_exec::Limits {
         call_timeout: std::time::Duration::from_secs(config.tpm.call_timeout_secs),
+        consensus_timeout: std::time::Duration::from_secs(config.tpm.consensus_timeout_secs),
+        breaker_trip_after: config.tpm.breaker_trip_after,
+        breaker_base: std::time::Duration::from_secs(1),
+        breaker_cap: std::time::Duration::from_secs(config.tpm.breaker_cap_secs.max(1)),
         signs_per_second: config.tpm.signs_per_second,
         quotes_per_second: config.tpm.quotes_per_second,
     })
@@ -2146,6 +2201,87 @@ fn run_backup(data_dir: Option<PathBuf>, dest: PathBuf, rate_mb: u64) -> Result<
             r.linked_files
         );
     }
+    Ok(())
+}
+
+/// `tenzro-node registry-undo`: show, or discard, the registry's undo records.
+async fn run_registry_undo(
+    data_dir: Option<PathBuf>,
+    discard: bool,
+    force: bool,
+    yes: bool,
+) -> Result<()> {
+    use tenzro_storage::traits::BlockStore as _;
+    let data_dir = data_dir
+        .map(tenzro_types::paths::expand_tilde)
+        .unwrap_or_else(tenzro_types::paths::default_data_dir);
+    // Only a store that is there: a wrong path is an error, not a new empty store.
+    let store = std::sync::Arc::new(
+        tenzro_storage::RocksDbStore::open_existing(&tenzro_storage::StorageConfig::new(
+            data_dir.join("db"),
+        ))
+        .map_err(|e| {
+            error::NodeError::Other(format!(
+                "no node store could be opened at {} (wrong --data-dir, or the node is running?): {e}",
+                data_dir.display()
+            ))
+        })?,
+    );
+    let blocks = tenzro_storage::BlockStoreImpl::new(store.clone())
+        .map_err(|e| error::NodeError::Other(e.to_string()))?;
+    let tip = blocks
+        .latest_height()
+        .await
+        .map_err(|e| error::NodeError::Other(e.to_string()))?;
+    let tip_epoch = match tip {
+        Some(h) => blocks
+            .get_block_by_height(h)
+            .await
+            .ok()
+            .flatten()
+            .map(|b| b.header.epoch),
+        None => None,
+    };
+    println!(
+        "chain tip: height {}, epoch {}",
+        tip.map_or("none".to_string(), |h| h.0.to_string()),
+        tip_epoch.map_or("none".to_string(), |e| e.to_string())
+    );
+    let registry = tenzro_token::validator_registry::ValidatorRegistry::with_storage(store);
+    let records = registry.undo_summaries();
+    if records.is_empty() {
+        println!("no undo records");
+        return Ok(());
+    }
+    for (tag, seq) in &records {
+        match seq {
+            Some(seq) => println!("{tag}  written #{seq}"),
+            None => println!("{tag}  UNREADABLE"),
+        }
+    }
+    if !discard {
+        return Ok(());
+    }
+    if !yes {
+        return Err(error::NodeError::Config(
+            "--discard removes records and needs --yes".to_string(),
+        ));
+    }
+    let tags: Vec<String> = if force {
+        records.iter().map(|(t, _)| t.clone()).collect()
+    } else {
+        registry.unreadable_undo_tags()
+    };
+    eprintln!(
+        "WARNING: discarding {} undo record(s) puts nothing back. The validator registry stays as the \
+         last run left it, which may include the changes of a block that never committed. \
+         Restoring from a snapshot is safer.",
+        tags.len()
+    );
+    let n = registry
+        .discard_undo_tags(&tags)
+        .map_err(error::NodeError::Other)?;
+    println!("discarded {n} undo records");
     Ok(())
 }
 
@@ -2433,6 +2569,21 @@ fn init_logging(log_level: &str, log_format: &str) -> Result<()> {
     Ok(())
 }
 
+/// The node config file as a raw TOML table, when one is given and parses.
+fn config_table(cli: &Cli) -> Option<toml::Table> {
+    cli.config
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| text.parse::<toml::Table>().ok())
+}
+
+/// Whether the node config file names `[onboarding] mode` itself.
+fn config_sets_onboarding_mode(cli: &Cli) -> bool {
+    config_table(cli)
+        .and_then(|table| table.get("onboarding")?.get("mode").cloned())
+        .is_some()
+}
+
 /// Load configuration from file or create default
 fn load_config(cli: &Cli) -> Result<NodeConfig> {
     if let Some(config_path) = &cli.config {
@@ -2697,8 +2848,87 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         config.genesis = Some(genesis);
     }
 
+    // A node given no `--boot-nodes` joins through the network profile the
+    // release ships (`share/network/<chain_id>.toml`): the relay, its
+    // operator's identity and the genesis validators. Not for a local chain
+    // (--dev, --solo) or an isolated node, which dial no one.
+    if !cli.dev && !cli.solo && !isolated {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok());
+        let from_env = std::env::var(tenzro_node::network_profile::PROFILE_ENV).ok();
+        let chain_id = config.chain_id();
+        tenzro_node::network_profile::apply(
+            &mut config.iroh.boot,
+            cli.boot_nodes.is_some(),
+            chain_id,
+            exe.as_deref(),
+            from_env.as_deref(),
+        )?;
+    }
+
+    // The identity gate mode the network profile ships, unless this node's
+    // config file sets one: a release that ships the profile enforces the
+    // rule without any setting by the operator.
+    if !cli.dev && !cli.solo && !isolated && !config_sets_onboarding_mode(cli) {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok());
+        let from_env = std::env::var(tenzro_node::network_profile::PROFILE_ENV).ok();
+        if let Some(mode) = tenzro_node::network_profile::onboarding_mode(
+            config.chain_id(),
+            exe.as_deref(),
+            from_env.as_deref(),
+        )? {
+            info!(?mode, "identity gate mode taken from the network profile");
+            config.onboarding.policy.mode = mode;
+        }
+    }
+
+    // Snapshot join defaults the network profile ships: the snapshot peers
+    // (`[state_sync] from`) and the snapshot producer settings (`[snapshot]`).
+    // Whatever the node config file sets itself wins.
+    if !cli.dev && !cli.solo && !isolated {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok());
+        let from_env = std::env::var(tenzro_node::network_profile::PROFILE_ENV).ok();
+        if let Some(profile) = tenzro_node::network_profile::shipped(
+            config.chain_id(),
+            exe.as_deref(),
+            from_env.as_deref(),
+        )? {
+            let table = config_table(cli);
+            if let Some(sync) = &profile.state_sync {
+                let node_sets = table
+                    .as_ref()
+                    .is_some_and(|t| t.contains_key("state_sync_from"));
+                if !node_sets && config.state_sync_from.is_empty() && !sync.from.is_empty() {
+                    info!(
+                        peers = sync.from.len(),
+                        "state sync peers taken from the network profile"
+                    );
+                    config.state_sync_from = sync.from.clone();
+                }
+            }
+            if let Some(snapshot) = &profile.snapshot {
+                let node_sets = |key: &str| {
+                    table
+                        .as_ref()
+                        .and_then(|t| t.get("snapshot")?.as_table()?.get(key))
+                        .is_some()
+                };
+                snapshot.apply_to(&mut config.snapshot, &node_sets);
+            }
+        }
+    }
+
     config.log_level = cli.log_level.clone();
     apply_listen_overrides(config, cli);
+
+    if cli.no_state_sync {
+        config.state_sync = tenzro_node::state_sync_policy::StateSyncMode::Off;
+    }
 
     // External (advertised) endpoint overrides — only set when supplied on
     // the CLI so that config-file values take precedence when no flag is
@@ -2737,9 +2967,10 @@ fn parse_state_sync_peers<'a>(
 ) -> Result<Vec<tenzro_iroh::EndpointAddr>> {
     let mut peers = Vec::new();
     for entry in entries {
-        peers.push(tenzro_iroh::parse_peer(entry).map_err(|e| {
-            error::NodeError::Other(format!("--state-sync-from {entry}: {e}"))
-        })?);
+        peers.push(
+            tenzro_iroh::parse_peer(entry)
+                .map_err(|e| error::NodeError::Other(format!("--state-sync-from {entry}: {e}")))?,
+        );
     }
     Ok(tenzro_iroh::merge_peers(peers))
 }
@@ -2751,7 +2982,7 @@ mod state_sync_peer_tests {
     #[test]
     fn config_and_flag_entries_merge_and_bad_ones_are_refused() {
         let id = tenzro_iroh::EndpointId::from_bytes(&ed25519_public([9; 32])).unwrap();
-        let from_config = vec![format!("{id}@127.0.0.1:1")];
+        let from_config = [format!("{id}@127.0.0.1:1")];
         let from_flag = vec![format!("{id}@127.0.0.1:2"), id.to_string()];
         let peers = parse_state_sync_peers(from_config.iter().chain(&from_flag)).unwrap();
         assert_eq!(peers.len(), 1);

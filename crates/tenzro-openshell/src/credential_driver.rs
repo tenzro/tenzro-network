@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use tenzro_crypto::batch::RecordSigner;
 #[cfg(test)]
 use tenzro_crypto::batch::ImmediateRecordSigner;
+use tenzro_crypto::batch::RecordSigner;
 use tenzro_types::agent_audit::{ActionKind, ActionOutcome};
 use tonic::{Request, Response, Status};
 
@@ -407,9 +407,15 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn fixture(ops: &[&str]) -> (Arc<StateAuthority>, Arc<ImmediateRecordSigner>, Arc<RecordLog>) {
+    pub fn fixture(
+        ops: &[&str],
+    ) -> (
+        Arc<StateAuthority>,
+        Arc<ImmediateRecordSigner>,
+        Arc<RecordLog>,
+    ) {
         let id = Arc::new(TestHybridSigner::p256_only(11));
-        let authority = StateAuthority::new(MACHINE, id.public_key().p256.clone(), 1337);
+        let authority = StateAuthority::new(MACHINE, id.public_key().clone(), 1337);
         authority.install_terms(&agent(), terms(ops));
         let signer = Arc::new(tenzro_crypto::batch::ImmediateRecordSigner::new(id));
         let records = Arc::new(RecordLog::new(signer.clone(), None));

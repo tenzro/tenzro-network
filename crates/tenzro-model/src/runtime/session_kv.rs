@@ -117,6 +117,8 @@ pub(super) struct SessionStore {
     /// Least time, in milliseconds, between two checkpoints of one batched
     /// session.
     checkpoint_interval_ms: AtomicU64,
+    /// Models whose missing checkpoint has been reported.
+    unchecked_reported: dashmap::DashSet<String>,
 }
 
 /// A session on a batch engine.
@@ -405,7 +407,23 @@ impl ModelRuntime {
                     s.taken_at = Some(std::time::Instant::now());
                 }
                 // The next turn is checkpointed instead.
-                Err(e) => debug!(session, error = %e, "no checkpoint of this turn"),
+                Err(e) => {
+                    if self
+                        .sessions
+                        .unchecked_reported
+                        .insert(model_id.to_string())
+                    {
+                        warn!(
+                            model = model_id,
+                            session,
+                            reason = %e,
+                            "a turn of a batched session has no checkpoint; a successor \
+                             replays the conversation from its messages instead of its cache"
+                        );
+                    } else {
+                        debug!(session, error = %e, "no checkpoint of this turn");
+                    }
+                }
             }
         }
         Ok(SessionTurn {

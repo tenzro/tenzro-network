@@ -13,15 +13,15 @@ use tenzro_cli::{commands, output, rpc};
 use commands::{
     AccessCommand, AdaptiveBurnCommand, AgentCommand, AuthCommand, BondCommand, BridgeCommand,
     CatalogCommand, ClusterCommand, ContractCommand, CryptoCommand, DaCommand, DecideCommand,
-    DetectCommand,
-    DiscoverCommand, DutyCommand, EmbedImageCommand, EmbedTextCommand, EmbedVideoCommand,
-    EscrowCommand, EventsCommand, FinalityCommand, ForecastCommand, FundingCommand,
-    GovernanceCommand, IdentityCommand, InferenceCommand, InsuranceCommand, IrohCommand, JoinCmd,
-    MediaGenCommand, ModelCommand, NodeCommand, PaymentCommand, Permit2Command, PqHybridCommand,
-    ProvenanceCommand, ProviderCommand, RegistryCommand, RerankCommand, ReserveCommand,
-    ScheduleCommand, SegmentCommand, SettleCommand, SetupCmd, SpeechCommand, SponsorCommand, StakeCommand,
-    TeeCommand, TextSegmentCommand, TokenCommand, TrainingCommand, TranscribeCommand, TrustCommand,
-    TxCommand, ValidatorCommand, VrfCommand, WalletCommand, ZkCommand,
+    DetectCommand, DiscoverCommand, DutyCommand, EmbedImageCommand, EmbedTextCommand,
+    EmbedVideoCommand, EscrowCommand, EventsCommand, FinalityCommand, ForecastCommand,
+    FundingCommand, GovernanceCommand, IdentityCommand, InferenceCommand, InsuranceCommand,
+    IrohCommand, JoinCmd, MediaGenCommand, ModelCommand, NodeCommand, PaymentCommand,
+    Permit2Command, PqHybridCommand, ProvenanceCommand, ProviderCommand, RegistryCommand,
+    RerankCommand, ReserveCommand, ScheduleCommand, SegmentCommand, SettleCommand, SetupCmd,
+    SpeechCommand, SponsorCommand, StakeCommand, TeeCommand, TextSegmentCommand, TokenCommand,
+    TrainingCommand, TranscribeCommand, TrustCommand, TxCommand, ValidatorCommand, VrfCommand,
+    WalletCommand, ZkCommand,
     bridge_fee::BridgeFeeCommand,
     device::DeviceCommand,
     machine_access::MachineAccessCommand,
@@ -45,6 +45,10 @@ struct Cli {
     /// Output format (text, json)
     #[arg(long, global = true, default_value = "text")]
     format: String,
+
+    /// Hide the notice about a newer release (and other optional lines)
+    #[arg(short, long, global = true)]
+    quiet: bool,
 
     /// The node to talk to, for every command that does not take its own
     /// `--rpc` (also `TENZRO_RPC`). Default: the endpoint `tenzro setup`
@@ -143,6 +147,13 @@ enum Command {
 
     /// Check this machine and the network, and say how to fix what is wrong
     Doctor(commands::doctor::DoctorCmd),
+
+    /// Update this machine to the newest signed C0 release (node-local fixes, CLI, performance) in one command, or one step at a time
+    Update(commands::UpdateCmd),
+
+    /// The release process: sign, check and publish the notice that tells nodes a release exists
+    #[command(subcommand)]
+    Release(commands::release::ReleaseCommand),
 
     /// Print shell completions: bash, zsh, fish, powershell or elvish
     Completions(CompletionsCmd),
@@ -487,7 +498,11 @@ fn report_error(e: &anyhow::Error) -> String {
         .chain()
         .find_map(|c| c.downcast_ref::<tenzro_cli::friendly::Unreachable>())
     {
-        return format!("{}✗{} {u}", output::colors::bad_stderr(), output::colors::reset_stderr());
+        return format!(
+            "{}✗{} {u}",
+            output::colors::bad_stderr(),
+            output::colors::reset_stderr()
+        );
     }
     format!("Error: {e:?}")
 }
@@ -519,13 +534,31 @@ async fn cli_main() -> Result<()> {
     let no_banner = std::env::var("TENZRO_NO_BANNER")
         .map(|v| v == "1")
         .unwrap_or(false);
-    if !matches!(command, Command::Version(_) | Command::Completions(_) | Command::Doctor(_) | Command::Tpm(_))
-        && !cli.verbose
+    if !matches!(
+        command,
+        Command::Version(_) | Command::Completions(_) | Command::Doctor(_) | Command::Tpm(_)
+    ) && !cli.verbose
         && !no_banner
         && std::io::stdout().is_terminal()
     {
         output::print_banner();
     }
+
+    // `status`, `doctor` and `update` say what they know about releases
+    // themselves; every other command ends with at most the one-line notice.
+    let says_own_update = matches!(
+        command,
+        Command::Version(_)
+            | Command::Completions(_)
+            | Command::Doctor(_)
+            | Command::Status(_)
+            | Command::Update(_)
+            | Command::Release(_)
+            | Command::Tpm(_)
+    );
+    let json_output =
+        cli.format == "json" || std::env::args().any(|a| a == "--json" || a == "--format=json");
+    let quiet = cli.quiet;
 
     // Execute command
     match command {
@@ -549,10 +582,17 @@ async fn cli_main() -> Result<()> {
         Command::Duty(cmd) => cmd.execute().await?,
         Command::Dev(cmd) => cmd.execute().await?,
         Command::Doctor(cmd) => cmd.execute().await?,
+        Command::Update(cmd) => cmd.execute().await?,
+        Command::Release(cmd) => cmd.execute()?,
         Command::Tpm(cmd) => cmd.execute().await?,
         Command::Completions(cmd) => {
             use clap::CommandFactory as _;
-            clap_complete::generate(cmd.shell, &mut Cli::command(), "tenzro", &mut std::io::stdout());
+            clap_complete::generate(
+                cmd.shell,
+                &mut Cli::command(),
+                "tenzro",
+                &mut std::io::stdout(),
+            );
         }
         Command::Token(cmd) => cmd.execute().await?,
         Command::Contract(cmd) => cmd.execute().await?,
@@ -612,6 +652,14 @@ async fn cli_main() -> Result<()> {
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,
         Command::Info(cmd) => execute_info(cmd).await?,
         Command::Version(cmd) => execute_version(cmd)?,
+    }
+
+    if !says_own_update {
+        commands::update::notice::print_after_command(
+            &commands::update::notice::data_dir(),
+            quiet,
+            json_output,
+        );
     }
 
     Ok(())
@@ -1676,25 +1724,13 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             let amount: String = Input::with_theme(output::prompt_theme())
                 .with_prompt("Amount (TNZO)")
                 .interact_text()?;
-            let amount_float: f64 = amount.parse().unwrap_or(0.0);
-            let amount_wei = (amount_float * 1e18) as u128;
             // Signed in hardware as this machine's client account and
-            // submitted pre-signed; the node never signs for it.
-            let result = tenzro_cli::keystore::send_as_client(
-                rpc,
-                "client",
-                tenzro_cli::keystore::address32(&to)?,
-                serde_json::json!({ "Transfer": { "amount": amount_wei.to_string() } }),
-                21_000,
-            )
-            .await?;
-            output::print_success("Transaction sent!");
-            output::print_field(
-                "Tx Hash",
-                &result
-                    .as_str()
-                    .map_or_else(|| result.to_string(), str::to_string),
-            );
+            // submitted pre-signed; the node never signs for it. The recipient
+            // and amount checks of `tenzro wallet send` apply here too.
+            let result =
+                tenzro_cli::commands::wallet::send_tnzo(rpc, "client", &to, &amount, None, None)
+                    .await?;
+            tenzro_cli::commands::wallet::report_transfer(rpc, &result, true).await?;
         }
         2 => {
             let addr: String = Input::with_theme(output::prompt_theme())
@@ -2160,8 +2196,9 @@ mod tests {
         assert!(!printed.is_empty(), "the wizard prints no tenzro command");
         for line in printed {
             let argv: Vec<&str> = line.split_whitespace().collect();
-            Cli::try_parse_from(&argv)
-                .unwrap_or_else(|e| panic!("the wizard prints `{line}`, which does not parse:\n{e}"));
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| {
+                panic!("the wizard prints `{line}`, which does not parse:\n{e}")
+            });
         }
     }
 }
@@ -2301,6 +2338,9 @@ pub enum RelayCommand {
 }
 
 #[cfg(test)]
+mod onboarding_guard;
+
+#[cfg(test)]
 mod first_run_tests {
     use super::*;
     use clap::CommandFactory as _;
@@ -2329,7 +2369,16 @@ mod first_run_tests {
         Cli::try_parse_from(["tenzro", "doctor", "--json"]).unwrap();
         Cli::try_parse_from(["tenzro", "completions", "bash"]).unwrap();
         Cli::try_parse_from(["tenzro", "tpm", "provision"]).unwrap();
-        Cli::try_parse_from(["tenzro", "tpm", "key-holder", "--socket", "/x", "--provider", "a@b:1"]).unwrap();
+        Cli::try_parse_from([
+            "tenzro",
+            "tpm",
+            "key-holder",
+            "--socket",
+            "/x",
+            "--provider",
+            "a@b:1",
+        ])
+        .unwrap();
     }
 
     /// Every `tenzro ...` command the first-run steps run is a command this
@@ -2339,15 +2388,29 @@ mod first_run_tests {
         let mut m = Machine::blank();
         m.root = KeyRoot::TpmReady;
         m.node_binary = Some("/usr/bin/tenzro-node".into());
-        m.node_build = Some(NodeBuild { flavour: "cpu".into(), startup_ok: true, refusal: None });
-        let net = Net::Reachable { chain_id: "0x1".into() };
+        m.node_build = Some(NodeBuild {
+            flavour: "cpu".into(),
+            startup_ok: true,
+            refusal: None,
+        });
+        let net = Net::Reachable {
+            chain_id: "0x1".into(),
+        };
         let o = Opts::defaults(&m, tenzro_cli::endpoint::PUBLIC_RPC);
         let mut seen = 0;
         for path in Path::ALL {
             for delegated in [false, true] {
-                let o = Opts { delegated, ..o.clone() };
+                let o = Opts {
+                    delegated,
+                    ..o.clone()
+                };
                 for s in &plan(path, &m, &net, &o).steps {
-                    if let Action::Exec { prog: Prog::Cli, args, .. } = &s.action {
+                    if let Action::Exec {
+                        prog: Prog::Cli,
+                        args,
+                        ..
+                    } = &s.action
+                    {
                         let mut argv = vec!["tenzro".to_string()];
                         argv.extend(args.iter().cloned());
                         Cli::command()

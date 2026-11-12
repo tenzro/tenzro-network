@@ -11,8 +11,8 @@
 //! This module implements the protocol-level primitive: the
 //! `PermitTransferFrom` and `PermitTransferFromWitness` types, the
 //! EIP-712 digest computation, the secp256k1 recovery, and the nonce
-//! bitmap state. The EVM precompile at `0x1023` calls into this module;
-//! see [`crate::precompiles`].
+//! bitmap state. The node's RPC handlers call into this module; there is no
+//! Permit2 precompile.
 
 use std::collections::HashMap;
 use std::sync::Arc;

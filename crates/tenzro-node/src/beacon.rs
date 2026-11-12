@@ -21,7 +21,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tenzro_crypto::vrf::VrfProver;
 use tenzro_vm::native::beacon::{
-    BeaconEntry, MIN_CONTRIBUTION_INTERVAL_MS, alpha, first_at_or_after, read_entry, read_head,
+    BACKUP_STEP_MS, BeaconEntry, MIN_CONTRIBUTION_INTERVAL_MS, alpha, first_at_or_after,
+    read_entry, read_head, submission_delay_ms,
 };
 use tracing::{debug, info};
 
@@ -84,9 +85,53 @@ pub(crate) async fn handle_get_beacon(
     Ok(json!({ "round": head.round, "mix": head.mix, "latest": latest.as_ref().map(entry_json) }))
 }
 
-/// Submit one contribution when this node is a bonded validator and its
-/// last one is old enough.
-async fn contribute_once(node: &Arc<TenzroNode>) -> Result<bool, String> {
+/// Whether `tx` is a beacon contribution for a round the beacon has already
+/// left behind: one that can only revert when it executes.
+pub(crate) fn is_stale_contribution(
+    chain: &dyn tenzro_vm::VmState,
+    tx: &tenzro_types::TransactionType,
+) -> bool {
+    match tx {
+        tenzro_types::TransactionType::BeaconContribute { round, .. } => {
+            tenzro_vm::native::beacon::is_stale_at(chain, *round)
+        }
+        _ => false,
+    }
+}
+
+/// The accounts that may contribute now: active validators with a validator's
+/// bond, a registered VRF key and no contribution in the last two intervals.
+fn eligible_contributors(
+    node: &Arc<TenzroNode>,
+    chain: &tenzro_vm::StateAdapter,
+    now: i64,
+) -> Vec<Vec<u8>> {
+    let Some(consensus) = node.consensus() else {
+        return Vec::new();
+    };
+    let floor = tenzro_vm::native::stake_ladder(chain).validator.max(1);
+    consensus
+        .validator_set()
+        .active_validators()
+        .iter()
+        .map(|v| v.address.as_bytes().to_vec())
+        .filter(|a| {
+            tenzro_vm::native::bonded_stake_of(chain, a) >= floor
+                && tenzro_vm::native::vrf_key_of(chain, a).is_some()
+                && tenzro_vm::native::beacon::last_contribution(chain, a)
+                    .is_none_or(|last| now >= last.saturating_add(MIN_CONTRIBUTION_INTERVAL_MS * 2))
+        })
+        .collect()
+}
+
+/// Submit one contribution when this node is a bonded validator, its
+/// last one is old enough, and it is this node's turn in the round.
+///
+/// One validator is first in line for each round and the others back it up
+/// in turn, each [`BACKUP_STEP_MS`] later than the one before. A node does
+/// not send for a round it already sent for, nor when the head moved on
+/// while its proof was being made. `sent` holds the round it last sent for.
+async fn contribute_once(node: &Arc<TenzroNode>, sent: &mut Option<u64>) -> Result<bool, String> {
     let Some(submitter) = node.ledger_submitter() else {
         return Ok(false);
     };
@@ -110,10 +155,24 @@ async fn contribute_once(node: &Arc<TenzroNode>) -> Result<bool, String> {
         return Ok(false);
     }
     let head = read_head(&chain);
+    if *sent == Some(head.round) {
+        return Ok(false);
+    }
     let mix: [u8; 32] = hex::decode(&head.mix)
         .ok()
         .and_then(|b| b.try_into().ok())
         .ok_or("the beacon mix is malformed")?;
+    let eligible = eligible_contributors(node, &chain, now);
+    let delay = submission_delay_ms(head.round, &mix, account.as_bytes(), &eligible)
+        .unwrap_or(eligible.len() as i64 * BACKUP_STEP_MS);
+    let round_began = head
+        .round
+        .checked_sub(1)
+        .and_then(|r| read_entry(&chain, r))
+        .map_or(0, |e| e.at_ms);
+    if now < round_began.saturating_add(delay) {
+        return Ok(false);
+    }
     let data_dir = node.config().data_dir.clone();
     let round = head.round;
     let commit = tenzro_vm::native::beacon::commit_reveal_enabled(&chain)
@@ -145,18 +204,25 @@ async fn contribute_once(node: &Arc<TenzroNode>) -> Result<bool, String> {
     })
     .await
     .map_err(|e| e.to_string())??;
+    // Proving takes a moment; a block may have taken the round meanwhile.
+    let chain = crate::rpc::chain_state_of(node).ok_or("no chain state")?;
+    if tenzro_vm::native::beacon::is_stale_at(&chain, round) {
+        return Ok(false);
+    }
     let tx = tenzro_types::TransactionType::BeaconContribute { round, proof };
     crate::rpc::submit_as_validator(node, tx, tenzro_vm::native::beacon::GAS_BEACON_CONTRIBUTE)
         .await
         .map_err(|e| e.message)?;
+    *sent = Some(round);
     Ok(true)
 }
 
 /// Contribute to the beacon while this node is a bonded validator.
 pub fn spawn_contributor(node: Arc<TenzroNode>) {
     tokio::spawn(async move {
+        let mut sent = None;
         loop {
-            match contribute_once(&node).await {
+            match contribute_once(&node, &mut sent).await {
                 Ok(true) => info!(target: "beacon", "contributed to the randomness beacon"),
                 Ok(false) => {}
                 Err(e) => debug!(target: "beacon", error = %e, "no beacon contribution this round"),
@@ -164,4 +230,29 @@ pub fn spawn_contributor(node: Arc<TenzroNode>) {
             tokio::time::sleep(TICK).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenzro_types::TransactionType;
+
+    #[test]
+    fn other_transactions_are_never_stale() {
+        let state = tenzro_vm::StateAdapter::new();
+        assert!(!is_stale_contribution(
+            &state,
+            &TransactionType::Transfer { amount: 1 }
+        ));
+    }
+
+    #[test]
+    fn a_contribution_for_the_head_round_is_not_stale() {
+        let state = tenzro_vm::StateAdapter::new();
+        let tx = TransactionType::BeaconContribute {
+            round: 0,
+            proof: Vec::new(),
+        };
+        assert!(!is_stale_contribution(&state, &tx));
+    }
 }

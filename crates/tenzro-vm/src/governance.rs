@@ -1177,9 +1177,12 @@ pub enum ProposalAction {
         link: String,
     },
     /// Approve accounts to register as validators while admission needs
-    /// approval (`validator.admission_approval`), or withdraw an approval not
-    /// yet used. An approval admits a registration; it does not seat, keep or
-    /// remove a validator.
+    /// approval (`validator.admission_approval`), or withdraw an approval.
+    /// The approved accounts are the admitted set, which starts as the
+    /// genesis validators. An approval admits a registration and a committee
+    /// seat; while admission is closed, a withdrawal takes a seated validator
+    /// off the committee at the next epoch boundary. While it is open
+    /// approvals change nothing.
     ApproveValidators {
         /// The accounts the validators register from.
         accounts: Vec<Address>,
@@ -2264,6 +2267,15 @@ pub struct UpgradeActivation {
     pub activation_height: u64,
 }
 
+impl UpgradeActivation {
+    /// The major protocol version `version` names ("3.1.0" names 3), if it
+    /// parses. The header version and the chain's recorded version both
+    /// follow this number.
+    pub fn named_protocol_version(&self) -> Option<u32> {
+        self.version.split('.').next()?.trim().parse::<u32>().ok()
+    }
+}
+
 /// Whether `update` may take the expedited track: a burn-rate change, which
 /// answers a supply alarm, or stopping a bridge route, which answers a route
 /// under attack. Opening a route never may: it waits out the full window.
@@ -2818,10 +2830,15 @@ impl Tighten {
 }
 
 /// Whether a parameter change only pauses a feature: it sets a status lever
-/// to paused. A pause answers a fault and can be put back by another vote, so
-/// it takes the expedited track; enabling, retiring and every other change
-/// take the standard one.
+/// to paused, or the identity rule's mode to audit. A pause answers a fault
+/// and can be put back by another vote, so it takes the expedited track;
+/// enabling, retiring and every other change take the standard one.
 pub fn is_pause_only(key: &str, value: u64) -> bool {
+    if key == crate::identity_required::MODE_KEY {
+        // Auditing the identity rule is its pause: nothing is refused while
+        // what enforce would refuse is still logged.
+        return value == crate::identity_required::Mode::Audit as u64;
+    }
     value == LeverStatus::Paused as u64
         && governed_param(key).is_some_and(|p| p.tighten == Tighten::Retire)
 }
@@ -3049,6 +3066,19 @@ pub const AUDIT_RETENTION_FLOOR_SECS: u64 = 183 * 24 * 60 * 60;
 /// still requires a rebuild, which is the honest signal that nobody decided it
 /// should be adjustable at runtime.
 pub const GOVERNED_PARAMS: &[GovernedParam] = &[
+    crate::feature_gate::registry_entry(
+        crate::identity_required::KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks refuse a transaction from an account with no registered identity (RegisterIdentity, key enrolment and protocol records stay open; a bonded validator is exempt). Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::identity_required::MODE_KEY,
+        min: crate::identity_required::Mode::Enforce as u64,
+        max: crate::identity_required::Mode::Off as u64,
+        genesis: crate::identity_required::Mode::Enforce as u64,
+        tighten: Tighten::Down,
+        description: "What the identity rule does once live, at execution and at every node's peer, mempool and edge admission: 0 enforce (refuse an account or peer with no registered identity), 1 audit (refuse nothing, log what enforce would refuse), 2 off. Relaxing applies at the next epoch, and a change to audit runs on the expedited track; returning to enforce waits out the tightening grace window.",
+    },
     GovernedParam {
         key: "stake.validator_tnzo",
         min: 1,
@@ -3435,7 +3465,7 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         max: 1,
         genesis: 0,
         tighten: Tighten::Up,
-        description: "1: a new validator registers only from an account an enacted ApproveValidators proposal approved; 0: any account may register. Validators already registered, and those named at genesis, are not affected.",
+        description: "1: closed: a validator registers and sits on a committee only if it is on the admitted set (the genesis validators and the accounts an enacted ApproveValidators proposal approved); 0: open: any account that meets the bond rules may.",
     },
     GovernedParam {
         key: "validator.sponsored_bond_max_tnzo",
@@ -5271,7 +5301,7 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
     },
     GovernedParam {
         key: TIMELOCK_PARAM,
-        min: 24 * 60 * 60 * 1000,
+        min: 4 * 60 * 60 * 1000,
         max: 30 * 24 * 60 * 60 * 1000,
         genesis: TIMELOCK_DELAY_MS as u64,
         tighten: Tighten::Neither,
@@ -8571,9 +8601,12 @@ mod tests {
         assert_eq!(change(lever, 0).track(), ProposalTrack::Standard, "resume");
         assert_eq!(change(lever, 2).track(), ProposalTrack::Standard, "retire");
         // A value of 1 on anything that is not a status lever is not a pause.
+        // The identity rule's mode is the one other key whose relaxing
+        // change (1, audit) takes the expedited track, by design.
         for p in GOVERNED_PARAMS
             .iter()
             .filter(|p| p.tighten != Tighten::Retire)
+            .filter(|p| p.key != crate::identity_required::MODE_KEY)
         {
             assert_eq!(
                 change(p.key, 1).track(),

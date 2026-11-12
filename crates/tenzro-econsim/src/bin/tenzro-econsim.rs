@@ -116,7 +116,7 @@ Assumptions added for launch decisions (all off or unchanged by default):
                         the treasury's outflow limits; the desk sells at most
                         sellback_max_tnzo_day (default 1M) a day
   closed_phase          1: before a listing: stable token with the leg in it, no public TNZO market,
-                        owner-funded running costs, validators contracted in USD; the
+                        running costs paid by the bootstrap funder, validators contracted in USD; the
                         output adds the day each listing-gate item is first met
   anchor_share          share of the demand that is related-party anchor demand
   preset=closed         the realistic preset in the closed phase";

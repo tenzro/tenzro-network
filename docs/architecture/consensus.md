@@ -25,14 +25,16 @@ drives it from `crates/tenzro-node/src/consensus_driver.rs`.
   this boot's disclosure key (X25519 + ML-KEM-768, also memory only), with a
   lifetime of six hours, re-signed at half-life. Announcements are gossiped
   on `tenzro/validators` and sent first on every consensus stream.
-- The endpoint itself is disclosed only to the committee: the validator
+- The endpoint itself is never published. To the committee the validator
   seals the endpoint and the commitment salt to each member's disclosure key
   (both key exchanges, AES-256-GCM) and gossips the sealed copies with the
   announcement. A member opens its copy and admits the endpoint only if it
   matches the signed commitment. The sealed copy also names the machine
   identity whose signed endpoint record resolves the endpoint; a member dials
   only through that record, and only when it names the committed endpoint.
-  A validator shares its record with the committee's machines alone, and the
+  A validator shares its record with the committee's machines and with the
+  machines on its own boot list, the entry points its operator chose; a boot
+  machine outside the committee keeps the record and passes it to no one. The
   record names relays, never an address. Publicly a validator shows its key,
   stake, announcements and certificates, never a network location. A
   validator needs no inbound port: it reaches the others over the Tenzro

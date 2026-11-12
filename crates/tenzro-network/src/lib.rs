@@ -67,9 +67,10 @@ pub use gossip_validation::{
     ValidationTicket,
 };
 pub use message::{
-    AnnouncementKind, BatchedAnnouncementMessage, BlobAnnouncementMessage, MessagePayload, ModelRegistrationMessage, ModelSchedule,
-    NetworkMessage, ProviderAnnouncementMessage, ProviderHeartbeatMessage, ShardReplicationEntry,
-    ShardReplicationMessage, SignedAnnouncement, StatusMessage,
+    AnnouncementKind, BatchedAnnouncementMessage, BlobAnnouncementMessage, MessagePayload,
+    ModelRegistrationMessage, ModelSchedule, NetworkMessage, ProviderAnnouncementMessage,
+    ProviderHeartbeatMessage, ShardReplicationEntry, ShardReplicationMessage, SignedAnnouncement,
+    StatusMessage,
 };
 pub use metrics::NetworkMetrics;
 pub use peer_status::{DEFAULT_FRESHNESS, PeerStatus as PeerChainStatus, PeerStatusTracker};

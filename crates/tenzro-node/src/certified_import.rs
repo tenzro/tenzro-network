@@ -99,11 +99,22 @@ pub fn check_range(cp: &Checkpoint, blocks: &[Block]) -> Result<(), String> {
 /// the lagged height. `local` is `None` when this node has no root for that
 /// height, which is itself a refusal: a block whose state claim cannot be
 /// checked is not executed.
-pub fn check_state_root(block: &Block, local: Option<Hash>) -> Result<(), String> {
+///
+/// The one exception is a node that restored its state from a snapshot at
+/// height `restored_at`: the first blocks after it claim the roots of
+/// heights below the snapshot, which the node never computed. Those blocks
+/// are certified and hash-linked to the snapshot's own block, so their claim
+/// is covered by the certificate, and the check starts at the snapshot.
+pub fn check_state_root(
+    block: &Block,
+    local: Option<Hash>,
+    restored_at: Option<u64>,
+) -> Result<(), String> {
     let claimed = block.header.state_root;
     let at = state_root_height(block.height().0);
     match local {
         Some(root) if root == claimed => Ok(()),
+        None if restored_at.is_some_and(|r| at < r) => Ok(()),
         Some(root) => Err(format!(
             "block at height {} claims state root {claimed} for height {at}, this node computed {root}",
             block.height()
@@ -117,10 +128,19 @@ pub fn check_state_root(block: &Block, local: Option<Hash>) -> Result<(), String
 
 /// Checks this node's post-state root at the checkpoint's state height
 /// against the root the checkpoint commits.
-pub fn check_certified_state(cp: &Checkpoint, local: Option<Hash>) -> Result<(), String> {
+///
+/// A node restored from a snapshot at `restored_at` has no root for heights
+/// below it; a checkpoint that ends there is covered by its certificate and
+/// the snapshot's own anchor.
+pub fn check_certified_state(
+    cp: &Checkpoint,
+    local: Option<Hash>,
+    restored_at: Option<u64>,
+) -> Result<(), String> {
     let at = cp.state_height;
     match local {
         Some(root) if root.0 == cp.state_root => Ok(()),
+        None if restored_at.is_some_and(|r| at < r) => Ok(()),
         Some(root) => Err(format!(
             "checkpoint {} commits state root {} at height {at}, this node computed {root}",
             cp.index,
@@ -379,17 +399,25 @@ mod tests {
     fn the_certified_state_root_must_match_local_execution() {
         let blocks = chain(2);
         let cp = checkpoint_over(&blocks);
-        assert!(check_certified_state(&cp, Some(Hash::new([5; 32]))).is_ok());
-        assert!(check_certified_state(&cp, Some(Hash::new([6; 32]))).is_err());
-        assert!(check_certified_state(&cp, None).is_err());
+        assert!(check_certified_state(&cp, Some(Hash::new([5; 32])), None).is_ok());
+        assert!(check_certified_state(&cp, Some(Hash::new([6; 32])), None).is_err());
+        assert!(check_certified_state(&cp, None, None).is_err());
+        assert!(
+            check_certified_state(&cp, None, Some(u64::MAX)).is_ok(),
+            "below a restored snapshot"
+        );
     }
 
     #[test]
     fn a_wrong_or_unknown_state_root_is_refused() {
         let b = block_on(&tip(), 1_001);
-        assert!(check_state_root(&b, Some(Hash::zero())).is_ok());
-        assert!(check_state_root(&b, Some(Hash::new([1; 32]))).is_err());
-        assert!(check_state_root(&b, None).is_err());
+        assert!(check_state_root(&b, Some(Hash::zero()), None).is_ok());
+        assert!(check_state_root(&b, Some(Hash::new([1; 32])), None).is_err());
+        assert!(check_state_root(&b, None, None).is_err());
+        assert!(
+            check_state_root(&b, None, Some(u64::MAX)).is_ok(),
+            "below a restored snapshot"
+        );
     }
 
     #[test]

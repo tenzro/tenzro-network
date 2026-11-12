@@ -101,10 +101,10 @@ except where they widen an attack surface.
   account on the destination chain.
 
 ### Settlement (`tenzro-settlement`)
-- Channel-state forgery: strict Ed25519 over the 40-byte canonical
-  preimage (`micropayments.rs:505 canonical_message`,
-  `:489 verify_signature_with_key`); the payer address is the pinned
-  public key. Fuzzed by `fuzz/settlement_channel_state`.
+- Voucher forgery: a `ClaimEscrow` pays only the advance of a payer-signed
+  cumulative voucher, under the domain tag `tenzro/escrow-voucher`
+  (`crates/tenzro-vm/src/native/payment_settlement.rs`, `check_voucher`).
+  Fuzzed by `fuzz/fuzz_targets/settlement_native.rs`.
 - Escrow authorization: create/release/refund are typed consensus
   transactions with payer-only checks; vault addresses are derived
   (no private key exists).

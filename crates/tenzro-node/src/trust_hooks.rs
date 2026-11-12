@@ -126,7 +126,7 @@ pub(crate) fn apply(
         && crate::catalog_sync::CatalogSync::affected_by(applied.kind)
         && let Some(catalog) = catalog
     {
-        catalog.refresh();
+        catalog.request_refresh();
     }
     Ok(applied)
 }

@@ -22,8 +22,8 @@ The head's block index MUST equal the target's block_count -- it is the block
 that comes after the trunk, not a replacement for any of it. That is asserted
 rather than assumed, because a head numbered anywhere else will load as a
 corrupt trunk and fail deep inside tensor creation with a message that points at
-the wrong thing (`blk.0.hc_attn_norm.weight not found`, which cost two builds to
-diagnose on 2026-09-01).
+the wrong thing (`blk.0.hc_attn_norm.weight not found`, which is hard to
+diagnose).
 """
 from __future__ import annotations
 

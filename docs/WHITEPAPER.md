@@ -70,9 +70,9 @@ Tenzro is that economy: an open network for the machine economy that grows itsel
 
 **One identity for humans and machines.** A single Tenzro Decentralized Identity (TDIP) covers human users, delegated agents acting on a human's behalf, and autonomous agents that own themselves. The same identity carries verifiable credentials, delegation scopes, KYC tier, and the wallet that signs every action. Move across Ethereum, Solana, Bitcoin, Cosmos chains, and any of the supported destination chains without switching keys or wallets.
 
-**Coordination across ecosystems.** An agent can fetch a lending quote on Arbitrum, settle a margin call on Ethereum, pay a Solana DEX for a swap, and post a receipt on Tenzro, all in one workflow, all from one wallet, all logged against one identity. Long-running workflows — multi-step trades, supply-chain settlements — run under the workflow runtime, which manages compensation, deadlines, and on-chain receipts.
+**Coordination across ecosystems.** An agent can fetch a lending quote on Arbitrum, settle a margin call on Ethereum, pay a Solana DEX for a swap, and post a receipt on Tenzro, all in one workflow, all from one wallet, all logged against one identity. Long-running workflows — multi-step trades, supply-chain settlements — run in harnesses over the public RPC, MCP, A2A and SDK surface, paying through escrows.
 
-**Open models on owned hardware.** Any open model, any size, runs on hardware its operators own. Open-weight models of every modality run on the network — language, vision, audio, video, time-series forecasting, segmentation, detection, embeddings. Providers serve their own hardware (consumer GPUs to data-center clusters, Apple Silicon to NVIDIA H200, AMD Instinct to Intel Gaudi) and earn per inference. Models too large for any single machine serve as distributed expert shards: providers hold the subset of experts they can fit, a dispatch planner batches tokens per holder, and settlement pays every holder for the work it verifiably did — so the largest open checkpoints run on pooled peer hardware instead of a hyperscale cluster. Users and agents pay per call, per token, or per session through the same settlement substrate.
+**Open models on owned hardware.** Any open model, any size, runs on hardware its operators own. Open-weight models of every modality run on the network — language, vision, audio, video, time-series forecasting, segmentation, detection, embeddings. Providers serve their own hardware (consumer GPUs to data-center clusters, Apple Silicon to NVIDIA H200, AMD Instinct) and earn per inference. Models too large for any single machine serve as distributed expert shards: providers hold the subset of experts they can fit, a dispatch planner batches tokens per holder, and settlement pays every holder for the work it verifiably did — so the largest open checkpoints run on pooled peer hardware instead of a hyperscale cluster. Users and agents pay per call, per token, or per session through the same settlement substrate.
 
 **Distributed AI at protocol level.** Inference runs across independent providers on one identity and settlement plane.
 
@@ -146,9 +146,9 @@ A single chain that picks one VM forces every workload to fit that VM. Tenzro ru
 
 ### EVM — liquidity and composability
 
-The Ethereum Virtual Machine surface targets the broadest pool of liquidity, tooling, and existing contracts. Tenzro implements every standard precompile (ecRecover, SHA-256, RIPEMD-160, Identity, ModExp, EC_ADD, EC_MUL, EC_PAIRING, BLAKE2F) per the canonical EIPs, plus all seven BLS12-381 precompiles (EIP-2537) for native consensus-grade signature aggregation. Block-STM gives parallel transaction execution with optimistic concurrency control and automatic fallback under contention. EIP-1559 dynamic fee market burns the base fee and rewards validators with the priority fee.
+The Ethereum Virtual Machine surface targets the broadest pool of liquidity, tooling, and existing contracts. Tenzro implements every standard precompile (ecRecover, SHA-256, RIPEMD-160, Identity, ModExp, EC_ADD, EC_MUL, EC_PAIRING, BLAKE2F) per the canonical EIPs, plus all seven BLS12-381 precompiles (EIP-2537) for native consensus-grade signature aggregation. Block-STM gives parallel transaction execution with optimistic concurrency control and automatic fallback under contention. EIP-1559 dynamic fee market burns the governed share of the base fee (all of it by default) and pays no fee to the block proposer; the rest goes to the treasury (section 15).
 
-Native primitives extend the EVM with protocol-aware precompiles: `TEE_VERIFY` (`0x1010`) runs strict hardware attestation verification and refuses simulated reports; `ZK_VERIFY` (`0x1011`) answers whether a proof commitment was attested in consensus state; `RANDOMNESS_BEACON` (`0x1009`) returns deterministic per-request randomness derived from finalized block hashes; the wTNZO pointer (`0x1001`), `TOKEN_FACTORY` (`0x1002`), `NFT_FACTORY` (`0x1006`) and `VRF_VERIFY` (`0x1007`) give Solidity contracts direct access to native TNZO, ERC-20 issuance, NFT minting with verifiable randomness, and ECVRF. All of them run inside real transactions with the calling frame's `msg.sender`, `msg.value` and static flag, and every write goes through the EVM journal. ERC-4337 v0.8 account abstraction, EIP-7702 delegation, and ERC-7579 modular validators are all implemented natively — smart accounts, session keys, social recovery, and spending limits work without any setup contract.
+Native primitives extend the EVM with protocol-aware precompiles: `TEE_VERIFY` (`0x1010`) runs strict hardware attestation verification and refuses simulated reports; `ZK_VERIFY` (`0x1011`) answers whether a proof commitment was attested in consensus state; `RANDOMNESS_BEACON` (`0x1009`) returns deterministic per-request randomness derived from finalized block hashes; the wTNZO pointer (`0x1001`), `TOKEN_FACTORY` (`0x1002`), `NFT_FACTORY` (`0x1006`) and `VRF_VERIFY` (`0x1007`) give Solidity contracts direct access to native TNZO, ERC-20 issuance, NFT minting with verifiable randomness, and ECVRF. All of them run inside real transactions with the calling frame's `msg.sender`, `msg.value` and static flag, and every write goes through the EVM journal. ERC-4337 v0.9 account abstraction, EIP-7702 delegation, and ERC-7579 modular validators are all implemented natively — smart accounts, session keys, social recovery, and spending limits work without any setup contract.
 
 ### SVM — throughput and latency
 
@@ -180,7 +180,7 @@ Stake is apportioned into seats, with no one-seat floor, so splitting stake acro
 
 Consensus and service are decoupled. Block finality is produced by a staked validator set whose voting power equals the bonded validator stake: checkpoint certificates form at a quorum of n − f seats (f = (n − 1) / 3), with stake apportioned into seats under a 10% per-validator cap, and the Byzantine bound `f` measured as a fraction of stake rather than a head-count of nodes. Only the validator bond carries finality weight. Service bonds — model, TEE, compute, storage, rail attestor, wallet provider, catalog publisher — carry none, so bonding for any number of service rungs cannot move a quorum.
 
-Serving compute, storage, and security is a separate set of roles that earn through proof-of-service (pay-per-use, rental, and per-byte fees, section 15). Every rung bonds TNZO, but no service rung votes. The bond is what a defrauded counterparty is made whole from: invalid TEE attestations, upheld inference-verification challenges, and persistent SLA failure all slash against it. Admission stays permissionless — anyone who posts the bond and meets the resource profile may serve, with no allowlist and no committee. Compute, storage, and cloud bonds scale with the capacity pledged, so a bond tracks the exposure it collateralizes rather than a flat fee (section 15). One operator may both validate and serve capacity, earning on both tracks. TEE attestation is an optional capability and a reputation signal; it never changes leader selection and is never an admission or voting gate. High-trust block classes (high-value bridge duties, institutional settlement routes) restrict leader election to validators above a higher stake and reputation bar, but rest on the same stake-weighted 2/3 bound. The result keeps the economic security budget concentrated entirely in validator-bonded stake while every service obligation carries its own collateral.
+Serving compute, storage, and security is a separate set of roles that earn through proof-of-service (pay-per-use, rental, and per-byte fees, section 15). Every rung bonds TNZO, but no service rung votes. The bond is what a defrauded counterparty is made whole from: invalid TEE attestations, upheld inference-verification challenges, and persistent SLA failure all slash against it. Admission stays permissionless — anyone who posts the bond and meets the resource profile may serve, with no allowlist and no committee. Compute and storage bonds scale with the capacity pledged, so a bond tracks the exposure it collateralizes rather than a flat fee (section 15). One operator may both validate and serve capacity, earning on both tracks. TEE attestation is an optional capability and a reputation signal; it never changes leader selection and is never an admission or voting gate. High-trust block classes (high-value bridge duties, institutional settlement routes) restrict leader election to validators above a higher stake and reputation bar, but rest on the same stake-weighted 2/3 bound. The result keeps the economic security budget concentrated entirely in validator-bonded stake while every service obligation carries its own collateral.
 
 ### Slashing and tail-fork resistance
 
@@ -347,8 +347,8 @@ Every payment surface asks the same check: a delegated agent pays only inside it
 Tenzro implements settlement as a protocol primitive rather than a contract:
 
 - **Escrow** — `CreateEscrow` / `ReleaseEscrow` / `RefundEscrow` are typed transactions; funds lock at a deterministically-derived vault address with no private key; release and refund are authorized only by the payer; full RocksDB durability and hydration on restart.
-- **Micropayment channels** — off-chain per-token billing with on-chain dispute resolution; signed channel updates carry the next state's canonical preimage `(nonce || payer_balance || payee_balance)`; channel close finalizes the latest signed state on-chain.
-- **Batch settlement** — atomic settle-many over a list of payer/payee/amount tuples, with rollback on any single failure.
+- **Payment channels** — per-token billing against an escrow the payer funds on the ledger; the payer signs cumulative vouchers off-chain and the payee claims the advance with `ClaimEscrow`; the unclaimed remainder is refunded only after expiry.
+- **Batch claims** — one `ClaimEscrow` transaction claims from several escrows and applies all claims or none; `ClaimEscrowPreimage` pays a hash-locked escrow against the lock's preimage.
 - **Reserve-bound minting** — a reserve-backed token mints in consensus only against signed, time-bound reserve attestations covering the supply after the mint, from bonded attestors whose stake together meets the token's backing; any bonded attestor may attest.
 
 ### Who is paying, and on what terms
@@ -591,11 +591,11 @@ Every catalog entry carries a license tier (Permissive / Attribution / Commercia
 
 ### Provider economics
 
-A provider runs the node with `--roles ai`, registers under the model registry, and posts the 1,000 TNZO model-provider bond against their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a micropayment channel; reputation tracks fast on success (latency only on HTTP 200), slow on failure (-5 per fault), and is gated to "settled-success only" on reputation gain so providers cannot game reputation without taking a real payment. Providers can also rent capacity for fixed terms backed by streaming escrow against their stake — see §15, *Capacity rental and escrow*.
+A provider runs the node with `--roles ai`, registers under the model registry, and posts the 1,000 TNZO model-provider bond against their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a payment channel (an escrow with payer-signed vouchers); routing standing is read from consensus state: zero without a live serving bond, otherwise a governed bonded standing plus a governed availability standing from the validators' SLA verdicts over the last closed hours. Providers can also rent capacity for fixed terms backed by streaming escrow against their stake — see §15, *Capacity rental and escrow*.
 
 ### Heterogeneous hardware
 
-The same provider binary runs on Apple Silicon, NVIDIA Ada / Hopper / Blackwell, AMD Instinct, Intel Gaudi, and CPU-only fallbacks. The runtime layer is ORT-backed for ONNX-shippable models and llama.cpp-backed for GGUF; the dispatch layer hides the difference. Small providers serve niche models; large providers run frontier models; the protocol does not pick winners.
+The same provider binary runs on Apple Silicon, NVIDIA Ada / Hopper / Blackwell, AMD Instinct, and CPU-only fallbacks. The runtime layer is ORT-backed for ONNX-shippable models and llama.cpp-backed for GGUF; the dispatch layer hides the difference. Small providers serve niche models; large providers run frontier models; the protocol does not pick winners.
 
 ### Node tiers and release variants
 
@@ -620,7 +620,7 @@ The language runtime is exposed five ways simultaneously:
 - **JSON-RPC** `tenzro_chat`
 - **OpenAI-compatible** `POST /v1/chat/completions` and `POST /v1/responses`
 - **Web** `POST /chat` on the verification API
-- **MCP** `chat_completion` tool, **A2A** `inference` skill, **CLI** `tenzro chat`
+- **MCP** `chat` tool, **A2A** `inference` skill, **CLI** `tenzro chat`
 
 Agents pick whichever surface fits their framework; the model and provider are the same underneath.
 
@@ -636,7 +636,7 @@ MoE pipeline roles are typed: `Replica`, `Router`, `ExpertHolder`, `PrefillDecod
 
 Execution is carried by an expert-host runtime embedded in every node: holders load expert FFN weights and gating networks from safetensors payloads, and a distributed layer forward gates locally, dispatches per-holder batches (local execution, the holder's iroh QUIC endpoint on the `tenzro/moe` ALPN, or HTTP), and recombines per-token outputs weighted by the gate probabilities. Holder failures are absorbed inside the forward: each batch walks its planned holder set in warm-first order, and when every known holder for an expert fails, the affected (expert, token) pairs are replanned against a rebuilt shard view that excludes the failed providers — bounded rounds, with results already gathered kept in the combine, each failure recording a reputation penalty against that holder. A forward that still cannot cover every token fails closed by default; `allow_partial` instead renormalizes the gate weights over the experts that responded and reports the unserved pairs. Every holder meters its aggregate expert-forward throughput over a rolling minute and stamps it onto each advertised holding as `committed_tps`, so the planner ranks holders by observed serving capacity. So a holder can advertise more experts than fit in memory, the runtime keeps experts in a byte-bounded memory-tier LRU — the budget auto-sizes to 60% of the host's available memory, or 4 GiB where that reading is unavailable — over a disk tier that spills raw safetensors and decodes them back on demand; readahead promotes the disk-tier experts a forward is about to hit before its batch arrives. A holder's declared residency (`Warm` for memory-resident, `Cold` for disk-tier) is read from this live tier state rather than a static declaration.
 
-The expert-shard view, the per-token-to-per-holder planner, the replication policy, and the execution runtime are surfaced through twelve RPCs (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`, `tenzro_moeExpertLoad`, `tenzro_moeGateLoad`, `tenzro_moeExpertUnload`, `tenzro_moeGateUnload`, `tenzro_moeExpertStatus`, `tenzro_moeRoute`, `tenzro_moeExecute`, `tenzro_moeForward`) and through the Rust and TypeScript SDKs.
+The expert-shard view, the per-token-to-per-holder planner, the replication policy, and the execution runtime are surfaced through sixteen RPCs (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`, `tenzro_moeExpertLoad`, `tenzro_moeGateLoad`, `tenzro_moeExpertUnload`, `tenzro_moeGateUnload`, `tenzro_moeExpertStatus`, `tenzro_moeRoute`, `tenzro_moeExecute`, `tenzro_moeForward`, `tenzro_moePrepareExperts`, `tenzro_moePrepareStatus`, `tenzro_moeListReceipts`, `tenzro_moeDisputeReceipt`) and through the Rust and TypeScript SDKs.
 
 ### Multi-Token Prediction
 
@@ -676,13 +676,13 @@ Some computations have to remain confidential — model weights from a proprieta
 - **NVIDIA GPU Confidential Computing** — NVIDIA NRAS HTTP API attestation with JWT verification and SPDM-based measurements.
 - **Intel Tiber Trust Authority** — hosted attestation via the ITA API with PS384/RS256 JWT verification against the pinned JWKS.
 
-All five surface a unified `AttestationResult` so applications do not have to special-case the vendor. Enclave encryption is AES-256-GCM with HKDF-SHA256 key derivation per vendor; in production the key is sealed by hardware (MKTME / VMSA / KMS / CC memory).
+All five surface a unified `AttestationResult` so applications do not have to special-case the vendor.
 
 ### How TEE composes with the protocol
 
 - **Validator participation** — TEE attestation is a reputation signal for validators; it does not change leader selection.
 - **Confidential inference** — model provider runs the inference inside the enclave, returns a TEE-attested result hash, and signs it with a key sealed by the enclave.
-- **Sealed key custody** — bridge signers and protocol-side cryptographic operations can run with a TEE-sealed key the operator can never extract.
+- **Attested key release** — a private model's content key is wrapped to an environment's release key only after its attestation passes the model's policy and the chain records the release; no key is kept or derived inside a TEE.
 - **ZK-in-TEE** — the enclave generates the witness, runs the prover, and signs the commitment with a PQ-hybrid composite signer (classical + ML-DSA-65). Verifiers can check the ZK proof, the TEE attestation, or both.
 
 ---
@@ -707,7 +707,7 @@ The enclave produces the witness, runs the prover inside the enclave, and signs 
 
 ### What gets proved
 
-- **Inference results** — model output committed to a chain identifier; verifiers can confirm a specific input produced a specific output under a specific model.
+- **Inference results** — no circuit proves model inference; results are checked through signed inference receipts and TEE attestation.
 - **Settlements** — settlement amount, payer, payee, and resulting balance commitments are provable against the chain state root.
 - **Identity claims** — credential possession, delegation scope membership, and trust-chain root anchoring are provable without revealing the underlying identity material.
 
@@ -719,7 +719,7 @@ The Tenzro peer-to-peer layer runs on iroh. Every node runs one QUIC endpoint wh
 
 Storage is RocksDB with column families per concern (blocks, state, accounts, transactions, identities, agents, models, providers, tokens, settlements, validator modules, agent memory, audit, bridge nonces, equivocation evidence, and more). Durable writes go through `write_batch_sync` with `fdatasync`. Block writes are atomic. Auto-repair handles WAL corruption on startup.
 
-The DA layer abstracts behind a `DaBackend` trait. Receipts can be inline or off-loaded. The implemented backends are `Inline` (safe pre-mainnet default, optional RocksDB-backed) and `IrohBlobs` over the iroh-blobs content-addressed transport. Iroh also carries the model-weight distribution path (peer-first with HuggingFace Hub fallback), agent-memory archives, and the A2A / MCP transport — all on one shared QUIC endpoint per node, anchored to the node's TDIP key via Pkarr.
+The DA layer abstracts behind a `DaBackend` trait. Receipts can be inline or off-loaded. The implemented backends are `Inline` (safe pre-mainnet default, optional RocksDB-backed) and `IrohBlobs` over the iroh-blobs content-addressed transport. Iroh also carries the model-weight distribution path (peer-first with HuggingFace Hub fallback), agent-memory archives, and the A2A / MCP transport — all on one shared QUIC endpoint per node, anchored to the node's TDIP key.
 
 Snapshot bootstrap is cryptographically anchored — the joining node specifies a block hash it trusts; the snapshot must hash to that root or the bootstrap aborts.
 
@@ -762,7 +762,7 @@ TNZO is the network's gas, settlement, staking, and governance token. The maximu
 - **Gas** — every transaction pays gas in TNZO under EIP-1559. The governed share of the base fee is burned (all of it by default); the rest of the block's fees, including the priority part, goes to the treasury less the insurance pool's governed share. No gas is paid to the block proposer.
 - **On-chain settlement fee** — every settlement the chain carries out pays `fees.settlement_fee_bps` of the value it pays out (10 basis points at genesis, never below the governed USD minimum); `fees.settlement_fee_burn_bps` of it is burned (half at genesis) and the rest goes to the treasury. A payment to a bonded provider can also carry a governed treasury leg for its class of work (`fees.treasury_leg_{inference,tee,rpc,compute,storage}_bps`, 0 at genesis, at most 5,000 basis points), taken from the provider's credit so the buyer's price does not change.
 - **Node revenue split** — a service payment a node collects is divided **exactly once**, by the node's economic mode, and nothing downstream takes a further cut. A **private** node — connected but not advertising itself, reached as its operator's access policy admits — keeps the whole payment: nobody discovered it and no validator was engaged on the caller's behalf. A **public validating** node pays 10% to the treasury. A **public node that does not validate** pays 10% to the treasury and 10% to the RPC provider validating on its behalf, that leg coming out of the operator's share because the node is buying validation it does not perform. The operator majority is enforced at construction rather than by convention, and every rate is one governance-set `EconomicPolicy` block rather than a constant. The treasury account is derived and keyless and spent only by governance; because the payee is configuration rather than code, changing it needs no code change. See [ECONOMICS.md](ECONOMICS.md) for the full model.
-- **Bonds** — every participating role bonds TNZO across a nine-rung ladder (validator, RPC operator, rail attestor, TEE provider, model provider, compute provider, storage provider, wallet provider, catalog publisher), each amount set by governance, with compute, storage, and cloud bonds scaling with the capacity pledged. Misbehavior is slashed against the bond.
+- **Bonds** — every participating role bonds TNZO across a ten-rung ladder (validator, RPC operator, rail attestor, TEE provider, edge operator, model provider, compute provider, storage provider, wallet provider, catalog publisher), each amount set by governance, with compute and storage bonds scaling with the capacity pledged. Misbehavior is slashed against the bond.
 
 Every demand source grows with usage, not with holding.
 
@@ -807,9 +807,8 @@ Two rungs scale with capacity, so the bond tracks the exposure it collateralizes
 
 - **Compute** — 5,000 TNZO per datacentre card, 2,000 per workstation card, 1,000 per consumer card, 500 per integrated accelerator, summed over everything pledged. A provider offering one datacentre card and one consumer card bonds 6,000 TNZO.
 - **Storage** — 100 TNZO per terabyte, so a 50 TB provider bonds 5,000 TNZO.
-- **Cloud** — 1,000 TNZO for functions, 5,000 for managed databases, 25,000 for machines. The classes are supersets: bonding for machines covers databases and functions.
 
-Pledging no capacity to a scaling rung yields that rung's floor, never zero — bonding is never free. The RPC operator bond is the largest on the ladder because a public RPC endpoint brokers tenant traffic and upstream chain access, which is the largest trust surface any role holds; it subsumes the validator bond, since an RPC operator is a validator that additionally serves public RPC.
+Pledging no capacity to a scaling rung yields that rung's floor, never zero — bonding is never free. The RPC operator bond is among the largest on the ladder (with the rail attestor's) because a public RPC endpoint brokers tenant traffic and upstream chain access, which is the largest trust surface any role holds; it subsumes the validator bond, since an RPC operator is a validator that additionally serves public RPC.
 
 Below the ladder, a node can join, sync, gossip, relay, and run consensus without bonding anything. Quorum weight is the validator's own bond, so bonding nothing contributes nothing to a quorum; there is no governance vote and no slashing exposure, since there is no bond to slash. Admission stays open without making influence free.
 
@@ -867,7 +866,7 @@ Mitigations:
 - **Custody in consensus.** The account keystore and agent Terms are chain state; every validator checks passkey approvals, recovery and agent spending against them. Off-chain spending policy is defense in depth, not the primary control.
 - **Approvals bound to one chain.** The digest a passkey or TPM root signs for a custody operation (agent terms, step-ups, identity revocation, DID services, root ballots, cluster membership) carries the chain id, so an approval collected on one Tenzro network never verifies on another.
 - **Anchored snapshot bootstrap.** Joining nodes specify a block hash they trust; the protocol refuses to bootstrap from a mismatched snapshot.
-- **Default-deny RPC surface.** Every dispatched JSON-RPC method is classified as admin, owner-proved, open or reserved, and a method in none is refused before its handler runs. A test reads the dispatcher's own source and fails while any arm is unclassified, so adding a method without deciding its gate makes it unreachable rather than public. This inverts an earlier allowlist whose default-open direction had already shipped thirteen unauthenticated methods. Privileged operations (cross-chain mint/burn, bridge authorization, compliance freeze, delegation-scope tweaks) are for node administrators only, checked against the operator DID and the administrators the access policy names; no policy rule grants them.
+- **Default-deny RPC surface.** Every dispatched JSON-RPC method is classified as admin, owner-proved or open, and a method in none is refused before its handler runs. A test reads the dispatcher's own source and fails while any arm is unclassified, so adding a method without deciding its gate makes it unreachable rather than public. This inverts an earlier allowlist whose default-open direction had already shipped thirteen unauthenticated methods. Privileged operations (cross-chain mint/burn, bridge authorization, compliance freeze, delegation-scope tweaks) are for node administrators only, checked against the operator DID and the administrators the access policy names; no policy rule grants them.
 - **One access policy per node.** An operator decides who may use each service surface (JSON-RPC, MCP, A2A, the OpenAI-compatible API, files, the web gateway and iroh) and each method class, in one file. Callers sign in with a passkey or a hardware key for a short-lived, DPoP-bound access token signed by the node's hardware-rooted key; no shared secret exists. The policy covers the service surface only: it has no representation for consensus or gossip, so a closed node structurally cannot stop validating.
 - **Reserve-bound minting.** Tokenized assets cannot mint past their attested reserve.
 
@@ -881,7 +880,7 @@ The same Tenzro stack underwrites a wide range of applications.
 
 **Agentic finance.** An agent runs on the user's behalf with a scoped delegation. It compares lending rates across Aave-class money markets on Arbitrum, swaps stables through a Solana DEX, settles a margin call on a tokenized treasury on Ethereum, and posts an audit receipt on Tenzro. The user retains the right to revoke at any time and the per-day spend cap holds across every leg of the workflow.
 
-**Tokenized RWA settlement.** An institutional asset manager issues a reserve-backed tokenized money-market fund on Tenzro, settles payment on the EVM surface (Permit2 + EIP-7702) against a delivery leg on another chain through a settlement plan, and emits an on-chain NAV receipt with a Plonky3 proof of the underlying calculation. The public commitment is verifiable.
+**Tokenized RWA settlement.** An institutional asset manager issues a reserve-backed tokenized money-market fund on Tenzro, settles payment on the EVM surface (Permit2 + EIP-7702) against a delivery leg on another chain through a settlement plan, and emits an on-chain NAV receipt. The public commitment is verifiable.
 
 **Open-source inference at scale.** A provider runs a heterogeneous fleet (a few H200s, a few Apple Silicon nodes, a few Hopper-class consumer GPUs) serving Qwen, Gemma, Mistral, and TimesFM at the same time. Users pay per call, providers settle per-token, a router application in a harness module picks providers from their bonds and SLA standing, and the treasury leg of each settlement funds protocol development.
 
@@ -904,7 +903,6 @@ These are not hypotheticals — every primitive named above is present in the cu
 - **A2A** — Agent-to-Agent protocol; the Google specification for inter-agent JSON-RPC with optional SSE.
 - **AP2** — Agent Payments Protocol; checkout / payment mandate validation for agent-initiated payments.
 - **BLS12-381** — Pairing-friendly elliptic curve exposed to EVM contracts through the EIP-2537 precompiles.
-- **BitVM2 / Clementine** — Trust-minimized two-way Bitcoin peg with optimistic challenge protocol.
 - **EIP-1559** — Ethereum fee-market upgrade with base-fee burn.
 - **EIP-2537** — BLS12-381 precompiles.
 - **EIP-4361** — Sign-In with Ethereum message format; the SIWT canonical form follows the same shape.
@@ -918,7 +916,7 @@ These are not hypotheticals — every primitive named above is present in the cu
 - **ERC-8004** — Trustless agent identity registry.
 - **GLEIF** — Global Legal Entity Identifier Foundation; issues LEIs under ISO 17442.
 - **HPKE** — Hybrid Public Key Encryption per RFC 9180.
-- **IBC-Eureka** — IBC over an SP1-compressed Tendermint light client.
+- **IBC-Eureka** — the IBC v2 protocol (classic IBC and v2 are both bridge routes).
 - **KERI** — Key Event Receipt Infrastructure; self-certifying identifiers with hash-chained key event logs and pre-rotation.
 - **KoalaBear** — The 31-bit prime field `2^31 − 2^24 + 1`, one of the two STARK base fields Tenzro uses (the other is Goldilocks).
 - **LEI** — Legal Entity Identifier; 20-character ISO 17442 code anchored to a legal entity in the GLEIF registry.
@@ -930,7 +928,6 @@ These are not hypotheticals — every primitive named above is present in the cu
 - **Pixel-step** — The work unit for generative media rendering: `width × height × steps × frames`, with `frames = 1` for image jobs.
 - **Plonky3** — The STARK toolkit Tenzro's proof systems are built on.
 - **SIWT** — Sign-In With Tenzro; an EIP-4361-shaped message that off-chain services use to authenticate Tenzro identities.
-- **SP1** — Succinct's general-purpose zkVM used by IBC-Eureka to compress Tendermint header verification into a plonk proof.
 - **TDIP** — Tenzro Decentralized Identity Protocol.
 - **TEE** — Trusted Execution Environment.
 - **TNZO** — The native token of Tenzro Network.

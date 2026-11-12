@@ -138,6 +138,10 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub verification_service: bool,
+    /// Why the status is not healthy: one `subsystem: reason` per degraded
+    /// or unhealthy subsystem. Absent when healthy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
 }
 
 // === Readiness (for K8s readinessProbe / load-balancer gating) ===

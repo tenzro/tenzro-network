@@ -102,6 +102,9 @@ pub enum RecordError {
     /// The record's ML-DSA binding does not verify.
     #[error("endpoint record ML-DSA binding does not verify")]
     BadPqBinding,
+    /// The record's update advert does not verify under its machine key.
+    #[error("endpoint record update advert does not verify")]
+    BadUpdateAdvert,
     /// The identity bound its records with an ML-DSA key, and this record
     /// carries no binding.
     #[error("endpoint record lacks the ML-DSA binding its identity uses")]
@@ -194,6 +197,11 @@ pub struct EndpointRecord {
     /// still verifies the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pq: Option<crate::pq_endpoint::PqBinding>,
+    /// The software the machine runs, signed by its hardware key (see
+    /// [`crate::update_advert`]). Not part of the P-256 signed message, so a
+    /// node that does not read it still verifies the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<crate::update_advert::SignedUpdateAdvert>,
 }
 
 fn put_bytes(m: &mut Vec<u8>, b: &[u8]) {
@@ -263,7 +271,8 @@ pub fn is_licence_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-._".contains(&b))
 }
 
-fn check_relay_url(url: &Url) -> Result<(), RecordError> {
+/// Whether `url` may name a relay: an http(s) URL with a host and no credentials.
+pub fn check_relay_url(url: &Url) -> Result<(), RecordError> {
     if url.as_str().len() > MAX_RELAY_URL_LEN {
         return Err(RecordError::Malformed("relay URL too long"));
     }
@@ -315,6 +324,7 @@ impl EndpointRecord {
             not_after_ms: now_ms.saturating_add(RECORD_LIFETIME_MS),
             signature: Vec::new(),
             pq: None,
+            update: None,
         };
         r.check_shape()
             .map_err(|e| IrohError::Backend(e.to_string()))?;

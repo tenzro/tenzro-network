@@ -514,7 +514,10 @@ mod tests {
     #[test]
     fn a_channel_id_is_a_32_byte_hex_escrow_id() {
         let id = hex::encode([7u8; 32]);
-        assert_eq!(escrow_id_param(&json!({"channel_id": id})).unwrap(), [7u8; 32]);
+        assert_eq!(
+            escrow_id_param(&json!({"channel_id": id})).unwrap(),
+            [7u8; 32]
+        );
         assert_eq!(
             escrow_id_param(&json!({"channel_id": format!("0x{id}")})).unwrap(),
             [7u8; 32]
@@ -532,7 +535,12 @@ mod tests {
 
     #[test]
     fn a_malformed_voucher_is_refused() {
-        for bad in [json!(null), json!({}), json!({"escrow_id": "x"}), json!("v")] {
+        for bad in [
+            json!(null),
+            json!({}),
+            json!({"escrow_id": "x"}),
+            json!("v"),
+        ] {
             let e = voucher_from(&bad).unwrap_err();
             assert_eq!(e.code, -32602);
             assert!(e.message.starts_with("invalid voucher"), "{}", e.message);
@@ -543,10 +551,14 @@ mod tests {
     async fn a_node_without_a_ledger_rail_holds_no_payment_channels() {
         let (node, _tmp) = crate::bare_node().await;
         let id = hex::encode([7u8; 32]);
-        let e = open(&node, Some(json!({"channel_id": id}))).await.unwrap_err();
+        let e = open(&node, Some(json!({"channel_id": id})))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, -32000);
         assert!(e.message.contains("no ledger rail"), "{}", e.message);
-        let e = close(&node, Some(json!({"channel_id": id}))).await.unwrap_err();
+        let e = close(&node, Some(json!({"channel_id": id})))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, -32000);
     }
 
@@ -564,11 +576,16 @@ mod tests {
     async fn an_update_needs_a_voucher_and_a_charge() {
         let (node, _tmp) = crate::bare_node().await;
         assert_eq!(update(&node, None).await.unwrap_err().code, -32602);
-        let e = update(&node, Some(json!({"charge": "1"}))).await.unwrap_err();
-        assert_eq!((e.code, e.message.as_str()), (-32602, "Missing voucher"));
-        let e = update(&node, Some(json!({"voucher": {"bogus": true}, "charge": "1"})))
+        let e = update(&node, Some(json!({"charge": "1"})))
             .await
             .unwrap_err();
+        assert_eq!((e.code, e.message.as_str()), (-32602, "Missing voucher"));
+        let e = update(
+            &node,
+            Some(json!({"voucher": {"bogus": true}, "charge": "1"})),
+        )
+        .await
+        .unwrap_err();
         assert!(e.message.starts_with("invalid voucher"), "{}", e.message);
     }
 
@@ -576,9 +593,13 @@ mod tests {
     async fn an_agent_voucher_needs_the_agents_token_and_a_channel_and_an_amount() {
         let (node, _tmp) = crate::bare_node().await;
         let id = hex::encode([7u8; 32]);
-        let e = agent_voucher(&node, None, Some(json!({"channel_id": id, "cumulative_amount": "5"})))
-            .await
-            .unwrap_err();
+        let e = agent_voucher(
+            &node,
+            None,
+            Some(json!({"channel_id": id, "cumulative_amount": "5"})),
+        )
+        .await
+        .unwrap_err();
         assert!(e.message.contains("access token"), "{}", e.message);
         let agent = Some("did:tenzro:agent:a");
         let e = agent_voucher(&node, agent, Some(json!({"cumulative_amount": "5"})))
@@ -586,27 +607,44 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.code, -32602);
         for amount in [json!(null), json!("five"), json!(5)] {
-            let e = agent_voucher(&node, agent, Some(json!({"channel_id": id, "cumulative_amount": amount})))
-                .await
-                .unwrap_err();
-            assert!(e.message.contains("cumulative_amount"), "{}", e.message);
-        }
-        let e = agent_voucher(&node, agent, Some(json!({"channel_id": id, "cumulative_amount": "5"})))
+            let e = agent_voucher(
+                &node,
+                agent,
+                Some(json!({"channel_id": id, "cumulative_amount": amount})),
+            )
             .await
             .unwrap_err();
-        assert_eq!(e.code, -32603, "no chain state on a node that is not running");
+            assert!(e.message.contains("cumulative_amount"), "{}", e.message);
+        }
+        let e = agent_voucher(
+            &node,
+            agent,
+            Some(json!({"channel_id": id, "cumulative_amount": "5"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            e.code, -32603,
+            "no chain state on a node that is not running"
+        );
     }
 
     #[tokio::test]
     async fn the_payment_reads_refuse_malformed_input_and_a_node_with_no_chain_state() {
         let (node, _tmp) = crate::bare_node().await;
-        let e = get_payee_split(&node, Some(json!({"payee": "ab"}))).await.unwrap_err();
+        let e = get_payee_split(&node, Some(json!({"payee": "ab"})))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, -32603);
-        let e = get_payment(&node, Some(json!({"pay_ref": "ab"}))).await.unwrap_err();
+        let e = get_payment(&node, Some(json!({"pay_ref": "ab"})))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, -32603);
         let e = list_payments(&node, None).await.unwrap_err();
         assert_eq!(e.code, -32603);
-        let e = quote_payment(&node, Some(json!({"usd_e6": 5}))).await.unwrap_err();
+        let e = quote_payment(&node, Some(json!({"usd_e6": 5})))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, -32603);
     }
 }

@@ -1221,7 +1221,11 @@ mod tests {
                 .enumerate()
                 .map(|(i, k)| VerifierMember {
                     address: member_address(k),
-                    pq_public_key: tenzro_bridge::route::attestation::testing::pq_key(&k.to_bytes()).verifying_key_bytes().to_vec(),
+                    pq_public_key: tenzro_bridge::route::attestation::testing::pq_key(
+                        &k.to_bytes(),
+                    )
+                    .verifying_key_bytes()
+                    .to_vec(),
                     operator: format!("{label}-op-{i}"),
                     rpc_provider: format!("{label}-rpc-{i}"),
                 })

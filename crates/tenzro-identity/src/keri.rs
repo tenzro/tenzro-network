@@ -681,8 +681,13 @@ mod tests {
         let classical = key();
         let fresh = KeyEventLog::new();
         let icp = KeriEvent::inception(vec![public(&classical)], 1, vec![[1u8; 32]], 1).unwrap();
-        let err = fresh.append(signed(icp.clone(), &[&classical])).unwrap_err();
-        assert!(err.to_string().contains("ML-DSA-65 signing keys only"), "{err}");
+        let err = fresh
+            .append(signed(icp.clone(), &[&classical]))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("ML-DSA-65 signing keys only"),
+            "{err}"
+        );
         // The same event is taken by a log that interoperates.
         KeyEventLog::interoperating()
             .append(signed(icp, &[&classical]))

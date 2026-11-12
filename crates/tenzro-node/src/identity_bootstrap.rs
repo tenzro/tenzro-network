@@ -31,7 +31,21 @@ static MACHINE_SIGNER: OnceLock<std::result::Result<Box<dyn HardwareSigner>, Str
 /// This machine's identity key, opened once, or why it did not open.
 fn opened_machine_signer() -> &'static std::result::Result<Box<dyn HardwareSigner>, String> {
     MACHINE_SIGNER.get_or_init(|| {
-        tenzro_device_key::signer::open_or_create(MACHINE_KEY_LABEL).map_err(|e| e.to_string())
+        // Opening the key can take minutes on a TPM that is busy or slow; say so before waiting.
+        tracing::info!(
+            "Opening this machine's identity key in its TPM or Secure Enclave; a first start can take up to three minutes"
+        );
+        let started = std::time::Instant::now();
+        let opened =
+            tenzro_device_key::signer::open_or_create(MACHINE_KEY_LABEL).map_err(|e| e.to_string());
+        match &opened {
+            Ok(_) => tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "machine identity key is open"
+            ),
+            Err(e) => tracing::warn!(error = %e, "machine identity key did not open"),
+        }
+        opened
     })
 }
 
@@ -45,6 +59,12 @@ pub struct RecordedPeers {
     /// endpoint announcements a neighbour no record names delivers. Without
     /// it no such neighbour is heard.
     pub consensus: Option<Arc<crate::consensus_driver::ConsensusHandle>>,
+    /// The identity registry (consensus chain state) the identity gate reads
+    /// to tell a registered neighbour from one that is merely named.
+    pub registry: Option<Arc<dyn tenzro_iroh::RegistryView>>,
+    /// The peer gate, whose protected identities (the boot list and the
+    /// validators' machines) stand as registered here as they do there.
+    pub gate: Option<tenzro_iroh::IdentityGate>,
 }
 
 impl tenzro_network::PeerIdentities for RecordedPeers {
@@ -58,6 +78,23 @@ impl tenzro_network::PeerIdentities for RecordedPeers {
         self.consensus
             .as_ref()
             .is_some_and(|c| c.vouches_for_announcement(announcement))
+    }
+
+    fn registry_standing(&self, did: &str) -> tenzro_onboarding_types::onboarding::Standing {
+        use tenzro_onboarding_types::onboarding::Standing;
+        // A machine the peer gate admits whatever the registry says is heard
+        // on gossip as well: a validator's machine need not be registered.
+        if self.gate.as_ref().is_some_and(|g| g.protects(did)) {
+            return Standing::Registered;
+        }
+        match &self.registry {
+            // A registry that cannot be believed yet (the node is syncing)
+            // vouches for no one the gate does not protect.
+            Some(r) if r.ready() => r.standing(did),
+            Some(_) => Standing::Unregistered,
+            // No registry wired: the identity gate is not in play.
+            None => Standing::Registered,
+        }
     }
 }
 
@@ -246,6 +283,9 @@ pub const MAX_REMEMBERED: usize = 16;
 /// How often the remembered relay operators are refreshed.
 const REMEMBER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How often the relay operators are looked for until the first are found.
+const REMEMBER_FIRST: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn remembered_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("iroh").join("known-relays.json")
 }
@@ -289,12 +329,14 @@ pub fn relay_operators(records: &[tenzro_iroh::EndpointRecord]) -> Vec<BootIdent
 pub fn remember(transport: &Arc<IdentityTransport>, data_dir: std::path::PathBuf) {
     let transport = transport.clone();
     tokio::spawn(async move {
+        let mut wait = REMEMBER_FIRST;
         loop {
-            tokio::time::sleep(REMEMBER_INTERVAL).await;
+            tokio::time::sleep(wait).await;
             let operators = relay_operators(&transport.store().records());
             if operators.is_empty() {
                 continue;
             }
+            wait = REMEMBER_INTERVAL;
             let path = remembered_path(&data_dir);
             let list: Vec<String> = operators.iter().map(ToString::to_string).collect();
             let tmp = path.with_extension("json.tmp");
@@ -351,10 +393,48 @@ pub async fn start(config: &NodeConfig, staked: &[url::Url]) -> Result<Arc<Ident
              did:tenzro:machine:<id>@<relay url>, or a genesis whose validators name relays."
         );
     }
-    let transport =
-        IdentityTransport::start(boot, staked, config.iroh.relay.as_ref(), machine_did())
-            .await
-            .map_err(|e| NodeError::Config(format!("identity transport: {e}")))?;
+    // A relay the boot list names is admitted when its operator's signed
+    // record can be fetched, and the transport waits a minute for that. A
+    // relay that was not up in that minute is kept as a candidate, is in the
+    // endpoint's relay map from the start, and is asked again every round of
+    // the record loop (see `IdentityTransport::admit_pending`), so the node
+    // starts after one ask and recovers its relay without a restart.
+    // (A node serving the relay itself starts once: starting it binds the
+    // relay listener.)
+    let wants_relay = config.iroh.relay.is_none() && boot.iter().any(|b| b.relay.is_some());
+    let own_did = machine_did();
+    let transport = admit_boot_relays(
+        wants_relay,
+        START_ADMISSION_ROUNDS,
+        || {
+            let (boot, own_did) = (boot.clone(), own_did.clone());
+            async move {
+                IdentityTransport::start_with_limits(
+                    boot,
+                    staked,
+                    config.iroh.relay.as_ref(),
+                    own_did,
+                    config.iroh.relay_limits.limits(),
+                )
+                .await
+                .map_err(|e| NodeError::Config(format!("identity transport: {e}")))
+            }
+        },
+        |t| !t.relays().is_empty(),
+    )
+    .await?;
+    // Relays the config names beside the boot list's, and the direct
+    // addresses it fixes for peers. A relay that does not answer now is asked
+    // again every round and joins the running endpoint when it does.
+    let mut extra = Vec::new();
+    for url in &config.iroh.relay_urls {
+        tenzro_iroh::identity_record::check_relay_url(url)
+            .map_err(|e| NodeError::Config(format!("[iroh] relay_urls {url}: {e}")))?;
+        extra.push(url.clone());
+    }
+    transport.add_relay_candidates(&extra);
+    transport.set_static_addrs(config.iroh.peer_addrs.clone());
+    transport.keep_direct_addrs(config.data_dir.join("iroh").join("direct-addrs.json"));
     // Providers of weights gated behind a licence serve them to this machine
     // only when its record states its operator accepted that licence.
     transport
@@ -364,7 +444,47 @@ pub async fn start(config: &NodeConfig, staked: &[url::Url]) -> Result<Arc<Ident
         bind_records(&transport);
     }
     keep_pq_pins(&transport, config.data_dir.clone());
+    crate::update_advert::keep(&transport, config.data_dir.clone());
     Ok(transport)
+}
+
+/// The asks [`start`] makes before going on: the record loop keeps asking.
+const START_ADMISSION_ROUNDS: u32 = 1;
+
+/// How many times a start asks for the boot relays' records, each ask
+/// waiting up to the transport's own admission window (a minute).
+pub const RELAY_ADMISSION_ROUNDS: u32 = 5;
+
+/// Starts the transport with `start`, again when `wants_relay` and it
+/// admitted no relay, up to `rounds` times in all. The last transport is
+/// returned either way: a node whose relay never answers still starts, and
+/// says so.
+async fn admit_boot_relays<T, Fut>(
+    wants_relay: bool,
+    rounds: u32,
+    mut start: impl FnMut() -> Fut,
+    has_relay: impl Fn(&T) -> bool,
+) -> Result<T>
+where
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut round = 1;
+    loop {
+        let transport = start().await?;
+        if !wants_relay || has_relay(&transport) {
+            return Ok(transport);
+        }
+        if round >= rounds {
+            tracing::error!(
+                rounds,
+                "no boot relay answered: this node starts with its relays unadmitted and asks \
+                 again every few seconds; peers are reached when one answers"
+            );
+            return Ok(transport);
+        }
+        tracing::warn!(round, rounds, "no boot relay admitted yet; asking again");
+        round += 1;
+    }
 }
 
 /// Where the ML-DSA pins of the identities this node has met are saved.
@@ -473,6 +593,9 @@ const CHAIN_POLICY_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 ///   machine (ML-DSA-87 / P-384) registers its machine identity, so peers
 ///   hold its endpoint records to the machine's ML-DSA key from the first.
 pub fn keep_chain_policies(node: Arc<crate::node::TenzroNode>) {
+    // Every node registers its own machine identity once the chain has
+    // finalized, and keeps trying until it is on chain.
+    crate::machine_registration::spawn(node.clone());
     tokio::spawn(async move {
         loop {
             if let Some(chain) = crate::rpc::chain_state_of(&node) {
@@ -489,7 +612,7 @@ pub fn keep_chain_policies(node: Arc<crate::node::TenzroNode>) {
                     ),
                 );
                 if let Err(e) = maybe_register_machine(&node, &chain).await {
-                    tracing::debug!(error = %e, "validator machine not registered this round");
+                    tracing::warn!(error = %e, "validator machine not registered this round");
                 }
             }
             tokio::time::sleep(CHAIN_POLICY_INTERVAL).await;
@@ -959,5 +1082,58 @@ mod tests {
             genesis_boot(&genesis).is_err(),
             "a genesis relay must be a URL, not a transport path"
         );
+    }
+    #[tokio::test]
+    async fn boot_relays_are_asked_for_again_until_one_answers() {
+        // The relay is down for the first two asks (each of which the real
+        // transport spends a minute on), then up.
+        let asks = std::cell::Cell::new(0u32);
+        let got = admit_boot_relays(
+            true,
+            RELAY_ADMISSION_ROUNDS,
+            || {
+                asks.set(asks.get() + 1);
+                let relays = if asks.get() >= 3 { 1 } else { 0 };
+                async move { Ok::<_, NodeError>(relays) }
+            },
+            |relays| *relays > 0,
+        )
+        .await
+        .unwrap();
+        assert_eq!((got, asks.get()), (1, 3));
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_never_answers_still_lets_the_node_start_after_the_rounds() {
+        let asks = std::cell::Cell::new(0u32);
+        let got = admit_boot_relays(
+            true,
+            RELAY_ADMISSION_ROUNDS,
+            || {
+                asks.set(asks.get() + 1);
+                async { Ok::<_, NodeError>(0) }
+            },
+            |relays| *relays > 0,
+        )
+        .await
+        .unwrap();
+        assert_eq!((got, asks.get()), (0, RELAY_ADMISSION_ROUNDS));
+    }
+
+    #[tokio::test]
+    async fn a_node_that_names_no_relay_starts_once() {
+        let asks = std::cell::Cell::new(0u32);
+        admit_boot_relays(
+            false,
+            RELAY_ADMISSION_ROUNDS,
+            || {
+                asks.set(asks.get() + 1);
+                async { Ok::<_, NodeError>(0) }
+            },
+            |relays| *relays > 0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(asks.get(), 1);
     }
 }

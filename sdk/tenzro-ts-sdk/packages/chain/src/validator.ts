@@ -50,6 +50,22 @@ export interface ListValidatorsResult {
   validators: ValidatorRegistryEntry[];
 }
 
+/** The node's answer to `tenzro_getUpdateNotice`. */
+export interface UpdateNoticeReply {
+  /** True when `if_none_match` named the notice the node holds; no notice is sent then. */
+  unchanged?: boolean;
+  /** The signed notice envelope. The caller checks its signature. */
+  notice?: unknown | null;
+  /** Value to send back as `if_none_match` on the next ask. */
+  etag: string | null;
+  latest_version?: string | null;
+  severity?: string | null;
+  /** Seconds the answer may be kept. */
+  cache_ttl_secs: number;
+  /** The node's epoch position, when it runs consensus. */
+  epoch: { epoch: number; blocks_to_boundary: number | null } | null;
+}
+
 /** The node's finality (`tenzro_getFinality`). */
 export interface Finality {
   /** Highest height ordered by consensus. */
@@ -199,6 +215,11 @@ export class ValidatorClient {
   /** `tenzro_getFinality`: ordered and certified heights and the latest certificate. */
   getFinality<T = Finality>(): Promise<T> {
     return this.rpc.call<T>("tenzro_getFinality");
+  }
+
+  /** `tenzro_getUpdateNotice`: the newest signed release notice the node holds and its epoch position. */
+  getUpdateNotice<T = UpdateNoticeReply>(params?: { if_none_match?: string }): Promise<T> {
+    return this.rpc.call<T>("tenzro_getUpdateNotice", params);
   }
 
   /** `tenzro_getRewardEpoch`: a closed reward epoch's summary. */

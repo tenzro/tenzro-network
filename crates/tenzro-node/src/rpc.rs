@@ -231,6 +231,8 @@ impl RpcServer {
         let node_state = self.node.clone();
         let open_routes = Router::new()
             .route("/health", get(handle_rpc_get))
+            // The load level and which classes of work are being shed.
+            .route("/load", get(handle_load))
             // Web Bot Auth key directories of delegated agents, derived from
             // their terms in consensus state.
             .route(
@@ -403,16 +405,16 @@ impl RpcServer {
             ))
             // Concurrency limit: max 1000 in-flight requests. Raised
             // from the original 200 because the synchronized 11s
-            // unavailability windows in the soak harness traced to
+            // unavailability windows seen under load traced to
             // contention at this layer during block-commit cadence —
             // handlers holding state locks across the commit boundary
             // caused all 200 slots to drain in lockstep, manifesting
             // as a periodic pause to external observers.
             .layer(ConcurrencyLimitLayer::new(1000))
-            // Per-address GCRA floor, outermost so an abusive source is
-            // rejected with 429 before consuming a concurrency slot. Its
-            // limits are governed; past the floor a transaction submission
-            // is admitted only on its sender's own lane quota.
+            // Per-address GCRA floor, so an abusive source is rejected with
+            // 429 before consuming a concurrency slot. Its limits are
+            // governed; past the floor a transaction submission is admitted
+            // only on its sender own quota.
             .layer(axum::middleware::from_fn_with_state(
                 crate::ip_rate_limit::IpRateLimiter::governed(
                     governed_address_limits(&self.node),
@@ -420,6 +422,13 @@ impl RpcServer {
                     crate::ip_rate_limit::Answer::JsonRpc,
                 ),
                 crate::ip_rate_limit::ip_rate_limit,
+            ))
+            // Load shedding, outermost: under load a request of a shed class
+            // gets 503 with Retry-After before it costs anything, and the
+            // number waiting behind the concurrency limit is bounded.
+            .layer(axum::middleware::from_fn_with_state(
+                crate::load_shed::ShedGate::new(),
+                crate::load_shed::load_shed,
             ));
 
         let listener = tokio::net::TcpListener::bind(&self.listen_addr)
@@ -450,6 +459,24 @@ impl RpcServer {
 
         Ok(())
     }
+}
+
+/// The load level and the classes of work being shed.
+async fn handle_load() -> impl IntoResponse {
+    let report = crate::load_monitor::latest_report();
+    let level = crate::load_monitor::current_level();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "level": level.name(),
+            "shedding": crate::load_monitor::shed_classes(level)
+                .into_iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>(),
+            "cause": report.as_ref().and_then(|r| r.cause.clone()),
+            "summary": report.map(|r| r.summary()).unwrap_or_else(|| "load GREEN".to_string()),
+        })),
+    )
 }
 
 /// Handle GET requests (health/info for reverse proxy health checks)
@@ -1229,7 +1256,16 @@ pub(crate) async fn handle_request(
     // holds the inlined state of every awaited handler. Left unboxed it is
     // large enough to exhaust a tokio worker's 2 MB stack as it is moved
     // through the caller chain. Boxing keeps it on the heap.
-    Box::pin(dispatch_request(node, request, auth_ctx, caller)).await
+    //
+    // Every transport reaches the dispatcher here, so this one wrapper times
+    // every method. It logs a warning for a slow call and changes nothing else.
+    let method = request.method.clone();
+    crate::rpc_slow::warn_if_slow(
+        &method,
+        crate::rpc_slow::SLOW_RPC,
+        Box::pin(dispatch_request(node, request, auth_ctx, caller)),
+    )
+    .await
 }
 
 async fn dispatch_request(
@@ -1273,6 +1309,24 @@ async fn dispatch_request(
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
                 data: None,
+            }),
+        };
+    }
+
+    // Under load the node refuses model work and memory-heavy calls by
+    // method, the same answer the HTTP edge gives a shed route.
+    if let Some(refusal) = crate::load_shed::method_refusal(&request.method) {
+        return JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: crate::load_shed::RPC_ERR_OVERLOADED,
+                message: refusal.message,
+                data: Some(serde_json::json!({
+                    "load": refusal.level.name(),
+                    "retry_after": refusal.retry_after,
+                })),
             }),
         };
     }
@@ -1321,7 +1375,7 @@ async fn dispatch_request(
         // Permissionless developer app registry: the wallet and margin a
         // settlement attributed to an app pays. Writes are
         // developer-DID-envelope-signed; reads are open.
-        // Committee-DA possession challenges + availability scoring (Task #92).
+        // Committee-DA possession challenges + availability scoring.
         // Validators audit each other's sliver custody with nonce-bound signed
         // proofs; every resolution feeds the target's rolling availability score.
         "tenzro_daChallenge" => handle_da_challenge(node, request.params).await,
@@ -1364,7 +1418,7 @@ async fn dispatch_request(
         "tenzro_getComputeBond" => handle_get_compute_bond(node, request.params).await,
         "tenzro_listComputeBonds" => handle_list_compute_bonds(node).await,
         "tenzro_computeBondParams" => handle_compute_bond_params(node).await,
-        // SLA fault detector (Phase B Thread 5). Validator-only writes
+        // SLA fault detector. Validator-only writes
         // (issue_probe broadcasts a VRF-stamped challenge over `tenzro/sla`);
         // read-only reflectors for outstanding probes + manager parameters.
         "tenzro_slaIssueProbe" => handle_sla_issue_probe(node, request.params).await,
@@ -1611,6 +1665,8 @@ async fn dispatch_request(
 
         // Node methods
         "tenzro_getNodeStatus" => handle_node_info(node).await,
+        // The newest signed release notice this node holds, for the caller to verify.
+        "tenzro_getUpdateNotice" => handle_get_update_notice(node, request.params).await,
         // Control-plane observability: what the node is admitting, how its
         // memory is divided, and which models are warm.
         "tenzro_fabricProfile" => handle_fabric_profile(node, request.params).await,
@@ -3018,15 +3074,13 @@ pub(crate) async fn handle_get_transaction(
         data: None,
     })?;
 
-    use tenzro_storage::CF_TRANSACTIONS;
-
     // Normalize the lookup key: storage is keyed by the bare hex-encoded Hash
     // (see Hash::Display), but callers on EVM-compat paths commonly pass a
     // `0x`-prefixed string. Strip the prefix if present so both forms resolve.
     let tx_hash_key = tx_hash_str.strip_prefix("0x").unwrap_or(tx_hash_str);
 
     // Query transaction from finalized storage first.
-    if let Ok(Some(tx_bytes)) = storage.get(CF_TRANSACTIONS, tx_hash_key.as_bytes())
+    if let Some(tx_bytes) = crate::tx_record::stored_transaction_json(storage.as_ref(), tx_hash_key)
         && let Ok(tx) = serde_json::from_slice::<SignedTransaction>(&tx_bytes)
     {
         let value = crate::network_rpc::transferred(&tx.transaction.tx_type);
@@ -4113,7 +4167,7 @@ async fn handle_inference_request(
             data: None,
         })?;
 
-    // Validate model_id length (MEDIUM #115)
+    // Validate model_id length
     tenzro_types::validation::validate_string_len(
         model_id,
         "model_id",
@@ -4134,7 +4188,7 @@ async fn handle_inference_request(
             data: None,
         })?;
 
-    // Validate input length (MEDIUM #115)
+    // Validate input length
     tenzro_types::validation::validate_string_len(
         input,
         "input",
@@ -4151,7 +4205,7 @@ async fn handle_inference_request(
         .and_then(|v| v.as_u64())
         .unwrap_or(100);
 
-    // Validate max_tokens bound (MEDIUM #115)
+    // Validate max_tokens bound
     tenzro_types::validation::validate_numeric_bound(
         max_tokens,
         "max_tokens",
@@ -4406,7 +4460,7 @@ pub(crate) async fn submit_as_validator(
     }))
 }
 
-// ---- Committee-DA possession challenges + availability (Task #92) -----------
+// ---- Committee-DA possession challenges + availability ----------------------
 //
 // Validators audit each other's Red Stuff sliver custody: a challenge sends a
 // fresh random nonce, the target answers with its full sliver plus a signature
@@ -6969,6 +7023,37 @@ async fn handle_get_finalized_block(
     Ok(serde_json::json!(format!("0x{:x}", certified)))
 }
 
+/// `tenzro_getUpdateNotice [{"if_none_match": etag}]` — the newest signed
+/// release notice this node holds (see [`crate::update_notice`]), with the
+/// epoch position so a validator or provider can tell when a restart is safe.
+/// A read; answered from memory, rate limited for all callers together, and
+/// carrying nothing that identifies the node or the caller. The caller checks
+/// the signature itself.
+async fn handle_get_update_notice(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let epoch = node.consensus().map(|c| {
+        let current = c.epoch_manager().current_epoch();
+        let ordered = c.finality().ordered;
+        tenzro_update_notice::banner::EpochView {
+            epoch: current.number,
+            blocks_to_boundary: Some(current.end_height.as_u64().saturating_sub(ordered)),
+        }
+    });
+    crate::update_notice::hub(&node.config().data_dir)
+        .rpc_reply(
+            params.as_ref(),
+            epoch,
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+        )
+        .map_err(|(code, message)| JsonRpcError {
+            code,
+            message,
+            data: None,
+        })
+}
+
 /// `tenzro_getFinality` — both finality levels.
 ///
 /// - `ordered`: the highest height this node has ordered. Final for every
@@ -7191,6 +7276,17 @@ pub(crate) async fn handle_node_info(
             crate::identity_bootstrap::machine_did().into(),
         );
         map.insert("operator_did".into(), node.operator_did().into());
+        // How the TPM is answering: healthy, degraded or stalled.
+        map.insert(
+            "tpm".into(),
+            tenzro_device_key::tpm_health().unwrap_or(Value::Null),
+        );
+        // The binary version, its hash and the update state the node states
+        // in its signed endpoint record.
+        map.insert(
+            "update".into(),
+            crate::update_advert::status_json(node.config().data_dir.clone()).await,
+        );
         // The wallet this node is paid at: payment channels, escrows and
         // inference bills name it as the payee.
         map.insert(
@@ -8374,6 +8470,19 @@ async fn handle_signed_submission(
     // lets act, and the ML-DSA-65 leg must verify against the key the account
     // enrolled in state.
     let state = chain_state(node)?;
+    // A validator registration from an account that is not admitted is
+    // refused here with its own error code while admission is closed.
+    if matches!(
+        signed_tx.transaction.tx_type,
+        TransactionType::RegisterValidator { .. }
+    ) && !tenzro_vm::validator_admission::is_admitted(
+        &state,
+        signed_tx.transaction.from.as_bytes(),
+    ) {
+        return Err(crate::validator_admission::rpc_refusal(
+            signed_tx.transaction.from.as_bytes(),
+        ));
+    }
     if let Err(e) = crate::event_loop::verify_transaction_signature(&signed_tx)
         .and_then(|()| {
             // Passkey standing is judged on this node's passkey clock, the
@@ -9061,7 +9170,7 @@ async fn handle_get_transaction_by_hash(
     };
     if let (Some(idx_raw), Some(tx_raw)) = (
         read(format!("idx:{hex_key}").as_bytes())?,
-        read(hex_key.as_bytes())?,
+        crate::tx_record::stored_transaction_json(storage.as_ref(), &hex_key),
     ) {
         let idx: Value = serde_json::from_slice(&idx_raw).map_err(|e| JsonRpcError {
             code: -32000,
@@ -9280,8 +9389,7 @@ async fn handle_net_peer_count(node: &Arc<TenzroNode>) -> std::result::Result<Va
 //          max_daily_spend / allowed_operations).
 //        - autonomous agent: conservative — small transfer/escrow caps,
 //          inference, plus `RegisterIdentity` so the agent can spawn
-//          children. Requires a 1 TNZO balance bond floor (subtask #54
-//          will add slashing on revocation).
+//          children. Requires a 1 TNZO balance bond floor.
 //   3. Calls `engine.issue_jwt(bearer_did, controller_did, cnf_jkt,
 //      envelope, ttl)`. The optional `dpop_jkt` parameter (RFC 9449 §10.1)
 //      pins the JWT to the caller's DPoP key — required for the
@@ -9551,7 +9659,7 @@ async fn handle_onboard_delegated_agent(
     let did = identity.did_string();
     let envelope = delegated_agent_envelope(max_tx, max_daily, &allowed_operations);
     // controller_did on the JWT is the *human* controller — this enables
-    // cascading revocation (subtask #54).
+    // cascading revocation.
     let token = mint_onboarding_jwt(
         node,
         &did,
@@ -9595,7 +9703,7 @@ async fn handle_onboard_delegated_agent(
         "refresh_token_expires_in": refresh_expires_in,
         "dpop_bound": dpop_jkt.is_some(),
         "authorization_details": envelope,
-        "note": "Save the access_token AND refresh_token. Exchange the refresh_token at tenzro_refreshToken when the access_token expires. Revoking the controller_did cascades revocation to this agent (subtask #54).",
+        "note": "Save the access_token AND refresh_token. Exchange the refresh_token at tenzro_refreshToken when the access_token expires. Revoking the controller_did cascades revocation to this agent.",
     }))
 }
 
@@ -9690,7 +9798,7 @@ async fn handle_onboard_autonomous_agent(
     // controller_did on the JWT is `did` itself — there is no human in
     // the act-chain. Cascading revocation by controller_did is therefore
     // a no-op for autonomous agents; revocation must target the JTI
-    // directly (subtask #54).
+    // directly.
     let token = mint_onboarding_jwt(
         node,
         &did,
@@ -12762,8 +12870,7 @@ async fn handle_install_sealed_model(
         .cloned()
         .ok_or_else(|| JsonRpcError {
             code: -32000,
-            message: "Node recipient key unavailable — cannot install sealed models"
-                .to_string(),
+            message: "Node recipient key unavailable — cannot install sealed models".to_string(),
             data: None,
         })?;
     let resolver = node.iroh_resolver.as_ref().ok_or_else(|| JsonRpcError {
@@ -17473,25 +17580,25 @@ pub(crate) fn network_offer(
         if is_self {
             continue;
         }
-        let (has_room, load_bps, latency_ms) = match node.network_providers.get(&reg.iroh_endpoint_id)
-        {
-            Some(p) => {
-                let cap = &p.announcement.capacity;
-                let latency = p.announcement.network_profile.latency_ms_to_peers;
-                (
-                    crate::offer_ranking::OfferRank::room(
-                        cap.active_requests,
-                        cap.max_concurrent_requests,
-                    ),
-                    crate::offer_ranking::OfferRank::load_bps(
-                        cap.active_requests,
-                        cap.max_concurrent_requests,
-                    ),
-                    if latency == 0 { u32::MAX } else { latency },
-                )
-            }
-            None => (true, 0, u32::MAX),
-        };
+        let (has_room, load_bps, latency_ms) =
+            match node.network_providers.get(&reg.iroh_endpoint_id) {
+                Some(p) => {
+                    let cap = &p.announcement.capacity;
+                    let latency = p.announcement.network_profile.latency_ms_to_peers;
+                    (
+                        crate::offer_ranking::OfferRank::room(
+                            cap.active_requests,
+                            cap.max_concurrent_requests,
+                        ),
+                        crate::offer_ranking::OfferRank::load_bps(
+                            cap.active_requests,
+                            cap.max_concurrent_requests,
+                        ),
+                        if latency == 0 { u32::MAX } else { latency },
+                    )
+                }
+                None => (true, 0, u32::MAX),
+            };
         let standing = chain.as_ref().map_or(0, |c| {
             crate::provider_standing::standing(c, provider_address.as_bytes(), now_ms)
         });
@@ -18195,7 +18302,7 @@ async fn handle_chat_simple(
 ///
 /// First implementation pass: text-only blocks. Tool-use parsing from the
 /// raw output, vision input, and extended-thinking emission are added
-/// in follow-up commits on this branch (see `docs/chat-api.md` for the
+/// later (see `docs/chat-api.md` for the
 /// public contract).
 ///
 /// What this pass supports today:
@@ -18286,7 +18393,7 @@ async fn handle_chat_rich(
     };
 
     // ── parse optional tools (validated, used by template; tool_use
-    //    extraction from output lands in a follow-up commit) ──────────
+    //    extraction from output comes later) ──────────
     let tools: Vec<ToolSchema> = match params.get("tools") {
         Some(v) => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
             code: -32602,
@@ -20786,7 +20893,7 @@ async fn openai_chat_completions_scoped(
                 node.stream_cursors.create(&completion_id);
                 let cursor_rid = completion_id.clone();
 
-                // P1.3 SLO metrics — label the provider as "local" for
+                // SLO metrics — label the provider as "local" for
                 // self-served models to keep label cardinality bounded.
                 let slo = node.stream_slo_metrics.clone();
                 let slo_provider = "local".to_string();
@@ -20794,7 +20901,7 @@ async fn openai_chat_completions_scoped(
                 slo.record_stream_started(&slo_provider, &slo_model);
                 let request_start = std::time::Instant::now();
 
-                // P2.2 audit log — publish stream lifecycle events to the bus
+                // Audit log — publish stream lifecycle events to the bus
                 // so downstream consumers (replay, dispute resolution) see the
                 // same start/first-token/drop/complete boundaries that the
                 // SLO histograms record.
@@ -20895,7 +21002,7 @@ async fn openai_chat_completions_scoped(
                     let mut serving_permit = serving_permit;
                     let mut first_token_ms: Option<u64> = None;
                     let cursors = node_clone.stream_cursors.clone();
-                    // P1.3 SLO timing state.
+                    // SLO timing state.
                     let mut got_any_token = false;
                     let mut last_token_at: Option<std::time::Instant> = None;
                     // The opening chunk names the role, as every OpenAI-compatible
@@ -21138,7 +21245,7 @@ async fn openai_chat_completions_scoped(
                     // it from `finished == true` so a client resuming after a
                     // completed stream still sees `[DONE]`.
                     cursors.finish(&cursor_rid);
-                    // P1.3 completion observation: local-model channel closing
+                    // Completion observation: local-model channel closing
                     // after at least one token is success; closing without any
                     // token (rare — would mean the generator faulted before
                     // emitting anything) is a failure for SLO purposes.
@@ -21557,7 +21664,7 @@ async fn openai_chat_completions_scoped(
                     let settle_node = node.clone();
                     let settle_pricing = svc.pricing.clone();
                     let settle_model = svc.model_id.clone();
-                    // P1.3 SLO metrics handle. Captured into the stream
+                    // SLO metrics handle. Captured into the stream
                     // closure; observations on first-chunk (TTFT),
                     // every subsequent chunk (intertoken), and on stream
                     // termination (completed/failed counters).
@@ -21567,7 +21674,7 @@ async fn openai_chat_completions_scoped(
                     slo.record_stream_started(&slo_provider, &slo_model);
                     let request_start = std::time::Instant::now();
 
-                    // P2.2 audit log — emit the same lifecycle events as
+                    // Audit log — emit the same lifecycle events as
                     // the local path, with `provider_label` set to the
                     // remote provider's address string for label parity
                     // with the SLO histograms.
@@ -21589,7 +21696,7 @@ async fn openai_chat_completions_scoped(
                     // wrapped in a heartbeat watchdog so a stuck-but-TCP-
                     // healthy provider gets caught at the application
                     // layer. With the defaults (5s × 2) we detect a stall
-                    // within 10s — matches the P1.1 acceptance.
+                    // within 10s.
                     let byte_stream = crate::infer::body_stream(resp);
                     let stream = async_stream::stream! {
                         use crate::streaming::{with_heartbeat, HeartbeatConfig, HeartbeatedChunk};
@@ -21617,7 +21724,7 @@ async fn openai_chat_completions_scoped(
                         let mut had_stream_error = false;
                         let mut had_stall = false;
                         let mut stall_silent_for_ms: u64 = 0;
-                        // P1.3 SLO timing state: when did the previous
+                        // SLO timing state: when did the previous
                         // chunk land? Used to compute inter-chunk gap as
                         // a proxy for inter-token latency at the chunk
                         // granularity we observe (the upstream may pack
@@ -22871,12 +22978,34 @@ async fn handle_set_settlement_preference(
             message: "public_key must be hex".to_string(),
             data: None,
         })?;
-    let public_key = tenzro_crypto::composite::CompositePublicKey::new(pk_bytes.clone(), None)
-        .map_err(|e| JsonRpcError {
+    if pk_bytes.len() != 64 {
+        return Err(JsonRpcError {
             code: -32602,
-            message: format!("public_key must be a P-256 key, x || y (64 bytes hex): {e}"),
+            message: "public_key must be a P-256 key, x || y (64 bytes hex)".to_string(),
+            data: None,
+        });
+    }
+    // The payee's ML-DSA-65 key is the one enrolled in chain state for this
+    // P-256 key; the signature must carry that leg.
+    let enrolled_pq = {
+        let chain_storage = node.storage().cloned().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Storage not available".to_string(),
             data: None,
         })?;
+        let state = tenzro_vm::StateAdapter::with_storage(
+            chain_storage as Arc<dyn tenzro_storage::KvStore>,
+        );
+        tenzro_vm::account_keys::enrolled_pq_key(&state, &pk_bytes)
+    };
+    let public_key =
+        tenzro_crypto::composite::CompositePublicKey::new(pk_bytes.clone(), enrolled_pq).map_err(
+            |e| JsonRpcError {
+                code: -32602,
+                message: format!("public_key must be a P-256 key, x || y (64 bytes hex): {e}"),
+                data: None,
+            },
+        )?;
 
     // The key must be one the DID declares for authentication, or anyone
     // could sign with a key of their own and claim to be the payee.
@@ -23365,10 +23494,7 @@ async fn handle_get_transaction_receipt(
         .get(CF_TRANSACTIONS, format!("idx:{}", hex_key).as_bytes())
         .ok()
         .flatten();
-    let tx_bytes = storage
-        .get(CF_TRANSACTIONS, hex_key.as_bytes())
-        .ok()
-        .flatten();
+    let tx_bytes = crate::tx_record::stored_transaction_json(storage.as_ref(), hex_key);
     let receipt_bytes = storage
         .get(CF_TRANSACTIONS, format!("receipt:{}", hex_key).as_bytes())
         .ok()
@@ -27620,5 +27746,30 @@ mod stop_and_serve_tests {
         assert!(!node.is_offloaded(MODEL));
         assert!(node.load_tracker.snapshot(MODEL).is_some());
         assert!(!runtime.is_stopped(MODEL));
+    }
+}
+
+#[cfg(test)]
+mod slow_request_real_path_tests {
+    use super::*;
+
+    /// A fast method through the real `handle_request` logs no slow-request
+    /// warning and still answers.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_fast_method_through_handle_request_does_not_warn() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..crate::config::NodeConfig::default()
+        };
+        let node = Arc::new(TenzroNode::new(config).await.expect("node"));
+        let request: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tenzro_blockNumber", "params": []
+        }))
+        .expect("request");
+        let (log, _guard) = crate::rpc_slow::test_capture::capture();
+        let response = handle_request(&node, request, &AuthContext::default(), None).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(!log.text().contains("slow RPC request"), "{}", log.text());
     }
 }

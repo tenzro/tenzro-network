@@ -542,7 +542,7 @@ as its context and the built binary is committed
 (`crates/tenzro-finality-prover/methods/finality-guest.bin`; an ignored test
 rebuilds it and checks it is unchanged), so the prover builds on any host,
 aarch64 GPU hosts included, and every build has the same image
-id: `578bacf21a7a6a60d75ba661def3099b49231a66f52434b55cc987a18cf6ce39`, which
+id: `84684b576dcba8ca62548bb2ef545eee3817bc5db36ac5a821847b5bd2b493a3`, which
 the production genesis names (`tenzro-finality-prover image-id` prints it; a
 test of the prover fails if the two differ).
 

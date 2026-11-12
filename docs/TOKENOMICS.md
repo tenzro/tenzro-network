@@ -13,12 +13,12 @@ This document specifies the economic model, the rationale behind each parameter,
 ## Table of contents
 
 1. [Why TNZO](#1-why-tnzo)
-2. [Supply and decimals](#2-supply-and-decimals)
+2. [Supply and distribution](#2-supply-and-distribution)
 3. [Demand sources](#3-demand-sources)
 4. [Fee architecture](#4-fee-architecture)
 5. [Burn channels and net supply](#5-burn-channels-and-net-supply)
 6. [Adaptive burn dial](#6-adaptive-burn-dial)
-7. [Staking](#7-staking)
+7. [Consensus, staking, and service roles](#7-consensus-staking-and-service-roles)
 8. [Bonded stake is not tokenized](#8-bonded-stake-is-not-tokenized)
 9. [Provider economies](#9-provider-economies)
 10. [Bonds and slashing](#10-bonds-and-slashing)
@@ -32,7 +32,8 @@ This document specifies the economic model, the rationale behind each parameter,
 15b. [Economic security](#15b-economic-security)
 16. [Governance economics](#16-governance-economics)
 17. [Sustainability](#17-sustainability)
-18. [Where the agentic decade is going](#18-where-the-agentic-decade-is-going)
+18. [Simulations](#18-simulations)
+19. [Where the agentic decade is going](#19-where-the-agentic-decade-is-going)
 
 ---
 
@@ -65,7 +66,7 @@ TNZO does not replace user-facing stablecoins. AP2 cart settlements, x402 USDC f
 | Chain ID | set by each network's genesis | 13380 on the preview network; `eth_chainId` returns it |
 | Network-rewards pool | 400,000,000 TNZO | Genesis-funded account; rewards are transfers out of it |
 
-Supply is fixed. Genesis allocates exactly the maximum supply: the accounts it names, including the network-rewards pool account (`tenzro_token::rewards_pool_address()`, 400M TNZO); genesis refuses a configuration whose allocations do not add up to 1,000,000,000 TNZO (`tnzo::check_genesis_supply`). There is no protocol-level mint authority beyond the genesis distribution: reward claims and vesting releases are transfers out of the pool and the vesting escrow account (see section 7), not mints. The only thing that changes total supply after genesis is burning (section 5), plus bridge mint and burn of tokens that crossed chains.
+Supply is fixed. Total supply never exceeds the maximum of 1,000,000,000 TNZO. Genesis allocates to the accounts it names, including the network-rewards pool account (`tenzro_token::rewards_pool_address()`, 400M TNZO); genesis refuses a configuration whose allocations total more than 1,000,000,000 TNZO (`tnzo::check_genesis_supply`); it does not require the allocations to total exactly that amount. There is no protocol-level mint authority beyond the genesis distribution: reward claims and vesting releases are transfers out of the pool and the vesting escrow account (see section 7), not mints. The only thing that changes total supply after genesis is burning (section 5), plus bridge mint and burn of tokens that crossed chains.
 
 There is no transfer circuit breaker on TNZO. A node-local, wall-clock breaker would be incompatible with deterministic execution, so none exists.
 
@@ -79,7 +80,7 @@ Every block is held to a value rule: the balances each transaction touches chang
 
 | Path | How value flows back as TNZO |
 |---|---|
-| Running a validator | Bond 10,000 TNZO and run a node that meets the resource profile (hardware, bandwidth, uptime, optional TEE attestation) to order blocks and sign checkpoints with a hardware-held consensus key. Voting power is stake-weighted; earn priority fees, leader-election rewards, and governance weight. Optional TEE attestation is a reputation signal and does not change leader selection. Only validators carry consensus weight; the service roles in the next row bond for their own rung without voting (section 7) |
+| Running a validator | Bond 10,000 TNZO and run a node that meets the resource profile (hardware, bandwidth, uptime, optional TEE attestation) to order blocks and sign checkpoints with a hardware-held consensus key. Voting power is stake-weighted; earn reward coupons for the consensus work performed, and governance weight. Optional TEE attestation is a reputation signal and does not change leader selection. Only validators carry consensus weight; the service roles in the next row bond for their own rung without voting (section 7) |
 | Serving compute or hardware | Bond for a service rung — model provider, TEE provider, compute provider, storage provider, rail attestor, wallet provider or catalog publisher — and earn per-call / per-token / per-service / per-attestation / per-byte fees, plus the provider class reward multiplier on staking rewards. Compute and storage bonds scale with the capacity pledged (section 7) |
 | Operating an RPC provider | Run a public or gated RPC endpoint that brokers access to network resources (external chains, regulated bridge routes, KYC-tier-gated services, admin-gated cross-chain mint/burn). Admit tenants by DID in the node's access policy, broker their upstream credentials keyed by DID, expose per-tenant analytics; earn from tenant access fees, per-call fees, and commission on the underlying flow routed through your endpoint |
 | Building and running apps on Tenzro | Run an application that drives transactions through the network — settlements, payments, inference billing, marketplace flows; earn from the underlying activity (provider fees, marketplace commissions, agent template invocations, AP2 / MPP / x402 settlement flow your app routes) |
@@ -113,7 +114,7 @@ The way to receive TNZO from the network is to do work it pays for.
 
 ## 3. Demand sources
 
-TNZO is needed for four things, each of which grows with use of the network:
+TNZO is needed for five things, each of which grows with use of the network:
 
 **Gas.** Every transaction on Tenzro Ledger — every EVM call, every SVM instruction, every identity operation, every governance vote, every cross-chain message — pays gas in TNZO. EIP-1559 sets a dynamic base fee that adjusts ±12.5% per block to target half the block gas limit. The governed share of the base fee is burned (100% by default) and everything else a block collects in fees, including the priority part, is credited to the treasury, less the insurance pool's governed share (`fees.insurance_pool_bps`, default 10%) (see section 4). No gas is paid to the block proposer.
 
@@ -334,7 +335,7 @@ A fixed burn fraction works well at one usage band. As the network grows, the bu
 
 Tenzro decouples **consensus weight** from **service capacity**. Block finality is produced by a staked validator set running DAG consensus with stake-weighted checkpoint certificates. Serving intelligence, security, compute, storage, and hosted services is a separate set of roles that earn through proof-of-service. Every role bonds TNZO, but only validators carry finality weight and governance weight. A single operator can do both: bond to validate *and* bond to serve capacity, earning on both tracks at once.
 
-Bonding is what puts a participant at risk for the work it claims to do, so it is universal across the ladder — nine rungs, each with its own bond sized to the trust surface it opens. Bonding is never free: a role that pledges no capacity still posts the floor for its rung. What differs between rungs is the size of the bond and what misbehavior costs, not whether a bond exists. Nothing about bonding requires a TEE, and nothing about a TEE substitutes for a bond.
+Bonding is what puts a participant at risk for the work it claims to do, so it is universal across the ladder — ten rungs, each with its own bond sized to the trust surface it opens. Bonding is never free: a role that pledges no capacity still posts the floor for its rung. What differs between rungs is the size of the bond and what misbehavior costs, not whether a bond exists. Nothing about bonding requires a TEE, and nothing about a TEE substitutes for a bond.
 
 ### The stake ladder
 
@@ -344,6 +345,7 @@ Bonding is what puts a participant at risk for the work it claims to do, so it i
 | Rail attestor | 100,000 TNZO | — |
 | Validator | 10,000 TNZO | — |
 | TEE provider | 10,000 TNZO | — |
+| Edge operator | 10,000 TNZO | — |
 | Model provider | 1,000 TNZO | — |
 | Wallet provider | 1,000 TNZO | — (declares its passkey domain) |
 | Catalog publisher | 1,000 TNZO | — |
@@ -352,7 +354,7 @@ Bonding is what puts a participant at risk for the work it claims to do, so it i
 
 A **wallet provider** bonds for the relying-party domain its passkeys are bound to. Validators fetch `https://<domain>/.well-known/tenzro-provider` each probe round and attest whether it names the bonding account; a frozen verdict that it does marks the domain as served by a staked provider, and an unavailable verdict takes the SLA penalty from the bond. Wallets from unbonded domains still work; they are only not shown as staked.
 
-The RPC operator carries the largest bond on the ladder because it holds the largest trust surface: it admits tenants to its node by DID, brokers upstream chain access under its own credentials, and fronts gated resources for parties that never touch the protocol directly. The RPC bond subsumes the validator bond: an RPC operator is a validator that additionally serves public RPC.
+The RPC operator carries the largest bond on the ladder, level with the rail attestor's, because it holds the largest trust surface: it admits tenants to its node by DID, brokers upstream chain access under its own credentials, and fronts gated resources for parties that never touch the protocol directly. The RPC bond subsumes the validator bond: an RPC operator is a validator that additionally serves public RPC.
 
 Below the ladder sits unbonded participation. A node can join, sync, gossip, relay, and run consensus without posting anything, because it claims no work and takes no counterparty risk. Its quorum weight is its own bond, so bonding nothing contributes nothing to a quorum; it gets no governance vote and has no slashing exposure, since there is no bond to slash. That is what keeps admission open without making influence free.
 
@@ -406,8 +408,8 @@ The clean line: **finality weight lives with validators; service capacity lives 
 | Compute bond minimum | 100 TNZO at genesis, `compute_bond.min_tnzo` | `tenzro-vm/native/mod.rs` |
 | Validator unbonding period | 7 days: `ExitValidator` moves the bond to unbonding (no longer stake, still slashable); a second `ExitValidator` after 7 days pays it out | `tenzro-vm/native/staking.rs` |
 | Reward model | Work-gated coupons on a declining annual schedule, paid from the genesis rewards pool; provider and ecosystem buckets capped at `revenue_peg_bps` (default and most 10,000) of the work weight they recorded, each settlement's weight at most a share of the fee it paid outside the trade | `tenzro-token/rewards.rs` |
-| Epoch duration | 14,400 blocks (~1 day at 6-second block target) | `tenzro-token/rewards.rs` |
-| Epochs per year | 365 | |
+| Epoch duration | 7,200 checkpoints at 500 ms (1 hour) in the launch genesis | `config/genesis-launch.toml` `[time]` |
+| Epochs per year | 8,766 (a schedule year is 31,557,600 s) | `tenzro-token/rewards.rs` |
 | Reward claim liquid fraction | `liquid_bps` (remainder opens 12-month reward vesting) | `tenzro-token/rewards.rs` |
 | Equivocation slash | `min(100%, max(5%, 3 × correlated bonded share))` of bonded and unbonding stake, 15% floor for a repeat offender, correlation window 16 checkpoints, earlier offenders topped up; applied in-block by the evidence transaction, into the insurance pool | `tenzro-types/constants.rs`, `tenzro-vm/native/staking.rs` |
 | Consensus quorum threshold | `n - f` of `n` seats, `f = (n - 1) / 3` | `tenzro-consensus/committee.rs` |
@@ -523,11 +525,9 @@ A model provider:
 - Registers in the model registry with one or more model identifiers, modalities, and pricing.
 - Serves inference requests routed by the inference router (price, latency, reputation, or weighted strategy).
 - Earns in either of two billing modes (see "Capacity rental and reservation" below): **pay-per-use** (per call or per token, the unit depends on modality) for on-demand consumption, or **time-based rental** (a stream escrow to the provider, paid per epoch) when a consumer reserves dedicated capacity.
-- Is rate-limited by their reputation score (250–1000 range).
+- Is ranked for routing by its standing, read from consensus state: 0 without a live serving bond, otherwise a bonded part (`routing.standing_bonded`, 3,000 at genesis) plus an availability part (`routing.standing_availability`, 7,000) scaled by the share of the last `routing.standing_window_hours` (24) closed hours that validators' SLA verdicts found it available, on a scale of 0 to 10,000.
 
-Reputation is asymmetric: success on settled payment increments reputation by +1 (capped at 1,000); failure decrements by -5 (floored at 0). The split between "successful HTTP 200" and "settled payment" matters: HTTP 200 alone updates latency only. Reputation gain is gated to settled-payment-only so providers cannot game reputation without taking a real payment.
-
-Reputation is durable. RocksDB persists per-provider reputation; restarts do not reset it.
+Standing is not written anywhere: every node computes the same number from the same chain state. HTTP 200 responses update latency and circuit-breaker metrics only; they do not move standing.
 
 ### TEE providers
 
@@ -808,7 +808,7 @@ Governance is on-chain: proposals, votes, enactment and vetoes are transactions 
 | Track | Voting window | Timelock | Quorum (of bonded stake) | Threshold (of participating stake) | Used for |
 |---|---|---|---|---|---|
 | Standard | 3 days | 2 days | 1/3 | 2/3 | Everything |
-| Expedited | 6 hours | 4 hours | 1/3 | 4/5 | A burn-dial change answering a supply alarm, and nothing else |
+| Expedited | 6 hours | 4 hours | 1/3 | 4/5 | A burn-dial change answering a supply alarm, stopping a bridge route, or a parameter change that only pauses a feature |
 
 Guardians hold negative powers only. Governance guardians veto a passed proposal during its timelock; protocol guardians pause enactment (voting and proposing continue). Either power takes `governance.guardian_threshold` distinct seated guardians of the role (default 2), a pause lifts by itself after `governance.max_pause_ms` (default 72 hours), and a new pause waits `governance.pause_cooloff_ms` (default 7 days) after the last one ended. A guardian is a human identity seated by an enacted `SetGuardian` proposal (or at genesis) for a term of at most `governance.guardian_max_term_ms` (default one year), and unseated by `RemoveGuardian` or when the term ends. Every seat names an independent key root (a passkey sync provider or a device-bound credential); two live seats of one role never share one. Foundation steward seats (role `steward`) may veto a queued treasury or expedited proposal, or hold treasury and expedited enactment for at most `governance.max_pause_ms`; they hold no power after `governance.steward_sunset_ms`, at most `governance.steward_max_seats` are live, and governance may only lower either value. No guardian action moves funds, sets a parameter or enacts a proposal. Actions fall into three domains: `Network` (parameters, economic policy, burn dial, supply targets, protocol upgrades; another vote can reverse them), `Treasury` (grants, tranches, recoveries; value moves and cannot be voted back) and `Sanction` (revoking an identity, seating or unseating a guardian). An agent may originate only the domains the governed agent phase permits.
 
@@ -853,7 +853,7 @@ The model is verified through closed-form analysis and scenario simulation acros
 
 ### 18.1 Net supply
 
-Define the per-epoch (one-day) change in circulating supply:
+Define the per-epoch (one-hour) change in circulating supply:
 
 ```
 ΔS_epoch = R_paid − B_basefee − B_settlement − B_paymaster
@@ -926,9 +926,9 @@ b_{t+1} = b_t × (1 + (gas_used − target) / (target × 8))
 
 With clamps `b ∈ [0.1 Gwei, 1000 Gwei]`. The fixed point is `b* such that gas_used(b*) = target`, i.e., the base fee where demand matches the 50%-utilization target.
 
-**Stress check — empty blocks.** If demand goes to zero, `b_{t+1} = b_t × 7/8`. After 10 blocks at zero demand, `b → 0.263 × b_0`; after 17 blocks, `b → 0.094 × b_0`, hitting the 0.1 Gwei floor from a 1 Gwei starting base fee. The fee market does not get stuck at a high base fee during demand droughts.
+**Stress check — empty blocks.** If demand goes to zero, `b_{t+1} = b_t × 7/8`. After 10 blocks at zero demand, `b → 0.263 × b_0`; after 18 blocks, `b → 0.090 × b_0`, hitting the 0.1 Gwei floor from a 1 Gwei starting base fee. The fee market does not get stuck at a high base fee during demand droughts.
 
-**Stress check — sustained congestion.** If demand stays at `2× target` (full blocks), `b_{t+1} = b_t × 9/8`. After 10 blocks, `b → 3.25 × b_0`; after 25 blocks, `b → 11.4 × b_0`; converges to the 1000 Gwei ceiling from a 1 Gwei starting base fee in ~58 blocks of sustained full-block demand. Up and down adjustments are symmetric in their fixed-point ratio per block (12.5% absolute), which means the time to fully respond to a demand shock is bounded and predictable.
+**Stress check — sustained congestion.** If demand stays at `2× target` (full blocks), `b_{t+1} = b_t × 9/8`. After 10 blocks, `b → 3.25 × b_0`; after 25 blocks, `b → 19.0 × b_0`; converges to the 1000 Gwei ceiling from a 1 Gwei starting base fee in ~59 blocks of sustained full-block demand. Up and down adjustments are symmetric in their fixed-point ratio per block (12.5% absolute), which means the time to fully respond to a demand shock is bounded and predictable.
 
 **Stress check — adversarial spamming.** An attacker can artificially inflate `gas_used` by spamming valid transactions. Under EIP-1559, each spam transaction also pays its own gas at the elevated base fee, which is burned. The attacker pays the protocol per-block to drive the fee up, and the elevated fee both deters legitimate users and accelerates burn. Spamming is self-defeating economically unless the attacker's goal is to deny service rather than to game economics — in which case the attacker is simply purchasing block space at market rate, which is the design.
 

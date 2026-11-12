@@ -228,6 +228,7 @@ pub mod signer;
 /// held at a persistent handle, made by provisioning, rather than generated
 /// on first use.
 pub const IDENTITY_KEY_LABEL: &str = "tenzro/consensus/validator";
+pub mod retry;
 /// The one serializing executor every TPM command runs on.
 #[cfg(any(target_os = "linux", windows, test))]
 pub mod tpm_exec;
@@ -236,6 +237,33 @@ pub mod tpm_exec;
 pub mod tpm_provision;
 pub mod tpm_queue;
 pub mod tpm_wire;
+
+/// Keeps the calling thread's TPM commands behind all others while it lives
+/// (see [`tpm_exec::deferred`]); does nothing on a platform without a TPM
+/// backend.
+pub struct TpmDefer {
+    #[cfg(any(target_os = "linux", windows))]
+    _guard: tpm_exec::DeferGuard,
+}
+
+/// Queue this thread's TPM commands behind all others until the guard drops:
+/// for work with no deadline, such as binding an endpoint record or signing a
+/// heartbeat.
+pub fn defer_tpm() -> TpmDefer {
+    TpmDefer {
+        #[cfg(any(target_os = "linux", windows))]
+        _guard: tpm_exec::deferred(),
+    }
+}
+
+/// How this process's TPM is answering, as a JSON object, or `None` on a
+/// platform without a TPM backend.
+pub fn tpm_health() -> Option<serde_json::Value> {
+    #[cfg(any(target_os = "linux", windows))]
+    return Some(tpm_exec::health().to_json());
+    #[cfg(not(any(target_os = "linux", windows)))]
+    None
+}
 pub use signer::{
     HardwareBackend, HardwareHybridSigner, HardwareMlDsaSigner, HardwareP384Signer, HardwareSigner,
 };

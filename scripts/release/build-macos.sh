@@ -33,12 +33,17 @@ stage=$(mktemp -d)/$name
 trap 'rm -rf "$src" "$(dirname "$stage")"' EXIT
 git archive --format=tar "$commit" | tar -x -C "$src"
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo/target-release/macos}
-(cd "$src" && RUSTFLAGS="--remap-path-prefix=$src=." \
+(cd "$src" && CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="--remap-path-prefix=$src=." \
     cargo build --release --locked --target "$target" -p tenzro-node -p tenzro-cli)
 out=$CARGO_TARGET_DIR/$target/release
 mkdir -p "$stage/bin"
 install -m755 "$out/tenzro-node" "$stage/bin/tenzro-node"
 install -m755 "$out/tenzro" "$stage/bin/tenzro"
+# Debug symbols to a dSYM bundle, shipped separately; the binaries are stripped.
+dbg=$(dirname "$stage")/$name-debug
+mkdir -p "$dbg"
+for b in tenzro-node tenzro; do dsymutil "$stage/bin/$b" -o "$dbg/$b.dSYM" && strip -x "$stage/bin/$b"; done
+release_network_profile "$src" "$stage"
 mach=arm64; [ "$arch" = x86_64 ] && mach=x86_64
 file "$stage/bin/tenzro-node" | grep -q "$mach" || { echo "REFUSING: not an $mach Mach-O"; exit 1; }
 if [ "$flavour" = metal ]; then
@@ -59,5 +64,6 @@ mkdir -p "$DIST"
 # bsdtar has no --sort; entries are added in sorted order by name instead.
 find "$(dirname "$stage")" -exec touch -h -t "$(date -r "$epoch" +%Y%m%d%H%M.%S)" {} +
 (cd "$(dirname "$stage")" && find "$name" | sort | tar --uid 0 --gid 0 -cf - -n -T - | gzip -9n > "$DIST/$name.tar.gz")
+(cd "$(dirname "$stage")" && find "$name-debug" | sort | tar --uid 0 --gid 0 -cf - -n -T - | gzip -9n > "$DIST/$name-debug.tar.gz")
 release_buildenv "$DIST/$name.buildenv.json" "$name" "$commit" "$flavour" "$target" "" ""
 echo "BUILD OK: $DIST/$name.tar.gz"

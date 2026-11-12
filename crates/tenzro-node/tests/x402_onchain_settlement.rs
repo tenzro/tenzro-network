@@ -65,6 +65,9 @@ fn test_config() -> (NodeConfig, tempfile::TempDir) {
             ..Default::default()
         },
         genesis: Some(tenzro_node::config::GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: tenzro_node::config::GENESIS_SCHEMA_VERSION,
             chain_id: CHAIN_ID,
             timestamp: 0,
@@ -648,7 +651,9 @@ async fn a_hash_locked_delivery_pays_the_seller_exactly_when_the_key_is_publishe
         "TNZO",
         &hex::encode(&seller.address().as_bytes()[..20]),
         1_000,
-        &tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::random())),
+        &tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
+            tenzro_crypto::composite::testing::TestHybridSigner::random(),
+        )),
     )
     .expect("seal");
     delivery.verify().expect("statement verifies");

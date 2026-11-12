@@ -407,7 +407,10 @@ fn delivery_of(request: &Value) -> Result<Delivery> {
                 let a: [u8; 20] = hex_bytes(e[0].as_str().unwrap_or_default(), "address")?
                     .try_into()
                     .map_err(|_| anyhow!("address"))?;
-                Ok((a, hex_bytes(e[1].as_str().unwrap_or_default(), "pq signature")?))
+                Ok((
+                    a,
+                    hex_bytes(e[1].as_str().unwrap_or_default(), "pq signature")?,
+                ))
             })
             .collect()
     };
@@ -712,7 +715,9 @@ impl BridgeAttestCmd {
         }
         if let Some(pq) = &self.pq_signature {
             if outbound || handover {
-                bail!("outbound records and handovers are verified by the external chain and take the secp256k1 signature only");
+                bail!(
+                    "outbound records and handovers are verified by the external chain and take the secp256k1 signature only"
+                );
             }
             let pq = hex_bytes(pq, "pq signature")?;
             let seat = |q: &tenzro_bridge::route::VerifierQuorum| {
@@ -793,7 +798,11 @@ impl BridgeAttestCmd {
                     pq: &[([u8; 20], Vec<u8>)]| {
             tenzro_bridge::route::attestation::dual_signers(q, &digest, sigs, pq).len()
         };
-        let signed = dual(&route.verifiers, &delivery.committee, &delivery.committee_pq);
+        let signed = dual(
+            &route.verifiers,
+            &delivery.committee,
+            &delivery.committee_pq,
+        );
         let blessed = route
             .blessing
             .as_ref()

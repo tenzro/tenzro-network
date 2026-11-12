@@ -205,9 +205,10 @@ mod tests {
         let fake = addr([1, 2, 3], 5, [7, 8, 9]);
         let a = assess_recipient(&fake, &[real], &[fake], &LookalikeParams::default());
         assert!(a.is_lookalike());
-        assert!(a
-            .flags
-            .contains(&RecipientFlag::LooksLike { trusted: real }));
+        assert!(
+            a.flags
+                .contains(&RecipientFlag::LooksLike { trusted: real })
+        );
         assert!(a.flags.contains(&RecipientFlag::SeenOnlyAsInboundSender));
         assert!(a.describe().iter().any(|l| l.contains("poisoning")));
         assert_eq!(a.full_address.len(), 64);

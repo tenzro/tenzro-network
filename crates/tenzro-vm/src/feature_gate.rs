@@ -150,8 +150,7 @@ pub fn in_genesis_root(key: &str, named_in_genesis_file: bool) -> bool {
 /// set, else the registry's genesis value, else [`NEVER`] for a key the
 /// registry does not know.
 pub fn activation_epoch(state: &dyn VmState, key: &str) -> u64 {
-    stored_param(state, key)
-        .unwrap_or_else(|| governed_param(key).map_or(NEVER, |p| p.genesis))
+    stored_param(state, key).unwrap_or_else(|| governed_param(key).map_or(NEVER, |p| p.genesis))
 }
 
 /// Whether the rule gated by `key` runs in a block of `epoch`.

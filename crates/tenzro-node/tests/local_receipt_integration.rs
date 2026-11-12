@@ -168,7 +168,7 @@ impl Gateway {
         // can be registered under it — `enroll` is the HTTP call that
         // records it, so it needs the server already listening.
         let client = reqwest::Client::new();
-        owner.enroll(&client, &base_url).await;
+        owner.enroll(&client, &base_url, &node).await;
         owner.register_machine(&node).await;
         // The model reaches the catalog the way every model does: a record
         // signed by a bonded catalog publisher.
@@ -188,6 +188,32 @@ impl Gateway {
             submitted.get("error").is_none(),
             "the bonded publisher's record was refused: {submitted}"
         );
+        // The node rebuilds its catalog on its own shortly after a catalog
+        // record is applied, so the entry is served only once the public
+        // listing shows it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let listed: Value = client
+                .post(&base_url)
+                .json(
+                    &json!({"jsonrpc": "2.0", "id": 2, "method": "tenzro_listCatalog",
+                              "params": {}}),
+                )
+                .send()
+                .await
+                .expect("list the catalog")
+                .json()
+                .await
+                .expect("catalog listing");
+            let served = listed["result"]["entries"].as_array().is_some_and(|es| {
+                es.iter()
+                    .any(|e| e["model"]["spec"]["id"].as_str() == Some(model_id))
+            });
+            if served || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         Self {
             base_url,
             shutdown,

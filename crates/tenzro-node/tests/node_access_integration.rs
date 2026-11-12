@@ -323,8 +323,21 @@ async fn a_real_payee_can_set_their_own_settlement_asset() {
         .clone();
 
     // A payee with a real P-256 identity key, registered the ordinary way.
-    let keypair = TestHybridSigner::random();
+    let keypair = TestHybridSigner::hybrid(7);
     let public_key = keypair.public_key().p256.clone();
+    {
+        // The payee's ML-DSA-65 key is enrolled in chain state, which the
+        // node reads to check the second leg.
+        let mut state =
+            tenzro_vm::StateAdapter::with_storage(n.node.storage().expect("node storage").clone());
+        tenzro_vm::account_keys::set_enrolled_pq_key(
+            &mut state,
+            &public_key,
+            keypair.public_key().pq.clone().expect("hybrid"),
+            &mut Vec::new(),
+        );
+        state.commit().expect("commit enrolled key");
+    }
     let registered = registry
         .register_human_via_binder(
             b"test-credential".to_vec(),
@@ -473,8 +486,21 @@ async fn a_stale_signed_preference_change_is_refused() {
         .expect("identity registry")
         .clone();
 
-    let keypair = TestHybridSigner::random();
+    let keypair = TestHybridSigner::hybrid(7);
     let public_key = keypair.public_key().p256.clone();
+    {
+        // The payee's ML-DSA-65 key is enrolled in chain state, which the
+        // node reads to check the second leg.
+        let mut state =
+            tenzro_vm::StateAdapter::with_storage(n.node.storage().expect("node storage").clone());
+        tenzro_vm::account_keys::set_enrolled_pq_key(
+            &mut state,
+            &public_key,
+            keypair.public_key().pq.clone().expect("hybrid"),
+            &mut Vec::new(),
+        );
+        state.commit().expect("commit enrolled key");
+    }
     let registered = registry
         .register_human_via_binder(
             b"test-credential".to_vec(),
@@ -523,8 +549,8 @@ async fn a_stale_signed_preference_change_is_refused() {
 
 /// A TEE-bound ZK proof must be unobtainable on hardware with no TEE.
 ///
-/// This is a regression test for a real defect found by running the RPC
-/// against this machine: `generate_tee_zk_proof` fabricated the attestation
+/// This is a regression test for a defect in which the RPC, run on a host
+/// with no TEE, had `generate_tee_zk_proof` fabricate the attestation
 /// itself — empty quote, measurement derived from
 /// `sha256("CODE_MEASUREMENT_<circuit>_<vendor>")`, a constant rather than a
 /// hardware measurement — and the handler never checked whether a TEE existed.
@@ -706,7 +732,7 @@ async fn a_malformed_proof_request_does_not_take_the_node_down() {
 // Operator lockout — both directions
 // ---------------------------------------------------------------------------
 //
-// Found by running the real flow against a live node rather than by reading
+// These tests run the real flow against a live node rather than reading
 // the code: the invariant "an operator who gates their node is not locked out
 // of it by their own setting" held only for a gate enabled by config, and only
 // on surfaces still behind the blanket middleware.

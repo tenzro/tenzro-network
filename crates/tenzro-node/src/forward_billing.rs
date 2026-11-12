@@ -398,11 +398,13 @@ mod tests {
         upstream_identity,
     };
     use serde_json::json;
-    use tenzro_crypto::composite::testing::TestHybridSigner;
     use tenzro_crypto::batch::ImmediateRecordSigner;
+    use tenzro_crypto::composite::testing::TestHybridSigner;
 
     fn session() -> ImmediateRecordSigner {
-        tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(TestHybridSigner::random()))
+        tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
+            TestHybridSigner::random(),
+        ))
     }
 
     fn bound() -> UsageBound {

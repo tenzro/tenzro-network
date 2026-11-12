@@ -13,7 +13,7 @@ The rest of this guide covers building `tenzro-node` from source and running it 
 
 ## Prerequisites
 
-- Rust 1.70+ (install from https://rustup.rs)
+- Rust 1.99.1, the version `rust-toolchain.toml` pins (install rustup from https://rustup.rs)
 - 8GB+ RAM recommended
 - 100GB+ free disk space
 - Linux, macOS, or Windows (WSL2)
@@ -41,7 +41,7 @@ cargo build --release -p tenzro-node
 
 Output:
 ```
-tenzro-node 0.2.0
+tenzro-node 0.2.1
 ```
 
 ## Running Your First Node
@@ -91,43 +91,32 @@ With the node running, register as a provider in one command:
 tenzro join --provider
 ```
 
-This detects your hardware, provisions identity + wallet, posts the 1,000 TNZO
-compute bond the model-provider rung requires, registers you with default pricing,
+This detects your hardware, provisions identity + wallet, posts the compute bond
+at the node's governed minimum (`tenzro provider bond params`), registers you with default pricing,
 and downloads + serves the largest catalog model that fits your machine.
 Capacity is advertised automatically and inference demand routes to you.
 
 ## Using Configuration Files
 
-Create `my-config.json`:
+Create `my-config.toml`:
 
-```json
-{
-  "role": "Validator",
-  "data_dir": "./data/my-node",
-  "log_level": "info",
-  "rpc_addr": "127.0.0.1:8545",
-  "web_addr": "127.0.0.1:8080",
-  "mcp_addr": "127.0.0.1:3001",
-  "a2a_addr": "127.0.0.1:3002",
-  "tee_enabled": false,
-  "metrics_enabled": true,
-  "health_enabled": true,
-  "network": {
-    "listen_addresses": [
-      "/ip4/0.0.0.0/tcp/9000",
-      "/ip4/0.0.0.0/udp/9000/quic-v1"
-    ],
-    "boot_nodes": [],
-    "max_peers": 50,
-    "chain": "Testnet"
-  }
-}
+```toml
+roles = ["validator"]
+data_dir = "./data/my-node"
+log_level = "info"
+rpc_addr = "127.0.0.1:8545"
+web_addr = "127.0.0.1:8080"
+mcp_addr = "127.0.0.1:3001"
+a2a_addr = "127.0.0.1:3002"
+tee_enabled = false
+metrics_enabled = true
+health_enabled = true
 ```
 
 Run with:
 
 ```bash
-./target/release/tenzro-node --config my-config.json
+./target/release/tenzro-node --config my-config.toml
 ```
 
 ## Interacting with Your Node

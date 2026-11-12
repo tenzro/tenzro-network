@@ -300,7 +300,9 @@ mod tests {
     const NOW: i64 = 1_800_000_000_000;
 
     fn signer() -> tenzro_crypto::batch::ImmediateRecordSigner {
-        tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::random()))
+        tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(
+            tenzro_crypto::composite::testing::TestHybridSigner::random(),
+        ))
     }
 
     fn escrow(payee: Address, amount: u128, lock: [u8; 32]) -> EscrowAccount {

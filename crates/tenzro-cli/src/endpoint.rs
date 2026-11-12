@@ -40,7 +40,11 @@ impl Source {
 /// Pure choice among the sources, in order of precedence. Empty strings are
 /// treated as absent.
 pub fn choose(flag: Option<&str>, env: Option<&str>, saved: Option<&str>) -> (String, Source) {
-    let some = |v: Option<&str>| v.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let some = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     if let Some(v) = some(flag) {
         return (v, Source::Flag);
     }
@@ -85,10 +89,19 @@ mod tests {
 
     #[test]
     fn flag_beats_environment_beats_saved_beats_default() {
-        assert_eq!(choose(Some("a"), Some("b"), Some("c")), ("a".into(), Source::Flag));
-        assert_eq!(choose(None, Some("b"), Some("c")), ("b".into(), Source::Environment));
+        assert_eq!(
+            choose(Some("a"), Some("b"), Some("c")),
+            ("a".into(), Source::Flag)
+        );
+        assert_eq!(
+            choose(None, Some("b"), Some("c")),
+            ("b".into(), Source::Environment)
+        );
         assert_eq!(choose(None, None, Some("c")), ("c".into(), Source::Saved));
-        assert_eq!(choose(None, None, None), (LOCAL_RPC.into(), Source::Default));
+        assert_eq!(
+            choose(None, None, None),
+            (LOCAL_RPC.into(), Source::Default)
+        );
     }
 
     #[test]

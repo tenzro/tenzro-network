@@ -392,6 +392,7 @@ rpc tenzro_getTransactionHistory P chain-core
 rpc tenzro_getTreasuryAccounts P chain-core
 rpc tenzro_getTreasuryPayouts P chain-core
 rpc tenzro_getTrustCredentials P trust-records
+rpc tenzro_getUpdateNotice N release-signalling
 rpc tenzro_getUpgradeReadiness P chain-core
 rpc tenzro_getValidatorState P chain-core
 rpc tenzro_getVesting P chain-core

@@ -99,7 +99,11 @@ pub fn parse_node_hardware(out: &str) -> Option<NodeBuild> {
             if v == "ok" {
                 startup = Some((true, None));
             } else if let Some(r) = v.strip_prefix("refused") {
-                let r = r.trim().trim_start_matches('(').trim_end_matches(')').trim();
+                let r = r
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .trim();
                 startup = Some((false, Some(r.to_string())));
             }
         }
@@ -116,11 +120,15 @@ pub fn parse_node_hardware(out: &str) -> Option<NodeBuild> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Net {
     Checking,
-    Reachable { chain_id: String },
+    Reachable {
+        chain_id: String,
+    },
     /// The name does not resolve.
     NotResolving,
     /// Resolved but did not answer (refused, timeout, TLS, HTTP error).
-    NotAnswering { reason: String },
+    NotAnswering {
+        reason: String,
+    },
 }
 
 impl Net {
@@ -287,9 +295,13 @@ pub fn findings(m: &Machine, net: &Net, rpc_url: &str) -> Vec<Finding> {
         let mut x = f(
             "Memory",
             Word::Watch,
-            format!("{:.0} GB: enough to follow the network, too little to serve models", m.ram_gb),
+            format!(
+                "{:.0} GB: enough to follow the network, too little to serve models",
+                m.ram_gb
+            ),
         );
-        x.fix.push("Use a machine with 16 GB or more to provide compute.".into());
+        x.fix
+            .push("Use a machine with 16 GB or more to provide compute.".into());
         x
     } else {
         f("Memory", Word::Ok, format!("{:.0} GB", m.ram_gb))
@@ -298,9 +310,13 @@ pub fn findings(m: &Machine, net: &Net, rpc_url: &str) -> Vec<Finding> {
         let mut x = f(
             "Disk",
             Word::Watch,
-            format!("{:.0} GB free: the chain and models need more", m.disk_free_gb),
+            format!(
+                "{:.0} GB free: the chain and models need more",
+                m.disk_free_gb
+            ),
         );
-        x.fix.push("Free some space, or point the node at a bigger disk with --data-dir.".into());
+        x.fix
+            .push("Free some space, or point the node at a bigger disk with --data-dir.".into());
         x
     } else {
         f("Disk", Word::Ok, format!("{:.0} GB free", m.disk_free_gb))
@@ -371,15 +387,34 @@ pub fn findings(m: &Machine, net: &Net, rpc_url: &str) -> Vec<Finding> {
 
     out.push(match net {
         Net::Checking => f("Network", Word::Unknown, format!("checking {rpc_url}")),
-        Net::Reachable { chain_id } => f("Network", Word::Ok, format!("{rpc_url} answers (chain {chain_id})")),
+        Net::Reachable { chain_id } => f(
+            "Network",
+            Word::Ok,
+            format!("{rpc_url} answers (chain {chain_id})"),
+        ),
         Net::NotResolving => {
-            let mut x = f("Network", Word::Watch, format!("the network is not reachable yet: {} does not resolve", crate::friendly::host_of(rpc_url)));
-            x.fix.push("You can still try Tenzro on this machine: it runs its own local chain.".into());
+            let mut x = f(
+                "Network",
+                Word::Watch,
+                format!(
+                    "the network is not reachable yet: {} does not resolve",
+                    crate::friendly::host_of(rpc_url)
+                ),
+            );
+            x.fix.push(
+                "You can still try Tenzro on this machine: it runs its own local chain.".into(),
+            );
             x
         }
         Net::NotAnswering { reason } => {
-            let mut x = f("Network", Word::Watch, format!("{rpc_url} did not answer: {reason}"));
-            x.fix.push("Check this machine's internet connection, or try Tenzro on a local chain.".into());
+            let mut x = f(
+                "Network",
+                Word::Watch,
+                format!("{rpc_url} did not answer: {reason}"),
+            );
+            x.fix.push(
+                "Check this machine's internet connection, or try Tenzro on a local chain.".into(),
+            );
             x
         }
     });
@@ -413,7 +448,10 @@ mod tests {
         x.keys_provisioned = None;
         assert_eq!(key_root(&x), KeyRoot::TpmUnknown);
         x.tpm_open_error = Some("denied".into());
-        assert!(matches!(key_root(&x), KeyRoot::TpmNoAccess { in_tss: false, .. }));
+        assert!(matches!(
+            key_root(&x),
+            KeyRoot::TpmNoAccess { in_tss: false, .. }
+        ));
         x.tpm_device = false;
         assert_eq!(key_root(&x), KeyRoot::NoTpm);
         let mut mac = facts();
@@ -428,7 +466,10 @@ mod tests {
     fn node_hardware_output_is_parsed() {
         let ok = parse_node_hardware("build: cpu\ngpus: 0\nonnx: CPU\nstartup: ok\n").unwrap();
         assert!(ok.startup_ok && ok.flavour == "cpu");
-        let bad = parse_node_hardware("build: cpu\ngpus: 1\nstartup: refused (CPU build on a GPU machine)\n").unwrap();
+        let bad = parse_node_hardware(
+            "build: cpu\ngpus: 1\nstartup: refused (CPU build on a GPU machine)\n",
+        )
+        .unwrap();
         assert!(!bad.startup_ok);
         assert_eq!(bad.refusal.as_deref(), Some("CPU build on a GPU machine"));
         assert!(parse_node_hardware("garbage").is_none());

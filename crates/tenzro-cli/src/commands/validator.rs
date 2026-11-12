@@ -1,4 +1,4 @@
-//! Validator commands for the Tenzro CLI (Dynamic Validator Set, task #413).
+//! Validator commands for the Tenzro CLI (dynamic validator set).
 //!
 //! Permissionless validator join/exit with mandatory hybrid PQ keying. Writes
 //! (`RegisterValidator`, `ExitValidator`, `UpdateValidatorMetadata`) are
@@ -187,6 +187,28 @@ impl ValidatorRegisterCmd {
 
         let rpc = RpcClient::new(&self.rpc);
 
+        // Initial phase: a wallet below the stake minimum gets the plain
+        // application message, not a rejected transaction.
+        let required = self
+            .self_stake
+            .max(crate::onboarding::role::JoinRole::Validator.stake_minimum_wei());
+        let account = crate::keystore::client_account(&self.key_namespace)?.0;
+        // While validator admission is closed, say so before anything is
+        // signed; the chain refuses the registration either way.
+        let admission =
+            crate::commands::setup::read_admission(&self.rpc, Some(account.as_str())).await;
+        if admission.refuses_validator() {
+            anyhow::bail!("{}", crate::onboarding::wizard::admission_refusal());
+        }
+        crate::onboarding::flow::gate(
+            &self.rpc,
+            &account,
+            "validator",
+            Some(crate::onboarding::role::JoinRole::Validator),
+            required,
+        )
+        .await?;
+
         // The Address / Vec<u8> fields serde-derive to JSON arrays of numbers.
         let tx_type = serde_json::json!({
             "RegisterValidator": {
@@ -213,7 +235,17 @@ impl ValidatorRegisterCmd {
             tx_type,
             DEFAULT_REGISTER_GAS,
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            spinner.finish_and_clear();
+            crate::onboarding::flow::plain_send_error(
+                e,
+                "validator",
+                Some(crate::onboarding::role::JoinRole::Validator),
+                required,
+                &account,
+            )
+        })?;
 
         spinner.finish_and_clear();
 
@@ -312,56 +344,146 @@ impl ValidatorIncreaseStakeCmd {
 }
 
 /// Voluntarily exit the validator set.
+///
+/// The exit is signed by the account the validator is bonded under. A
+/// validator of the genesis set, or one its node registered itself
+/// (`--validator-self-stake`), is bonded under the machine's node account and
+/// exits with `--node-account`. A validator registered with `tenzro validator
+/// register` is bonded under the client account that registered it and exits
+/// with that account's `--key-namespace`.
 #[derive(Debug, Parser)]
 pub struct ValidatorExitCmd {
-    /// Hardware key namespace of the signing account
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    /// Hardware key namespace of the signing client account (default
+    /// `client`); with `--node-account`, the node's `hardware_key_namespace`
+    /// (default: the machine's default node)
+    #[arg(long)]
+    key_namespace: Option<String>,
+
+    /// Sign as this machine's node account: the account a validator of the
+    /// genesis set, or one its node registered itself, is bonded under
+    #[arg(long)]
+    node_account: bool,
+
+    #[command(flatten)]
+    delegated: crate::keystore::DelegatedKey,
+
+    /// Return once the transaction is submitted, without waiting for it to be
+    /// executed
+    #[arg(long)]
+    no_wait: bool,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
 
+/// The key namespace a client account signs under when none is given.
+const DEFAULT_CLIENT_KEY_NAMESPACE: &str = "client";
+
+/// Which account signs an exit.
+#[derive(Debug, PartialEq, Eq)]
+enum ExitSigner<'a> {
+    /// The client account under this key namespace.
+    Client(&'a str),
+    /// The machine's node account, under the node's key namespace.
+    Node(Option<&'a str>),
+}
+
 impl ValidatorExitCmd {
+    /// The account this exit is signed by. A key holder serves a node's
+    /// keys, so naming one for a client account is refused, not ignored.
+    fn signer(&self) -> Result<ExitSigner<'_>> {
+        if self.node_account {
+            return Ok(ExitSigner::Node(self.key_namespace.as_deref()));
+        }
+        if self.delegated.tpm_key_holder.is_some() || self.delegated.tpm_label.is_some() {
+            return Err(anyhow!(
+                "--tpm-key-holder and --tpm-label apply to the node account: add --node-account \
+                 to exit as the node account, or leave them out (and unset TENZRO_TPM_KEY_HOLDER \
+                 and TENZRO_TPM_LABEL) to exit as a client account"
+            ));
+        }
+        Ok(ExitSigner::Client(
+            self.key_namespace
+                .as_deref()
+                .unwrap_or(DEFAULT_CLIENT_KEY_NAMESPACE),
+        ))
+    }
+
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
 
         output::print_header("Exit Validator");
 
         let rpc = RpcClient::new(&self.rpc);
+        let signer = self.signer()?;
+        if matches!(signer, ExitSigner::Node(_)) && self.delegated.install()? {
+            output::print_info("keys delegated to the key holder: signing through it");
+        }
 
-        let spinner = output::create_spinner("Querying nonce and chain ID...");
-        spinner.set_message("Signing ExitValidator transaction...");
-
-        // ExitValidator is a unit variant — `data` field omitted entirely.
-        // Unit variant — externally-tagged serde renders it as a bare string.
+        let spinner = output::create_spinner("Signing ExitValidator transaction...");
+        // Unit variant: externally-tagged serde renders it as a bare string.
         let tx_type = serde_json::json!("ExitValidator");
-
-        let result: serde_json::Value = crate::keystore::send_as_client(
-            &rpc,
-            &self.key_namespace,
-            crate::keystore::address32(&crate::keystore::client_account(&self.key_namespace)?.0)?,
-            tx_type,
-            DEFAULT_EXIT_GAS,
-        )
-        .await?;
-
+        let (result, from) = match signer {
+            ExitSigner::Node(ns) => {
+                let account = crate::keystore::node_account(ns)?;
+                crate::keystore::send_as_node(&rpc, ns, account, tx_type, DEFAULT_EXIT_GAS).await?
+            }
+            ExitSigner::Client(ns) => {
+                let from = crate::keystore::client_account(ns)?.0;
+                let result = crate::keystore::send_as_client(
+                    &rpc,
+                    ns,
+                    crate::keystore::address32(&from)?,
+                    tx_type,
+                    DEFAULT_EXIT_GAS,
+                )
+                .await?;
+                (result, from)
+            }
+        };
         spinner.finish_and_clear();
 
         output::print_success("ExitValidator transaction submitted");
         println!();
-        output::print_field(
-            "From",
-            &crate::keystore::client_account(&self.key_namespace)?.0,
-        );
+        output::print_field("From", &from);
         output::print_field("Transaction Hash", &extract_tx_hash(&result));
+
+        if !self.no_wait {
+            let Some(tx_hash) = crate::keystore::submitted_hash(&result) else {
+                return Err(anyhow!(
+                    "the node answered the exit without a transaction hash, so whether it took \
+                     effect is not known: {result}"
+                ));
+            };
+            let waited = crate::keystore::RECEIPT_WAIT;
+            match crate::keystore::await_receipt(&rpc, &tx_hash, waited).await {
+                Ok(Some(_)) => output::print_success("ExitValidator transaction executed"),
+                Ok(None) => output::print_warning(&format!(
+                    "The exit was in no block after {} seconds. It may still be executed; its \
+                     receipt (eth_getTransactionReceipt) says whether it took effect.",
+                    waited.as_secs()
+                )),
+                Err(e) if e.to_string().contains("was executed and reverted") => {
+                    return Err(anyhow!(
+                        "{e}\nAn exit is accepted only from the account the validator is bonded \
+                         under: --node-account for a validator of the genesis set or one its \
+                         node registered itself, --key-namespace for one registered from a \
+                         client account."
+                    ));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
         output::print_warning(
-            "Validator transitions to PendingExit. Removal is effective \
-             ACTIVATION_EFFECTIVE_DELAY_BLOCKS after the next epoch boundary. \
-             Re-registration is blocked for `reentry_cooldown_epochs` (default 4) \
-             following voluntary exit.",
+            "The validator leaves the set after the next epoch boundary, if the exit limit \
+             allows it: keep the node signing until `tenzro validator get <address>` shows it \
+             Exited. The bond is held in unbonding; after the unbonding period, send the same \
+             exit again from the same account to pay it out. Registering again is refused for \
+             some epochs after leaving.",
         );
+
         Ok(())
     }
 }
@@ -689,6 +811,9 @@ pub struct ValidatorRegisterMachineCmd {
     #[arg(long)]
     key_namespace: Option<String>,
 
+    #[command(flatten)]
+    delegated: crate::keystore::DelegatedKey,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -699,12 +824,19 @@ impl ValidatorRegisterMachineCmd {
         use crate::rpc::RpcClient;
         let rpc = RpcClient::new(&self.rpc);
         let ns = self.key_namespace.as_deref();
+        let delegated = self.delegated.install()?;
         let signer = crate::keystore::machine_identity_signer(ns)?;
         let wallet = crate::keystore::node_account(ns)?;
         let (did, register) = crate::keystore::machine_identity_registration(&signer, wallet)?;
         output::print_header("Register Machine Identity");
         output::print_field("Machine DID", &did);
         output::print_field("Wallet", &format!("0x{}", hex::encode(wallet)));
+        if delegated {
+            output::print_info(
+                "keys delegated to the key holder: signing through it; this machine's own \
+                 TPM does not attest for them",
+            );
+        }
         if crate::keystore::identity_registered(&rpc, &did).await {
             output::print_info("already registered");
             return Ok(());
@@ -740,6 +872,9 @@ pub struct ValidatorAttachAttestationCmd {
     #[arg(long)]
     key_namespace: Option<String>,
 
+    #[command(flatten)]
+    delegated: crate::keystore::DelegatedKey,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -750,6 +885,7 @@ impl ValidatorAttachAttestationCmd {
         use crate::rpc::RpcClient;
         let rpc = RpcClient::new(&self.rpc);
         let ns = self.key_namespace.as_deref();
+        self.delegated.install()?;
         let signer = crate::keystore::machine_identity_signer(ns)?;
         let wallet = crate::keystore::node_account(ns)?;
         let did = crate::keystore::machine_root_did(&signer);
@@ -768,17 +904,23 @@ impl ValidatorAttachAttestationCmd {
             output::print_info("the machine root already carries a TPM attestation");
             return Ok(());
         }
-        let (account_nonce, _) = crate::rpc::fetch_nonce_and_chain_id(
-            &rpc,
-            &format!("0x{}", hex::encode(wallet)),
-            None,
-            None,
-        )
+        // The quote answers the chain challenge of the account nonce, so a
+        // nonce that moved needs a new quote, not just a new transaction:
+        // the whole attach is built again.
+        let (result, _) = crate::keystore::retry_stale_nonce(|| async {
+            let (account_nonce, _) = crate::rpc::fetch_nonce_and_chain_id(
+                &rpc,
+                &format!("0x{}", hex::encode(wallet)),
+                None,
+                None,
+            )
+            .await?;
+            let attach =
+                crate::keystore::machine_attestation_attachment(&signer, wallet, account_nonce)?;
+            crate::keystore::send_as_node_once(&rpc, ns, [0u8; 32], attach, DEFAULT_ATTACH_GAS)
+                .await
+        })
         .await?;
-        let attach =
-            crate::keystore::machine_attestation_attachment(&signer, wallet, account_nonce)?;
-        let (result, _) =
-            crate::keystore::send_as_node(&rpc, ns, [0u8; 32], attach, DEFAULT_ATTACH_GAS).await?;
         let tx_hash = result
             .get("tx_hash")
             .and_then(|v| v.as_str())
@@ -787,5 +929,66 @@ impl ValidatorAttachAttestationCmd {
         output::print_field("Transaction Hash", tx_hash);
         output::print_success("TPM attestation sent for the machine root");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> ValidatorExitCmd {
+        ValidatorExitCmd::try_parse_from(std::iter::once("exit").chain(args.iter().copied()))
+            .expect("the exit arguments parse")
+    }
+
+    /// The parsed command with no key holder, whatever the environment of the
+    /// test run names.
+    fn undelegated(args: &[&str]) -> ValidatorExitCmd {
+        let mut cmd = parse(args);
+        cmd.delegated = crate::keystore::DelegatedKey::default();
+        cmd
+    }
+
+    #[test]
+    fn an_exit_is_signed_by_the_client_account_unless_the_node_account_is_asked_for() {
+        assert_eq!(
+            undelegated(&[]).signer().unwrap(),
+            ExitSigner::Client("client")
+        );
+        assert_eq!(
+            undelegated(&["--key-namespace", "ops"]).signer().unwrap(),
+            ExitSigner::Client("ops")
+        );
+    }
+
+    #[test]
+    fn a_node_account_exit_signs_under_the_nodes_namespace_and_the_default_node_without_one() {
+        assert_eq!(
+            undelegated(&["--node-account"]).signer().unwrap(),
+            ExitSigner::Node(None)
+        );
+        assert_eq!(
+            undelegated(&["--node-account", "--key-namespace", "node-a"])
+                .signer()
+                .unwrap(),
+            ExitSigner::Node(Some("node-a"))
+        );
+    }
+
+    #[test]
+    fn a_client_account_exit_refuses_a_key_holder_and_a_node_account_exit_takes_one() {
+        let holder = ["--tpm-key-holder", "/run/holder.sock", "--tpm-label", "m1"];
+        let refused = parse(&holder).signer().unwrap_err().to_string();
+        assert!(refused.contains("--node-account"), "{refused}");
+
+        let mut args = vec!["--node-account"];
+        args.extend(holder);
+        assert_eq!(parse(&args).signer().unwrap(), ExitSigner::Node(None));
+    }
+
+    #[test]
+    fn an_exit_waits_for_its_receipt_unless_told_not_to() {
+        assert!(!undelegated(&[]).no_wait);
+        assert!(undelegated(&["--no-wait"]).no_wait);
     }
 }

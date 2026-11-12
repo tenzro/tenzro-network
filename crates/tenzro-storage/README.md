@@ -19,42 +19,31 @@ The `tenzro-storage` crate provides the storage infrastructure for the Tenzro Ne
 
 ## Architecture
 
-### Column Families (42 total)
+### Column Families (21 total)
 
 The storage layer uses RocksDB with the following column families:
 
 - `blocks` - Block data indexed by hash and height
 - `state` - VM state, committed into the state trie
+- `state_trie` - State trie nodes, versioned by height
 - `accounts` - Account state and metadata
 - `transactions` - Transaction storage and indexing
 - `metadata` - System metadata and configuration
-- `state_trie` - State trie nodes, versioned by height
 - `identities` - TDIP identity registry
 - `delegations` - Identity delegation records
 - `credentials` - Verifiable credentials
-- `channels` - Micropayment channels
+- `channels` - Payment channel records
 - `agents` - AI agent registry and state
 - `models` - Model catalog and metadata
 - `providers` - Provider registrations
-- `agent_templates` - Agent template definitions
-- `skills` - Skill registry
-- `tools` - Tool definitions
-- `knowledge` - Queryable data resources (vector indices, document corpora, data feeds)
-- `workflow_templates` - Reusable saga specs tenants instantiate
-- `tokens` - Token registry (ERC-20, SPL, CIP-56)
-- `settlements` - Settlement receipts and history
 - `model_services` - Served model endpoints
-- `nfts` - NFT metadata and ownership
-- `events` - Event store for event sourcing
-- `webhooks` - Webhook subscriptions
-- `compliance` - Compliance and audit logs
+- `tokens` - Token registry
+- `settlements` - Settlement receipts and history
+- `events` - Event store
 - `audit` - Audit log records
-- `approvals` - Approval state for multi-step flows
 - `validator_modules` - ERC-7579 validator module configs and state
 - `da_committee` - Availability certificates and sliver assignments
 - `challenges` - Filed disputes over an inference commitment
-- `databases` - Database descriptors and partition placements
-- `model_hashes` - Canonical per-model content hashes (BLAKE3 + SHA-256)
 
 ### Data Availability Primitives (`da` module)
 
@@ -92,7 +81,7 @@ use std::path::PathBuf;
 
 // Create storage configuration
 let config = StorageConfig::new(PathBuf::from("./data/tenzro-db"))
-    .with_cache_size(512 * 1024 * 1024)  // 512 MB cache
+    .with_memory_bytes(512 * 1024 * 1024)  // 512 MiB budget
     .with_compression(true);
 
 // Open RocksDB store
@@ -208,7 +197,7 @@ let account_store = AccountStoreImpl::new(kv_store);
 ### StorageConfig Options
 
 - `db_path`: Path to the database directory
-- `cache_size`: LRU cache size in bytes (default: 512 MB, max: 1 GB)
+- `memory_bytes`: Memory the store may hold, in bytes: the block cache with every column family's memtables charged against it (default: 512 MiB)
 - `compression`: Enable/disable compression (default: true)
 - `max_open_files`: Maximum number of open files (default: 1000)
 - `write_buffer_size`: Write buffer size in bytes (default: 64 MB)

@@ -325,6 +325,55 @@ pub(super) fn contribute(
     Ok((changes, vec![log]))
 }
 
+/// How much later each backup submitter waits than the one before it, ms.
+pub const BACKUP_STEP_MS: i64 = 20_000;
+
+/// Whether a contribution for `round` can no longer execute because the
+/// beacon has moved on to `head_round`. A later round is not stale: the
+/// beacon may yet reach it.
+pub fn is_stale(head_round: u64, round: u64) -> bool {
+    round < head_round
+}
+
+/// [`is_stale`] against the head stored in `state`.
+pub fn is_stale_at(state: &dyn VmState, round: u64) -> bool {
+    is_stale(read_head(state).round, round)
+}
+
+/// How long into the round `me` waits before submitting its contribution,
+/// ms, or `None` when `me` is not among the `eligible` contributors.
+///
+/// The eligible accounts are ranked by a hash of the round, the mix and the
+/// account, so the order changes every round and no account can pick its
+/// place. The first submits at once and each later one a [`BACKUP_STEP_MS`]
+/// after the one before, so one contribution goes in per round and the rest
+/// only when the ones ahead have not.
+pub fn submission_delay_ms(
+    round: u64,
+    mix: &[u8; 32],
+    me: &[u8],
+    eligible: &[Vec<u8>],
+) -> Option<i64> {
+    let rank_of = |who: &[u8]| -> [u8; 32] {
+        Sha256::new()
+            .chain_update(b"tenzro/beacon/submitter/v1")
+            .chain_update(round.to_be_bytes())
+            .chain_update(mix)
+            .chain_update(who)
+            .finalize()
+            .into()
+    };
+    if !eligible.iter().any(|a| a.as_slice() == me) {
+        return None;
+    }
+    let mine = rank_of(me);
+    let ahead = eligible
+        .iter()
+        .filter(|a| a.as_slice() != me && rank_of(a) < mine)
+        .count();
+    Some(ahead as i64 * BACKUP_STEP_MS)
+}
+
 /// Record a beacon value taken at `at_ms` with no contribution, for tests of
 /// what draws from the beacon.
 #[cfg(test)]
@@ -505,5 +554,49 @@ mod tests {
         super::super::staking::index_vrf_key(&mut state, &[0xA; 32], &a.public_key().0);
         let p = contribution(&state, &a);
         assert!(contribute(&mut state, &[0xA; 32], 1_000, &p).is_err());
+    }
+
+    #[test]
+    fn only_rounds_behind_the_head_are_stale() {
+        assert!(is_stale(5, 4));
+        assert!(!is_stale(5, 5));
+        assert!(!is_stale(5, 6));
+    }
+
+    #[test]
+    fn one_submitter_goes_first_and_the_rest_back_it_up_in_turn() {
+        let eligible: Vec<Vec<u8>> = (0u8..5).map(|i| vec![i; 32]).collect();
+        let mix = genesis_mix();
+        let mut delays: Vec<i64> = eligible
+            .iter()
+            .map(|a| submission_delay_ms(7, &mix, a, &eligible).unwrap())
+            .collect();
+        delays.sort();
+        assert_eq!(delays, vec![0, 20_000, 40_000, 60_000, 80_000]);
+        assert_eq!(submission_delay_ms(7, &mix, &[9; 32], &eligible), None);
+    }
+
+    #[test]
+    fn the_order_of_submitters_changes_with_the_round() {
+        let eligible: Vec<Vec<u8>> = (0u8..8).map(|i| vec![i; 32]).collect();
+        let mix = genesis_mix();
+        let first = |round: u64| {
+            eligible
+                .iter()
+                .position(|a| submission_delay_ms(round, &mix, a, &eligible) == Some(0))
+        };
+        let firsts: std::collections::HashSet<_> = (0..32).map(first).collect();
+        assert!(firsts.len() > 1);
+    }
+
+    #[test]
+    fn a_round_behind_the_stored_head_is_stale() {
+        let mut state = StateAdapter::new();
+        record_for_test(&mut state, 1);
+        record_for_test(&mut state, 2);
+        assert_eq!(read_head(&state).round, 2);
+        assert!(is_stale_at(&state, 1));
+        assert!(!is_stale_at(&state, 2));
+        assert!(!is_stale_at(&state, 3));
     }
 }

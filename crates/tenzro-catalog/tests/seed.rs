@@ -2824,7 +2824,10 @@ fn the_hybrid_nemotron_models_share_one_architecture_label() {
         "nemotron-3-ultra-550b-a55b",
         "nemotron-3.5-bolt-74b-a9b",
     ] {
-        assert!(ids.iter().any(|i| i == id), "{id} must be labelled nemotronh");
+        assert!(
+            ids.iter().any(|i| i == id),
+            "{id} must be labelled nemotronh"
+        );
     }
     assert_eq!(
         ModelArchitecture::NemotronH.engine_architectures().unwrap(),
@@ -2854,12 +2857,33 @@ fn nemotron_3_ultra_covers_every_published_quantisation() {
     assert!((base.serving.top_p - 0.95).abs() < 1e-6);
     let moe = base.moe.expect("routed experts are declared");
     assert_eq!((moe.num_experts, moe.experts_per_token), (512, 22));
-    assert_eq!(license_tier_of("nemotron-3-ultra-550b-a55b"), Some(LicenseTier::Permissive));
+    assert_eq!(
+        license_tier_of("nemotron-3-ultra-550b-a55b"),
+        Some(LicenseTier::Permissive)
+    );
     let quants = [
-        "BF16", "Q8_0", "UD-Q8_K_XL", "UD-Q6_K_XL", "UD-Q6_K", "UD-Q5_K_XL", "UD-Q5_K_M",
-        "UD-Q5_K_S", "MXFP4_MOE", "UD-Q4_K_XL", "UD-Q4_K_M", "UD-Q4_K_S", "UD-IQ4_NL",
-        "UD-IQ4_XS", "UD-Q3_K_XL", "UD-Q3_K_M", "UD-IQ3_S", "UD-IQ3_XXS", "UD-Q2_K_XL",
-        "UD-IQ2_M", "UD-IQ2_XXS", "UD-IQ1_M",
+        "BF16",
+        "Q8_0",
+        "UD-Q8_K_XL",
+        "UD-Q6_K_XL",
+        "UD-Q6_K",
+        "UD-Q5_K_XL",
+        "UD-Q5_K_M",
+        "UD-Q5_K_S",
+        "MXFP4_MOE",
+        "UD-Q4_K_XL",
+        "UD-Q4_K_M",
+        "UD-Q4_K_S",
+        "UD-IQ4_NL",
+        "UD-IQ4_XS",
+        "UD-Q3_K_XL",
+        "UD-Q3_K_M",
+        "UD-IQ3_S",
+        "UD-IQ3_XXS",
+        "UD-Q2_K_XL",
+        "UD-IQ2_M",
+        "UD-IQ2_XXS",
+        "UD-IQ1_M",
     ];
     let all: Vec<HfModelEntry> = get_model_catalog()
         .into_iter()
@@ -2907,14 +2931,20 @@ fn nemotron_bolt_models_are_wired_with_their_projectors_and_drafters() {
     assert_eq!(e4b.architecture, ModelArchitecture::Gemma4);
     assert_eq!(e4b.context_length, 65_536);
     assert!(e4b.mmproj.is_some());
-    assert_eq!(e4b.drafter_id.as_deref(), Some("nemotron-3.5-bolt-e4b-dflash"));
+    assert_eq!(
+        e4b.drafter_id.as_deref(),
+        Some("nemotron-3.5-bolt-e4b-dflash")
+    );
     assert_eq!(e4b.mtp_kind, MtpKind::DraftDflash);
     assert!((e4b.serving.top_p - 0.95).abs() < 1e-6);
     let big = get_model_by_id("nemotron-3.5-bolt-74b-a9b").expect("74b");
     assert_eq!(big.architecture, ModelArchitecture::NemotronH);
     assert_eq!(big.context_length, 262_144);
     assert!(big.mmproj.is_some());
-    assert_eq!(big.drafter_id.as_deref(), Some("nemotron-3.5-bolt-74b-a9b-lilicorr"));
+    assert_eq!(
+        big.drafter_id.as_deref(),
+        Some("nemotron-3.5-bolt-74b-a9b-lilicorr")
+    );
     let moe = big.moe.expect("moe");
     assert_eq!((moe.num_experts, moe.experts_per_token), (496, 9));
     // The 24 GB build the vendor ships is about 22 GB of weights.
@@ -2922,9 +2952,7 @@ fn nemotron_bolt_models_are_wired_with_their_projectors_and_drafters() {
     // Every quantisation variant keeps the same drafter and projector wiring.
     let variants: Vec<HfModelEntry> = get_model_catalog()
         .into_iter()
-        .filter(|e| {
-            e.id.starts_with("nemotron-3.5-bolt-74b-a9b-") && !e.id.ends_with("lilicorr")
-        })
+        .filter(|e| e.id.starts_with("nemotron-3.5-bolt-74b-a9b-") && !e.id.ends_with("lilicorr"))
         .collect();
     assert!(variants.len() >= 13);
     for v in variants {
@@ -2932,7 +2960,10 @@ fn nemotron_bolt_models_are_wired_with_their_projectors_and_drafters() {
         assert_eq!(v.context_length, 262_144);
     }
     // The drafters are models the target loads beside itself, not standalone.
-    for d in ["nemotron-3.5-bolt-e4b-dflash", "nemotron-3.5-bolt-74b-a9b-lilicorr"] {
+    for d in [
+        "nemotron-3.5-bolt-e4b-dflash",
+        "nemotron-3.5-bolt-74b-a9b-lilicorr",
+    ] {
         let e = get_model_by_id(d).expect(d);
         assert_eq!(e.drafter_id, None);
         assert!(e.size_bytes < 1_000_000_000);
@@ -2947,7 +2978,10 @@ fn nemotron_and_mistral_large_effort_switches_resolve() {
         Some(("medium_effort".to_string(), "medium".to_string()))
     );
     // `high` is the template default for Nemotron: nothing is set.
-    assert_eq!(resolve_reasoning_effort("nemotron-3-ultra-550b-a55b", Some("high")), None);
+    assert_eq!(
+        resolve_reasoning_effort("nemotron-3-ultra-550b-a55b", Some("high")),
+        None
+    );
     assert_eq!(
         EffortPolicy::for_family("mistral-large").levels,
         vec!["low", "medium", "high"]
@@ -2964,14 +2998,21 @@ fn embeddinggemma_2_is_registered_as_onnx_and_gguf() {
     assert_eq!(o.matryoshka_dims, vec![512, 256, 128]);
     assert_eq!(o.max_sequence_length, 8192);
     assert!(!o.supports_fp16);
-    assert_eq!(license_tier_of("embeddinggemma-2"), Some(LicenseTier::Permissive));
+    assert_eq!(
+        license_tier_of("embeddinggemma-2"),
+        Some(LicenseTier::Permissive)
+    );
     let g = get_model_by_id("embeddinggemma-2-gguf").expect("gguf entry");
     assert_eq!(g.architecture, ModelArchitecture::GemmaEmbedding2);
     assert_eq!(g.quantization, "UD-Q4_K_XL");
     assert!(g.size_bytes < 250_000_000);
     let f16 = get_model_by_id("embeddinggemma-2-gguf-f16").expect("f16");
     assert!(!f16.promotable, "float16 gives NaN on this model");
-    assert!(get_model_by_id("embeddinggemma-2-gguf-bf16").unwrap().promotable);
+    assert!(
+        get_model_by_id("embeddinggemma-2-gguf-bf16")
+            .unwrap()
+            .promotable
+    );
 }
 
 /// Mistral Large 4: every published quantisation, loadable by the engine,
@@ -2980,7 +3021,9 @@ fn embeddinggemma_2_is_registered_as_onnx_and_gguf() {
 #[test]
 fn mistral_large_4_is_published_and_licence_restricted() {
     assert_eq!(
-        ModelArchitecture::MistralLarge4.engine_architectures().unwrap(),
+        ModelArchitecture::MistralLarge4
+            .engine_architectures()
+            .unwrap(),
         &["mistral-large4"]
     );
     let base = get_model_by_id("mistral-large-4").expect("base");
@@ -2990,7 +3033,10 @@ fn mistral_large_4_is_published_and_licence_restricted() {
     let moe = base.moe.expect("moe");
     assert_eq!((moe.num_experts, moe.experts_per_token), (128, 4));
     assert!((base.serving.top_p - 0.95).abs() < 1e-6);
-    assert_eq!(license_tier_of("mistral-large-4"), Some(LicenseTier::NonCommercial));
+    assert_eq!(
+        license_tier_of("mistral-large-4"),
+        Some(LicenseTier::NonCommercial)
+    );
     assert!(!permits_paid_use("mistral-large-4"));
     let all: Vec<HfModelEntry> = get_model_catalog()
         .into_iter()
@@ -2998,16 +3044,37 @@ fn mistral_large_4_is_published_and_licence_restricted() {
         .collect();
     assert_eq!(all.len(), 11);
     for e in &all {
-        assert_eq!(e.drafter_id.as_deref(), Some("mistral-large-4-dspark"), "{}", e.id);
+        assert_eq!(
+            e.drafter_id.as_deref(),
+            Some("mistral-large-4-dspark"),
+            "{}",
+            e.id
+        );
         assert_eq!(e.mtp_default_draft_n, Some(3), "{}", e.id);
     }
     for q in [
-        "BF16", "Q8_0", "UD-Q6_K_XL", "UD-Q5_K_XL", "UD-Q4_K_XL", "UD-Q3_K_XL", "UD-IQ3_XXS",
-        "UD-Q2_K_XL", "UD-IQ2_XXS", "UD-IQ1_M", "UD-IQ1_S",
+        "BF16",
+        "Q8_0",
+        "UD-Q6_K_XL",
+        "UD-Q5_K_XL",
+        "UD-Q4_K_XL",
+        "UD-Q3_K_XL",
+        "UD-IQ3_XXS",
+        "UD-Q2_K_XL",
+        "UD-IQ2_XXS",
+        "UD-IQ1_M",
+        "UD-IQ1_S",
     ] {
-        let e = all.iter().find(|e| e.quantization == q).unwrap_or_else(|| panic!("{q}"));
+        let e = all
+            .iter()
+            .find(|e| e.quantization == q)
+            .unwrap_or_else(|| panic!("{q}"));
         assert!(e.promotable, "{}", e.id);
-        assert!(e.hardware_tiers.iter().any(|t| t.nodes > 1), "{} is a cluster-tier model", e.id);
+        assert!(
+            e.hardware_tiers.iter().any(|t| t.nodes > 1),
+            "{} is a cluster-tier model",
+            e.id
+        );
     }
     // The smallest build is the 233 GB one named in the registry repository.
     let smallest = get_model_by_id("mistral-large-4-ud-iq1-s").unwrap();
@@ -3022,11 +3089,18 @@ fn mistral_large_4_is_published_and_licence_restricted() {
 /// prefix the runtime keys the algorithm on, inheriting the target's licence.
 #[test]
 fn mistral_large_4_dspark_drafters_are_registered() {
-    for (id, quant) in [("mistral-large-4-dspark", "Q8_0"), ("mistral-large-4-dspark-bf16", "BF16")] {
+    for (id, quant) in [
+        ("mistral-large-4-dspark", "Q8_0"),
+        ("mistral-large-4-dspark-bf16", "BF16"),
+    ] {
         let e = get_model_by_id(id).unwrap_or_else(|| panic!("{id}"));
         assert_eq!(e.quantization, quant);
         assert!(
-            e.hf_filename.rsplit('/').next().unwrap().starts_with("dspark-"),
+            e.hf_filename
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .starts_with("dspark-"),
             "the runtime picks DSpark from the file name: {}",
             e.hf_filename
         );
@@ -3045,8 +3119,14 @@ fn nemotron_bolt_e4b_4gb_vendor_build_is_registered() {
     assert_eq!(e.quantization, "Q4_K_M");
     assert_eq!(e.size_bytes, 6_180_446_208);
     assert_eq!(e.context_length, 65_536);
-    assert!(e.mmproj.is_none(), "the vendor repository ships no projector");
-    assert_eq!(e.drafter_id.as_deref(), Some("nemotron-3.5-bolt-e4b-dflash"));
+    assert!(
+        e.mmproj.is_none(),
+        "the vendor repository ships no projector"
+    );
+    assert_eq!(
+        e.drafter_id.as_deref(),
+        Some("nemotron-3.5-bolt-e4b-dflash")
+    );
     assert_eq!(license_tier_of(&e.id), Some(LicenseTier::Permissive));
 }
 
@@ -3054,12 +3134,18 @@ fn nemotron_bolt_e4b_4gb_vendor_build_is_registered() {
 /// projector pinned by SHA-256 at the upstream revision, code capability.
 #[test]
 fn qwen35_3d_coder_third_party_fine_tune_is_registered() {
-    for (id, quant) in [("qwen3.5-4b-3d-coder", "Q4_K_M"), ("qwen3.5-4b-3d-coder-q8-0", "Q8_0")] {
+    for (id, quant) in [
+        ("qwen3.5-4b-3d-coder", "Q4_K_M"),
+        ("qwen3.5-4b-3d-coder-q8-0", "Q8_0"),
+    ] {
         let e = get_model_by_id(id).unwrap_or_else(|| panic!("{id}"));
         assert_eq!(e.hf_repo, "ccore/Qwen3.5-4B-3D-Coder");
         assert_eq!(e.quantization, quant);
         assert_eq!(e.architecture, ModelArchitecture::Qwen35);
-        assert_eq!(e.mmproj.as_ref().unwrap().filename, "mmproj-Qwen3.5-4B-BF16.gguf");
+        assert_eq!(
+            e.mmproj.as_ref().unwrap().filename,
+            "mmproj-Qwen3.5-4B-BF16.gguf"
+        );
         assert_eq!(license_tier_of(id), Some(LicenseTier::Permissive));
     }
     let entry = read_entries(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("seed"))
@@ -3070,7 +3156,10 @@ fn qwen35_3d_coder_third_party_fine_tune_is_registered() {
     assert!(entry.capabilities.iter().any(|c| c == "code"));
     assert_eq!(entry.components.len(), 2);
     for c in &entry.components {
-        assert_eq!(c.revision(), Some("196c03ff49d8d99f49235ad19c7d48f940bc7523"));
+        assert_eq!(
+            c.revision(),
+            Some("196c03ff49d8d99f49235ad19c7d48f940bc7523")
+        );
     }
 }
 
@@ -3080,20 +3169,60 @@ fn qwen35_3d_coder_third_party_fine_tune_is_registered() {
 #[test]
 fn november_2026_survey_models_are_registered() {
     for (id, repo, arch, tier) in [
-        ("glm-5.3", "unsloth/GLM-5.3-GGUF", ModelArchitecture::Glm, LicenseTier::CommercialCustom),
-        ("glm-5.3-flash", "unsloth/GLM-5.3-Flash-GGUF", ModelArchitecture::Glm, LicenseTier::Permissive),
+        (
+            "glm-5.3",
+            "unsloth/GLM-5.3-GGUF",
+            ModelArchitecture::Glm,
+            LicenseTier::CommercialCustom,
+        ),
+        (
+            "glm-5.3-flash",
+            "unsloth/GLM-5.3-Flash-GGUF",
+            ModelArchitecture::Glm,
+            LicenseTier::Permissive,
+        ),
         (
             "deepseek-v4.1-flash-1017",
             "unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
             ModelArchitecture::DeepSeekV3,
             LicenseTier::Permissive,
         ),
-        ("minimax-m3.1-flash", "unsloth/MiniMax-M3.1-Flash-GGUF", ModelArchitecture::MiniMax, LicenseTier::CommercialCustom),
-        ("beam-1.0", "unsloth/Beam-1.0-501B-A23B-GGUF", ModelArchitecture::Beam, LicenseTier::Permissive),
-        ("glm-ocr", "ggml-org/GLM-OCR-GGUF", ModelArchitecture::Glm, LicenseTier::Permissive),
-        ("flint", "unsloth/flint-GGUF", ModelArchitecture::Flint, LicenseTier::Permissive),
-        ("spark-x2.6-4b", "XHToken/Spark-X2.6-4B-GGUF", ModelArchitecture::Spark25, LicenseTier::Permissive),
-        ("sage-a1.5", "InternScience/Sage-A1.5-Q4_K_M-GGUF", ModelArchitecture::Qwen35Moe, LicenseTier::Permissive),
+        (
+            "minimax-m3.1-flash",
+            "unsloth/MiniMax-M3.1-Flash-GGUF",
+            ModelArchitecture::MiniMax,
+            LicenseTier::CommercialCustom,
+        ),
+        (
+            "beam-1.0",
+            "unsloth/Beam-1.0-501B-A23B-GGUF",
+            ModelArchitecture::Beam,
+            LicenseTier::Permissive,
+        ),
+        (
+            "glm-ocr",
+            "ggml-org/GLM-OCR-GGUF",
+            ModelArchitecture::Glm,
+            LicenseTier::Permissive,
+        ),
+        (
+            "flint",
+            "unsloth/flint-GGUF",
+            ModelArchitecture::Flint,
+            LicenseTier::Permissive,
+        ),
+        (
+            "spark-x2.6-4b",
+            "XHToken/Spark-X2.6-4B-GGUF",
+            ModelArchitecture::Spark25,
+            LicenseTier::Permissive,
+        ),
+        (
+            "sage-a1.5",
+            "InternScience/Sage-A1.5-Q4_K_M-GGUF",
+            ModelArchitecture::Qwen35Moe,
+            LicenseTier::Permissive,
+        ),
     ] {
         let e = get_model_by_id(id).unwrap_or_else(|| panic!("{id}"));
         assert_eq!(e.hf_repo, repo, "{id}");
@@ -3101,22 +3230,49 @@ fn november_2026_survey_models_are_registered() {
         assert_eq!(license_tier_of(id), Some(tier), "{id}");
         assert!(e.promotable, "{id}");
     }
-    assert_eq!(ModelArchitecture::Beam.engine_architectures().unwrap(), &["beam"]);
-    assert!(ModelArchitecture::Glm.engine_architectures().unwrap().contains(&"glm5-next"));
-    assert!(ModelArchitecture::DeepSeekV3.engine_architectures().unwrap().contains(&"deepseek41"));
+    assert_eq!(
+        ModelArchitecture::Beam.engine_architectures().unwrap(),
+        &["beam"]
+    );
+    assert!(
+        ModelArchitecture::Glm
+            .engine_architectures()
+            .unwrap()
+            .contains(&"glm5-next")
+    );
+    assert!(
+        ModelArchitecture::DeepSeekV3
+            .engine_architectures()
+            .unwrap()
+            .contains(&"deepseek41")
+    );
     // Every ladder build ends in a named quantisation and DSpark drafters keep their prefix.
-    for id in ["deepseek-v4.1-flash-1017-dspark", "minimax-m3.1-flash-dspark"] {
+    for id in [
+        "deepseek-v4.1-flash-1017-dspark",
+        "minimax-m3.1-flash-dspark",
+    ] {
         let e = get_model_by_id(id).unwrap_or_else(|| panic!("{id}"));
         assert!(e.hf_filename.starts_with("dspark-"), "{id}");
     }
-    assert!(get_model_by_id("spark-x2.6-4b-dspark").unwrap().hf_filename.contains("DSpark"));
+    assert!(
+        get_model_by_id("spark-x2.6-4b-dspark")
+            .unwrap()
+            .hf_filename
+            .contains("DSpark")
+    );
     assert_eq!(get_model_by_id("flint").unwrap().quantization, "UD-Q4_K_XL");
     assert!(get_model_by_id("sage-a1.5").unwrap().mmproj.is_some());
     assert_eq!(
-        get_model_by_id("deepseek-v4.1-flash-1017").unwrap().drafter_id.as_deref(),
+        get_model_by_id("deepseek-v4.1-flash-1017")
+            .unwrap()
+            .drafter_id
+            .as_deref(),
         Some("deepseek-v4.1-flash-1017-dspark")
     );
-    let glm: Vec<_> = get_model_catalog().into_iter().filter(|e| e.id.starts_with("glm-5.3-flash")).collect();
+    let glm: Vec<_> = get_model_catalog()
+        .into_iter()
+        .filter(|e| e.id.starts_with("glm-5.3-flash"))
+        .collect();
     assert_eq!(glm.len(), 12);
 }
 
@@ -3132,7 +3288,11 @@ fn laya_is_pinned_as_decision_models() {
     for e in &catalog {
         assert_eq!(e.architecture, ModelArchitecture::ModernBert);
         assert_eq!(e.family, "laya");
-        assert!(get_model_by_id(&e.id).is_none(), "{} is no chat model", e.id);
+        assert!(
+            get_model_by_id(&e.id).is_none(),
+            "{} is no chat model",
+            e.id
+        );
         assert_eq!(license_tier_of(&e.id), Some(LicenseTier::Permissive));
         let en = entry(&e.id).unwrap();
         assert_eq!(en.model.engine(), "decision");
@@ -3150,23 +3310,45 @@ fn laya_is_pinned_as_decision_models() {
         assert_eq!(e.context_length, 1024);
         // The multilingual model ships in BF16: its 8-bit build moved a near-tie
         // answer by 0.13 against the reference implementation.
-        assert_eq!(e.quantization, if id == "laya-multilingual" { "BF16" } else { "Q8_0" });
-        assert!(e.description.contains("tools/gguf-export/convert.sh"), "{id}");
+        assert_eq!(
+            e.quantization,
+            if id == "laya-multilingual" {
+                "BF16"
+            } else {
+                "Q8_0"
+            }
+        );
+        assert!(
+            e.description.contains("tools/gguf-export/convert.sh"),
+            "{id}"
+        );
         assert!(e.description.contains("Apache-2.0"), "{id}");
         let c = &entry(id).unwrap().components[0];
         match &c.source {
-            Source::Network { blake3, built_from, recipe } => {
+            Source::Network {
+                blake3,
+                built_from,
+                recipe,
+            } => {
                 assert_eq!(blake3.len(), 64, "{id}");
                 assert_eq!(built_from.revision.len(), 40, "{id}");
-                assert!(built_from.repo.starts_with("convaiinnovations/laya"), "{id}");
+                assert!(
+                    built_from.repo.starts_with("convaiinnovations/laya"),
+                    "{id}"
+                );
                 assert_eq!(recipe, "tools/gguf-export/convert.sh");
             }
             other => panic!("{id}: {other:?} is not a rebuilt network file"),
         }
     }
-    assert_eq!(get_decision_model_by_id("laya").unwrap().quantization, "Q8_0");
     assert_eq!(
-        ModelArchitecture::ModernBert.engine_architectures().unwrap(),
+        get_decision_model_by_id("laya").unwrap().quantization,
+        "Q8_0"
+    );
+    assert_eq!(
+        ModelArchitecture::ModernBert
+            .engine_architectures()
+            .unwrap(),
         &["modern-bert"]
     );
 }

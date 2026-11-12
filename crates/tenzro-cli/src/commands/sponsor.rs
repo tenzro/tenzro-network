@@ -471,7 +471,11 @@ fn caps_of(v: &Value) -> Option<Caps> {
     let c = v.get("caps")?;
     let s = |k: &str| {
         c.get(k)
-            .map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string()))
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| x.to_string())
+            })
             .unwrap_or_else(|| "0".into())
     };
     Some(Caps {
@@ -697,7 +701,9 @@ impl SponsorStatusCmd {
                     "Approval",
                     &format!(
                         "{}{}",
-                        ap.get("class").and_then(Value::as_str).unwrap_or("operator"),
+                        ap.get("class")
+                            .and_then(Value::as_str)
+                            .unwrap_or("operator"),
                         if ap.get("revoked").and_then(Value::as_bool).unwrap_or(false) {
                             " (revoked)"
                         } else {
@@ -850,7 +856,11 @@ mod tests {
     #[test]
     fn zero_caps_are_called_out_as_paying_nothing() {
         let a = assess(&base());
-        let caps = a.items.iter().find(|i| i.label == "Sponsorship caps").unwrap();
+        let caps = a
+            .items
+            .iter()
+            .find(|i| i.label == "Sponsorship caps")
+            .unwrap();
         assert_eq!(caps.level, Level::Warn);
         assert!(caps.detail.contains("pays nothing"));
     }
@@ -916,7 +926,11 @@ mod tests {
         }];
         let a = assess(&i);
         assert!(!a.ready_to_apply);
-        let g = a.items.iter().find(|x| x.label == "Governance approval").unwrap();
+        let g = a
+            .items
+            .iter()
+            .find(|x| x.label == "Governance approval")
+            .unwrap();
         assert!(g.detail.contains("p9") && g.detail.contains("Voting"));
     }
 
@@ -948,7 +962,10 @@ mod tests {
             {"proposal": {"id": "b", "status": "Passed", "action": {"action": "approve_operator", "operator": "0x".to_string() + &"cd".repeat(32)}}},
             {"proposal": {"id": "c", "status": "Queued", "action": {"action": "approve_operator", "operator": "ab".repeat(32)}}},
         ]});
-        let ids: Vec<String> = proposals_for(&list, &acct).into_iter().map(|p| p.id).collect();
+        let ids: Vec<String> = proposals_for(&list, &acct)
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
         assert_eq!(ids, vec!["a", "c"]);
     }
 

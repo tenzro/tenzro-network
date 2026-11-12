@@ -50,7 +50,9 @@ use tenzro_model::{
 fn main() {
     tenzro_model::parse_jail::enter_if_requested();
     let Ok(wanted) = std::env::var("TENZRO_REAL_SCENARIOS") else {
-        println!("real_model_requests: skipped (set TENZRO_REAL_SCENARIOS=long,audio,video,decision)");
+        println!(
+            "real_model_requests: skipped (set TENZRO_REAL_SCENARIOS=long,audio,video,decision)"
+        );
         return;
     };
     let models = std::env::var("TENZRO_MODELS_DIR")
@@ -81,7 +83,10 @@ fn main() {
             }
         }));
         match outcome {
-            Ok(note) => println!("PASS {name} ({:.0} s): {note}", started.elapsed().as_secs_f64()),
+            Ok(note) => println!(
+                "PASS {name} ({:.0} s): {note}",
+                started.elapsed().as_secs_f64()
+            ),
             Err(why) => {
                 failed += 1;
                 println!("FAIL {name}: {why}");
@@ -100,7 +105,9 @@ async fn fetch(dir: &Path, id: &str) -> Result<PathBuf, String> {
         .or_else(|| get_decision_model_by_id(id))
         .ok_or_else(|| format!("{id} is not in the catalog"))?;
     let downloader = HfDownloader::new(dir.to_path_buf());
-    if downloader.is_downloaded(id) && (entry.mmproj.is_none() || downloader.mmproj_path(id).exists()) {
+    if downloader.is_downloaded(id)
+        && (entry.mmproj.is_none() || downloader.mmproj_path(id).exists())
+    {
         return Ok(downloader.model_path(id));
     }
     let (tx, _rx) = tokio::sync::watch::channel(DownloadProgress {
@@ -317,7 +324,10 @@ async fn decision(dir: &Path) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("load: {e}"))?;
-    let option = |k: &str, d: Value| DecisionOption { key: k.into(), description: d };
+    let option = |k: &str, d: Value| DecisionOption {
+        key: k.into(),
+        description: d,
+    };
     let questions = vec![
         Question::noul("spam", "Is this message spam?", Value::Null, Value::Null),
         Question::choice(
@@ -332,13 +342,19 @@ async fn decision(dir: &Path) -> Result<String, String> {
         Question::score(
             "urgency",
             "How urgent does the message sound?",
-            vec![json!("not urgent"), json!("somewhat urgent"), json!("very urgent")],
+            vec![
+                json!("not urgent"),
+                json!("somewhat urgent"),
+                json!("very urgent"),
+            ],
         ),
     ];
     let r = rt
         .decide(
             ID,
-            json!("WIN A FREE IPHONE now!!! Click the link below to claim your prize before midnight"),
+            json!(
+                "WIN A FREE IPHONE now!!! Click the link below to claim your prize before midnight"
+            ),
             questions,
         )
         .await
@@ -443,7 +459,10 @@ async fn latent_real() -> Result<String, String> {
     let mut ex = MoeExtractor::open(REPO, revision, MoeTensorNaming::NemotronH)
         .await
         .map_err(|e| format!("open: {e}"))?;
-    let gate_blob = ex.gate_blob(layer).await.map_err(|e| format!("gate: {e}"))?;
+    let gate_blob = ex
+        .gate_blob(layer)
+        .await
+        .map_err(|e| format!("gate: {e}"))?;
     let gate = GatingNetwork::from_safetensors(&gate_blob).map_err(|e| e.to_string())?;
     let latent = LatentProjection::from_safetensors(&gate_blob).map_err(|e| e.to_string())?;
     let (d_model, d_latent, n_experts) = (gate.d_model(), latent.d_latent(), gate.num_experts());
@@ -459,8 +478,11 @@ async fn latent_real() -> Result<String, String> {
         hidden.push(((seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5) * 3.4641);
     }
     let rt = MoeExpertRuntime::new();
-    rt.load_gate("bolt", layer, &gate_blob).map_err(|e| e.to_string())?;
-    let routed = rt.route("bolt", layer, d_model, &hidden, top_k).map_err(|e| e.to_string())?;
+    rt.load_gate("bolt", layer, &gate_blob)
+        .map_err(|e| e.to_string())?;
+    let routed = rt
+        .route("bolt", layer, d_model, &hidden, top_k)
+        .map_err(|e| e.to_string())?;
     let wanted: BTreeSet<u32> = routed
         .iter()
         .flat_map(|t| t.slots.iter().map(|s| s.expert.expert))
@@ -470,11 +492,21 @@ async fn latent_real() -> Result<String, String> {
     }
     let mut experts = HashMap::new();
     for e in &wanted {
-        let blob = ex.expert_blob(layer, *e).await.map_err(|er| format!("expert {e}: {er}"))?;
-        rt.load_expert("bolt", layer, *e, &blob, None).map_err(|er| er.to_string())?;
-        experts.insert(*e, ExpertFfn::from_safetensors(&blob).map_err(|er| er.to_string())?);
+        let blob = ex
+            .expert_blob(layer, *e)
+            .await
+            .map_err(|er| format!("expert {e}: {er}"))?;
+        rt.load_expert("bolt", layer, *e, &blob, None)
+            .map_err(|er| er.to_string())?;
+        experts.insert(
+            *e,
+            ExpertFfn::from_safetensors(&blob).map_err(|er| er.to_string())?,
+        );
     }
-    let shared_blob = ex.shared_expert_blob(layer).await.map_err(|e| format!("shared: {e}"))?;
+    let shared_blob = ex
+        .shared_expert_blob(layer)
+        .await
+        .map_err(|e| format!("shared: {e}"))?;
     rt.load_expert("bolt", layer, n_experts as u32, &shared_blob, None)
         .map_err(|e| e.to_string())?;
     let shared = ExpertFfn::from_safetensors(&shared_blob).map_err(|e| e.to_string())?;
@@ -491,7 +523,10 @@ async fn latent_real() -> Result<String, String> {
     let mut by_expert: HashMap<u32, Vec<u32>> = HashMap::new();
     for t in &routed {
         for s in &t.slots {
-            by_expert.entry(s.expert.expert).or_default().push(t.token_index);
+            by_expert
+                .entry(s.expert.expert)
+                .or_default()
+                .push(t.token_index);
         }
     }
     for (expert, tokens) in by_expert {
@@ -499,7 +534,14 @@ async fn latent_real() -> Result<String, String> {
             .iter()
             .flat_map(|t| z[*t as usize * d_latent..(*t as usize + 1) * d_latent].to_vec())
             .collect();
-        let req = ExpertExecuteRequest::compressed("bolt".into(), layer, expert, tokens, d_latent as u32, rows);
+        let req = ExpertExecuteRequest::compressed(
+            "bolt".into(),
+            layer,
+            expert,
+            tokens,
+            d_latent as u32,
+            rows,
+        );
         combiner
             .accumulate(&rt.execute(&req).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
@@ -512,8 +554,16 @@ async fn latent_real() -> Result<String, String> {
     // The layer function on the same weights.
     let cpu = tenzro_model::CpuCompute::detect();
     let x = ndarray::Array2::from_shape_vec((n_tokens, d_model), hidden.clone()).unwrap();
-    let want = latent_moe_forward(x.view(), &gate, top_k, &latent, &experts, Some(&shared), &cpu)
-        .map_err(|e| e.to_string())?;
+    let want = latent_moe_forward(
+        x.view(),
+        &gate,
+        top_k,
+        &latent,
+        &experts,
+        Some(&shared),
+        &cpu,
+    )
+    .map_err(|e| e.to_string())?;
     let mut worst = 0f32;
     let mut energy = 0f64;
     for (a, b) in served.iter().zip(want.iter()) {
@@ -550,11 +600,12 @@ async fn decision_file() -> Result<String, String> {
     use tenzro_model::decision_runtime::{DecisionOption, DecisionRuntime, Question, QuestionKind};
     let var = |k: &str| std::env::var(k).map_err(|_| format!("{k} is not set"));
     let gguf = PathBuf::from(var("LAYA_GGUF")?);
-    let n_ctx: u32 = var("LAYA_CTX")?.parse().map_err(|_| "LAYA_CTX is a number")?;
-    let cases: Value = serde_json::from_slice(
-        &std::fs::read(var("LAYA_CASES")?).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let n_ctx: u32 = var("LAYA_CTX")?
+        .parse()
+        .map_err(|_| "LAYA_CTX is a number")?;
+    let cases: Value =
+        serde_json::from_slice(&std::fs::read(var("LAYA_CASES")?).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let rt = Arc::new(DecisionRuntime::default());
     let (rt2, g2) = (rt.clone(), gguf.clone());
     tokio::task::spawn_blocking(move || rt2.load("laya-file", &g2, n_ctx))
@@ -600,20 +651,39 @@ async fn decision_file() -> Result<String, String> {
         for a in &r.answers {
             let mut o = serde_json::Map::new();
             o.insert("type".into(), json!(a.kind.name()));
-            if let Some(c) = &a.choice { o.insert("choice".into(), json!(c)); }
-            if let Some(s) = a.score { o.insert("score".into(), json!(s)); }
-            if let Some(n) = a.noul { o.insert("noul".into(), json!(n)); }
-            if !a.probabilities.is_empty() {
-                o.insert("probabilities".into(), a.probabilities.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<serde_json::Map<_, _>>().into());
+            if let Some(c) = &a.choice {
+                o.insert("choice".into(), json!(c));
             }
-            if let Some(c) = a.confidence { o.insert("confidence".into(), json!(c)); }
+            if let Some(s) = a.score {
+                o.insert("score".into(), json!(s));
+            }
+            if let Some(n) = a.noul {
+                o.insert("noul".into(), json!(n));
+            }
+            if !a.probabilities.is_empty() {
+                o.insert(
+                    "probabilities".into(),
+                    a.probabilities
+                        .iter()
+                        .map(|(k, v)| (k.clone(), json!(v)))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into(),
+                );
+            }
+            if let Some(c) = a.confidence {
+                o.insert("confidence".into(), json!(c));
+            }
             let _ = QuestionKind::Noul;
             answers.insert(a.id.clone(), Value::Object(o));
         }
         out.insert(name.clone(), Value::Object(answers));
     }
-    std::fs::write(var("LAYA_OUT")?, serde_json::to_vec_pretty(&out).unwrap()).map_err(|e| e.to_string())?;
-    Ok(format!("{} states answered, {tokens} prompt tokens", out.len()))
+    std::fs::write(var("LAYA_OUT")?, serde_json::to_vec_pretty(&out).unwrap())
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{} states answered, {tokens} prompt tokens",
+        out.len()
+    ))
 }
 
 async fn fetch_all(dir: &Path) -> Result<String, String> {

@@ -236,6 +236,7 @@ pub mod catalog_sync;
 pub mod certified_import;
 pub mod challenge_rpc;
 pub mod chat_content;
+pub mod checkpoint_recorder;
 pub mod cluster_identity;
 pub mod compute_index_reporter;
 pub mod compute_observations;
@@ -268,6 +269,11 @@ mod governance_rpc;
 pub mod hash_vouchers;
 pub mod hosted_operators;
 mod insurance_rpc;
+pub mod journal_writer;
+/// Allocator arena cap and periodic trim, against resident-memory growth.
+pub mod malloc_tuning;
+#[cfg(test)]
+mod plan_stager_tests;
 pub mod policy_reflection;
 mod provider_listing_rpc;
 mod token_rpc;
@@ -280,6 +286,7 @@ mod validator_net_tests;
 pub use tenzro_types::eu_ai_disclosure;
 pub mod account_outflow_rpc;
 pub mod beacon;
+pub mod block_summary;
 pub mod da_retention;
 pub mod event_index;
 pub mod event_loop;
@@ -296,6 +303,7 @@ pub mod host_firewall;
 pub mod http_client;
 pub mod http_surface;
 pub mod identity_bootstrap;
+pub mod identity_gate;
 pub mod identity_mirror;
 pub mod infer;
 pub mod inference_admission;
@@ -314,6 +322,12 @@ pub mod remote_tpm;
 pub mod tpm_key_holder;
 mod trust_hooks;
 mod trust_rpc;
+pub(crate) mod tx_record;
+pub mod update_advert;
+pub mod update_notice;
+pub mod validator_admission;
+#[cfg(test)]
+mod validator_admission_tests;
 pub mod verifiable_inference;
 /// Validator keyset generation and on-disk layout.
 ///
@@ -323,6 +337,7 @@ pub mod verifiable_inference;
 /// to do it with — and reaching it through this crate meant `tenzro-cli`
 /// pulled 1062 crates, llama.cpp's C++ build among them, to offer `setup`.
 pub use tenzro_keygen as keygen;
+pub mod consensus_runtime;
 pub mod decision_rpc;
 pub mod images_http;
 #[cfg(feature = "inference")]
@@ -332,14 +347,18 @@ pub mod lane_resolver;
 pub mod layer_pipeline;
 pub mod ledger_payment;
 pub mod liveness;
+pub mod load_monitor;
+pub mod load_shed;
 #[cfg(feature = "inference")]
 pub mod loaded_models;
 pub mod machine_access;
 pub mod machine_admission;
+pub mod machine_registration;
 pub mod mcp;
 #[cfg(feature = "inference")]
 pub mod media_models;
 pub mod media_verify;
+pub mod memory_guard;
 pub mod metrics;
 pub mod modality_http;
 pub mod model_blob_fetcher_bridge;
@@ -347,6 +366,7 @@ pub mod model_blob_fetcher_bridge;
 pub mod moe;
 pub mod moe_placement;
 pub mod network_catalog;
+pub mod network_profile;
 /// Opening a sealed keyset from hardware.
 ///
 /// Moved with `keygen`, which is its only caller here besides `main`.
@@ -366,6 +386,7 @@ pub mod voice_rpc;
 pub mod keystore_rpc;
 mod network_legs;
 pub mod node_did_document;
+mod offer_ranking;
 pub mod openai_responses;
 pub mod openai_tools;
 pub mod passkey_rpc;
@@ -381,7 +402,6 @@ pub mod pricing;
 pub mod proof_log;
 pub mod provider_heartbeat;
 mod provider_standing;
-mod offer_ranking;
 pub mod recovery;
 pub mod role_bonds;
 pub mod router_inputs;
@@ -389,6 +409,7 @@ pub mod rpc;
 pub mod rpc_gates;
 pub mod rpc_gateway;
 pub mod rpc_integrations;
+mod rpc_slow;
 pub mod sealed_delivery;
 pub mod sealed_model_attester;
 pub mod serving_admission;
@@ -404,6 +425,7 @@ pub mod standby;
 pub mod state_commitment;
 pub(crate) mod state_reads;
 mod state_rpc;
+pub mod state_sync_policy;
 pub mod storage_maintenance;
 pub mod storage_provider_runtime;
 pub mod streaming;

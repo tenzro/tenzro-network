@@ -29,13 +29,13 @@ use std::time::Duration;
 use iroh::EndpointId;
 use iroh::endpoint::{Connection, IdleTimeout, Incoming, QuicTransportConfig, VarInt};
 use iroh::protocol::{
-    AcceptError, DynProtocolHandler, IncomingFilterOutcome, ProtocolHandler, Router,
-    RouterBuilder,
+    AcceptError, DynProtocolHandler, IncomingFilterOutcome, ProtocolHandler, Router, RouterBuilder,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::ALPN_CONSENSUS;
+use crate::identity_gate::{Admit, IdentityGate};
 
 /// Application close code for a connection closed because its pool or its
 /// peer is at its bound.
@@ -94,6 +94,10 @@ impl ConnectionLimits {
         QuicTransportConfig::builder()
             .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
             .max_idle_timeout(Some(idle))
+            // Every path of a connection, the direct one included, carries a
+            // keep-alive, so the direct path stays open and a relay outage
+            // finds it already there.
+            .default_path_keep_alive_interval(Duration::from_secs(4))
             .max_concurrent_bidi_streams(VarInt::from_u32(self.max_concurrent_bidi_streams))
             .max_concurrent_uni_streams(VarInt::from_u32(self.max_concurrent_uni_streams))
             .receive_window(VarInt::from_u32(self.receive_window_bytes))
@@ -241,6 +245,7 @@ struct Gated<P> {
     inner: P,
     gate: ConnectionGate,
     class: Class,
+    identity: Option<IdentityGate>,
 }
 
 impl<P> std::fmt::Debug for Gated<P> {
@@ -258,6 +263,14 @@ impl<P: ProtocolHandler> ProtocolHandler for Gated<P> {
     }
 
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        // Who may use this protocol at all comes first: a refused peer takes
+        // no place in the pools.
+        if let Some(identity) = &self.identity
+            && let Admit::Refuse { code, reason } = identity.admit(&conn).await
+        {
+            conn.close(code.into(), reason.as_bytes());
+            return Ok(());
+        }
         let Some(permit) = self.gate.admit(self.class, conn.remote_id()) else {
             tracing::debug!(target: "tenzro_iroh::limits", "connection refused: at its bound");
             conn.close(REFUSED_CONNECTIONS.into(), b"connection limit");
@@ -282,6 +295,7 @@ impl<P: ProtocolHandler> ProtocolHandler for Gated<P> {
 pub struct GatedRouter {
     builder: RouterBuilder,
     gate: ConnectionGate,
+    identity: Option<IdentityGate>,
 }
 
 impl GatedRouter {
@@ -289,10 +303,21 @@ impl GatedRouter {
     /// the gate has no room for before their handshake.
     pub fn new(builder: RouterBuilder, gate: ConnectionGate) -> Self {
         let filter = gate.clone();
-        let builder = builder.incoming_filter(Arc::new(move |incoming| {
-            filter.incoming_filter(incoming)
-        }));
-        Self { builder, gate }
+        let builder =
+            builder.incoming_filter(Arc::new(move |incoming| filter.incoming_filter(incoming)));
+        Self {
+            builder,
+            gate,
+            identity: None,
+        }
+    }
+
+    /// Admits peers to each protocol by registered identity (see
+    /// [`crate::identity_gate`]). Protocols registered after this call are
+    /// gated; call it before [`Self::accept`].
+    pub fn with_identity_gate(mut self, identity: IdentityGate) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     /// Serves `alpn` with `handler`, under the pool the protocol counts in.
@@ -301,6 +326,7 @@ impl GatedRouter {
             inner: handler,
             gate: self.gate.clone(),
             class: Class::of(alpn.as_ref()),
+            identity: self.identity.clone(),
         });
         self.builder = self.builder.accept(alpn, gated);
         self
@@ -515,7 +541,10 @@ mod tests {
         }
         let late = client().await;
         let conn = late.connect(server.addr(), ALPN_CONSENSUS).await.unwrap();
-        assert!(echoes(&conn).await, "a new consensus peer is still admitted");
+        assert!(
+            echoes(&conn).await,
+            "a new consensus peer is still admitted"
+        );
         router.shutdown().await.unwrap();
     }
 

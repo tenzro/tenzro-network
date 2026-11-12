@@ -352,7 +352,7 @@ pub fn report(recs: &[Rec], bad: &[String], seeds: usize) -> String {
     let inb: Vec<&Rec> = recs.iter().filter(|r| r.inside_band).collect();
 
     // Mechanisms.
-    s.push_str("## Mechanisms\n\nStrict gate (the owner's): every replay of every cell holds every check with the mechanism on. No-regression: in every cell and setting where the mechanism-off replay holds, the mechanism-on replay holds too; rescued: settings that fail off and hold on.\n\n| mechanism | replays | holding | strict: cells all holding | no-regression | rescued | cells with a failing replay |\n|---|---|---|---|---|---|---|\n");
+    s.push_str("## Mechanisms\n\nStrict gate: every replay of every cell holds every check with the mechanism on. No-regression: in every cell and setting where the mechanism-off replay holds, the mechanism-on replay holds too; rescued: settings that fail off and hold on.\n\n| mechanism | replays | holding | strict: cells all holding | no-regression | rescued | cells with a failing replay |\n|---|---|---|---|---|---|---|\n");
     let key = |r: &Rec| {
         format!(
             "{}|{}|{}|{}|{}|{}|{}|{}",

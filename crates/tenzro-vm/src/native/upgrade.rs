@@ -8,6 +8,10 @@
 //! activates `upgrade.activation_delay_blocks` after the block that enacted
 //! it, a height every replica derives from the same block.
 //!
+//! The chain's protocol version lives in state ([`PROTOCOL_VERSION_KEY`]),
+//! seeded by genesis and raised by an enacted upgrade at its activation
+//! height, so every replica derives the same version for every height.
+//!
 //! A security fix is a protocol upgrade on the security-fix track. It rests
 //! on an upheld fault, or on a commitment to a vulnerability its proposer
 //! reveals after enactment. A commitment not revealed within
@@ -42,6 +46,63 @@ pub const GAS_SECURITY_DISCLOSURE: u64 = 60_000;
 pub const UPGRADE_SCHEDULED_TOPIC: &[u8] = b"UpgradeScheduled";
 
 const ACTIVATION_KEY: &str = "upgrade_activation";
+
+/// Storage key (in the system account) of the chain's protocol version.
+pub const PROTOCOL_VERSION_KEY: &str = "network:protocol_version";
+/// Topic of the log that announces the protocol version record after an
+/// upgrade changed it, so nodes mirror it without reading state.
+pub const PROTOCOL_VERSION_TOPIC: &[u8] = b"ProtocolVersionScheduled";
+
+/// The chain's protocol version as consensus state holds it: the version in
+/// force, and the one a scheduled upgrade raises it to at its activation
+/// height.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolVersionRecord {
+    /// The version in force until `next` activates.
+    pub version: u32,
+    /// The scheduled raise, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<PendingProtocolVersion>,
+}
+
+/// A scheduled raise of the protocol version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingProtocolVersion {
+    /// The version from `activation_height` on.
+    pub version: u32,
+    /// First height at the new version.
+    pub activation_height: u64,
+}
+
+impl ProtocolVersionRecord {
+    /// The version at `height`.
+    pub fn at(&self, height: u64) -> u32 {
+        match self.next {
+            Some(n) if height >= n.activation_height => n.version.max(self.version),
+            _ => self.version,
+        }
+    }
+}
+
+/// The record genesis writes under [`PROTOCOL_VERSION_KEY`].
+pub fn genesis_protocol_version(version: u32) -> Result<Vec<u8>> {
+    serde_json::to_vec(&ProtocolVersionRecord {
+        version,
+        next: None,
+    })
+    .map_err(|e| VmError::Internal(format!("encode {PROTOCOL_VERSION_KEY}: {e}")))
+}
+
+/// The chain's protocol version record, if genesis recorded one.
+pub fn read_protocol_version(state: &dyn VmState) -> Option<ProtocolVersionRecord> {
+    funding::read_json(state, PROTOCOL_VERSION_KEY)
+}
+
+/// The chain's protocol version at `height`, or `None` when genesis recorded
+/// none (a chain that predates the record is not range-checked).
+pub fn protocol_version_at(state: &dyn VmState, height: u64) -> Option<u32> {
+    read_protocol_version(state).map(|r| r.at(height))
+}
 
 /// One validator machine's readiness for a binary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +254,46 @@ pub(super) fn schedule(
     logs.push(Log::new(
         SYSTEM_ADDRESS.to_vec(),
         vec![UPGRADE_SCHEDULED_TOPIC.to_vec()],
+        blob,
+    ));
+    schedule_protocol_version(state, &activation, height, changes, logs)
+}
+
+/// Raise the recorded protocol version to the one `activation` names, from
+/// its activation height. A chain whose genesis recorded no version, and a
+/// version string that names no number, leave things as they are, matching
+/// how the block header takes its version. The version never goes back: a
+/// raise already due folds in first, and a lower one names nothing new.
+fn schedule_protocol_version(
+    state: &mut dyn VmState,
+    activation: &UpgradeActivation,
+    enacted_at: u64,
+    changes: &mut Vec<StateChange>,
+    logs: &mut Vec<Log>,
+) -> Result<()> {
+    let (Some(mut record), Some(named)) = (
+        read_protocol_version(state),
+        activation.named_protocol_version(),
+    ) else {
+        return Ok(());
+    };
+    if let Some(due) = record.next
+        && enacted_at >= due.activation_height
+    {
+        record.version = record.version.max(due.version);
+        record.next = None;
+    }
+    let floor = record
+        .next
+        .map_or(record.version, |n| n.version.max(record.version));
+    record.next = Some(PendingProtocolVersion {
+        version: named.max(floor),
+        activation_height: activation.activation_height,
+    });
+    let blob = funding::write_json(state, PROTOCOL_VERSION_KEY, &record, changes)?;
+    logs.push(Log::new(
+        SYSTEM_ADDRESS.to_vec(),
+        vec![PROTOCOL_VERSION_TOPIC.to_vec()],
         blob,
     ));
     Ok(())

@@ -559,6 +559,23 @@ async fn consensus_reads() {
         )
         .await;
     assert_eq!(fin.certificate.unwrap().signers, 3);
+    let notice = node
+        .check(
+            "tenzro_getUpdateNotice",
+            json!({"notice": null, "etag": null, "cache_ttl_secs": 60, "epoch": {"epoch": 2, "blocks_to_boundary": 40}}),
+            c.get_update_notice(None),
+            json!([]),
+        )
+        .await;
+    assert_eq!(notice.cache_ttl_secs, 60);
+    assert_eq!(notice.epoch.unwrap().blocks_to_boundary, Some(40));
+    node.check(
+        "tenzro_getUpdateNotice",
+        json!({"unchanged": true, "etag": "ab", "cache_ttl_secs": 60, "epoch": null}),
+        c.get_update_notice(Some("ab")),
+        json!({"if_none_match": "ab"}),
+    )
+    .await;
     node.check(
         "tenzro_getRewardEpoch",
         json!({"epoch": 3}),

@@ -14,7 +14,7 @@
 //! payload binding payments/settlements to originator/beneficiary
 //! identity records. The actual VASP-to-VASP TRP wire transport is
 //! the next layer up (handled by integration partners or by the
-//! tenzro-payments HTTP middleware in a follow-up).
+//! tenzro-payments HTTP middleware, not yet built).
 //!
 //! Our job here:
 //! 1. Provide the canonical Rust types matching the IVMS101 v1.1.0

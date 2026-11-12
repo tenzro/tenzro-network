@@ -35,7 +35,7 @@ with another hash, or whose manifest signature does not verify. It needs cosign 
 The release signature is made with a hardware-held key and is not uploaded to a transparency log, so `--insecure-ignore-tlog=true` is required: without it cosign 3 looks for a log entry and fails with "signature not found in transparency log". The check against the public key is complete without the log. Step 1 prints `Verified OK`. Step 2 prints `<archive>: OK` for each archive you downloaded. If either
 step prints anything else, delete the download and do not install it.
 
-The signature is a classical ECDSA P-256 signature from a hardware-held key. A post-quantum signature is planned as a follow-up; no quantum resistance is claimed. Archives have no signature of their own: `SHA256SUMS` is the signed object, and each archive is checked against it.
+The signature is a classical ECDSA P-256 signature from a hardware-held key. No quantum resistance is claimed. Archives have no signature of their own: `SHA256SUMS` is the signed object, and each archive is checked against it.
 
 
 ## Steps on Windows

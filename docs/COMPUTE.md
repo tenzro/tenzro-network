@@ -115,23 +115,7 @@ Compute claims (§6) buy capacity ahead, hour-aligned, settled on the same SLA v
 
 ## 3. Pricing
 
-A provider chooses how its per-epoch rate is set:
-
-- **Fixed.** The provider names a flat rate per epoch and it stays put.
-- **Network-dynamic.** The rate tracks network utilization through an EIP-1559-style controller over an exponentially smoothed utilization signal. When demand for compute runs above target, the rate rises; below target, it falls. Compute uses a denominator of 8 (a per-step move bounded at ±12.5%), a 50% target, and a smoothing window of 4.
-
-The controller is the same proportional step the chain's gas base fee uses (`tenzro-vm`'s `FeeMarket::calculate_next_base_fee`), applied to the per-epoch rate instead of gas price. It is integer-only — no floats in the settlement path:
-
-```
-util  = EMA over the last `window` epochs of (busy_capacity / total_capacity), scaled to the target's integer domain
-target = 50% utilization
-
-if util == target:   rate stays
-if util  > target:   rate += rate × (util − target) / target / D      // capped at +12.5% per step
-if util  < target:   rate -= rate × (target − util) / target / D       // capped at −12.5% per step
-```
-
-with `D = 8` for compute (and inference), `D = 16` for storage — storage moves at half the per-step speed because storage demand is stickier than inference demand. The new rate is clamped to a configured floor and ceiling so a quiet or saturated window cannot drive it to zero or unbounded. The EMA smoothing (`window = 4`) keeps a single burst epoch from whipsawing the rate.
+A provider names a flat rate per epoch and it stays put. The rate is fixed: it never follows utilization or demand, so a renter pays the same rate whenever it opens a deal, and a provider cannot raise its price by filling its own capacity. A node configured with any other pricing mode refuses the configuration (`crates/tenzro-node/src/pricing.rs`).
 
 Pricing is the provider's call: it is the basis of the provider's bid on a rental task, and the renter sees every bid before it awards.
 
@@ -228,7 +212,7 @@ Every path pays out exactly what the vault holds, so value is conserved.
 - `tenzro_getComputeBond` — one provider's bond, or `null` when it has never posted one
 - `tenzro_listComputeBonds` — every bond this node knows about
 
-Bond mutations are native transactions rather than RPCs — submit them through
+Bond mutations are native transactions rather than RPCs; the CLI below signs and submits them.
 
 ### CLI
 

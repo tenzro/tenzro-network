@@ -75,7 +75,7 @@ Each call returns `{ identity, wallet, access_token, refresh_token, expires_in, 
 
 The `dpop_jkt` parameter on every onboarding/refresh/link call is the RFC 7638 SHA-256 thumbprint of the holder's Ed25519 public key. Pass it to bind the issued token to that key — every subsequent privileged call must then carry a DPoP proof signed by the same key. **Strongly recommended.**
 
-When operating from MCP/SDK/CLI clients, call `tenzro auth refresh` (or `tenzro auth link-wallet`) to keep the locally cached token current; the CLI persists the latest tokens to `~/.tenzro/config.json`.
+When operating from MCP/SDK/CLI clients, call `tenzro auth refresh` to keep the locally cached token current; the CLI persists the latest tokens to `~/.tenzro/config.json`.
 
 ---
 

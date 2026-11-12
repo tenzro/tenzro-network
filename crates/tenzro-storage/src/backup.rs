@@ -109,6 +109,25 @@ impl SnapshotDir {
         Ok(self.list()?.pop())
     }
 
+    /// Removes every snapshot directory an earlier run left unfinished and
+    /// returns the bytes freed.
+    pub fn clean_partials(&self) -> Result<u64> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(io_err("read", &self.root, e)),
+        };
+        let mut freed = 0u64;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.to_string_lossy().ends_with(PARTIAL_SUFFIX) {
+                freed += dir_bytes(&path);
+                fs::remove_dir_all(&path).map_err(|e| io_err("remove", &path, e))?;
+            }
+        }
+        Ok(freed)
+    }
+
     /// Removes all but the newest `keep` snapshots (at least one is kept).
     pub fn trim(&self, keep: usize) -> Result<()> {
         let all = self.list()?;
@@ -118,6 +137,28 @@ impl SnapshotDir {
         }
         Ok(())
     }
+}
+
+/// The bytes of the files under `dir`, counted without following links.
+fn dir_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if let Ok(m) = entry.metadata() {
+                total += m.len();
+            }
+        }
+    }
+    total
 }
 
 /// Reads the description written beside a snapshot.

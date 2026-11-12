@@ -6,30 +6,38 @@ asset recovery), legal-entity mandates (counterparty defaults, court
 orders), and routine compliance (sub-account freezing pending KYC
 refresh). The standard reached Final status on 2026-05-27.
 
-## The four mandatory hooks
+## The interface
 
-| Selector | Function | Purpose |
-|---|---|---|
-| `0x33e4e1d3` | `forcedTransfer(address,address,uint256)` | Privileged transfer executed by the compliance role — asset recovery, court-ordered seizure, post-default re-allocation. Bypasses normal allowance / signing. |
-| `0x57c52a45` | `setFrozenTokens(address,uint256)` | Freeze a specific amount on an account; the remainder stays transferable. Used for KYC-refresh-pending where only a sub-balance is quarantined. |
-| `0xe4d8156e` | `getFrozenTokens(address)` | Read the frozen amount for an account. |
-| `0x1c70d7e6` | `killSwitch()` | Global emergency stop; halts all transfers for the token until cleared by governance. |
+The five standard ERC-7943 fungible functions, whose selectors XOR to the
+interface id:
 
-Auxiliary read/write selectors: `isKillSwitched(0x3d3b9f47)`,
-`clearKillSwitch(0xb22f3ea7)`.
+| Function | Purpose |
+|---|---|
+| `forcedTransfer(address,address,uint256)` | The issuer moves an amount between accounts: asset recovery, a court order, re-allocation after a default. |
+| `setFrozenTokens(address,uint256)` | The issuer freezes an amount on an account; the remainder stays transferable. |
+| `getFrozenTokens(address)` | The frozen amount of an account. |
+| `canTransact(address)` | Whether an account may transact in the token. |
+| `canTransfer(address,address,uint256)` | Whether a transfer would be allowed now. |
 
-The selectors are byte-identical to the ERC-7943 reference
-implementation, so wallets that already speak uRWA dispatch against
-Tenzro without recompilation.
+Halting every holder transfer of a token (the kill switch) is not part of
+ERC-7943. It is the issuer's `set_halted`, a native `Token` transaction.
 
-## Precompile addresses
+## EVM interface
 
-Three EVM precompile addresses are reserved for the uRWA hooks (see
-Status):
+The token factory precompile (`0x1002`) serves the ERC-7943 functions keyed
+by token id, over the same ledger and the same rule engine as its ERC-20
+functions: `canTransact(bytes32,address)`,
+`canTransfer(bytes32,address,address,uint256)`,
+`getFrozenTokens(bytes32,address)`,
+`setFrozenTokens(bytes32,address,uint256)` and
+`forcedTransfer(bytes32,address,address,uint256)`, with
+`facadeOf(bytes32)` and `supportsInterface(bytes4)`. Every token also
+answers at its own facade address with the standard functions, which take
+no token id. There is no separate uRWA precompile.
 
-- `0x101a` — freeze registry (get / set frozen tokens)
-- `0x101b` — forced-transfer dispatcher
-- `0x101c` — kill-switch registry
+`setFrozenTokens` and `forcedTransfer` act only for an issuer that holds the
+power alone under the token's manifest. A power held by a council goes
+through the native `Token` transaction.
 
 ## Transfer enforcement
 
@@ -59,7 +67,7 @@ holders).
 
 | Method | Description |
 |---|---|
-| `tenzro_urwaIsKillSwitched` | Read the kill-switch state for a given `token_id` (32-byte hex). Returns the active flag plus the canonical selectors + precompile addresses for SDK integrators. |
+| `tenzro_urwaIsKillSwitched` | Read the kill-switch state for a given `token_id_hex` (32-byte hex). Returns the token id and the active flag. |
 | `tenzro_urwaGetFrozenTokens` | Read the frozen-amount value for a `(token_id, account)` pair. Returns the frozen amount in token smallest unit. |
 | `Token` `set_frozen` | Set the frozen amount for a `(token_id, account)` pair. Signed by the token's issuer. |
 | `Token` `set_halted` | Activate or clear a token's kill switch. Signed by the token's issuer. |
@@ -75,25 +83,20 @@ Accounts are 20-byte or 32-byte hex addresses.
 - **NOT for TNZO** — TNZO is a network utility token, not a tokenized
   security, so it does not carry uRWA hooks.
 
-## Auth model
+## Who may act
 
-Per the Tenzro admin gate, kill-switch + forced-transfer + freeze
-mutations are operator-gated by default. Network-wide compliance
-decisions (e.g. a fleet-level kill switch for a token tracked across
-multiple operators) MUST flow through the
-`tenzro-token::GovernanceEngine` rather than a single operator's admin
-token — see *Network-wide resources require governance* in the
-governance architecture doc.
+Only the token's issuer freezes, halts or forces a transfer: with a signed
+`Token` transaction or, where the token's manifest gives the issuer the
+power alone, through the EVM interface.
 
 ## SDK surface
 
-The Rust + TypeScript SDKs will surface `UrwaClient` wrappers with
-typed parameter structs over the two read RPCs. The wallet UI surfaces
-the kill-switched state inline on tokenized assets so users see why a
-transfer cannot proceed.
+The Rust SDK (`UrwaClient`, `sdk/tenzro-sdk/src/urwa.rs`) and the TypeScript
+SDK (`urwa.ts`) wrap the two read RPCs. The issuer's controls are `Token`
+transactions built with the SDK's typed transactions.
 
 ## Status
 
-Registry, transfer enforcement in the token registry, and the read and
-admin-gated mutation RPCs are live. The precompiles at `0x101a`-`0x101c`
-and the governance-driven network-wide kill switch are not implemented.
+Transfer enforcement in the token ledger, the EVM interface in the token
+factory precompile and the two read RPCs are live. A network-wide kill
+switch driven by governance is not implemented.

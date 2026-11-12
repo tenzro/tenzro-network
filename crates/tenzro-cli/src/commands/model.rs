@@ -549,14 +549,13 @@ impl ModelDownloadCmd {
         output::print_field("Size", &format_bytes(entry.size_bytes));
         println!();
 
-        let pb_label = match self.policy() {
-            tenzro_model::SourcePolicy::Network => "Downloading from verified network providers...",
-            tenzro_model::SourcePolicy::HuggingFace => "Downloading from HuggingFace...",
-            tenzro_model::SourcePolicy::Auto => {
-                "Downloading (network-first, HuggingFace fallback)..."
-            }
+        let source_note = match self.policy() {
+            tenzro_model::SourcePolicy::Network => "from verified network providers",
+            tenzro_model::SourcePolicy::HuggingFace => "from HuggingFace",
+            tenzro_model::SourcePolicy::Auto => "from the network, or HuggingFace if needed",
         };
-        let pb = output::create_progress_bar(entry.size_bytes, pb_label);
+        let task = crate::progress::global().bytes("Model download", Some(entry.size_bytes));
+        task.message(source_note);
 
         let (progress_tx, mut progress_rx) =
             tokio::sync::watch::channel(tenzro_model::DownloadProgress {
@@ -567,31 +566,36 @@ impl ModelDownloadCmd {
                 total_bytes: entry.size_bytes,
             });
 
-        // Monitor progress in background
-        let pb_clone = pb.clone();
+        // Feed the progress display from the download as it moves.
+        let reporter = task.reporter();
         let monitor = tokio::spawn(async move {
             while progress_rx.changed().await.is_ok() {
                 let progress = progress_rx.borrow().clone();
-                pb_clone.set_position(progress.downloaded_bytes);
+                if progress.total_bytes > 0 {
+                    reporter.set_total(progress.total_bytes);
+                }
+                reporter.set(progress.downloaded_bytes);
+                if progress.total_bytes > 0 && progress.downloaded_bytes >= progress.total_bytes {
+                    reporter.message("checking the file");
+                }
             }
         });
 
         // Perform download
-        match downloader
+        let result = downloader
             .download_model(&entry, None, self.policy(), progress_tx)
-            .await
-        {
+            .await;
+        monitor.abort();
+        match result {
             Ok(path) => {
-                pb.finish_with_message("Download complete!");
+                task.finish();
                 output::print_success(&format!("Model downloaded to: {}", path.display()));
             }
             Err(e) => {
-                pb.finish_with_message("Download failed");
+                task.fail(&e.to_string());
                 return Err(anyhow::anyhow!("Download failed: {}", e));
             }
         }
-
-        monitor.abort();
         Ok(())
     }
 }
@@ -1043,15 +1047,27 @@ impl ModelEndpointsCmd {
                             output::colors::reset()
                         )
                     } else if location == "local" {
-                        format!("{}local{}", output::colors::accent(), output::colors::reset())
+                        format!(
+                            "{}local{}",
+                            output::colors::accent(),
+                            output::colors::reset()
+                        )
                     } else {
-                        format!("{}network{}", output::colors::accent(), output::colors::reset())
+                        format!(
+                            "{}network{}",
+                            output::colors::accent(),
+                            output::colors::reset()
+                        )
                     };
 
                     let status_colored = if status.to_lowercase() == "online" {
                         format!("{}online{}", output::colors::ok(), output::colors::reset())
                     } else {
-                        format!("{}offline{}", output::colors::bad(), output::colors::reset())
+                        format!(
+                            "{}offline{}",
+                            output::colors::bad(),
+                            output::colors::reset()
+                        )
                     };
 
                     let load_str = if let Some(load) = endpoint.get("load") {

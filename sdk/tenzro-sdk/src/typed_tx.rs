@@ -436,6 +436,8 @@ struct Envelope {
 /// submits to. [`RpcClient`] reaches it over HTTP; an application embedding a
 /// node implements this over its in-process dispatch.
 #[async_trait::async_trait]
+// The async_trait expansion already marks the returned future must_use.
+#[allow(clippy::double_must_use)]
 pub trait NodeRpc: Send + Sync {
     /// One JSON-RPC call, answering its `result`.
     async fn call_value(&self, method: &str, params: Value) -> SdkResult<Value>;

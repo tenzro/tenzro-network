@@ -128,6 +128,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_amount_typed_back_matches_the_amount_parsed() {
+        for a in [
+            "5050",
+            "0.1",
+            "1234.567890123456789",
+            "9999.999999999999999999",
+            "10000",
+        ] {
+            let wei = parse_amount_wei(a).unwrap();
+            assert!(
+                tenzro_types::transfer_policy::amount_confirmation_matches(wei, a),
+                "{a}"
+            );
+        }
+        assert_eq!(parse_amount_wei("5050").unwrap(), 5_050 * 10u128.pow(18));
+    }
+
+    #[test]
     fn whole_tnzo() {
         assert_eq!(tnzo_to_wei_string("1").unwrap(), "1000000000000000000");
         assert_eq!(tnzo_to_wei_string("100").unwrap(), "100000000000000000000");

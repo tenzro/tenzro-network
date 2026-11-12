@@ -34,7 +34,7 @@ pub trait KycResolver: Send + Sync {
     fn kyc_tier(&self, did: &str, wallet: &tenzro_types::Address) -> KycTier;
 }
 
-/// Configurable enforcement policy for delegation scopes (HIGH #94).
+/// Configurable enforcement policy for delegation scopes.
 #[derive(Debug, Clone, Copy)]
 pub struct DelegationPolicy {
     /// Minimum reputation a machine must have for an operation to be allowed.
@@ -122,13 +122,13 @@ pub struct IdentityRegistry {
     /// node, which holds the attestation verifiers; without one such records
     /// are not accepted.
     evidence_verifier: Option<EvidenceVerifier>,
-    /// Delegation enforcement policy (HIGH #94)
+    /// Delegation enforcement policy
     delegation_policy: DelegationPolicy,
     /// Optional ERC-8004 on-chain mirror.
     ///
     /// When set, every machine identity registration is automatically
-    /// reflected into the on-chain ERC-8004 IdentityRegistry (typically
-    /// the precompile at `0x101a` on Tenzro). The hook is best-effort —
+    /// reflected into the on-chain ERC-8004 IdentityRegistry (the contract
+    /// at [`crate::erc8004::addresses::IDENTITY_REGISTRY`]). The hook is best-effort —
     /// failures are logged but never roll back the TDIP registration.
     on_chain_agent_registry: Option<Arc<dyn crate::erc8004::OnChainAgentRegistry>>,
     /// Optional AgentBond lookup. When wired, the principal-chain
@@ -504,7 +504,7 @@ impl IdentityRegistry {
         Ok(updated)
     }
 
-    /// Configures the delegation enforcement policy (HIGH #94).
+    /// Configures the delegation enforcement policy.
     pub fn with_delegation_policy(mut self, policy: DelegationPolicy) -> Self {
         self.delegation_policy = policy;
         self
@@ -512,7 +512,7 @@ impl IdentityRegistry {
 
     /// Wires an ERC-8004 on-chain mirror so every machine identity
     /// registration is reflected into the on-chain IdentityRegistry
-    /// (typically the Tenzro precompile at `0x101a`). Best-effort:
+    /// (the contract at [`crate::erc8004::addresses::IDENTITY_REGISTRY`]). Best-effort:
     /// failures are logged but never fail the TDIP registration.
     pub fn with_on_chain_agent_registry(
         mut self,
@@ -565,7 +565,7 @@ impl IdentityRegistry {
         }
     }
 
-    /// Returns the active delegation policy (HIGH #94).
+    /// Returns the active delegation policy.
     pub fn delegation_policy(&self) -> DelegationPolicy {
         self.delegation_policy
     }
@@ -2252,7 +2252,7 @@ impl IdentityRegistry {
 
     /// Test-only helper that overwrites (or installs) an identity record by DID.
     ///
-    /// This is used by trust-chain-traversal tests (CRITICAL #41) to patch
+    /// This is used by trust-chain-traversal tests to patch
     /// identities after `register_*()` so the test can install real
     /// `AssertionMethod` public keys matching the Ed25519 keypairs the test
     /// signs with. Production code must not call this — use the typed
@@ -3162,9 +3162,9 @@ mod tests {
         assert_eq!(registry.machine_registration_fee(), 500_000_000_000_000_000);
     }
 
-    // ----- HIGH #94: delegation enforcement -----
+    // ----- delegation enforcement -----
 
-    // ----- HIGH #95: KYC tier requires signed credential -----
+    // ----- KYC tier requires signed credential -----
 
     /// Grades one wallet, standing in for the node's resolver.
     struct WalletKyc(tenzro_types::Address, KycTier);

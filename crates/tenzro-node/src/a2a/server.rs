@@ -374,6 +374,7 @@ async fn agent_card_handler(State(state): State<Arc<A2aState>>) -> Response {
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
                     "error": "agent card unavailable: this node cannot sign it",
+                    "reason": e.to_string(),
                 })),
             )
                 .into_response()
@@ -1969,7 +1970,11 @@ mod tests {
         };
         let (_keep, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
         let addr = format!("127.0.0.1:{port}");
-        tokio::spawn(start_a2a_server_with_shutdown(addr, state.clone(), shutdown_rx));
+        tokio::spawn(start_a2a_server_with_shutdown(
+            addr,
+            state.clone(),
+            shutdown_rx,
+        ));
         let base = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::new();
         let mut up = false;
@@ -1990,7 +1995,12 @@ mod tests {
                 if let Some(v) = version {
                     r = r.header(A2A_VERSION_HEADER, v);
                 }
-                r.send().await.unwrap().json::<serde_json::Value>().await.unwrap()
+                r.send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
             }
         };
         let list = post(
@@ -2017,7 +2027,10 @@ mod tests {
             serde_json::json!({"jsonrpc":"2.0","id":4,"method":"ListTasks","params":{}}),
         )
         .await;
-        assert_eq!(unversioned["error"]["code"], VERSION_NOT_SUPPORTED, "{unversioned}");
+        assert_eq!(
+            unversioned["error"]["code"], VERSION_NOT_SUPPORTED,
+            "{unversioned}"
+        );
         assert_eq!(state.task_manager.task_count(), 0);
     }
 
@@ -2140,9 +2153,7 @@ mod tests {
         .expect("node");
         let id: Arc<dyn tenzro_crypto::composite::HybridSigner> =
             Arc::new(tenzro_crypto::testing::TestHybridSigner::p256_only(40));
-        node.set_record_signer(
-            tenzro_crypto::batch::ImmediateRecordSigner::new(id),
-        );
+        node.set_record_signer(tenzro_crypto::batch::ImmediateRecordSigner::new(id));
         let state = build_a2a_state(Arc::new(node), Arc::new(WebState::new()));
         let resp = handle_send_message(&state, params(), serde_json::json!(7), &sender).await;
         let task = &resp.result.expect("result")["task"];

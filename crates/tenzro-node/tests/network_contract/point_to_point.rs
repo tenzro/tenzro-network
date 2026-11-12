@@ -9,9 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use iroh::EndpointId;
+use tenzro_crypto::batch::ImmediateRecordSigner;
 use tenzro_crypto::composite::HybridSigner;
 use tenzro_crypto::composite::testing::TestHybridSigner;
-use tenzro_crypto::batch::ImmediateRecordSigner;
 use tenzro_iroh::{
     ALPN_DA_COMMITTEE, ALPN_INFER, MAX_INFER_BYTES, MAX_STORE_REQUEST, Reply, RequestHandler,
     RequestProtocol,
@@ -122,9 +122,9 @@ impl CommitteeView for StaticCommittee {
 
 /// A member's hardware identity stand-in, named by its seed.
 fn session_of(seed: &u8) -> Arc<ImmediateRecordSigner> {
-    Arc::new(
-        tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(TestHybridSigner::p256_only(*seed))),
-    )
+    Arc::new(tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(
+        TestHybridSigner::p256_only(*seed),
+    )))
 }
 
 #[tokio::test]

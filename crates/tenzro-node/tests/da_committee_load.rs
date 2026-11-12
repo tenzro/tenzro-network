@@ -32,10 +32,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use tenzro_crypto::batch::ImmediateRecordSigner;
 use tenzro_crypto::batch::RecordSigner;
 use tenzro_crypto::composite::HybridSigner;
 use tenzro_crypto::composite::testing::TestHybridSigner;
-use tenzro_crypto::batch::ImmediateRecordSigner;
 
 /// A member's hardware identity stand-in, named by its seed.
 fn session_of(seed: u8) -> ImmediateRecordSigner {

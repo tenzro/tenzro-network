@@ -94,7 +94,7 @@ pub struct EnrollPasskeyRequest {
     /// [`require_key_possession`].
     #[serde(default)]
     pub authorization: Option<CustodyAuthorization>,
-    /// Optional display name (e.g. "Hilal's iPhone"). Stored on the TDIP
+    /// Optional display name (e.g. "Alice's iPhone"). Stored on the TDIP
     /// identity metadata so the user can identify this account in their
     /// device list.
     #[serde(default)]

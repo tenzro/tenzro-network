@@ -43,8 +43,9 @@ pub struct HttpSurfaceConfig {
     pub trusted_proxies: Vec<String>,
     /// Host names the listeners answer to besides IP literals and
     /// `localhost`. An entry `*.example.com` admits every subdomain of
-    /// `example.com` but not `example.com` itself. The advertised RPC host
-    /// and the public node suffix are added automatically.
+    /// `example.com` but not `example.com` itself. The hosts of
+    /// `external_rpc_addr`, `external_mcp_addr`, `external_a2a_addr` and the
+    /// WebAuthn RP ID override are added automatically.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     /// Largest number of calls accepted in one JSON-RPC batch.
@@ -110,7 +111,16 @@ impl SurfacePolicy {
             .map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
             .filter(|h| !h.is_empty())
             .collect();
-        if let Some(advertised) = config.external_rpc_addr.as_deref() {
+        // Every public address the operator told the node about is a name the edge sends here.
+        for advertised in [
+            config.external_rpc_addr.as_deref(),
+            config.external_mcp_addr.as_deref(),
+            config.external_a2a_addr.as_deref(),
+            rp_id_override,
+        ]
+        .into_iter()
+        .flatten()
+        {
             let authority = advertised
                 .split("://")
                 .last()
@@ -119,7 +129,7 @@ impl SurfacePolicy {
                 .next()
                 .unwrap_or("");
             let h = host_of(authority);
-            if !h.is_empty() {
+            if !h.is_empty() && !hosts.contains(&h) {
                 hosts.push(h);
             }
         }
@@ -134,6 +144,13 @@ impl SurfacePolicy {
     /// The WebAuthn relying-party ID passkey assertions are verified against.
     pub fn webauthn_rp_id(&self) -> &str {
         &self.rp_id
+    }
+
+    /// The host names the listeners answer to besides IP literals and
+    /// `localhost`: the configured `allowed_hosts` and every name derived from
+    /// the external addresses.
+    pub fn hosts(&self) -> &[String] {
+        &self.hosts
     }
 
     /// Largest accepted JSON-RPC batch.
@@ -375,6 +392,25 @@ mod tests {
             let policy = SurfacePolicy::from_config(&config, rp).expect("starts");
             assert_eq!(policy.webauthn_rp_id(), "tenzro.com");
         }
+    }
+
+    #[test]
+    fn every_external_address_is_an_allowed_host() {
+        let config = crate::config::NodeConfig {
+            external_rpc_addr: Some("https://rpc.example.org".into()),
+            external_mcp_addr: Some("https://mcp.example.org:443/path".into()),
+            external_a2a_addr: Some("https://a2a.example.org/".into()),
+            ..Default::default()
+        };
+        let p = SurfacePolicy::from_config(&config, Some("passkey.example.org")).unwrap();
+        for h in ["rpc", "mcp", "a2a", "passkey"] {
+            assert!(p.host_allowed(&format!("{h}.example.org")), "{h}");
+        }
+        assert_eq!(p.hosts().len(), 4);
+        assert!(!p.host_allowed("api.example.org"));
+        // The same name given twice is listed once.
+        let again = SurfacePolicy::from_config(&config, Some("rpc.example.org")).unwrap();
+        assert_eq!(again.hosts().len(), 3);
     }
 
     #[test]

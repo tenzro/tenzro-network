@@ -20,18 +20,22 @@ use iroh_blobs::{
         blobs::{AddPathOptions, ImportMode},
         downloader::Downloader,
     },
-    store::{fs::FsStore, mem::MemStore},
+    store::{
+        GcConfig, ProtectCb, ProtectOutcome,
+        fs::{FsStore, options::Options},
+        mem::MemStore,
+    },
 };
 use tokio::sync::Mutex;
 
 use crate::config::TenzroIrohConfig;
+use crate::connection_limits::{ConnectionGate, GatedRouter};
 use crate::discovery::{ALPN_DISCOVERY, DiscoveryProtocol, DiscoveryStore};
 use crate::error::{IrohError, IrohResult};
-use crate::connection_limits::{ConnectionGate, GatedRouter};
 use crate::identity_transport::{IdentityTransport, base_builder, base_builder_with, with_relays};
 use crate::jsonrpc::{
-    ALPN_A2A_PQ, ALPN_MCP_PQ, ALPN_MOE_PQ, JsonRpcDispatcher,
-    JsonRpcProtocol, McpProtocol, McpStreamHandler,
+    ALPN_A2A_PQ, ALPN_MCP_PQ, ALPN_MOE_PQ, JsonRpcDispatcher, JsonRpcProtocol, McpProtocol,
+    McpStreamHandler,
 };
 use crate::request::{
     ALPN_DA_COMMITTEE, ALPN_INFER, DeferredRequestHandler, MAX_INFER_BYTES, MAX_STORE_REQUEST,
@@ -86,8 +90,78 @@ pub trait IrohResolver: Send + Sync {
 /// - `Mem` — in-memory store for tests and ad-hoc clients bound via
 ///   [`IrohBackedResolver::bind_in_memory`].
 enum ResolverStore {
-    Fs(FsStore),
+    Fs(FsStore, Arc<Released>),
     Mem(MemStore),
+}
+
+/// How often the filesystem blob store sweeps blobs that were released.
+const RELEASE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Blobs a caller let go of. Their tags are deleted at once; the store frees
+/// the bytes at its next sweep. The sweep touches only these blobs: every
+/// other blob in the store, tagged or not, is protected from it.
+struct Released {
+    store: std::sync::OnceLock<BlobStore>,
+    pending: std::sync::Mutex<std::collections::HashSet<Hash>>,
+}
+
+impl Released {
+    fn new() -> Self {
+        Self {
+            store: std::sync::OnceLock::new(),
+            pending: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    fn add(&self, hashes: impl IntoIterator<Item = Hash>) {
+        if let Ok(mut p) = self.pending.lock() {
+            p.extend(hashes);
+        }
+    }
+
+    /// A blob published again is no longer released.
+    fn forget(&self, hash: &Hash) {
+        if let Ok(mut p) = self.pending.lock() {
+            p.remove(hash);
+        }
+    }
+
+    /// The blobs to protect from a sweep: every blob except the released
+    /// ones. The store is read on a spawned task, so the callback holds only
+    /// the task's handle across its await.
+    async fn protected(self: Arc<Self>) -> Option<std::collections::HashSet<Hash>> {
+        tokio::spawn(async move {
+            let store = self.store.get()?;
+            let all = store.blobs().list().hashes().await.ok()?;
+            let mut pending = self.pending.lock().ok()?;
+            let present: std::collections::HashSet<Hash> = all.into_iter().collect();
+            pending.retain(|h| present.contains(h));
+            Some(
+                present
+                    .into_iter()
+                    .filter(|h| !pending.contains(h))
+                    .collect(),
+            )
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+}
+
+fn release_protection(released: Arc<Released>) -> ProtectCb {
+    Arc::new(move |live| {
+        let released = released.clone();
+        Box::pin(async move {
+            match released.protected().await {
+                Some(protected) => {
+                    live.extend(protected);
+                    ProtectOutcome::Continue
+                }
+                None => ProtectOutcome::Abort,
+            }
+        })
+    })
 }
 
 impl Deref for ResolverStore {
@@ -95,7 +169,7 @@ impl Deref for ResolverStore {
 
     fn deref(&self) -> &BlobStore {
         match self {
-            Self::Fs(s) => s,
+            Self::Fs(s, _) => s,
             Self::Mem(s) => s,
         }
     }
@@ -163,6 +237,12 @@ pub struct IrohBackedResolver {
     /// Session successor assignments and sealed KV-cache deltas peers send
     /// over [`crate::request::ALPN_KV_CHECKPOINT`].
     kv_checkpoint_handler: DeferredRequestHandler,
+    /// Admits peers to each protocol by registered identity. Inert until the
+    /// node installs the identity registry it reads.
+    identity_gate: crate::identity_gate::IdentityGate,
+    /// Registration requests peers send over
+    /// [`crate::identity_gate::ALPN_ONBOARD`].
+    onboard_handler: DeferredRequestHandler,
     /// The path transport bound to `endpoint`, released on shutdown.
     paths: Option<crate::paths::Paths>,
 }
@@ -246,10 +326,19 @@ impl IrohBackedResolver {
     /// subsequent boots, so blobs published before a restart stay fetchable.
     async fn load_fs_store(cfg: &TenzroIrohConfig) -> IrohResult<ResolverStore> {
         let root = cfg.data_dir.join("blobs");
-        let store = FsStore::load(&root).await.map_err(|e| {
-            IrohError::Backend(format!("blob store load at {}: {e}", root.display()))
-        })?;
-        Ok(ResolverStore::Fs(store))
+        let released = Arc::new(Released::new());
+        let mut options = Options::new(&root);
+        options.gc = Some(GcConfig {
+            interval: RELEASE_SWEEP_INTERVAL,
+            add_protected: Some(release_protection(released.clone())),
+        });
+        let store = FsStore::load_with_opts(root.join("blobs.db"), options)
+            .await
+            .map_err(|e| {
+                IrohError::Backend(format!("blob store load at {}: {e}", root.display()))
+            })?;
+        let _ = released.store.set(BlobStore::clone(&store));
+        Ok(ResolverStore::Fs(store, released))
     }
 
     /// Bind a new endpoint using a [`TenzroIrohConfig`].
@@ -451,60 +540,75 @@ impl IrohBackedResolver {
         let agent_key_handler = DeferredRequestHandler::new("agent serving");
         let agent_token_handler = DeferredRequestHandler::new("agent serving");
         let kv_checkpoint_handler = DeferredRequestHandler::new("session continuity");
+        let identity_gate = crate::identity_gate::IdentityGate::new(
+            tenzro_onboarding_types::onboarding::OnboardingPolicy::default(),
+            discovery.clone(),
+        );
+        let onboard_handler = DeferredRequestHandler::new("onboarding");
         let mut builder = GatedRouter::new(
             Router::builder(endpoint.clone()),
             ConnectionGate::new(connection),
         )
+        .with_identity_gate(identity_gate.clone())
         .accept(ALPN, blobs)
-            .accept(
-                ALPN_DA_COMMITTEE,
-                RequestProtocol::new(
-                    "da-committee",
-                    Arc::new(da_committee_handler.clone()),
-                    MAX_STORE_REQUEST,
-                    limits,
-                ),
-            )
-            .accept(
-                crate::request::ALPN_AGENT_KEY,
-                RequestProtocol::new(
-                    "agent-key",
-                    Arc::new(agent_key_handler.clone()),
-                    crate::request::MAX_AGENT_KEY_REQUEST,
-                    limits,
-                ),
-            )
-            .accept(
-                crate::request::ALPN_AGENT_TOKEN,
-                RequestProtocol::new(
-                    "agent-token",
-                    Arc::new(agent_token_handler.clone()),
-                    crate::request::MAX_AGENT_KEY_REQUEST * 4,
-                    limits,
-                ),
-            )
-            .accept(
-                crate::request::ALPN_KV_CHECKPOINT,
-                RequestProtocol::new(
-                    "kv-checkpoint",
-                    Arc::new(kv_checkpoint_handler.clone()),
-                    crate::request::MAX_KV_CHECKPOINT_REQUEST,
-                    limits,
-                ),
-            )
-            .accept(
-                crate::state_sync::ALPN_STATE_SYNC,
-                crate::state_sync::StateSyncProtocol::new(Arc::new(snapshot_directory.clone())),
-            )
-            .accept(
-                crate::consensus::ALPN_CONSENSUS,
-                crate::consensus::ConsensusProtocol::new(Arc::new(consensus_handler.clone())),
-            )
-            .accept(
-                crate::block_sync::ALPN_BLOCK_SYNC,
-                crate::block_sync::BlockSyncProtocol::new(block_sync_server.clone(), limits),
-            )
-            .accept(crate::gossip::ALPN_GOSSIP, gossip.protocol());
+        .accept(
+            crate::identity_gate::ALPN_ONBOARD,
+            RequestProtocol::new(
+                "onboard",
+                Arc::new(onboard_handler.clone()),
+                crate::request::MAX_ONBOARD_REQUEST,
+                limits,
+            ),
+        )
+        .accept(
+            ALPN_DA_COMMITTEE,
+            RequestProtocol::new(
+                "da-committee",
+                Arc::new(da_committee_handler.clone()),
+                MAX_STORE_REQUEST,
+                limits,
+            ),
+        )
+        .accept(
+            crate::request::ALPN_AGENT_KEY,
+            RequestProtocol::new(
+                "agent-key",
+                Arc::new(agent_key_handler.clone()),
+                crate::request::MAX_AGENT_KEY_REQUEST,
+                limits,
+            ),
+        )
+        .accept(
+            crate::request::ALPN_AGENT_TOKEN,
+            RequestProtocol::new(
+                "agent-token",
+                Arc::new(agent_token_handler.clone()),
+                crate::request::MAX_AGENT_KEY_REQUEST * 4,
+                limits,
+            ),
+        )
+        .accept(
+            crate::request::ALPN_KV_CHECKPOINT,
+            RequestProtocol::new(
+                "kv-checkpoint",
+                Arc::new(kv_checkpoint_handler.clone()),
+                crate::request::MAX_KV_CHECKPOINT_REQUEST,
+                limits,
+            ),
+        )
+        .accept(
+            crate::state_sync::ALPN_STATE_SYNC,
+            crate::state_sync::StateSyncProtocol::new(Arc::new(snapshot_directory.clone())),
+        )
+        .accept(
+            crate::consensus::ALPN_CONSENSUS,
+            crate::consensus::ConsensusProtocol::new(Arc::new(consensus_handler.clone())),
+        )
+        .accept(
+            crate::block_sync::ALPN_BLOCK_SYNC,
+            crate::block_sync::BlockSyncProtocol::new(block_sync_server.clone(), limits),
+        )
+        .accept(crate::gossip::ALPN_GOSSIP, gossip.protocol());
         if let Some(discovery) = discovery.clone() {
             builder = builder.accept(ALPN_DISCOVERY, DiscoveryProtocol::new(discovery));
         }
@@ -564,6 +668,8 @@ impl IrohBackedResolver {
             agent_key_handler,
             agent_token_handler,
             kv_checkpoint_handler,
+            identity_gate,
+            onboard_handler,
             paths: paths_handle,
         }))
     }
@@ -587,6 +693,18 @@ impl IrohBackedResolver {
         &self.agent_key_handler
     }
 
+    /// The identity gate of this endpoint's protocols.
+    pub fn identity_gate(&self) -> &crate::identity_gate::IdentityGate {
+        &self.identity_gate
+    }
+
+    /// The handler of registration requests peers send over
+    /// [`crate::identity_gate::ALPN_ONBOARD`]. A node that onboards peers
+    /// installs it here.
+    pub fn onboard_handler(&self) -> &DeferredRequestHandler {
+        &self.onboard_handler
+    }
+
     /// The handler of agent tokens peers deliver over
     /// [`crate::request::ALPN_AGENT_TOKEN`].
     pub fn agent_token_handler(&self) -> &DeferredRequestHandler {
@@ -604,6 +722,45 @@ impl IrohBackedResolver {
     /// store here once it exists.
     pub fn block_sync_server(&self) -> &crate::block_sync::DeferredBlockSyncServer {
         &self.block_sync_server
+    }
+
+    /// Lets go of published blobs: their tags are deleted now and the store
+    /// frees the bytes at its next sweep (within a few minutes). A blob that
+    /// is published again before the sweep is kept. Returns the number of
+    /// tags removed.
+    pub async fn release_blobs(&self, hashes: &[[u8; 32]]) -> IrohResult<usize> {
+        use futures_util::StreamExt as _;
+        let wanted: std::collections::HashSet<Hash> =
+            hashes.iter().map(|h| Hash::from_bytes(*h)).collect();
+        if wanted.is_empty() {
+            return Ok(0);
+        }
+        let mut names = Vec::new();
+        {
+            let mut tags = self
+                .store
+                .tags()
+                .list()
+                .await
+                .map_err(|e| IrohError::Backend(format!("listing tags: {e}")))?;
+            while let Some(tag) = tags.next().await {
+                let tag = tag.map_err(|e| IrohError::Backend(format!("listing tags: {e}")))?;
+                if wanted.contains(&tag.hash) {
+                    names.push(tag.name);
+                }
+            }
+        }
+        for name in &names {
+            self.store
+                .tags()
+                .delete(name.0.as_ref())
+                .await
+                .map_err(|e| IrohError::Backend(format!("deleting a tag: {e}")))?;
+        }
+        if let ResolverStore::Fs(_, released) = &self.store {
+            released.add(wanted);
+        }
+        Ok(names.len())
     }
 
     /// The snapshot directory served over the state-sync ALPN. The node
@@ -817,7 +974,7 @@ impl IrohBackedResolver {
     /// Extract the optional provider hint (peer iroh `EndpointId`) from `uri`,
     /// where the URI variant supports one. Only `Blob` carries a hint in its
     /// canonical form today (`?n=<endpoint-id>`); other content variants may
-    /// grow one in a follow-up.
+    /// grow one later.
     ///
     /// The hint string is accepted in either lowercase hex (the form emitted
     /// by iroh's `Display` impl, and the form documented for `TenzroUri::Blob`)
@@ -911,6 +1068,9 @@ impl IrohResolver for IrohBackedResolver {
             .add_bytes(bytes)
             .await
             .map_err(|e| IrohError::Backend(format!("add_bytes: {e}")))?;
+        if let ResolverStore::Fs(_, released) = &self.store {
+            released.forget(&tag.hash);
+        }
         Ok(TenzroUri::Blob {
             hash: tag.hash.to_string(),
             provider_hint: None,
@@ -964,7 +1124,12 @@ mod tests {
             .expect("bind on the configured port while the first is open");
         let bound = node.endpoint().bound_sockets();
         assert!(bound.iter().any(|a| a.port() == port), "bound {bound:?}");
-        assert!(sync.endpoint().bound_sockets().iter().all(|a| a.port() != port));
+        assert!(
+            sync.endpoint()
+                .bound_sockets()
+                .iter()
+                .all(|a| a.port() != port)
+        );
         let _ = node.shutdown().await;
         let _ = sync.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);

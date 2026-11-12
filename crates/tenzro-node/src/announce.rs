@@ -368,9 +368,10 @@ mod tests {
         lane.submit(move || {
             let _ = tx.send(signer.sign_record(b"announcement").is_ok());
         });
-        let ok = tokio::task::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(5)))
-            .await
-            .unwrap();
+        let ok =
+            tokio::task::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(5)))
+                .await
+                .unwrap();
         assert_eq!(ok, Ok(true));
         assert!(lane.is_alive());
     }
@@ -389,7 +390,9 @@ mod tests {
                 self.0.sign_record(m)
             }
         }
-        let signer = std::sync::Arc::new(Stalled(crate::batch_signing::test_support::Immediate::new(22)));
+        let signer = std::sync::Arc::new(Stalled(
+            crate::batch_signing::test_support::Immediate::new(22),
+        ));
         let lanes = SigningLanes::new();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         // The loop's shape: a select over heartbeat ticks and consensus
@@ -418,8 +421,14 @@ mod tests {
         };
         // The consensus stand-in was handled promptly while the heartbeat
         // signature was still waiting on the stalled hardware.
-        assert!(handled_late < std::time::Duration::from_millis(50), "{handled_late:?}");
-        assert!(done_rx.try_recv().is_err(), "the heartbeat is still waiting on the hardware");
+        assert!(
+            handled_late < std::time::Duration::from_millis(50),
+            "{handled_late:?}"
+        );
+        assert!(
+            done_rx.try_recv().is_err(),
+            "the heartbeat is still waiting on the hardware"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -431,9 +440,10 @@ mod tests {
         lane.submit(move || {
             let _ = tx.send(());
         });
-        let got = tokio::task::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(5)))
-            .await
-            .unwrap();
+        let got =
+            tokio::task::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(5)))
+                .await
+                .unwrap();
         assert!(got.is_ok());
         // A lane whose thread is gone does not queue.
         lane.alive.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -443,8 +453,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_signing_lane_never_makes_the_submitter_wait_and_drops_the_oldest() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let lane = SigningLane::new("test", 1);
         let ran = Arc::new(AtomicUsize::new(0));
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
@@ -457,10 +467,12 @@ mod tests {
             r.fetch_add(1, Ordering::SeqCst);
         });
         // The worker has taken the blocking job before the queue is tested.
-        tokio::task::spawn_blocking(move || started_rx.recv_timeout(std::time::Duration::from_secs(5)))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            started_rx.recv_timeout(std::time::Duration::from_secs(5))
+        })
+        .await
+        .unwrap()
+        .unwrap();
         let started = std::time::Instant::now();
         for tag in [10usize, 100, 1000] {
             let r = ran.clone();

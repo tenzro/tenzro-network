@@ -136,11 +136,11 @@ impl EvmExecutor {
     ///
     /// # Security Features
     ///
-    /// - **Nonce validation** (Issue #82): Validates transaction nonce before execution
+    /// - **Nonce validation**: validates the transaction nonce before execution
     ///   to prevent replay attacks and out-of-order execution.
-    /// - **Reentrancy protection** (Issue #83): Handled internally by revm's EVM call
+    /// - **Reentrancy protection**: handled internally by revm's EVM call
     ///   stack. Revm enforces the max call depth limit (1024) automatically.
-    /// - **Gas refunds** (Issue #81): Extracts gas refunds from revm (e.g., SSTORE
+    /// - **Gas refunds**: extracts gas refunds from revm (e.g., SSTORE
     ///   clearing refunds) and exposes them in ExecutionResult.
     pub fn execute_with_revm(
         &self,
@@ -149,7 +149,7 @@ impl EvmExecutor {
     ) -> Result<ExecutionResult> {
         tracing::debug!("Executing transaction with revm");
 
-        // Validate nonce before execution (Issue #82 - Replay attack protection)
+        // Validate nonce before execution (replay attack protection)
         let expected_nonce = state.get_nonce(&tx.from);
         if tx.nonce != expected_nonce {
             return Err(VmError::InvalidNonce {
@@ -391,7 +391,7 @@ impl EvmExecutor {
             }
         }
 
-        // Construct execution result with gas refund (Issue #81)
+        // Construct execution result with gas refund
         if success {
             let mut result = if let Some(address) = contract_address {
                 ExecutionResult::deployment(gas_used, address, logs, state_changes)
@@ -521,7 +521,7 @@ impl VmExecutor for EvmExecutor {
 
     /// Execute a transaction on the EVM
     ///
-    /// # Security Note (Issue #26 - Architecture Decision)
+    /// # Security Note (signature verification happens upstream)
     ///
     /// Transaction signature verification is NOT performed at this layer because:
     /// 1. VmTransaction is a VM-agnostic type without signature fields

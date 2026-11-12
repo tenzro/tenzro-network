@@ -403,7 +403,7 @@ impl AuthEngine {
             authorization_details: authorization_details.clone(),
             // Plain RAR token — no AAP layer. Tokens that opt in to
             // AAP are minted via `issue_jwt_with_aap` (added in
-            // a follow-up; for now AAP-bearing tokens are produced
+            // a later change; for now AAP-bearing tokens are produced
             // by the token-exchange path).
             aap_agent: None,
             aap_task: None,

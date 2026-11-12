@@ -272,13 +272,31 @@ impl HistoryArchive {
     /// segment is deleted only after the DA layer returned its pointer and
     /// the pointer is recorded. With no DA layer it is deleted outright.
     pub async fn prune_below(&self, floor: u64) -> Result<PruneReport> {
+        self.prune_below_limited(floor, usize::MAX).await
+    }
+
+    /// As [`Self::prune_below`], handing over at most `max_segments` closed
+    /// segments (a segment covers at most [`SEGMENT_MAX_BLOCKS`] blocks). The
+    /// node calls it every pass with a small bound while the volume has room,
+    /// so history leaves in steady small steps and never in one large burst;
+    /// under disk pressure it calls it unbounded.
+    pub async fn prune_below_limited(
+        &self,
+        floor: u64,
+        max_segments: usize,
+    ) -> Result<PruneReport> {
         let mut report = PruneReport::default();
+        let mut steps = 0usize;
         let Some(latest) = self.checkpoints.latest_index() else {
             return Ok(report);
         };
         let blocks = BlockStoreImpl::new(self.storage.clone())?;
         let mut next = read_u64(&*self.storage, NEXT_CHECKPOINT_KEY)?;
         loop {
+            if steps >= max_segments {
+                return Ok(report);
+            }
+            steps += 1;
             let mut cps: Vec<Checkpoint> = Vec::new();
             let mut covered = 0u64;
             let mut closed = false;

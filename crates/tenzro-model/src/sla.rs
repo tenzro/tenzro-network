@@ -33,9 +33,9 @@
 use crate::error::{ModelError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tenzro_crypto::batch::RecordSigner;
 use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_crypto::keys::Address;
-use tenzro_crypto::batch::RecordSigner;
 #[cfg(test)]
 use tenzro_crypto::vrf::VrfSecretKey;
 use tenzro_crypto::vrf::{self, OUTPUT_LEN, PROOF_LEN, VrfProof, VrfProver, VrfPublicKey};

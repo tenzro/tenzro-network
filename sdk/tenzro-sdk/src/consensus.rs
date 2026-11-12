@@ -89,6 +89,24 @@ impl ConsensusClient {
             .await
     }
 
+    /// Calls `tenzro_getUpdateNotice`: the newest signed release notice the node
+    /// holds and its epoch position. Pass the `etag` of an earlier answer as
+    /// `if_none_match` to get `unchanged: true` instead of the notice again.
+    pub async fn get_update_notice(
+        &self,
+        if_none_match: Option<&str>,
+    ) -> crate::error::SdkResult<UpdateNoticeReply> {
+        self.rpc
+            .call(
+                "tenzro_getUpdateNotice",
+                match if_none_match {
+                    Some(etag) => serde_json::json!({ "if_none_match": etag }),
+                    None => serde_json::json!([]),
+                },
+            )
+            .await
+    }
+
     /// Calls `tenzro_getRewardEpoch`: get reward epoch.
     pub async fn get_reward_epoch(&self, epoch: u64) -> crate::error::SdkResult<serde_json::Value> {
         self.rpc
@@ -155,6 +173,34 @@ impl ConsensusClient {
             )
             .await
     }
+}
+
+/// The node's answer to `tenzro_getUpdateNotice`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateNoticeReply {
+    /// True when `if_none_match` named the notice the node holds; no notice is sent then.
+    pub unchanged: Option<bool>,
+    /// The signed notice envelope; the caller checks its signature.
+    pub notice: Option<serde_json::Value>,
+    /// Value to send back as `if_none_match` on the next ask.
+    pub etag: Option<String>,
+    /// Version the notice announces.
+    pub latest_version: Option<String>,
+    /// Severity the notice announces.
+    pub severity: Option<String>,
+    /// Seconds the answer may be kept.
+    pub cache_ttl_secs: u64,
+    /// The node's epoch position, when it runs consensus.
+    pub epoch: Option<UpdateNoticeEpoch>,
+}
+
+/// The node's epoch position in an update notice answer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateNoticeEpoch {
+    /// Current epoch number.
+    pub epoch: u64,
+    /// Blocks until the epoch boundary.
+    pub blocks_to_boundary: Option<u64>,
 }
 
 /// The node's finality: the height it has ordered, the height a checkpoint

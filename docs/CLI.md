@@ -35,6 +35,8 @@ Commands:
   duty            Network duties: work the chain pays the first prover for
   dev             Start a local single-validator chain for development, keys in this machine's hardware
   doctor          Check this machine and the network, and say how to fix what is wrong
+  update          Update this machine to the newest signed C0 release (node-local fixes, CLI, performance) in one command, or one step at a time
+  release         The release process: sign, check and publish the notice that tells nodes a release exists
   completions     Print shell completions: bash, zsh, fish, powershell or elvish
   tpm             TPM commands of the node (provision, serve, key-holder, grant-request, grant-install, remote-check)
   token           Token management commands (create, query, cross-VM transfers)
@@ -100,6 +102,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <URL>        The node to talk to, for every command that does not take its own `--rpc` (also `TENZRO_RPC`). Default: the endpoint `tenzro setup` saved, else the node on this machine. Give it before the command: `tenzro --rpc http://host:8545 status` [env: TENZRO_RPC=]
   -h, --help             Print help
   -V, --version          Print version
@@ -126,6 +129,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -141,6 +145,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --principal <PRINCIPAL>  Only calls by this DID
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --since <SINCE>          Only records at or after this time (RFC 3339)
       --until <UNTIL>          Only records before this time (RFC 3339)
       --limit <LIMIT>          At most this many records, the most recent [default: 100]
@@ -159,6 +164,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -175,6 +181,7 @@ Options:
       --format <FORMAT>    Output format (text, json) [default: text]
       --method <METHOD>    A JSON-RPC method name
       --class <CLASS>      A method class
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --did <DID>          The caller's DID; omit for an anonymous caller
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
@@ -192,6 +199,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --did <DID>        Withdraw every live token of this DID
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -210,6 +218,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -224,6 +233,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -239,6 +249,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace the key lives under: a node's `hardware_key_namespace`, to sign in as that node's identity rather than the machine's default one. The DPoP key stays this client's own
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -254,6 +265,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -276,6 +288,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -290,6 +303,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -305,6 +319,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -320,6 +335,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -334,6 +350,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -348,6 +365,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -362,6 +380,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -401,6 +420,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -418,6 +438,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -434,6 +455,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --nonce <NONCE>    The account's next action nonce, read from that chain
       --action <ACTION>  A JSON file with the action: target, selector, amount, relay_refund, data (hex and decimal strings)
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -455,6 +477,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -470,6 +493,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --epoch <EPOCH>          Epoch of the commitment
       --format <FORMAT>        Output format (text, json) [default: text]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              RPC endpoint to read chain state from [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -491,6 +515,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -506,6 +531,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint of a node that follows the chain [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -522,6 +548,7 @@ Options:
       --format <FORMAT>       Output format (text, json) [default: text]
       --root <ROOT>           A root identity: its agents named with --covers or in the audit file
       --covers <AGENTS>       An agent of --root to cover; repeat for each
+  -q, --quiet                 Hide the notice about a newer release (and other optional lines)
       --audit <AUDIT>         File holding the audit entry proofs from the agents' recorder (JSON array)
       --receipts <RECEIPTS>   File holding the agents' signed session receipts (JSON array)
       --payment <PAYMENTS>    A payment the covered agents made (pay_ref hex), proven into the pack's commerce section; repeat for each
@@ -544,6 +571,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --out <OUT>        Where to write the profile; printed when absent
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -565,6 +593,8 @@ Options:
           Output format (text, json) [default: text]
       --genesis-hash <GENESIS_HASH>
           Genesis block hash, hex
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
           Root of the genesis committee, hex
       --handover-program <HANDOVER_PROGRAM>
@@ -587,6 +617,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -602,6 +633,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --signer <SIGNER>        The recorder's hardware identity key: its P-256 point (hex, x || y)
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --signer-pq <SIGNER_PQ>  The recorder's ML-DSA-65 identity key (hex), when its identity has one
       --rpc <RPC>              RPC endpoint to read chain state from. Any node answers it, so pass one you trust [default: http://127.0.0.1:8545]
   -h, --help                   Print help
@@ -619,6 +651,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --adapter <ADAPTER>            adapter
       --format <FORMAT>              Output format (text, json) [default: text]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -643,6 +676,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -664,6 +698,8 @@ Options:
           Output format (text, json) [default: text]
       --amount <AMOUNT>
           Value moved, wei
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --chain <CHAIN>
           Chain [default: tenzro]
       --payment-protocol <PAYMENT_PROTOCOL>
@@ -722,6 +758,9 @@ Options:
       --agent-did <AGENT_DID>
           The agent (update, revoke)
 
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+
       --rotate-tokens
           Also withdraw the agent's live access tokens (update)
 
@@ -750,6 +789,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The hardware key namespace of the machine root's account [default: client]
       --bond <BOND>                    Post this bond (wei) against the agent from the machine root's account before its terms, which need a bond sized by their spend ceiling (`tenzro bond get` shows an existing one)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -766,6 +806,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --authorization <AUTHORIZATION>  JSON file with the controller's signed authorization
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -788,6 +829,8 @@ Options:
           Output format (text, json) [default: text]
       --approval <APPROVAL>
           JSON file with the controller's approval of the revoke_identity challenge: {account, nonce, root_public_key, signature}
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --reason <REASON>
           Reason the challenge was issued for
       --key-namespace <KEY_NAMESPACE>
@@ -810,6 +853,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The hardware key namespace of the machine root's account [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -826,6 +870,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --terms <TERMS>                  JSON file with the completed terms the challenge returned, unchanged
       --authorization <AUTHORIZATION>  JSON file with the controller's signed authorization
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rotate-tokens                  Also withdraw the agent's live access tokens; must match the challenge
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -844,6 +889,7 @@ Options:
       --epoch <EPOCH>          epoch
       --format <FORMAT>        Output format (text, json) [default: text]
       --findings <FINDINGS>    findings (JSON)
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -861,6 +907,7 @@ Options:
       --amount-wei <AMOUNT_WEI>        Amount to fund, in wei (1 TNZO = 10^18 wei)
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The paying client identity's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -878,6 +925,7 @@ Options:
       --asset <ASSET>                  The asset, CAIP-19
       --format <FORMAT>                Output format (text, json) [default: text]
       --budget <BUDGET>                Most the account may move under the grant, in the asset's smallest unit
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --per-action <PER_ACTION>        Most one action may move; defaults to the budget
       --ttl-ms <TTL_MS>                How long the grant lives, ms [default: 600000]
       --target <TARGETS>               An allowed target, `target_hex:selector_hex` (repeatable)
@@ -903,6 +951,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --checkpoint <CHECKPOINT>  The checkpoint; defaults to the latest certified one
       --format <FORMAT>          Output format (text, json) [default: text]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -919,6 +968,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --cursor <CURSOR>        cursor
       --format <FORMAT>        Output format (text, json) [default: text]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -931,12 +981,20 @@ Call tenzro_listKillSwitchByController (list kill switch by controller) and prin
 Usage: tenzro agent kill-switch-by-controller [OPTIONS] --controller-did <CONTROLLER_DID>
 
 Options:
-      --controller-did <CONTROLLER_DID>  controller did
-  -v, --verbose                          Enable verbose logging
-      --cursor <CURSOR>                  cursor
-      --format <FORMAT>                  Output format (text, json) [default: text]
-      --rpc <RPC>                        RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                             Print help
+      --controller-did <CONTROLLER_DID>
+          controller did
+  -v, --verbose
+          Enable verbose logging
+      --cursor <CURSOR>
+          cursor
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --rpc <RPC>
+          RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help
+          Print help
 ```
 
 ### `tenzro agent kill-switch-receipt`
@@ -951,6 +1009,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -967,6 +1026,7 @@ Options:
       --controller <CONTROLLER>        Controller address (hex, must match the signing key)
       --format <FORMAT>                Output format (text, json) [default: text]
       --agent-did <AGENT_DID>          Agent DID whose quarantine to lift
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --reason-text <REASON_TEXT>      Optional human reason text
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -984,6 +1044,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1005,6 +1066,8 @@ Options:
           Output format (text, json) [default: text]
       --controller-did <CONTROLLER_DID>
           Controller DID (e.g. `did:tenzro:human:...`)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --agent-did <AGENT_DID>
           Agent DID to pause (`did:tenzro:machine:...`)
       --reason-code <REASON_CODE>
@@ -1037,6 +1100,8 @@ Options:
           Output format (text, json) [default: text]
       --controller-did <CONTROLLER_DID>
           Controller DID
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --agent-did <AGENT_DID>
           Agent DID to quarantine
       --reason-code <REASON_CODE>
@@ -1064,6 +1129,7 @@ Options:
       --format <FORMAT>          Output format (text, json) [default: text]
       --mmr-root <MMR_ROOT>      The session's MMR root (32-byte hex)
       --count <COUNT>            Entries the root covers
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -1080,6 +1146,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --keyid <KEYID>          keyid
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -1099,6 +1166,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --checkpoint <CHECKPOINT>  The checkpoint; defaults to the latest certified one
       --format <FORMAT>          Output format (text, json) [default: text]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -1121,6 +1189,8 @@ Options:
           Output format (text, json) [default: text]
       --controller-did <CONTROLLER_DID>
           Controller DID
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --agent-did <AGENT_DID>
           Agent DID to terminate
       --reason-code <REASON_CODE>
@@ -1149,6 +1219,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -1164,6 +1235,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1180,6 +1252,7 @@ Options:
       --chain <CHAIN>        The chain, CAIP-2 (eip155:<id>)
       --format <FORMAT>      Output format (text, json) [default: text]
       --agent-id <AGENT_ID>  The ERC-8004 agentId
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --owner <OWNER>        The address that owns the entry
       --deadline <DEADLINE>  Unix seconds the consent expires (at most 300 s after it is used)
       --registry <REGISTRY>  The identity registry, if not the canonical one
@@ -1208,6 +1281,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1222,6 +1296,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1242,6 +1317,9 @@ Options:
           Output format (text, json)
           
           [default: text]
+
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
 
   -h, --help
           Print help (see a summary with '-h')
@@ -1275,6 +1353,9 @@ Options:
           
           [default: http://127.0.0.1:8545]
 
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+
       --token <TOKEN>
           Access token this proof is presented with. Hashed into `ath`, which the node requires on access-token requests. Falls back to `TENZRO_BEARER_JWT`
 
@@ -1300,6 +1381,8 @@ Options:
           Output format (text, json) [default: text]
       --child-dpop-jkt <CHILD_DPOP_JKT>
           JWK thumbprint of the child holder's key; the child token is DPoP-bound to it
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --requested-rar <REQUESTED_RAR>
           File holding the child's `authorization_details` array, a subset of the parent's
       --capability <REQUESTED_AAP_CAPABILITIES>
@@ -1324,6 +1407,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1345,6 +1429,8 @@ Options:
           Identifier of the secure element that holds the device key
       --dpop-jkt <DPOP_JKT>
           JWK thumbprint to DPoP-bind the issued token to
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help
@@ -1369,6 +1455,8 @@ Options:
           Output format (text, json) [default: text]
       --public-key-hex <PUBLIC_KEY_HEX>
           Passkey P-256 public key (raw x||y), hex
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --ml-dsa-public-key-hex <ML_DSA_PUBLIC_KEY_HEX>
           ML-DSA-65 verifying key, hex
       --challenge-id <CHALLENGE_ID>
@@ -1399,6 +1487,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --refresh-token <REFRESH_TOKEN>  Refresh token. If omitted, reads from `~/.tenzro/config.json`
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -1414,6 +1503,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --at-ms <AT_MS>    The first value taken at or after this block time, ms
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -1436,6 +1526,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1453,6 +1544,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1469,6 +1561,7 @@ Options:
       --agent-did <AGENT_DID>          Agent DID whose bond is being increased
       --format <FORMAT>                Output format (text, json) [default: text]
       --amount <AMOUNT>                Additional bond amount in wei
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -1487,6 +1580,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1508,6 +1602,8 @@ Options:
           Output format (text, json) [default: text]
       --controller-did <CONTROLLER_DID>
           Controller DID (e.g. `did:tenzro:human:...`)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --amount <AMOUNT>
           Bond amount in wei (1 TNZO = 10^18 wei)
       --rpc <RPC>
@@ -1528,6 +1624,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --agent-did <AGENT_DID>          Agent DID whose bond is being withdrawn
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -1561,6 +1658,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1580,6 +1678,8 @@ Options:
           External chain the message comes from
       --format <FORMAT>
           Output format (text, json) [default: text]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --tx <TX>
           The source transaction: a Solana signature (base58) or an EVM transaction hash
       --source-rpc <SOURCE_RPC>
@@ -1624,6 +1724,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -1641,6 +1742,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --from-chain <FROM_CHAIN>        External chain the delivery comes from
       --delivery <DELIVERY>            The attested delivery (hex)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -1658,6 +1760,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --threshold <THRESHOLD>  How many must sign a withdrawal
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -1674,6 +1777,7 @@ Options:
       --chain <CHAIN>                  External chain of the route
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -1690,6 +1794,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1726,6 +1831,9 @@ Options:
       --cosmos-rpc <COSMOS_RPC>
           The Cosmos chain's CometBFT RPC endpoint
 
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+
       --height <HEIGHT>
           The header height whose app hash the proof reaches (default: the height the route's light client stands at)
 
@@ -1761,6 +1869,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --chain <CHAIN>                  External chain the light client follows
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --update <UPDATE>                The update (hex): the bootstrap from the route's anchor, or a committee handover
       --beacon <BEACON>                A beacon node's Beacon API base URL: read the route's light-client state, fetch the update it needs next (the bootstrap from its anchor, or the handover of its current period) and relay it
       --cosmos-rpc <COSMOS_RPC>        A CometBFT RPC endpoint of the route's Cosmos chain: relay the bootstrap from the route's anchor, or the header at `--height` (default: the latest) from the height the light client trusts
@@ -1781,6 +1890,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1796,6 +1906,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -1813,6 +1924,7 @@ Options:
       --chain <CHAIN>                  External chain of the route
       --format <FORMAT>                Output format (text, json) [default: text]
       --member <MEMBER>                The member's 20-byte signing address (hex)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --first <FIRST>                  One delivery the member signed (hex)
       --second <SECOND>                Another delivery with the same nonce the member signed (hex)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
@@ -1832,6 +1944,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --chain <CHAIN>                  External chain of the route
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --signed-by-set <SIGNED_BY_SET>  The committee the signer sat on
       --set-index <SET_INDEX>          The set index the handover names
       --members <MEMBERS>              The handover's member addresses (20-byte hex each), in order
@@ -1855,6 +1968,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --chain <CHAIN>      External chain (e.g. "ethereum", "base", "arbitrum", "solana")
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -1870,6 +1984,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1886,6 +2001,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --recipient <RECIPIENT>          Recipient on the destination chain (hex); for Bitcoin, the output script to pay
       --amount <AMOUNT>                Amount in the smallest unit (decimal): TNZO wei, or the deposit asset's unit over a deposit route, or the carried asset's unit
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --asset <ASSET>                  A carried asset's symbol (USDC, OUSD): burns its representation here and the route's vault releases the token on the destination chain
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -1904,6 +2020,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --format <FORMAT>            Output format (text, json) [default: text]
       --sequence <SEQUENCE>        The withdrawal's sequence on the route
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --request-out <REQUEST_OUT>  Where to write the withdrawal to collect signatures in
       --request-in <REQUEST_IN>    A withdrawal written by --request-out
       --signer <SIGNER>            The signer's BIP-340 key (hex)
@@ -1926,6 +2043,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1942,6 +2060,7 @@ Options:
       --dest-chain <DEST_CHAIN>  Destination chain CAIP-2 identifier (e.g. eip155:1, solana:mainnet-beta)
       --format <FORMAT>          Output format (text, json) [default: text]
       --native-fee <NATIVE_FEE>  Destination-native fee in the destination chain smallest unit (u128 decimal)
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -1963,6 +2082,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1978,6 +2098,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -1997,6 +2118,7 @@ Options:
       --format <FORMAT>        Output format (text, json) [default: text]
       --sequence <SEQUENCE>    Sequence of this publication; a node replaces a model's entry only with a higher one. Defaults to the current Unix time
       --out <OUT>              Write the signed records here instead of submitting them
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -2015,6 +2137,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2033,6 +2156,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --sequence <SEQUENCE>    
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -2058,6 +2182,8 @@ Options:
           Output format (text, json) [default: text]
       --optimize <OPTIMIZE>
           Cost-quality knob in [0.0, 1.0] for intent selection
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --quality-floor <QUALITY_FLOOR>
           Reject models below this tier during intent selection: cheap or strong
       --max-tokens <MAX_TOKENS>
@@ -2095,6 +2221,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2110,6 +2237,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --format <FORMAT>            Output format (text, json) [default: text]
       --seq <SEQ>                  Sequence number of the list being accepted
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                  RPC endpoint of the member machine [default: http://127.0.0.1:8545]
   -h, --help                       Print help
 ```
@@ -2126,6 +2254,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --name <NAME>                  Cluster name
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --seq <SEQ>                    Sequence number: 1 creates the cluster, each change uses a higher one
       --member <MEMBERS>             Member machine DIDs (repeat for each member)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
@@ -2144,6 +2273,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --format <FORMAT>            Output format (text, json) [default: text]
       --rpc <RPC>                  RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
   -h, --help                       Print help
 ```
 
@@ -2159,6 +2289,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --challenge-id <CHALLENGE_ID>  The custody challenge id the operator's approval answers
       --format <FORMAT>              Output format (text, json) [default: text]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint (the node that issued the custody challenge) [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -2176,6 +2307,7 @@ Arguments:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2194,6 +2326,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2210,6 +2343,7 @@ Options:
       --call <CALLS>                   A call, `<vm>:<to hex>:<calldata hex>[:<value wei>]` with vm one of evm or svm. Repeat for each call, in order
       --format <FORMAT>                Output format (text, json) [default: text]
       --gas-limit <GAS_LIMIT>          Gas for all the calls together [default: 1000000]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -2227,6 +2361,7 @@ Options:
       --bytecode <BYTECODE>            Contract creation code (hex-encoded, with optional 0x prefix)
       --format <FORMAT>                Output format (text, json) [default: text]
       --args <ARGS>                    Constructor arguments (hex-encoded ABI)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --gas-limit <GAS_LIMIT>          Gas limit [default: 3000000]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -2246,6 +2381,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2261,6 +2397,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --message <MESSAGE>      Message (hex)
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --signature <SIGNATURE>  Signature (hex)
       --key-type <KEY_TYPE>    Key type: ed25519 or secp256k1 [default: ed25519]
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
@@ -2287,6 +2424,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2302,6 +2440,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -2316,6 +2455,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2331,6 +2471,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --target-index <TARGET_INDEX>  Committee index of the member to challenge
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -2347,6 +2488,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2361,6 +2503,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2378,6 +2521,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2392,6 +2536,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2412,6 +2557,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2426,6 +2572,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2441,6 +2588,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -2457,6 +2605,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --state <STATE>                The text to decide about
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --state-file <STATE_FILE>      A file holding the state: text, or JSON (an email, a ticket, a record)
       --yes-no <YES_NO>              A yes/no question as `id=instructions`; repeat for each
       --questions <QUESTIONS>        Questions as JSON: an array of `{ id, type, instructions, criteria }` (see the MCP `decide` tool), or `@path` to read it from a file
@@ -2478,6 +2627,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2498,6 +2648,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2512,6 +2663,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2527,6 +2679,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -2547,6 +2700,8 @@ Options:
           Output format (text, json) [default: text]
       --image <IMAGE>
           
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --score-threshold <SCORE_THRESHOLD>
           Score threshold in [0, 1]. Default 0.25 [default: 0.25]
       --verification <VERIFICATION>
@@ -2571,6 +2726,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2587,6 +2743,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc-addr <RPC_ADDR>            RPC listen address [default: 127.0.0.1:8545]
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the client account funded at genesis (the account the other commands sign with by default) [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --fund <ADDRESS>                 Another account to fund at genesis, 32-byte hex: an account whose key is a passkey or another machine's hardware. Repeatable
   -h, --help                           Print help
 ```
@@ -2609,6 +2766,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2630,6 +2788,8 @@ Options:
           label
       --attestation-object-b64 <ATTESTATION_OBJECT_B64>
           attestation object b64
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help
@@ -2651,6 +2811,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2670,6 +2831,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --authorization <AUTHORIZATION>  JSON file holding a bound device's WebAuthn assertion over that challenge: `credential_id`, `authenticator_data_b64`, `client_data_json_b64`, `signature_b64`
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -2696,6 +2858,8 @@ Options:
           Output format (text, json) [default: text]
       --challenge-id <CHALLENGE_ID>
           Custody challenge id (`tenzro_createCustodyChallenge`, operation `transfer_machine_ownership`)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --authorization <AUTHORIZATION>
           Controller transfer: JSON file holding an assertion over the challenge from a device bound to the controller
       --machine-signature-hex <MACHINE_SIGNATURE_HEX>
@@ -2721,6 +2885,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --format <FORMAT>            Output format (text, json) [default: text]
       --rpc <RPC>                  [default: http://127.0.0.1:8545]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
   -h, --help                       Print help
 ```
 
@@ -2738,6 +2903,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2752,6 +2918,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2766,6 +2933,7 @@ Options:
       --json             Print one JSON object for support instead of the checklist
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2784,6 +2952,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2801,6 +2970,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2815,6 +2985,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2836,6 +3007,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2850,6 +3022,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2865,6 +3038,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -2882,6 +3056,7 @@ Options:
       --format <FORMAT>              Output format (text, json) [default: text]
       --image <IMAGE>                Path to the input image (PNG/JPEG/WebP)
       --normalize                    L2-normalize the output (most retrieval pipelines want this)
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --verification <VERIFICATION>  Verification level: none, receipt, optimistic or tee. A call for a model the node does not serve is forwarded to a provider offering it, and an optimistic answer may be re-executed on another provider
       --provider <PROVIDER>          Serve on this provider's offer (its payee address, hex)
       --rpc <RPC>                    [default: http://127.0.0.1:8545]
@@ -2904,6 +3079,8 @@ Options:
           Output format (text, json) [default: text]
       --text-embedding <TEXT_EMBEDDING>
           JSON file holding the text embedding as an array of numbers
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           [default: http://127.0.0.1:8545]
   -h, --help
@@ -2922,6 +3099,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2942,6 +3120,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2956,6 +3135,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -2971,6 +3151,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -2988,6 +3169,7 @@ Options:
       --format <FORMAT>                 Output format (text, json) [default: text]
       --input <INPUTS>                  Input strings (repeat --input for multiple)
       --image <IMAGES>                  A picture to embed (PNG, JPEG or WebP; repeat for multiple). Needs a vision-language embedder
+  -q, --quiet                           Hide the notice about a newer release (and other optional lines)
       --video-frames <VIDEO_FRAMES>...  A video to embed, as its frames in order, comma-separated (repeat for multiple videos). Needs a vision-language embedder
       --media-text <MEDIA_TEXT>         Text embedded together with the single --image or --video-frames item, as one input
       --requested-dim <REQUESTED_DIM>   Optional Matryoshka truncation dim (e.g. 512, 256, 128 for EmbeddingGemma)
@@ -3013,6 +3195,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3033,6 +3216,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3047,6 +3231,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3063,6 +3248,7 @@ Options:
       --format <FORMAT>              Output format (text, json) [default: text]
       --vision-model <VISION_MODEL>  Model id of an already-loaded image encoder to pool frames through
       --num-frames <NUM_FRAMES>      Evenly-spaced frames sampled per clip. Defaults to 8 node-side
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --visibility <VISIBILITY>      Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
       --rpc <RPC>                    [default: http://127.0.0.1:8545]
   -h, --help                         Print help
@@ -3081,6 +3267,7 @@ Options:
       --format <FORMAT>              Output format (text, json) [default: text]
       --video <VIDEO>                Path to a video file (MP4, WebM or MKV)
       --normalize                    
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --frame-stride <FRAME_STRIDE>  Keep every Nth decoded frame instead of spreading the samples evenly across the clip. Still capped at the encoder's frame budget
       --verification <VERIFICATION>  Verification level: none, receipt, optimistic or tee. A call for a model the node does not serve is forwarded to a provider offering it, and an optimistic answer may be re-executed on another provider
       --provider <PROVIDER>          Serve on this provider's offer (its payee address, hex)
@@ -3100,6 +3287,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3127,6 +3315,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3142,6 +3331,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --cursor <CURSOR>  cursor
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -3158,6 +3348,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --cursor <CURSOR>  cursor
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -3177,6 +3368,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -3198,6 +3390,8 @@ Options:
           Payee address (hex)
       --amount <AMOUNT>
           Amount in wei (smallest unit; 1 TNZO = 10^18 wei)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --asset <ASSET>
           Asset id (defaults to native TNZO) [default: TNZO]
       --expires-at <EXPIRES_AT>
@@ -3232,6 +3426,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3249,6 +3444,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3264,6 +3460,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -3283,6 +3480,8 @@ Options:
           Output format (text, json) [default: text]
       --network-escrow-id <NETWORK_ESCROW_ID>
           The HashLock escrow paying the network's share under the same lock (32-byte hex)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help
@@ -3304,6 +3503,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --payer <PAYER>                  Payer address (must match the signing key)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -3324,6 +3524,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --payer <PAYER>                  Payer address (must match the signing key)
       --proof <PROOF>                  Optional proof data (hex). If omitted, an empty proof is used: the release transaction signed from your own account is your authorisation, all that any kind but a custom or quorum escrow asks
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -3344,6 +3545,7 @@ Options:
       --charge <CHARGE>                What this payment pays, in wei (the increase over the last voucher)
       --format <FORMAT>                Output format (text, json) [default: text]
       --out <OUT>                      Write the signed voucher to this file as JSON and pay nothing now
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --binding <BINDING>              The head of the receipt chain this voucher pays for (32 bytes of hex); omit for a voucher signed ahead of delivery
       --key-namespace <KEY_NAMESPACE>  The payer's hardware key namespace (a-z, 0-9, '-', '_'): the client account that funded the escrow [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -3369,6 +3571,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3388,6 +3591,8 @@ Options:
           Output format (text, json) [default: text]
       --from-cursor <FROM_CURSOR>
           Resume after this cursor (height:tx_index:event_index)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --to-cursor <TO_CURSOR>
           Stop at this cursor, inclusive
       --types <TYPES>
@@ -3423,6 +3628,7 @@ Options:
       --from-height <FROM_HEIGHT>  Start at this height
   -v, --verbose                    Enable verbose logging
       --from-cursor <FROM_CURSOR>  Resume after this cursor (height:tx_index:event_index)
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --to-cursor <TO_CURSOR>      Stop at this cursor, inclusive
       --types <TYPES>              Event types (comma-separated): log, transaction_included
       --address <ADDRESS>          Filter logs by contract address (20-byte hex)
@@ -3443,6 +3649,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3459,6 +3666,7 @@ Options:
       --format <FORMAT>          Output format (text, json) [default: text]
       --topic0 <TOPIC0>          Topic[0] filter (event signature hash, hex)
       --from-block <FROM_BLOCK>  From block
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --to-block <TO_BLOCK>      To block
       --limit <LIMIT>            Maximum logs to return [default: 100]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
@@ -3476,6 +3684,7 @@ Options:
       --types <TYPES>              Event types (comma-separated): log, transaction_included
   -v, --verbose                    Enable verbose logging
       --address <ADDRESS>          Filter logs by contract address (20-byte hex)
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --topic <TOPIC>              Filter logs by topic[0] (32-byte hex)
       --from-cursor <FROM_CURSOR>  Resume after this cursor (height:tx_index:event_index)
       --from-height <FROM_HEIGHT>  Start at this height (default: the current tip)
@@ -3506,6 +3715,8 @@ Options:
           Genesis block hash (0x-prefixed hex)
       --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
           Root of the genesis committee (0x-prefixed hex), from the genesis file
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program (0x-prefixed hex), from the chain's governance: needed once the node serves a handover chain proof
       --rpc <RPC>
@@ -3525,6 +3736,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3544,6 +3756,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3559,6 +3772,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --out <OUT>        Where to write the handover (bincode)
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -3576,6 +3790,7 @@ Options:
       --chain-id <CHAIN_ID>          Chain id
       --format <FORMAT>              Output format (text, json) [default: text]
       --genesis-hash <GENESIS_HASH>  Genesis block hash (0x-prefixed hex)
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --out <OUT>                    Where to write the step (bincode)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
@@ -3599,6 +3814,8 @@ Options:
           Genesis block hash (0x-prefixed hex)
       --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
           Root of the genesis committee (0x-prefixed hex), from the genesis file
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program (0x-prefixed hex), from the chain's governance: needed once the node serves a handover chain proof
       --rpc <RPC>
@@ -3624,6 +3841,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3638,6 +3856,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3653,6 +3872,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -3675,6 +3895,8 @@ Options:
           Output format (text, json) [default: text]
       --context-file <CONTEXT_FILE>
           JSON file holding the context series as an array of numbers. Use this instead of `--context` for series too long for a command line
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --horizon <HORIZON>
           Steps ahead to predict. Must not exceed the model's max horizon
       --quantile <QUANTILES>...
@@ -3703,6 +3925,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3727,6 +3950,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3742,6 +3966,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -3758,6 +3983,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --grant-id <GRANT_ID>            Id of the enacted grant proposal (64 hex)
       --index <INDEX>                  Tranche index (1 is the second tranche)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --evidence <EVIDENCE>            What was delivered, recorded with the verification (verify only) [default: ""]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -3775,6 +4001,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -3790,6 +4017,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --legs <LEGS>                    Leg ids (hex) of committed settlement plans that paid you
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -3807,6 +4035,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --recipient <RECIPIENT>          Who is paid (a registered identity's account); defaults to --from
       --amount <AMOUNT>                Total amount in wei
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --category <CATEGORY>            Free category label: development, research, audit, infrastructure, community, events, operators, ... [default: ""]
       --link <LINK>                    Link to the public write-up [default: ""]
       --memo <MEMO>                    Why [default: ""]
@@ -3834,6 +4063,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --grant-id <GRANT_ID>            Id of the enacted grant proposal (64 hex)
       --index <INDEX>                  Tranche index (the next unpaid one; 1 is the second tranche)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --memo <MEMO>                    Milestone evidence [default: ""]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -3854,6 +4084,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3870,6 +4101,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --grant-id <GRANT_ID>            Id of the enacted grant proposal (64 hex)
       --index <INDEX>                  Tranche index (1 is the second tranche)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --evidence <EVIDENCE>            What was delivered, recorded with the verification (verify only) [default: ""]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -3923,6 +4155,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -3941,6 +4174,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -3956,6 +4190,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --format <FORMAT>            Output format (text, json) [default: text]
       --rpc <RPC>                  RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
   -h, --help                       Print help
 ```
 
@@ -3974,6 +4209,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -3990,6 +4226,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4008,6 +4245,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -4023,6 +4261,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -4038,6 +4277,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --json             Emit the raw JSON the node returned
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -4055,6 +4295,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --limit <LIMIT>    How many to show (1-100) [default: 20]
       --before <BEFORE>  Continue from a previous page's `next`
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --json             Emit the raw JSON
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
@@ -4072,6 +4313,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --json             Emit the raw JSON the node returned
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -4088,6 +4330,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the protocol guardian or Foundation steward account signing [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4105,6 +4348,7 @@ Options:
       --format <FORMAT>    Output format (text, json) [default: text]
       --offset <OFFSET>    Disbursements to skip [default: 0]
       --limit <LIMIT>      Most disbursements to show [default: 100]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -4123,6 +4367,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4139,6 +4384,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --node-account                   Propose from this machine's node account, the validator account its genesis entry or registration bonded, instead of a client account
       --action <ACTION>                The proposal action as JSON, tagged by "action", e.g. '{"action":"parameter_change","key":"...","value":1,"memo":"..."}' or '{"action":"policy_update","update":{...},"memo":"...","track":{"kind":"standard"}}'; a security fix is '"track":{"kind":"security_fix","basis":{"kind":"vulnerability","commitment":"<hex sha256>"}}'
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --file <FILE>                    Read the proposal action from a JSON file
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -4156,6 +4402,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --class <CLASS>                  developer, contributor or community [possible values: developer, contributor, community]
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --summary <SUMMARY>              What the grantee builds or does
       --link <LINK>                    Link to the public statement of the criteria [default: ""]
       --memo <MEMO>                    Why, shown to voters
@@ -4183,6 +4430,8 @@ Options:
           Output format (text, json) [default: text]
       --provider-did <PROVIDER_DID>
           The operator's machine identity (did:tenzro:machine:...)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --region <REGION>
           Where the operator runs
       --history-from-epoch <HISTORY_FROM_EPOCH>
@@ -4217,6 +4466,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --from-epoch <FROM_EPOCH>        First hourly epoch claimed
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --to-epoch <TO_EPOCH>            Last hourly epoch claimed
       --amount <AMOUNT>                Amount, smallest unit
       --memo <MEMO>                    Why, shown to voters
@@ -4238,6 +4488,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --from-epoch <FROM_EPOCH>        First hourly epoch claimed
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --to-epoch <TO_EPOCH>            Last hourly epoch claimed
       --token-id <TOKEN_ID>            The settlement asset: its token id (0x and 64 hex)
       --amount <AMOUNT>                Amount, the asset's smallest unit
@@ -4262,6 +4513,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --value <VALUE>                  The proposed value
       --memo <MEMO>                    Why, shown to voters
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
       --node-account                   Propose from this machine's node account
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
@@ -4281,6 +4533,7 @@ Options:
       --amount <AMOUNT>                Amount, smallest unit
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
       --node-account                   Propose from this machine's node account
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
@@ -4300,6 +4553,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --node-account                   Propose from this machine's node account
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -4318,6 +4572,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --node-account                   Propose from this machine's node account
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -4336,6 +4591,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --node-account                   Propose from this machine's node account
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -4354,6 +4610,7 @@ Options:
       --amount <AMOUNT>                Amount, smallest unit
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
       --node-account                   Propose from this machine's node account
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
@@ -4374,6 +4631,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4396,6 +4654,8 @@ Options:
           Output format (text, json) [default: text]
       --out <OUT>
           Write the receipt fetched from the node to this file
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --verify
           Verify it offline against the genesis anchor
       --chain-id <CHAIN_ID>
@@ -4427,6 +4687,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -4444,6 +4705,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4461,6 +4723,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4475,6 +4738,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4492,6 +4756,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4510,6 +4775,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -4529,6 +4795,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -4547,6 +4814,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4567,6 +4835,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --validator <VALIDATOR>          Validator account whose bond the ballot carries (64 hex). The ballot is cast by the validator's root: its operator's passkey identity signs it, or, with --machine-root, the autonomous machine that is the validator approves it
       --machine-root                   Cast the ballot as the validator's machine root: this machine's identity key (the key its machine DID derives from) approves it and the node account submits it. For a validator whose identity is this autonomous machine
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --yes                            Vote yes
       --no                             Vote no
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
@@ -4587,6 +4856,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4600,6 +4870,7 @@ Usage: tenzro hardware [OPTIONS]
 Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -v, --verbose          Enable verbose logging
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4627,6 +4898,7 @@ Commands:
   resolve-did            Resolve a DID to identity info (alias for resolve)
   resolve-document       Resolve a DID to its W3C DID Document
   register-machine       Register a new machine identity
+  register-account       Register the on-chain identity of this CLI's own account; the account pays the gas
   revoke                 Revoke an identity on its root's authority (a RevokeIdentity transaction)
   revoke-jwt             Revoke a single JWT by its `jti` (cascades through the act-chain)
   forget                 Hard-delete a revoked identity (TDIP/GDPR Article 17 right-to-erasure)
@@ -4635,6 +4907,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4650,6 +4923,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -4667,6 +4941,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4684,6 +4959,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4699,6 +4975,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --validity-secs <VALIDITY_SECS>  validity secs
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4715,6 +4992,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --detailed                       Show detailed information
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: https://rpc.tenzro.com]
   -h, --help                           Print help
 ```
@@ -4732,10 +5010,28 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --identity-type <IDENTITY_TYPE>  Identity type: human or machine [default: human]
       --controller <CONTROLLER>        Controller DID (required for machine identities; it signs the registration)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --public-key <PUBLIC_KEY>        Machine P-256 public key, hex x || y from its TPM or Secure Enclave
       --capabilities <CAPABILITIES>    Machine capabilities, comma-separated
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the controller account that signs a machine registration [default: client]
       --rpc <RPC>                      RPC endpoint [default: https://rpc.tenzro.com]
+  -h, --help                           Print help
+```
+
+### `tenzro identity register-account`
+
+```
+Register the on-chain identity of this CLI's own account; the account pays the gas
+
+Usage: tenzro identity register-account [OPTIONS]
+
+Options:
+      --name <NAME>                    Display name recorded with the identity [default: "client account"]
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  The account's hardware key namespace (a-z, 0-9, '-', '_'). Each namespace is its own account [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
 
@@ -4752,6 +5048,7 @@ Options:
       --format <FORMAT>              Output format (text, json) [default: text]
       --public-key <PUBLIC_KEY>      The machine's public key (hex), from its TPM or Secure Enclave
       --capabilities <CAPABILITIES>  Capabilities (comma-separated)
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --request-out <REQUEST_OUT>    Write the prepared request here and print the `params_hash` to sign
       --request-in <REQUEST_IN>      Send a request prepared with `--request-out`
       --did-envelope <DID_ENVELOPE>  Hex DID envelope by the controller over the prepared request
@@ -4773,6 +5070,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: https://rpc.tenzro.com]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4790,6 +5088,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4807,6 +5106,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4826,6 +5126,7 @@ Options:
       --approver <APPROVER>            The approving root's DID; the DID itself when absent
       --format <FORMAT>                Output format (text, json) [default: text]
       --approval <APPROVAL>            JSON file with the approving root's approval of the challenge
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the account that sends the transaction [default: client]
       --gas-limit <GAS_LIMIT>          Gas for the transaction; a root with many agents needs more [default: 1000000]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -4847,6 +5148,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --did-envelope <DID_ENVELOPE>  Hex DID envelope proving control of the token's bearer DID or of the controller DID that authorized it. Must be bound to method `tenzro_revokeJwt` with the jti as the params hash
       --format <FORMAT>              Output format (text, json) [default: text]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -4864,6 +5166,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --sequence <SEQUENCE>            The rotation's sequence number: one more than the last rotation (1 for the first) [default: 1]
       --key-namespace <KEY_NAMESPACE>  The hardware key namespace of the signing account [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4884,6 +5187,8 @@ Options:
           Output format (text, json) [default: text]
       --id <ID>
           The service id fragment (`<did>#<id>`)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --service-type <SERVICE_TYPE>
           The service type, for example LinkedDomains; required unless --remove
       --endpoint <ENDPOINT>
@@ -4914,6 +5219,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -4929,6 +5235,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --update <UPDATE>  The update (JSON) with its `kind`: `{"kind":"resource","resource_type":..,"resource_id":..}`
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -4945,6 +5252,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --id <ID>              id
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -4961,6 +5269,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -4976,6 +5285,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -5015,6 +5325,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5030,6 +5341,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
   -h, --help                         Print help
 ```
 
@@ -5048,6 +5360,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --voter-rpc <VOTER_RPC>      The voting validator's own node, which signs the commit [default: http://127.0.0.1:8545]
       --format <FORMAT>            Output format (text, json) [default: text]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                  RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                       Print help
 ```
@@ -5063,6 +5376,7 @@ Options:
       --model-id <MODEL_ID>  Report per-cluster outcome counters and error rate for this model
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -5083,6 +5397,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5100,6 +5415,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -v, --verbose          Enable verbose logging
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5115,6 +5431,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5132,6 +5449,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -v, --verbose          Enable verbose logging
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5149,6 +5467,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5164,6 +5483,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --provider <PROVIDER>  Filter by provider (announce-signer pubkey hex)
       --format <FORMAT>      Output format (text, json) [default: text]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -5180,6 +5500,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5195,6 +5516,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -5210,6 +5532,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --hidden-states <HIDDEN_STATES>  hidden states (JSON)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -5226,6 +5549,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -5241,6 +5565,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --cluster <CLUSTER>    The difficulty cluster the request landed in — the routing decision's `cluster`
       --outcome <OUTCOME>    How the call turned out: resolved, escalated, or failed
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
@@ -5262,6 +5587,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --verification <VERIFICATION>  Verification the answer must carry: none, receipt, optimistic or tee [default: none] [possible values: none, receipt, optimistic, tee]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --temperature <TEMPERATURE>    Temperature (0.0-2.0, for text models)
       --max-tokens <MAX_TOKENS>      Maximum output tokens (for text models)
       --output-file <OUTPUT_FILE>    Save output to file
@@ -5283,6 +5609,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --voter-rpc <VOTER_RPC>  The voting validator's own node, which signs the reveal [default: http://127.0.0.1:8545]
       --verdict                Revealed verdict (true = did-not-verify / upholds)
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --salt <SALT>            Reveal salt (hex) — must reproduce the earlier commit hash
       --format <FORMAT>        Output format (text, json) [default: text]
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
@@ -5305,6 +5632,8 @@ Options:
           Per-request cost cap in smallest TNZO unit (decimal string)
       --optimize <OPTIMIZE>
           Cost-quality knob in [0.0, 1.0]: 0.0 cheapest acceptable, 1.0 strongest
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --quality-floor <QUALITY_FLOOR>
           Reject any model below this tier: cheap or strong
       --est-input-tokens <EST_INPUT_TOKENS>
@@ -5344,6 +5673,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5363,6 +5693,7 @@ Options:
       --format <FORMAT>          Output format (text, json) [default: text]
       --sponsor <SPONSOR>        The sponsoring agent's DID
       --max-tokens <MAX_TOKENS>  Most output tokens (up to the node's cap)
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -5379,6 +5710,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --jurisdiction <JURISDICTION>  The jurisdiction the session is pinned to (an operator outside it can never succeed the session)
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -5395,6 +5727,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --provider <PROVIDER>  provider
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -5414,6 +5747,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -v, --verbose          Enable verbose logging
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5429,6 +5763,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --receipt <RECEIPT>  receipt (JSON)
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -5444,6 +5779,7 @@ Options:
       --rpc <RPC>        RPC endpoint to query [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5464,6 +5800,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5483,6 +5820,8 @@ Options:
           Output format (text, json) [default: text]
       --recon-chain <RECON_CHAIN>
           The route's external chain
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --recon-position <RECON_POSITION>
           The mismatch's position in the lock's record
       --key-namespace <KEY_NAMESPACE>
@@ -5507,6 +5846,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5521,6 +5861,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5535,6 +5876,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5552,6 +5894,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5588,6 +5931,9 @@ Options:
           
           Cheaper, and it proves a payload you already hold is the one that settled — but it cannot say *what* settled, so it does not survive the Tenzro Ledger losing state.
 
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+
       --primary-committed
           Whether the primary settlement committed
 
@@ -5617,6 +5963,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5631,6 +5978,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5645,6 +5993,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5659,6 +6008,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5674,6 +6024,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --out <OUT>        Output path; if omitted, writes raw bytes to stdout
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -5689,6 +6040,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5704,6 +6056,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5720,8 +6073,11 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --name <NAME>      Display name [default: "Tenzro User"]
       --origin <ORIGIN>  Origin hint (e.g. "cli", "sdk", "app", "mcp", "a2a") [default: cli]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --type <TYPE>      Participant type: human, agent, or bot [default: human]
       --provider         Also become an inference provider: detect hardware, post the compute bond, register, set default pricing, and pull + serve the largest catalog model that fits this machine. Requires a running local tenzro-node (or --rpc pointing at your node)
+      --role <ROLE>      Show where your application for a staked role stands and the next step: validator, edge, tee, rpc, attestor, wallet, catalog, ai, compute or storage. Run it again at any time; it continues from wherever you are
+      --wallet <WALLET>  Wallet address to check with --role (defaults to this machine's)
   -h, --help             Print help
 ```
 
@@ -5741,6 +6097,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5762,6 +6119,8 @@ Options:
           A network range, as CIDR with an optional port: `198.51.100.0/24`, `127.0.0.1/32:5432`, `fd12::/64:443`. Repeatable
       --folder <FOLDERS>
           An absolute folder path the sandbox mounts. Repeatable
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --operations <OPERATIONS>
           Operations: `connect` for networks, `read` and/or `write` for folders
       --expires-at-ms <EXPIRES_AT_MS>
@@ -5795,6 +6154,7 @@ Options:
       --challenge-id <CHALLENGE_ID>    The challenge the first run printed
       --format <FORMAT>                Output format (text, json) [default: text]
       --authorization <AUTHORIZATION>  JSON file from the owner's wallet: `credential_id_hex`, `assertion` and `ml_dsa_signature_hex` over that challenge
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -5814,6 +6174,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --authorization <AUTHORIZATION>  JSON file from the owner's wallet: `credential_id_hex`, `assertion` and `ml_dsa_signature_hex` over that challenge
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -5833,6 +6194,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5848,6 +6210,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5869,6 +6232,8 @@ Options:
           Media kind (text2image, image2image, text2video, image2video, text2audio, image23d, action_policy, world_model)
       --params <PARAMS>
           Path to a JSON file containing `MediaGenParams`, with a `seed`
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --input <INPUTS>
           A file holding one of the inputs `params.inputs` names by SHA-256, in their order; repeatable
       --verification <VERIFICATION>
@@ -5933,6 +6298,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5948,6 +6314,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5963,6 +6330,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --path <PATH>      Absolute directory on the node holding the model's files
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -5981,6 +6349,7 @@ Options:
   -v, --verbose          Enable verbose logging
   -y, --yes              Skip confirmation prompt
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -5996,6 +6365,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6012,6 +6382,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --name <NAME>          Filter by name substring
       --limit <LIMIT>        Maximum results [default: 20]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -6031,6 +6402,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --catalog-rpc <CATALOG_RPC>  Node whose model catalog is read (the catalog is published data that nodes serve, not compiled into this binary) [default: http://127.0.0.1:8545]
       --format <FORMAT>            Output format (text, json) [default: text]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
   -h, --help                       Print help
 ```
 
@@ -6048,6 +6420,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -v, --verbose          Enable verbose logging
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6062,6 +6435,7 @@ Options:
       --format <FORMAT>  Output format (table, json) [default: table]
   -v, --verbose          Enable verbose logging
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6079,6 +6453,7 @@ Options:
       --catalog-rpc <CATALOG_RPC>  Node whose model catalog is read (the catalog is published data that nodes serve, not compiled into this binary) [default: http://127.0.0.1:8545]
   -v, --verbose                    Enable verbose logging
       --format <FORMAT>            Output format (text, json) [default: text]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
   -h, --help                       Print help
 ```
 
@@ -6094,6 +6469,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --model-id <MODEL_ID>            Model ID whose manifest is already stored on the node
       --manifest-file <MANIFEST_FILE>  Path to a manifest JSON file received out-of-band from the publisher
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
       --format <FORMAT>                Output format (text, json) [default: text]
   -h, --help                           Print help
@@ -6111,6 +6487,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6126,6 +6503,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6141,6 +6519,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6156,6 +6535,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6171,6 +6551,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --serving                    Show only models currently being served
       --family <FAMILY>            Filter by family (e.g. qwen3, gemma3, mistral)
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --loaded                     List every model the node holds, of every type (chat, vision, embedding, forecast, segmentation, detection, audio, video, media, speech), with its engine, visibility, access and state
       --format <FORMAT>            Output format (table, json) [default: table]
       --catalog-rpc <CATALOG_RPC>  Node whose model catalog is read (the catalog is published data that nodes serve, not compiled into this binary) [default: http://127.0.0.1:8545]
@@ -6189,6 +6570,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6204,6 +6586,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6220,6 +6603,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --limit <LIMIT>        limit
       --cursor <CURSOR>      The next_cursor of the page before
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -6236,6 +6620,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6247,14 +6632,24 @@ Call tenzro_previewServe (preview serve) and print the node's answer
 Usage: tenzro model preview-serve [OPTIONS] --model-id <MODEL_ID>
 
 Options:
-      --model-id <MODEL_ID>              model id
-  -v, --verbose                          Enable verbose logging
-      --format <FORMAT>                  Output format (text, json) [default: text]
-      --quant <QUANT>                    quant
-      --context-length <CONTEXT_LENGTH>  context length
-      --max-concurrent <MAX_CONCURRENT>  max concurrent
-      --rpc <RPC>                        RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                             Print help
+      --model-id <MODEL_ID>
+          model id
+  -v, --verbose
+          Enable verbose logging
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+      --quant <QUANT>
+          quant
+      --context-length <CONTEXT_LENGTH>
+          context length
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --max-concurrent <MAX_CONCURRENT>
+          max concurrent
+      --rpc <RPC>
+          RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help
+          Print help
 ```
 
 ### `tenzro model prune`
@@ -6268,6 +6663,7 @@ Options:
       --rpc <RPC>        RPC endpoint (default: http://127.0.0.1:8545) [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6282,6 +6678,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6297,6 +6694,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --provider <PROVIDER>  Provider name
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -6315,6 +6713,7 @@ Options:
       --path <PATH>                    Local artifact file to seal (e.g. a GGUF)
   -v, --verbose                        Enable verbose logging
       --owner-did <OWNER_DID>          Publisher DID recorded on the manifest
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --recipient <RECIPIENTS>         Recipient in `did:...=<2432-hex hybrid recipient key>[=<enclave measurement hex>]` form (repeatable). A third component pins the recipient to an enclave measurement — that node must produce a matching attestation to install
       --artifact-name <ARTIFACT_NAME>  Artifact name (defaults to the file name)
       --shard-bytes <SHARD_BYTES>      Shard size in bytes (defaults to 256 MiB)
@@ -6338,6 +6737,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6352,6 +6752,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (table, json) [default: table]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6383,6 +6784,9 @@ Options:
 
       --force-single
           Never form a cluster — load the whole model on this node even if it is too large for one machine (the load will fail if it does not fit)
+
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
 
       --public
           Announce the model; any caller may invoke it by paying your per-use price (free at 0), with no key, even on a node whose service-key gate is on. Overrides the node's visibility for this model
@@ -6444,6 +6848,9 @@ Options:
           
           [default: text]
 
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -6459,6 +6866,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6474,6 +6882,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6489,6 +6898,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6504,6 +6914,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6519,6 +6930,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6534,6 +6946,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6551,6 +6964,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6579,6 +6993,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6594,6 +7009,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --model-id <MODEL_ID>  
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6610,6 +7026,7 @@ Options:
       --format <FORMAT>            Output format (text, json) [default: text]
       --model-id <MODEL_ID>        
       --layer <LAYER>              
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --d-model <D_MODEL>          Hidden dimension per token
       --hidden-file <HIDDEN_FILE>  Local file of raw little-endian f32 hidden states (n_tokens x d_model)
       --top-k <TOP_K>              Experts per token; defaults to the catalog experts_per_token
@@ -6631,6 +7048,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --model-id <MODEL_ID>  
       --layer <LAYER>        
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --expert <EXPERT>      
       --file <FILE>          Local safetensors file with gate_proj/up_proj/down_proj weights
       --uri <URI>            Content-addressed tenzro://blob/<hash> URI (fetched over iroh-blobs)
@@ -6650,6 +7068,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --model-id <MODEL_ID>  
       --layer <LAYER>        
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --file <FILE>          Local safetensors file with the router.weight tensor
       --uri <URI>            Content-addressed tenzro://blob/<hash> URI (fetched over iroh-blobs)
   -h, --help                 Print help
@@ -6667,6 +7086,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --model-id <MODEL_ID>            Tenzro model id
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --routings-json <ROUTINGS_JSON>  Path to a JSON file containing an array of routing decisions — `[{token_index: u32, experts: [{layer: u32, expert: u32}, ...]}]`
       --allow-cold                     Allow cold-residency holders when no warm holder is available
   -h, --help                           Print help
@@ -6685,6 +7105,7 @@ Options:
       --format <FORMAT>          Output format (text, json) [default: text]
       --model-id <MODEL_ID>      
       --layer <LAYER>            
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --experts <EXPERTS>        Comma-separated expert ids to prepare; omit to prepare every expert in the layer
       --no-gate                  Skip publishing the layer's gating-network blob
       --quant <QUANT>            Quantization preset (`q4_k_m`, `q8_0`, `q4_k`, `q6_k`) applied to all projections. Omit to publish dense f32 blobs
@@ -6704,6 +7125,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --job-id <JOB_ID>  Job id returned by `moe prepare-experts`
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6718,6 +7140,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6733,6 +7156,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --model-id <MODEL_ID>  Tenzro model id (e.g. `qwen3.5-397b-a17b`)
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6747,6 +7171,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6763,6 +7188,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --model-id <MODEL_ID>  
       --layer <LAYER>        
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --expert <EXPERT>      
   -h, --help                 Print help
 ```
@@ -6780,6 +7206,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --model-id <MODEL_ID>  
       --layer <LAYER>        
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -6842,6 +7269,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6857,6 +7285,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -6872,6 +7301,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6887,6 +7317,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
   -h, --help                         Print help
 ```
 
@@ -6901,6 +7332,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6915,6 +7347,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6929,6 +7362,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6943,6 +7377,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6957,6 +7392,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6971,6 +7407,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6985,6 +7422,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -6999,6 +7437,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7014,6 +7453,7 @@ Options:
   -v, --verbose                    Enable verbose logging
       --blocks <BLOCKS>            Number of recent blocks to include in fee-history summary (1..=1024) [default: 10]
       --percentiles <PERCENTILES>  Tip percentiles to request (e.g. "25,50,75") [default: 25,50,75]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --format <FORMAT>            Output format (text, json) [default: text]
   -h, --help                       Print help
 ```
@@ -7029,6 +7469,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7043,6 +7484,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7058,6 +7500,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --force <FORCE>                  force [possible values: true, false]
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -7074,6 +7517,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -7088,6 +7532,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7102,6 +7547,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7116,6 +7562,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7133,6 +7580,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7147,6 +7595,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7161,6 +7610,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7175,6 +7625,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7190,6 +7641,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -7205,6 +7657,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -7220,6 +7673,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7234,6 +7688,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7248,6 +7703,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7263,6 +7719,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -7278,6 +7735,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7293,6 +7751,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7307,6 +7766,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7323,6 +7783,7 @@ Options:
       --config <CONFIG>      Path to configuration file
       --format <FORMAT>      Output format (text, json) [default: text]
       --data-dir <DATA_DIR>  Data directory for blockchain storage. Defaults to the canonical per-instance directory under the Tenzro root ($TENZRO_HOME, or ~/.tenzro) — the same one `tenzro-node` picks with no flags, so starting through the CLI and starting the binary directly land on the same state rather than two half-populated trees. Also settable via `$TENZRO_DATA_DIR`, the same variable `tenzro-node` itself reads [env: TENZRO_DATA_DIR=]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --metrics              Enable metrics server
       --rpc-addr <RPC_ADDR>  RPC listen address [default: 127.0.0.1:9944]
   -h, --help                 Print help
@@ -7340,6 +7801,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --key <KEY>              key
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -7355,6 +7817,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7369,6 +7832,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7383,6 +7847,7 @@ Options:
       --rpc <RPC>        RPC endpoint to query [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7398,6 +7863,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --force            Force stop without graceful shutdown
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7418,6 +7884,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7434,6 +7901,7 @@ Options:
       --format <FORMAT>        Output format (text, json) [default: text]
       --object-id <OBJECT_ID>  Logical object id it was stored under
       --out <OUT>              Where the bytes are written
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -7449,6 +7917,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rate <RATE>      Fixed byte-epoch rate (wei)
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7463,6 +7932,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7479,6 +7949,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --object-id <OBJECT_ID>          Logical object id (content key the renter will reference)
       --owner <OWNER>                  Owner address (hex, 0x-prefixed or bare)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --file <FILE>                    Path to the file whose bytes are stored
       --data-shards <DATA_SHARDS>      Data shards (default 4) [default: 4]
       --parity-shards <PARITY_SHARDS>  Parity shards (default 2) [default: 2]
@@ -7496,6 +7967,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7511,6 +7983,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --start <START>    Inclusive starting height
       --end <END>        Inclusive ending height
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --max <MAX>        Maximum number of blocks to return in this batch (1..=256, default 64)
       --format <FORMAT>  Output format (text, json) [default: text]
   -h, --help             Print help
@@ -7532,6 +8005,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7548,6 +8022,7 @@ Options:
       --file <FILE>              The downloaded binary
       --format <FORMAT>          Output format (text, json) [default: text]
       --install-to <INSTALL_TO>  Where the node binary is installed; replaced atomically
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --platform <PLATFORM>      The artifact platform; defaults to the platform the node reports
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
@@ -7564,6 +8039,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7580,6 +8056,7 @@ Options:
       --artifact <ARTIFACTS>   `<platform>=<path to binary>`, once per platform
       --format <FORMAT>        Output format (text, json) [default: text]
       --key-label <KEY_LABEL>  Label of the publisher's key in this machine's TPM or Secure Enclave
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -7596,6 +8073,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -7611,6 +8089,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -7622,12 +8101,20 @@ Call tenzro_verifyEventProof (verify event proof) and print the node's answer
 Usage: tenzro node verify-event-proof [OPTIONS]
 
 Options:
-      --proof <PROOF>                      proof (JSON)
-  -v, --verbose                            Enable verbose logging
-      --certified-proof <CERTIFIED_PROOF>  certified proof (JSON)
-      --format <FORMAT>                    Output format (text, json) [default: text]
-      --rpc <RPC>                          RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                               Print help
+      --proof <PROOF>
+          proof (JSON)
+  -v, --verbose
+          Enable verbose logging
+      --certified-proof <CERTIFIED_PROOF>
+          certified proof (JSON)
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --rpc <RPC>
+          RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help
+          Print help
 ```
 
 ### `tenzro node vesting`
@@ -7642,6 +8129,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -7663,6 +8151,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7684,6 +8173,8 @@ Options:
           Output format (text, json) [default: text]
       --ml-dsa-public-key-hex <ML_DSA_PUBLIC_KEY_HEX>
           The ML-DSA-65 verifying key of the hardware that holds the passkey, hex; the authorization carries its signature over the same challenge
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --registration-authenticator-data-hex <REGISTRATION_AUTHENTICATOR_DATA_HEX>
           The registration's `authenticatorData`, hex, as `navigator.credentials.create()` returned it; required for a first wallet (salt 0)
       --rp-id <RP_ID>
@@ -7712,6 +8203,7 @@ Options:
       --anchor <ANCHOR>  For an account with no keystore on chain: its anchor (the JSON `tenzro_enrollPasskey` returned, or a file holding it)
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7727,6 +8219,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --salt <SALT>                  CREATE2 salt [default: 0]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --web-url <WEB_URL>            Web API base serving /auth/passkey (derived from the RPC URL when omitted)
   -h, --help                         Print help
 ```
@@ -7745,6 +8238,7 @@ Options:
       --rp-id <RP_ID>    The relying party the passkey is registered on (the wallet provider's domain)
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7762,6 +8256,7 @@ Options:
       --key-namespace <KEY_NAMESPACE>  Key namespace of the client account that pays the fee [default: default]
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -7794,6 +8289,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -7813,6 +8309,8 @@ Options:
           The cumulative amount the payee may have claimed in total
       --format <FORMAT>
           Output format (text, json) [default: text]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           RPC endpoint of one of the agent's serving nodes [default: http://127.0.0.1:8545]
   -h, --help
@@ -7835,6 +8333,7 @@ Options:
       --asset <ASSET>          Asset (e.g. USDC, TNZO) [default: USDC]
       --format <FORMAT>        Output format (text, json) [default: text]
       --protocol <PROTOCOL>    Protocol: mpp or x402 [default: mpp]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --recipient <RECIPIENT>  Recipient DID or address
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                   Print help
@@ -7853,6 +8352,7 @@ Options:
       --format <FORMAT>            Output format (text, json) [default: text]
       --payer <PAYER>              Only payments from this payer
       --agent-did <AGENT_DID>      Only payments made by this delegated agent
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --class <CLASS>              Only this record class: native, proven or attested
       --asset <ASSET>              Only this asset
       --from-cursor <FROM_CURSOR>  Continue after this event cursor
@@ -7876,6 +8376,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --provider <PROVIDER>  Only legs owed to this provider account
       --limit <LIMIT>        Most entries
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --cursor <CURSOR>      Continue from this cursor (the previous page's `cursor`)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
@@ -7894,6 +8395,7 @@ Options:
       --chain <CHAIN>                  The chain its account paid on (CAIP-2)
       --format <FORMAT>                Output format (text, json) [default: text]
       --delivery <DELIVERY>            The route delivery carrying the account's payment report (hex)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -7911,6 +8413,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --accept <ACCEPT>  Assets to price it in (`TNZO` or a `0x` token id); TNZO when none
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -7927,6 +8430,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --payment-id <PAYMENT_ID>  The payment id a native payment settled under
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -7944,6 +8448,7 @@ Options:
       --amount <AMOUNT>                Amount to return, in the asset's smallest unit (decimal)
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -7966,6 +8471,8 @@ Options:
           Output format (text, json) [default: text]
       --cumulative-amount <CUMULATIVE_AMOUNT>
           The cumulative amount the payee may have claimed in total
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           RPC endpoint of one of the agent's serving nodes [default: http://127.0.0.1:8545]
   -h, --help
@@ -7984,6 +8491,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -8000,6 +8508,7 @@ Options:
       --clear                          Clear the standing rule
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -8017,6 +8526,7 @@ Options:
       --amount <AMOUNT>                Amount in wei (decimal)
       --format <FORMAT>                Output format (text, json) [default: text]
       --payment-id <PAYMENT_ID>        Payment id, the idempotency key the authorization signs
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --request <REQUEST>              The resource paid for; its digest is the request the payment binds
       --quote-digest <QUOTE_DIGEST>    The payee's quote digest (hex), when the payment pays a quote
       --usd-e6 <USD_E6>                The quoted USD price in micro-units, when the payment is USD-priced [default: 0]
@@ -8040,6 +8550,7 @@ Options:
       --format <FORMAT>          Output format (text, json) [default: text]
       --provider <PROVIDER>      Only calls paid to this provider account
       --payer <PAYER>            Only calls paid by this account
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --from-ms <FROM_MS>        Only calls served at or after this time, unix ms
       --to-ms <TO_MS>            Only calls served before this time, unix ms
       --cursor <CURSOR>          Continue from this cursor (the previous page's `cursor`)
@@ -8060,6 +8571,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8075,6 +8587,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --max <MAX>                Most payments read (pages of 200) [default: 2000]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --verify                   Re-read every payment from this endpoint and report each difference (`--verify` alone uses `--rpc`)
       --verify-rpc <VERIFY_RPC>  The endpoint the statement is checked against
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
@@ -8093,6 +8606,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -8111,6 +8625,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8126,6 +8641,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --nonce <NONCE>    
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -8138,20 +8654,36 @@ Atomically verify a signed Permit2 message and consume the nonce
 Usage: tenzro permit2 verify-and-consume [OPTIONS] --chain-id <CHAIN_ID> --owner <OWNER> --token <TOKEN> --amount <AMOUNT> --spender <SPENDER> --nonce <NONCE> --deadline <DEADLINE> --signature <SIGNATURE>
 
 Options:
-      --chain-id <CHAIN_ID>                        
-  -v, --verbose                                    Enable verbose logging
-      --format <FORMAT>                            Output format (text, json) [default: text]
-      --owner <OWNER>                              
-      --token <TOKEN>                              
-      --amount <AMOUNT>                            
-      --spender <SPENDER>                          
-      --nonce <NONCE>                              
-      --deadline <DEADLINE>                        
-      --signature <SIGNATURE>                      
-      --witness <WITNESS>                          
-      --witness-type-string <WITNESS_TYPE_STRING>  
-      --rpc <RPC>                                  [default: http://127.0.0.1:8545]
-  -h, --help                                       Print help
+      --chain-id <CHAIN_ID>
+          
+  -v, --verbose
+          Enable verbose logging
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+      --owner <OWNER>
+          
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --token <TOKEN>
+          
+      --amount <AMOUNT>
+          
+      --spender <SPENDER>
+          
+      --nonce <NONCE>
+          
+      --deadline <DEADLINE>
+          
+      --signature <SIGNATURE>
+          
+      --witness <WITNESS>
+          
+      --witness-type-string <WITNESS_TYPE_STRING>
+          
+      --rpc <RPC>
+          [default: http://127.0.0.1:8545]
+  -h, --help
+          Print help
 ```
 
 ## `tenzro pq-hybrid`
@@ -8169,6 +8701,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8184,6 +8717,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -8199,6 +8733,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -8217,6 +8752,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8234,6 +8770,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -v, --verbose          Enable verbose logging
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8255,6 +8792,8 @@ Options:
           Output format (text, json) [default: text]
       --genesis-hash <GENESIS_HASH>
           Genesis block hash, hex
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
           Root of the genesis committee, hex
       --handover-program <HANDOVER_PROGRAM>
@@ -8293,6 +8832,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8316,6 +8856,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8331,6 +8872,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --address <ADDRESS>  Provider wallet address (32-byte hex; must match the bond's payout address)
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -8347,6 +8889,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8363,6 +8906,7 @@ Options:
       --address <ADDRESS>  Provider wallet address (32-byte hex; must match the bond's payout address)
       --format <FORMAT>    Output format (text, json) [default: text]
       --amount <AMOUNT>    Additional amount in TNZO
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -8378,6 +8922,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8392,6 +8937,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8408,6 +8954,7 @@ Options:
       --address <ADDRESS>  Provider wallet address (32-byte hex; with or without 0x)
       --format <FORMAT>    Output format (text, json) [default: text]
       --amount <AMOUNT>    Bond amount in TNZO (decimal, e.g. "100" for 100 TNZO)
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -8424,6 +8971,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --address <ADDRESS>  Provider wallet address (32-byte hex; must match the bond's payout address)
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -8440,6 +8988,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -8455,6 +9004,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --limit <LIMIT>    limit
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -8472,6 +9022,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --region <REGION>                region
       --attested-only <ATTESTED_ONLY>  attested only [possible values: true, false]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --limit <LIMIT>                  limit
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -8489,6 +9040,7 @@ Options:
   -v, --verbose               Enable verbose logging
       --format <FORMAT>       Output format (text, json) [default: text]
       --rpc <RPC>             RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                 Hide the notice about a newer release (and other optional lines)
   -h, --help                  Print help
 ```
 
@@ -8504,6 +9056,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -8524,6 +9077,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8539,6 +9093,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --model <MODEL>        Catalog id of the model or service
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -8555,6 +9110,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The operator account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -8572,6 +9128,7 @@ Options:
       --denom <DENOM>                  What the prices are in: nano_usd or wei [default: nano_usd]
       --format <FORMAT>                Output format (text, json) [default: text]
       --line <LINES>                   A priced line, `unit[@tier]=price[/per_exp]`; repeat for each
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --min-charge <MIN_CHARGE>        Least one call is charged, in the card's denomination [default: 0]
       --post                           Post the card on chain after setting it, signed by the operator account under `--key-namespace`, so receipts and disputes can name it
       --key-namespace <KEY_NAMESPACE>  The operator account's hardware key namespace, for `--post` [default: client]
@@ -8590,6 +9147,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8606,6 +9164,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --input-tokens <INPUT_TOKENS>    Prompt tokens [default: 0]
       --output-tokens <OUTPUT_TOKENS>  Completion tokens [default: 0]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --verification <VERIFICATION>    Verification level: none, receipt, optimistic or tee [default: none]
       --provider <PROVIDER>            Only this provider (address)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -8626,6 +9185,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8640,6 +9200,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8655,6 +9216,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --epoch <EPOCH>                epoch
       --format <FORMAT>              Output format (text, json) [default: text]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --round <ROUND>                round
       --deadline-ms <DEADLINE_MS>    deadline ms
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
@@ -8672,6 +9234,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8687,6 +9250,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --epoch <EPOCH>                epoch
       --format <FORMAT>              Output format (text, json) [default: text]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -8702,6 +9266,7 @@ Options:
       --provider <PROVIDER>      The provider's account address
   -v, --verbose                  Enable verbose logging
       --from <FROM>              Start of the window, inclusive: a UTC date (YYYY-MM-DD) or unix milliseconds
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --to <TO>                  End of the window, exclusive: a UTC date (YYYY-MM-DD) or unix milliseconds
       --period <PERIOD>          Period the statement is cut into: day or month [default: day]
       --format <FORMAT>          Output format: json or csv [default: json]
@@ -8725,6 +9290,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --detailed           Show detailed statistics
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -8744,6 +9310,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8760,6 +9327,7 @@ Options:
       --asset <ASSET>    Show only rails carrying this asset (e.g. USDC, RLUSD, pUSD)
       --format <FORMAT>  Output format (text, json) [default: text]
       --json             
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -8783,6 +9351,8 @@ Options:
           Output format (text, json) [default: text]
       --tnzo-micro-usd <TNZO_MICRO_USD>
           TNZO price in micro-USD, needed to compare against a rail's fee. Without it the node settles on the home chain rather than guessing
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           [default: http://127.0.0.1:8545]
   -h, --help
@@ -8804,6 +9374,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8819,6 +9390,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --version <VERSION>  A past version of the entry (default: the latest)
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -8836,6 +9408,7 @@ Options:
       --after <AFTER>    List ids after this one (the previous page's next)
       --format <FORMAT>  Output format (text, json) [default: text]
       --limit <LIMIT>    Most entries to return (default 100, at most 500)
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -8854,6 +9427,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8870,9 +9444,111 @@ Options:
       --agent <AGENT>                  The agent
       --format <FORMAT>                Output format (text, json) [default: text]
       --delivery <DELIVERY>            The route delivery carrying the report, hex
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
+```
+
+## `tenzro release`
+
+```
+The release process: sign, check and publish the notice that tells nodes a release exists
+
+Usage: tenzro release [OPTIONS] <COMMAND>
+
+Commands:
+  notice  Release notices: the signed message that tells nodes a release exists
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro release notice`
+
+```
+Release notices: the signed message that tells nodes a release exists
+
+Usage: tenzro release notice [OPTIONS] <COMMAND>
+
+Commands:
+  sign     Prepare and finish the release signing run
+  verify   Check a signed notice the way a node does
+  publish  Put a verified notice into a release directory as notice.json
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+#### `tenzro release notice publish`
+
+```
+Put a verified notice into a release directory as notice.json
+
+Usage: tenzro release notice publish [OPTIONS] --dir <DIR> <SIGNED>
+
+Arguments:
+  <SIGNED>  The signed notice
+
+Options:
+      --dir <DIR>                The release directory (the channel's files); the notice becomes `notice.json` in it
+  -v, --verbose                  Enable verbose logging
+      --format <FORMAT>          Output format (text, json) [default: text]
+      --public-key <PUBLIC_KEY>  The public key to verify against, PEM. Default: the embedded release key
+      --channel <CHANNEL>        The channel the notice must be for [default: stable]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
+  -h, --help                     Print help
+```
+
+#### `tenzro release notice sign`
+
+```
+Prepare and finish the release signing run
+
+Usage: tenzro release notice sign [OPTIONS] [NOTICE]
+
+Arguments:
+  [NOTICE]  The unsigned notice, JSON. `issued_ms` and `expires_ms` of 0 are filled (now, and 30 days on)
+
+Options:
+      --out <OUT>                Write the signed notice here
+  -v, --verbose                  Enable verbose logging
+      --format <FORMAT>          Output format (text, json) [default: text]
+      --prepare <PREPARE>        Release signing run, step 1: write `payload.json` and `notice.msg` (the bytes the release key signs) into this directory
+      --finish <FINISH>          Release signing run, step 2: the directory `--prepare` wrote; attach `--signature`
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
+      --signature <SIGNATURE>    The signature the release signing run made over `notice.msg`: a file holding hex or base64 of an ECDSA P-256 signature (raw or DER)
+      --public-key <PUBLIC_KEY>  The release public key, PEM (`tenzro-release.pub`)
+  -h, --help                     Print help
+```
+
+#### `tenzro release notice verify`
+
+```
+Check a signed notice the way a node does
+
+Usage: tenzro release notice verify [OPTIONS] <SIGNED>
+
+Arguments:
+  <SIGNED>  The signed notice
+
+Options:
+      --public-key <PUBLIC_KEY>  The public key to verify against, PEM. Default: the embedded release key
+  -v, --verbose                  Enable verbose logging
+      --channel <CHANNEL>        The channel the notice must be for [default: stable]
+      --format <FORMAT>          Output format (text, json) [default: text]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
+      --running <RUNNING>        The release to treat as running, for the downgrade check [default: 0.0.0]
+      --now-ms <NOW_MS>          The clock to check expiry against, Unix milliseconds; default now
+  -h, --help                     Print help
 ```
 
 ## `tenzro rerank`
@@ -8892,6 +9568,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8906,6 +9583,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8921,6 +9599,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -8941,6 +9620,8 @@ Options:
           Output format (text, json) [default: text]
       --query <QUERY>
           The query
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --query-image <QUERY_IMAGE>
           A picture in the query (PNG, JPEG or WebP), read with the query text. Needs a vision-language reranker
       --query-video-frames <QUERY_VIDEO_FRAMES>...
@@ -8977,6 +9658,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -8995,6 +9677,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9012,6 +9695,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9029,6 +9713,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9047,6 +9732,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9065,6 +9751,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9081,6 +9768,7 @@ Options:
       --format <FORMAT>        Output format (text, json) [default: text]
       --namespace <NAMESPACE>  Restrict to one namespace (`eth`, `iroh`, …)
       --contains <CONTAINS>    Case-insensitive substring of the method name
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --namespaces             List the namespaces rather than the methods
   -h, --help                   Print help
 ```
@@ -9099,6 +9787,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9113,6 +9802,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9133,6 +9823,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9147,6 +9838,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9162,6 +9854,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -9179,6 +9872,7 @@ Options:
       --format <FORMAT>              Output format (text, json) [default: text]
       --image <IMAGE>                Path to the input image (PNG/JPEG/WebP)
       --prompts <PROMPTS>            JSON file containing a list of SegmentPrompt values. Coordinates are in original-image pixels: `{"type":"point","x":412,"y":310,"is_foreground":true}`, `{"type":"points","points":[{"x":412,"y":310,"is_foreground":true}]}`, `{"type":"box","x0":120,"y0":80,"x1":540,"y1":420}`
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --verification <VERIFICATION>  Verification level: none, receipt, optimistic or tee. A call for a model the node does not serve is forwarded to a provider offering it, and an optimistic answer may be re-executed on another provider
       --provider <PROVIDER>          Serve on this provider's offer (its payee address, hex)
       --rpc <RPC>                    [default: http://127.0.0.1:8545]
@@ -9197,6 +9891,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9227,6 +9922,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9242,6 +9938,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -9258,6 +9955,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --index <INDEX>                  The rail leg's index
       --evidence <EVIDENCE>            The payee's evidence that the payment did not arrive, hex
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -9275,6 +9973,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -9291,6 +9990,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --status <STATUS>  Only plans in this status: open, committed, aborted
       --limit <LIMIT>    Most plans to return [default: 50]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -9307,6 +10007,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --chain <CHAIN>      The route's external chain
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -9324,6 +10025,7 @@ Options:
       --format <FORMAT>            Output format (text, json) [default: text]
       --seq <SEQ>                  Batch number; the latest when omitted
       --participant <PARTICIPANT>  A participant's address (32-byte hex) for its collateral and statement
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                  RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                       Print help
 ```
@@ -9340,6 +10042,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -9357,6 +10060,7 @@ Options:
       --amount <AMOUNT>                Amount in the asset's smallest unit
       --format <FORMAT>                Output format (text, json) [default: text]
       --agent-auth <AGENT_AUTH>        JSON file holding a delegated agent's signed action (`{ action, signature }`): the collateral is the agent's, moving to or from its wallet under its terms. A post states the amount; a withdrawal states none
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -9375,6 +10079,7 @@ Options:
       --format <FORMAT>              Output format (text, json) [default: text]
       --split <SPLIT>                JSON file holding the split rule
       --network-fees <NETWORK_FEES>  Network fees the payee side bears, wei [default: 0]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -9392,6 +10097,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --index <INDEX>                  The leg's index
       --evidence <EVIDENCE>            The leg's evidence, hex: a lock leg's `Locked` event proof, a hash-locked leg's funding proof or, once funded, its preimage; a rail leg's settlement confirmation, sent by its attestor or payee once the plan commits [default: ""]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --network-fee <NETWORK_FEE>      The fee paid on the leg's network to carry this proof, wei of TNZO; a commit repays it up to the leg's `max_network_fee` [default: 0]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -9410,6 +10116,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --index <INDEX>      The leg's index
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -9427,6 +10134,7 @@ Options:
       --chain <CHAIN>                  The route's external chain
       --format <FORMAT>                Output format (text, json) [default: text]
       --entries <ENTRIES>              JSON file holding the entries the lock recorded since the last reconciliation, in order: `[{plan_id, leg_id, kind, amount}]`, kind one of locked, released, refunded
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --checkpoint <CHECKPOINT>        The route's proof of the lock's checkpoint, hex
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -9445,6 +10153,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --chain <CHAIN>      The route's external chain
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -9462,6 +10171,7 @@ Options:
       --amount <AMOUNT>                Amount in the asset's smallest unit
       --format <FORMAT>                Output format (text, json) [default: text]
       --agent-auth <AGENT_AUTH>        JSON file holding a delegated agent's signed action (`{ action, signature }`): the collateral is the agent's, moving to or from its wallet under its terms. A post states the amount; a withdrawal states none
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -9485,6 +10195,8 @@ Options:
           RPC endpoint override for identity provisioning
       --name <NAME>
           Display name for identity provisioning
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --mode <MODE>
           Participation mode on the public network. A shorthand for `--roles`: `consume` selects no serving role, `provide` selects the AI provider role, `validate` selects the validator role. `--roles` wins when both are given, since it says strictly more [possible values: consume, provide, validate]
       --machine-name <MACHINE_NAME>
@@ -9492,7 +10204,17 @@ Options:
       --visibility <VISIBILITY>
           Whether this node is reachable from the public internet, or stays reachable only on the local network [possible values: public, private]
       --operator <OPERATOR>
-          Who operates this machine: `self` (a human holds the passkey) or `autonomous` (the machine answers for itself via an attestable hardware root). `autonomous` requires a usable TPM 2.0 or, on Apple hardware, a Secure Enclave [possible values: self, autonomous]
+          How the node is operated: `self` (a human holds the passkey and approves actions), `autonomous` (the machine answers for itself via its TPM 2.0 or Secure Enclave) or `agentic` (an AI agent operates the node under a delegation from a human passkey). Without it an interactive run asks [possible values: self, autonomous, agentic]
+      --delegator <DELEGATOR>
+          Who delegates to the agent in `--operator agentic`: a `did:tenzro:human:` identity or a 0x account
+      --delegation-scopes <DELEGATION_SCOPES>
+          Operations an agent may perform, comma-separated. Defaults to `inference`
+      --delegation-limit <DELEGATION_LIMIT>
+          Most an agent may spend per day: TNZO (`10`, `10 TNZO`) or wei with its suffix. Defaults to 10 TNZO
+      --delegation-hours <DELEGATION_HOURS>
+          Hours until the agent's delegation expires [default: 24]
+      --restart
+          Discard the saved place of an unfinished setup and start over
       --roles <ROLES>
           Comma-separated roles this node serves, e.g. `validator,ai,storage`
       --access <ACCESS>
@@ -9508,7 +10230,7 @@ Options:
       --validator-stake <VALIDATOR_STAKE>
           Self-stake a public-network validator registers with: TNZO (`10000`, `10000 TNZO`) or wei with its suffix. The network's minimum is the governed `stake.validator_tnzo` (10,000 TNZO at genesis) [default: 10000]
       --bootstrap <BOOTSTRAP>
-          Boot identity of an existing private network, as its operator prints it: `did:tenzro:machine:<id>@<relay url>`
+          Boot identity of an existing private network, as its operator prints it: `did:tenzro:machine:<id>@<relay url>`. Several, separated by commas, name several relays; the node moves to another when one stops
       --genesis <GENESIS>
           Path to the genesis.toml of an existing private network
       --provision-tpm
@@ -9540,6 +10262,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9554,6 +10277,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9569,6 +10293,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -9591,6 +10316,8 @@ Options:
           The text to speak
       --language <LANGUAGE>
           Language code (en, zh, ...)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --voice-reference <VOICE_REFERENCE>
           Reference audio of the voice (wav, mp3, flac); the node must allow cloning
       --seed <SEED>
@@ -9621,6 +10348,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9640,6 +10368,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9656,6 +10385,7 @@ Options:
       --account <ACCOUNT>            Operator account (64 hex). Defaults to the node's own account
       --format <FORMAT>              Output format (text, json) [default: text]
       --did <DID>                    Machine identity (did:tenzro:machine:...). Defaults to the node's
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --hours <HOURS>                How many past hours of availability to count [default: 168]
       --json                         Print the gathered facts as JSON instead of the readout
       --region <REGION>              Where the operator runs (shown to voters) [default: <region>]
@@ -9678,6 +10408,7 @@ Options:
       --account <ACCOUNT>  Operator account (64 hex). Defaults to the node's own account
       --format <FORMAT>    Output format (text, json) [default: text]
       --did <DID>          Machine identity (did:tenzro:machine:...). Defaults to the node's
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --hours <HOURS>      How many past hours of availability to count [default: 168]
       --json               Print the gathered facts as JSON instead of the readout
   -h, --help               Print help
@@ -9696,6 +10427,7 @@ Options:
       --account <ACCOUNT>  Operator account (64 hex). Defaults to the node's own account
       --format <FORMAT>    Output format (text, json) [default: text]
       --did <DID>          Machine identity (did:tenzro:machine:...). Defaults to the node's
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --hours <HOURS>      How many past hours of availability to count [default: 168]
       --json               Print the gathered facts as JSON instead of the readout
   -h, --help               Print help
@@ -9722,6 +10454,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9738,6 +10471,7 @@ Options:
       --amount <AMOUNT>                Amount: whole or fractional TNZO (`10000`, `10000 TNZO`, `0.5tnzo`) or wei with its suffix (`250000000000000000wei`)
       --format <FORMAT>                Output format (text, json) [default: text]
       --domain <DOMAIN>                The relying-party domain your passkeys are bound to, for wallet. The domain must serve /.well-known/tenzro-provider naming the bonding account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --bridge-signer <BRIDGE_SIGNER>  For attestor: the 20-byte secp256k1 address (hex) you sign bridge deliveries with, which makes you eligible for bridge route committees
       --rpc-provider <RPC_PROVIDER>    For attestor with a bridge signer: the RPC provider you read source chains from
       --signer-proof <SIGNER_PROOF>    For attestor with a bridge signer: that key's 65-byte recoverable signature (hex) over the bridge signer digest of the bonding account
@@ -9763,6 +10497,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --url <URL>                      Public https URL of your own edge in front of the role, or "" to clear
       --key-namespace <KEY_NAMESPACE>  The staking account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -9779,6 +10514,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9794,6 +10530,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -9808,6 +10545,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9824,6 +10562,7 @@ Options:
       --amount <AMOUNT>                Amount: TNZO (`100`, `100 TNZO`) or wei with its suffix (`100wei`)
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The staking account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -9842,6 +10581,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9857,6 +10597,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The staking account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -9874,6 +10615,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --watch [<MS>]     Redraw the screen in place every N milliseconds (2000 when no value is given) until interrupted
       --json             Print one JSON object instead of the formatted readout
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9895,6 +10637,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9910,6 +10653,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --out <OUT>              Write the report (JSON, as `tee verify --report` takes its hex) to this file
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                   Print help
 ```
@@ -9925,6 +10669,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9939,6 +10684,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9953,6 +10699,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -9969,6 +10716,7 @@ Options:
       --format <FORMAT>          Output format (text, json) [default: text]
       --nonce <NONCE>            The nonce from `tenzro tee challenge` the report answers
       --bound-data <BOUND_DATA>  Hex of any extra data the report binds alongside the nonce
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -9990,6 +10738,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10004,6 +10753,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10019,6 +10769,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -10039,6 +10790,8 @@ Options:
           Output format (text, json) [default: text]
       --image <IMAGE>
           Path to the input image (PNG/JPEG/WebP)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --text <TEXT>
           Free-text label to segment (e.g. `"person"`, `"sofa"`, `"dog"`)
       --box <BOX>
@@ -10067,6 +10820,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10104,6 +10858,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10119,6 +10874,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -10138,6 +10894,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10153,6 +10910,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --attestor-did <ATTESTOR_DID>  attestor did
       --format <FORMAT>              Output format (text, json) [default: text]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                         Print help
 ```
@@ -10170,6 +10928,7 @@ Options:
       --amount <AMOUNT>                Amount (smallest units)
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -10186,6 +10945,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --from <FROM>          Sender (hex)
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --to <TO>              Recipient (hex)
       --amount <AMOUNT>      Amount (smallest units)
       --rpc <RPC>            [default: http://127.0.0.1:8545]
@@ -10205,6 +10965,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --subject <SUBJECT>              Account the claim is about (hex)
       --kind <KIND>                    Claim kind (kyc, accredited, jurisdiction, ...)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --value <VALUE>                  Claim value (a jurisdiction code, a level, ...) [default: ""]
       --expires-ms <EXPIRES_MS>        Block time (Unix ms) the claim lapses at
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
@@ -10228,6 +10989,8 @@ Options:
           Output format (text, json) [default: text]
       --symbol <SYMBOL>
           Token symbol (e.g. "MTK")
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --supply <SUPPLY>
           Initial supply credited to the issuer (smallest units)
       --decimals <DECIMALS>
@@ -10262,6 +11025,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -10278,6 +11042,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --from <FROM>                    Holder debited (hex)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --to <TO>                        Account credited (hex)
       --amount <AMOUNT>                Amount (smallest units)
       --reason-code <REASON_CODE>      Issuer reason code (non-zero)
@@ -10300,6 +11065,7 @@ Options:
       --account <ACCOUNT>              Holder account (hex)
       --format <FORMAT>                Output format (text, json) [default: text]
       --amount <AMOUNT>                Amount frozen (smallest units)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --reason-code <REASON_CODE>      Issuer reason code (non-zero)
       --evidence <EVIDENCE>            SHA-256 of the evidence held off-chain (hex)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
@@ -10319,6 +11085,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --resume                         Resume transfers instead of halting them
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --reason-code <REASON_CODE>      Issuer reason code (non-zero)
       --evidence <EVIDENCE>            SHA-256 of the evidence held off-chain (hex)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
@@ -10339,6 +11106,7 @@ Options:
       --address <ADDRESS>  EVM contract address
       --format <FORMAT>    Output format (text, json) [default: text]
       --id <ID>            Token ID (hex)
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -10355,6 +11123,7 @@ Options:
       --vm <VM>          Filter by VM type: evm, svm, native
       --format <FORMAT>  Output format (text, json) [default: text]
       --limit <LIMIT>    Maximum tokens to list [default: 50]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -10372,6 +11141,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --to <TO>                        Recipient account (hex)
       --amount <AMOUNT>                Amount (smallest units)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --reserve <RESERVE>              JSON files holding the reserve attestations a reserve-backed token needs (one per attestor)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -10390,6 +11160,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -10405,6 +11176,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --power <POWER>                  The power: mint, freeze, halt, force or policy_change
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --to <TO>                        Who holds it afterwards, JSON: '"disabled"' or '{"issuer_council":{"k":3}}'
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -10423,6 +11195,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -10439,6 +11212,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --subject <SUBJECT>              Account the claim is about (hex)
       --kind <KIND>                    Claim kind
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -10457,6 +11231,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --policy <POLICY>                Policy JSON: '{"eligibility":[...],"policy_timelock_ms":604800000}'
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -10479,6 +11254,8 @@ Options:
           Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>
           The signing account's hardware key namespace [default: client]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help
@@ -10498,6 +11275,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --to <TO>                        Recipient account (hex)
       --amount <AMOUNT>                Amount (smallest units)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -10516,6 +11294,7 @@ Arguments:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10535,6 +11314,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10550,6 +11330,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10565,6 +11346,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --round <ROUND>    JSON file holding the round: `recipe`, `records` (`[{ prompt, completion }]`), `sample_seed`, `steps`, `adapter_seed`, and optionally `start` (`{ state_uri, start_root, steps_taken }`) and `verification`
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -10581,6 +11363,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10602,6 +11385,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10616,6 +11400,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10631,6 +11416,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --visibility <VISIBILITY>  Visibility override: `public`, `gated` or `private`. Omit to follow the node's visibility
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                [default: http://127.0.0.1:8545]
   -h, --help                     Print help
 ```
@@ -10648,6 +11434,7 @@ Options:
       --audio <AUDIO>                Path to the input audio (WAV/MP3/FLAC)
       --format <FORMAT>              Output format (text, json) [default: text]
       --language <LANGUAGE>          Optional language ISO code (e.g. "en", "fr"). Auto-detect if omitted
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --timestamps                   Emit per-segment timestamps when supported
       --temperature <TEMPERATURE>    Optional decoding temperature (sampling-capable models)
       --verification <VERIFICATION>  Verification level: none, receipt, optimistic or tee. A call for a model the node does not serve is forwarded to a provider offering it, and an optimistic answer may be re-executed on another provider
@@ -10669,6 +11456,7 @@ Options:
       --audio <AUDIO>                16-bit PCM WAV to stream (the first channel is sent)
       --format <FORMAT>              Output format (text, json) [default: text]
       --language <LANGUAGE>          Optional language ISO code (e.g. "en", "fr")
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --chunk-ms <CHUNK_MS>          Milliseconds of audio per chunk line [default: 200]
       --verification <VERIFICATION>  Verification level for each final segment: none, receipt, optimistic or tee
       --rpc <RPC>                    [default: http://127.0.0.1:8545]
@@ -10687,6 +11475,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10723,6 +11512,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10740,6 +11530,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10756,6 +11547,7 @@ Options:
       --format <FORMAT>          Output format (text, json) [default: text]
       --subject <SUBJECT>        `tenzro:model:<root>` or an operator DID
       --kind <KIND>              certification, rating, evaluation, safety-scan or policy-conformance
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --scheme <SCHEME>          
       --grade <GRADE>            
       --score <SCORE>            0..=10000
@@ -10780,6 +11572,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --reason <REASON>  [default: ""]
       --out <OUT>        
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10795,6 +11588,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --sequence <SEQUENCE>      
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --terms <TERMS>            
       --valid-days <VALID_DAYS>  [default: 90]
       --out <OUT>                
@@ -10814,6 +11608,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --index <INDEX>    
       --out <OUT>        
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10830,6 +11625,7 @@ Options:
       --format <FORMAT>    Output format (text, json) [default: text]
       --receipt <RECEIPT>  A signed jurisdiction receipt, as returned with an inference response
       --clause <CLAUSE>    `serves.models` or `jurisdictions`
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --out <OUT>          
   -h, --help               Print help
 ```
@@ -10847,6 +11643,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --root <ROOT>      root
       --path <PATH>      path
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -10864,6 +11661,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --path <PATH>      
       --out <OUT>        
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10880,6 +11678,7 @@ Options:
       --format <FORMAT>      Output format (text, json) [default: text]
       --listing <LISTING>    
       --observer <OBSERVER>  
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --out <OUT>            
   -h, --help                 Print help
 ```
@@ -10898,6 +11697,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10915,6 +11715,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10931,6 +11732,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --nonce <NONCE>                  The challenge nonce the report answers, hex
       --measurement <MEASUREMENT>      The report's measurement, hex (the node checks it against the report)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The hardware key namespace of the signing account [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -10949,6 +11751,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --root <ROOT>      root
       --path <PATH>      path
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -10966,6 +11769,7 @@ Options:
       --format <FORMAT>        Output format (text, json) [default: text]
       --key-label <KEY_LABEL>  
       --out <OUT>              
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -10983,6 +11787,7 @@ Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -10998,6 +11803,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11013,6 +11819,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11029,6 +11836,7 @@ Options:
       --file <FILE>      The file's path inside the model
       --format <FORMAT>  Output format (text, json) [default: text]
       --path <PATH>      The downloaded file on this machine
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -11046,6 +11854,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --root <ROOT>      root
       --path <PATH>      path
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -11061,6 +11870,7 @@ Options:
       --key-label <KEY_LABEL>  
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -11079,6 +11889,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11095,6 +11906,7 @@ Arguments:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11112,7 +11924,195 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
+```
+
+## `tenzro update`
+
+```
+Update this machine to the newest signed C0 release (node-local fixes, CLI, performance) in one command, or one step at a time
+
+Usage: tenzro update [OPTIONS]
+       tenzro update <COMMAND>
+
+Commands:
+  check       Ask the release channel whether a newer C0 update exists
+  apply       Verify a signed C0 update completely, then swap the binaries (restarts nothing)
+  rollback    Put the previous binaries back; runs no new binary and needs no network
+  notice      Show the newest signed release notice this machine holds (--refresh asks the channel or a node)
+  notices     Turn release banners on or off
+  boot-check  Count a node start against the open update trial; the node unit runs this before the node
+  verify      Probe the restarted node for the health window; mark the release good or roll it back
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose
+          Enable verbose logging
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --channel <CHANNEL>
+          The release channel: an https URL, or a local directory holding timestamp.json, targets.json and the files [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+      --trusted-keys <TRUSTED_KEYS>
+          JSON file of trusted keys; default `<data-dir>/update/trusted-keys.json`, else the built-in root
+      --platform <PLATFORM>
+          Platform to fetch, `<arch>-<os>`; defaults to this machine's
+      --data-dir <DATA_DIR>
+          Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+      --install-dir <INSTALL_DIR>
+          The install directory: a Tenzro install root (with `versions/` and `current`) or a folder holding the binaries. Defaults to where this `tenzro` runs from
+      --yes
+          Install without asking first. Needed when no terminal is attached
+      --no-restart
+          Install only: the restart and `tenzro update verify` are left to you
+      --rpc-url <RPC_URL>
+          The node's JSON-RPC endpoint: asked for the node's roles before a restart and for its health after it [default: http://127.0.0.1:8545]
+      --interval-secs <INTERVAL_SECS>
+          Seconds between health probes after the restart [default: 10]
+      --health-window-secs <HEALTH_WINDOW_SECS>
+          Seconds the new release has, from its first start, to prove itself healthy [default: 600]
+      --max-boot-attempts <MAX_BOOT_ATTEMPTS>
+          Starts the new release may have before it is rolled back [default: 3]
+  -h, --help
+          Print help
+```
+
+### `tenzro update apply`
+
+```
+Verify a signed C0 update completely, then swap the binaries (restarts nothing)
+
+Usage: tenzro update apply [OPTIONS]
+
+Options:
+      --channel <CHANNEL>
+          The release channel: an https URL, or a local directory holding timestamp.json, targets.json and the files [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+  -v, --verbose
+          Enable verbose logging
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+      --trusted-keys <TRUSTED_KEYS>
+          JSON file of trusted keys; default `<data-dir>/update/trusted-keys.json`, else the built-in root
+      --platform <PLATFORM>
+          Platform to fetch, `<arch>-<os>`; defaults to this machine's
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --data-dir <DATA_DIR>
+          Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+      --install-dir <INSTALL_DIR>
+          The install directory: a Tenzro install root (with `versions/` and `current`) or a folder holding the binaries. Defaults to where this `tenzro` runs from
+      --health-window-secs <HEALTH_WINDOW_SECS>
+          Seconds the new release has, from its first start, to prove itself healthy [default: 600]
+      --max-boot-attempts <MAX_BOOT_ATTEMPTS>
+          Starts the new release may have before it is rolled back [default: 3]
+  -h, --help
+          Print help
+```
+
+### `tenzro update boot-check`
+
+```
+Count a node start against the open update trial; the node unit runs this before the node
+
+Usage: tenzro update boot-check [OPTIONS]
+
+Options:
+      --install-dir <INSTALL_DIR>  The install directory; defaults to where this `tenzro` runs from
+  -v, --verbose                    Enable verbose logging
+      --data-dir <DATA_DIR>        Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+      --format <FORMAT>            Output format (text, json) [default: text]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
+  -h, --help                       Print help
+```
+
+### `tenzro update check`
+
+```
+Ask the release channel whether a newer C0 update exists
+
+Usage: tenzro update check [OPTIONS]
+
+Options:
+      --channel <CHANNEL>            The release channel: an https URL, or a local directory holding timestamp.json, targets.json and the files [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+  -v, --verbose                      Enable verbose logging
+      --format <FORMAT>              Output format (text, json) [default: text]
+      --trusted-keys <TRUSTED_KEYS>  JSON file of trusted keys; default `<data-dir>/update/trusted-keys.json`, else the built-in root
+      --platform <PLATFORM>          Platform to fetch, `<arch>-<os>`; defaults to this machine's
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
+      --data-dir <DATA_DIR>          Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+  -h, --help                         Print help
+```
+
+### `tenzro update notice`
+
+```
+Show the newest signed release notice this machine holds (--refresh asks the channel or a node)
+
+Usage: tenzro update notice [OPTIONS]
+
+Options:
+      --refresh              Ask the release channel (and, failing that, a node) for a newer notice first
+  -v, --verbose              Enable verbose logging
+      --channel <CHANNEL>    The release channel to ask: an https URL or a local directory [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+      --format <FORMAT>      Output format (text, json) [default: text]
+      --json                 Print the notice as one JSON object
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
+      --data-dir <DATA_DIR>  Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+  -h, --help                 Print help
+```
+
+### `tenzro update notices`
+
+```
+Turn release banners on or off
+
+Usage: tenzro update notices [OPTIONS] [STATE]
+
+Arguments:
+  [STATE]  `on` or `off`: whether banners and status lines about new releases show [possible values: on, off]
+
+Options:
+      --data-dir <DATA_DIR>  Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+  -v, --verbose              Enable verbose logging
+      --format <FORMAT>      Output format (text, json) [default: text]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
+  -h, --help                 Print help
+```
+
+### `tenzro update rollback`
+
+```
+Put the previous binaries back; runs no new binary and needs no network
+
+Usage: tenzro update rollback [OPTIONS]
+
+Options:
+      --install-dir <INSTALL_DIR>  The install directory; defaults to where this `tenzro` runs from
+  -v, --verbose                    Enable verbose logging
+      --data-dir <DATA_DIR>        Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+      --format <FORMAT>            Output format (text, json) [default: text]
+  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
+  -h, --help                       Print help
+```
+
+### `tenzro update verify`
+
+```
+Probe the restarted node for the health window; mark the release good or roll it back
+
+Usage: tenzro update verify [OPTIONS]
+
+Options:
+      --install-dir <INSTALL_DIR>      The install directory; defaults to where this `tenzro` runs from
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --rpc-url <RPC_URL>              The node's JSON-RPC endpoint [default: http://127.0.0.1:8545]
+      --interval-secs <INTERVAL_SECS>  Seconds between probes [default: 10]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --data-dir <DATA_DIR>            Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+  -h, --help                           Print help
 ```
 
 ## `tenzro urwa`
@@ -11130,6 +12130,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11145,6 +12146,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --account <ACCOUNT>    20-byte hex-encoded account address
       --format <FORMAT>      Output format (text, json) [default: text]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>            [default: http://127.0.0.1:8545]
   -h, --help                 Print help
 ```
@@ -11161,6 +12163,7 @@ Options:
   -v, --verbose              Enable verbose logging
       --format <FORMAT>      Output format (text, json) [default: text]
       --rpc <RPC>            [default: http://127.0.0.1:8545]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
   -h, --help                 Print help
 ```
 
@@ -11187,6 +12190,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11201,6 +12205,9 @@ Options:
       --key-namespace <KEY_NAMESPACE>  The node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -11213,9 +12220,14 @@ Voluntarily exit the validator set (signed ExitValidator transaction)
 Usage: tenzro validator exit [OPTIONS]
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
+      --node-account                   Sign as this machine's node account: the account a validator of the genesis set, or one its node registered itself, is bonded under
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --no-wait                        Return once the transaction is submitted, without waiting for it to be executed
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -11234,6 +12246,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11249,6 +12262,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --additional <ADDITIONAL>        Additional self-stake: TNZO (`500`, `500 TNZO`) or wei with its suffix. Only ever adds; reducing a stake is unbonding, which has its own path and delay
       --format <FORMAT>                Output format (text, json) [default: text]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -11265,6 +12279,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --name <NAME>      A comment written above the entry, so a reader can tell which machine it came from
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -11281,6 +12296,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11295,6 +12311,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11316,6 +12333,8 @@ Options:
           1952-byte ML-DSA-65 verifying key of the hardware consensus key (hex), as printed by `tenzro validator keys`
       --p256-public-key <P256_PUBLIC_KEY>
           65-byte uncompressed P-256 key, the classical half of the same composite key (hex)
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --node-key <NODE_KEY>
           32-byte Ed25519 node key of the node that runs the validator (hex), as printed by `tenzro validator keys`
       --proof-of-possession <PROOF_OF_POSSESSION>
@@ -11349,6 +12368,9 @@ Options:
       --key-namespace <KEY_NAMESPACE>  The node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -11369,6 +12391,8 @@ Options:
           Output format (text, json) [default: text]
       --metadata-uri <METADATA_URI>
           New off-chain pointer (≤256 bytes); omit to skip
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --tee-attestation-hash <TEE_ATTESTATION_HASH>
           New 32-byte SHA-256 TEE attestation commitment (hex); omit to skip
       --rpc <RPC>
@@ -11388,6 +12412,7 @@ Options:
       --detailed         Show detailed version information
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11406,6 +12431,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11439,6 +12465,9 @@ Options:
           
           [default: text]
 
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -11454,6 +12483,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11471,6 +12501,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11487,6 +12518,7 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
       --proof <PROOF>    Hex-encoded 80-byte VRF proof (Gamma(32) || c(16) || s(32))
       --alpha <ALPHA>    Hex-encoded input message (alpha)
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -11514,6 +12546,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11529,6 +12562,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --detailed           Show detailed asset breakdown
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -11545,6 +12579,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --rpc <RPC>                      Enroll the account's ML-DSA-65 key on this node now. An account signs nothing until it has enrolled one, and needs funds for the gas of the enrolment; without this flag the first transaction it sends enrolls it
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
   -h, --help                           Print help
 ```
 
@@ -11563,6 +12598,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11578,6 +12614,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -11593,6 +12630,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --format <FORMAT>    Output format (text, json) [default: text]
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
 ```
 
@@ -11618,6 +12656,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11636,6 +12675,7 @@ Options:
   -v, --verbose            Enable verbose logging
       --account <ACCOUNT>  The guarded account, hex
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -11652,6 +12692,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
       --yes                            Sign without typing `yes` at the prompt (the preview is still shown)
       --approval-file <APPROVAL_FILE>  The guardian's passkey approval (JSON file), needed when the account's guardian cancels or pays early. `approval-target` prints what it signs
@@ -11673,6 +12714,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
       --yes                            Sign without typing `yes` at the prompt (the preview is still shown)
       --approval-file <APPROVAL_FILE>  The guardian's passkey approval (JSON file), needed when the account's guardian cancels or pays early. `approval-target` prints what it signs
@@ -11694,6 +12736,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
       --yes                            Sign without typing `yes` at the prompt (the preview is still shown)
       --approval-file <APPROVAL_FILE>  The guardian's passkey approval (JSON file), needed when the account's guardian cancels or pays early. `approval-target` prints what it signs
@@ -11714,6 +12757,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11733,6 +12777,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
       --yes                            Sign without typing `yes` at the prompt (the preview is still shown)
       --approval-file <APPROVAL_FILE>  The guardian's passkey approval (JSON file), needed when the account's guardian cancels or pays early. `approval-target` prints what it signs
@@ -11751,6 +12796,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
       --yes                            Sign without typing `yes` at the prompt (the preview is still shown)
       --approval-file <APPROVAL_FILE>  The guardian's passkey approval (JSON file), needed when the account's guardian cancels or pays early. `approval-target` prints what it signs
@@ -11769,6 +12815,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
       --yes                            Sign without typing `yes` at the prompt (the preview is still shown)
       --approval-file <APPROVAL_FILE>  The guardian's passkey approval (JSON file), needed when the account's guardian cancels or pays early. `approval-target` prints what it signs
@@ -11791,6 +12838,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  The key namespace used to find the default account [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -11804,7 +12852,7 @@ Usage: tenzro wallet send [OPTIONS] <TO> <AMOUNT>
 
 Arguments:
   <TO>      Recipient address
-  <AMOUNT>  Amount to send
+  <AMOUNT>  Amount to send, in TNZO: `100`, `0.5`. Exact to 18 places
 
 Options:
       --asset <ASSET>
@@ -11815,12 +12863,16 @@ Options:
           Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>
           The signing account's hardware key namespace (a-z, 0-9, '-', '_'). Each namespace is its own account [default: client]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
       --confirm-address <CONFIRM_ADDRESS>
           The full recipient address, repeated, to proceed when the recipient is new to this account or resembles one it trusts. Without it a terminal asks for the address to be typed; a script must pass it
       --confirm-amount <CONFIRM_AMOUNT>
-          The amount again, in TNZO, to proceed with a transfer at or above the governed step-up amount (`wallet.step_up_threshold_tnzo`)
+          The amount again, in TNZO, to proceed with a transfer at or above the governed step-up amount (`wallet.step_up_threshold_tnzo`). Without it a terminal asks for the amount to be typed; a script must pass it
+      --no-wait
+          Return as soon as the node has accepted the transfer, without waiting for it to be executed. Its receipt then says whether it took effect
   -h, --help
           Print help
 ```
@@ -11838,6 +12890,7 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --payee-did <PAYEE_DID>          The payee DID (defaults to the configured identity)
       --key-namespace <KEY_NAMESPACE>  The hardware key namespace of the signing account [default: client]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -11854,6 +12907,7 @@ Options:
   -v, --verbose                Enable verbose logging
       --format <FORMAT>        Output format (text, json) [default: text]
       --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
   -h, --help                   Print help
 ```
 
@@ -11872,6 +12926,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11898,6 +12953,7 @@ Commands:
 Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11913,6 +12969,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -11928,6 +12985,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --out <OUT>        Where to write the bound proof (JSON)
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help             Print help
 ```
@@ -11943,6 +13001,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -11958,6 +13017,7 @@ Options:
       --witness <WITNESS>  The 32-byte service result, hex
       --binding <BINDING>  The 32-byte request binding, hex
       --format <FORMAT>    Output format (text, json) [default: text]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help               Print help
 ```
@@ -11974,6 +13034,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --format <FORMAT>          Output format (text, json) [default: text]
       --vendor <VENDOR>          vendor
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
       --witness <WITNESS>        witness
       --binding <BINDING>        binding
       --rpc <RPC>                RPC endpoint [default: http://127.0.0.1:8545]
@@ -11991,6 +13052,7 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -12006,6 +13068,7 @@ Options:
   -v, --verbose                  Enable verbose logging
       --binding <BINDING>        32-byte hex binding: the verifier's challenge or the request hash
       --format <FORMAT>          Output format (text, json) [default: text]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
   -h, --help                     Print help
 ```
 
@@ -12021,6 +13084,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -12036,6 +13100,7 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
 
@@ -12051,6 +13116,7 @@ Options:
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --rpc <RPC>                    RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                        Hide the notice about a newer release (and other optional lines)
   -h, --help                         Print help
 ```
 

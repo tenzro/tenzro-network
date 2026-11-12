@@ -196,7 +196,7 @@ pub struct TenzroIdentity {
     pub status: IdentityStatus,
     pub wallet_address: Address,
     pub wallet_id: String,
-    pub services: Vec<ServiceEndpoint>,
+    pub pq_verifying_key: Vec<u8>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub metadata: HashMap<String, String>,
@@ -219,7 +219,6 @@ pub enum IdentityStatus {
 pub enum IdentityData {
     Human {
         display_name: String,
-        kyc_tier: KycTier,
         controlled_machines: Vec<String>,
     },
     Machine {
@@ -227,6 +226,14 @@ pub enum IdentityData {
         controller_did: Option<String>,
         reputation: u32,
         tenzro_agent_id: Option<String>,
+        erc8004_agent_id: Option<u64>,
+    },
+    Institution {
+        legal_name: String,
+        lei: String,
+        vlei_credential_id: Option<String>,
+        controlled_machines: Vec<String>,
+        country_iso2: Option<String>,
     },
 }
 ```
@@ -335,7 +342,7 @@ The VM keeps the day's and the hour's spend and action counts in chain state, so
 
 **Typed actions only.** Everything a delegated agent asks a node to do is a typed proposal (an operation, and the model it names) that the scope check validates against the terms before anything runs:
 
-- With the agent's access token: `tenzro_agentAct` (checked in full, then by the VM), a model call (`tenzro_chat`, `tenzro_inference`, `tenzro_generate`, `tenzro_textEmbed`, `tenzro_chatByIntent`: the `inference` operation), a tool or skill invocation, or a read (`get*`, `list*`, `estimate*`, `eth_call` and the like). Any other method is refused.
+- With the agent's access token: `tenzro_agentAct` (checked in full, then by the VM), a model call (`tenzro_chat`, `tenzro_textEmbed`, `tenzro_chatByIntent`: the `inference` operation), a tool or skill invocation, or a read (`get*`, `list*`, `estimate*`, `eth_call` and the like). Any other method is refused.
 - With the agent's bearer token: the request must carry a typed intent, either `inference` or a free tool or skill invocation. A request without an intent, a paid invocation, a workflow or other resource class, and any value-moving intent are refused: an agent's value moves only through `tenzro_agentAct`.
 - A tool or skill invocation is checked again once the node knows what it runs: `url_fetch` and remote tools are `fetch`, `web_search` is `web_search`, `file-manager` is `files`, `code-executor` and sandboxed bundles are `execute`, the model-backed skills are `inference`. The operation must be in `allowed_operations`.
 
@@ -545,10 +552,10 @@ The wallet address is stored in `TenzroIdentity.wallet_address` and is the on-ch
 TDIP identities can declare service endpoints following the W3C DID specification:
 
 ```rust
-pub struct ServiceEndpoint {
+pub struct DidService {
     pub id: String,
     pub service_type: String,
-    pub endpoint: String,
+    pub service_endpoint: String,
 }
 ```
 
@@ -568,13 +575,13 @@ pub struct ServiceEndpoint {
 
 ### 14.1 ERC-8004 Compatibility
 
-TDIP machine identities are addressable through ERC-8004 system contracts on Tenzro's EVM via three native precompiles, with calldata byte-identical to canonical Ethereum deployments:
+TDIP machine identities are addressable through the three canonical ERC-8004 registry contracts on Tenzro's EVM. They are part of genesis, at the addresses of the upstream reference deployment, so calldata is byte-identical to canonical Ethereum deployments:
 
-| Precompile | Address | Function |
-|------------|---------|----------|
-| `ERC8004_IDENTITY` | `0x101a` | `registerAgent` / `getAgent` for native agent discovery |
-| `ERC8004_REPUTATION` | `0x101b` | `submitFeedback` / `getFeedback` / `getFeedbackCount` for peer-to-peer reputation |
-| `ERC8004_VALIDATION` | `0x101c` | `validationRequest` / `validationResponse` / `getValidation` for verifiable work attestation |
+| Contract | Address | Function |
+|----------|---------|----------|
+| `IdentityRegistry` | `0x8004A818BFB912233c491871b3d84c89A494BD9e` | `registerAgent` / `getAgent` for native agent discovery |
+| `ReputationRegistry` | `0x8004B663056A597Dffe9eCcC1965A193B7388713` | `submitFeedback` / `getFeedback` / `getFeedbackCount` for peer-to-peer reputation |
+| `ValidationRegistry` | `0x8004Cb1BF31DAf7788923b405b754f57acEB4272` | `validationRequest` / `validationResponse` / `getValidation` for verifiable work attestation |
 
 Selectors match `tenzro_identity::erc8004::selectors` byte-for-byte, so the same calldata works against either the native Tenzro registry or any Ethereum mirror. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side. The `IdentityData::Machine.erc8004_agent_id` field captures the allocation so the TDIP record carries the canonical id for cross-system lookup, and `OnChainAgentRegistry::lookup_agent_id_by_did` provides reverse DID → agentId resolution.
 
@@ -582,8 +589,13 @@ Selectors match `tenzro_identity::erc8004::selectors` byte-for-byte, so the same
 
 TDIP identities can have registrations on multiple chains:
 
-| Chain | Registration | Cost |
-|-------|-------------|------|
+| Chain | Mechanism |
+|-------|-----------|
+| Tenzro (TDIP) | Native registration |
+| EVM (ERC-8004) | The node mirrors machine registrations into the `IdentityRegistry` contract on Tenzro's EVM (`erc8004_mirror.rs`) |
+| Solana | The Tenzro registrar program registers the agent in `agent_registry_8004` on behalf of a P-256 key (`erc8004_svm_registrar.rs`) |
+
+-------|-------------|------|
 | Tenzro (TDIP) | Always, native | TNZO fee |
 | Tempo | Always, auto | Free |
 | EVM (ERC-8004) | Opt-in | Gas fee |
@@ -629,7 +641,7 @@ TDIP identities can have registrations on multiple chains:
 | `tenzro_resolveIdentity` | Resolve a DID to TenzroIdentity |
 | `tenzro_resolveDidDocument` | Resolve a DID to W3C DID Document |
 | `tenzro_listIdentities` | List identities known to this node |
-| `tenzro_updateIdentity` | Operator-only identity update (`update.kind`: `service`, `resource`) |
+| `tenzro_updateIdentity` | Operator-only identity update (`update.kind`: `resource`; service entries go through an `IdentityServices` transaction, section 9.1) |
 | `tenzro_revokeIdentity` | Admit a signed `RevokeIdentity` transaction (any account may send it; the root's approval inside authorises it) after checking the approval against chain state; every validator re-verifies it, every node revokes the identity's tokens when it applies the block, and a root's revocation also revokes the agents it delegated |
 | `tenzro_forgetIdentity` | Right-to-erasure: drop the identity's off-chain record |
 | `tenzro_verifyDidEnvelope` | Verify a DID-signed envelope (also served at `POST /verify/did-envelope`) |
@@ -645,7 +657,7 @@ wrapped array is rejected rather than silently misread.
 
 Reachable from every surface: CLI `tenzro device {list,wallet-readiness,revoke,transfer}`,
 Rust SDK `client.device()`, TypeScript SDK `client.device()`, MCP tools
-`list_bound_devices` / `wallet_readiness`, and the A2A `device-binding` skill.
+`list_bound_devices` / `wallet_readiness`.
 
 The roots an operator pins for attestation verification are
 `webauthn_trusted_roots` in `NodeConfig` — base64 DER, one per entry. An entry
@@ -668,6 +680,13 @@ crates/tenzro-identity/src/
 ├── w3c.rs              — W3C DID Document conversion
 ├── document.rs         — DID Document types
 ├── wallet_binding.rs   — hardware-bound wallet auto-provisioning
+├── envelope.rs         — protocol-neutral Tenzro DID envelope
+├── erc8004.rs          — ERC-8004 registry calldata and selectors
+├── erc8004_svm_registrar.rs — Solana registrar program transactions
+├── ivms101.rs          — IVMS101 payloads
+├── keri.rs             — KERI key event logs
+├── kya.rs              — Know Your Agent federation primitives
+├── pq_rotation.rs      — move an identity to a post-quantum key under the same DID
 └── error.rs            — IdentityError types (DelegationViolation, TrustChainBroken, TrustChainCycle, TrustChainTooDeep)
 ```
 
@@ -728,7 +747,7 @@ is_value_allowed(1500)             → false
 
 ## Copyright
 
-Copyright 2026 Tenzro Network Contributors. Licensed under MIT OR Apache-2.0.
+Copyright 2026 Tenzro Network Contributors. Licensed under Apache-2.0.
 
 This specification is open for adoption and implementation. Implementors may freely build TDIP-compliant systems.
 

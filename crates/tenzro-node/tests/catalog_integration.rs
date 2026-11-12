@@ -248,8 +248,37 @@ fn withdraw(publisher: &Key, sequence: u64, model: &str) -> Value {
     ))
 }
 
+/// How long the node gets to rebuild its catalog after a record arrives. The
+/// node wakes its rebuild when a catalog record is applied and waits a short
+/// debounce first (`REFRESH_DEBOUNCE`), so the rebuild is due well inside this
+/// bound; the periodic interval is not what is waited for.
+const REBUILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the node publicly says about its catalog: how it was assembled and
+/// every entry it serves.
+async fn catalog_view(url: &str) -> Value {
+    ok(&call(url, "tenzro_listCatalog", json!({})).await).clone()
+}
+
+/// Submit a record. When the node accepts it, wait on the public RPC until
+/// the catalog it lists changes: the node rebuilds on its own after a record
+/// arrives, and a read straight after would see the catalog before it. A
+/// record that leaves the catalog as it was (nothing served or refused
+/// differently) runs out the deadline.
 async fn submit(url: &str, record: Value) -> Value {
-    call(url, "tenzro_submitTrustRecord", json!({ "record": record })).await
+    let before = catalog_view(url).await;
+    let resp = call(url, "tenzro_submitTrustRecord", json!({ "record": record })).await;
+    if resp.get("error").is_some() {
+        return resp;
+    }
+    let deadline = std::time::Instant::now() + REBUILD_DEADLINE;
+    while std::time::Instant::now() < deadline {
+        if catalog_view(url).await != before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    resp
 }
 
 async fn served(url: &str, model: &str) -> Value {

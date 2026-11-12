@@ -21,7 +21,7 @@ The CI workflow (`.github/workflows/ci.yml`, `benches` job) runs `cargo check --
 
 ## tenzro-iroh — `tenzro://` URI parsing
 
-`TenzroUri::parse` is on every cross-node fetch path (iroh-blobs DA, gradient store, sealed shards, agent memory). Sub-200ns budget across all 9 variants.
+`TenzroUri::parse` is on every cross-node fetch path (iroh-blobs DA, gradient store, sealed shards, agent memory). Sub-200ns budget across the variants below.
 
 | Function | Mean |
 |---|---|
@@ -30,12 +30,8 @@ The CI workflow (`.github/workflows/ci.yml`, `benches` job) runs `cargo check --
 | `tenzro_uri_parse/node` | 47.7 ns |
 | `tenzro_uri_parse/did` | 48.5 ns |
 | `tenzro_uri_parse/model` | 112.3 ns |
-| `tenzro_uri_parse/gradient` | 128.9 ns |
-| `tenzro_uri_parse/shard` | 150.4 ns |
-| `tenzro_uri_parse/manifest` | 89.5 ns |
 | `tenzro_uri_parse/memory` | 80.5 ns |
 | `tenzro_uri_parse/receipt` | 117.2 ns |
-| `tenzro_uri_display_roundtrip/blob_gradient_model` | 598.6 ns |
 
 ## tenzro-identity — TDIP DID parsing + registry resolution
 
@@ -46,10 +42,7 @@ DID parse is on every payment / message-routing / delegation-enforcement hot pat
 | `did_parse/human` | 21.0 ns |
 | `did_parse/machine_delegated` | 73.3 ns |
 | `did_parse/machine_autonomous` | 49.6 ns |
-| `did_generate/human_new` | 660.8 ns |
-| `did_generate/autonomous_machine_new` | 665.7 ns |
 | `registry_resolve/hit_machine_did` | 342.3 ns |
-| `enforce_operation/payment_within_scope` | 355.4 ns |
 
 ## tenzro-token — TNZO balance, transfer, adaptive burn
 
@@ -59,10 +52,9 @@ DID parse is on every payment / message-routing / delegation-enforcement hot pat
 |---|---|
 | `tnzo_balance_of/hit` | 19.0 ns |
 | `tnzo_balance_of/miss` | 16.5 ns |
-| `tnzo_transfer/1_tnzo_known_recipient` | 387.0 ns |
 | `adaptive_burn/compute_recommendation_inside_band` | 2.04 ns |
 
-## tenzro-storage — RocksDB + Merkle Patricia Trie
+## tenzro-storage — RocksDB
 
 The 5k-key prefix-scan exercises the registry-hydration path consumed by every manager that boots from `CF_*` (models, agents, escrows, settlements, …).
 
@@ -78,19 +70,11 @@ The 5k-key prefix-scan exercises the registry-hydration path consumed by every m
 | `rocksdb_prefix_scan/5k_matching` | 690.3 µs |
 | `memory_store/put_256B` | 2.46 µs |
 | `memory_store/get_hit_256B` | 91.3 ns |
-| `merkle_trie_insert/10` | 791.9 ns |
-| `merkle_trie_insert/100` | 6.95 µs |
-| `merkle_trie_insert/1000` | 94.31 µs |
-| `merkle_trie_proof/generate_proof` | 37.56 ns |
-| `merkle_trie_proof/verify_proof` | 2.96 ns |
 
-## tenzro-wallet — Smart-account hashing + keystore KDF
-
-`keystore_store_shares` is dominated by Argon2id (64 MiB memory, 3 iterations, parallelism 4) — intentionally slow to harden against offline brute-force.
+## tenzro-wallet — Nonce manager
 
 | Function | Mean |
 |---|---|
-| `user_op_hash/eip712_v0_8` | 4.01 µs |
 | `nonce_manager/next_nonce_single_address` | 20.47 ns |
 
 ## tenzro-model — Pricing + provider reputation
@@ -99,9 +83,6 @@ These are pure-function paths on every inference request (router consults pricin
 
 | Function | Mean |
 |---|---|
-| `pricing_calculate_cost/per_token_512in_256out` | 1.01 ns |
-| `pricing_calculate_price/dynamic_7b_50pct_load_no_market` | 17.27 ns |
-| `pricing_calculate_price/dynamic_7b_50pct_load_with_market` | 86.62 ns |
 | `provider_manager_record_success/in_memory` | 52.41 ns |
 | `provider_manager_get_reputation/hit` | 21.60 ns |
 | `provider_manager_get_reputation/miss` | 18.54 ns |
@@ -141,33 +122,14 @@ Consensus latency and throughput are measured by the network emulator runs in `c
 |---|---|
 | `mpp_challenge_creation/create_challenge` | 3.33 µs |
 | `mpp_credential_verification/verify_credential` | 173.1 ns |
-| `x402_payload_creation/create_payload` | 68.48 ns |
 | `credential_parsing/parse_from_json` | 31.36 µs |
-| `credential_parsing/parse_from_base64` | 34.93 µs |
 | `credential_parsing/parse_mpp_challenge` | 415.3 ns |
 | `payment_gateway_routing/route_challenge_creation` | 3.15 µs |
 | `payment_gateway_routing/challenge_store_operations` | 553.6 ns |
 
-## tenzro-settlement — Settlement engine + escrow + channels + fees
-
-`immediate_settlement/single_settlement` and `batch_settlement/batch/N` measure the in-memory async path including provider-signature verification. `micropayment_channel/open_100_updates_close` exercises the full channel lifecycle with 100 signed state updates.
-
-| Function | Mean |
-|---|---|
-| `immediate_settlement/single_settlement` | 162.3 µs |
-| `batch_settlement/batch/10` | 1.49 ms |
-| `batch_settlement/batch/50` | 5.87 ms |
-| `batch_settlement/batch/100` | 7.25 ms |
-| `escrow_create_release/create_and_release` | 33.27 µs |
-| `micropayment_channel/open_100_updates_close` | 4.46 ms |
-| `fee_calculation/collect_fee` | 968.2 ns |
-| `fee_calculation/fee_for_amount/1000` | 2.40 ns |
-| `fee_calculation/fee_for_amount/1000000` | 2.44 ns |
-| `fee_calculation/fee_for_amount/1000000000` | 2.44 ns |
-
 ## tenzro-vm — EVM execution + state adapter + gas estimation
 
-`compute_state_root` is the Merkle-Patricia-Trie commit on every block. `evm_execution/*` covers single revm dispatch.
+`evm_execution/*` covers single revm dispatch.
 
 | Function | Mean |
 |---|---|
@@ -175,7 +137,6 @@ Consensus latency and throughput are measured by the network emulator runs in `c
 | `evm_execution/contract_call` | 36.19 µs |
 | `state_adapter/get_set_balance` | 280.1 ns |
 | `state_adapter/get_set_storage` | 578.6 ns |
-| `state_adapter/compute_state_root` | 1.58 ms |
 | `gas_estimation/estimate_transfer` | 474.0 ps |
 | `gas_estimation/estimate_call/32` | 2.50 ns |
 | `gas_estimation/estimate_call/256` | 2.56 ns |
@@ -185,20 +146,6 @@ Consensus latency and throughput are measured by the network emulator runs in `c
 | `gas_estimation/estimate_deployment/256` | 460.3 ps |
 | `gas_estimation/estimate_deployment/1024` | 411.8 ps |
 | `gas_estimation/estimate_deployment/4096` | 441.2 ps |
-
-## tenzro-zk — Plonky3 STARK prove + verify
-
-Pinned testnet config: `log_blowup=1, num_queries=64, query_pow=16, commit_pow=8`. AIR sizes differ across circuits (inference is the largest trace). Prove is multi-millisecond CPU; verify is sub-millisecond — the asymmetry is exactly what the on-chain `ZK_VERIFY` precompile relies on (it never re-proves, only checks the recorded commitment).
-
-| Function | Mean |
-|---|---|
-| `plonky3_prove/inference_air` | 50.46 ms |
-| `plonky3_verify/inference_air` | 961.3 µs |
-| `plonky3_prove/settlement_air` | 10.29 ms |
-| `plonky3_verify/settlement_air` | 937.7 µs |
-| `plonky3_prove/identity_air` | 5.83 ms |
-| `plonky3_verify/identity_air` | 938.0 µs |
-| `plonky3_verify_envelope/inference` | 1.03 ms |
 
 ## When to re-run
 

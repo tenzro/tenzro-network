@@ -60,10 +60,13 @@ fn base_command(path: &Path, args: &[String]) -> Command {
 
 /// Run `prog args` and stream its output.
 pub fn spawn(prog: &Prog, args: &[String]) -> Result<Running> {
-    let path = resolve(prog).ok_or_else(|| anyhow!("{} was not found on this machine", prog.name()))?;
+    let path =
+        resolve(prog).ok_or_else(|| anyhow!("{} was not found on this machine", prog.name()))?;
     let mut cmd = base_command(&path, args);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| anyhow!("could not start {}: {e}", prog.name()))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("could not start {}: {e}", prog.name()))?;
     let (tx, rx) = channel();
     pump(child.stdout.take(), tx.clone());
     pump(child.stderr.take(), tx.clone());
@@ -72,7 +75,10 @@ pub fn spawn(prog: &Prog, args: &[String]) -> Result<Running> {
     std::thread::spawn(move || {
         // Poll rather than hold the lock in `wait`, so `kill` can take it.
         loop {
-            let status = waiter.lock().ok().and_then(|mut c| c.try_wait().ok().flatten());
+            let status = waiter
+                .lock()
+                .ok()
+                .and_then(|mut c| c.try_wait().ok().flatten());
             if let Some(st) = status {
                 // Give the readers a moment to flush the last lines.
                 std::thread::sleep(std::time::Duration::from_millis(150));
@@ -100,11 +106,15 @@ fn pump<R: std::io::Read + Send + 'static>(r: Option<R>, tx: Sender<Msg>) {
 /// Start `prog args` and leave it running, its output in `log`. Returns the
 /// process id.
 pub fn spawn_detached(prog: &Prog, args: &[String], log: &Path) -> Result<u32> {
-    let path = resolve(prog).ok_or_else(|| anyhow!("{} was not found on this machine", prog.name()))?;
+    let path =
+        resolve(prog).ok_or_else(|| anyhow!("{} was not found on this machine", prog.name()))?;
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let out = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
     let err = out.try_clone()?;
     let mut cmd = base_command(&path, args);
     cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
@@ -119,7 +129,9 @@ pub fn spawn_detached(prog: &Prog, args: &[String], log: &Path) -> Result<u32> {
         // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         cmd.creation_flags(0x0000_0008 | 0x0000_0200);
     }
-    let child = cmd.spawn().map_err(|e| anyhow!("could not start {}: {e}", prog.name()))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("could not start {}: {e}", prog.name()))?;
     Ok(child.id())
 }
 
@@ -139,7 +151,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_command_streams_its_lines_and_its_exit_code() {
-        let r = spawn(&Prog::Other("sh"), &["-c".into(), "echo one; echo two 1>&2; exit 3".into()]).unwrap();
+        let r = spawn(
+            &Prog::Other("sh"),
+            &["-c".into(), "echo one; echo two 1>&2; exit 3".into()],
+        )
+        .unwrap();
         let mut lines = Vec::new();
         let mut code = None;
         while let Ok(m) = r.rx.recv_timeout(std::time::Duration::from_secs(5)) {
@@ -159,14 +175,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_environment_is_colourless_and_not_echoed() {
-        let r = spawn(&Prog::Other("sh"), &["-c".into(), "echo $NO_COLOR $TERM".into()]).unwrap();
-        let m = r.rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let r = spawn(
+            &Prog::Other("sh"),
+            &["-c".into(), "echo $NO_COLOR $TERM".into()],
+        )
+        .unwrap();
+        let m =
+            r.rx.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
         assert!(matches!(m, Msg::Line(l) if l == "1 dumb"));
     }
 
     #[test]
     fn a_missing_program_is_a_plain_error() {
-        let e = spawn(&Prog::Other("definitely-not-a-program-xyz"), &[]).err().unwrap();
+        let e = spawn(&Prog::Other("definitely-not-a-program-xyz"), &[])
+            .err()
+            .unwrap();
         assert!(e.to_string().contains("was not found"));
     }
 }

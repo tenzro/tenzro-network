@@ -8,12 +8,12 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
 
 ## Modules
 
-**15 modules:** attestation, certs, detection, enclave_crypto, error, registry, sealed_agent_keypair, sealed_secp256k1, traits, intel_tdx (feature), amd_sev_snp (feature), aws_nitro (feature), nvidia_gpu (feature), intel_tiber (feature)
+**23 modules:** certs, detection, error, measurements, registry, report_data, traits, verify, x509, hardware_identity, identity_evidence, nvidia_device, nvidia_rim, ocsp, tpm_attest, confidential_job, key_release, intel_tdx (feature), amd_sev_snp (feature), aws_nitro (feature), nvidia_gpu (feature), nvml (feature), intel_tiber (feature)
 
 ### TEE Provider Abstraction
 - `TeeProvider` trait - Unified interface for all TEE vendors
 - `TeeRegistry` - Manages and tracks available TEE providers
-- `AttestationVerifier` - Verifies TEE attestation reports with X.509 certificate chains
+- `verify::verify_report` - Verifies a vendor attestation report against a `VerifyPolicy`, including its X.509 certificate chain
 - `detect_tee()` - Runtime detection of available TEE hardware
 
 ### Supported Vendors
@@ -43,14 +43,7 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
 - X.509 certificate chain validation with pinned vendor root CAs (Intel, AMD, AWS, NVIDIA)
 - TEE measurement verification
 - Validity period and key usage extension validation
-- Functions: `verify_certificate_chain()`, `parse_x509_certificate()`, `verify_certificate_signature()`
-
-### Enclave Encryption
-- Shared AES-256-GCM encryption module used by all vendors
-- Key derivation: `HKDF-SHA256(key_id, vendor_tag)` with domain separation
-- Wire format: `nonce(12) || ciphertext || tag(16)`
-- Keys are sealed by hardware (MKTME / VMSA / KMS / CC memory). There is no
-  software derivation path
+- Functions in `x509`: `parse()`, `parse_pem_chain()`, `verify_issued_by()`, `verify_chain()`
 
 ### Key release and confidential jobs
 
@@ -95,7 +88,7 @@ tenzro-tee = { path = "../tenzro-tee", features = ["intel-tdx", "nvidia-gpu"] }
 ### Basic Usage
 
 ```rust
-use tenzro_tee::{detect_tee, TeeRegistry, AttestationVerifier, TeeProvider};
+use tenzro_tee::{detect_tee, TeeRegistry, TeeProvider};
 use tenzro_types::tee::TeeVendor;
 
 // Detect available TEE hardware
@@ -113,29 +106,8 @@ registry.register_provider(provider_id, tee_type)?;
 let tee_provider = registry.get_provider(&tee_type)?;
 let attestation = tee_provider.generate_attestation(b"nonce")?;
 
-// Verify the attestation
-let verifier = AttestationVerifier::new();
-let is_valid = verifier.verify(&attestation)?;
-```
-
-### Enclave Encryption
-
-```rust
-use tenzro_tee::enclave_crypto::{enclave_encrypt_aes256gcm, enclave_decrypt_aes256gcm};
-use uuid::Uuid;
-
-// Vendor tag binds the derived AES key to a specific TEE family.
-// Use the vendor's `enclave_vendor_tag()` helper to obtain this (e.g. `b"intel-tdx"`).
-let key_id = Uuid::new_v4();
-let vendor_tag: &[u8] = b"intel-tdx";
-let plaintext = b"sensitive data";
-
-// Encrypt: nonce(12) || ciphertext || tag(16)
-let ciphertext = enclave_encrypt_aes256gcm(&key_id, vendor_tag, plaintext)?;
-
-// Decrypt with the same key_id + vendor_tag
-let decrypted = enclave_decrypt_aes256gcm(&key_id, vendor_tag, &ciphertext)?;
-assert_eq!(plaintext, &decrypted[..]);
+// Verify the attestation against a policy (`VerifyPolicy`)
+let verified = tenzro_tee::verify::verify_report(&attestation, &policy)?;
 ```
 
 ## Dependencies
@@ -145,8 +117,7 @@ assert_eq!(plaintext, &decrypted[..]);
 - `x509-cert` - X.509 certificate parsing
 - `p256`, `p384`, `rsa` - Public key cryptography
 - `der`, `spki`, `signature`, `ecdsa` - Certificate chain verification
-- `aes-gcm` - AES-256-GCM encryption (enclave crypto)
-- `sha2` - HKDF key derivation
+- `sha2` - SHA-256 digests
 - `reqwest` - HTTP client for remote attestation services (Intel PCS, AMD KDS, NVIDIA NRAS)
 - `libc` - System calls for `/dev/tdx-guest`, `/dev/sev-guest`, `/dev/nsm` access
 - `base64` - Base64 encoding for attestation documents
@@ -162,28 +133,17 @@ Unit tests and doc tests cover:
 - AWS Nitro attestation document parsing and signature verification
 - NVIDIA GPU attestation and NRAS integration
 - X.509 certificate chain verification with pinned root CAs
-- Enclave encryption and decryption (all vendors)
-- TEE detection and simulation fallback
+- TEE detection (no simulation path: a host without the vendor device reports no TEE)
 - Registry management and provider lookup
 
 ## License
 
 Apache-2.0.
 
-## `tpm_seal` — sealing a machine's own key to its TPM
+## `tpm_attest` — a machine's TPM as its root
 
-A machine that stores its own key seals it rather than writing a keyfile: the
-blob on disk is ciphertext under the TPM's storage hierarchy, so copying the
-disk yields something no other TPM will open. A host that cannot seal is refused
-rather than degrading to plaintext — the value of the autonomous claim rests on
-the key being unextractable.
-
-Driven through `tpm2-tools`, the same way this workspace already talks to
-`nvidia-smi` and `rocm-smi`; the secret reaches the TPM over the tool's stdin and
-never touches disk in the clear.
-
-A TPM is also the **third platform root** (`platform_root`), after SEV-SNP and
-TDX, and on commodity hardware the only one. It has no measured-image binding —
-it seals to the platform, not to what the platform is running — but it is what
-an ordinary machine has, and the identity rule already requires an attestable
-root before a machine may speak for itself.
+A TPM is the platform root on commodity hardware. `tpm_attest` reads the
+endorsement key from its persistent handle, runs credential activation to prove
+the attestation key lives in that TPM, and checks a quote over the verifier's
+challenge. A TPM has no measured-image binding: it speaks for the platform, not
+for what the platform is running.

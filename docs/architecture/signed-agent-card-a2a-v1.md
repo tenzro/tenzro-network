@@ -45,7 +45,7 @@ Protected header (itself serialised in RFC 8785 form before base64url):
 1. Take the card JSON and remove `signatures`.
 2. Canonicalise it with RFC 8785 (JCS): members sorted by UTF-16 code
    units, numbers as ECMAScript doubles, minimal string escaping.
-   Implementation: `crates/tenzro-node/src/a2a/jcs.rs`, tested against the
+   Implementation: `crates/tenzro-trust/src/jcs.rs`, tested against the
    RFC 8785 number vectors (Appendix B), the section 3.2.2 sample object and
    the section 3.2.3 ordering example.
 3. JWS signing input is `BASE64URL(protected) || "." || BASE64URL(canonical card)`.

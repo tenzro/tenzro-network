@@ -1,0 +1,291 @@
+name: Release Linux and Windows
+
+# Builds the Linux and Windows release artifacts on GitHub-hosted runners from
+# a given commit, so a release does not depend on any particular machine:
+#   linux-cpu    tenzro-node and the CLI for Linux x86_64 (ubuntu-24.04) and
+#                aarch64 (ubuntu-24.04-arm), CPU, scripts/release/build-linux.sh
+#                inside the repository Dockerfile (glibc 2.39 floor); the
+#                aarch64 archive is also the one for Raspberry Pi class boards.
+#                Checked on the runner: the archive matches its sha256 and the
+#                node's startup self-check runs to a clean exit
+#   linux-cuda   the same two architectures with CUDA, inside Dockerfile.cuda
+#                (CUDA 13, ONNX Runtime built with the CUDA and TensorRT
+#                providers). nvcc compiles without a GPU, so no GPU runner is
+#                used; the node can only be run and install-gated on a machine
+#                with an NVIDIA GPU, so no install record is written for these
+#                two archives
+#   windows      tenzro-node.exe and tenzro.exe for Windows x86_64 (native
+#                MSVC), scripts/release/build-windows.ps1, CPU build, with its
+#                own install gate on the runner
+# Artifacts keep the names of the macOS workflow (tenzro-node-<os>-<arch>-<flavour>)
+# and carry a .sha256 file and the build record (.buildenv.json) beside them.
+#
+# Signing is not done here. The jobs hold no secrets and only read the
+# repository; the signed SHA256SUMS over these archives is produced afterwards
+# by the release signer, who checks each archive against the .sha256 uploaded
+# here.
+#
+# Disk and time (hosted runners; estimates, not yet measured):
+#   cpu    about 30 GB of the runner disk after cleanup, 1 to 2 h
+#   cuda   about 60 GB of the runner disk after cleanup (CUDA base image, the
+#          ONNX Runtime stage and the builder layers), 4 to 6 h. The ONNX
+#          Runtime stage compiles one unit at a time on a 16 GB runner and
+#          can run past the 6 h job limit with the full architecture list;
+#          pass cuda_archs (for example 90;120 on x86_64, 121 on aarch64) to
+#          build for the GPUs actually targeted.
+#   The free-disk steps remove preinstalled toolchains the build does not use.
+# The Linux builds run inside container builds, where a runner-side cargo cache
+# does not reach; the Windows build is native and keeps its cargo cache.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit to build (SHA, tag or branch)'
+        required: true
+        default: 'main'
+      build:
+        description: 'What to build'
+        type: choice
+        options: [all, cpu, cuda, windows]
+        default: all
+      cuda_archs:
+        description: 'cuda only: ONNX Runtime CUDA architectures, semicolon separated (empty: the Dockerfile list for each architecture)'
+        required: false
+        default: ''
+  push:
+    tags: ['v*']
+
+# One run per ref; a newer run of the same ref replaces a running one.
+concurrency:
+  group: release-linux-windows-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  linux-cpu:
+    if: github.event_name == 'push' || inputs.build == 'all' || inputs.build == 'cpu'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    env:
+      ARTIFACT: tenzro-node-linux-${{ matrix.arch }}-cpu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Pins
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "toolchain: $channel"
+          grep -q -- "--default-toolchain $channel " Dockerfile || { echo "FAILED: Dockerfile does not install Rust $channel"; exit 1; }
+          test -f Cargo.lock
+
+      - name: Build
+        # Hosted runners: 4 cores / 16 GB. The build container is capped below
+        # the runner memory so the runner itself stays responsive.
+        env:
+          MEM: 14g
+          IMAGE: '0'
+        run: |
+          commit=$(git rev-parse HEAD)
+          echo "commit: $commit"
+          scripts/release/build-linux.sh "${{ matrix.arch }}" cpu "$commit" "$RUNNER_TEMP/dist"
+
+      - name: Digest, size and self-check
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          sha256sum "$ARTIFACT.tar.gz" > "$ARTIFACT.tar.gz.sha256"
+          cat "$ARTIFACT.tar.gz.sha256"
+          ls -l "$ARTIFACT.tar.gz"
+          tar -tvzf "$ARTIFACT.tar.gz"
+          sha256sum -c "$ARTIFACT.tar.gz.sha256"
+          tar -xzf "$ARTIFACT.tar.gz"
+          node="$PWD/$ARTIFACT/bin/tenzro-node"
+          file "$node" "$ARTIFACT/bin/tenzro"
+          "$node" --version
+          "$ARTIFACT/bin/tenzro" --version
+          # Exit codes 0 and 1 are a result (started, or refused with a
+          # reason); anything else is a crash.
+          set +e
+          timeout 60 "$node" hardware > hw.log 2>&1
+          rc=$?
+          set -e
+          cat hw.log
+          case "$rc" in 0|1) ;; *) echo "FAILED: exit $rc"; exit 1 ;; esac
+          grep -qx 'build: CPU' hw.log || { echo "FAILED: not a CPU build"; exit 1; }
+          jq -n --arg artifact "$ARTIFACT" --arg file "$ARTIFACT.tar.gz" \
+            --arg sha "$(sha256sum "$ARTIFACT.tar.gz" | cut -d' ' -f1)" \
+            --arg host "Linux-$(uname -m)" --arg checked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{artifact: $artifact, file: $file, sha256: $sha, role: "cpu", host: $host, verdict: "pass", checked: $checked}' \
+            > "$ARTIFACT.install.json"
+          cat "$ARTIFACT.install.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.tar.gz
+            ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.tar.gz.sha256
+            ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.buildenv.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.ARTIFACT }}.install
+          path: ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.install.json
+          if-no-files-found: error
+
+  linux-cuda:
+    if: github.event_name == 'push' || inputs.build == 'all' || inputs.build == 'cuda'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    env:
+      ARTIFACT: tenzro-node-linux-${{ matrix.arch }}-cuda
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk space
+        # The CUDA build needs about 60 GB: remove everything it does not use.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/local/julia* || true
+          sudo docker image prune --all --force || true
+          df -h /
+          avail=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          [ "$avail" -ge 60 ] || { echo "FAILED: $avail GB free, the CUDA build needs 60"; exit 1; }
+
+      - name: Pins
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "toolchain: $channel"
+          grep -q -- "--default-toolchain $channel " Dockerfile.cuda || { echo "FAILED: Dockerfile.cuda does not install Rust $channel"; exit 1; }
+          test -f Cargo.lock
+
+      - name: Build
+        # nvcc compiles without a GPU. One ONNX Runtime job per 8 GB of the cap.
+        env:
+          MEM: 14g
+          IMAGE: '0'
+          ORT_CUDA_ARCHITECTURES: ${{ inputs.cuda_archs }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          echo "commit: $commit"
+          scripts/release/build-linux.sh "${{ matrix.arch }}" cuda "$commit" "$RUNNER_TEMP/dist"
+
+      - name: Digest and size
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          sha256sum "$ARTIFACT.tar.gz" > "$ARTIFACT.tar.gz.sha256"
+          cat "$ARTIFACT.tar.gz.sha256"
+          ls -l "$ARTIFACT.tar.gz"
+          tar -tvzf "$ARTIFACT.tar.gz"
+          sha256sum -c "$ARTIFACT.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.tar.gz
+            ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.tar.gz.sha256
+            ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.buildenv.json
+          if-no-files-found: error
+
+  windows:
+    if: github.event_name == 'push' || inputs.build == 'all' || inputs.build == 'windows'
+    runs-on: windows-2025
+    timeout-minutes: 240
+    env:
+      ARTIFACT: tenzro-node-windows-x86_64-cpu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target x86_64-pc-windows-msvc
+          rustup default "$channel"
+          rustc --version
+          choco install protoc --no-progress -y
+          /c/ProgramData/chocolatey/bin/protoc.exe --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # build-windows.ps1 builds in the target directory given below.
+          cache-directories: C:/tz/target/cpu
+
+      - name: Build
+        # Hosted runner: 4 cores / 16 GB. The script builds from a git archive
+        # of the commit, checks the binaries, packs the zip and runs its own
+        # install gate (the packed node must report a CPU build and start).
+        shell: powershell
+        run: |
+          $commit = git rev-parse HEAD
+          Write-Output "commit: $commit"
+          $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+          scripts\release\build-windows.ps1 -Flavour cpu -Ref $commit -TargetDir C:\tz\target -DistDir C:\tz\dist -Jobs 4 -MinFreeGB 20
+
+      - name: Digest and size
+        shell: bash
+        working-directory: C:/tz/dist
+        run: |
+          sha256sum "$ARTIFACT.zip" > "$ARTIFACT.zip.sha256"
+          cat "$ARTIFACT.zip.sha256"
+          ls -l "$ARTIFACT.zip"
+          unzip -l "$ARTIFACT.zip"
+          sha256sum -c "$ARTIFACT.zip.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            C:/tz/dist/${{ env.ARTIFACT }}.zip
+            C:/tz/dist/${{ env.ARTIFACT }}.zip.sha256
+            C:/tz/dist/${{ env.ARTIFACT }}.buildenv.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.ARTIFACT }}.install
+          path: C:/tz/dist/${{ env.ARTIFACT }}.install.json
+          if-no-files-found: error

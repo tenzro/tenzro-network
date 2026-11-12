@@ -46,9 +46,9 @@ The framework, not the adapters, enforces them:
 
 ## Other modules
 
-- `chainlink_feed`, `chainlink_por`, `price_oracle` — Chainlink price and
-  proof-of-reserve readers.
-- `fee_oracle`, `fee_sponsor` — bridge fees quoted and sponsored in TNZO.
+- `chainlink_feed`, `chainlink_por`, `data_streams` — Chainlink price,
+  proof-of-reserve and Data Streams readers.
+- `fee_oracle` — bridge fees quoted in TNZO.
 - `evm_signer` — EIP-1559 signing with a hardware-held key.
 - `secp256k1_multisig` — committee signature verification.
 

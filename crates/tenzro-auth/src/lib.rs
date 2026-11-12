@@ -43,11 +43,11 @@
 //!
 //! - **Does not provision identities or wallets.** Onboarding RPCs
 //!   (`tenzro_onboardHuman` / `tenzro_onboardDelegatedAgent` /
-//!   `tenzro_onboardAutonomousAgent`, subtask #52) live in
+//!   `tenzro_onboardAutonomousAgent`) live in
 //!   `tenzro-node::rpc` and call into [`AuthEngine::issue_jwt`] *after*
 //!   identity + wallet provisioning. This crate is auth, not identity.
 //! - **Does not perform signing.** The new ambient-auth signing path
-//!   (subtask #51) lives in `tenzro-node::rpc`; it asks this crate
+//!   lives in `tenzro-node::rpc`; it asks this crate
 //!   "is the bearer of this JWT authorized to sign for DID X up to amount
 //!   Y?" and gets back a yes/no plus a wallet handle.
 //! - **Does not implement the OAuth /authorize HTML flow.** The MCP
@@ -75,7 +75,7 @@
 //!    is no implicit fallback, no string scope, no `"all"` shorthand.
 //! 4. **Cascading revocation by act-chain.** Revoking a JWT also revokes
 //!    every JWT whose `controller_did` points back at the revoked DID,
-//!    transitively. (Subtask #54 implements the recursion; this crate's
+//!    transitively. (The node implements the recursion; this crate's
 //!    storage layout supports it via the `controller_did:<did>`
 //!    secondary index in `CF_AUDIT`.)
 //! 5. **No approval queue.** An action the agent's consensus Terms hold
@@ -109,7 +109,7 @@
 //!
 //! Each public method has a unit test. The combined onboarding +
 //! signing + revocation flows are covered by an integration test in
-//! `crates/tenzro-node/tests/auth_integration.rs` (subtask #56).
+//! `crates/tenzro-node/tests/auth_integration.rs`.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]

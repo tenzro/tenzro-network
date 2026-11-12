@@ -64,18 +64,27 @@ mod tests {
 
     #[test]
     fn a_listed_delegate_and_a_clearing_are_quiet() {
-        let s = DelegateStatus::from_rpc(&json!({"allowlist_enforced": false, "listed": true})).unwrap();
+        let s = DelegateStatus::from_rpc(&json!({"allowlist_enforced": false, "listed": true}))
+            .unwrap();
         assert!(s.warning("ab").is_empty());
-        let c = DelegateStatus::from_rpc(&json!({"allowlist_enforced": true, "listed": false, "clears": true})).unwrap();
+        let c = DelegateStatus::from_rpc(
+            &json!({"allowlist_enforced": true, "listed": false, "clears": true}),
+        )
+        .unwrap();
         assert!(c.warning("00").is_empty());
     }
 
     #[test]
     fn an_unlisted_delegate_is_warned_about_either_way() {
-        let open = DelegateStatus::from_rpc(&json!({"allowlist_enforced": false, "listed": false})).unwrap();
+        let open = DelegateStatus::from_rpc(&json!({"allowlist_enforced": false, "listed": false}))
+            .unwrap();
         let t = open.warning("0xabc").join(" ");
-        assert!(t.contains("not on the network's list") && t.contains("does not enforce"), "{t}");
-        let shut = DelegateStatus::from_rpc(&json!({"allowlist_enforced": true, "listed": false})).unwrap();
+        assert!(
+            t.contains("not on the network's list") && t.contains("does not enforce"),
+            "{t}"
+        );
+        let shut = DelegateStatus::from_rpc(&json!({"allowlist_enforced": true, "listed": false}))
+            .unwrap();
         assert!(shut.warning("abc").join(" ").contains("will be refused"));
         assert!(DelegateStatus::from_rpc(&json!({})).is_none());
     }

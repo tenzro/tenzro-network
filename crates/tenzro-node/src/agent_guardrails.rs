@@ -175,7 +175,9 @@ impl TaintBook {
                 .filter(|(_, l)| now_ms.saturating_sub(l.at_ms) < TAINT_HOLD_MS);
             match held {
                 Some((did, stored_label)) => {
-                    let newer = labels.get(did).is_some_and(|l| l.at_ms >= stored_label.at_ms);
+                    let newer = labels
+                        .get(did)
+                        .is_some_and(|l| l.at_ms >= stored_label.at_ms);
                     if !newer {
                         labels.insert(did.to_string(), stored_label);
                     }
@@ -587,7 +589,11 @@ mod tests {
 
         let after = TaintBook::default();
         after.attach(store.clone(), 1_000 + TAINT_HOLD_MS);
-        assert!(after.get("did:tenzro:machine:old", 1_000 + TAINT_HOLD_MS).is_none());
+        assert!(
+            after
+                .get("did:tenzro:machine:old", 1_000 + TAINT_HOLD_MS)
+                .is_none()
+        );
         let left = store
             .scan_prefix(tenzro_storage::CF_METADATA, TAINT_KEY_PREFIX.as_bytes())
             .unwrap();
@@ -606,7 +612,10 @@ mod tests {
         book.set("did:tenzro:machine:c", "browse".into(), 9_000);
         book.set("did:tenzro:machine:d", "fetch".into(), 3_000);
         book.attach(store.clone(), 10_000);
-        assert_eq!(book.get("did:tenzro:machine:c", 10_000).unwrap().source, "browse");
+        assert_eq!(
+            book.get("did:tenzro:machine:c", 10_000).unwrap().source,
+            "browse"
+        );
 
         let restarted = TaintBook::default();
         restarted.attach(store, 10_000);

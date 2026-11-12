@@ -183,7 +183,37 @@ epoch of the block it executes. The convention, and the helper, live in
   that adds one starts on an existing data directory
   (docs/GENESIS-ROOT-UPGRADES.md).
 
-No rule is gated at present, so the registry has no `feature.` key yet.
+### The identity rule
+
+One rule is gated: a transaction from an account with no registered identity
+is refused at execution (`feature.identity_required.activation_epoch`).
+Registration (`RegisterIdentity`, key enrolment) and protocol records stay
+open to an unregistered account, and an account holding a validator bond is
+exempt, so the genesis validators keep producing blocks from block 1 and any
+other account can register itself. The registry value is never, so a running
+chain is untouched; the launch genesis names `0`, so the rule is live from
+the first block of a new network.
+
+Because a live rule's epoch is final, the rule carries a governed mode beside
+its gate, `feature.identity_required.mode`:
+
+| Value | Mode | What happens to an account or peer with no registered identity |
+|---|---|---|
+| `0` | enforce (genesis value) | refused at execution, and by every node's peer gate, mempool and edge |
+| `1` | audit | admitted everywhere; each admission enforce would have refused is logged |
+| `2` | off | admitted everywhere without a check |
+
+The mode moves by an ordinary `parameter_change`, with no new genesis and no
+release. Relaxing (to `1` or `2`) applies at the next epoch; a change to
+audit runs on the expedited track like pausing a status lever, a change to
+off on the standard track. Returning to enforce asks more of everyone the
+rule binds, so it waits out the tightening grace window
+(`governance.tightening_grace_epochs`). Every node reads the mode from chain
+state at admission time: while it is enforce, a node's peer gate, mempool
+and edge run in the node's own `[onboarding]` mode; once governance relaxes
+it, every node admits what the governed mode admits, with no restart and no
+config change. The execution rule is the same on every validator whatever a
+node's own `[onboarding]` table says.
 
 ## Jail
 
@@ -311,6 +341,53 @@ A key that is not a governed parameter, or a value outside its bounds,
 refuses the genesis. A parameter the file leaves out starts at the genesis
 value below.
 
+### Ordering rules
+
+Two consensus values decide what every validator must compute alike: the DAG
+rounds kept below the last committed leader (`gc_depth`, the floor of the
+ordering state) and the seats a committee apportions by stake
+(`seat_budget`, part of the committee root). They are the network's, not a
+node's, and are fixed in the genesis `[consensus]` table:
+
+```toml
+[consensus]
+gc_depth = 50
+seat_budget = 1000
+```
+
+A value the table leaves out is this release's default (50 rounds, 1,000
+seats) on every node. A value it names is committed by the genesis state
+root and `genesis_inputs_digest`; a genesis without the table keeps the
+digests it had. Each must be positive. A node's own `[consensus]` table keeps
+its local settings (round timing, batching, mempool limits), but a `gc_depth`
+or `seat_budget` in it is ignored with a warning naming the value the
+network applies, so two validators with different files derive the same
+committee and ordering state. They are not governed parameters: changing
+them is a protocol upgrade.
+
+### Validator registry rules
+
+The validator registry's configuration is committed chain state. Two of its
+rules have no governed parameter, so they are fixed in the genesis
+`[validator_registry]` table rather than compiled into a release:
+
+```toml
+[validator_registry]
+activation_churn_bps = 400     # validators activated per epoch, of the active set
+reentry_cooldown_epochs = 4    # epochs before an exited validator may register again
+```
+
+The table names both or neither; a partial table refuses the genesis. When
+named, genesis writes the registry configuration (these two, with the
+governed rules at their genesis values) where every node's registry reads
+it, and both genesis digests commit to the table. The governed rules are the
+validator self-stake floor (`stake.validator_tnzo`), the minimum self-stake
+of a validator that also serves RPC (`stake.rpc_tnzo`, the RPC operator
+bond), `staking.exit_churn_bps` and `slashing.jail_term_epochs`; each node
+reads them from chain state at the epoch's last block, so a vote that
+changes one moves the registry at the next boundary on every node alike. A
+genesis without the table writes nothing and keeps its digests.
+
 ## Every parameter
 
 `Tightens` is the direction that makes the rule stricter for those it binds:
@@ -383,6 +460,8 @@ a change that way waits out the grace window.
 | `evm.max_authorizations_per_tx` | 2 | 1 | 256 | down | Most EIP-7702 authorizations one set-code transaction may carry. A run of them over consecutive nonces is how a stolen key sweeps accounts. |
 | `evm.multiple_authorizations_per_signer_allowed` | 0 | 0 | 1 | down | Whether one signer may appear more than once in an EIP-7702 authorization list. Entries over consecutive nonces for one account are how a stolen key sweeps it. |
 | `evm.universal_authorization_allowed` | 0 | 0 | 1 | down | Whether an EIP-7702 authorization signed for every chain (chain id zero) is admitted. One signature then holds on each chain that admits it. |
+| `feature.identity_required.activation_epoch` | 4611686018427387904 | 0 | 4611686018427387904 | neither | First epoch whose blocks refuse a transaction from an account with no registered identity (RegisterIdentity, key enrolment and protocol records stay open; a bonded validator is exempt). Dormant until a vote sets it. |
+| `feature.identity_required.mode` | 0 | 0 | 2 | down | What the identity rule does once live, at execution and at every node's peer, mempool and edge admission: 0 enforce (refuse an account or peer with no registered identity), 1 audit (refuse nothing, log what enforce would refuse), 2 off. Relaxing applies at the next epoch, and a change to audit runs on the expedited track; returning to enforce waits out the tightening grace window. |
 | `fees.activity_reward_fee_bps` | 5000 | 0 | 9000 | neither | Most one settlement earns in ecosystem activity rewards, in basis points of the settlement fee it paid, shared by the apps, agents and tools its payer attributed it to. With mint.provider_reward_cost_bps and fees.creator_royalty_fee_bps it may add up to at most 9000, below the whole fee, so trading with oneself never pays. |
 | `fees.bandwidth_target_per_block` | 2500000 | 1 | 18446744073709551615 | neither | Gas worth of transaction bytes a block targets; the bandwidth base fee follows its own use against it. |
 | `fees.base_fee_change_denominator` | 8 | 2 | 1024 | neither | The base fee moves at most 1/this per block (8: 12.5%). |
@@ -467,7 +546,7 @@ a change that way waits out the grace window.
 | `governance.steward_sunset_ms` | 0 | 0 | 4102444800000 | neither | Block time after which Foundation steward seats hold no power; governance may only move it earlier. |
 | `governance.threshold_bps` | 6667 | 5001 | 9000 | neither | Share of participating stake that must vote yes on the standard track, bps. |
 | `governance.tightening_grace_epochs` | 168 | 0 | 2160 | down | Epochs a tightening parameter change (a higher bond, slash or fee, or a shorter window) waits after the next epoch boundary before it applies. At most 90 days. |
-| `governance.timelock_ms` | 172800000 | 86400000 | 2592000000 | neither | How long a passed standard proposal waits before it may execute, ms: the window in which guardians and holders can still respond. |
+| `governance.timelock_ms` | 172800000 | 14400000 | 2592000000 | neither | How long a passed standard proposal waits before it may execute, ms: the window in which guardians and holders can still respond. |
 | `governance.voting_period_ms` | 259200000 | 86400000 | 2592000000 | neither | Voting window on the standard and Ratify tracks, ms. A proposal keeps the rules it opened under. |
 | `grants.per_grantee_yearly_max_tnzo` | 0 | 0 | 1000000000 | down | Most treasury TNZO one approved grantee may be paid in a 365-day period, whole TNZO, whoever the grantee is. 0 disables grants. |
 | `grants.per_grantee_yearly_max_usd` | 0 | 0 | 1000000000 | down | Most one approved grantee may be paid in a stable asset in a 365-day period, whole US dollars. 0 disables stable grants. |
@@ -540,7 +619,7 @@ a change that way waits out the grace window.
 | `reward.availability_readiness_cold_bps` | 10000 | 0 | 10000 | down | Availability reward multiplier, bps, for a subject that declared ReadinessTier::Cold (a DeclareReadinessTier transaction signed by the account that owns its bond or stake). Genesis 100%: the tier changes no payout until governance sets it apart from Warm. |
 | `reward.availability_readiness_cool_bps` | 10000 | 0 | 10000 | down | Availability reward multiplier, bps, for a subject that declared ReadinessTier::Cool. Genesis 100%. |
 | `reward.availability_readiness_warm_bps` | 10000 | 0 | 10000 | down | Availability reward multiplier, bps, for ReadinessTier::Warm -- the default tier for any subject that has never declared one. Genesis 100%. |
-| `reward.availability_require_hardware_binding` | 0 | 0 | 1 | up | Whether the availability reward is paid at all: while zero (genesis) it pays nothing, whatever its cap, decay, demand offset or readiness tiers, because nothing ties a verdict to a real machine. Set, a verified-available verdict pays only when the subject's provider_did is a machine identity with a TPM endorsement chaining to a recognized root (the check validator admission uses). |
+| `reward.availability_require_hardware_binding` | 0 | 0 | 1 | up | Whether the availability reward is paid at all: while zero (genesis) it pays nothing, whatever its cap, decay, demand offset or readiness tiers, because nothing ties a verdict to a real machine. Set, a verified-available verdict pays only when the subject's provider_did is a machine identity with a TPM endorsement chaining to a recognised root (the check validator admission uses). |
 | `reward.sla_challenge_energy_budget_bps` | 0 | 0 | 1000 | neither | Most of the bonded compute fleet's own daily energy the SLA probe cadence may spend on challenges, bps. Zero disables the check. |
 | `rewards.base_liquid_bps` | 10000 | 0 | 10000 | neither | Share of a validator's running-cost base paid liquid when it claims, bps; the base is the operator's and is split before the rest of the claim. |
 | `rewards.claim_liquid_bps` | 2500 | 0 | 10000 | neither | Share of a reward claim paid liquid, bps; the rest vests. |
@@ -630,14 +709,14 @@ a change that way waits out the grace window.
 | `treasury.max_period_outflow_bps` | 300 | 1 | 10000 | down | Most the treasury pays out within one outflow period, bps of its balance when the period began. |
 | `treasury.max_proposal_outflow_bps` | 200 | 1 | 10000 | down | Most one proposal pays out of the treasury, bps of the treasury balance when it enacts. |
 | `treasury.max_sale_tnzo_epoch` | 10000 | 1 | 10000000 | neither | Most the running-cost reserve pays out in one epoch, whole TNZO, however much volume the reports show. A ceiling wash trading cannot raise. |
-| `treasury.month_epochs` | 720 | 1 | 8760 | neither | Epochs one treasury accounting month spans: the window realized revenue, paid running costs and the reserve target are measured over. |
+| `treasury.month_epochs` | 720 | 1 | 8760 | neither | Epochs one treasury accounting month spans: the window realised revenue, paid running costs and the reserve target are measured over. |
 | `treasury.outflow_period_ms` | 2592000000 | 3600000 | 31536000000 | up | Length of a treasury outflow period, ms. |
 | `treasury.payment_ttl_epochs` | 720 | 1 | 8760 | neither | Epochs an enacted running-cost payment stays payable; what the reserve's caps have not paid by then lapses, so a payment sized at one price is never paid out at a much later one. |
 | `treasury.proposal_outflow_exception_bps` | 0 | 0 | 500 | down | Basis points of the period's opening stable holdings one stable sponsorship payment may use above the period outflow limit when its proposal asks for the exception. The yearly USD caps and the per-proposal limit still bind. 0 disables the exception. |
 | `treasury.reserve_drawdown_bps` | 300 | 0 | 10000 | neither | Share of the running-cost reserve's balance running-cost payments may draw in a trailing month beyond the revenue share, bps. |
-| `treasury.reserve_fill_share_bps` | 5000 | 0 | 10000 | neither | Share of the fee revenue the treasury realized since the last epoch boundary that moves into the running-cost reserve at the boundary, while the reserve is under its target and only as far as the target, bps. |
+| `treasury.reserve_fill_share_bps` | 5000 | 0 | 10000 | neither | Share of the fee revenue the treasury realised since the last epoch boundary that moves into the running-cost reserve at the boundary, while the reserve is under its target and only as far as the target, bps. |
 | `treasury.reserve_target_months` | 12 | 0 | 120 | neither | The running-cost reserve's target, in months of observed running cost: the larger of what the reserve paid over the trailing month and what that month's revenue share allowed. |
-| `treasury.running_cost_revenue_share_bps` | 3000 | 0 | 10000 | neither | Share of the trailing month's realized fee revenue running-cost payments may use in that month, bps. |
+| `treasury.running_cost_revenue_share_bps` | 3000 | 0 | 10000 | neither | Share of the trailing month's realised fee revenue running-cost payments may use in that month, bps. |
 | `treasury.sale_volume_share_bps` | 500 | 0 | 10000 | neither | Most the running-cost reserve pays out in one epoch, bps of the TNZO the market traded in an epoch as the validators' volume reports observe it; no recent report, no payout. |
 | `treasury.sponsorship_grants_yearly_max_tnzo` | 0 | 0 | 1000000000 | down | Most treasury TNZO sponsorship and grants may pay out together in a 365-day period, whole TNZO. 0 disables both. |
 | `treasury.sponsorship_grants_yearly_max_usd` | 0 | 0 | 1000000000 | down | Most sponsorship and grants may pay together in stable assets in a 365-day period, whole US dollars. 0 disables both. |
@@ -647,7 +726,7 @@ a change that way waits out the grace window.
 | `tx.privileged_max_validity_ms` | 600000 | 1000 | 86400000 | down | Longest validity window for a privileged transaction (governance, guardian, issuer, agent Terms and kill-switch actions). |
 | `upgrade.activation_delay_blocks` | 1000 | 1 | 1000000 | neither | Blocks between an upgrade's enactment and the height from which every node runs the new binary. |
 | `upgrade.readiness_bps` | 6700 | 5001 | 10000 | neither | Share of bonded validator stake, in basis points, whose machines must have quoted the new binary before a protocol upgrade enacts. |
-| `validator.admission_approval` | 0 | 0 | 1 | up | 1: a new validator registers only from an account an enacted ApproveValidators proposal approved; 0: any account may register. Validators already registered, and those named at genesis, are not affected. |
+| `validator.admission_approval` | 0 | 0 | 1 | up | 1: closed: a validator registers and sits on a committee only if it is on the admitted set (the genesis validators and the accounts an enacted ApproveValidators proposal approved); 0: open: any account that meets the bond rules may. |
 | `validator.base_cap_tnzo_month` | 20000 | 0 | 10000000 | neither | Most base reward one validator earns, in whole TNZO a month, so a falling rate cannot raise it without bound. |
 | `validator.base_cost_usd_month` | 1500 | 0 | 100000 | neither | Running cost one active validator's base reward covers, in USD a month at the rate in force; one base per validator with recorded consensus work. |
 | `validator.sponsored_bond_max_tnzo` | 0 | 0 | 1000000000 | down | Most sponsored stake one validator may hold, bonded and unbonding, whole TNZO: existing treasury TNZO an enacted SponsorValidatorBond bonded on its behalf. It counts toward the bond and is slashable, never votes, earns nothing and returns to the treasury on recall or exit. 0 disables sponsorship. |

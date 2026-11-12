@@ -62,7 +62,10 @@ fn ejecting_the_dead_from_a_live_set_leaves_a_three_of_three_set_with_no_toleran
     // the set is four or more again.
     assert!(!advances(&c3, 2));
     let (c4, _) = committee(4);
-    assert!(advances(&c4, 3), "a replacement restores one failure of tolerance");
+    assert!(
+        advances(&c4, 3),
+        "a replacement restores one failure of tolerance"
+    );
 }
 
 #[test]
@@ -87,7 +90,10 @@ fn a_set_launched_at_three_f_plus_one_with_f_dead_has_no_spare_for_any_f() {
         assert!(advances(&c, live), "n = {n}: f dead still certifies");
         assert_eq!(headroom(&c, live), 0, "n = {n}: and nothing is spare");
         assert!(!advances(&c, live - 1), "n = {n}: one more loss halts");
-        assert!(!can_eject(&c, live - 1), "n = {n}: a halted set ejects nobody");
+        assert!(
+            !can_eject(&c, live - 1),
+            "n = {n}: a halted set ejects nobody"
+        );
     }
 }
 

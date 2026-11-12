@@ -52,6 +52,7 @@ pub mod config;
 pub mod da;
 pub mod error;
 pub mod kv;
+pub mod resources;
 pub mod state_trie;
 pub mod traits;
 

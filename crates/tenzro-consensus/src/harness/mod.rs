@@ -174,8 +174,8 @@ mod tests {
         assert!(r.common_height > 10, "{r:?}");
     }
 
-    /// Four equal validators, as the founding set of the network that
-    /// stalled on 2026-10-19: one of them is gone for good. With only two
+    /// Four equal validators, as the founding set of a network that
+    /// stalled: one of them is gone for good. With only two
     /// of the four running, nothing is certified and no epoch ever closes,
     /// so no validator-set change (an ejection included) can be reached.
     #[test]

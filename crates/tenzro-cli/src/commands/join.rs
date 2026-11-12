@@ -45,6 +45,17 @@ pub struct JoinCmd {
     /// local tenzro-node (or --rpc pointing at your node).
     #[arg(long)]
     pub provider: bool,
+
+    /// Show where your application for a staked role stands and the next
+    /// step: validator, edge, tee, rpc, attestor, wallet, catalog, ai,
+    /// compute or storage. Run it again at any time; it continues from
+    /// wherever you are.
+    #[arg(long)]
+    pub role: Option<String>,
+
+    /// Wallet address to check with --role (defaults to this machine's)
+    #[arg(long, requires = "role")]
+    pub wallet: Option<String>,
 }
 
 impl JoinCmd {
@@ -78,6 +89,19 @@ impl JoinCmd {
     }
 
     pub async fn execute(&self) -> Result<()> {
+        if let Some(role) = &self.role {
+            let role = crate::onboarding::role::JoinRole::parse(role).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown role `{role}`; use one of: validator, edge, tee, rpc, attestor, wallet, catalog, ai, compute, storage"
+                )
+            })?;
+            let rpc_url = self
+                .rpc
+                .clone()
+                .unwrap_or_else(|| crate::endpoint::resolve().0);
+            return crate::onboarding::flow::run_join_role(role, &rpc_url, self.wallet.clone())
+                .await;
+        }
         let rpc_url = self.rpc.clone().unwrap_or_else(|| {
             if self.provider {
                 "http://127.0.0.1:8545".to_string()
@@ -114,21 +138,51 @@ impl JoinCmd {
         let clean_name = self.name.trim_start_matches('@').to_string();
 
         // Step 2: provision the MicroNode identity + wallet.
-        let spinner = output::create_spinner("Provisioning MicroNode identity and wallet...");
+        let spinner = output::create_spinner("Provisioning identity and wallet...");
 
-        let result: serde_json::Value = rpc
-            .call(
+        let result: serde_json::Value = if self.r#type == "human" {
+            // A human identity is rooted in a passkey the node cannot mint:
+            // the wallet page runs the ceremony and this process relays the
+            // public key material to `tenzro_onboardHuman`.
+            spinner.finish_and_clear();
+            let ceremony = crate::onboarding::ceremony::run(
+                &rpc_url,
+                &clean_name,
+                crate::onboarding::ceremony::DEFAULT_TIMEOUT,
+            )
+            .await?;
+            let spinner = output::create_spinner("Registering your identity...");
+            let params = crate::onboarding::ceremony::build_onboard_params(&ceremony, &clean_name);
+            let onboarded: serde_json::Value =
+                rpc.call("tenzro_onboardHuman", params).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "The node refused the passkey enrolment: {e}\n\
+                         The passkey was created but no identity exists yet. \
+                         Run `tenzro join` again; the challenge expires after a few minutes."
+                    )
+                })?;
+            spinner.finish_and_clear();
+            onboarded
+        } else {
+            // A participant that is not a person is this machine: its wallet
+            // key is the CLI's own hardware account key, and the node is given
+            // the public half.
+            let (account, public) = crate::keystore::client_account("client")?;
+            rpc.call(
                 "tenzro_joinAsMicroNode",
                 serde_json::json!([{
                     "display_name": clean_name,
                     "origin": self.origin,
                     "participant_type": self.r#type,
+                    "public_key": hex::encode(&public.p256),
+                    "machine_id": account,
                 }]),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to join network: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to join network: {}", e))?
+        };
         spinner.finish_and_clear();
-        output::print_success("MicroNode provisioned on Tenzro Network");
+        output::print_success("Identity provisioned on Tenzro Network");
         let is_micro_node = true;
 
         // Extract identity from RPC response
@@ -299,10 +353,19 @@ impl JoinCmd {
         // client that holds the passkey. Export the result as
         // `TENZRO_BEARER_JWT` + `TENZRO_DPOP_PROOF` for subsequent privileged
         // calls.
-        println!();
-        output::print_info(
-            "To mint a DPoP-bound JWT for a human identity, onboard from the client that holds your passkey: tenzro_onboardHuman takes the passkey public key, its ML-DSA-65 key and an `authorization` signed by both over a tenzro_createCustodyChallenge `enroll_passkey` challenge. Then export TENZRO_BEARER_JWT + TENZRO_DPOP_PROOF for privileged calls.",
-        );
+        if self.r#type != "human" {
+            println!();
+            output::print_info(
+                "To mint a DPoP-bound JWT for a human identity, onboard from the client that holds your passkey: tenzro_onboardHuman takes the passkey public key, its ML-DSA-65 key and an `authorization` signed by both over a tenzro_createCustodyChallenge `enroll_passkey` challenge. Then export TENZRO_BEARER_JWT + TENZRO_DPOP_PROOF for privileged calls.",
+            );
+        }
+
+        if self.r#type != "human" {
+            output::print_info(
+                "This account sends transactions once its identity is on chain: fund it, \
+                 then run `tenzro identity register-account`.",
+            );
+        }
 
         // Provider path: hardware detection → funding → compute bond →
         // registration → default pricing → model pull + serve → TEE check.
@@ -388,6 +451,28 @@ const COMPUTE_BOND_POST_GAS: u64 = tenzro_types::constants::bond_gas::COMPUTE_BO
 
 /// Automatic provider provisioning against the node at `rpc`.
 ///
+/// The provider steps of a joined identity: registration, bond, pricing and
+/// the first model, saved to the config. `tenzro setup` runs this after its
+/// role and funding steps, once the identity and wallet exist.
+pub(crate) async fn provider_setup(rpc_url: &str, name: &str) -> Result<()> {
+    let mut cfg = config::load_config();
+    let (Some(did), Some(wallet)) = (cfg.did.clone(), cfg.wallet_address.clone()) else {
+        anyhow::bail!(
+            "provider setup needs the identity and wallet the previous step creates, and none is recorded. \
+             Fix: run `tenzro setup --restart`."
+        );
+    };
+    let rpc = RpcClient::new(rpc_url);
+    let (pricing, served_model) = run_provider_flow(&rpc, &did, &wallet, name).await?;
+    cfg.pricing = Some(pricing);
+    if let Some(model_id) = served_model
+        && !cfg.served_models.contains(&model_id)
+    {
+        cfg.served_models.push(model_id);
+    }
+    config::save_config(&cfg)
+}
+
 /// Returns the pricing that was set on the node plus the model id that
 /// ended up being served (None when no catalog model fits the hardware).
 async fn run_provider_flow(
@@ -460,8 +545,19 @@ async fn run_provider_flow(
     spinner.finish_and_clear();
     output::print_field("Balance", &crate::rpc::format_tnzo(balance_wei));
     if balance_wei < bond_wei {
+        // Ask the website where the application stands so the message below
+        // continues from there (the record is kept in the CLI config).
+        let _ = crate::onboarding::flow::snapshot(
+            rpc,
+            &crate::onboarding::flow::AnySource::from_env(),
+            crate::onboarding::role::JoinRole::ComputeProvider.slug(),
+            Some(crate::onboarding::role::JoinRole::ComputeProvider),
+            wallet_address,
+            bond_wei,
+        )
+        .await;
         let need = crate::commands::stake_options::StakeNeed {
-            role: "compute bond".to_string(),
+            role: "compute provider".to_string(),
             required_wei: bond_wei,
             balance_wei: Some(balance_wei),
             account: wallet_address.to_string(),

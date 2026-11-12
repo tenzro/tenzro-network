@@ -72,6 +72,143 @@ pub struct RelayRoleConfig {
 /// How often the record loop runs.
 const TICK: Duration = Duration::from_secs(60);
 
+/// How often the record loop runs while a relay the node waits for has not
+/// answered but another is in use.
+const RELAY_RETRY: Duration = Duration::from_secs(20);
+
+/// Most relays a node takes on from other validators' records.
+pub const MAX_LEARNED_RELAYS: usize = 4;
+
+/// Most relay URLs one dialed address carries.
+const MAX_DIAL_RELAYS: usize = 4;
+
+/// Most direct addresses one dialed address carries.
+const MAX_DIAL_DIRECT: usize = 4;
+
+/// What every address this process dials is given beside what its record
+/// names: the relays in use (a peer whose relay failed moved to another one,
+/// and its record may not say so yet) and the direct addresses its path last
+/// used or the operator fixed.
+#[derive(Default)]
+struct DialHints {
+    relays: Vec<Url>,
+    direct: std::collections::HashMap<EndpointId, Vec<SocketAddr>>,
+    fixed: std::collections::BTreeMap<String, Vec<SocketAddr>>,
+    version: u64,
+}
+
+struct SharedHints(std::sync::RwLock<DialHints>);
+
+fn dial_hints() -> &'static SharedHints {
+    static HINTS: std::sync::OnceLock<SharedHints> = std::sync::OnceLock::new();
+    HINTS.get_or_init(|| SharedHints(std::sync::RwLock::new(DialHints::default())))
+}
+
+impl SharedHints {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, DialHints> {
+        self.0.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, DialHints> {
+        self.0.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn add_to(&self, addr: &mut EndpointAddr, did: &str) {
+        add_relays(addr, &self.read().relays);
+        self.add_direct_to(addr, did);
+    }
+
+    fn add_direct_to(&self, addr: &mut EndpointAddr, did: &str) {
+        let h = self.read();
+        let fixed = h.fixed.get(did).into_iter().flatten();
+        let direct = h.direct.get(&addr.id).into_iter().flatten();
+        for sa in fixed
+            .chain(direct)
+            .take(MAX_DIAL_DIRECT)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            *addr = addr.clone().with_ip_addr(sa);
+        }
+    }
+
+    fn add_relays(&self, urls: &[Url]) {
+        let mut h = self.write();
+        for url in urls {
+            if !h.relays.contains(url) {
+                h.relays.push(url.clone());
+            }
+        }
+    }
+
+    fn set_fixed(&self, fixed: std::collections::BTreeMap<String, Vec<SocketAddr>>) {
+        self.write().fixed = fixed;
+    }
+
+    fn set_direct(&self, id: EndpointId, mut addrs: Vec<SocketAddr>) {
+        addrs.truncate(MAX_DIAL_DIRECT);
+        let mut h = self.write();
+        if h.direct.get(&id) != Some(&addrs) {
+            h.direct.insert(id, addrs);
+            h.version += 1;
+        }
+    }
+
+    /// Writes the remembered direct addresses to `path` when they changed
+    /// since `saved`; returns the version now saved.
+    fn save(&self, path: &std::path::Path, saved: u64) -> u64 {
+        let h = self.read();
+        if h.version == saved {
+            return saved;
+        }
+        let map: std::collections::BTreeMap<String, &Vec<SocketAddr>> =
+            h.direct.iter().map(|(id, a)| (id.to_string(), a)).collect();
+        let Ok(json) = serde_json::to_vec(&map) else {
+            return saved;
+        };
+        let tmp = path.with_extension("tmp");
+        let wrote = path
+            .parent()
+            .is_none_or(|d| std::fs::create_dir_all(d).is_ok())
+            && std::fs::write(&tmp, json).is_ok()
+            && std::fs::rename(&tmp, path).is_ok();
+        if wrote { h.version } else { saved }
+    }
+
+    /// Takes back what [`Self::save`] wrote; a missing or damaged file adds nothing.
+    fn restore(&self, path: &std::path::Path) {
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        let Ok(map) =
+            serde_json::from_slice::<std::collections::BTreeMap<String, Vec<SocketAddr>>>(&bytes)
+        else {
+            return;
+        };
+        for (id, addrs) in map {
+            if let Ok(id) = id.parse::<EndpointId>() {
+                self.set_direct(id, addrs);
+            }
+        }
+    }
+}
+
+/// Gives `addr` the relays among `urls` it does not name yet, up to the most
+/// one dialed address carries.
+fn add_relays(addr: &mut EndpointAddr, urls: &[Url]) {
+    let mut relays = addr.relay_urls().count();
+    for url in urls {
+        if relays >= MAX_DIAL_RELAYS {
+            break;
+        }
+        let url = RelayUrl::from(url.clone());
+        if !addr.relay_urls().any(|u| *u == url) {
+            *addr = addr.clone().with_relay_url(url);
+            relays += 1;
+        }
+    }
+}
+
 /// How often the record loop runs while a boot identity is unresolved.
 const BOOT_RETRY: Duration = Duration::from_secs(5);
 
@@ -128,11 +265,22 @@ pub fn iroh_endpoint(record: &EndpointRecord) -> IrohResult<EndpointId> {
 /// How to dial the iroh endpoint a record names: its id and the relays it
 /// names, its own relay first when it serves one. Never an IP address.
 pub fn endpoint_addr(record: &EndpointRecord) -> IrohResult<EndpointAddr> {
+    addr_with(record, |addr| {
+        dial_hints().add_to(addr, &record.machine_did())
+    })
+}
+
+/// The address a record names, with what `hints` adds to it.
+fn addr_with(
+    record: &EndpointRecord,
+    hints: impl FnOnce(&mut EndpointAddr),
+) -> IrohResult<EndpointAddr> {
     let id = iroh_endpoint(record)?;
     let mut addr = EndpointAddr::new(id);
     for relay in &record.relays {
         addr = addr.with_relay_url(RelayUrl::from(relay.url.clone()));
     }
+    hints(&mut addr);
     let forwarders = record
         .forwarders
         .iter()
@@ -163,8 +311,19 @@ pub fn endpoint_id_of(key: &EndpointKey) -> IrohResult<EndpointId> {
 /// through `store`. With no relays the endpoint relays nothing; with no
 /// store it looks nothing up.
 pub fn with_relays(
-    mut builder: Builder,
+    builder: Builder,
     relays: &[RelayRef],
+    store: Option<Arc<DiscoveryStore>>,
+) -> Builder {
+    let urls: Vec<Url> = relays.iter().map(|r| r.url.clone()).collect();
+    with_relay_urls(builder, &urls, store)
+}
+
+/// [`with_relays`] for relays named by URL alone: the admitted ones and those
+/// still waited on.
+pub fn with_relay_urls(
+    mut builder: Builder,
+    relays: &[Url],
     store: Option<Arc<DiscoveryStore>>,
 ) -> Builder {
     if relays.is_empty() {
@@ -172,7 +331,7 @@ pub fn with_relays(
     } else {
         let map: RelayMap = relays
             .iter()
-            .map(|r| RelayConfig::new(RelayUrl::from(r.url.clone()), None))
+            .map(|url| RelayConfig::new(RelayUrl::from(url.clone()), None))
             .collect();
         builder = builder.relay_mode(RelayMode::Custom(map));
     }
@@ -247,11 +406,21 @@ pub struct IdentityTransport {
     store: Arc<DiscoveryStore>,
     boot: Vec<BootIdentity>,
     relays: Vec<RelayRef>,
+    /// Relays admitted after the endpoint was bound.
+    late: Mutex<Vec<RelayRef>>,
+    /// Relay URLs this node waits to admit: named at start or learned from a
+    /// validator's record, and not answering yet.
+    pending: Mutex<Vec<Url>>,
+    /// Operators whose record may name a further relay (the boot list, and
+    /// the validators the node adds).
+    relay_operators: Mutex<std::collections::HashSet<String>>,
     own_relay: Option<Url>,
     /// Held so the relay role keeps serving while the transport lives.
     _relay_server: Option<RelayServer>,
     scope: Mutex<RecordScope>,
     accepted_licences: Mutex<Vec<String>>,
+    /// The software this machine states in its record, once the node declared it.
+    update: Mutex<Option<crate::update_advert::UpdateAdvert>>,
     current: Mutex<Option<EndpointRecord>>,
     /// The addresses peers saw this node at.
     observations: Mutex<Observations>,
@@ -291,6 +460,24 @@ impl IdentityTransport {
         relay_role: Option<&RelayRoleConfig>,
         machine_did: Option<String>,
     ) -> IrohResult<Arc<Self>> {
+        Self::start_with_limits(
+            boot,
+            staked_relays,
+            relay_role,
+            machine_did,
+            crate::relay::RelayLimits::default(),
+        )
+        .await
+    }
+
+    /// [`Self::start`] with the limits the relay role runs under.
+    pub async fn start_with_limits(
+        boot: Vec<BootIdentity>,
+        staked_relays: &[Url],
+        relay_role: Option<&RelayRoleConfig>,
+        machine_did: Option<String>,
+        relay_limits: crate::relay::RelayLimits,
+    ) -> IrohResult<Arc<Self>> {
         let store = Arc::new(DiscoveryStore::new());
         let mut relays = Vec::new();
         let (relay_server, own_relay) = match relay_role {
@@ -302,13 +489,9 @@ impl IdentityTransport {
                             .to_string(),
                     )
                 })?;
-                let server = RelayServer::spawn(
-                    role.bind_addr,
-                    store.clone(),
-                    did.clone(),
-                    crate::relay::RelayLimits::default(),
-                )
-                .await?;
+                let server =
+                    RelayServer::spawn(role.bind_addr, store.clone(), did.clone(), relay_limits)
+                        .await?;
                 tracing::info!(listen = %server.local_addr(), url = %role.public_url, "relay role serving");
                 relays.push(RelayRef {
                     did,
@@ -333,6 +516,7 @@ impl IdentityTransport {
         let mut seen = std::collections::HashSet::new();
         staked.retain(|url| seen.insert(*url));
         let patient = candidates.len();
+        let mut pending: Vec<Url> = Vec::new();
         let fetched = futures::future::join_all(
             candidates
                 .iter()
@@ -366,27 +550,37 @@ impl IdentityTransport {
                     }
                     relays.push(relay);
                 }
-                Err(e) => tracing::warn!(relay = %url, error = %e, "relay not admitted"),
+                Err(e) => {
+                    tracing::warn!(relay = %url, error = %e, "relay not admitted; asking again each round");
+                    pending.push(url.clone());
+                }
             }
         }
         let pq_channel = crate::pq_endpoint::PqChannel::new(store.clone());
-        Ok(Arc::new(Self {
+        let relay_operators = boot.iter().map(|b| b.did.clone()).collect();
+        let transport = Arc::new(Self {
             store,
             pq_channel,
             machine_pq: std::sync::OnceLock::new(),
             boot,
             relays,
+            late: Mutex::new(Vec::new()),
+            pending: Mutex::new(pending),
+            relay_operators: Mutex::new(relay_operators),
             own_relay,
             _relay_server: relay_server,
             scope: Mutex::new(RecordScope::Network),
             accepted_licences: Mutex::new(Vec::new()),
+            update: Mutex::new(None),
             current: Mutex::new(None),
             observations: Mutex::new(Observations::default()),
             external: Mutex::new(Vec::new()),
             relay_checks: Mutex::new(std::collections::BTreeMap::new()),
             paths: crate::paths::Paths::new(),
             peer_relay: std::sync::OnceLock::new(),
-        }))
+        });
+        transport.publish_relay_hints();
+        Ok(transport)
     }
 
     /// Binds this node's records with the machine's hardware ML-DSA key
@@ -402,10 +596,11 @@ impl IdentityTransport {
         if self.machine_pq.set(machine.clone()).is_err() {
             return false;
         }
-        self.pq_channel.set_own_key(crate::pq_endpoint::ChannelKeys {
-            p256: channel,
-            ml_dsa: machine,
-        })
+        self.pq_channel
+            .set_own_key(crate::pq_endpoint::ChannelKeys {
+                p256: channel,
+                ml_dsa: machine,
+            })
     }
 
     /// The records and ML-DSA endpoint key the versioned RPC ALPNs use.
@@ -425,6 +620,192 @@ impl IdentityTransport {
         &self.relays
     }
 
+    /// Every relay this node uses now: those admitted at start, then those
+    /// admitted since.
+    pub fn live_relays(&self) -> Vec<RelayRef> {
+        let mut all = self.relays.clone();
+        all.extend(self.late.lock().iter().cloned());
+        all
+    }
+
+    /// The URLs the endpoint's relay map holds: the relays in use and those
+    /// still waited on.
+    pub fn endpoint_relay_urls(&self) -> Vec<Url> {
+        let mut urls: Vec<Url> = self.live_relays().into_iter().map(|r| r.url).collect();
+        for url in self.pending.lock().iter() {
+            if !urls.contains(url) {
+                urls.push(url.clone());
+            }
+        }
+        urls
+    }
+
+    /// Adds relays to wait for beside the boot list's: `urls` are admitted by
+    /// their operators' records, each round until they answer. Returns how
+    /// many were new.
+    pub fn add_relay_candidates(&self, urls: &[Url]) -> usize {
+        let live: Vec<Url> = self.live_relays().into_iter().map(|r| r.url).collect();
+        let mut pending = self.pending.lock();
+        let mut added = 0;
+        for url in urls {
+            if Some(url) != self.own_relay.as_ref() && !live.contains(url) && !pending.contains(url)
+            {
+                pending.push(url.clone());
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Lets the records of `dids` name further relays (`serves_relay`): the
+    /// validators of the network, which each may serve one beside the
+    /// primary. The boot list's identities are trusted already.
+    pub fn trust_relay_operators(&self, dids: impl IntoIterator<Item = String>) {
+        self.relay_operators.lock().extend(dids);
+    }
+
+    /// Direct addresses to try for the machines in `fixed`, beside the
+    /// relays their records name.
+    pub fn set_static_addrs(&self, fixed: std::collections::BTreeMap<String, Vec<SocketAddr>>) {
+        dial_hints().set_fixed(fixed);
+    }
+
+    /// Takes relays named by the records of trusted operators as candidates:
+    /// at most [`MAX_LEARNED_RELAYS`] in all.
+    fn learn_relays(&self) {
+        let operators = self.relay_operators.lock().clone();
+        let known: Vec<Url> = self.endpoint_relay_urls();
+        let mut fresh = Vec::new();
+        for record in self.store.records() {
+            let Some(url) = record.serves_relay.clone() else {
+                continue;
+            };
+            if operators.contains(&record.machine_did())
+                && Some(&url) != self.own_relay.as_ref()
+                && !known.contains(&url)
+                && !fresh.contains(&url)
+            {
+                fresh.push(url);
+            }
+        }
+        let room =
+            MAX_LEARNED_RELAYS.saturating_sub(self.late.lock().len() + self.pending.lock().len());
+        fresh.truncate(room);
+        if !fresh.is_empty() {
+            tracing::info!(
+                relays = fresh.len(),
+                "relays named by validators' records are candidates"
+            );
+            self.add_relay_candidates(&fresh);
+        }
+    }
+
+    /// Admits each relay still waited on whose operator's record can be
+    /// fetched now, and adds it to the running endpoint's relay map, so a
+    /// relay that was down at start, or that a validator announced later,
+    /// carries traffic without a restart.
+    pub async fn admit_pending(&self, endpoint: &Endpoint) {
+        self.learn_relays();
+        let urls = self.pending.lock().clone();
+        if urls.is_empty() {
+            return;
+        }
+        let fetched = futures::future::join_all(urls.iter().map(|url| async move {
+            tokio::time::timeout(ASK_TIMEOUT, fetch_relay_record(url))
+                .await
+                .map_err(|_| IrohError::Backend("timed out".into()))
+                .and_then(|r| r)
+        }))
+        .await;
+        for (url, fetched) in urls.into_iter().zip(fetched) {
+            match fetched {
+                Ok(record) => {
+                    let relay = RelayRef {
+                        did: record.machine_did(),
+                        url: url.clone(),
+                    };
+                    if let Err(e) = self.store.offer(record) {
+                        tracing::warn!(relay = %url, error = %e, "relay operator record not kept");
+                    }
+                    self.pending.lock().retain(|u| *u != url);
+                    {
+                        let mut late = self.late.lock();
+                        if !late.contains(&relay) && !self.relays.contains(&relay) {
+                            late.push(relay.clone());
+                        }
+                    }
+                    let id = RelayUrl::from(url.clone());
+                    endpoint
+                        .insert_relay(id.clone(), Arc::new(RelayConfig::new(id, None)))
+                        .await;
+                    tracing::info!(relay = %url, operator = %relay.did, "relay admitted by its operator's record");
+                }
+                Err(e) => tracing::debug!(relay = %url, error = %e, "relay not answering yet"),
+            }
+        }
+        self.publish_relay_hints();
+    }
+
+    /// How this node dials the endpoint a record names: as [`endpoint_addr`]
+    /// does, with the relays this node uses now, whatever else runs in the
+    /// process.
+    pub fn dial_addr(&self, record: &EndpointRecord) -> IrohResult<EndpointAddr> {
+        let urls: Vec<Url> = self.live_relays().into_iter().map(|r| r.url).collect();
+        addr_with(record, |addr| {
+            add_relays(addr, &urls);
+            dial_hints().add_direct_to(addr, &record.machine_did());
+        })
+    }
+
+    /// Makes every address this process dials carry the relays in use.
+    fn publish_relay_hints(&self) {
+        let urls: Vec<Url> = self.live_relays().into_iter().map(|r| r.url).collect();
+        dial_hints().add_relays(&urls);
+    }
+
+    /// Remembers the direct addresses the paths to peers are using now, so a
+    /// dial can try them without any relay, and the next start can too.
+    pub async fn remember_direct_addrs(&self, endpoint: &Endpoint) {
+        for record in self.store.records().into_iter().take(SYNC_FANOUT * 2) {
+            let Ok(id) = iroh_endpoint(&record) else {
+                continue;
+            };
+            if id == endpoint.id() {
+                continue;
+            }
+            if let Some(info) = endpoint.remote_info(id).await {
+                let direct: Vec<SocketAddr> = info
+                    .addrs()
+                    .filter(|a| matches!(a.usage(), iroh::endpoint::TransportAddrUsage::Active))
+                    .filter_map(|a| match a.addr() {
+                        iroh::TransportAddr::Ip(sa) => Some(*sa),
+                        _ => None,
+                    })
+                    .collect();
+                if !direct.is_empty() {
+                    dial_hints().set_direct(id, direct);
+                }
+            }
+        }
+    }
+
+    /// Takes back the direct addresses saved at `path` and keeps them saved
+    /// while the node runs.
+    pub fn keep_direct_addrs(self: &Arc<Self>, path: std::path::PathBuf) {
+        dial_hints().restore(&path);
+        let this = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut saved = 0u64;
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if this.upgrade().is_none() {
+                    return;
+                }
+                saved = dial_hints().save(&path, saved);
+            }
+        });
+    }
+
     /// This node's discovery store.
     pub fn store(&self) -> &Arc<DiscoveryStore> {
         &self.store
@@ -432,8 +813,9 @@ impl IdentityTransport {
 
     /// Scopes this machine's record, and the records this node answers, to
     /// the epoch set `members`: from the next renewal the record is shared
-    /// only with peers a member certifies. A private node keeps sharing its
-    /// record with its counterparties only.
+    /// only with peers a member certifies and with the machines on this
+    /// node's own boot list. A private node keeps sharing its record with
+    /// its counterparties only.
     ///
     /// A machine that serves a relay keeps its own record network-scoped: its
     /// relay is reached by every node of the network, which admits it by that
@@ -499,12 +881,30 @@ impl IdentityTransport {
         Ok(())
     }
 
+    /// States in this machine's record, from the next renewal, the software it
+    /// runs. A record already signed is replaced only when the advert changed.
+    pub fn declare_update(&self, advert: crate::update_advert::UpdateAdvert) {
+        let mut held = self.update.lock();
+        if held.as_ref() != Some(&advert) {
+            *held = Some(advert);
+            drop(held);
+            *self.current.lock() = None;
+        }
+    }
+
     /// Whether this machine's record, under its current scope, may be
-    /// published to `did`.
+    /// published to `did`. A record scoped to the epoch set also goes to the
+    /// machines on this node's own boot list, the entry points its operator
+    /// chose: a boot machine admits this node in full, relays for it and
+    /// dials it only when it holds the record that names this node's
+    /// endpoint. A boot machine outside the set keeps the record and answers
+    /// it to no one.
     fn publishes_to(&self, did: &str) -> bool {
         match &*self.scope.lock() {
             RecordScope::Network => true,
-            RecordScope::EpochSet => self.store.in_epoch_set(did),
+            RecordScope::EpochSet => {
+                self.store.in_epoch_set(did) || self.boot.iter().any(|b| b.did == did)
+            }
             RecordScope::Counterparties(list) => list.iter().any(|d| d == did),
         }
     }
@@ -517,7 +917,7 @@ impl IdentityTransport {
             .filter_map(|b| {
                 self.store
                     .lookup(&b.did)
-                    .and_then(|r| endpoint_addr(&r).ok())
+                    .and_then(|r| self.dial_addr(&r).ok())
                     .map(|a| (b.did.clone(), a))
             })
             .collect()
@@ -526,7 +926,8 @@ impl IdentityTransport {
     /// Fetches the record of `machine` from the peer itself, when that peer
     /// disclosed its endpoint `peer` to this node and no record of it naming
     /// that endpoint is held yet. A record scoped to the epoch set reaches
-    /// no one outside it, so a member first learns the record of another
+    /// no one outside it but its owner's boot machines, which pass it on to
+    /// no one, so a member first learns the record of another
     /// from that member: it reaches the endpoint through the relay the boot
     /// list names for the machine, or else through its own relays, hands it
     /// this node's record so the peer can certify it, and asks for the
@@ -594,10 +995,9 @@ impl IdentityTransport {
     /// connection to. An endpoint is reached through a relay only while it
     /// is connected there, so its record names those and no others.
     fn reachable_through(&self, home: &[Url]) -> Vec<RelayRef> {
-        self.relays
-            .iter()
+        self.live_relays()
+            .into_iter()
             .filter(|r| home.contains(&r.url))
-            .cloned()
             .collect()
     }
 
@@ -611,6 +1011,9 @@ impl IdentityTransport {
         home: &[Url],
         signer: &dyn HardwareSigner,
     ) -> Option<EndpointRecord> {
+        // Nothing waits on a record under a deadline: its signatures go
+        // behind votes at the TPM, and are held back while the chip stalls.
+        let _defer = tenzro_device_key::defer_tpm();
         let now = now_ms();
         let relays = self.reachable_through(home);
         let forwarders: Vec<EndpointKey> = self
@@ -632,6 +1035,7 @@ impl IdentityTransport {
                 && r.relays == relays
                 && r.forwarders == forwarders
                 && r.pq.is_some() == self.machine_pq.get().is_some()
+                && r.update.as_ref().map(|u| &u.advert) == self.update.lock().as_ref()
         }) {
             return Some(r.clone());
         }
@@ -650,14 +1054,19 @@ impl IdentityTransport {
             now,
         ) {
             Ok(mut record) => {
-                if let (Some(machine), Some(_)) =
-                    (self.machine_pq.get(), self.pq_channel.own_key())
+                if let (Some(machine), Some(_)) = (self.machine_pq.get(), self.pq_channel.own_key())
                     && let Err(e) = record.bind_pq(machine.as_ref())
                 {
                     // An unbound record would be refused by every peer
                     // that holds this identity's key, so none is signed.
                     tracing::warn!(error = %e, "binding this machine's endpoint record failed");
                     return current.clone();
+                }
+                if let Some(advert) = self.update.lock().clone()
+                    && let Err(e) = record.attach_update(signer, advert)
+                {
+                    // The advert is informational: the record is still good without it.
+                    tracing::warn!(error = %e, "stating this machine's software in its endpoint record failed");
                 }
                 if let Err(e) = self.store.offer(record.clone()) {
                     tracing::warn!(error = %e, "own endpoint record not kept");
@@ -681,7 +1090,7 @@ impl IdentityTransport {
         endpoint: &Endpoint,
         signer: Option<&'static dyn HardwareSigner>,
     ) {
-        self.choose_forwarders(endpoint).await;
+        let silent = self.choose_forwarders(endpoint).await;
         let own = match signer {
             Some(s) => {
                 let (this, id) = (self.clone(), endpoint.id());
@@ -709,48 +1118,62 @@ impl IdentityTransport {
             }
         }
         peers.retain(|r| {
-            Some(r.machine_did()) != own_did && iroh_endpoint(r).is_ok_and(|id| id != endpoint.id())
+            Some(r.machine_did()) != own_did
+                && iroh_endpoint(r).is_ok_and(|id| id != endpoint.id() && !silent.contains(&id))
         });
         peers.truncate(SYNC_FANOUT);
-        let observers = peers.clone();
-        for peer in peers {
-            let Ok(addr) = endpoint_addr(&peer) else {
-                continue;
-            };
-            if let Some(own) = own
+        // The peers are asked at once, and one that lets a question time out,
+        // here or as a forwarder before, is asked nothing more this round: a
+        // peer that is gone costs the round one timeout and holds no other
+        // peer back.
+        let exchanges = peers.into_iter().map(|peer| {
+            let own = own
                 .as_ref()
                 .filter(|_| self.publishes_to(&peer.machine_did()))
-            {
-                let publish = DiscoveryRequest::Publish(own.clone());
-                if let Err(e) =
-                    tokio::time::timeout(ASK_TIMEOUT, ask(endpoint, addr.clone(), &publish)).await
-                {
-                    tracing::debug!(peer = %peer.machine_did(), error = %e, "publish timed out");
-                }
-            }
-            match tokio::time::timeout(
-                ASK_TIMEOUT,
-                ask(endpoint, addr, &DiscoveryRequest::Snapshot),
-            )
-            .await
-            {
-                Ok(Ok(DiscoveryResponse::Records(records))) => {
-                    for r in records {
-                        // A stale or foreign record is refused by the store.
-                        let _ = self.store.offer(r);
+                .cloned();
+            async move {
+                let addr = self.dial_addr(&peer).ok()?;
+                if let Some(own) = own {
+                    let publish = DiscoveryRequest::Publish(own);
+                    if let Err(e) =
+                        tokio::time::timeout(ASK_TIMEOUT, ask(endpoint, addr.clone(), &publish))
+                            .await
+                    {
+                        tracing::debug!(peer = %peer.machine_did(), error = %e, "publish timed out");
+                        return None;
                     }
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    tracing::debug!(peer = %peer.machine_did(), error = %e, "snapshot failed")
+                match tokio::time::timeout(
+                    ASK_TIMEOUT,
+                    ask(endpoint, addr, &DiscoveryRequest::Snapshot),
+                )
+                .await
+                {
+                    Ok(Ok(DiscoveryResponse::Records(records))) => {
+                        for r in records {
+                            // A stale or foreign record is refused by the store.
+                            let _ = self.store.offer(r);
+                        }
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        tracing::debug!(peer = %peer.machine_did(), error = %e, "snapshot failed")
+                    }
+                    Err(e) => {
+                        tracing::debug!(peer = %peer.machine_did(), error = %e, "snapshot timed out");
+                        return None;
+                    }
                 }
-                Err(e) => {
-                    tracing::debug!(peer = %peer.machine_did(), error = %e, "snapshot timed out")
-                }
+                Some(peer)
             }
-        }
-        self.observe(endpoint, &observers).await;
-        self.punch_peers(endpoint, &observers).await;
+        });
+        let answering: Vec<EndpointRecord> = futures::future::join_all(exchanges)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        self.observe(endpoint, &answering).await;
+        self.punch_peers(endpoint, &answering).await;
     }
 
     /// Behind an endpoint-dependent NAT, tries to punch a direct path to
@@ -762,7 +1185,7 @@ impl IdentityTransport {
             if tried >= PUNCH_FANOUT {
                 return;
             }
-            let Ok(addr) = endpoint_addr(peer) else {
+            let Ok(addr) = self.dial_addr(peer) else {
                 continue;
             };
             if !self.paths.punch_due(&addr.id) {
@@ -786,7 +1209,7 @@ impl IdentityTransport {
     /// `endpoint` and withdraws the ones they no longer report.
     async fn observe(&self, endpoint: &Endpoint, peers: &[EndpointRecord]) {
         let asks = peers.iter().take(OBSERVE_FANOUT).filter_map(|peer| {
-            let addr = endpoint_addr(peer).ok()?;
+            let addr = self.dial_addr(peer).ok()?;
             let did = peer.machine_did();
             Some(async move {
                 match tokio::time::timeout(
@@ -877,33 +1300,38 @@ impl IdentityTransport {
     /// lowest round-trip time among the relay operators this node admitted,
     /// counting only those reached on a direct path (a forwarder reached
     /// through a relay adds nothing). A node peers reach directly at its own
-    /// address keeps none.
-    pub async fn choose_forwarders(&self, endpoint: &Endpoint) {
+    /// address keeps none. Returns the candidates that let the connection
+    /// time out.
+    pub async fn choose_forwarders(&self, endpoint: &Endpoint) -> Vec<EndpointId> {
         let local = reachability::local_ips(endpoint);
         if self.observations.lock().nat_kind(&local, now_ms()) == reachability::NatKind::None {
             self.paths.offer(&[]);
-            return;
+            return Vec::new();
         }
         let candidates: Vec<EndpointAddr> = self
-            .relays
+            .live_relays()
             .iter()
             .filter(|r| Some(&r.url) != self.own_relay.as_ref())
             .filter_map(|r| self.store.lookup(&r.did))
-            .filter_map(|record| endpoint_addr(&record).ok())
+            .filter_map(|record| self.dial_addr(&record).ok())
             .filter(|addr| addr.id != endpoint.id())
             .take(MAX_FORWARDER_CANDIDATES)
             .collect();
         let tried = futures::future::join_all(candidates.into_iter().map(|addr| async move {
             let id = addr.id;
-            tokio::time::timeout(ASK_TIMEOUT, self.paths.connect_forwarder(addr))
+            let connected = tokio::time::timeout(ASK_TIMEOUT, self.paths.connect_forwarder(addr))
                 .await
-                .ok()
-                .and_then(Result::ok)
-                .map(|_| id)
+                .map(|r| r.is_ok());
+            (id, connected)
         }))
         .await;
+        let silent: Vec<EndpointId> = tried
+            .iter()
+            .filter(|(_, connected)| connected.is_err())
+            .map(|(id, _)| *id)
+            .collect();
         // Give hole punching to the forwarders a moment before judging.
-        if tried.iter().any(Option::is_some) {
+        if tried.iter().any(|(_, connected)| *connected == Ok(true)) {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
         let mut direct: Vec<(EndpointId, Duration)> = self
@@ -919,11 +1347,12 @@ impl IdentityTransport {
             .map(|(id, _)| id)
             .collect();
         self.paths.offer(&keep);
+        silent
     }
 
     /// Whether this node admitted `url` as one of its relays.
     pub fn uses_relay(&self, url: &str) -> bool {
-        self.relays.iter().any(|r| r.url.as_str() == url)
+        self.live_relays().iter().any(|r| r.url.as_str() == url)
     }
 
     /// What this node knows about its reachability on `endpoint`.
@@ -974,11 +1403,23 @@ impl IdentityTransport {
         };
         loop {
             self.sync_once(&endpoint, signer).await;
+            self.admit_pending(&endpoint).await;
+            self.remember_direct_addrs(&endpoint).await;
             let unresolved = self
                 .boot
                 .iter()
                 .any(|b| Some(&b.did) != own.as_ref() && self.store.lookup(&b.did).is_none());
-            let wait = if unresolved { BOOT_RETRY } else { TICK };
+            let (relayless, waiting) = (
+                self.live_relays().is_empty(),
+                !self.pending.lock().is_empty(),
+            );
+            let wait = if unresolved || (relayless && waiting) {
+                BOOT_RETRY
+            } else if waiting {
+                RELAY_RETRY
+            } else {
+                TICK
+            };
             tokio::select! {
                 _ = endpoint.closed() => return,
                 _ = tokio::time::sleep(wait) => {}
@@ -1279,9 +1720,9 @@ mod tests {
             let transport = IdentityTransport::start(boot, &[], role.as_ref(), Some(key.did()))
                 .await
                 .unwrap();
-            let mut builder = transport.paths().install(with_relays(
+            let mut builder = transport.paths().install(with_relay_urls(
                 base_builder(),
-                transport.relays(),
+                &transport.endpoint_relay_urls(),
                 Some(transport.store().clone()),
             ));
             if relay_only {
@@ -1412,7 +1853,7 @@ mod tests {
                 dialed = true;
                 let conn = node
                     .endpoint
-                    .connect(endpoint_addr(&record).unwrap(), ECHO_ALPN)
+                    .connect(node.transport.dial_addr(&record).unwrap(), ECHO_ALPN)
                     .await
                     .expect("dial the target");
                 let (mut send, mut recv) = conn.open_bi().await.unwrap();
@@ -1694,6 +2135,83 @@ mod tests {
         );
     }
 
+    /// A validator scopes its record to the epoch set and still hands it to
+    /// the machine on its own boot list. That machine then names the
+    /// validator's endpoint, and passes the record to no one: a node that
+    /// boots from the same machine never comes to hold it.
+    #[tokio::test]
+    async fn an_epoch_set_record_reaches_the_boot_machine_and_stops_there() {
+        let port = free_port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let role = RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            public_url: url.clone(),
+        };
+        let operator_did = TestMachineKey::from_seed(95).did();
+        let operator = TestNode::start(95, vec![], Some(role), true).await;
+        operator.sync().await;
+        let boot = || vec![format!("{operator_did}@{url}").parse().unwrap()];
+        let validator = TestNode::start(96, boot(), None, true).await;
+        let bystander = TestNode::start(97, boot(), None, true).await;
+        validator
+            .transport
+            .share_within_epoch_set([validator.key.did()].into_iter().collect());
+        for _ in 0..3 {
+            validator.sync().await;
+            bystander.sync().await;
+            operator.sync().await;
+        }
+
+        let held = operator
+            .transport
+            .store()
+            .lookup(&validator.key.did())
+            .expect("the boot machine holds the validator's record");
+        assert_eq!(held.scope, RecordScope::EpochSet);
+        assert_eq!(
+            operator
+                .transport
+                .store()
+                .naming(validator.endpoint.id())
+                .map(|r| r.machine_did()),
+            Some(validator.key.did()),
+            "the boot machine names the validator's endpoint"
+        );
+        assert!(
+            validator
+                .transport
+                .store()
+                .lookup(&bystander.key.did())
+                .is_some(),
+            "the validator and the bystander did meet through the boot machine"
+        );
+        assert!(
+            bystander
+                .transport
+                .store()
+                .lookup(&validator.key.did())
+                .is_none(),
+            "neither the validator nor the boot machine hands the record on"
+        );
+        let operator_record = bystander
+            .transport
+            .store()
+            .lookup(&operator_did)
+            .expect("the bystander holds the boot machine's record");
+        let lookup = DiscoveryRequest::Lookup(validator.key.did());
+        let answer = ask(
+            &bystander.endpoint,
+            bystander.transport.dial_addr(&operator_record).unwrap(),
+            &lookup,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(answer, DiscoveryResponse::Record(None)),
+            "the boot machine does not answer a lookup for it either"
+        );
+    }
+
     /// Two members that know each other's records; one restarts with the
     /// same machine key and a new endpoint, and scopes its record to the
     /// epoch set at once, as a restarted validator does. The other must come
@@ -1799,17 +2317,15 @@ mod tests {
         send.write_all(b"peer relay").await.unwrap();
         send.finish().unwrap();
         assert_eq!(recv.read_to_end(64).await.unwrap(), b"peer relay");
+        let forwarder_record = forwarder
+            .transport
+            .store()
+            .lookup(&forwarder.key.did())
+            .unwrap();
         assert!(
             crate::paths::forwarder_answers(
                 &a.endpoint,
-                endpoint_addr(
-                    &forwarder
-                        .transport
-                        .store()
-                        .lookup(&forwarder.key.did())
-                        .unwrap()
-                )
-                .unwrap(),
+                a.transport.dial_addr(&forwarder_record).unwrap(),
                 Duration::from_secs(10)
             )
             .await
@@ -1855,7 +2371,7 @@ mod tests {
         let conn = tokio::time::timeout(
             Duration::from_secs(20),
             a.endpoint
-                .connect(endpoint_addr(&record).unwrap(), ECHO_ALPN),
+                .connect(a.transport.dial_addr(&record).unwrap(), ECHO_ALPN),
         )
         .await
         .expect("dial in time")
@@ -1888,16 +2404,27 @@ mod tests {
                 node.sync().await;
             }
         }
-        let b_addr = endpoint_addr(&a.transport.store().lookup(&b.key.did()).unwrap()).unwrap();
-        let seen = match ask(&a.endpoint, b_addr.clone(), &DiscoveryRequest::Observe)
-            .await
-            .unwrap()
-        {
-            DiscoveryResponse::Observed(seen) => {
-                seen.expect("a direct path between two hosts on one machine")
+        let b_record = a.transport.store().lookup(&b.key.did()).unwrap();
+        let b_addr = a.transport.dial_addr(&b_record).unwrap();
+        // A new connection starts on the relay and moves to a direct path once
+        // one is found, which on a loaded machine can take a few attempts.
+        let mut direct = None;
+        for _ in 0..40 {
+            match ask(&a.endpoint, b_addr.clone(), &DiscoveryRequest::Observe)
+                .await
+                .unwrap()
+            {
+                DiscoveryResponse::Observed(Some(seen)) => {
+                    direct = Some(seen);
+                    break;
+                }
+                DiscoveryResponse::Observed(None) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await
+                }
+                other => panic!("unexpected answer {other:?}"),
             }
-            other => panic!("unexpected answer {other:?}"),
-        };
+        }
+        let seen = direct.expect("a direct path between two hosts on one machine");
         let a_ports: Vec<u16> = a
             .endpoint
             .bound_sockets()
@@ -1908,6 +2435,7 @@ mod tests {
             a_ports.contains(&seen.port()),
             "b sees a at one of a's own sockets: {seen} vs {a_ports:?}"
         );
+        let b_addr = private.transport.dial_addr(&b_record).unwrap();
         match ask(&private.endpoint, b_addr, &DiscoveryRequest::Observe)
             .await
             .unwrap()
@@ -1993,7 +2521,7 @@ mod tests {
         let conn = tokio::time::timeout(
             Duration::from_secs(20),
             a.endpoint
-                .connect(endpoint_addr(&record).unwrap(), ECHO_ALPN),
+                .connect(a.transport.dial_addr(&record).unwrap(), ECHO_ALPN),
         )
         .await
         .expect("dial in time")
@@ -2138,15 +2666,18 @@ mod tests {
             assert_eq!(peers.len(), 2, "every other genesis validator resolves");
             n.layer.add_peers(peers).await;
         }
-        for _ in 0..200 {
-            if nodes
+        // A message published before the mesh has formed goes nowhere.
+        let meshed = async {
+            while !nodes
                 .iter()
                 .all(|n| n.layer.neighbour_count("tenzro/blocks").unwrap_or(0) >= 1)
             {
-                break;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        };
+        tokio::time::timeout(Duration::from_secs(60), meshed)
+            .await
+            .expect("every node has a neighbour on the topic");
         nodes[1]
             .layer
             .publish("tenzro/blocks", bytes::Bytes::from_static(b"block 1"))
@@ -2228,10 +2759,10 @@ mod tests {
         // counterparty and refuse the stranger; no snapshot carries it.
         let lookup = DiscoveryRequest::Lookup(private.key.did());
         for holder in [&private, &counterparty] {
+            let holder_record = holder.transport.store().lookup(&holder.key.did()).unwrap();
             let to_stranger = ask(
                 &stranger.endpoint,
-                endpoint_addr(&holder.transport.store().lookup(&holder.key.did()).unwrap())
-                    .unwrap(),
+                stranger.transport.dial_addr(&holder_record).unwrap(),
                 &lookup,
             )
             .await
@@ -2242,8 +2773,7 @@ mod tests {
             );
             let snapshot = ask(
                 &stranger.endpoint,
-                endpoint_addr(&holder.transport.store().lookup(&holder.key.did()).unwrap())
-                    .unwrap(),
+                stranger.transport.dial_addr(&holder_record).unwrap(),
                 &DiscoveryRequest::Snapshot,
             )
             .await
@@ -2260,7 +2790,7 @@ mod tests {
         }
         let to_counterparty = ask(
             &counterparty.endpoint,
-            endpoint_addr(&held).unwrap(),
+            counterparty.transport.dial_addr(&held).unwrap(),
             &lookup,
         )
         .await
@@ -2450,5 +2980,185 @@ mod tests {
                 .certified_in(member.id(), &[member_key.did()].into_iter().collect()),
             Some(member_key.did())
         );
+    }
+
+    /// Whether `from` reaches `to` through the record it holds for it.
+    async fn echo_reaches(from: &TestNode, to: &TestNode) -> bool {
+        let Some(record) = from.transport.store().lookup(&to.key.did()) else {
+            return false;
+        };
+        let Ok(addr) = from.transport.dial_addr(&record) else {
+            return false;
+        };
+        let dial = async {
+            let conn = from.endpoint.connect(addr, ECHO_ALPN).await.ok()?;
+            let (mut send, mut recv) = conn.open_bi().await.ok()?;
+            send.write_all(b"x").await.ok()?;
+            send.finish().ok()?;
+            recv.read_to_end(8).await.ok()
+        };
+        matches!(tokio::time::timeout(Duration::from_secs(5), dial).await, Ok(Some(echo)) if echo == b"x")
+    }
+
+    /// Whether each of two nodes gets an echo from the other within
+    /// `within`, with what they hold now: nothing is exchanged while waiting.
+    async fn reach_each_other(a: &TestNode, b: &TestNode, within: Duration) -> bool {
+        let both = async {
+            while !(echo_reaches(a, b).await && echo_reaches(b, a).await) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        };
+        tokio::time::timeout(within, both).await.is_ok()
+    }
+
+    /// Nodes that know one relay take on a second while running, and keep
+    /// reaching each other, over relay-only paths, when the first stops.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_that_joins_late_carries_the_nodes_when_the_first_relay_stops() {
+        let (p1, p2) = (free_port(), free_port());
+        let url = |p: u16| Url::parse(&format!("http://127.0.0.1:{p}/")).unwrap();
+        let role = |p: u16| RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{p}").parse().unwrap(),
+            public_url: url(p),
+        };
+        let r1 = TestNode::start(80, vec![], Some(role(p1)), false).await;
+        let r2 = TestNode::start(81, vec![], Some(role(p2)), false).await;
+        r1.sync().await;
+        r2.sync().await;
+        let boot: Vec<BootIdentity> =
+            vec![format!("{}@{}", r1.key.did(), url(p1)).parse().unwrap()];
+        let a = TestNode::start(82, boot.clone(), None, true).await;
+        let b = TestNode::start(83, boot, None, true).await;
+        for _ in 0..2 {
+            for n in [&a, &b, &r1] {
+                n.sync().await;
+            }
+        }
+        assert!(
+            echo_reaches(&a, &b).await,
+            "reaches through the first relay"
+        );
+
+        // The second relay is added to the running endpoints.
+        for n in [&a, &b] {
+            assert_eq!(n.transport.add_relay_candidates(&[url(p2)]), 1);
+            n.transport.admit_pending(&n.endpoint).await;
+            assert!(
+                n.transport.uses_relay(url(p2).as_str()),
+                "admitted without a restart"
+            );
+        }
+
+        // The first relay stops.
+        r1._router.shutdown().await.unwrap();
+        r1.endpoint.close().await;
+        drop(r1);
+        assert!(
+            fetch_relay_record(&url(p1)).await.is_err(),
+            "the first relay is gone"
+        );
+
+        let second = RelayUrl::from(url(p2));
+        let stopped = tokio::time::Instant::now();
+        let moved = async {
+            loop {
+                let on_second = |n: &TestNode| {
+                    n.endpoint.addr().relay_urls().all(|u| *u == second)
+                        && n.endpoint.addr().relay_urls().next().is_some()
+                };
+                if on_second(&a) && on_second(&b) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(60), moved)
+            .await
+            .expect("both nodes move to the second relay");
+        // No record has been exchanged since the first relay stopped: the
+        // addresses the nodes dial carry the relays in use.
+        assert!(
+            reach_each_other(&a, &b, Duration::from_secs(30)).await,
+            "the nodes reach each other through the second relay"
+        );
+        eprintln!(
+            "relay stop: reconnected through the second relay after {:?}",
+            stopped.elapsed()
+        );
+
+        // A round with the stopped relay among its peers stays short, and
+        // the records the rounds leave name the second relay.
+        let names_second = |from: &TestNode, to: &TestNode| {
+            from.transport
+                .store()
+                .lookup(&to.key.did())
+                .is_some_and(|r| {
+                    r.relays.iter().map(|r| r.url.clone()).collect::<Vec<_>>() == vec![url(p2)]
+                })
+        };
+        let converged = async {
+            loop {
+                for n in [&a, &b, &r2] {
+                    n.transport.admit_pending(&n.endpoint).await;
+                    let round = tokio::time::Instant::now();
+                    n.sync().await;
+                    assert!(
+                        round.elapsed() < 2 * ASK_TIMEOUT,
+                        "a round with one stopped peer took {:?}",
+                        round.elapsed()
+                    );
+                }
+                if names_second(&a, &b) && names_second(&b, &a) {
+                    return;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(120), converged)
+            .await
+            .expect("the records come to name the second relay");
+        assert!(
+            reach_each_other(&a, &b, Duration::from_secs(30)).await,
+            "the nodes reach each other by the new records"
+        );
+    }
+
+    /// A dialed address carries the relays in use and the direct addresses a
+    /// path last used or the operator fixed; the direct ones survive a restart.
+    #[test]
+    fn a_dialed_address_carries_the_relays_in_use_and_the_direct_addresses_known() {
+        let hints = SharedHints(std::sync::RwLock::new(DialHints::default()));
+        let id = iroh::SecretKey::from_bytes(&[3u8; 32]).public();
+        let did = format!("did:tenzro:machine:{}", "ab".repeat(32));
+        let first = Url::parse("https://one.example.net/").unwrap();
+        let second = Url::parse("https://two.example.net/").unwrap();
+        hints.add_relays(&[first.clone(), second.clone()]);
+        hints.set_fixed([(did.clone(), vec!["192.0.2.7:9001".parse().unwrap()])].into());
+        hints.set_direct(id, vec!["198.51.100.4:9001".parse().unwrap()]);
+
+        // The record names only the relay that failed.
+        let mut addr = EndpointAddr::new(id).with_relay_url(RelayUrl::from(first.clone()));
+        hints.add_to(&mut addr, &did);
+        assert_eq!(addr.relay_urls().count(), 2, "the second relay is added");
+        let ips: Vec<SocketAddr> = addr.ip_addrs().copied().collect();
+        assert_eq!(ips.len(), 2, "{ips:?}");
+
+        let dir = std::env::temp_dir().join(format!("dial-hints-{}", std::process::id()));
+        let path = dir.join("direct-addrs.json");
+        let saved = hints.save(&path, 0);
+        assert!(saved > 0);
+        assert_eq!(
+            hints.save(&path, saved),
+            saved,
+            "nothing changed, nothing written"
+        );
+        let restarted = SharedHints(std::sync::RwLock::new(DialHints::default()));
+        restarted.restore(&path);
+        let mut again = EndpointAddr::new(id);
+        restarted.add_to(&mut again, "other");
+        assert_eq!(
+            again.ip_addrs().copied().collect::<Vec<_>>(),
+            vec!["198.51.100.4:9001".parse::<SocketAddr>().unwrap()]
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -11,10 +11,10 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use crate::error::SdkResult;
 use crate::rpc::RpcClient;
 use crate::typed_tx::{TxKind, TypedTransaction};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const ONE_TNZO: u128 = 1_000_000_000_000_000_000;
@@ -78,13 +78,19 @@ impl PolicyView {
             window_ms: v.get("window_ms")?.as_u64()?,
             cap: dec(v.get("cap")?)?,
             hold_ms: v.get("hold_ms")?.as_u64()?,
-            guardian: v.get("guardian").and_then(|g| g.as_str()).map(str::to_string),
+            guardian: v
+                .get("guardian")
+                .and_then(|g| g.as_str())
+                .map(str::to_string),
             pending: v.get("pending").filter(|p| !p.is_null()).and_then(|p| {
                 Some(PendingView {
                     window_ms: p.get("window_ms")?.as_u64()?,
                     cap: dec(p.get("cap")?)?,
                     hold_ms: p.get("hold_ms")?.as_u64()?,
-                    guardian: p.get("guardian").and_then(|g| g.as_str()).map(str::to_string),
+                    guardian: p
+                        .get("guardian")
+                        .and_then(|g| g.as_str())
+                        .map(str::to_string),
                     remove: p.get("remove")?.as_bool()?,
                     effective_ms: p.get("effective_ms")?.as_i64()?,
                 })
@@ -157,24 +163,39 @@ impl OutflowRequest {
         // The chain's `Op` is externally tagged: `{"set": {..fields..}}`.
         let a: Vec<u32> = account.iter().map(|b| u32::from(*b)).collect();
         let v = match self {
-            Self::Set { window_ms, cap, hold_ms, guardian } => json!({ "set": {
+            Self::Set {
+                window_ms,
+                cap,
+                hold_ms,
+                guardian,
+            } => json!({ "set": {
                 "account": a, "window_ms": window_ms, "cap": cap.to_string(),
                 "hold_ms": hold_ms, "guardian": guardian,
             }}),
             Self::Remove => json!({ "remove": { "account": a } }),
-            Self::CancelPending { approval } => json!({ "cancel_pending": { "account": a, "approval": approval } }),
+            Self::CancelPending { approval } => {
+                json!({ "cancel_pending": { "account": a, "approval": approval } })
+            }
             Self::RequestRelease { to, amount } => json!({ "request_release": {
                 "account": a, "to": to, "amount": amount.to_string(),
             }}),
-            Self::CancelRelease { id, approval } => json!({ "cancel_release": { "account": a, "id": id, "approval": approval } }),
-            Self::ClaimRelease { id, approval } => json!({ "claim_release": { "account": a, "id": id, "approval": approval } }),
+            Self::CancelRelease { id, approval } => {
+                json!({ "cancel_release": { "account": a, "id": id, "approval": approval } })
+            }
+            Self::ClaimRelease { id, approval } => {
+                json!({ "claim_release": { "account": a, "id": id, "approval": approval } })
+            }
         };
         serde_json::to_vec(&v).expect("an outflow request encodes")
     }
 
     /// The transaction carrying the request, ready for `TypedTxClient::send`.
     pub fn typed_transaction(&self, account: &[u8]) -> SdkResult<TypedTransaction> {
-        let op: Vec<u32> = self.op_json(account).iter().map(|b| u32::from(*b)).collect();
+        let op: Vec<u32> = self
+            .op_json(account)
+            .iter()
+            .map(|b| u32::from(*b))
+            .collect();
         TypedTransaction::new(TxKind::AccountOutflow, json!({ "op": op }))
     }
 
@@ -183,7 +204,12 @@ impl OutflowRequest {
     pub fn describe(&self, current: Option<&PolicyView>, now_ms: i64) -> Vec<String> {
         let mut out = Vec::new();
         match self {
-            Self::Set { window_ms, cap, hold_ms, guardian } => {
+            Self::Set {
+                window_ms,
+                cap,
+                hold_ms,
+                guardian,
+            } => {
                 out.push(format!(
                     "Cap: this account can send at most {} per {}.",
                     tnzo(*cap),
@@ -221,7 +247,9 @@ impl OutflowRequest {
                                 if cur.guardian.is_some() { " or your guardian" } else { "" }
                             ));
                         } else {
-                            out.push("This tightens the policy, so it takes effect at once.".to_string());
+                            out.push(
+                                "This tightens the policy, so it takes effect at once.".to_string(),
+                            );
                         }
                     }
                 }
@@ -239,7 +267,11 @@ impl OutflowRequest {
                 out.push("Cancel the queued change to this account's outflow policy. The policy stays as it is now.".to_string());
             }
             Self::RequestRelease { to, amount } => {
-                out.push(format!("Queue a payment of {} to 0x{}.", tnzo(*amount), hex(to)));
+                out.push(format!(
+                    "Queue a payment of {} to 0x{}.",
+                    tnzo(*amount),
+                    hex(to)
+                ));
                 match current {
                     Some(c) => out.push(format!(
                         "It can be paid at {} (after the {} hold). You{} can cancel it until it is paid.",
@@ -251,7 +283,9 @@ impl OutflowRequest {
                 }
             }
             Self::CancelRelease { id, .. } => {
-                out.push(format!("Cancel queued payment #{id}. Nothing is sent; it leaves the queue."));
+                out.push(format!(
+                    "Cancel queued payment #{id}. Nothing is sent; it leaves the queue."
+                ));
             }
             Self::ClaimRelease { id, .. } => {
                 out.push(format!(
@@ -292,15 +326,23 @@ pub fn creation_offer() -> Vec<String> {
 
 /// Whether `new` loosens `cur` (the VM queues those for the hold).
 pub fn looser(cur: &PolicyView, new: &PolicyView) -> bool {
-    new.cap.saturating_mul(u128::from(cur.window_ms)) > cur.cap.saturating_mul(u128::from(new.window_ms))
+    new.cap.saturating_mul(u128::from(cur.window_ms))
+        > cur.cap.saturating_mul(u128::from(new.window_ms))
         || new.hold_ms < cur.hold_ms
         || (cur.guardian.is_some() && new.guardian != cur.guardian)
 }
 
 /// Lines describing the account's policy and what is waiting.
-pub fn describe_state(policy: Option<&PolicyView>, releases: &[ReleaseView], now_ms: i64) -> Vec<String> {
+pub fn describe_state(
+    policy: Option<&PolicyView>,
+    releases: &[ReleaseView],
+    now_ms: i64,
+) -> Vec<String> {
     let Some(p) = policy else {
-        return vec!["No outflow policy: this account is not limited. (Opt in with `outflow set`.)".to_string()];
+        return vec![
+            "No outflow policy: this account is not limited. (Opt in with `outflow set`.)"
+                .to_string(),
+        ];
     };
     let mut out = vec![
         format!("Cap: {} per {}.", tnzo(p.cap), span(p.window_ms)),
@@ -312,12 +354,27 @@ pub fn describe_state(policy: Option<&PolicyView>, releases: &[ReleaseView], now
     ];
     if let Some(q) = &p.pending {
         out.push(if q.remove {
-            format!("Queued: removal of the policy at {}. You{} can cancel it.", at(q.effective_ms), if p.guardian.is_some() { " or your guardian" } else { "" })
+            format!(
+                "Queued: removal of the policy at {}. You{} can cancel it.",
+                at(q.effective_ms),
+                if p.guardian.is_some() {
+                    " or your guardian"
+                } else {
+                    ""
+                }
+            )
         } else {
             format!(
                 "Queued: a looser policy (cap {} per {}, hold {}) at {}. You{} can cancel it.",
-                tnzo(q.cap), span(q.window_ms), span(q.hold_ms), at(q.effective_ms),
-                if p.guardian.is_some() { " or your guardian" } else { "" }
+                tnzo(q.cap),
+                span(q.window_ms),
+                span(q.hold_ms),
+                at(q.effective_ms),
+                if p.guardian.is_some() {
+                    " or your guardian"
+                } else {
+                    ""
+                }
             )
         });
     }
@@ -327,7 +384,11 @@ pub fn describe_state(policy: Option<&PolicyView>, releases: &[ReleaseView], now
             r.id,
             tnzo(r.amount),
             r.to,
-            if now_ms >= r.unlock_ms { "ready to be paid".to_string() } else { format!("unlocks at {}", at(r.unlock_ms)) }
+            if now_ms >= r.unlock_ms {
+                "ready to be paid".to_string()
+            } else {
+                format!("unlocks at {}", at(r.unlock_ms))
+            }
         ));
     }
     out
@@ -376,7 +437,11 @@ fn at(ms: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, rem % 3600 / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rem / 3600,
+        rem % 3600 / 60
+    )
 }
 
 /// The node queries behind the outflow policy: an account's policy and its
@@ -423,12 +488,23 @@ mod tests {
     const HOUR: u64 = 3_600_000;
 
     fn policy() -> PolicyView {
-        PolicyView { window_ms: DAY, cap: 10 * T, hold_ms: 24 * HOUR, guardian: Some("did:tenzro:human:g1".into()), pending: None }
+        PolicyView {
+            window_ms: DAY,
+            cap: 10 * T,
+            hold_ms: 24 * HOUR,
+            guardian: Some("did:tenzro:human:g1".into()),
+            pending: None,
+        }
     }
 
     #[test]
     fn a_first_policy_is_described_with_cap_hold_and_guardian() {
-        let r = OutflowRequest::Set { window_ms: DAY, cap: 10 * T, hold_ms: 24 * HOUR, guardian: Some("did:tenzro:human:g1".into()) };
+        let r = OutflowRequest::Set {
+            window_ms: DAY,
+            cap: 10 * T,
+            hold_ms: 24 * HOUR,
+            guardian: Some("did:tenzro:human:g1".into()),
+        };
         let text = r.describe(None, 0).join(" ");
         assert!(text.contains("at most 10 TNZO per 24 hours"), "{text}");
         assert!(text.contains("waits 24 hours"));
@@ -438,29 +514,73 @@ mod tests {
 
     #[test]
     fn no_guardian_is_called_out() {
-        let r = OutflowRequest::Set { window_ms: DAY, cap: T, hold_ms: HOUR, guardian: None };
+        let r = OutflowRequest::Set {
+            window_ms: DAY,
+            cap: T,
+            hold_ms: HOUR,
+            guardian: None,
+        };
         assert!(r.describe(None, 0).join(" ").contains("No guardian"));
     }
 
     #[test]
     fn loosening_is_said_to_be_queued_and_tightening_is_immediate() {
         let cur = policy();
-        let loose = OutflowRequest::Set { window_ms: DAY, cap: 100 * T, hold_ms: 24 * HOUR, guardian: cur.guardian.clone() };
+        let loose = OutflowRequest::Set {
+            window_ms: DAY,
+            cap: 100 * T,
+            hold_ms: 24 * HOUR,
+            guardian: cur.guardian.clone(),
+        };
         let t = loose.describe(Some(&cur), 0).join(" ");
-        assert!(t.contains("loosens the policy") && t.contains("1970-01-02 00:00 UTC"), "{t}");
-        let tight = OutflowRequest::Set { window_ms: DAY, cap: T, hold_ms: 48 * HOUR, guardian: Some("did:tenzro:human:g1".into()) };
-        assert!(tight.describe(Some(&cur), 0).join(" ").contains("tightens the policy"));
-        assert!(looser(&cur, &PolicyView { guardian: None, ..cur.clone() }));
+        assert!(
+            t.contains("loosens the policy") && t.contains("1970-01-02 00:00 UTC"),
+            "{t}"
+        );
+        let tight = OutflowRequest::Set {
+            window_ms: DAY,
+            cap: T,
+            hold_ms: 48 * HOUR,
+            guardian: Some("did:tenzro:human:g1".into()),
+        };
+        assert!(
+            tight
+                .describe(Some(&cur), 0)
+                .join(" ")
+                .contains("tightens the policy")
+        );
+        assert!(looser(
+            &cur,
+            &PolicyView {
+                guardian: None,
+                ..cur.clone()
+            }
+        ));
     }
 
     #[test]
     fn release_and_removal_name_who_can_cancel_and_when() {
         let cur = policy();
-        let rel = OutflowRequest::RequestRelease { to: vec![0xb1; 32], amount: 3 * T / 2 };
+        let rel = OutflowRequest::RequestRelease {
+            to: vec![0xb1; 32],
+            amount: 3 * T / 2,
+        };
         let t = rel.describe(Some(&cur), 0).join(" ");
-        assert!(t.contains("1.5 TNZO") && t.contains("You or your guardian can cancel"), "{t}");
-        assert!(OutflowRequest::Remove.describe(Some(&cur), 0).join(" ").contains("queued for the current hold"));
-        assert!(rel.describe(None, 0).join(" ").contains("no outflow policy"));
+        assert!(
+            t.contains("1.5 TNZO") && t.contains("You or your guardian can cancel"),
+            "{t}"
+        );
+        assert!(
+            OutflowRequest::Remove
+                .describe(Some(&cur), 0)
+                .join(" ")
+                .contains("queued for the current hold")
+        );
+        assert!(
+            rel.describe(None, 0)
+                .join(" ")
+                .contains("no outflow policy")
+        );
     }
 
     #[test]
@@ -473,11 +593,25 @@ mod tests {
 
     #[test]
     fn the_wire_form_is_the_vm_op_shape() {
-        let v: Value = serde_json::from_slice(&OutflowRequest::Set { window_ms: 5, cap: 7, hold_ms: 9, guardian: None }.op_json(&[1, 2])).unwrap();
+        let v: Value = serde_json::from_slice(
+            &OutflowRequest::Set {
+                window_ms: 5,
+                cap: 7,
+                hold_ms: 9,
+                guardian: None,
+            }
+            .op_json(&[1, 2]),
+        )
+        .unwrap();
         assert_eq!(v["set"]["cap"], "7");
         assert_eq!(v["set"]["account"], json!([1, 2]));
         assert!(v.get("op").is_none());
-        let tx = OutflowRequest::CancelRelease { id: 3, approval: None }.typed_transaction(&[1]).unwrap();
+        let tx = OutflowRequest::CancelRelease {
+            id: 3,
+            approval: None,
+        }
+        .typed_transaction(&[1])
+        .unwrap();
         assert_eq!(tx.kind, TxKind::AccountOutflow);
         assert!(tx.fields["op"].is_array());
     }
@@ -487,9 +621,17 @@ mod tests {
         let v = json!({"window_ms": DAY, "cap": (10 * T).to_string(), "hold_ms": 24 * HOUR, "guardian": "did:tenzro:human:g1",
             "pending": {"window_ms": DAY, "cap": (50 * T).to_string(), "hold_ms": 24 * HOUR, "guardian": "did:tenzro:human:g1", "remove": false, "effective_ms": 86_400_000}});
         let p = PolicyView::from_rpc(&v).unwrap();
-        let rel = ReleaseView::from_rpc(&json!({"id": 4, "to": "b1", "amount": T.to_string(), "unlock_ms": 100})).unwrap();
+        let rel = ReleaseView::from_rpc(
+            &json!({"id": 4, "to": "b1", "amount": T.to_string(), "unlock_ms": 100}),
+        )
+        .unwrap();
         let t = describe_state(Some(&p), &[rel], 0).join(" ");
-        assert!(t.contains("Queued: a looser policy") && t.contains("Queued payment #4") && t.contains("unlocks at"), "{t}");
+        assert!(
+            t.contains("Queued: a looser policy")
+                && t.contains("Queued payment #4")
+                && t.contains("unlocks at"),
+            "{t}"
+        );
         assert!(describe_state(None, &[], 0)[0].contains("not limited"));
         assert!(PolicyView::from_rpc(&Value::Null).is_none());
     }

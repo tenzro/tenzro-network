@@ -84,12 +84,17 @@ impl EquivocationJailer {
     /// Drops `validator`, which signed two checkpoints with index `index` in
     /// epoch `epoch`, from the next epoch's pending queue and jails it in the
     /// registry.
-    pub fn report_checkpoint_equivocation(&self, validator: &Address, epoch: u64, index: u64) {
+    pub fn report_checkpoint_equivocation(
+        &self,
+        validator: &Address,
+        epoch: u64,
+        index: u64,
+        current_epoch: u64,
+    ) {
         self.epoch_manager.remove_pending_validator(validator);
         let Some(registry) = self.validator_registry.as_ref() else {
             return;
         };
-        let current_epoch = self.epoch_manager.current_epoch().number;
         match registry.jail(validator, current_epoch) {
             Ok(()) => tracing::warn!(
                 validator = %validator,
@@ -794,8 +799,14 @@ fn resolve_operator_identity(
         IdentityData::Human { .. } | IdentityData::Institution { .. } => 2,
     };
 
+    // A node with a hardware wallet accepts an inferred identity only when it
+    // is its own: the registry mirrors every identity on the chain, so ranking
+    // all of them would hand an unregistered node the best-ranked stranger's
+    // DID and account. Otherwise the caller falls back to the machine's
+    // own account.
+    let own_did = machine.map(|m| m.did.as_deref());
     all.iter()
-        .filter(|(_, id)| usable(id))
+        .filter(|(d, id)| usable(id) && own_did.is_none_or(|own| own == Some(d.as_str())))
         .min_by(|a, b| {
             rank(&a.1.identity_data)
                 .cmp(&rank(&b.1.identity_data))
@@ -822,20 +833,56 @@ fn resolve_operator_payee(
 ///
 /// Consensus owns the transition and knows nothing about the registry; this
 /// is the seam between them.
-struct RegistryEpochPlanStager {
-    epoch_manager: Arc<tenzro_consensus::EpochManager>,
-    registry: Arc<tenzro_token::validator_registry::ValidatorRegistry>,
+pub(crate) struct RegistryEpochPlanStager {
+    pub(crate) epoch_manager: Arc<tenzro_consensus::EpochManager>,
+    pub(crate) registry: Arc<tenzro_token::validator_registry::ValidatorRegistry>,
     /// Chain state, for the governed validator self-stake the epoch gate
     /// admits candidates at, with its USD floor at the safety rate, and the
     /// governed exit churn.
-    store: Option<Arc<dyn KvStore>>,
+    pub(crate) store: Option<Arc<dyn KvStore>>,
 }
 
 impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
-    fn stage_next_epoch(&self) {
+    fn unstage_next_epoch(&self, token: &str) {
+        if let Err(e) = self.registry.restore_undo(token) {
+            tracing::error!(error = %e, "The validator registry could not be put back after a failed derivation; the next try puts it back first");
+        }
+    }
+
+    fn stage_next_epoch(&self) -> std::result::Result<String, String> {
+        // How the registry stands before this boundary changes it, kept once
+        // per boundary and first of all: the governed settings, the release of
+        // jailed validators, the ejections and the status steps all follow.
+        // When the record is already there an earlier staging ran: the
+        // registry is put back as the record holds it before anything is
+        // applied, and staging does not go on until that has worked, so a
+        // staging that is repeated, or that follows a failed undo, never
+        // applies the boundary twice.
+        let tag = format!("boundary:{}", self.epoch_manager.current_epoch().number + 1);
+        if self
+            .registry
+            .has_undo(&tag)
+            .map_err(|e| format!("the undo record could not be looked for: {e}"))?
+        {
+            self.registry
+                .restore_undo(&tag)
+                .map_err(|e| format!("the registry could not be put back before staging: {e}"))?;
+        } else {
+            self.registry.clear_undo_prefix("boundary:");
+            if !self.registry.write_undo(&tag, &self.registry.checkpoint()) {
+                return Err(self
+                    .registry
+                    .take_storage_error()
+                    .unwrap_or_else(|| "the undo record could not be written".to_string()));
+            }
+        }
         if let Some(store) = &self.store {
             let chain = tenzro_vm::StateAdapter::with_storage(store.clone());
-            let floor = tenzro_vm::native::entry_stake_ladder(&chain).validator;
+            let ladder = tenzro_vm::native::entry_stake_ladder(&chain);
+            let floor = ladder.validator;
+            // A validator that also serves RPC holds the governed RPC operator
+            // bond, `stake.rpc_tnzo`, as the rest of the network requires it.
+            let rpc_floor = ladder.rpc;
             let exit_churn = u32::try_from(tenzro_vm::native::network_param(
                 &chain,
                 tenzro_vm::native::EXIT_CHURN_PARAM,
@@ -845,10 +892,12 @@ impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
                 tenzro_vm::native::network_param(&chain, tenzro_vm::native::JAIL_TERM_PARAM);
             let mut cfg = self.registry.config();
             if cfg.min_self_stake != floor
+                || cfg.min_rpc_provider_stake != rpc_floor
                 || cfg.exit_churn_bps != exit_churn
                 || cfg.jail_term_epochs != jail_term
             {
                 cfg.min_self_stake = floor;
+                cfg.min_rpc_provider_stake = rpc_floor;
                 cfg.exit_churn_bps = exit_churn;
                 cfg.jail_term_epochs = jail_term;
                 self.registry.set_config(cfg);
@@ -909,6 +958,18 @@ impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
             &self.registry,
             &admitted,
         );
+        // While validator admission is closed no account that is not
+        // admitted reaches the next committee, bonded or not.
+        if let Some(chain) = chain.as_ref() {
+            let refused = crate::validator_admission::enforce_committee(&self.epoch_manager, chain);
+            if !refused.is_empty() {
+                info!(
+                    count = refused.len(),
+                    "Validator admission is closed: accounts that are not admitted kept off the committee"
+                );
+            }
+        }
+        Ok(tag)
     }
 }
 
@@ -918,6 +979,9 @@ impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
 const CONSENSUS_RECORDS_MEMORY: usize = 32 << 20;
 /// Memtable size per column family of the consensus records store.
 const CONSENSUS_RECORDS_WRITE_BUFFER: usize = 4 << 20;
+
+/// A rewrite of a load sample, shared with the monitor's thread.
+pub type LoadReading = Arc<dyn Fn(&mut crate::load_monitor::LoadSample) + Send + Sync>;
 
 pub struct TenzroNode {
     config: NodeConfig,
@@ -1238,6 +1302,10 @@ pub struct TenzroNode {
     /// the boot identities it resolves. Started first in [`Self::start`].
     pub identity_transport: Option<Arc<tenzro_iroh::IdentityTransport>>,
 
+    /// Answers the onboarding protocol (status, owner-approval challenge,
+    /// sponsored first registration); present once the iroh endpoint is up.
+    pub(crate) onboard_server: Option<Arc<crate::identity_gate::OnboardServer>>,
+
     /// Deferred A2A JSON-RPC dispatcher over iroh.
     ///
     /// Registered on the iroh router at bind time (in `init_ai_infrastructure`)
@@ -1248,6 +1316,13 @@ pub struct TenzroNode {
     /// returns a JSON-RPC `-32603` "dispatcher not yet bound" envelope to
     /// connecting peers.
     pub iroh_a2a_dispatcher: Option<Arc<tenzro_iroh::DeferredJsonRpcDispatcher>>,
+    /// Rewrites every load reading the monitor takes before it is applied.
+    /// `None` in a running node, which acts on what it measures; an
+    /// embedder that must not depend on the machine sets one before `start`.
+    load_reading: Option<LoadReading>,
+    /// The thread that samples the host and publishes the load level; ended
+    /// by `stop`, which leaves the published level at GREEN.
+    load_monitor: parking_lot::Mutex<Option<crate::load_monitor::MonitorThread>>,
 
     /// Deferred MCP-over-iroh stream handler. Same chicken-and-egg pattern
     /// as `iroh_a2a_dispatcher`: the `tenzro/mcp` ALPN is registered on the
@@ -1473,7 +1548,7 @@ pub struct TenzroNode {
     pub load_tracker: Arc<tenzro_model::LoadTracker>,
     /// In-memory store of recent chat-completion SSE streams keyed by
     /// completion id. Powers `Last-Event-ID`-based resume on
-    /// `/v1/chat/completions` (Streaming Stability P0.1). GC is spawned at
+    /// `/v1/chat/completions`. GC is spawned at
     /// node init and runs every 30s; entries are evicted per
     /// [`crate::streaming::DEFAULT_TTL`] (finished) or
     /// [`crate::streaming::cursor::IN_FLIGHT_IDLE_TIMEOUT`] (in-flight).
@@ -1639,6 +1714,8 @@ const ENDPOINT_KEY_LABEL: &str = "tenzro/transport/endpoint";
 impl TenzroNode {
     /// Create a new Tenzro Network node
     pub async fn new(config: NodeConfig) -> Result<Self> {
+        // Opening the node's own keys must not be shed by a loaded TPM queue.
+        let _tpm = tenzro_device_key::tpm_exec::lifecycle();
         // The light build cannot fill a role that runs models; every way of
         // starting a node (the binary, an embedded handle) refuses here.
         crate::engine_roles::check(&config.roles, config.connector.is_some())
@@ -1702,6 +1779,10 @@ impl TenzroNode {
                 std::env::var("TENZRO_WEBAUTHN_RP_ID").ok().as_deref(),
             )
             .map_err(crate::error::NodeError::Config)?,
+        );
+        tracing::info!(
+            hosts = ?http_surface.hosts(),
+            "HTTP surface answers to these host names besides IP literals and localhost"
         );
         // Sized from the machine's core count. Two concurrent requests per
         // core: inference alternates compute and memory stalls, so a little
@@ -1826,7 +1907,10 @@ impl TenzroNode {
             )),
             iroh_resolver: None,
             identity_transport: None,
+            onboard_server: None,
             iroh_a2a_dispatcher: None,
+            load_reading: None,
+            load_monitor: parking_lot::Mutex::new(None),
             iroh_mcp_handler: None,
             iroh_infer_dispatcher: None,
             identity_registry: None,
@@ -1986,6 +2070,8 @@ impl TenzroNode {
 
     /// Start all subsystems
     pub async fn start(&mut self) -> Result<()> {
+        // Opening the node's own keys must not be shed by a loaded TPM queue.
+        let _tpm = tenzro_device_key::tpm_exec::lifecycle();
         {
             let mut state = self.state.write();
             // A node can only be started exactly once; any state other than
@@ -2029,19 +2115,51 @@ impl TenzroNode {
         //     checkpoint block commits, verified bucket by bucket, before
         //     consensus and the validator registry come up and hydrate from
         //     it. Block-sync then imports from the restored height on.
-        if !self.state_sync_peers.is_empty() {
-            info!(peers = self.state_sync_peers.len(), "Starting state sync");
-            match self.restore_state_from_peers().await {
-                Ok(s) => info!(
-                    height = s.height,
-                    state_root = %s.state_root,
-                    buckets_fetched = s.buckets_fetched,
-                    "State sync complete: restored state reproduces the checkpoint's root"
-                ),
-                Err(e) => warn!(
-                    error = %e,
-                    "State sync failed; continuing with block replay from the local tip"
-                ),
+        match self.join_plan().await {
+            crate::state_sync_policy::JoinPlan::Replay(reason) => info!(
+                ?reason,
+                "Catching up by block replay from the local tip, not by snapshot"
+            ),
+            crate::state_sync_policy::JoinPlan::Snapshot(source) => {
+                if source == crate::state_sync_policy::PeerSource::Boot {
+                    self.adopt_boot_peers_for_state_sync().await;
+                }
+                if self.state_sync_peers.is_empty() {
+                    warn!(
+                        "Snapshot join planned but no peer resolved; continuing with block replay \
+                         from the local tip"
+                    );
+                } else {
+                    info!(peers = self.state_sync_peers.len(), "Starting state sync");
+                    match self.restore_state_from_peers().await {
+                        Ok(s) => info!(
+                            height = s.height,
+                            state_root = %s.state_root,
+                            buckets_fetched = s.buckets_fetched,
+                            "State sync complete: restored state reproduces the checkpoint's root"
+                        ),
+                        Err(e) => {
+                            let interrupted = match &self.storage {
+                                Some(s) => crate::snapshot::restore_interrupted(s).await?,
+                                None => false,
+                            };
+                            if interrupted {
+                                // The restore had begun: genesis state is cleared and some
+                                // buckets are written. Replaying blocks on top of that
+                                // cannot reproduce the chain's state, so do not.
+                                return Err(NodeError::Other(format!(
+                                    "state sync stopped part-way ({e}); restart to resume it \
+                                     from the buckets already written, or wipe the data \
+                                     directory to start over"
+                                )));
+                            }
+                            warn!(
+                                error = %e,
+                                "State sync failed; continuing with block replay from the local tip"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -2133,6 +2251,9 @@ impl TenzroNode {
         // `EpochManager`. A ModelProvider without one fetches blocks it can
         // never accept, so its local height never leaves genesis.
         let should_init_consensus = self.config.roles.is_validator();
+        if should_init_consensus {
+            crate::consensus_runtime::enable(crate::tier::machine_cores());
+        }
         self.init_consensus(!should_init_consensus).await?;
 
         // 7b. The validator identity set, for admitting compute
@@ -2243,8 +2364,8 @@ impl TenzroNode {
         crate::machine_access::reconcile_owner(self);
 
         // 10b. Wire per-DID admission controller into the consensus
-        //      mempool. Has to happen AFTER both consensus (#7) and identity
-        //      (#10) are up — `NodeLaneResolver` reads from the
+        //      mempool. Has to happen AFTER both consensus and identity
+        //      are up — `NodeLaneResolver` reads from the
         //      `IdentityRegistry`, which does not exist at `init_consensus`
         //      time. Until this call executes the mempool
         //      applies size limits only; the window is bounded by the
@@ -2314,6 +2435,17 @@ impl TenzroNode {
             }
         }
 
+        // 10d. The identity gate at the mempool: a transaction from an
+        //      account with no registered identity is not pooled (audit mode
+        //      logs it instead). Node-local; the VM's rules are unchanged.
+        if let (Some(consensus), Some(storage)) = (self.consensus.clone(), self.storage.clone()) {
+            crate::identity_gate::install_mempool_gate(
+                &self.config.onboarding,
+                consensus.mempool(),
+                storage as Arc<dyn KvStore>,
+            );
+        }
+
         // 11. Initialize payment gateway (MPP/x402)
         self.init_payments().await.inspect_err(|e| {
             self.health_monitor
@@ -2371,6 +2503,7 @@ impl TenzroNode {
 
         // Mark as running
         *self.state.write() = NodeState::Running;
+        self.start_load_protection();
         info!("Tenzro Network node started successfully");
 
         Ok(())
@@ -2430,6 +2563,15 @@ impl TenzroNode {
             )
         {
             info!(status = ?entry.status, "Self-register: already registered, skipping");
+            return Ok(());
+        }
+
+        // While validator admission is closed only an admitted account may
+        // register; say so here rather than let the refusal surface later.
+        if let Some(chain) = crate::rpc::chain_state_of(self)
+            && let Err(e) = tenzro_vm::validator_admission::check(&chain, address.as_bytes())
+        {
+            warn!("Self-register: {e}");
             return Ok(());
         }
 
@@ -2811,6 +2953,13 @@ impl TenzroNode {
 
         info!("Stopping Tenzro Network node...");
 
+        // Stopping must not be shed by a loaded TPM queue, and the load level
+        // this node published ends with it.
+        let _tpm = tenzro_device_key::tpm_exec::lifecycle();
+        if let Some(monitor) = self.load_monitor.lock().take() {
+            monitor.stop();
+        }
+
         // Stop in reverse order
         // Note: In a full implementation, each subsystem would have a proper shutdown method
 
@@ -2998,6 +3147,53 @@ impl TenzroNode {
         synced.ok_or_else(|| {
             last_error.unwrap_or_else(|| NodeError::Config("no state-sync peers configured".into()))
         })
+    }
+
+    /// How this node catches up: by snapshot or by replaying blocks (see
+    /// [`crate::state_sync_policy`]).
+    async fn join_plan(&self) -> crate::state_sync_policy::JoinPlan {
+        use tenzro_storage::BlockStore;
+        let has_chain = match self.storage.clone() {
+            Some(storage) => match tenzro_storage::block_store::BlockStoreImpl::new(storage) {
+                Ok(blocks) => blocks
+                    .latest_height()
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|h| h.0 > 0),
+                Err(_) => true,
+            },
+            None => true,
+        };
+        crate::state_sync_policy::plan(crate::state_sync_policy::JoinFacts {
+            mode: self.config.state_sync,
+            is_validator: self.config.roles.is_validator(),
+            named_peers: !self.state_sync_peers.is_empty(),
+            has_checkpoint: self.weak_subjectivity_anchor.is_some(),
+            has_chain,
+        })
+    }
+
+    /// Takes the boot identities that resolve within a minute as the
+    /// snapshot peers. Which of them holds a snapshot is learnt by asking:
+    /// a peer without one answers so, and the next is tried.
+    async fn adopt_boot_peers_for_state_sync(&mut self) {
+        let Some(identity) = self.identity_transport.clone() else {
+            return;
+        };
+        for _ in 0..60 {
+            let addrs: Vec<_> = identity.peer_addrs().into_iter().map(|(_, a)| a).collect();
+            if !addrs.is_empty() {
+                self.state_sync_peers = addrs.iter().map(|a| a.id).collect();
+                self.state_sync_addrs = addrs.into_iter().filter(|a| !a.addrs.is_empty()).collect();
+                info!(
+                    peers = self.state_sync_peers.len(),
+                    "Snapshot peers taken from the resolved boot identities"
+                );
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
     }
 
     pub(crate) async fn init_storage(&mut self) -> Result<()> {
@@ -3693,12 +3889,10 @@ impl TenzroNode {
                         // Already present (warm restart or prior re-registration).
                     }
                     Err(e) => {
-                        warn!(
-                            validator = %v.address,
-                            error = %e,
-                            "Failed to seed genesis validator into registry — \
-                             slashing/jail integration will not apply to this validator"
-                        );
+                        return Err(NodeError::Other(format!(
+                            "genesis validator {} could not be seeded into the validator registry: {e}",
+                            v.address
+                        )));
                     }
                 }
             }
@@ -3709,7 +3903,7 @@ impl TenzroNode {
         // block-sync can verify historical commit-QCs against the correct
         // set. Without persistence, a node falling behind across an epoch
         // boundary would reject every historical block as `InvalidValidatorSet`
-        // and never re-converge — the May 2026 testnet stall root cause.
+        // and never re-converge — a liveness stall the history prevents.
         let epoch_manager = if let Some(ref storage) = self.storage {
             let epoch_store = std::sync::Arc::new(
                 crate::epoch_state_store::RocksDbEpochStateStore::new(storage.clone()),
@@ -3743,10 +3937,16 @@ impl TenzroNode {
             .map(|g| g.chain_id)
             .unwrap_or_default();
         let epoch_manager = Arc::new(epoch_manager);
+        // The ordering rules (DAG depth, committee seats) are the network's:
+        // taken from the genesis whatever this node's own [consensus] says.
+        let network = crate::config::network_consensus_config(
+            self.config.consensus.as_ref(),
+            self.config.genesis.as_ref(),
+        )?;
         let consensus = ConsensusHandle::new(
             tenzro_consensus::ConsensusConfig {
                 session_key_scheme: self.config.consensus_key_scheme,
-                ..self.config.consensus.clone().unwrap_or_default()
+                ..network
             },
             self.config
                 .genesis
@@ -3881,42 +4081,35 @@ impl TenzroNode {
         // it, once per epoch (see `ConsensusHandle::publication`).
         let network = self.network.clone();
         let publisher = consensus.clone();
-        // Its signers are recorded on chain, by one member per checkpoint,
-        // so they earn the epoch's vote reward. The record pays no fee, and
-        // nothing waits on it: blocks and checkpoints go on whether or not
-        // it lands.
-        let recorder = self.identity_signer.clone();
-        let record_store = storage.clone();
+        // Its signers are recorded on chain, by one member per epoch (the
+        // others only as timed fallbacks), only for checkpoints that certify
+        // real work, and held to go with other traffic or just before the
+        // epoch ends, so they earn the epoch's vote reward and an idle chain
+        // goes quiet (see `checkpoint_recorder`). The record pays no fee,
+        // and nothing waits on it: blocks and checkpoints go on whether or
+        // not it lands.
         let record_chain = self
             .config
             .genesis
             .as_ref()
             .map(|g| g.chain_id)
             .unwrap_or_default();
-        let record_nonces = self.validator_nonces.clone();
-        let record_gossip = self.validator_tx_gossip.clone();
+        let recorder = self.identity_signer.clone().map(|signer| {
+            crate::checkpoint_recorder::CheckpointRecorder::new(
+                publisher.clone(),
+                signer,
+                storage.clone(),
+                record_chain,
+                self.validator_nonces.clone(),
+                self.validator_tx_gossip.clone(),
+                crate::checkpoint_recorder::rank_step_for(publisher.time_rules()),
+                Arc::default(),
+            )
+        });
         tokio::spawn(async move {
             while let Some(cert) = formed_rx.recv().await {
-                if let Some(signer) = recorder.as_ref()
-                    && publisher.records_signers_of(&cert)
-                {
-                    let record = publisher.signers_record(cert.clone());
-                    let tx_type =
-                        tenzro_types::transaction::TransactionType::RecordCheckpointSigners {
-                            certificate: bincode::serialize(&record).expect("certificate encodes"),
-                        };
-                    if let Err(e) = submit_validator_transaction(
-                        &publisher,
-                        signer,
-                        &record_store,
-                        record_chain,
-                        &record_nonces,
-                        &record_gossip,
-                        tx_type,
-                        100_000,
-                    ) {
-                        warn!(error = %e, index = cert.checkpoint.index, "checkpoint signers not recorded on chain");
-                    }
+                if let Some(recorder) = recorder.as_ref() {
+                    recorder.on_certificate(&cert);
                 }
                 if let Some(net) = network.as_ref() {
                     let published = publisher.publication(cert.clone());
@@ -4058,11 +4251,14 @@ impl TenzroNode {
                 .await?
                 .map_or(0, |h| h.0)
         };
-        if !consensus.resume(tip)? {
+        if !crate::consensus_runtime::scoped(|| consensus.resume(tip))? {
             if let Some(recovery) = crate::recovery::pending_start(&storage, tip)? {
-                consensus.launch(recovery.epoch, recovery.start)?;
+                crate::consensus_runtime::scoped(|| {
+                    consensus.launch(recovery.epoch, recovery.start)
+                })?;
             } else if consensus.latest_certificate().is_none() && tip == 0 {
-                consensus.launch(0, self.genesis_start().await?)?;
+                let start = self.genesis_start().await?;
+                crate::consensus_runtime::scoped(|| consensus.launch(0, start))?;
             }
         }
         Ok((ordered_rx, certificates_rx))
@@ -4097,7 +4293,7 @@ impl TenzroNode {
         })
     }
 
-    /// Wire the committee-resident Red Stuff DA backend (Task #82).
+    /// Wire the committee-resident Red Stuff DA backend.
     ///
     /// Builds a durable per-validator custody store, an `EpochManagerCommitteeView`
     /// that shapes erasure coding against the live validator set, a
@@ -4162,7 +4358,7 @@ impl TenzroNode {
         );
         self.da_committee_backend = Some(backend.clone());
 
-        // Background possession auditor (Task #92): every interval, challenge
+        // Background possession auditor: every interval, challenge
         // one random attester of one random held certificate to prove current
         // custody of its own sliver. 10 minutes keeps challenge traffic to a
         // single sliver round-trip per tick while still surfacing a member
@@ -4624,12 +4820,33 @@ impl TenzroNode {
                     let transport: Arc<dyn crate::snapshot::BlobStore> = Arc::new(
                         crate::snapshot::IrohSnapshotTransport::new(resolver.clone(), None),
                     );
-                    let snapshot_store = Arc::new(crate::snapshot::SnapshotStore::new(
-                        store,
-                        transport,
-                        self.config.snapshot.clone(),
-                    ));
+                    let snapshot_store = Arc::new(
+                        crate::snapshot::SnapshotStore::new(
+                            store,
+                            transport,
+                            self.config
+                                .snapshot
+                                .clone()
+                                .resolved(self.config.roles.is_validator()),
+                        )
+                        .with_data_dir(self.config.data_dir.clone()),
+                    );
                     resolver.snapshot_directory().set(snapshot_store.clone());
+                    // Snapshots past the retention (or whose lease ran out
+                    // after a peer fetched them) are removed with their blobs.
+                    {
+                        let snapshot_store = snapshot_store.clone();
+                        tokio::spawn(async move {
+                            let mut tick =
+                                tokio::time::interval(std::time::Duration::from_secs(600));
+                            loop {
+                                tick.tick().await;
+                                if let Err(e) = snapshot_store.maintain().await {
+                                    tracing::warn!(error = %e, "state snapshot retention failed");
+                                }
+                            }
+                        });
+                    }
                     self.snapshot_store = Some(snapshot_store);
                 }
                 for addr in &self.state_sync_addrs {
@@ -4648,6 +4865,8 @@ impl TenzroNode {
                                     crate::identity_bootstrap::RecordedPeers {
                                         store: identity.store().clone(),
                                         consensus: self.consensus.clone(),
+                                        registry: self.chain_registry(),
+                                        gate: Some(resolver.identity_gate().clone()),
                                     },
                                 ));
                                 crate::identity_bootstrap::seed_gossip(
@@ -4661,6 +4880,7 @@ impl TenzroNode {
                     }
                 }
                 router_transport.bind(resolver.endpoint().clone());
+                self.install_identity_gate(&resolver);
                 self.iroh_resolver = Some(resolver);
             }
             Err(e) => {
@@ -6021,6 +6241,13 @@ impl TenzroNode {
                 .with_claim_margin_ms(claim_margin_ms),
             );
             self.ledger_submitter = Some(submitter.clone());
+            // The same account pays a machine's sponsored first registration,
+            // when this node is configured to sponsor.
+            if let Some(server) = &self.onboard_server {
+                server.set_sink(Arc::new(crate::identity_gate::LedgerSink(
+                    submitter.clone(),
+                )));
+            }
             let _ = self.finding_submitter.set(submitter.clone());
             // A validator drafts burn-dial changes from the supply metrics and
             // puts each to an on-chain vote from its own account.
@@ -6584,6 +6811,13 @@ impl TenzroNode {
         // the getters are exercised at runtime rather than just sitting unused.
         {
             let initial_height = event_loop.current_height();
+            // A node whose binary does not support the chain's protocol
+            // version stops here, before it executes anything.
+            if let Some(policy) = &self.policy_applier {
+                policy
+                    .startup_check(initial_height.0.saturating_add(1))
+                    .map_err(|m| NodeError::Other(m.to_string()))?;
+            }
             let initial_hash = event_loop.last_block_hash();
             info!(
                 height = initial_height.0,
@@ -6635,6 +6869,11 @@ impl TenzroNode {
             });
             info!("Block sync wired to gossip (tenzro/blocks)");
 
+            // Release notices: gossip, the downloads host and the cache.
+            let notice_net = network.clone();
+            let notice_dir = self.config().data_dir.clone();
+            tokio::spawn(async move { crate::update_notice::start(notice_net, notice_dir).await });
+
             // Wire transaction gossip: subscribe to tenzro/transactions and
             // forward each inbound `MessagePayload::Transaction(tx)` into
             // `NodeEvent::NewTransaction`, which runs signature verification
@@ -6642,11 +6881,11 @@ impl TenzroNode {
             //
             // Without this subscriber, RPC nodes publish transactions to the
             // gossip topic but no validator's mempool ever receives them,
-            // so every block proposer emits an empty block. That was the
-            // root cause of the testnet wedge where `eth_blockNumber`
-            // advanced normally but every finalized block had `tx_count=0`
+            // so every block proposer emits an empty block. The chain looks
+            // healthy — `eth_blockNumber`
+            // advances normally but every finalized block has `tx_count=0`
             // and no transaction (transfer, contract call) ever
-            // settled despite the JSON-RPC layer reporting `submitted:queued`.
+            // settles despite the JSON-RPC layer reporting `submitted:queued`.
             //
             // `Ingress::admit` does not re-broadcast on receive: the
             // gossip layer passes accepted messages on itself, and a fresh
@@ -6885,7 +7124,9 @@ impl TenzroNode {
                 // member, dials the others and fetches blocks from them.
                 let net_endpoints = network.clone();
                 let book = self.consensus.clone();
+                let admission_store = self.storage().cloned();
                 tokio::spawn(async move {
+                    let gate = crate::validator_admission::PeerGate::default();
                     let mut rx = match net_endpoints.subscribe("tenzro/validators").await {
                         Ok(rx) => rx,
                         Err(e) => {
@@ -6903,6 +7144,19 @@ impl TenzroNode {
                         >(&bytes)
                         {
                             Ok(a) => {
+                                // Closed validator admission: a key that is
+                                // not an admitted account's gets no further.
+                                let chain = admission_store.as_ref().map(|s| {
+                                    tenzro_vm::StateAdapter::with_storage(
+                                        s.clone() as Arc<dyn tenzro_storage::KvStore>
+                                    )
+                                });
+                                if !gate.allows(
+                                    chain.as_ref().map(|c| c as &dyn tenzro_vm::traits::VmState),
+                                    &a.announcement.validator,
+                                ) {
+                                    continue;
+                                }
                                 // An endpoint a validator disclosed to this
                                 // node, as a committee member, becomes a
                                 // gossip peer of it.
@@ -7259,6 +7513,77 @@ impl TenzroNode {
         self.payment_gateway.as_ref()
     }
 
+    /// The identity registry the identity gate reads: consensus chain state,
+    /// believed once the chain has certified a checkpoint.
+    fn chain_registry(&self) -> Option<Arc<dyn tenzro_iroh::RegistryView>> {
+        let chain = self.storage.clone()? as Arc<dyn KvStore>;
+        let consensus = self.consensus.clone();
+        let ready: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || consensus.as_ref().is_some_and(|c| c.certified_height() > 0));
+        Some(Arc::new(crate::identity_gate::ChainRegistry::new(
+            chain, ready,
+        )))
+    }
+
+    /// Turns on the identity gate for the peers of this node's iroh
+    /// endpoint and the neighbours of its gossip: serves the onboarding
+    /// protocol, installs the registry, protects the boot list and the
+    /// validators, starts the standing sweep. The gate acts in the
+    /// `[onboarding]` mode; in `audit` it logs what it would refuse.
+    fn install_identity_gate(&mut self, resolver: &Arc<tenzro_iroh::IrohBackedResolver>) {
+        use crate::identity_gate as ig;
+        let cfg = self.config.onboarding.clone();
+        let Some(chain) = self.storage.clone().map(|s| s as Arc<dyn KvStore>) else {
+            return;
+        };
+        let gate = resolver.identity_gate().clone();
+        // The onboarding protocol is served whatever the mode: it is how a
+        // machine registers. It pays nobody's fee until the ledger rail is up
+        // and `[onboarding.sponsor]` is on.
+        if let Some(identity) = self.identity_transport.clone() {
+            let server = Arc::new(ig::OnboardServer::new(
+                &cfg,
+                ig::names_from(identity.store().clone()),
+                chain.clone(),
+                gate.clone(),
+                None,
+                None,
+            ));
+            resolver.onboard_handler().set(server.clone());
+            self.onboard_server = Some(server);
+        }
+        let Some(registry) = self.chain_registry() else {
+            return;
+        };
+        let consensus = self.consensus.clone();
+        let protected = ig::protected_identities(&self.config, consensus.as_deref(), Some(&chain));
+        if ig::install_peer_gate(&cfg, &gate, registry, protected).is_none() {
+            return;
+        }
+        // Validators come and go with the epoch: keep the protected set
+        // current.
+        {
+            let (config, gate, chain, consensus) =
+                (self.config.clone(), gate.clone(), chain.clone(), consensus);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tick.tick().await;
+                    gate.protect(ig::protected_identities(
+                        &config,
+                        consensus.as_deref(),
+                        Some(&chain),
+                    ));
+                }
+            });
+        }
+        if cfg.policy.mode == tenzro_onboarding_types::onboarding::GateMode::Enforce
+            && let Some(network) = &self.network
+        {
+            network.set_gossip_registered_only(true);
+        }
+    }
+
     /// The ledger settlement submitter, when the ledger rail is up.
     pub fn ledger_submitter(&self) -> Option<&Arc<crate::payment_rails::LedgerSubmitter>> {
         self.ledger_submitter.as_ref()
@@ -7408,6 +7733,29 @@ impl TenzroNode {
     /// all of them.
     pub fn traffic(&self) -> &Arc<tenzro_model::traffic::TrafficManager> {
         &self.traffic
+    }
+
+    /// Starts the load monitor and registers what the node gives back when
+    /// memory runs short: the store's block cache and idle models.
+    fn start_load_protection(&self) {
+        let monitor = crate::load_monitor::LoadMonitor::new(Some(self.config.data_dir.clone()));
+        if let Some(store) = self.storage.clone() {
+            monitor.register(crate::memory_guard::StoreCache::reclaimer(store));
+        }
+        #[cfg(feature = "inference")]
+        if let Some(runtime) = self.model_runtime.clone() {
+            monitor.register(crate::memory_guard::IdleModels::reclaimer(
+                runtime,
+                self.lifecycle.clone(),
+            ));
+        }
+        let reading = self.load_reading.clone();
+        let thread = monitor.spawn_with(crate::load_monitor::SAMPLE_EVERY, move |s| {
+            if let Some(reading) = &reading {
+                reading(s);
+            }
+        });
+        *self.load_monitor.lock() = Some(thread);
     }
 
     /// Warm-set tracking and cold-start messaging.
@@ -7835,6 +8183,13 @@ impl TenzroNode {
         }
     }
 
+    /// Set a rewrite of every load reading before the monitor applies it,
+    /// so the level does not follow the machine. Must be called before
+    /// [`TenzroNode::start`].
+    pub fn set_load_reading(&mut self, reading: LoadReading) {
+        self.load_reading = Some(reading);
+    }
+
     /// Set the peers to restore state from at start, by iroh `EndpointId`.
     /// Must be called before [`TenzroNode::start`], together with
     /// [`TenzroNode::set_weak_subjectivity_anchor`], which state sync
@@ -8082,7 +8437,9 @@ impl TenzroNode {
 
     /// The hybrid X25519 + ML-KEM-768 public key machine images and secrets
     /// are sealed to.
-    pub fn machine_sealing_public_key(&self) -> Result<tenzro_crypto::hybrid_seal::HybridPublicKey> {
+    pub fn machine_sealing_public_key(
+        &self,
+    ) -> Result<tenzro_crypto::hybrid_seal::HybridPublicKey> {
         if let Some(key) = self.machine_sealing_public_key.get() {
             return Ok(key.clone());
         }
@@ -9354,6 +9711,27 @@ pub(crate) fn ensure_pq_key_enrolled(
         }
         None => {}
     }
+    // An enrolment of this key already waiting in the mempool is not
+    // submitted again: while the chain makes no blocks (no quorum yet) it
+    // cannot execute, and each further copy would only take the next nonce.
+    let address = Address::new(public.account_slot());
+    let pending = consensus.mempool().has_pending_from(&address, |s| {
+        matches!(
+            &s.transaction.tx_type,
+            tenzro_types::transaction::TransactionType::AccountKeys {
+                op: AccountKeysOp::EnrollPqKey { ml_dsa_public_key, .. },
+            } if *ml_dsa_public_key == key
+        )
+    });
+    if pending {
+        if nonces.enrolment_due() {
+            info!(
+                "the validator account ML-DSA-65 key enrolment is submitted and waiting to execute \
+                 (no block has included it yet, e.g. while waiting for quorum); not submitting another"
+            );
+        }
+        return Ok(false);
+    }
     if !nonces.enrolment_due() {
         return Ok(false);
     }
@@ -9362,31 +9740,27 @@ pub(crate) fn ensure_pq_key_enrolled(
         .sign(SignatureContext::PqKeyEnrollment, &message)
         .map_err(|e| NodeError::Other(format!("signing the key enrolment: {e}")))?
         .pq
-        .ok_or_else(|| NodeError::Other("the signer produced no ML-DSA-65 signature".to_string()))?;
-    let address = Address::new(public.account_slot());
+        .ok_or_else(|| {
+            NodeError::Other("the signer produced no ML-DSA-65 signature".to_string())
+        })?;
     let gas_price = consensus.node_tx_gas_price();
-    let (nonce, signed) = nonces.admit_next(
-        consensus,
-        storage.clone(),
-        &address,
-        |nonce| {
-            let signed = sign_validator_transaction(
-                signer.as_ref(),
-                chain_id,
-                nonce,
-                tenzro_types::transaction::TransactionType::AccountKeys {
-                    op: AccountKeysOp::EnrollPqKey {
-                        ml_dsa_public_key: key.clone(),
-                        possession: possession.clone(),
-                    },
+    let (nonce, signed) = nonces.admit_next(consensus, storage.clone(), &address, |nonce| {
+        let signed = sign_validator_transaction(
+            signer.as_ref(),
+            chain_id,
+            nonce,
+            tenzro_types::transaction::TransactionType::AccountKeys {
+                op: AccountKeysOp::EnrollPqKey {
+                    ml_dsa_public_key: key.clone(),
+                    possession: possession.clone(),
                 },
-                200_000,
-                gas_price,
-            )?;
-            consensus.submit_transaction(signed.clone())?;
-            Ok::<_, NodeError>((nonce, signed))
-        },
-    )?;
+            },
+            200_000,
+            gas_price,
+        )?;
+        consensus.submit_transaction(signed.clone())?;
+        Ok::<_, NodeError>((nonce, signed))
+    })?;
     info!(nonce, "enrolling the validator account ML-DSA-65 key");
     crate::payment_rails::gossip_admitted(gossip, signed);
     Ok(false)
@@ -9986,5 +10360,141 @@ mod offload_record_tests {
         let long = offload_key("muse-glimmer-30b-dflash");
         assert!(long.starts_with(&short[..]), "the ids genuinely nest");
         assert_ne!(short, long, "but the keys are still distinct");
+    }
+}
+
+/// A node's earning and bonding account must be its own, never a
+/// stranger's. The identity registry on every node mirrors every identity on
+/// the chain, so inference over it must not hand a node whose own account is
+/// unregistered some other machine's identity.
+#[cfg(test)]
+mod operator_account_tests {
+    use super::{MachineOperator, resolve_operator_identity, resolve_operator_payee};
+    use tenzro_identity::{
+        IdentityData, IdentityRegistry, IdentityStatus, TenzroDid, TenzroIdentity,
+    };
+    use tenzro_types::primitives::Address;
+
+    fn account(seed: u8) -> Address {
+        Address::new([seed; 32])
+    }
+
+    fn did(seed: u8) -> String {
+        format!("did:tenzro:machine:{}", hex::encode([seed; 32]))
+    }
+
+    fn machine_identity(did: &str, wallet: Address, controller: Option<&str>) -> TenzroIdentity {
+        TenzroIdentity {
+            did: TenzroDid::parse(did).expect("DID"),
+            public_keys: Vec::new(),
+            identity_data: IdentityData::Machine {
+                capabilities: Vec::new(),
+                controller_did: controller.map(str::to_string),
+                reputation: 0,
+                tenzro_agent_id: None,
+                erc8004_agent_id: None,
+            },
+            status: IdentityStatus::Active,
+            wallet_address: wallet,
+            wallet_id: String::new(),
+            pq_verifying_key: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: Default::default(),
+        }
+    }
+
+    fn human_identity(seed: u8, wallet: Address) -> TenzroIdentity {
+        let mut id = machine_identity(&did(seed), wallet, None);
+        id.did = TenzroDid::parse(&format!("did:tenzro:human:{}", hex::encode([seed; 32])))
+            .expect("DID");
+        id.identity_data = IdentityData::Human {
+            display_name: "Owner".into(),
+            controlled_machines: Vec::new(),
+        };
+        id
+    }
+
+    /// The registry of a node that has synced a chain on which the first machine (seed 1)
+    /// registered its machine identity.
+    fn registry_with_gpu_host() -> IdentityRegistry {
+        let registry = IdentityRegistry::new();
+        registry.upsert_identity_for_test(machine_identity(&did(1), account(1), None));
+        registry
+    }
+
+    fn pi() -> MachineOperator {
+        MachineOperator {
+            did: Some(did(2)),
+            account: account(2),
+        }
+    }
+
+    #[test]
+    fn an_unregistered_machine_does_not_take_another_machines_account() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        // The Pi's own hardware wallet account has no registry entry.
+        let payee = resolve_operator_payee(Some(&registry), Some(&pi()), None);
+        assert_eq!(
+            payee,
+            Some(account(2)),
+            "the Pi earns into its own account, not the gpu-host's"
+        );
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&pi()), None),
+            None
+        );
+    }
+
+    #[test]
+    fn two_unregistered_machines_get_two_accounts() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        let other = MachineOperator {
+            did: Some(did(3)),
+            account: account(3),
+        };
+        let a = resolve_operator_payee(Some(&registry), Some(&pi()), None);
+        let b = resolve_operator_payee(Some(&registry), Some(&other), None);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_machine_registered_under_its_own_account_resolves_to_it() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        registry.upsert_identity_for_test(machine_identity(&did(2), account(2), None));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&pi()), None),
+            Some((did(2), account(2)))
+        );
+    }
+
+    #[test]
+    fn the_machines_own_did_resolves_to_its_registered_wallet() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        registry.upsert_identity_for_test(machine_identity(&did(2), account(9), None));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&pi()), None),
+            Some((did(2), account(9)))
+        );
+    }
+
+    #[test]
+    fn a_configured_operator_is_still_honoured() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        registry.upsert_identity_for_test(human_identity(7, account(7)));
+        let owner = format!("did:tenzro:human:{}", hex::encode([7u8; 32]));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&pi()), Some(&owner)),
+            Some((owner, account(7)))
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_hardware_wallet_still_infers_its_operator() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), None, None),
+            Some((did(1), account(1)))
+        );
     }
 }

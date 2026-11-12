@@ -18,7 +18,13 @@ const BLOCK_PATH: &[&str] = &[
     "tenzro-token",
 ];
 
-const FORBIDDEN: &[&str] = &["iroh_blobs", "iroh::blobs", "BlobStore", "bao_file", "blob_store"];
+const FORBIDDEN: &[&str] = &[
+    "iroh_blobs",
+    "iroh::blobs",
+    "BlobStore",
+    "bao_file",
+    "blob_store",
+];
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {

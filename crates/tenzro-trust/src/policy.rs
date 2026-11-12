@@ -542,11 +542,9 @@ pub(crate) mod tests {
                 signer_pq_key: self.0.public_key().pq.clone(),
                 batched: None,
             };
-            let signed = tenzro_crypto::batch::RecordSigner::sign_record(
-                &self.1,
-                &r.canonical_preimage(),
-            )
-            .unwrap();
+            let signed =
+                tenzro_crypto::batch::RecordSigner::sign_record(&self.1, &r.canonical_preimage())
+                    .unwrap();
             r.batched = Some(serde_json::to_vec(&signed.batched).unwrap());
             r
         }

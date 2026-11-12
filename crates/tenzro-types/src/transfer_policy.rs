@@ -39,7 +39,11 @@ pub struct TransferPolicy {
 
 impl TransferPolicy {
     /// From the governed values; a missing one falls back to genesis.
-    pub fn from_governed(ceiling: Option<u64>, step_up: Option<u64>, window_ms: Option<u64>) -> Self {
+    pub fn from_governed(
+        ceiling: Option<u64>,
+        step_up: Option<u64>,
+        window_ms: Option<u64>,
+    ) -> Self {
         Self {
             daily_ceiling_tnzo: ceiling.unwrap_or(DEFAULT_DAILY_CEILING_TNZO),
             step_up_threshold_tnzo: step_up.unwrap_or(DEFAULT_STEP_UP_THRESHOLD_TNZO),
@@ -114,11 +118,21 @@ pub fn amount_confirmation_matches(amount_wei: u128, typed: &str) -> bool {
     if !digits(whole) || !digits(frac) {
         return false;
     }
-    let w: u128 = if whole.is_empty() { 0 } else { match whole.parse() { Ok(v) => v, Err(_) => return false } };
+    let w: u128 = if whole.is_empty() {
+        0
+    } else {
+        match whole.parse() {
+            Ok(v) => v,
+            Err(_) => return false,
+        }
+    };
     let f: u128 = if frac.is_empty() {
         0
     } else {
-        match format!("{frac:0<18}").parse() { Ok(v) => v, Err(_) => return false }
+        match format!("{frac:0<18}").parse() {
+            Ok(v) => v,
+            Err(_) => return false,
+        }
     };
     w.checked_mul(ONE_TNZO).and_then(|x| x.checked_add(f)) == Some(amount_wei)
 }
@@ -131,7 +145,10 @@ mod tests {
 
     #[test]
     fn small_transfer_is_allowed() {
-        assert_eq!(evaluate_transfer(5 * T, 0, &TransferPolicy::default()), TransferDecision::Allow);
+        assert_eq!(
+            evaluate_transfer(5 * T, 0, &TransferPolicy::default()),
+            TransferDecision::Allow
+        );
     }
 
     #[test]
@@ -158,8 +175,14 @@ mod tests {
     #[test]
     fn governed_values_replace_genesis() {
         let p = TransferPolicy::from_governed(Some(10), Some(5), Some(3_600_000));
-        assert!(matches!(evaluate_transfer(6 * T, 0, &p), TransferDecision::StepUp { .. }));
-        assert!(matches!(evaluate_transfer(11 * T, 0, &p), TransferDecision::Refuse { .. }));
+        assert!(matches!(
+            evaluate_transfer(6 * T, 0, &p),
+            TransferDecision::StepUp { .. }
+        ));
+        assert!(matches!(
+            evaluate_transfer(11 * T, 0, &p),
+            TransferDecision::Refuse { .. }
+        ));
     }
 
     #[test]

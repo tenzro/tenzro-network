@@ -735,7 +735,7 @@ mod tests {
     }
 
     /// Seed 3054677367's netem window kept failing here long after the
-    /// loss that caused it had cleared (TENZRO-INFLIGHT.md, 2026-10-21): a
+    /// loss that caused it had cleared: a
     /// validator a stall isolates falls further behind the healthy
     /// majority for as long as the isolation lasts, not just one epoch's
     /// worth (measured directly in a netem-only replay: a 2-epoch gap

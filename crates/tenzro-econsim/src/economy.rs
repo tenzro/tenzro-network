@@ -272,12 +272,12 @@ pub struct Assumptions {
     /// The closed phase before a public listing: payments, escrows and the
     /// treasury leg settle in the stable token (`stable_asset`,
     /// `stable_leg`), TNZO has no public market (no price discovery, no
-    /// reserve or grant sales, the price stays at launch), the owner funds
-    /// the running costs, and validators are contracted in USD, so they
+    /// reserve or grant sales, the price stays at launch), the bootstrap funder
+    /// pays the running costs, and validators are contracted in USD, so they
     /// neither leave nor join on their yield.
     pub closed_phase: bool,
-    /// Share of the demand that is related-party anchor demand: the owner's
-    /// own products buying from the network. The listing gate counts only
+    /// Share of the demand that is related-party anchor demand: the bootstrap
+    /// funder's own products buying from the network. The listing gate counts only
     /// the rest as unrelated demand.
     pub anchor_share: f64,
     /// Cost and split inputs of the per-class accounts.
@@ -4026,7 +4026,7 @@ impl Economy {
         } else {
             a.running_cost_ask_usd_month / 30.44
         };
-        // Before a listing the owner pays the running costs in full.
+        // Before a listing the bootstrap funder pays the running costs in full.
         let proceeds = if a.closed_phase { asked_day } else { proceeds };
         self.cost_trail.push_back((proceeds, asked_day));
         self.cost_total.0 += proceeds;

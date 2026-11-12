@@ -74,16 +74,38 @@ pub struct StakeSigner {
 }
 
 impl StakeSigner {
-    async fn send(&self, op: StakeOp, what: &str) -> Result<()> {
+    /// `gate`: for a bond, the role it is for and the TNZO it needs, so a
+    /// wallet below that in the initial phase gets the plain application
+    /// message before anything is signed, and a refusal for lack of funds is
+    /// told the same way.
+    async fn send(
+        &self,
+        op: StakeOp,
+        what: &str,
+        gate: Option<(
+            &'static str,
+            Option<crate::onboarding::role::JoinRole>,
+            u128,
+        )>,
+    ) -> Result<()> {
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let tx_type = serde_json::to_value(TransactionType::Stake { op })?;
         let (account, _) = crate::keystore::client_account(&self.key_namespace)?;
+        if let Some((label, role, required)) = gate {
+            crate::onboarding::flow::gate(&self.rpc, &account, label, role, required).await?;
+        }
         let to: [u8; 32] = hex::decode(account.trim_start_matches("0x"))?
             .try_into()
             .map_err(|_| anyhow!("the client account is 32 bytes"))?;
         let result =
             crate::keystore::send_as_client(&rpc, &self.key_namespace, to, tx_type, 150_000)
-                .await?;
+                .await
+                .map_err(|e| match gate {
+                    Some((label, role, required)) => crate::onboarding::flow::plain_send_error(
+                        e, label, role, required, &account,
+                    ),
+                    None => e,
+                })?;
         output::print_success(&format!("{what} signed in hardware and submitted"));
         output::print_field("Account", &account);
         output::print_field(
@@ -216,6 +238,8 @@ impl StakeBondCmd {
                     capacity,
                 },
                 "Stake bond",
+                crate::onboarding::role::JoinRole::parse(&self.role)
+                    .map(|j| (j.label(), Some(j), self.amount.max(j.stake_minimum_wei()))),
             )
             .await
     }
@@ -247,6 +271,7 @@ impl StakeUnbondCmd {
                     amount: self.amount,
                 },
                 "Stake unbond",
+                None,
             )
             .await
     }
@@ -268,7 +293,7 @@ impl StakeWithdrawCmd {
         output::print_header("Withdraw Role Stake");
         let role = parse_role(&self.role)?;
         self.signer
-            .send(StakeOp::Withdraw { role }, "Stake withdrawal")
+            .send(StakeOp::Withdraw { role }, "Stake withdrawal", None)
             .await
     }
 }
@@ -393,7 +418,7 @@ impl StakeEndpointCmd {
         output::print_field("Role", role.as_str());
         output::print_field("URL", if url.is_empty() { "(cleared)" } else { &url });
         self.signer
-            .send(StakeOp::Endpoint { role, url }, "Role endpoint")
+            .send(StakeOp::Endpoint { role, url }, "Role endpoint", None)
             .await
     }
 }

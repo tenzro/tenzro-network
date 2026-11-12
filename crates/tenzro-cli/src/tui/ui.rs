@@ -21,7 +21,10 @@ pub fn too_small(f: &mut Frame, theme: &Theme) -> bool {
     }
     let text = vec![
         Line::from(Span::styled("Terminal too small", theme.title())),
-        Line::from(format!("Need at least {MIN_W}x{MIN_H}, this window is {}x{}.", a.width, a.height)),
+        Line::from(format!(
+            "Need at least {MIN_W}x{MIN_H}, this window is {}x{}.",
+            a.width, a.height
+        )),
         Line::from("Make the window bigger, or press q to quit."),
     ];
     f.render_widget(Clear, a);
@@ -31,12 +34,27 @@ pub fn too_small(f: &mut Frame, theme: &Theme) -> bool {
 
 /// The three bands of every screen: header (1 row), body, footer (1 row).
 pub fn bands(area: Rect) -> (Rect, Rect, Rect) {
-    let [h, b, ft] = Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let [h, b, ft] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
     (h, b, ft)
 }
 
 pub fn header(f: &mut Frame, area: Rect, theme: &Theme, left: &str, right: Vec<Span<'static>>) {
-    let [l, r] = Layout::horizontal([Constraint::Min(10), Constraint::Length(right.iter().map(|s| s.width() as u16).sum::<u16>().min(area.width / 2))]).areas(area);
+    let [l, r] = Layout::horizontal([
+        Constraint::Min(10),
+        Constraint::Length(
+            right
+                .iter()
+                .map(|s| s.width() as u16)
+                .sum::<u16>()
+                .min(area.width / 2),
+        ),
+    ])
+    .areas(area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" tenzro ", theme.title()),
@@ -44,18 +62,29 @@ pub fn header(f: &mut Frame, area: Rect, theme: &Theme, left: &str, right: Vec<S
         ])),
         l,
     );
-    f.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), r);
+    f.render_widget(
+        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
+        r,
+    );
 }
 
 pub fn footer(f: &mut Frame, area: Rect, theme: &Theme, text: &str) {
-    f.render_widget(Paragraph::new(Line::from(Span::styled(format!(" {text}"), theme.muted()))), area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {text}"), theme.muted()))),
+        area,
+    );
 }
 
 /// A box of `w` by `h` (clamped) in the middle of `area`.
 pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
-    Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
 }
 
 /// The help overlay, generated from the same table the keys come from.
@@ -70,16 +99,32 @@ pub fn help(f: &mut Frame, theme: &Theme, table: &[Binding], title: &str) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Esc or ? closes this help", theme.muted())));
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(format!(" {title} "), theme.title()));
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    lines.push(Line::from(Span::styled(
+        "Esc or ? closes this help",
+        theme.muted(),
+    )));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(format!(" {title} "), theme.title()));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// Word-wrap `text` to `width` columns after a label of `label_w` columns:
 /// the label is on the first line and the following lines are indented under
 /// the text, so wrapped paragraphs keep their hanging indent. A word longer
 /// than the line is broken.
-pub fn hang(label: Span<'static>, label_w: usize, text: &str, width: u16, style: ratatui::style::Style) -> Vec<Line<'static>> {
+pub fn hang(
+    label: Span<'static>,
+    label_w: usize,
+    text: &str,
+    width: u16,
+    style: ratatui::style::Style,
+) -> Vec<Line<'static>> {
     let avail = (width as usize).saturating_sub(label_w + 1).max(8);
     let mut rows: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -93,7 +138,11 @@ pub fn hang(label: Span<'static>, label_w: usize, text: &str, width: u16, style:
             rows.push(head);
             word = word.chars().skip(avail).collect();
         }
-        let need = if cur.is_empty() { word.chars().count() } else { cur.chars().count() + 1 + word.chars().count() };
+        let need = if cur.is_empty() {
+            word.chars().count()
+        } else {
+            cur.chars().count() + 1 + word.chars().count()
+        };
         if need > avail {
             rows.push(std::mem::take(&mut cur));
         }
@@ -108,7 +157,11 @@ pub fn hang(label: Span<'static>, label_w: usize, text: &str, width: u16, style:
     rows.into_iter()
         .enumerate()
         .map(|(i, r)| {
-            let lead = if i == 0 { label.clone() } else { Span::raw(" ".repeat(label_w)) };
+            let lead = if i == 0 {
+                label.clone()
+            } else {
+                Span::raw(" ".repeat(label_w))
+            };
             Line::from(vec![lead, Span::styled(r, style)])
         })
         .collect()
@@ -140,12 +193,24 @@ mod tests {
 
     #[test]
     fn hang_wraps_under_the_text_and_breaks_long_words() {
-        let l = hang(Span::raw(" Why   "), 7, "one two three four five six", 20, ratatui::style::Style::default());
+        let l = hang(
+            Span::raw(" Why   "),
+            7,
+            "one two three four five six",
+            20,
+            ratatui::style::Style::default(),
+        );
         assert!(l.len() >= 2);
         for row in &l[1..] {
             assert!(row.spans[0].content.starts_with("       "));
         }
-        let l = hang(Span::raw("> "), 2, &"x".repeat(50), 20, ratatui::style::Style::default());
+        let l = hang(
+            Span::raw("> "),
+            2,
+            &"x".repeat(50),
+            20,
+            ratatui::style::Style::default(),
+        );
         assert!(l.len() >= 3 && l.iter().all(|r| r.width() <= 20));
     }
 

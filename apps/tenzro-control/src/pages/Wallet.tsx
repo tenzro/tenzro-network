@@ -1,3 +1,5 @@
+import { ApplicationNotice } from "@/components/ApplicationNotice";
+import { currentEnv, stakeGap } from "@/lib/onboarding";
 import * as React from "react";
 import qrcode from "qrcode-generator";
 import { Badge, Button, Card, ErrorBox, Field, Input, Micro, Row, Stat } from "@/components/ui";
@@ -319,6 +321,24 @@ function stakeSignerText(signer: string | undefined): string {
   return "a TPM or Secure Enclave, which this machine does not have";
 }
 
+/// Whether the initial-phase application message is showing for this gate, so
+/// the generic readout is not shown twice.
+function initialPhaseNotice(gate: RoleStakeGate, wallet: WalletStatusView | null): boolean {
+  const balance = wallet ? BigInt(wallet.stake_balance_wei || "0") : null;
+  return (
+    stakeGap(
+      {
+        roleLabel: gate.label,
+        requiredWei: BigInt(gate.required_wei),
+        balanceWei: balance,
+        account: "",
+        state: "not_applied",
+      },
+      currentEnv(),
+    ) !== null
+  );
+}
+
 function StakeRow({
   gate,
   wallet,
@@ -424,7 +444,18 @@ function StakeRow({
       )}
 
       {!bonded && !gate.can_stake && (
-        <p className="text-xs leading-relaxed text-muted-foreground">{readout.detail}</p>
+        <>
+          <ApplicationNotice
+            roleLabel={gate.label}
+            requiredWei={gate.required_wei}
+            balanceWei={wallet?.stake_balance_wei ?? null}
+            staked={bonded}
+            account={wallet?.stake_account.address || wallet?.address || ""}
+          />
+          {!initialPhaseNotice(gate, wallet) && (
+            <p className="text-xs leading-relaxed text-muted-foreground">{readout.detail}</p>
+          )}
+        </>
       )}
 
       {error && <ErrorBox message={error} />}

@@ -382,7 +382,10 @@ mod tests {
     #[test]
     fn validity_is_stated_in_words_and_long_windows_are_called_out() {
         let short = validity_line(0, 5 * 60_000);
-        assert!(short.contains("Valid for 5 minutes after signing"), "{short}");
+        assert!(
+            short.contains("Valid for 5 minutes after signing"),
+            "{short}"
+        );
         assert!(!short.contains("long window"));
         let long = validity_line(0, 3 * 24 * 60 * 60 * 1000);
         assert!(long.contains("3 days"), "{long}");

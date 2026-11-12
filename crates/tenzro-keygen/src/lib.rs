@@ -280,14 +280,20 @@ impl HybridRecipient for DerivedHybridRecipient {
         self.public.clone()
     }
 
-    fn agree_x25519(&self, share: &[u8; 32]) -> tenzro_crypto::Result<zeroize::Zeroizing<[u8; 32]>> {
+    fn agree_x25519(
+        &self,
+        share: &[u8; 32],
+    ) -> tenzro_crypto::Result<zeroize::Zeroizing<[u8; 32]>> {
         self.keys
             .root
             .x25519_agree(self.label, share)
             .map_err(|e| CryptoError::DecryptionFailed(format!("derived X25519 agreement: {e}")))
     }
 
-    fn decapsulate(&self, ciphertext: &[u8]) -> tenzro_crypto::Result<zeroize::Zeroizing<[u8; 32]>> {
+    fn decapsulate(
+        &self,
+        ciphertext: &[u8],
+    ) -> tenzro_crypto::Result<zeroize::Zeroizing<[u8; 32]>> {
         self.keys
             .root
             .ml_kem768_decapsulate(self.label, ciphertext)
@@ -369,10 +375,7 @@ mod tests {
         let b = k.machine_sealing().unwrap();
         assert_ne!(a.public_key(), b.public_key());
         assert_ne!(a.public_key().ml_kem, b.public_key().ml_kem);
-        assert_eq!(
-            a.public_key(),
-            k.model_recipient().unwrap().public_key()
-        );
+        assert_eq!(a.public_key(), k.model_recipient().unwrap().public_key());
     }
 
     #[test]

@@ -889,7 +889,10 @@ async fn every_binding_sends_the_params_the_node_reads() {
         json!({ "resource": "/r", "amount": "5", "asset": "TNZO", "protocol": "x402" }),
     );
     let _ = c.payment().quote(1000, &["TNZO"]).await;
-    expect!("tenzro_quotePayment", json!({ "usd_e6": 1000, "accept": ["TNZO"] }));
+    expect!(
+        "tenzro_quotePayment",
+        json!({ "usd_e6": 1000, "accept": ["TNZO"] })
+    );
     let credential: tenzro_sdk::payment::PaymentCredential = serde_json::from_value(json!({
         "credential_id": "k1",
         "challenge_id": "c1",

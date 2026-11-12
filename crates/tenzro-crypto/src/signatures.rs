@@ -296,7 +296,7 @@ impl Verifier for Secp256k1VerifierImpl {
         let sig = Secp256k1Signature::try_from(signature.as_bytes())
             .map_err(|e| CryptoError::InvalidSignature(e.to_string()))?;
 
-        // SECURITY (Issue #7 - RESOLVED): k256's verify() uses constant-time comparison
+        // SECURITY: k256's verify() uses constant-time comparison
         // internally via the `subtle` crate to prevent timing side-channel attacks during
         // signature verification. No additional constant-time checks needed.
         Sigv3Verifier::verify(&self.verifying_key, message, &sig)

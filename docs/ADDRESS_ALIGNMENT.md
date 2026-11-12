@@ -89,7 +89,7 @@ All fixed 2026-08-04. Recorded because each one looked like a different bug:
    40-hex path is reachable only from user input and external announcements,
    which is exactly why it is the one that broke.
 4. **Suspect alignment whenever a balance reads 0 against an account you
-   believe is funded.** It is a cheaper hypothesis than it looks.
+   believe is funded.** It is a cheaper assumption than it looks.
 
 Regression tests live in `tenzro-types/src/primitives.rs`
 (`address_widening_tests`) and `tenzro-vm/src/token_ledger.rs`. The EVM

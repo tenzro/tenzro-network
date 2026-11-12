@@ -234,8 +234,7 @@ pub fn envelope_encrypt(
 ) -> Result<EncryptedEnvelope> {
     let data_key = SymmetricKey::generate();
     let encrypted_data = data_key.encrypt(plaintext)?;
-    let sealed_key =
-        crate::hybrid_seal::seal(recipient, ENVELOPE_CONTEXT, &data_key.to_bytes())?;
+    let sealed_key = crate::hybrid_seal::seal(recipient, ENVELOPE_CONTEXT, &data_key.to_bytes())?;
     Ok(EncryptedEnvelope {
         version: ENVELOPE_VERSION,
         sealed_key,
@@ -364,8 +363,7 @@ mod tests {
         assert!(envelope_decrypt(&recipient, &version).is_err());
 
         let mut share = envelope.clone();
-        share.sealed_key.x25519_share =
-            HybridSecretKey::generate().public().x25519;
+        share.sealed_key.x25519_share = HybridSecretKey::generate().public().x25519;
         assert!(envelope_decrypt(&recipient, &share).is_err());
 
         let mut kem = envelope.clone();

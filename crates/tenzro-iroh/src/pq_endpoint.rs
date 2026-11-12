@@ -332,8 +332,8 @@ pub fn verify_channel_proof(
     if !verify_p256(p256_key, &message, p256_sig) {
         return Err(refused());
     }
-    let (scheme, key) = SignatureScheme::split_public_key(&binding.machine_pq_key)
-        .ok_or_else(refused)?;
+    let (scheme, key) =
+        SignatureScheme::split_public_key(&binding.machine_pq_key).ok_or_else(refused)?;
     ml_dsa_verify_scheme(scheme, key, PQ_CHANNEL_CONTEXT, &message, ml_dsa_sig)
         .map_err(|_| refused())
 }
@@ -415,7 +415,9 @@ pub async fn authenticate_acceptor(
     peer: Option<&EndpointRecord>,
 ) -> IrohResult<()> {
     let peer = peer.ok_or_else(|| {
-        IrohError::Backend("no record of the dialer: classical-only authentication is refused".into())
+        IrohError::Backend(
+            "no record of the dialer: classical-only authentication is refused".into(),
+        )
     })?;
     bound_key(peer)?;
     let (mut send, mut recv) = conn

@@ -117,6 +117,9 @@ test("consensus, state and validator reads", async () => {
   await check(n, "tenzro_getEpochHandover", { epoch: 2 }, () => v.getEpochHandover({ epoch: 2 }), { epoch: 2 });
   const fin = await check(n, "tenzro_getFinality", { ordered: 12, certified: 10, certificate: null }, () => v.getFinality(), []);
   assert.equal(fin.certified, 10);
+  const notice = await check(n, "tenzro_getUpdateNotice", { notice: null, etag: null, cache_ttl_secs: 60, epoch: null }, () => v.getUpdateNotice(), []);
+  assert.equal(notice.cache_ttl_secs, 60);
+  await check(n, "tenzro_getUpdateNotice", { unchanged: true, etag: "ab", cache_ttl_secs: 60, epoch: null }, () => v.getUpdateNotice({ if_none_match: "ab" }), { if_none_match: "ab" });
   await check(n, "tenzro_getRewardEpoch", { epoch: 3 }, () => v.getRewardEpoch({ epoch: 3 }), { epoch: 3 });
   await check(n, "tenzro_getRewardSchedule", {}, () => v.getRewardSchedule(), []);
   await check(n, "tenzro_getStateProof", { value: null }, () => v.getStateProof({ namespace: "accounts", key: "ab" }), { namespace: "accounts", key: "ab" });

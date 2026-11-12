@@ -167,6 +167,18 @@ impl<K: KvStore + ?Sized> BlockStoreImpl<K> {
     }
 }
 
+/// Reads the block stored at `height` straight from `kv`, without the async
+/// store: for lookups that already hold a store handle and need one block.
+pub fn read_block_by_height<K: KvStore + ?Sized>(
+    kv: &K,
+    height: BlockHeight,
+) -> Result<Option<Block>> {
+    let key = BlockStoreImpl::<crate::kv::MemoryStore>::block_height_key(height);
+    kv.get(CF_BLOCKS, &key)?
+        .map(|data| BlockStoreImpl::<K>::decode_block(&data))
+        .transpose()
+}
+
 #[async_trait]
 impl<K: KvStore + ?Sized + 'static> BlockStore for BlockStoreImpl<K> {
     async fn get_block(&self, hash: &Hash) -> Result<Option<Block>> {

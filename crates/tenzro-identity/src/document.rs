@@ -285,7 +285,10 @@ mod tests {
         doc.add_verification_method(classical("key-2"));
 
         assert!(doc.has_post_quantum_method());
-        assert_eq!(doc.verification_method[0].method_type, ML_DSA_65_METHOD_TYPE);
+        assert_eq!(
+            doc.verification_method[0].method_type,
+            ML_DSA_65_METHOD_TYPE
+        );
         assert_eq!(doc.authentication[0], "did:tenzro:human:alice#pq-key-1");
         assert_eq!(doc.assertion_method[0], "did:tenzro:human:alice#pq-key-1");
         assert_eq!(doc.authentication.len(), 3);

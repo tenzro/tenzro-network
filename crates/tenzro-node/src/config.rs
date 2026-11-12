@@ -96,6 +96,177 @@ pub struct GenesisConfig {
     /// genesis alone. The genesis state root commits to them.
     #[serde(default)]
     pub role_stakes: Vec<GenesisRoleStake>,
+    /// The chain's protocol version (`[protocol] version`), recorded in
+    /// consensus state and raised by an enacted protocol upgrade at its
+    /// activation height. Optional: a genesis without it records no
+    /// version, stamps the header with `PQ_HYBRID_PROTOCOL_VERSION` as
+    /// before and leaves every node's protocol range check off. When set it
+    /// must lie within the range this binary supports, the genesis state
+    /// root and the genesis inputs digest commit to it, and the header
+    /// carries it.
+    #[serde(default)]
+    pub protocol: Option<ProtocolGenesis>,
+    /// Ordering rules every validator must apply alike (`[consensus]`):
+    /// the DAG depth kept below the last committed leader and the seats a
+    /// committee apportions by stake. They decide the committee root and the
+    /// ordering state, so they are the network's, not a node's: a value left
+    /// out is this release's default on every node, a value named here is
+    /// committed by the genesis state root and inputs digest, and a node's
+    /// own `[consensus]` table cannot change either.
+    #[serde(default)]
+    pub consensus: ConsensusGenesis,
+    /// Validator registry rules the release would otherwise compile in
+    /// (`[validator_registry]`). The registry configuration is committed
+    /// chain state, so a value a later release changed would split fresh
+    /// nodes from old ones; named here, it is the network's. All fields or
+    /// none: a genesis without the table keeps the registry's compiled
+    /// configuration and the digests it had.
+    #[serde(default)]
+    pub validator_registry: ValidatorRegistryGenesis,
+}
+
+/// The `[validator_registry]` genesis table: the registry rules that have no
+/// governed parameter. Its other rules (the validator self-stake floor, the
+/// RPC provider minimum `stake.rpc_tnzo`, exit churn, jail term) are governed
+/// parameters, taken from `[network_params]` and followed at every boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidatorRegistryGenesis {
+    /// Validators activated per epoch, in basis points of the active set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_churn_bps: Option<u32>,
+    /// Epochs a validator that exited waits before it may register again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reentry_cooldown_epochs: Option<u64>,
+}
+
+impl ValidatorRegistryGenesis {
+    /// Whether the genesis names the table.
+    pub fn is_named(&self) -> bool {
+        self.activation_churn_bps.is_some() || self.reentry_cooldown_epochs.is_some()
+    }
+
+    /// Checks the table names every field or none, within bounds.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.is_named() {
+            return Ok(());
+        }
+        let (Some(churn), Some(_)) = (self.activation_churn_bps, self.reentry_cooldown_epochs)
+        else {
+            return Err("[validator_registry] names every field or none: \
+                        activation_churn_bps, reentry_cooldown_epochs"
+                .into());
+        };
+        if churn == 0 || churn > 10_000 {
+            return Err(format!(
+                "[validator_registry] activation_churn_bps ({churn}) must be within 1..=10000"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl GenesisConfig {
+    /// The validator registry configuration this genesis starts the chain
+    /// with, when it names `[validator_registry]`: those values, with the
+    /// governed rules (self-stake floor, RPC provider minimum, exit churn,
+    /// jail term) at their genesis values. `None` for a genesis without the
+    /// table.
+    pub fn validator_registry_config(
+        &self,
+    ) -> std::result::Result<Option<tenzro_token::ValidatorRegistryConfig>, String> {
+        self.validator_registry.validate()?;
+        let v = self.validator_registry;
+        let (Some(churn), Some(cooldown)) = (v.activation_churn_bps, v.reentry_cooldown_epochs)
+        else {
+            return Ok(None);
+        };
+        let exit_churn = self.network_param(tenzro_vm::native::EXIT_CHURN_PARAM);
+        let ladder = self.stake_ladder();
+        Ok(Some(tenzro_token::ValidatorRegistryConfig {
+            min_self_stake: ladder.validator,
+            min_rpc_provider_stake: ladder.rpc,
+            activation_churn_bps: churn,
+            exit_churn_bps: u32::try_from(exit_churn).unwrap_or(u32::MAX),
+            reentry_cooldown_epochs: cooldown,
+            jail_term_epochs: self.network_param(tenzro_vm::native::JAIL_TERM_PARAM),
+        }))
+    }
+}
+
+/// The `[consensus]` genesis table: the ordering rules of the network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsensusGenesis {
+    /// Rounds of the DAG kept below the last committed leader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gc_depth: Option<u64>,
+    /// Seats apportioned across a committee by stake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_budget: Option<u64>,
+}
+
+impl ConsensusGenesis {
+    /// Whether the genesis names any ordering rule.
+    pub fn is_named(&self) -> bool {
+        self.gc_depth.is_some() || self.seat_budget.is_some()
+    }
+
+    /// The rules in force: what the genesis names, else this release's
+    /// default, the same on every node.
+    pub fn rules(&self) -> std::result::Result<(u64, u64), String> {
+        let d = tenzro_consensus::ConsensusConfig::default();
+        let gc_depth = self.gc_depth.unwrap_or(d.gc_depth);
+        let seat_budget = self.seat_budget.unwrap_or(d.seat_budget);
+        if gc_depth == 0 || seat_budget == 0 {
+            return Err(format!(
+                "[consensus] gc_depth ({gc_depth}) and seat_budget ({seat_budget}) must be positive"
+            ));
+        }
+        Ok((gc_depth, seat_budget))
+    }
+}
+
+/// The consensus configuration a node runs: its own `[consensus]` table for
+/// what is local (timing, batching, mempool), with the ordering rules taken
+/// from the genesis whatever the local table says. A local value that
+/// differs is ignored and logged, so two validators with different files
+/// still derive the same committee and ordering state.
+pub fn network_consensus_config(
+    local: Option<&tenzro_consensus::ConsensusConfig>,
+    genesis: Option<&GenesisConfig>,
+) -> Result<tenzro_consensus::ConsensusConfig> {
+    let mut out = local.cloned().unwrap_or_default();
+    let (gc_depth, seat_budget) = genesis
+        .map(|g| g.consensus)
+        .unwrap_or_default()
+        .rules()
+        .map_err(NodeError::Config)?;
+    if local.is_some() && out.gc_depth != gc_depth {
+        tracing::warn!(
+            local = out.gc_depth,
+            network = gc_depth,
+            "[consensus] gc_depth in the node config is ignored: the network's value applies"
+        );
+    }
+    if local.is_some() && out.seat_budget != seat_budget {
+        tracing::warn!(
+            local = out.seat_budget,
+            network = seat_budget,
+            "[consensus] seat_budget in the node config is ignored: the network's value applies"
+        );
+    }
+    out.gc_depth = gc_depth;
+    out.seat_budget = seat_budget;
+    Ok(out)
+}
+
+/// The `[protocol]` genesis table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtocolGenesis {
+    /// The protocol version the chain starts at.
+    pub version: u32,
 }
 
 /// Governed records the network starts with. Governance replaces each later
@@ -496,6 +667,9 @@ impl GenesisConfig {
 
     pub fn default_testnet() -> Self {
         Self {
+            protocol: None,
+            consensus: ConsensusGenesis::default(),
+            validator_registry: ValidatorRegistryGenesis::default(),
             version: GENESIS_SCHEMA_VERSION,
             chain_id: tenzro_types::constants::TESTNET_CHAIN_ID,
             timestamp: 0,
@@ -1683,6 +1857,13 @@ pub struct NodeConfig {
     #[serde(default)]
     pub iroh: tenzro_iroh::TenzroIrohConfig,
 
+    /// The identity gate: peers, gossip neighbours and transaction senders
+    /// without a registered identity, the onboarding window they get, and
+    /// whether this node sponsors a machine's first registration. The
+    /// `[onboarding]` table (see [`crate::identity_gate`]).
+    #[serde(default)]
+    pub onboarding: crate::identity_gate::OnboardingConfig,
+
     /// Peers to restore state from at start, as `<EndpointId>` or
     /// `<EndpointId>@<ip:port>`; the `--state-sync-from` flag adds to these.
     /// A bare id is found by discovery, an id with an address is dialled there
@@ -1691,17 +1872,25 @@ pub struct NodeConfig {
     #[serde(default)]
     pub state_sync_from: Vec<String>,
 
+    /// How a node catches up with the chain. `auto` (default): a node
+    /// without the validator role restores the committed state from a boot
+    /// peer's snapshot when a weak-subjectivity checkpoint is configured,
+    /// and a validator replays the blocks. `off`: replay on every role.
+    /// `state_sync_from` peers restore either way.
+    #[serde(default)]
+    pub state_sync: crate::state_sync_policy::StateSyncMode,
+
     /// Data-availability backend selector for off-loaded payloads (agent-memory
     /// archival). `Auto` (default) prefers iroh-blobs when the resolver is
     /// bound; `Inline` forces the in-process store; `IrohBlobs` requires iroh.
     #[serde(default)]
     pub da_backend: DaBackendSelector,
 
-    /// State-sync snapshot producer cadence + retention. Disabled by
-    /// default — only dedicated RPC / archival operators should produce
-    /// snapshots, since every snapshot is a multi-GB copy of the full
-    /// state. Validators run with the default (disabled) so they never
-    /// accumulate snapshot directories on their data volume.
+    /// State-sync snapshot producer cadence + retention. Unset, a validator
+    /// produces snapshots (it is the node joiners ask) and every other role
+    /// does not; `enabled` overrides either way. Snapshots beyond
+    /// `retain_count` are removed with their blobs, and the blobs kept stay
+    /// under `max_published_bytes` and `max_volume_pct` of the data volume.
     #[serde(default)]
     pub snapshot: crate::snapshot::SnapshotConfig,
 
@@ -1911,6 +2100,14 @@ fn default_pipeline_timeout() -> u64 {
 pub struct TpmConfig {
     /// Seconds one TPM command may take before it fails with an error.
     pub call_timeout_secs: u64,
+    /// Seconds a consensus signature (a vote or a block) may take: the
+    /// longest budget, no shorter than `call_timeout_secs`.
+    pub consensus_timeout_secs: u64,
+    /// Commands in a row that go unanswered before the node stops sending
+    /// normal commands to the TPM and probes it on a pause instead.
+    pub breaker_trip_after: u32,
+    /// Seconds between probes of a stalled TPM, at the longest.
+    pub breaker_cap_secs: u64,
     /// Sustained TPM signatures per second.
     pub signs_per_second: u32,
     /// Sustained TPM quotes and certifications per second.
@@ -1955,6 +2152,9 @@ impl Default for TpmConfig {
     fn default() -> Self {
         Self {
             call_timeout_secs: 10,
+            consensus_timeout_secs: 30,
+            breaker_trip_after: 3,
+            breaker_cap_secs: 20,
             signs_per_second: 30,
             quotes_per_second: 2,
             root_authorization_handle: default_root_authorization_handle(),
@@ -2156,7 +2356,9 @@ impl NodeConfig {
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
             provider_rates: ProviderRatesConfig::default(),
@@ -2228,7 +2430,9 @@ impl NodeConfig {
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
             provider_rates: ProviderRatesConfig::default(),
@@ -2300,7 +2504,9 @@ impl NodeConfig {
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
             provider_rates: ProviderRatesConfig::default(),
@@ -2372,7 +2578,9 @@ impl NodeConfig {
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
             provider_rates: ProviderRatesConfig::default(),
@@ -2742,10 +2950,9 @@ mod tests {
 
     #[test]
     fn test_save_and_load_config() {
-        use std::env;
         let config = NodeConfig::default_validator();
-        let temp_dir = env::temp_dir();
-        let temp_file = temp_dir.join("test_node_config.toml");
+        let dir = tempfile::tempdir().unwrap();
+        let temp_file = dir.path().join("test_node_config.toml");
 
         // Save config
         config.save_to_file(&temp_file).unwrap();
@@ -2754,9 +2961,6 @@ mod tests {
         let loaded = NodeConfig::load_from_file(&temp_file).unwrap();
         assert_eq!(loaded.roles, config.roles);
         assert_eq!(loaded.rpc_addr, config.rpc_addr);
-
-        // Clean up
-        let _ = std::fs::remove_file(temp_file);
     }
 
     #[test]

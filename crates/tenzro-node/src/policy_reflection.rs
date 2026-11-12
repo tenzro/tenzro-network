@@ -23,8 +23,10 @@ use tenzro_vm::governance::{
     PolicyEnactedLog, PolicyTrack, ProposalAction, UpgradeActivation, policy_kind,
 };
 use tenzro_vm::native::{
-    POLICY_ENACTED_TOPIC, UPGRADE_SCHEDULED_TOPIC, read_policy, read_upgrade_activation,
+    POLICY_ENACTED_TOPIC, PROTOCOL_VERSION_TOPIC, ProtocolVersionRecord, UPGRADE_SCHEDULED_TOPIC,
+    read_policy, read_protocol_version, read_upgrade_activation,
 };
+use tenzro_vm::protocol_range::{ProtocolMismatch, ProtocolRange};
 use tenzro_vm::traits::VmState;
 use tracing::{info, warn};
 
@@ -37,8 +39,13 @@ pub struct PolicyApplier {
     burn_rate: Option<Arc<BurnRateConfigManager>>,
     /// The protocol upgrade consensus scheduled last.
     upgrade: std::sync::RwLock<Option<UpgradeActivation>>,
+    /// The chain's protocol version as consensus state holds it; `None` for
+    /// a chain whose genesis recorded none, which is not range-checked.
+    protocol: std::sync::RwLock<Option<ProtocolVersionRecord>>,
     /// Hex SHA-256 of the binary this node runs.
     own_code_hash: Option<String>,
+    /// The protocol versions this binary can execute.
+    supported: ProtocolRange,
 }
 
 impl PolicyApplier {
@@ -51,7 +58,54 @@ impl PolicyApplier {
             economic_policy,
             burn_rate,
             upgrade: std::sync::RwLock::new(None),
+            protocol: std::sync::RwLock::new(None),
             own_code_hash,
+            supported: ProtocolRange::this_binary(),
+        }
+    }
+
+    /// Override the protocol versions this node can execute.
+    pub fn with_supported_protocols(mut self, supported: ProtocolRange) -> Self {
+        self.supported = supported;
+        self
+    }
+
+    /// The protocol version `height` runs at, as consensus state holds it.
+    pub fn protocol_version_at(&self, height: u64) -> Option<u32> {
+        self.protocol
+            .read()
+            .ok()
+            .and_then(|p| p.as_ref().map(|r| r.at(height)))
+    }
+
+    /// The mismatch between the chain's protocol version at `height` and the
+    /// versions this binary supports, if there is one.
+    pub fn protocol_mismatch_at(&self, height: u64) -> Option<ProtocolMismatch> {
+        self.supported
+            .check(self.protocol_version_at(height)?)
+            .err()
+    }
+
+    /// Why this node must stop executing the block at `height`, in plain
+    /// words, if it must: an upgrade names another binary, or the chain's
+    /// protocol version is outside what this binary supports.
+    pub fn stop_reason(&self, height: u64) -> Option<String> {
+        if let Some(upgrade) = self.superseded_at(height) {
+            return Some(format!(
+                "protocol upgrade {} (binary {}) activated at height {}; this node runs another binary \
+                 and stops executing blocks until it is replaced",
+                upgrade.version, upgrade.code_hash, upgrade.activation_height
+            ));
+        }
+        self.protocol_mismatch_at(height).map(|m| m.to_string())
+    }
+
+    /// Startup check against the next height to execute: refuses to start a
+    /// node whose binary does not support the chain's protocol version.
+    pub fn startup_check(&self, next_height: u64) -> Result<(), ProtocolMismatch> {
+        match self.protocol_mismatch_at(next_height) {
+            Some(m) => Err(m),
+            None => Ok(()),
         }
     }
 
@@ -99,6 +153,17 @@ impl PolicyApplier {
                 }
                 continue;
             }
+            if topic == Some(PROTOCOL_VERSION_TOPIC) {
+                match serde_json::from_slice::<ProtocolVersionRecord>(&log.data) {
+                    Ok(record) => {
+                        if let Ok(mut slot) = self.protocol.write() {
+                            *slot = Some(record);
+                        }
+                    }
+                    Err(e) => warn!("Malformed protocol version log, skipping: {e}"),
+                }
+                continue;
+            }
             if topic != Some(POLICY_ENACTED_TOPIC) {
                 continue;
             }
@@ -129,6 +194,9 @@ impl PolicyApplier {
             {
                 warn!(kind, "could not apply the enacted policy at startup: {e}");
             }
+        }
+        if let Ok(mut slot) = self.protocol.write() {
+            *slot = read_protocol_version(state);
         }
         if let Some(activation) = read_upgrade_activation(state) {
             self.note_upgrade(activation);
@@ -371,6 +439,83 @@ mod tests {
             applier.superseded_at(500).is_none(),
             "this node runs the upgraded binary"
         );
+    }
+
+    // ---- The protocol version range ----
+
+    fn version_log(version: u32, next: Option<(u32, u64)>) -> Log {
+        let record = ProtocolVersionRecord {
+            version,
+            next: next.map(|(version, activation_height)| {
+                tenzro_vm::native::PendingProtocolVersion {
+                    version,
+                    activation_height,
+                }
+            }),
+        };
+        Log::new(
+            vec![0; 20],
+            vec![PROTOCOL_VERSION_TOPIC.to_vec()],
+            serde_json::to_vec(&record).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_binary_outside_the_protocol_range_stops_at_the_activation_height_with_a_clear_message() {
+        let (applier, _) = applier();
+        let node = applier.with_supported_protocols(ProtocolRange { min: 2, max: 2 });
+        // The chain runs 2 and a scheduled upgrade raises it to 3 at 100.
+        node.reflect_logs(&[version_log(2, Some((3, 100)))]);
+        assert_eq!(node.protocol_version_at(99), Some(2));
+        assert_eq!(node.protocol_version_at(100), Some(3));
+        assert!(node.stop_reason(99).is_none(), "in range before activation");
+        assert!(node.startup_check(99).is_ok());
+
+        let reason = node.stop_reason(100).expect("out of range at activation");
+        assert!(reason.contains("protocol version mismatch"), "{reason}");
+        assert!(reason.contains("protocol version 3"), "{reason}");
+        assert!(reason.contains("2 to 2"), "{reason}");
+        assert!(reason.contains("Stopping"), "{reason}");
+        assert!(node.stop_reason(10_000).is_some());
+
+        // Started after the activation, the node refuses to start at all.
+        let err = node.startup_check(100).unwrap_err().to_string();
+        assert!(err.contains("protocol version 3"), "{err}");
+
+        // A binary that has the newer range goes on.
+        let upgraded = PolicyApplier::new(Arc::new(EconomicPolicyManager::new()), None, None)
+            .with_supported_protocols(ProtocolRange { min: 2, max: 3 });
+        upgraded.reflect_logs(&[version_log(2, Some((3, 100)))]);
+        assert!(upgraded.stop_reason(100).is_none());
+    }
+
+    #[test]
+    fn a_chain_below_the_binarys_minimum_refuses_too_and_no_record_means_no_check() {
+        let node = PolicyApplier::new(Arc::new(EconomicPolicyManager::new()), None, None)
+            .with_supported_protocols(ProtocolRange { min: 2, max: 4 });
+        assert!(
+            node.stop_reason(1).is_none() && node.startup_check(1).is_ok(),
+            "a chain that records no version is not range-checked"
+        );
+        node.reflect_logs(&[version_log(1, None)]);
+        let err = node.startup_check(1).unwrap_err().to_string();
+        assert!(err.contains("protocol version 1"), "{err}");
+        assert!(err.contains("older than this binary supports"), "{err}");
+    }
+
+    #[test]
+    fn hydrating_from_state_reads_the_recorded_version() {
+        let mut state = tenzro_vm::StateAdapter::new();
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::PROTOCOL_VERSION_KEY.as_bytes(),
+            tenzro_vm::native::genesis_protocol_version(5).unwrap(),
+        );
+        let (applier, _) = applier();
+        let node = applier.with_supported_protocols(ProtocolRange { min: 2, max: 4 });
+        node.hydrate(&state);
+        assert_eq!(node.protocol_version_at(0), Some(5));
+        assert!(node.startup_check(1).is_err());
     }
 
     fn log(update: PolicyUpdate) -> Log {

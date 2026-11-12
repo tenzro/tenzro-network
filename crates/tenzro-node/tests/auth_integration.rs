@@ -26,6 +26,7 @@
 //! contend.
 
 mod dpop_bearer;
+mod hybrid_account;
 mod passkey_holder;
 
 use std::sync::Arc;
@@ -193,6 +194,7 @@ fn machine_with_key(fields: Value) -> (Value, tenzro_crypto::testing::TestHybrid
 async fn passkey_controller(
     client: &reqwest::Client,
     url: &str,
+    node: &TenzroNode,
 ) -> (PasskeyHolder, String, String, Value) {
     let holder = PasskeyHolder::generate();
     let authorization = holder.authorize(&challenge(client, url, holder.challenge_params()).await);
@@ -212,6 +214,18 @@ async fn passkey_controller(
         .expect("account")
         .to_string();
     let anchor = r["anchor"].clone();
+    // The enrolment's identity registration is a transaction no block carries
+    // in this server, so the enrolled ML-DSA-65 key is recorded in chain state
+    // as that transaction would.
+    let storage = node.storage().expect("node storage").clone();
+    let mut state = tenzro_vm::StateAdapter::with_storage(storage);
+    tenzro_vm::account_keys::set_enrolled_pq_key(
+        &mut state,
+        &holder.public_xy(),
+        hex::decode(holder.ml_dsa_public_key_hex()).expect("ml-dsa key is hex"),
+        &mut Vec::new(),
+    );
+    state.commit().expect("commit enrolled key");
     (holder, did, account, anchor)
 }
 
@@ -275,7 +289,8 @@ fn signed_revocation(
     use tenzro_types::primitives::{ChainId, Nonce};
     use tenzro_types::transaction::{Transaction, TransactionType};
     use tenzro_vm::traits::VmState as _;
-    let signer = tenzro_crypto::composite::testing::TestHybridSigner::random();
+    let signer = hybrid_account::fresh_signer();
+    hybrid_account::enroll(node, &signer);
     let from = signer.address();
     let gas_limit = 200_000u64;
     let gas_price = 4_000_000_000u64;
@@ -743,11 +758,12 @@ async fn test_onboard_human_proof_by_a_different_key_is_refused() {
 
 #[tokio::test]
 async fn test_onboard_delegated_agent_carries_controller_and_scope() {
-    let (base_url, tx, handle, _tmp, _node) = setup_test_server().await;
+    let (base_url, tx, handle, _tmp, node) = setup_test_server().await;
     let client = reqwest::Client::new();
 
     // A human controller with a passkey-bound account.
-    let (holder, controller_did, account, anchor) = passkey_controller(&client, &base_url).await;
+    let (holder, controller_did, account, anchor) =
+        passkey_controller(&client, &base_url, &node).await;
 
     // Now onboard a delegated agent under that controller.
     let agent_holder = DpopHolder::new();
@@ -937,7 +953,8 @@ async fn test_revoke_jti_invalidates_subsequent_validation() {
     // A machine delegated by a passkey controller. The controller's passkey
     // cannot sign a DID envelope, so the token's owner proof here is the
     // bearer's: the machine signs with its hardware key.
-    let (holder, controller_did, account, anchor) = passkey_controller(&client, &base_url).await;
+    let (holder, controller_did, account, anchor) =
+        passkey_controller(&client, &base_url, &node).await;
     let (params, device_key) = machine_with_key(json!({
         "controller_did": controller_did,
         "capabilities": ["inference"],
@@ -1080,7 +1097,8 @@ async fn test_revoke_did_cascades_to_act_chain() {
     let engine = node.auth_engine().expect("auth engine");
 
     // Onboard a delegated agent under a passkey controller.
-    let (holder, controller_did, account, anchor) = passkey_controller(&client, &base_url).await;
+    let (holder, controller_did, account, anchor) =
+        passkey_controller(&client, &base_url, &node).await;
     let agent = rpc_call_admin(
         &client,
         &base_url,
@@ -1716,7 +1734,8 @@ async fn deploy_contract_admits_a_signed_transaction_and_executes_nothing() {
     use tenzro_vm::traits::VmState as _;
     let (base_url, tx, handle, _tmp, node) = setup_test_server().await;
     let client = reqwest::Client::new();
-    let signer = tenzro_crypto::composite::testing::TestHybridSigner::random();
+    let signer = hybrid_account::fresh_signer();
+    hybrid_account::enroll(&node, &signer);
     let params = signed_deploy(&node, &signer, vec![0x60, 0x00]);
     let from = signer.address();
     let balance_before = {

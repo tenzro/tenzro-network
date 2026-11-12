@@ -115,7 +115,7 @@ Every `load_*_model` takes a catalog `model_id` and an optional `visibility`; `l
 
 ### Chainlink MCP Server
 
-**Chainlink (12 tools):** `chainlink_get_price`, `chainlink_list_feeds`, `ds_get_report`, `ds_list_feeds`, `vrf_request_random`, `vrf_get_subscription`, `por_get_reserve`, `por_list_feeds`, `chainlink_check_upkeep`, `chainlink_get_upkeep_info`, `chainlink_estimate_functions_cost`, `chainlink_get_subscription`.
+**Chainlink (13 tools):** `chainlink_get_price`, `chainlink_list_feeds`, `ds_get_report`, `ds_list_feeds`, `vrf_request_random`, `vrf_get_subscription`, `por_get_reserve`, `por_list_feeds`, `chainlink_check_upkeep`, `chainlink_get_upkeep_info`, `chainlink_estimate_functions_cost`, `chainlink_get_subscription`, `chainlink_broadcast_signed_tx`.
 
 See [SKILL.md](SKILL.md) for the complete reference with all commands and curl examples.
 

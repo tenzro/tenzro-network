@@ -367,7 +367,7 @@ fn the_closed_preset_is_the_realistic_one_before_a_listing() {
 }
 
 #[test]
-fn the_closed_phase_has_no_market_and_the_owner_pays_the_running_costs() {
+fn the_closed_phase_has_no_market_and_the_bootstrap_funder_pays_the_running_costs() {
     let mut c = RunConfig::scenario(Market::Growth, 17, 6);
     c.assumptions.closed_phase = true;
     c.assumptions.agent_tasks_per_day = 200_000.0;
@@ -376,7 +376,7 @@ fn the_closed_phase_has_no_market_and_the_owner_pays_the_running_costs() {
     assert!(out.ledger_failures.is_empty(), "{:?}", out.ledger_failures);
     for d in &out.days {
         // Nothing trades: the price stays at launch and the reserve sells
-        // nothing, while the owner pays every running cost asked.
+        // nothing, while the bootstrap funder pays every running cost asked.
         assert_eq!(d.price_usd, 0.10);
         assert_eq!(d.volume_tnzo, 0.0);
         assert_eq!(d.reserve_paid_tnzo, 0.0);
@@ -402,7 +402,7 @@ fn the_closed_phase_has_no_market_and_the_owner_pays_the_running_costs() {
 #[test]
 fn anchor_demand_does_not_count_toward_the_listing_gate() {
     // $100,000 a day of agent demand meets the unrelated-demand item; with
-    // half of it the owner's own, $50,000 does not.
+    // half of it the bootstrap funder's own, $50,000 does not.
     let run = |anchor: f64| {
         let mut c = RunConfig::scenario(Market::Flat, 18, 4);
         c.assumptions.closed_phase = true;

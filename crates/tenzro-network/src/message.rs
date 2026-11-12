@@ -67,7 +67,9 @@ impl NetworkMessage {
             .reject_trailing_bytes()
             .deserialize(bytes)?;
         msg.payload = msg.payload.into_native().map_err(|e| {
-            Box::new(bincode::ErrorKind::Custom(format!("batched announcement: {e}")))
+            Box::new(bincode::ErrorKind::Custom(format!(
+                "batched announcement: {e}"
+            )))
         })?;
         Ok(msg)
     }
@@ -196,19 +198,18 @@ pub struct BatchedAnnouncementMessage {
     pub signature: tenzro_crypto::batch::RecordSignature,
 }
 
-fn to_batched<T: SignedAnnouncement>(
-    kind: AnnouncementKind,
-    m: &T,
-) -> Option<MessagePayload> {
+fn to_batched<T: SignedAnnouncement>(kind: AnnouncementKind, m: &T) -> Option<MessagePayload> {
     let record = m.signature()?.clone();
     let mut unsigned = m.clone();
     *unsigned.signer_fields().1 = None;
     let body = serde_json::to_vec(&unsigned).ok()?;
-    Some(MessagePayload::BatchedAnnouncement(BatchedAnnouncementMessage {
-        kind,
-        body,
-        signature: record,
-    }))
+    Some(MessagePayload::BatchedAnnouncement(
+        BatchedAnnouncementMessage {
+            kind,
+            body,
+            signature: record,
+        },
+    ))
 }
 
 fn from_batched<T: SignedAnnouncement + serde::de::DeserializeOwned>(
@@ -465,7 +466,7 @@ pub trait SignedAnnouncement: Clone + Serialize {
             .ok_or_else(|| "unsigned announcement".to_string())?;
         let mut unsigned = self.clone();
         *unsigned.signer_fields().1 = None;
-            let preimage = announce_preimage(Self::DOMAIN, &unsigned)?;
+        let preimage = announce_preimage(Self::DOMAIN, &unsigned)?;
         signature
             .verify_record_at(identity, &preimage, self.made_at_ms())
             .map_err(|e| e.to_string())
@@ -1120,8 +1121,8 @@ mod tests {
         }
     }
 
-    use tenzro_crypto::composite::testing::TestHybridSigner;
     use tenzro_crypto::batch::ImmediateRecordSigner;
+    use tenzro_crypto::composite::testing::TestHybridSigner;
 
     const DID: &str = "did:tenzro:machine:test";
 
@@ -1135,7 +1136,10 @@ mod tests {
     fn identity(
         seed: u8,
         hybrid: bool,
-    ) -> (ImmediateRecordSigner, tenzro_crypto::composite::CompositePublicKey) {
+    ) -> (
+        ImmediateRecordSigner,
+        tenzro_crypto::composite::CompositePublicKey,
+    ) {
         let hw = if hybrid {
             TestHybridSigner::hybrid(seed)
         } else {

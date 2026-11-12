@@ -73,6 +73,7 @@
 // The core.
 pub mod access;
 pub mod account_keys;
+pub mod account_outflow;
 pub mod auth;
 pub mod client;
 pub mod config;
@@ -87,11 +88,10 @@ pub mod keystore;
 pub mod network;
 pub mod node;
 pub mod passkey_client;
+pub mod recipient_guard;
 pub mod rpc;
 pub mod sse;
 pub mod typed_tx;
-pub mod account_outflow;
-pub mod recipient_guard;
 pub mod types;
 pub mod wallet;
 
@@ -244,10 +244,9 @@ pub use governance::{
     ProposalPage, ProposalView, SponsoredBond, Tally, TreasuryAccount, TreasuryAccounts,
     TreasuryGrant, TreasuryPayouts, VotingPower, approve_grantee_proposal,
     approve_operator_proposal, parameter_change_proposal, recall_sponsored_bond_proposal,
-    reinstate_validator_proposal, release_sponsored_bond, revoke_grantee_proposal, revoke_operator_proposal,
-    sponsor_operator_running_cost_proposal, sponsor_operator_stable_proposal,
-    sponsor_validator_bond_proposal,
-    verify_governance_receipt,
+    reinstate_validator_proposal, release_sponsored_bond, revoke_grantee_proposal,
+    revoke_operator_proposal, sponsor_operator_running_cost_proposal,
+    sponsor_operator_stable_proposal, sponsor_validator_bond_proposal, verify_governance_receipt,
 };
 pub use identity::{
     IdentityClient, IdentityInfo, IdentityType, PqRotationKey, RegisterHumanParams,

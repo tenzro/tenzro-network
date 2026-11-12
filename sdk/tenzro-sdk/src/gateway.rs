@@ -4,7 +4,7 @@
 //! dedicated, documented signature — wallets, inference, storage, databases.
 //! This covers everything else.
 //!
-//! It exists because the alternative does not work. A node serves ~900 JSON-RPC
+//! It exists because the alternative does not work. A node serves several hundred JSON-RPC
 //! methods and gains more with each release; an SDK that hand-wraps them is
 //! always some months behind the node it is talking to, and the developer who
 //! hits that gap discovers it at the moment they need the method. Here the
@@ -75,7 +75,7 @@ impl GatewayClient {
     /// Every method this node serves, with how each is gated.
     ///
     /// `namespace` and `contains` narrow the listing; the unfiltered directory
-    /// is ~900 entries.
+    /// has several hundred entries.
     ///
     /// # Example
     ///

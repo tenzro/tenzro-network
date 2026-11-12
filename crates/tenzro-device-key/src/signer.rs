@@ -958,7 +958,9 @@ pub(crate) mod tests {
         assert!(signer.has_ml_dsa());
         let public = signer.public_key().clone();
         assert_eq!(public.pq.as_ref().map(Vec::len), Some(1952));
-        let sig = signer.sign(SignatureContext::Transaction, b"payload").unwrap();
+        let sig = signer
+            .sign(SignatureContext::Transaction, b"payload")
+            .unwrap();
         let legs = verify_composite(
             &public,
             SignatureContext::Transaction,

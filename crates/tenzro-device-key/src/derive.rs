@@ -200,9 +200,7 @@ enum Root {
     #[cfg(any(target_os = "linux", windows, test))]
     Tpm(crate::derive_tpm::TpmRoot),
     #[cfg(any(target_os = "macos", target_os = "ios", test))]
-    Enclave {
-        key: Box<dyn EnclaveAgreement>,
-    },
+    Enclave { key: Box<dyn EnclaveAgreement> },
     Passkey {
         label: String,
         output: Zeroizing<[u8; 32]>,
@@ -901,7 +899,10 @@ pub(crate) mod tests {
         // Another root derives another key, and a short ciphertext is refused.
         let b = prf_root("tenzro/test/kem", 2);
         assert_ne!(b.ml_kem768_public("tenzro/test/kem").unwrap(), ek);
-        assert!(a.ml_kem768_decapsulate("tenzro/test/kem", &ct[1..]).is_err());
+        assert!(
+            a.ml_kem768_decapsulate("tenzro/test/kem", &ct[1..])
+                .is_err()
+        );
     }
 
     #[test]

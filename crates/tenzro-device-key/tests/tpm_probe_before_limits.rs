@@ -14,6 +14,7 @@ fn limits_from_the_configuration_apply_after_the_probe() {
         call_timeout: Duration::from_secs(10),
         signs_per_second: 30,
         quotes_per_second: Limits::default().quotes_per_second + 3,
+        ..Limits::default()
     };
     configure(configured).expect("the probe must not fix the default limits");
 }

@@ -122,6 +122,8 @@ pub use tenzro_catalog as catalog;
 pub mod chat;
 pub mod cluster;
 #[cfg(feature = "engine")]
+pub mod decision_runtime;
+#[cfg(feature = "engine")]
 pub mod detection_runtime;
 pub mod difficulty;
 pub mod engine_config;
@@ -179,8 +181,6 @@ pub mod provisioning;
 pub mod quant;
 pub mod registry;
 #[cfg(feature = "engine")]
-pub mod decision_runtime;
-#[cfg(feature = "engine")]
 pub mod rerank_runtime;
 pub mod routing;
 #[cfg(feature = "engine")]
@@ -226,12 +226,13 @@ pub use catalog::{
     MediaGenModelEntry, ModelArchitecture, MoeShape, MtpKind, OmniModelEntry, OnnxAudioEntry,
     OnnxDetectionEntry, OnnxForecastEntry, OnnxSegmentationEntry, OnnxTextEmbeddingEntry,
     OnnxTextSegmentationEntry, OnnxVideoEntry, OnnxVisionEntry, TtsModelEntry, VisionPreprocess,
-    get_audio_catalog, get_audio_model_by_id, get_detection_catalog, get_detection_model_by_id,
-    get_decision_catalog, get_decision_model_by_id, get_embed_catalog, get_embed_model_by_id, get_forecast_catalog, get_forecast_model_by_id,
-    get_media_gen_catalog, get_media_gen_model_by_id, get_media_gen_models_for_kind,
-    get_model_by_id, get_model_catalog, get_omni_catalog, get_omni_model_by_id, get_rerank_catalog,
-    get_rerank_model_by_id, get_segmentation_catalog, get_segmentation_model_by_id,
-    get_text_embedding_catalog, get_text_embedding_model_by_id, get_text_segmentation_catalog,
+    get_audio_catalog, get_audio_model_by_id, get_decision_catalog, get_decision_model_by_id,
+    get_detection_catalog, get_detection_model_by_id, get_embed_catalog, get_embed_model_by_id,
+    get_forecast_catalog, get_forecast_model_by_id, get_media_gen_catalog,
+    get_media_gen_model_by_id, get_media_gen_models_for_kind, get_model_by_id, get_model_catalog,
+    get_omni_catalog, get_omni_model_by_id, get_rerank_catalog, get_rerank_model_by_id,
+    get_segmentation_catalog, get_segmentation_model_by_id, get_text_embedding_catalog,
+    get_text_embedding_model_by_id, get_text_segmentation_catalog,
     get_text_segmentation_model_by_id, get_tts_catalog, get_tts_model_by_id, get_video_catalog,
     get_video_model_by_id, get_vision_catalog, get_vision_model_by_id, license_territory,
     media_gen_model_splits,
@@ -282,8 +283,9 @@ pub use moe_extract::{MoeExtractor, MoeTensorNaming};
 pub use moe_quant::{QuantError, QuantKind, QuantMatrix};
 pub use moe_receipt::{
     ActivationRow, ActivationVerification, DEFAULT_ACTIVATION_K, ExpertActivationCommitment,
-    ExpertExecutionReceipt, build_expert_receipt, start_expert_receipt, PendingExpertReceipt, expert_receipt_signing_payload,
-    verify_activation_commitment, verify_expert_receipt,
+    ExpertExecutionReceipt, PendingExpertReceipt, build_expert_receipt,
+    expert_receipt_signing_payload, start_expert_receipt, verify_activation_commitment,
+    verify_expert_receipt,
 };
 pub use moe_router::{
     DispatchPlan, ExpertBatch, HolderEndpoint, MoeDispatchError, TokenAssignment, TokenRouting,
@@ -325,9 +327,9 @@ pub use segmentation_runtime::{
 };
 pub use sla::{
     CapacityResult, CapacityWork, MAX_POSSESSION_DEALS, MAX_PROBE_TOKENS, MAX_STATE_READS,
-    MIN_SLA_RESPONSE_WINDOW_MS, PossessionDeal, SLA_PROBE_DOMAIN, SLA_RESPONSE_DOMAIN,
-    STATE_READ_NAMESPACE, PendingSlaResponse, SlaEnvelope, SlaManager, SlaSignature, Verified, SlaProbe, SlaResponse, SlaResult,
-    StateReadEntry, inference_prompt, possession_nonce,
+    MIN_SLA_RESPONSE_WINDOW_MS, PendingSlaResponse, PossessionDeal, SLA_PROBE_DOMAIN,
+    SLA_RESPONSE_DOMAIN, STATE_READ_NAMESPACE, SlaEnvelope, SlaManager, SlaProbe, SlaResponse,
+    SlaResult, SlaSignature, StateReadEntry, Verified, inference_prompt, possession_nonce,
     response_signing_payload as sla_response_signing_payload, state_read_keys,
 };
 #[cfg(feature = "engine")]

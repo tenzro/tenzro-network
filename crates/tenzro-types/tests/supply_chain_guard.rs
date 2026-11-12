@@ -14,7 +14,9 @@ fn read(rel: &str) -> String {
 }
 
 fn strings_in_list(text: &str, key: &str) -> Vec<String> {
-    let start = text.find(&format!("{key} = [")).unwrap_or_else(|| panic!("no {key} list"));
+    let start = text
+        .find(&format!("{key} = ["))
+        .unwrap_or_else(|| panic!("no {key} list"));
     let rest = &text[start..];
     let end = rest.find(']').expect("list ends");
     rest[..end]
@@ -52,7 +54,10 @@ fn the_files_the_policy_names_exist() {
 fn deny_toml_is_strict_and_lists_the_sources_the_policy_lists() {
     let deny = read("deny.toml");
     let policy = read("supply-chain/policy.toml");
-    assert!(deny.contains("yanked = \"deny\""), "a yanked crate must fail the build");
+    assert!(
+        deny.contains("yanked = \"deny\""),
+        "a yanked crate must fail the build"
+    );
     assert!(deny.contains("unknown-registry = \"deny\""));
     assert!(deny.contains("unknown-git = \"deny\""));
     assert_eq!(
@@ -64,7 +69,10 @@ fn deny_toml_is_strict_and_lists_the_sources_the_policy_lists() {
     let mut in_policy = strings_in_list(&policy, "git");
     in_deny.sort();
     in_policy.sort();
-    assert_eq!(in_deny, in_policy, "deny.toml and the policy name different git sources");
+    assert_eq!(
+        in_deny, in_policy,
+        "deny.toml and the policy name different git sources"
+    );
 }
 
 fn sources_registry(policy: &str) -> String {
@@ -106,7 +114,11 @@ fn the_toolchain_and_the_security_tools_are_pinned_exactly() {
         "rust-toolchain.toml channel {channel} is not an exact version"
     );
     let env = read("scripts/testnet/security/tools.env");
-    for tool in ["CARGO_AUDIT_VERSION", "CARGO_DENY_VERSION", "CARGO_VET_VERSION"] {
+    for tool in [
+        "CARGO_AUDIT_VERSION",
+        "CARGO_DENY_VERSION",
+        "CARGO_VET_VERSION",
+    ] {
         let v = env
             .lines()
             .find_map(|l| l.strip_prefix(&format!("{tool}=")))
@@ -125,14 +137,20 @@ fn the_workflow_runs_every_gate_with_the_pinned_tools() {
     for step in strings_in_list(&policy, "steps") {
         assert!(wf.contains(&step), "the workflow no longer runs `{step}`");
     }
-    assert!(wf.contains("scripts/testnet/security/tools.env"), "tool versions come from tools.env");
+    assert!(
+        wf.contains("scripts/testnet/security/tools.env"),
+        "tool versions come from tools.env"
+    );
     for tool in ["cargo-deny", "cargo-audit", "cargo-vet"] {
         assert!(
             wf.contains(&format!("cargo install --locked {tool} --version")),
             "{tool} is not installed locked at a pinned version"
         );
     }
-    assert!(wf.contains("schedule:"), "a weekly run catches new advisories on an unchanged lockfile");
+    assert!(
+        wf.contains("schedule:"),
+        "a weekly run catches new advisories on an unchanged lockfile"
+    );
 }
 
 #[test]
@@ -147,7 +165,10 @@ fn every_action_is_named_by_commit_and_every_cargo_call_is_locked() {
         let text = fs::read_to_string(&path).unwrap();
         for (n, line) in text.lines().enumerate() {
             let l = line.trim();
-            if let Some(rest) = l.strip_prefix("- uses: ").or_else(|| l.strip_prefix("uses: ")) {
+            if let Some(rest) = l
+                .strip_prefix("- uses: ")
+                .or_else(|| l.strip_prefix("uses: "))
+            {
                 let spec = rest.split_whitespace().next().unwrap();
                 if spec.starts_with("./") {
                     continue;

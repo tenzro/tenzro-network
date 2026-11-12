@@ -594,7 +594,8 @@ mod tests {
         let public_key = tenzro_crypto::composite::HybridSigner::public_key(&identity).clone();
         let provider =
             Address::from_bytes(tenzro_crypto::sha256(&public_key.p256).as_bytes()).unwrap();
-        let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(identity));
+        let signer =
+            tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(identity));
 
         let (tokens, outputs) = sample_outputs(4, 64);
         let commitment = ExpertActivationCommitment::from_outputs(&tokens, &outputs, 64, 8)

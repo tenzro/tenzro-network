@@ -319,26 +319,8 @@ impl MultiVmRuntime {
             tx.vm_type
         );
 
-        // Validate transaction data size (MAX 128KB)
-        const MAX_TX_DATA_SIZE: usize = 128 * 1024; // 128KB
-        // A ZK attestation carries a whole STARK proof, which every validator
-        // re-verifies, so it has its own bound (priced per byte by the handler).
-        let limit = if tx.vm_type == VmType::Tenzro
-            && tx.data.starts_with(&crate::native::SELECTOR_ZK_ATTEST)
-        {
-            tenzro_types::transaction::MAX_ZK_PROOF_SIZE + 4
-        } else {
-            MAX_TX_DATA_SIZE
-        };
-        if tx.data.len() > limit {
-            return Err(VmError::InvalidTransaction(format!(
-                "Transaction data too large: {} bytes (max: {})",
-                tx.data.len(),
-                limit
-            )));
-        }
-
-        // Validate chain ID — prevent cross-chain replay attacks
+        // Validate chain ID — prevent cross-chain replay attacks. A
+        // transaction signed for another chain spends nothing here.
         if tx.chain_id != self.config.chain_id {
             return Err(VmError::InvalidTransaction(format!(
                 "Chain ID mismatch: transaction has {}, expected {}",
@@ -346,16 +328,8 @@ impl MultiVmRuntime {
             )));
         }
 
-        crate::tx_validity::check(tx, state)?;
-        crate::delegation_guard::check(tx, state)?;
-
-        // Validate gas limit and price
-        self.config.validate_gas_limit(tx.gas_limit)?;
-        if !crate::native::pays_no_fee(tx) {
-            self.config.validate_gas_price(tx.gas_price)?;
-        }
-
-        // Validate nonce
+        // Validate nonce. One ahead of the account waits for the ones before
+        // it; one behind it was decided at its nonce already. Neither spends.
         let account_nonce = state.get_nonce(&tx.from);
         if tx.nonce != account_nonce {
             return Err(VmError::InvalidNonce {
@@ -364,16 +338,19 @@ impl MultiVmRuntime {
             });
         }
 
-        // EIP-7702: a set-code transaction's authorization list is applied
-        // by the EVM (see `EvmExecutor::execute_with_revm`).
-        if !tx.authorization_list.is_empty() && tx.vm_type != VmType::Evm {
-            return Err(VmError::InvalidTransaction(
-                "EIP-7702 authorizations are only valid on EVM transactions".to_string(),
+        // Signed by its sender for this chain at the account's next nonce:
+        // whatever is decided about it from here is final. A transaction
+        // refused by a rule below spends its nonce and pays for the base
+        // transaction gas, as one its handler refuses does, so the same
+        // signed transaction can never execute later, once the rule that
+        // refused it no longer would.
+        if let Err(refused) = self.admissible(tx, &*state) {
+            state.set_nonce(&tx.from, account_nonce + 1);
+            return Ok(ExecutionResult::failed(
+                tx.gas_limit.min(crate::gas::evm_gas_costs::TRANSACTION),
+                refused.to_string(),
             ));
         }
-
-        // The transaction's VM must be enabled.
-        self.get_executor(tx.vm_type)?;
 
         // Execution is bounded by gas, never by wall-clock time: a timeout
         // would make the outcome depend on how fast this validator is.
@@ -443,6 +420,50 @@ impl MultiVmRuntime {
         state.set_nonce(&tx.from, spent);
 
         Ok(result)
+    }
+
+    /// The rules a signed transaction at its account's next nonce must meet
+    /// to run: its size, its validity window, its sender's identity and
+    /// delegations, its gas, and an enabled VM.
+    fn admissible(&self, tx: &VmTransaction, state: &dyn VmState) -> Result<()> {
+        const MAX_TX_DATA_SIZE: usize = 128 * 1024; // 128KB
+        // A ZK attestation carries a whole STARK proof, which every validator
+        // re-verifies, so it has its own bound (priced per byte by the handler).
+        let limit = if tx.vm_type == VmType::Tenzro
+            && tx.data.starts_with(&crate::native::SELECTOR_ZK_ATTEST)
+        {
+            tenzro_types::transaction::MAX_ZK_PROOF_SIZE + 4
+        } else {
+            MAX_TX_DATA_SIZE
+        };
+        if tx.data.len() > limit {
+            return Err(VmError::InvalidTransaction(format!(
+                "Transaction data too large: {} bytes (max: {})",
+                tx.data.len(),
+                limit
+            )));
+        }
+
+        crate::tx_validity::check(tx, state)?;
+        crate::identity_required::check(tx, state)?;
+        crate::delegation_guard::check(tx, state)?;
+
+        self.config.validate_gas_limit(tx.gas_limit)?;
+        if !crate::native::pays_no_fee(tx) {
+            self.config.validate_gas_price(tx.gas_price)?;
+        }
+
+        // EIP-7702: a set-code transaction's authorization list is applied
+        // by the EVM (see `EvmExecutor::execute_with_revm`).
+        if !tx.authorization_list.is_empty() && tx.vm_type != VmType::Evm {
+            return Err(VmError::InvalidTransaction(
+                "EIP-7702 authorizations are only valid on EVM transactions".to_string(),
+            ));
+        }
+
+        // The transaction's VM must be enabled.
+        self.get_executor(tx.vm_type)?;
+        Ok(())
     }
 
     /// Run a transaction in its VM. Contract calls and delegated agents'
@@ -610,5 +631,131 @@ mod tests {
 
         let result = runtime.execute_transaction(&tx, &mut state).await;
         assert!(result.is_ok(), "EVM transfer failed: {:?}", result.err());
+    }
+
+    fn transfer_at(nonce: u64, gas_price: u128, chain_id: u64) -> VmTransaction {
+        VmTransaction::new(
+            vec![1u8; 20],
+            Some(vec![2u8; 20]),
+            0,
+            vec![],
+            21_000,
+            gas_price,
+            nonce,
+            VmType::Evm,
+            chain_id,
+        )
+    }
+
+    /// A transaction at its account's next nonce that a rule refuses spends
+    /// the nonce and comes back failed, as one its handler refuses does. The
+    /// same signed transaction can then never execute, even once the rule
+    /// that refused it would let it through.
+    #[tokio::test]
+    async fn a_refused_transaction_spends_its_nonce_and_never_executes_later() {
+        let strict = MultiVmRuntime::new(VmConfig::default().with_min_gas_price(10))
+            .await
+            .unwrap();
+        let mut state = StateAdapter::new();
+        state.set_balance(&[1u8; 20], 1_000_000_000_000_000_000u128);
+        let cheap = transfer_at(0, 1, strict.config().chain_id);
+
+        let refused = strict
+            .execute_transaction(&cheap, &mut state)
+            .await
+            .unwrap();
+        assert!(!refused.success);
+        assert!(
+            refused
+                .revert_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("below minimum"),
+            "{:?}",
+            refused.revert_reason
+        );
+        assert_eq!(
+            state.get_nonce(&[1u8; 20]),
+            1,
+            "the refusal spent the nonce"
+        );
+
+        let relaxed = MultiVmRuntime::new(VmConfig::default().with_min_gas_price(1))
+            .await
+            .unwrap();
+        match relaxed.execute_transaction(&cheap, &mut state).await {
+            Err(VmError::InvalidNonce {
+                expected: 1,
+                got: 0,
+            }) => {}
+            other => panic!("the refused transaction ran again: {other:?}"),
+        }
+        assert_eq!(state.get_nonce(&[1u8; 20]), 1);
+    }
+
+    /// A protocol record pays no fee but is held to its sender's account
+    /// nonce like any transaction, so no transaction type is exempt from the
+    /// account nonce: one behind it is refused, and spends nothing.
+    #[tokio::test]
+    async fn a_protocol_record_is_held_to_its_sender_nonce_like_any_transaction() {
+        let runtime = MultiVmRuntime::new(VmConfig::default()).await.unwrap();
+        let mut state = StateAdapter::new();
+        let sender = vec![7u8; 32];
+        state.set_nonce(&sender, 1);
+        let record = VmTransaction::new(
+            sender.clone(),
+            None,
+            0,
+            crate::native::SELECTOR_CHECKPOINT_SIGNERS.to_vec(),
+            100_000,
+            0,
+            0,
+            VmType::Tenzro,
+            runtime.config().chain_id,
+        );
+        assert!(crate::native::pays_no_fee(&record));
+        assert!(matches!(
+            runtime.execute_transaction(&record, &mut state).await,
+            Err(VmError::InvalidNonce {
+                expected: 1,
+                got: 0
+            })
+        ));
+        assert_eq!(state.get_nonce(&sender), 1);
+    }
+
+    /// What is not this account's next transaction on this chain spends
+    /// nothing: one signed for another chain, and one ahead of the nonce
+    /// (it waits for the ones before it).
+    #[tokio::test]
+    async fn another_chain_or_a_later_nonce_spends_nothing() {
+        let runtime = MultiVmRuntime::new(VmConfig::default()).await.unwrap();
+        let mut state = StateAdapter::new();
+        state.set_balance(&[1u8; 20], 1_000_000_000_000_000_000u128);
+        let chain = runtime.config().chain_id;
+
+        assert!(matches!(
+            runtime
+                .execute_transaction(&transfer_at(0, 1_000_000_000, chain + 1), &mut state)
+                .await,
+            Err(VmError::InvalidTransaction(_))
+        ));
+        assert!(matches!(
+            runtime
+                .execute_transaction(&transfer_at(3, 1_000_000_000, chain), &mut state)
+                .await,
+            Err(VmError::InvalidNonce {
+                expected: 0,
+                got: 3
+            })
+        ));
+        assert_eq!(state.get_nonce(&[1u8; 20]), 0);
+
+        let ran = runtime
+            .execute_transaction(&transfer_at(0, 1_000_000_000, chain), &mut state)
+            .await
+            .unwrap();
+        assert!(ran.success, "{:?}", ran.revert_reason);
+        assert_eq!(state.get_nonce(&[1u8; 20]), 1);
     }
 }

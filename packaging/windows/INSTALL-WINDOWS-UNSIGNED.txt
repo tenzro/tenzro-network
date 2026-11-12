@@ -27,7 +27,7 @@ SmartScreen:
     line does not show the SmartScreen page. UAC still appears.
 
 Command line (no prompts beyond UAC, no wizard):
-  msiexec /i tenzro-0.2.0-windows-x86_64-cuda.msi /qn ADDTOPATH=system
+  msiexec /i tenzro-0.2.1-windows-x86_64-cuda.msi /qn ADDTOPATH=system
   Properties: INSTALLFOLDER=<dir>, ADDTOPATH=system|user|none (default system).
   Remove: msiexec /x <path-to-msi> /qn   (or Settings > Apps > Tenzro)
 

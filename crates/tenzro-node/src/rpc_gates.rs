@@ -391,6 +391,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_getTreasuryAccounts",
     "tenzro_getTreasuryPayouts",
     "tenzro_getTrustCredentials",
+    "tenzro_getUpdateNotice",
     "tenzro_getUpgradeReadiness",
     "tenzro_getValidatorState",
     "tenzro_getVesting",
@@ -752,6 +753,98 @@ pub fn gate_class(method: &str) -> Option<GateClass> {
         None
     }
 }
+
+/// How the identity rule (no anonymous write calls) covers an open write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityCover {
+    /// It ends in the consensus mempool, which admits only a registered
+    /// sender (`tenzro_consensus::SenderRegistry`).
+    Mempool,
+    /// It is how an identity is registered or proven: open by design.
+    RegistrationPath,
+    /// It writes nothing durable.
+    Stateless,
+    /// The actor proves who it is in the call (a signature by the owner or
+    /// payer), and the effect is bounded by what that proof authorizes.
+    ActorProof,
+    /// An anonymous durable write the identity rule does not cover yet. Each
+    /// is a decision still to take, with the reason it is open.
+    NotYet(&'static str),
+}
+
+/// For each of [`OPEN_WRITES`], how the identity rule covers it. A method
+/// added to [`OPEN_WRITES`] must be classified here, so an anonymous write
+/// call is never added without deciding what the identity rule does about it.
+pub const OPEN_WRITE_IDENTITY: &[(&str, IdentityCover)] = &[
+    ("eth_call", IdentityCover::Stateless),
+    ("eth_estimateGas", IdentityCover::Stateless),
+    ("eth_sendRawTransaction", IdentityCover::Mempool),
+    ("sendTransaction", IdentityCover::Mempool),
+    ("simulateTransaction", IdentityCover::Stateless),
+    ("tenzro_accessChallenge", IdentityCover::RegistrationPath),
+    ("tenzro_agentNodePqKey", IdentityCover::Stateless),
+    ("tenzro_attestFinalityProof", IdentityCover::Stateless),
+    ("tenzro_canTransfer", IdentityCover::Stateless),
+    (
+        "tenzro_createCustodyChallenge",
+        IdentityCover::RegistrationPath,
+    ),
+    (
+        "tenzro_createPasskeySession",
+        IdentityCover::RegistrationPath,
+    ),
+    ("tenzro_createPaymentChallenge", IdentityCover::Stateless),
+    ("tenzro_createTeeZkProof", IdentityCover::Stateless),
+    ("tenzro_createZkProof", IdentityCover::Stateless),
+    ("tenzro_deployContract", IdentityCover::Mempool),
+    ("tenzro_exportEvidencePack", IdentityCover::Stateless),
+    (
+        "tenzro_fileInferenceChallenge",
+        IdentityCover::NotYet(
+            "opens a dispute on a stored commitment; the challenger is not named by the call, so gating it needs the challenger's identity added to its params",
+        ),
+    ),
+    ("tenzro_finalizeChallenge", IdentityCover::Stateless),
+    (
+        "tenzro_iroh_publishBlob",
+        IdentityCover::NotYet(
+            "stores caller bytes on this node's disk; gating it needs a caller identity the call does not carry (a token), and the SDK publishes without one",
+        ),
+    ),
+    (
+        "tenzro_issueAccessToken",
+        IdentityCover::NotYet(
+            "a hardware-key proof for a DID the key derives is accepted whether or not the DID is registered; gating it must exempt the operator DID, the access policy's admins and delegated agents' serving keys",
+        ),
+    ),
+    (
+        "tenzro_issueKyaCredential",
+        IdentityCover::NotYet(
+            "issues a credential for a DID the presented key derives; as for access tokens, the registered-or-exempt rule is still to be written",
+        ),
+    ),
+    ("tenzro_joinAsMicroNode", IdentityCover::RegistrationPath),
+    (
+        "tenzro_onboardAutonomousAgent",
+        IdentityCover::RegistrationPath,
+    ),
+    ("tenzro_openPaymentChannel", IdentityCover::ActorProof),
+    ("tenzro_queryEvents", IdentityCover::Stateless),
+    ("tenzro_redeemSealedDelivery", IdentityCover::ActorProof),
+    ("tenzro_refreshToken", IdentityCover::ActorProof),
+    ("tenzro_rotateIdentityToPq", IdentityCover::ActorProof),
+    ("tenzro_sendRawTransaction", IdentityCover::Mempool),
+    ("tenzro_sponsoredInference", IdentityCover::ActorProof),
+    ("tenzro_standbyQuote", IdentityCover::Stateless),
+    ("tenzro_submitReconciliation", IdentityCover::Stateless),
+    (
+        "tenzro_submitTrustRecord",
+        IdentityCover::NotYet(
+            "records are signed by their author, who need not be registered; whether an unregistered author may add to the trust ledger is a decision for the trust design",
+        ),
+    ),
+    ("tenzro_subscribe", IdentityCover::Stateless),
+];
 
 #[cfg(test)]
 mod tests {
@@ -1437,5 +1530,36 @@ mod tests {
             "OWNER_METHODS whose handlers check no proof — move them to \
              ADMIN_METHODS: {unchecked:?}"
         );
+    }
+
+    /// No anonymous write call is added without deciding what the identity
+    /// rule does about it, and the ones it does not cover yet are named.
+    #[test]
+    fn every_open_write_says_how_the_identity_rule_covers_it() {
+        let writes: BTreeSet<&str> = OPEN_WRITES.iter().map(|(m, _)| *m).collect();
+        let covered: BTreeSet<&str> = OPEN_WRITE_IDENTITY.iter().map(|(m, _)| *m).collect();
+        assert_eq!(
+            writes, covered,
+            "OPEN_WRITES and OPEN_WRITE_IDENTITY must name the same methods: classify the \
+             difference"
+        );
+        assert_eq!(
+            covered.len(),
+            OPEN_WRITE_IDENTITY.len(),
+            "a method is classified once"
+        );
+        // The methods that put a transaction in the pool are exactly the ones
+        // the mempool gate covers.
+        for method in [
+            "tenzro_sendRawTransaction",
+            "eth_sendRawTransaction",
+            "sendTransaction",
+            "tenzro_deployContract",
+        ] {
+            assert!(
+                OPEN_WRITE_IDENTITY.contains(&(method, IdentityCover::Mempool)),
+                "{method} must be covered by the mempool gate"
+            );
+        }
     }
 }

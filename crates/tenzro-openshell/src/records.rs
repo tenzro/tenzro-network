@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_crypto::batch::{RecordSignature, RecordSigner};
+use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_types::agent_audit::{
     ActionKind, ActionOutcome, AuditEntry, Digest32, Mmr, SignedAuditEntry, ToolCallFacts,
 };

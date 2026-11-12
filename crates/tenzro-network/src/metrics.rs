@@ -30,6 +30,10 @@ pub struct NetworkMetrics {
     /// Consensus-class gossip shed because no verified endpoint record
     /// names the neighbour that delivered it.
     pub gossip_shed_unidentified: Counter,
+    /// Gossip shed because the neighbour that delivered it has no
+    /// registered identity (the identity gate; see
+    /// `GossipGuard::set_registered_only`).
+    pub gossip_shed_unregistered: Counter,
     /// Gossip messages successfully published.
     pub gossip_published: Counter,
     /// Gossip messages received and accepted.
@@ -71,6 +75,13 @@ impl NetworkMetrics {
             gossip_shed_unidentified.clone(),
         );
 
+        let gossip_shed_unregistered = Counter::default();
+        sub.register(
+            "gossip_shed_unregistered",
+            "Gossip shed because its neighbour has no registered identity",
+            gossip_shed_unregistered.clone(),
+        );
+
         let gossip_published = Counter::default();
         sub.register(
             "gossip_published",
@@ -90,6 +101,7 @@ impl NetworkMetrics {
             gossip_rejected_duplicate,
             gossip_shed_over_budget,
             gossip_shed_unidentified,
+            gossip_shed_unregistered,
             gossip_published,
             gossip_accepted,
         })

@@ -236,6 +236,9 @@ async fn a_caller_with_no_tnzo_completes_a_paid_inference_through_a_sponsoring_a
             ..Default::default()
         },
         genesis: Some(tenzro_node::config::GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: tenzro_node::config::GENESIS_SCHEMA_VERSION,
             chain_id: CHAIN_ID,
             timestamp: 0,

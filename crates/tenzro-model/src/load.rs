@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn a_small_model_on_a_large_machine_is_not_throttled_to_a_handful() {
-        // The concrete regression from bring-up: qwen3-0.6b (min_ram 2 GiB) on
+        // The concrete regression this guards: qwen3-0.6b (min_ram 2 GiB) on
         // a 121 GiB box served TWO concurrent requests. It should saturate the
         // batching engine's slot pool instead.
         assert_eq!(

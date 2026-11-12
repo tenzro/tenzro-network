@@ -58,7 +58,7 @@ impl TestNode {
         let addr = addr_rx.await.expect("bound address");
         let base_url = format!("http://{addr}");
         let client = reqwest::Client::new();
-        owner.enroll(&client, &base_url).await;
+        owner.enroll(&client, &base_url, &node).await;
         owner.register_machine(&node).await;
 
         Self {
@@ -170,7 +170,7 @@ async fn a_grant_signed_by_anyone_but_the_owner_is_refused() {
     let n = TestNode::boot().await;
     // Another enrolled account: an agent's or a stranger's passkey.
     let mut other = MachineOwner::generate(0x52);
-    other.enroll(&n.client, &n.base_url).await;
+    other.enroll(&n.client, &n.base_url, &n.node).await;
 
     let terms = n.terms("127.0.0.1/32", Some(9000));
     let (challenge_id, digest) = other
@@ -373,7 +373,7 @@ async fn grants_end_when_the_machine_changes_hands() {
     assert!(n.reachable("127.0.0.1", 9000));
 
     let mut buyer = MachineOwner::generate(0x53);
-    buyer.enroll(&n.client, &n.base_url).await;
+    buyer.enroll(&n.client, &n.base_url, &n.node).await;
     n.node
         .identity_registry()
         .unwrap()

@@ -1,0 +1,25 @@
+[package]
+name = "tenzro-update-notice"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+description = "Signed release notices: format, verification, on-disk cache and banner rules for Tenzro nodes"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+p256 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+# Test keys and sample notices for other crates' tests.
+fixture = []

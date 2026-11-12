@@ -2,7 +2,7 @@
 
 Specification for `tenzro_chat`, the RPC method that drives AI inference on the Tenzro Network, and the OpenAI-compatible HTTP surface.
 
-This document defines both methods at the JSON-RPC layer. The same call shapes are exposed through MCP (`chat_completion` tool) and the A2A `inference` skill.
+This document defines both methods at the JSON-RPC layer. The same call shapes are exposed through MCP (`chat` tool) and the A2A `inference` skill.
 
 ## Status
 
@@ -31,12 +31,12 @@ No silent upgrades. No heuristics. The caller's choice of field determines the s
 
 ## Authentication
 
-The RPC server runs in one of three auth modes, selected by the `TENZRO_MCP_AUTH` environment variable on the node:
+The MCP server (`/mcp`) runs in one of two auth modes, selected by the `TENZRO_MCP_AUTH` environment variable on the node (any other value stops the MCP server from starting):
 
 | Mode | Behavior |
 |------|----------|
-| `full` | All methods require a DPoP-bound bearer JWT. |
-| `false` | Auth disabled. Suitable only for local development. |
+| `tiered` | The default when unset. Public-read tools are open; every other call requires a bearer JWT issued for the `/mcp` resource. |
+| `full` | All calls require a bearer JWT. |
 
 `tenzro_chat` is a write method (it consumes tokens and bills the caller). Under `tiered` and `full`, it requires an authenticated request.
 
@@ -224,7 +224,7 @@ Provenance signing proves *who* served a response; a TOPLOC commitment proves *w
 | `tenzro_finalizeChallenge` | `{challenge_id}` | Tallies revealed votes by committee stake weight. More than two thirds of committee stake upholds or dismisses; with no quorum the challenge closes as dismissed only once the reveal window has passed. Idempotent. |
 | `tenzro_auditInferenceChallenge` | `{challenge_id}` or `{challenge}` | Re-checks a challenge record — this node's, or one fetched from any node — from its contents: every commit and reveal signature against its seat's key, every reveal against its commit, the recorded verdict against the signed stake, and each seat's key against this node's validator registry. |
 
-**Committee & quorum.** No administrator decides the verdict, and no one but a seat can cast a seat's vote: votes are signed by the seat's validator consensus key, so the node holding the dispute, and its operator, cannot vote on the committee's behalf. The committee (a third of the active validators, between three and seven) is sampled without replacement with probability proportional to stake, from keys derived from the commitment hash and the finalized block hash at filing. The provider fixed the commitment hash before any dispute and a commitment can be challenged only once, so neither side can re-draw the committee. A validator whose consensus key is the provider's own key is never seated. The quorum threshold is `floor(2 × total / 3) + 1` of committee stake. Challenge state is held by the node that stores the commitment; the signed record lets any node audit it, and it is not yet replicated through consensus.
+**Committee & quorum.** No administrator decides the verdict, and no one but a seat can cast a seat's vote: votes are signed by the seat's validator consensus key, so the node holding the dispute, and its operator, cannot vote on the committee's behalf. The committee (a third of the active validators, between three and seven) is sampled without replacement with probability proportional to stake, from keys derived from the commitment hash and the finalized block hash at filing. The provider fixed the commitment hash before any dispute and a commitment can be challenged only once, so neither side can re-draw the committee. A validator whose consensus key is the provider's own key is never seated. The quorum threshold is `floor(2 × total / 3) + 1` of committee stake. Challenge state is held by the node that stores the commitment; the signed record lets any node audit it, and it is not replicated through consensus.
 
 **Penalties on an upheld challenge.** The provider's routing reputation is decremented through the same path as a failed call (−5); the finalize response carries a `reputation_penalized` boolean. A compute bond is slashed only in consensus, through an `InferenceFault`. Reputation only ever increases through settled payments, so a provider cannot recover by challenging itself.
 
@@ -265,7 +265,7 @@ Data-residency rules (GDPR transfers, sectoral regulation, sovereign-deployment 
 
 **Streaming.** SSE streams carry no `tenzro_jurisdiction` receipt, in the final chunk or anywhere else — the general `tenzro_receipt` inference receipt, when the serving node can sign one, rides the final chunk of a stream (and no chunk before it) just as it rides the body of a non-streamed completion; it binds the request and the served output, not a locality claim. A forwarding gateway passes the provider's receipt through unchanged. For pinned streaming requests the fail-closed claim check runs before generation starts — refusal arrives as HTTP 412 (`jurisdiction_not_satisfied`) before the first token. That pre-stream check is the whole streaming locality contract; callers needing a jurisdiction receipt use the non-streaming path.
 
-**Surfaces.** Simple + rich `tenzro_chat` and `tenzro_chatByIntent` (`jurisdiction` / `jurisdiction_receipt` params); OpenAI-compatible HTTP (same field names in the request body, refusals as HTTP 412 with error codes `jurisdiction_not_satisfied` / `jurisdiction_receipt_unavailable`); MCP `chat_completion` (same params); A2A inference skill (`jurisdiction` / `jurisdiction_receipt` message metadata); CLI `tenzro chat --jurisdiction "DE,EU" [--require-jurisdiction-receipt]`, `tenzro inference route --message ... --jurisdiction ...`.
+**Surfaces.** Simple + rich `tenzro_chat` and `tenzro_chatByIntent` (`jurisdiction` / `jurisdiction_receipt` params); OpenAI-compatible HTTP (same field names in the request body, refusals as HTTP 412 with error codes `jurisdiction_not_satisfied` / `jurisdiction_receipt_unavailable`); MCP `chat` (same params); A2A inference skill (`jurisdiction` / `jurisdiction_receipt` message metadata); CLI `tenzro chat --jurisdiction "DE,EU" [--require-jurisdiction-receipt]`, `tenzro inference route --message ... --jurisdiction ...`.
 
 ---
 
@@ -371,7 +371,7 @@ Images and tools compose. A turn may carry both, and the model can answer with `
 
 A model serving images runs one request at a time rather than under continuous batching, for the same reason a model with a draft model does: the multimodal decode path holds the context for the whole turn.
 
-**Surfaces.** Rich-shape `tenzro_chat` carries `image` blocks as above. The OpenAI-compatible path uses an [`image_url` content part](#message-content-parts) with the bytes inlined as a `data:` URI. The MCP `chat_completion` tool takes a flat `images` array of base64 strings alongside its text, bound in array order. `tenzro chat` attaches a local file with `/image <path>` at the REPL, sniffing the media type from the bytes. The simple `tenzro_chat` shape carries a bare `message` string with no field an attachment could ride on, so it serves text whatever the model's projector.
+**Surfaces.** Rich-shape `tenzro_chat` carries `image` blocks as above. The OpenAI-compatible path uses an [`image_url` content part](#message-content-parts) with the bytes inlined as a `data:` URI. The MCP `chat` tool takes the same parameters as `tenzro_chat`, `image` blocks included. `tenzro chat` attaches a local file with `/image <path>` at the REPL, sniffing the media type from the bytes. The simple `tenzro_chat` shape carries a bare `message` string with no field an attachment could ride on, so it serves text whatever the model's projector.
 
 ### Tools
 
@@ -538,7 +538,7 @@ Tools follow the OpenAI wire format end to end.
 
 ### Streaming deltas
 
-A stream opens with a `{"role": "assistant", "content": ""}` delta. Content arrives token by token. The model's reasoning is delivered as `reasoning_content` on the final delta, beside the finish reason and usage; incremental `reasoning_content` deltas need the runtime's token channel to carry reasoning separately from the answer, which it does not yet do.
+A stream opens with a `{"role": "assistant", "content": ""}` delta. Content arrives token by token. The model's reasoning is delivered once, as `reasoning_content` on the final delta, beside the finish reason and usage; it is not streamed incrementally.
 
 ### Signed receipts and forwarded billing
 
@@ -1379,7 +1379,7 @@ All four operations are exposed on JSON-RPC, both MCP servers, A2A, the CLI, bot
 | TS SDK | `inference.routeIntent(params)` | `inference.chatByIntent(params)` | `inference.recordRouteOutcome(...)` | `inference.routeDifficultyStats(...)` |
 | OpenClaw skill | `route_intent(...)` | `chat_by_intent(...)` | `record_route_outcome(...)` | `route_difficulty_stats(...)` |
 
-The MCP `chat_completion` tool and the CLI `tenzro chat` command also make `model` optional: when `model` is omitted and a `use_case` is supplied, they resolve the model via the router before dispatching. That path resolves the offer at dispatch rather than pinning it to the scored price, so `chat_by_intent` is the one that guarantees the quoted price is the settled price. Supplying `model` explicitly skips routing.
+The MCP `chat` tool and the CLI `tenzro chat` command also make `model` optional: when `model` is omitted and a `use_case` is supplied, they resolve the model via the router before dispatching. That path resolves the offer at dispatch rather than pinning it to the scored price, so `chat_by_intent` is the one that guarantees the quoted price is the settled price. Supplying `model` explicitly skips routing.
 
 Neither feedback nor index inspection is needed for routing to work. Outcomes the node can observe are recorded by `tenzro_chatByIntent` itself, whichever wrapper called it, so the feedback call carries `escalated` in practice. The stats call is an operator diagnostic.
 

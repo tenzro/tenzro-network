@@ -21,12 +21,12 @@ Thank you for your interest in contributing to Tenzro Network! This document pro
 ### Prerequisites
 
 **Rust Development:**
-- Rust 1.85+ (2024 edition, per rust-toolchain.toml)
+- Rust 1.99.1 (2024 edition, pinned in rust-toolchain.toml)
 - cargo (comes with Rust)
 - git
 
 **Control App Development:**
-- Node.js 18+
+- Node.js 24 (the version CI uses)
 - npm or yarn
 - System dependencies for Tauri (see [Tauri prerequisites](https://tauri.app/v1/guides/getting-started/prerequisites))
 
@@ -61,13 +61,13 @@ cargo test
 ### Run the Node
 
 ```bash
-cargo run --bin tenzro-node -- --role validator
+cargo run --bin tenzro-node -- --roles validator
 ```
 
 ### Run the CLI
 
 ```bash
-cargo run --bin tenzro-cli -- --help
+cargo run --bin tenzro -- --help
 ```
 
 ### Run the Control App
@@ -91,7 +91,7 @@ npm run tauri dev
 
 ### Environment Variables
 
-No special environment variables are required for basic development. Configuration is loaded from TOML files (when implemented) or uses sensible defaults.
+No special environment variables are required for basic development. Configuration is loaded from TOML files or uses sensible defaults.
 
 ### Feature Flags
 
@@ -107,7 +107,6 @@ Several crates use feature flags for optional functionality:
 - **tenzro-payments:**
   - `mpp` (default) — Machine Payments Protocol
   - `x402` (default) — Coinbase x402 protocol
-  - `tempo-bridge` — Tempo network integration
 
 Example: Build with specific features:
 
@@ -246,7 +245,6 @@ cargo build --features intel-tdx,amd-sev-snp
 ### Branching Strategy
 
 - `main` — Stable branch, always passing tests
-- `develop` — Integration branch for next release
 - Feature branches: `feature/description` or `feat/description`
 - Bug fixes: `fix/description`
 - Documentation: `docs/description`
@@ -294,7 +292,7 @@ cargo build --features intel-tdx,amd-sev-snp
 6. **Open a Pull Request:**
    - Provide a clear description of the changes
    - Reference any related issues
-   - Ensure CI checks pass (when implemented)
+   - Ensure CI checks pass
    - Request review from maintainers
 
 ### Pull Request Guidelines
@@ -310,7 +308,7 @@ cargo build --features intel-tdx,amd-sev-snp
 - At least one maintainer review is required
 - Address all review comments
 - Keep PRs focused and reasonably sized (< 500 lines when possible)
-- Rebase on main/develop before merging if needed
+- Rebase on main before merging if needed
 
 ---
 
@@ -390,37 +388,40 @@ The workspace follows a strict dependency hierarchy to prevent circular dependen
 Each crate and the workspace crates it depends on (`tenzro-` dropped):
 
 ```
-tenzro-auth -> device-key, identity, storage, tee, types
-tenzro-bridge -> types, wallet
+tenzro-auth -> device-key, storage, tee, types
+tenzro-bridge -> crypto, types, wallet
 tenzro-catalog -> types
 tenzro-cert-stark -> (none)
-tenzro-cli -> bridge, catalog, consensus, crypto, device-key, events, finality, identity, keygen, model, payments, storage, trust, types, zk
+tenzro-cli -> bridge, catalog, consensus, crypto, device-key, events, finality, identity, keygen, model, onboarding-types, storage, tee, trust, types, update-notice, zk
 tenzro-cluster -> device-key, types
-tenzro-consensus -> cert-stark, crypto, finality, storage, types
+tenzro-consensus -> cert-stark, crypto, finality, onboarding-types, storage, types
 tenzro-crypto -> types
-tenzro-device-key -> crypto
+tenzro-device-key -> crypto, types
 tenzro-econsim -> consensus, sim, token, types, vm
 tenzro-events -> storage, types
-tenzro-finality-prover -> finality, finality-methods, zk
 tenzro-finality -> types
+tenzro-finality-prover -> finality, finality-methods, zk
 tenzro-identity -> crypto, storage, types, wallet
-tenzro-iroh -> device-key, storage, types
+tenzro-iroh -> crypto, device-key, onboarding-types, storage, types
 tenzro-keygen -> crypto, device-key
 tenzro-keystore-unlock -> (none)
 tenzro-model -> catalog, cluster, crypto, device-key, storage, types
-tenzro-network -> crypto, device-key, iroh, types
-tenzro-node -> auth, bridge, cluster, consensus, crypto, device-key, events, identity, iroh, keygen, keystore-unlock, model, network, payments, settlement, storage, storage-provider, tee, token, trust, types, vm, wallet, zk
+tenzro-network -> crypto, device-key, iroh, onboarding-types, types
+tenzro-node -> auth, bridge, cluster, consensus, crypto, device-key, events, identity, iroh, keygen, keystore-unlock, model, network, onboarding-types, payments, settlement, storage, storage-provider, tee, token, trust, types, update-notice, vm, wallet, zk
+tenzro-onboarding-types -> (none)
+tenzro-openshell -> crypto, device-key, payments, tee, types
 tenzro-payments -> bridge, crypto, identity, settlement, storage, types, wallet
 tenzro-secure-enclave -> device-key
-tenzro-settlement-fuzz -> types
 tenzro-settlement -> crypto, storage, token, types, wallet
+tenzro-settlement-fuzz -> types
 tenzro-sim -> consensus, storage, token, types, vm
-tenzro-storage-provider -> cluster, iroh, settlement, storage, types
 tenzro-storage -> types
+tenzro-storage-provider -> cluster, iroh, settlement, storage, types
 tenzro-tee -> crypto, device-key, secure-enclave, types
 tenzro-token -> crypto, storage, types
 tenzro-trust -> crypto, identity, storage, types
 tenzro-types -> (none)
+tenzro-update-notice -> (none)
 tenzro-vm -> bridge, consensus, crypto, finality, settlement, storage, tee, token, trust, types, zk
 tenzro-wallet -> crypto, types
 tenzro-zk -> types

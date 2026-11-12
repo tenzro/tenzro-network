@@ -3840,7 +3840,7 @@ pub struct TenzroMcpServer {
     /// gate does not apply. In that mode `call_tool`/`list_tools` are
     /// restricted, fail-closed, to the read-only tool allowlist
     /// ([`IROH_READONLY_TOOLS`]); every state-changing / admin / operator /
-    /// compute / key-management tool — and `chat_completion` — is refused.
+    /// compute / key-management tool — and `chat` — is refused.
     /// `false` on the HTTP MCP path, which behaves exactly as before.
     iroh_readonly: bool,
     /// When true, this instance serves the compact listing at
@@ -3858,11 +3858,11 @@ pub struct TenzroMcpServer {
 /// Membership rule: pure reads / queries / stateless computations only. It
 /// deliberately excludes everything that mutates node, chain, provider,
 /// stake, model, site/app, or wallet state; executes compute
-/// (`chat_completion`, `*_embed`, `forecast`, `detect`, `segment`,
+/// (`chat`, `*_embed`, `forecast`, `detect`, `segment`,
 /// `transcribe`, `moe_forward`, agent runs); manages or exposes
 /// keys/wallets/passkeys; or reads user file/database contents.
 ///
-/// `chat_completion` is intentionally NOT listed: gated inference already
+/// `chat` is intentionally NOT listed: gated inference already
 /// has the properly-credential-gated `tenzro/infer` ALPN, so exposing it
 /// here would only re-open an ungated inference bypass. See the module
 /// note in `mcp/iroh_transport.rs`.
@@ -3870,6 +3870,7 @@ const IROH_READONLY_TOOLS: &[&str] = &[
     // ── Network / chain / node reads ──
     "get_node_status",
     "get_node_did_document",
+    "get_update_notice",
     "get_network_stats",
     "get_block",
     "get_checkpoint_certificate",
@@ -4633,7 +4634,7 @@ impl TenzroMcpServer {
     /// ALPN). That transport carries no credential and no verified peer
     /// identity, so this instance is locked to the read-only tool allowlist
     /// ([`IROH_READONLY_TOOLS`]): state-changing / admin / operator / compute
-    /// / key-management tools and `chat_completion` are refused. The HTTP MCP
+    /// / key-management tools and `chat` are refused. The HTTP MCP
     /// path continues to use [`new`](Self::new) and is unaffected.
     pub fn new_iroh(node: Arc<TenzroNode>) -> Self {
         Self {
@@ -5184,18 +5185,18 @@ impl TenzroMcpServer {
 
     // ─── Universal RPC gateway ───
     //
-    // The node serves ~900 methods; the tools above cover the ones worth a
+    // The node serves several hundred methods; the tools above cover the ones worth a
     // dedicated, documented signature. These two cover the rest, so nothing
     // the node can do is unreachable from MCP.
     //
     // Writing a tool per method instead would make this server worse, not
-    // better: tool-selection accuracy falls as the list grows, so 500 more
+    // better: tool-selection accuracy falls as the list grows, so hundreds more
     // near-identical entries would cost an agent accuracy on the tools it
     // actually wanted. Discovery plus a gateway keeps the curated list small
     // and the surface complete.
 
     #[tool(
-        description = "Enumerate the JSON-RPC methods this node serves, with how each is gated (admin, owner, open or reserved). Use this to discover capability beyond the named tools, then invoke what you find with call_rpc. Filter with `namespace` or `contains` — the unfiltered directory is ~900 entries."
+        description = "Enumerate the JSON-RPC methods this node serves, with how each is gated (admin, owner, open or reserved). Use this to discover capability beyond the named tools, then invoke what you find with call_rpc. Filter with `namespace` or `contains` — the unfiltered directory has several hundred entries."
     )]
     async fn list_rpc_methods(
         &self,
@@ -5388,6 +5389,15 @@ impl TenzroMcpServer {
         &self,
     ) -> std::result::Result<Json<Typed<NodeDidDocumentOutput>>, ErrorData> {
         rpc_tool_typed(&self.node, "tenzro_nodeDidDocument", serde_json::json!({})).await
+    }
+
+    #[tool(
+        description = "Get the newest signed Tenzro release notice this node holds: the latest version, its severity (normal, security, or required by a named epoch), the release notes link and the archive digests per platform, with the node's position in its epoch. Read only. The notice is signed by the release key and carries data only; verify the signature before relying on it. Use it to tell a person whether a newer Tenzro is available."
+    )]
+    async fn get_update_notice(
+        &self,
+    ) -> std::result::Result<Json<Typed<UpdateNoticeOutput>>, ErrorData> {
+        rpc_tool_typed(&self.node, "tenzro_getUpdateNotice", serde_json::json!({})).await
     }
 
     #[tool(
@@ -10071,6 +10081,7 @@ mod tests {
         "get_provider_pricing",
         "get_router_metrics",
         "get_treasury_accounts",
+        "get_update_notice",
         "iroh_get_info",
         "list_access_tokens",
         "list_active_validators",
@@ -10112,10 +10123,9 @@ mod tests {
     /// exception: each forwards one JSON-RPC method's `params` unchanged by
     /// design (see that module's own doc comment), so their schema is
     /// necessarily `{"params": object | array}` rather than named fields —
-    /// giving them typed input would mean hand-describing all 403 served
-    /// JSON-RPC methods' parameter shapes a second time here, which is the
-    /// larger, separate undertaking line 61 (progressive discovery) exists
-    /// to make unnecessary rather than something to duplicate by hand.
+    /// giving them typed input would mean describing every served JSON-RPC
+    /// method's parameter shape a second time here, which progressive
+    /// discovery exists to make unnecessary.
     #[test]
     fn every_hand_typed_tools_input_schema_is_not_free_form() {
         let mirror_names: std::collections::BTreeSet<&str> = super::super::rpc_tools::RPC_TOOLS
@@ -10881,7 +10891,10 @@ mod tests {
             .await
             .unwrap();
         let body = other.text().await.unwrap();
-        assert!(body.contains("-32022") || body.contains("nsupported"), "{body}");
+        assert!(
+            body.contains("-32022") || body.contains("nsupported"),
+            "{body}"
+        );
     }
 
     /// Resources over HTTP: the event template is listed and `resources/list`

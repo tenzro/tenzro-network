@@ -9,7 +9,7 @@ Chain event log with proofs and live event streaming for the Tenzro Network.
 ## Key Types
 
 - **`EventBus`** — Ring-buffered broadcast hub with monotonic sequence numbers and per-subscriber backpressure. Configurable channel capacity and history retention.
-- **`TenzroEvent`** — Unified event enum covering all VM emissions (EVM Log, SVM transaction event), consensus messages (`BlockFinalized`, `ValidatorJoined`, `EpochTransition`), token economy (`Transferred`, `Staked`, `Slashed`), identity (`Registered`, `Revoked`), and provider lifecycle (`ProviderRegistered`, `ModelServed`).
+- **`TenzroEvent`** — Unified event enum covering all VM emissions (EVM Log, SVM transaction event), chain progress (`NewBlock`, `BlockFinalized`, `BlockReorged`, `SyncProgress`), token movement (`Transfer`, `NftTransfer`, `StakeDeposited`, `StakeWithdrawn`, `ValidatorSlashed`), identity (`IdentityRegistered`, `CredentialIssued`), and models and inference (`ModelRegistered`, `InferenceCompleted`).
 - **`EventFilter`** — Query DSL: filter by event type, VM, contract address, block range, identity DID, model ID. Composable via `EventFilter::and`/`or`.
 - **`EventEnvelope`** — Wire form with sequence number, timestamp, source subsystem, and the inner `TenzroEvent` payload.
 - **`EventSubscriber`** — Pull-style consumer interface (`async fn next() -> EventEnvelope`).
@@ -19,7 +19,7 @@ Chain event log with proofs and live event streaming for the Tenzro Network.
 
 ## Used By
 
-- **`tenzro-node`** — Wires the event bus into the JSON-RPC subscription surface (`tenzro_subscribe`, `tenzro_unsubscribe`), the Web API SSE endpoint, and the gossip `tenzro/events` topic for cross-node fan-out.
+- **`tenzro-node`** — Wires the event bus into the JSON-RPC subscription surface (`tenzro_subscribe`).
 - **`tenzro-vm`** — Emits VM logs / SVM events on every transaction commit.
 - **`tenzro-consensus`** — Emits `BlockFinalized` and epoch lifecycle events.
 - **`tenzro-token`** — Emits transfer / stake / slash events for explorer indexing.

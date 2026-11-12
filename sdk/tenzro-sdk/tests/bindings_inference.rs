@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 use tenzro_sdk::TenzroClient;
 use tenzro_sdk::inference::{IntentParams, RouteOutcome};
 use tenzro_sdk::multimodal::{
-    DecisionOption, DecisionQuestion, DetectParams, EmbedInput, ForecastParams, ImageEmbedParams, LoadModelParams,
-    LoadVideoModelParams, SegmentParams, TaskRouting, TextEmbedParams, TextSegmentParams,
-    TranscribeParams, VideoEmbedParams,
+    DecisionOption, DecisionQuestion, DetectParams, EmbedInput, ForecastParams, ImageEmbedParams,
+    LoadModelParams, LoadVideoModelParams, SegmentParams, TaskRouting, TextEmbedParams,
+    TextSegmentParams, TranscribeParams, VideoEmbedParams,
 };
 use tenzro_sdk::provider::{
     ChatMessage, ChatOptions, InstallSealedModelRequest, MicroNodeIdentity, SealModelRequest,

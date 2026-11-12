@@ -156,7 +156,7 @@ struct Person {
 
 impl Person {
     fn new(seed: u8) -> Self {
-        let passkey = TestHybridSigner::p256_only(seed);
+        let passkey = TestHybridSigner::hybrid(seed);
         let did = format!(
             "did:tenzro:human:{}",
             tenzro_types::did_derivation::human_id(&passkey.public_key().p256)
@@ -173,7 +173,7 @@ impl Person {
             key_type: "P-256".into(),
             wallet_id: format!("wallet-{wallet}"),
             wallet_address: Address::new([wallet; 32]),
-            pq_verifying_key: Vec::new(),
+            pq_verifying_key: self.passkey.public_key().pq.clone().expect("hybrid"),
             metadata: Default::default(),
             proof: RegistrationProof::Hardware {
                 signature: tenzro_types::account_signature::CompositeSignature::classical(
@@ -184,11 +184,17 @@ impl Person {
             },
         };
         let statement = registration_statement(&payload);
+        let classical =
+            self.passkey
+                .sign_passkey(0x05, SignatureContext::IdentityRegistration, &statement);
+        let pq = self
+            .passkey
+            .sign(SignatureContext::IdentityRegistration, &statement)
+            .unwrap()
+            .pq
+            .expect("hybrid");
         payload.proof = RegistrationProof::Hardware {
-            signature: self
-                .passkey
-                .sign(SignatureContext::IdentityRegistration, &statement)
-                .unwrap(),
+            signature: CompositeSignature::hybrid(classical, pq),
         };
         call(SELECTOR_IDENTITY_REGISTER, &payload)
     }
@@ -203,11 +209,11 @@ impl Person {
             account,
             nonce,
             root_public_key: self.passkey.public_key().p256.clone(),
-            signature: CompositeSignature::classical(self.passkey.sign_passkey(
+            signature: self.passkey.sign_passkey_composite(
                 0x05,
                 SignatureContext::AccountOwner,
                 &digest,
-            )),
+            ),
         }
     }
 

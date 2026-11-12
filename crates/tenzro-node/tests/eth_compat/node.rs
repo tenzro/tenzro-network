@@ -153,6 +153,9 @@ async fn start_chain() -> Chain {
         data_dir: tmp.path().to_path_buf(),
         iroh: tenzro_iroh::TenzroIrohConfig::loopback(),
         genesis: Some(GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: GENESIS_SCHEMA_VERSION,
             chain_id: CHAIN_ID,
             timestamp: 0,

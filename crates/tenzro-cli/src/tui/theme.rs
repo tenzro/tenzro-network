@@ -140,14 +140,21 @@ mod tests {
         assert_eq!(depth_from(Some("1"), None, Some("truecolor")), Depth::None);
         assert_eq!(depth_from(None, Some("dumb"), None), Depth::None);
         assert_eq!(depth_from(Some(""), Some("xterm"), None), Depth::Ansi256);
-        assert_eq!(depth_from(None, Some("xterm"), Some("truecolor")), Depth::True);
+        assert_eq!(
+            depth_from(None, Some("xterm"), Some("truecolor")),
+            Depth::True
+        );
     }
 
     #[test]
     fn without_colour_status_is_still_distinguishable() {
         let t = Theme::with_depth(Depth::None);
         assert_eq!(t.status(Word::Down).fg, None);
-        assert!(t.status(Word::Down).add_modifier.contains(Modifier::UNDERLINED));
+        assert!(
+            t.status(Word::Down)
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
         assert!(t.selected().add_modifier.contains(Modifier::REVERSED));
     }
 

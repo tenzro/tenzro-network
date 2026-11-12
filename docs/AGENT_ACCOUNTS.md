@@ -24,7 +24,7 @@ governance with `SetAgentAccountChain`). The salt is
 
 `tenzro agent accounts <did>` (RPC `tenzro_agentAccounts`, MCP `agent_accounts`)
 lists every account as CAIP-10 and, for EVM and Solana, as an ERC-7930
-interoperable address (`tenzro caip erc7930 --caip10 <id>`). The agent's DID
+interoperable address (the `erc7930` field of the result). The agent's DID
 document lists each one as a `blockchainAccountId`.
 
 ## Grants

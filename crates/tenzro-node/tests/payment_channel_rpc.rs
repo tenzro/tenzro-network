@@ -413,6 +413,9 @@ impl Node {
 /// A one-validator genesis on chain 1337.
 fn genesis(validator: tenzro_node::config::GenesisValidator) -> tenzro_node::config::GenesisConfig {
     tenzro_node::config::GenesisConfig {
+        protocol: None,
+        consensus: Default::default(),
+        validator_registry: Default::default(),
         version: tenzro_node::config::GENESIS_SCHEMA_VERSION,
         chain_id: 1337,
         timestamp: 0,

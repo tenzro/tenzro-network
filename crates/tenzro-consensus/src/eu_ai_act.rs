@@ -695,7 +695,9 @@ mod tests {
             tenzro_crypto::batch::ImmediateRecordSigner::new(id)
         };
         let mut forged = pack.clone();
-        let sig = tenzro_crypto::batch::RecordSigner::sign_record(&other, &forged.audit[0].entry.body).unwrap();
+        let sig =
+            tenzro_crypto::batch::RecordSigner::sign_record(&other, &forged.audit[0].entry.body)
+                .unwrap();
         forged.audit[0].entry.signature = serde_json::to_vec(&sig).unwrap();
         // Re-commit is out of reach of a forger, so the forged entry no longer
         // reaches the root either; check the signature alone, as a verifier

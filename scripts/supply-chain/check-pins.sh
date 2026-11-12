@@ -99,6 +99,10 @@ fi
 # No unsafe in the crates that have none; consensus keeps its two libc calls and no more.
 "$(dirname "$0")/check-unsafe.sh" || fail=1
 
+# Onboarding cannot be bypassed: no unlisted start flag, subcommand or environment variable, no
+# installer that starts or joins anything, no test-only key feature in a release.
+"$(dirname "$0")/check-onboarding.sh" || fail=1
+
 # Every npm project turns dependency install scripts off (.npmrc ignore-scripts=true), at its
 # own directory or at the repository root.
 while IFS= read -r pj; do

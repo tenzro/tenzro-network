@@ -1,8 +1,7 @@
 //! The screen shown when a role needs stake the account does not hold.
 //!
-//! There is no faucet, so a new operator arrives with zero TNZO and a role
-//! that needs thousands. Instead of an error, they get the options in the
-//! order worth trying: apply for a sponsorship grant first, then receive TNZO
+//! A new operator arrives with zero TNZO and a role that needs thousands.
+//! Instead of an error, they get the options in the order worth trying: apply for a sponsorship grant first, then receive TNZO
 //! at the account, then carry on without a staked role. The need is also
 //! written to `~/.tenzro/config.json` (`pending_stake`) so `tenzro status`
 //! and `tenzro sponsor status` keep naming it until it is met.
@@ -12,13 +11,10 @@ use anyhow::Result;
 use crate::config;
 use crate::rpc::format_tnzo;
 
-/// How a rendered line should be drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineKind {
-    Heading,
-    Text,
-    Command,
-}
+pub use crate::onboarding::message::LineKind;
+use crate::onboarding::message::{GapInput, MsgEnv, stake_gap};
+use crate::onboarding::role::JoinRole;
+use crate::onboarding::state::ApplicationState;
 
 /// A role's stake requirement against the account that must hold it.
 #[derive(Debug, Clone)]
@@ -44,8 +40,34 @@ impl StakeNeed {
             .saturating_sub(self.balance_wei.unwrap_or(0))
     }
 
-    /// The screen, as lines. Pure.
+    /// The record key for this role: its application slug when it is one.
+    pub fn role_key(&self) -> String {
+        JoinRole::parse(&self.role).map_or_else(|| self.role.clone(), |r| r.slug().to_string())
+    }
+
+    /// The screen, as lines, from the ambient phase and the application
+    /// status this machine last kept.
     pub fn lines(&self) -> Vec<(LineKind, String)> {
+        let state = crate::onboarding::flow::cached_state(&self.account, &self.role_key())
+            .unwrap_or(ApplicationState::NotApplied);
+        self.lines_with(&MsgEnv::current(), state)
+    }
+
+    /// The screen. Pure. In the initial phase it is the one shared
+    /// application message (`onboarding::message`, which `tenzro doctor`
+    /// renders too); in any other phase, the general options below.
+    pub fn lines_with(&self, env: &MsgEnv, state: ApplicationState) -> Vec<(LineKind, String)> {
+        let input = GapInput {
+            role_label: &self.role,
+            required_wei: self.required_wei,
+            balance_wei: self.balance_wei,
+            account: &self.account,
+            state,
+        };
+        stake_gap(&input, env).unwrap_or_else(|| self.general_lines())
+    }
+
+    fn general_lines(&self) -> Vec<(LineKind, String)> {
         let held = match self.balance_wei {
             Some(b) => format!("This account holds {}.", format_tnzo(b)),
             None => "The account's balance could not be read.".to_string(),
@@ -59,7 +81,10 @@ impl StakeNeed {
                     self.role
                 ),
             ),
-            (LineKind::Text, "Your options, in the order to try them:".into()),
+            (
+                LineKind::Text,
+                "Your options, in the order to try them:".into(),
+            ),
             (
                 LineKind::Text,
                 "1. Apply for a sponsorship grant. Governance can approve an operator whose \
@@ -131,7 +156,18 @@ impl StakeNeed {
 
 /// The `tenzro ...` commands the screen prints.
 pub fn printed_tenzro_commands(need: &StakeNeed) -> Vec<String> {
-    need.lines()
+    use crate::onboarding::phase::Phase;
+    let mut lines = need.lines_with(
+        &MsgEnv::with_phase(Phase::OpenStake),
+        ApplicationState::NotApplied,
+    );
+    lines.extend(crate::onboarding::message::next_step(
+        &need.role,
+        Some("ai"),
+        need.required_wei,
+        ApplicationState::Funded,
+    ));
+    lines
         .into_iter()
         .filter(|(k, t)| *k == LineKind::Command && t.starts_with("tenzro "))
         .map(|(_, t)| t)
@@ -141,6 +177,38 @@ pub fn printed_tenzro_commands(need: &StakeNeed) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open() -> MsgEnv {
+        MsgEnv::with_phase(crate::onboarding::phase::Phase::OpenStake)
+    }
+
+    #[test]
+    fn the_initial_phase_screen_is_the_shared_application_message() {
+        use crate::onboarding::phase::Phase;
+        let lines = need(Some(0)).lines_with(
+            &MsgEnv::with_phase(Phase::Foundation),
+            ApplicationState::NotApplied,
+        );
+        let t = crate::onboarding::message::to_text(&lines);
+        assert!(
+            t.contains("How to apply") && t.contains("10000 TNZO"),
+            "{t}"
+        );
+        assert!(!t.contains("sponsorship grant"), "{t}");
+        // the same text doctor renders: both come from stake_gap
+        let direct = crate::onboarding::message::stake_gap(
+            &GapInput {
+                role_label: "validator",
+                required_wei: need(Some(0)).required_wei,
+                balance_wei: Some(0),
+                account: &need(Some(0)).account,
+                state: ApplicationState::NotApplied,
+            },
+            &MsgEnv::with_phase(Phase::Foundation),
+        )
+        .unwrap();
+        assert_eq!(lines, direct);
+    }
 
     fn need(balance: Option<u128>) -> StakeNeed {
         StakeNeed {
@@ -153,20 +221,37 @@ mod tests {
 
     #[test]
     fn sponsorship_is_the_first_option() {
-        let lines = need(Some(0)).lines();
+        let lines = need(Some(0)).lines_with(&open(), ApplicationState::NotApplied);
         let texts: Vec<&str> = lines.iter().map(|(_, t)| t.as_str()).collect();
-        let sponsor = texts.iter().position(|t| t.starts_with("1. Apply for a sponsorship grant")).unwrap();
-        let receive = texts.iter().position(|t| t.starts_with("2. Receive TNZO")).unwrap();
-        let without = texts.iter().position(|t| t.starts_with("3. Continue without")).unwrap();
+        let sponsor = texts
+            .iter()
+            .position(|t| t.starts_with("1. Apply for a sponsorship grant"))
+            .unwrap();
+        let receive = texts
+            .iter()
+            .position(|t| t.starts_with("2. Receive TNZO"))
+            .unwrap();
+        let without = texts
+            .iter()
+            .position(|t| t.starts_with("3. Continue without"))
+            .unwrap();
         assert!(sponsor < receive && receive < without);
     }
 
     #[test]
     fn the_screen_names_the_amount_the_account_and_the_balance() {
-        let lines = need(Some(0)).lines();
+        let lines = need(Some(0)).lines_with(&open(), ApplicationState::NotApplied);
         assert!(lines[0].1.contains("10000 TNZO"), "{}", lines[0].1);
-        assert!(lines.iter().any(|(_, t)| t == &format!("0x{}", "ab".repeat(32))));
-        assert!(need(None).lines()[0].1.contains("could not be read"));
+        assert!(
+            lines
+                .iter()
+                .any(|(_, t)| t == &format!("0x{}", "ab".repeat(32)))
+        );
+        assert!(
+            need(None).lines_with(&open(), ApplicationState::NotApplied)[0]
+                .1
+                .contains("could not be read")
+        );
     }
 
     #[test]

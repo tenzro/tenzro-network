@@ -7,9 +7,9 @@ unchanged, on a minimal base image.
 
 | Tag | Platforms | Base | Serves models on |
 |---|---|---|---|
-| `tenzro-node:launch-cpu` | linux/amd64, linux/arm64 | Debian 12 slim | the CPU (CPU-tier models) |
+| `tenzro-node:launch-cpu` | linux/amd64, linux/arm64 | Ubuntu 24.04 | the CPU (CPU-tier models) |
 | `tenzro-node:launch-cuda` | linux/amd64, linux/arm64 | NVIDIA CUDA runtime, Ubuntu 24.04 | NVIDIA GPUs (llama.cpp and ONNX models) |
-| `tenzro-node:launch-vulkan` | linux/amd64, linux/arm64 | Debian 12 slim, Vulkan loader, Mesa Vulkan drivers | AMD, Intel and NVIDIA GPUs through Vulkan (llama.cpp models) |
+| `tenzro-node:launch-vulkan` | linux/amd64, linux/arm64 | Ubuntu 24.04, Vulkan loader, Mesa Vulkan drivers | AMD, Intel and NVIDIA GPUs through Vulkan (llama.cpp models) |
 
 Each tag also exists pinned to the release commit:
 `tenzro-node:launch-<commit>-<flavour>`. Use the pinned tag in anything you

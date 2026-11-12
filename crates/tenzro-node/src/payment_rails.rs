@@ -63,7 +63,8 @@ pub struct NonceReservation {
 /// not yet enrolled on chain: its enrolment is submitted and nothing else is
 /// admitted from the account before it has executed. Retryable; the
 /// submission itself is not dropped, the caller still holds it.
-pub const PQ_ENROLMENT_PENDING: &str = "the node account's ML-DSA-65 key enrolment is pending on chain; retry shortly";
+pub const PQ_ENROLMENT_PENDING: &str =
+    "the node account's ML-DSA-65 key enrolment is pending on chain; retry shortly";
 
 /// How long a submitted enrolment is awaited before one is submitted again.
 const ENROLMENT_RETRY: Duration = Duration::from_secs(30);
@@ -151,6 +152,12 @@ impl LedgerSubmitter {
     /// The account this submitter sends from: the validator's ledger account.
     pub fn address(&self) -> Address {
         self.node_addr
+    }
+
+    /// The most a transaction of `gas` can cost this account at the gas price
+    /// it sends with, in the smallest unit.
+    pub fn fee_for(&self, gas: u64) -> u128 {
+        u128::from(self.consensus.node_tx_gas_price()).saturating_mul(u128::from(gas))
     }
 
     /// The chain this submitter signs for.

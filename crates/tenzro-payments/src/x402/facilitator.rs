@@ -1276,7 +1276,9 @@ mod escrow_scheme_tests {
     async fn a_sealed_delivery_settles_only_when_both_legs_are_locked_by_its_key() {
         let ledger = Arc::new(Ledger::default());
         let f = facilitator(ledger.clone());
-        let session = tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::random()));
+        let session = tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(
+            tenzro_crypto::composite::testing::TestHybridSigner::random(),
+        ));
         let (delivery, _key) = crate::dvp::SealedDelivery::seal(
             "/paid",
             b"the answer",

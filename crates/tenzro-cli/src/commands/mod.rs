@@ -21,9 +21,9 @@ pub mod contract;
 pub mod crypto;
 pub mod da;
 pub mod dev;
-pub mod doctor;
 pub mod device;
 pub mod discover;
+pub mod doctor;
 pub mod duty;
 pub mod escrow;
 pub mod events;
@@ -47,13 +47,14 @@ pub mod node;
 pub mod node_upgrade;
 pub mod passkey;
 pub mod payment;
-pub mod preflight;
 pub mod permit2;
 pub mod pq_hybrid;
+pub mod preflight;
 pub mod provenance;
 pub mod provider;
 pub mod rails;
 pub mod registry;
+pub mod release;
 pub mod reserve;
 pub mod rpc_cmd;
 pub mod schedule;
@@ -67,10 +68,11 @@ pub mod stake;
 pub mod stake_options;
 pub mod status_bar;
 pub mod tee;
-pub mod tpm;
 pub mod token;
+pub mod tpm;
 pub mod trust;
 pub mod tx;
+pub mod update;
 pub mod urwa;
 pub mod validator;
 pub mod visibility;
@@ -106,9 +108,9 @@ pub use join::JoinCmd;
 pub use media_gen::MediaGenCommand;
 pub use model::ModelCommand;
 pub use multimodal::{
-    DecideCommand, DetectCommand, EmbedImageCommand, EmbedTextCommand, EmbedVideoCommand, ForecastCommand,
-    RerankCommand, SegmentCommand, SpeechCommand, TextSegmentCommand, TrainingCommand,
-    TranscribeCommand,
+    DecideCommand, DetectCommand, EmbedImageCommand, EmbedTextCommand, EmbedVideoCommand,
+    ForecastCommand, RerankCommand, SegmentCommand, SpeechCommand, TextSegmentCommand,
+    TrainingCommand, TranscribeCommand,
 };
 pub use node::NodeCommand;
 pub use payment::PaymentCommand;
@@ -127,6 +129,7 @@ pub use tee::TeeCommand;
 pub use token::TokenCommand;
 pub use trust::TrustCommand;
 pub use tx::TxCommand;
+pub use update::UpdateCmd;
 pub use validator::ValidatorCommand;
 pub use vrf::VrfCommand;
 pub use wallet::WalletCommand;

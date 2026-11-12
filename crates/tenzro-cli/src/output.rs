@@ -82,7 +82,11 @@ pub mod colors {
     }
     /// Red for the error stream, which may be a terminal when stdout is not.
     pub fn bad_stderr() -> &'static str {
-        if enabled_stderr() { "\x1b[38;5;174m" } else { "" }
+        if enabled_stderr() {
+            "\x1b[38;5;174m"
+        } else {
+            ""
+        }
     }
     pub fn bold() -> &'static str {
         if enabled() { "\x1b[1m" } else { "" }
@@ -158,7 +162,12 @@ pub fn print_success(message: &str) {
 
 /// Print an error message
 pub fn print_error(message: &str) {
-    eprintln!("{}✗{} {}", colors::bad_stderr(), colors::reset_stderr(), message);
+    eprintln!(
+        "{}✗{} {}",
+        colors::bad_stderr(),
+        colors::reset_stderr(),
+        message
+    );
 }
 
 /// Print a warning message
@@ -173,7 +182,13 @@ pub fn print_info(message: &str) {
 
 /// Print a key-value pair
 pub fn print_field(key: &str, value: &str) {
-    println!("  {}{:20}{} {}", colors::bold(), key, colors::reset(), value);
+    println!(
+        "  {}{:20}{} {}",
+        colors::bold(),
+        key,
+        colors::reset(),
+        value
+    );
 }
 
 /// Print a status with color coding

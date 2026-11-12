@@ -1,0 +1,57 @@
+# Network profile for chain 13380, Tenzro testnet. Packaging only -- not a genesis field,
+# does not affect the genesis hash. DIDs are the `tenzro-node tpm provision` output of each
+# machine.
+version = 1
+chain_id = 13380
+
+[relay]
+url = "https://relay.tenzro.com/"
+operator_did = "did:tenzro:machine:1ecd914920f4d5eb72603e8ebb59084db76f6740ebbbe34a915bd0ff04229da6"   # the public node
+
+# A second relay, served by a validator, goes here when its operator has published
+# the URL and its record answers (a `[[relays]]` table with `url` and `operator_did`).
+# Without it nodes still learn every relay a validator serves from that validator's
+# signed endpoint record, and use it when the first relay is down.
+
+[[validators]]
+did = "did:tenzro:machine:686608a957f23ea6af111c99a75231e5e58e6a602487ad0bb68ea2b9e64b6c81"
+
+[[validators]]
+did = "did:tenzro:machine:d57b9c920d6b7cce1053ac7cda0522bd49703c6ababe588353fe5074d5d4374b"
+
+[[validators]]
+did = "did:tenzro:machine:ddaec1d3a098f6a63373e6481653ea7366f375b40a3d7532cc059224dcf35771"
+
+[[validators]]
+did = "did:tenzro:machine:9e67137ff88c99bfd967379cd47c78d86f37337bf3286d6b37fe8a6397179b18"
+
+# A delegated validator without a TPM is not listed here: its machine DID is not derivable
+# before it runs. It joins via gossip through these four once started.
+
+# The identity rule: no participant without a wallet and an identity. A node of this
+# network refuses peers and transactions from an unregistered identity unless its own
+# config file sets [onboarding] mode. (Not a genesis field; the execution-layer gate is
+# seeded in config/genesis-launch.toml.)
+[onboarding]
+mode = "enforce"
+
+# Snapshot join. A node that does not hold the validator role restores the committed state
+# from a validator's snapshot, checked against a finalized block it trusts, then block-syncs
+# only what follows; it never replays the history. Validators produce and serve snapshots by
+# default. interval_blocks is the minimum spacing; a snapshot is cut at the first epoch start
+# past it, so a joiner replays at most one epoch of blocks after restoring.
+#
+# The trusted block is a finalized block of the running chain, named by height and hash. An
+# operator gives it with --checkpoint-height and --checkpoint-hash, or the genesis
+# [weak_subjectivity] block supplies it. Without either a node replays the chain from block 0
+# and says so in its log. `from` below names snapshot peers (the node config key
+# state_sync_from overrides it); empty, the node asks the boot identities above. The [snapshot]
+# keys are defaults that the node config [snapshot] table overrides key by key.
+[state_sync]
+from = []
+
+[snapshot]
+interval_blocks = 10000
+retain_count = 2
+max_published_bytes = 17179869184
+max_volume_pct = 15

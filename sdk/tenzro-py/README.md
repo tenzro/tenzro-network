@@ -29,7 +29,7 @@ hardware. It carries:
 
 ## Install
 
-Not yet published to PyPI — install from source until it is:
+Install from source:
 
 ```sh
 pip install git+https://github.com/tenzro/tenzro-sdk-python            # RPC, builders, verification
@@ -249,7 +249,7 @@ modules (`device`).
 | `tenzro` (core) | `RpcClient`, `AsyncRpcClient`, `RpcError`, `ApiError`, `AccessCredential`, `SseDecoder`; the signer interface and hardware signer (`tenzro.signer`), `tenzro.wallet`, the typed transaction builders (`tenzro.typed_tx`), ML-DSA-65 enrollment (`tenzro.account_keys`) |
 | `tenzro.payments` | x402 payers (`HybridPayer`, `AgentChannelPayer`, `PayingClient`), the publisher gate (`PublisherGate`, `AsyncPublisherGate`, `tenzro.payments.asgi`, `tenzro.payments.wsgi`), `PublisherPolicy`, `rsl_xml` |
 | `tenzro.settlement` | `preview_split`, `split_rule_hash`, `PlanBuilder`, plan payments, refunds, payee split rules; `get_plan`, `get_plan_decision`, `get_leg_receipt`, `list_plans` |
-| `tenzro.agents` | `AgentTerms`, `delegate_agent`, `update_agent_terms`, `agent_act`, `agent_voucher`; `kill_switch_receipt`, `kill_switches_by_agent`, `kill_switches_by_controller`, `agent_quarantine`; NVIDIA OpenShell: `openshell_policy_terms`, `mint_openshell_credential`, `openshell_session_id`, `parse_openshell_records`, `verify_openshell_records`, `openshell_payments` |
+| `tenzro.agents` | `AgentTerms`, `delegate_agent`, `update_agent_terms`, `agent_act`, `agent_voucher`; `kill_switch_receipt`, `kill_switches_by_agent`, `kill_switches_by_controller`, `agent_quarantine`; NVIDIA OpenShell: `openshell_terms`, `mint_openshell_credential`, `openshell_session_id`, `parse_openshell_entries`, `verify_openshell_session`, `openshell_payments` |
 | `tenzro.admin` | `audit_log`, `verify_audit_log` (operator only) |
 | `tenzro.bridge` | bridge sends, agents' accounts on other chains and action digests, EIP-7702 (`tenzro.bridge.eip7702`) |
 | `tenzro.inference` | `ChatClient`, `AsyncChatClient`, `ChatStreamAssembler` |

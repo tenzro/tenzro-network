@@ -556,7 +556,10 @@ mod tests {
         let mut forged = first.body.clone();
         let at = forged.iter().position(|b| *b == b'1').unwrap();
         forged[at] = b'2';
-        assert!(sig.verify_record_at(s.identity(), &forged, e1.at_ms).is_err());
+        assert!(
+            sig.verify_record_at(s.identity(), &forged, e1.at_ms)
+                .is_err()
+        );
 
         // The disk holds what was signed, and a new process finds it.
         assert_eq!(log.entries(&e1.session_id).unwrap(), vec![first, second]);

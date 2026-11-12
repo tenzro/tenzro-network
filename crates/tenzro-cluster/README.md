@@ -49,9 +49,6 @@ for this key?" — answered locally with no lookup.
   out of the per-token path.
 - **`tenzro-storage-provider`** — erasure-coded shard placement across
   independent providers.
-- **`tenzro-database`** — partition placement, pinned to its own domain tag so
-  database partitions and storage shards never co-place by accident over the
-  same member set.
 
 ## Tests
 

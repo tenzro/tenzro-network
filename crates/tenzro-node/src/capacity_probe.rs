@@ -430,7 +430,9 @@ mod tests {
         let probe = mgr
             .issue_probe("unit-0", 0, 0, 10_000, Some(burst_work()))
             .unwrap();
-        let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(TestHybridSigner::random()));
+        let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
+            TestHybridSigner::random(),
+        ));
         let provider_address = tenzro_types::primitives::Address::new([2u8; 32]);
         (mgr, probe, signer, provider_address)
     }
@@ -543,7 +545,9 @@ mod tests {
             let probe = mgr
                 .issue_probe(&did, epoch, 0, deadline, Some(burst_work()))
                 .unwrap();
-            let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(TestHybridSigner::random()));
+            let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
+                TestHybridSigner::random(),
+            ));
             let addr = tenzro_types::primitives::Address::new([i as u8; 32]);
             let result = if i < real_units {
                 let CapacityWork::Matmul { n, rows } = probe.work.clone().unwrap() else {

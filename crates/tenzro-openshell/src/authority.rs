@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_payments::gateway::{RailOutcome, SettlementInstruction, SettlementRail};
 use tenzro_payments::payer_auth::{EnrolledKeys, PayerKeyResolver};
 use tenzro_payments::terms_gate::{PaymentIntent, TermsGate};
@@ -223,20 +224,25 @@ struct State {
 pub struct StateAuthority {
     machine_did: String,
     chain_id: u64,
+    serving: CompositePublicKey,
     delegations: Arc<dyn Delegations>,
     local: Option<Arc<LocalDelegations>>,
     state: RwLock<State>,
 }
 
 impl StateAuthority {
-    /// An authority for the serving node `machine_did`, whose P-256 key
-    /// (`x || y`) signs the agents' payments, with delegations held in this
+    /// An authority for the serving node `machine_did`, whose composite key
+    /// (P-256 `x || y` and the enrolled ML-DSA-65 key) signs the agents' payments, with delegations held in this
     /// process ([`StateAuthority::install_terms`], [`StateAuthority::revoke`]).
-    pub fn new(machine_did: impl Into<String>, serving_p256: Vec<u8>, chain_id: u64) -> Arc<Self> {
+    pub fn new(
+        machine_did: impl Into<String>,
+        serving: CompositePublicKey,
+        chain_id: u64,
+    ) -> Arc<Self> {
         let local = Arc::new(LocalDelegations::default());
         Self::build(
             machine_did.into(),
-            serving_p256,
+            serving,
             chain_id,
             local.clone(),
             Some(local),
@@ -247,31 +253,28 @@ impl StateAuthority {
     /// agent's delegation from `delegations`: a running Tenzro node.
     pub fn over(
         machine_did: impl Into<String>,
-        serving_p256: Vec<u8>,
+        serving: CompositePublicKey,
         chain_id: u64,
         delegations: Arc<dyn Delegations>,
     ) -> Arc<Self> {
-        Self::build(
-            machine_did.into(),
-            serving_p256,
-            chain_id,
-            delegations,
-            None,
-        )
+        Self::build(machine_did.into(), serving, chain_id, delegations, None)
     }
 
     fn build(
         machine_did: String,
-        serving_p256: Vec<u8>,
+        serving: CompositePublicKey,
         chain_id: u64,
         delegations: Arc<dyn Delegations>,
         local: Option<Arc<LocalDelegations>>,
     ) -> Arc<Self> {
         let mut state = State::default();
-        state.serving_keys.insert(machine_did.clone(), serving_p256);
+        state
+            .serving_keys
+            .insert(machine_did.clone(), serving.p256.clone());
         Arc::new(Self {
             machine_did,
             chain_id,
+            serving,
             delegations,
             local,
             state: RwLock::new(state),
@@ -631,10 +634,13 @@ impl PayerKeyResolver for StateAuthority {
     }
 }
 
-/// Serving nodes sign with P-256 alone here; no ML-DSA key is enrolled.
+/// The serving node's own key is the only one this authority knows; its
+/// ML-DSA-65 key is the one enrolled for the account that P-256 key controls.
 impl EnrolledKeys for StateAuthority {
-    fn enrolled_pq_key(&self, _p256_xy: &[u8]) -> PayResult<Option<Vec<u8>>> {
-        Ok(None)
+    fn enrolled_pq_key(&self, p256_xy: &[u8]) -> PayResult<Option<Vec<u8>>> {
+        Ok((p256_xy == self.serving.p256.as_slice())
+            .then(|| self.serving.pq.clone())
+            .flatten())
     }
 }
 
@@ -703,7 +709,14 @@ mod tests {
     use tenzro_types::agent_terms::AgentTerms;
 
     fn authority(edit: impl FnOnce(&mut AgentTerms)) -> Arc<StateAuthority> {
-        let a = StateAuthority::new(MACHINE, vec![7; 64], 1337);
+        let a = StateAuthority::new(
+            MACHINE,
+            CompositePublicKey {
+                p256: vec![7; 64],
+                pq: None,
+            },
+            1337,
+        );
         let mut t = terms(&["fetch", "pay"]);
         edit(&mut t);
         a.install_terms(&agent(), t);
@@ -728,7 +741,14 @@ mod tests {
 
     #[test]
     fn an_agent_with_no_terms_is_refused_and_is_not_reported_stopped() {
-        let a = StateAuthority::new(MACHINE, vec![7; 64], 1337);
+        let a = StateAuthority::new(
+            MACHINE,
+            CompositePublicKey {
+                p256: vec![7; 64],
+                pq: None,
+            },
+            1337,
+        );
         let r = a.check(&agent(), &fetch(), 1_000).unwrap_err();
         assert_eq!(r.0, "the agent has no Terms");
         assert!(Authority::authorize(&*a, &agent(), &fetch(), 1_000).is_err());
@@ -759,7 +779,12 @@ mod tests {
         let b = authority(|_| {});
         assert!(b.revoked(&agent(), 1_000).is_none());
         b.revoke(ROOT, "root withdrawn");
-        assert_eq!(Authority::authorize(&*b, &agent(), &fetch(), 1_000).unwrap_err().0, REVOKED);
+        assert_eq!(
+            Authority::authorize(&*b, &agent(), &fetch(), 1_000)
+                .unwrap_err()
+                .0,
+            REVOKED
+        );
     }
 
     #[test]
@@ -775,7 +800,15 @@ mod tests {
 
     #[test]
     fn an_unreadable_delegation_refuses_and_reports_the_agent_stopped() {
-        let a = StateAuthority::over(MACHINE, vec![7; 64], 1337, Arc::new(Down));
+        let a = StateAuthority::over(
+            MACHINE,
+            CompositePublicKey {
+                p256: vec![7; 64],
+                pq: None,
+            },
+            1337,
+            Arc::new(Down),
+        );
         let r = a.check(&agent(), &fetch(), 1_000).unwrap_err();
         assert!(r.0.contains("could not be read"), "{r}");
         assert!(a.terms(&agent()).is_none());
@@ -812,7 +845,10 @@ mod tests {
             ..Default::default()
         };
         Authority::authorize(&*a, &agent(), &pay(60), 1_000).unwrap();
-        assert!(Authority::authorize(&*a, &agent(), &pay(60), 2_000).is_err(), "120 > 100");
+        assert!(
+            Authority::authorize(&*a, &agent(), &pay(60), 2_000).is_err(),
+            "120 > 100"
+        );
         Authority::authorize(&*a, &agent(), &pay(40), 3_000).unwrap();
         assert!(Authority::authorize(&*a, &agent(), &pay(1), 4_000).is_err());
         assert!(

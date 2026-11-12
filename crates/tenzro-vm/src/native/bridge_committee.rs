@@ -614,8 +614,7 @@ pub(super) fn report_equivocation(
             .filter(|(addr, _)| *addr == member)
             .cloned()
             .collect();
-        !tenzro_bridge::route::attestation::dual_signers(&seat_only, digest, &sigs, &pq)
-            .is_empty()
+        !tenzro_bridge::route::attestation::dual_signers(&seat_only, digest, &sigs, &pq).is_empty()
     };
     if !signed(&a, &da) || !signed(&b, &db) {
         return Err(refuse("the member's signature is not on both deliveries"));
@@ -949,11 +948,12 @@ mod tests {
             d.committee.push((member.address, sign(sk, &digest)));
             if with_pq {
                 let k = tenzro_bridge::route::attestation::testing::pq_key(&sk.to_bytes());
-                d.committee_pq.push(tenzro_bridge::route::attestation::testing::sign_pq(
-                    &k,
-                    member.address,
-                    &digest,
-                ));
+                d.committee_pq
+                    .push(tenzro_bridge::route::attestation::testing::sign_pq(
+                        &k,
+                        member.address,
+                        &digest,
+                    ));
             }
             d.encode()
         };

@@ -8,7 +8,7 @@ The official Tenzro SDK for TypeScript: a typed client for every JSON-RPC method
 
 ## Compatibility
 
-The npm registry currently serves **0.7.0**: `TenzroClient` built directly from an endpoint and chain id (`new TenzroClient({ endpoint, chainId })`), with 60+ methods (`getChainId`, `getBalance`, `getStatus`, `sendTransaction`, and the rest) — it does not yet have `connectToNetwork` or the hardware-signer helpers used below, which land with the next publish. This page describes the current source; for code that matches what `npm install tenzro-sdk` gives you today, see [tenzro-sdk-typescript](https://github.com/tenzro/tenzro-sdk-typescript)'s quickstart.
+The npm registry currently serves **0.7.0**: `TenzroClient` built directly from an endpoint and chain id (`new TenzroClient({ endpoint, chainId })`), with 60+ methods (`getChainId`, `getBalance`, `getStatus`, `sendTransaction`, and the rest) — `connectToNetwork` and the hardware-signer helpers used below are in the current source. This page describes the current source; for code that matches what `npm install tenzro-sdk` gives you today, see [tenzro-sdk-typescript](https://github.com/tenzro/tenzro-sdk-typescript)'s quickstart.
 
 ## Installation
 

@@ -128,7 +128,7 @@ pub struct ExecutionSupport {
     /// Node can serve remote inference with layer streaming.
     #[serde(default)]
     pub remote_streamed: bool,
-    /// Node can participate as local MoE expert coordinator.
+    /// Node can participate as local MoE expert host.
     #[serde(default)]
     pub hybrid_moe_local: bool,
     /// Node can participate in regional MoE mesh.

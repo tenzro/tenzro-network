@@ -74,7 +74,12 @@ mod tests {
     #[tokio::test]
     async fn the_account_is_required_and_must_be_hex() {
         let (node, _tmp) = crate::bare_node().await;
-        for params in [None, Some(json!({})), Some(json!({"account": 5})), Some(json!([]))] {
+        for params in [
+            None,
+            Some(json!({})),
+            Some(json!({"account": 5})),
+            Some(json!([])),
+        ] {
             let e = handle_get_account_outflow(&node, params).await.unwrap_err();
             assert_eq!(e.code, -32602);
             assert!(e.message.contains("required"), "{}", e.message);

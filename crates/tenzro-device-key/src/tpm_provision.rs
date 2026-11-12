@@ -581,7 +581,7 @@ mod tests {
         p
     }
 
-    /// A TPM like spark's: certificates for RSA-2048 and P-384 EKs, an
+    /// A TPM that holds certificates for RSA-2048 and P-384 EKs, an
     /// unrelated key at the RSA EK handle. The RSA handle is left alone and
     /// the P-384 EK is made persistent at its own handle.
     #[test]

@@ -36,10 +36,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
+use tenzro_crypto::encryption::{
+    EncryptedEnvelope, SymmetricKey, envelope_decrypt, envelope_encrypt,
+};
+use tenzro_crypto::hybrid_seal::HybridPublicKey;
 #[cfg(test)]
 use tenzro_crypto::hybrid_seal::HybridSecretKey;
-use tenzro_crypto::encryption::{EncryptedEnvelope, SymmetricKey, envelope_decrypt, envelope_encrypt};
-use tenzro_crypto::hybrid_seal::HybridPublicKey;
 use tenzro_crypto::{
     CompositePublicKey, CompositeSignature, PqPolicy, SignatureContext, verify_composite,
 };
@@ -134,8 +136,7 @@ pub struct RecipientSpec {
 pub trait RecipientEnclaveAttester: Send + Sync {
     /// Attests the local enclave against `recipient_key` and returns the
     /// verified measurement as lowercase hex.
-    async fn attest(&self, recipient_did: &str, recipient_key: &HybridPublicKey)
-    -> Result<String>;
+    async fn attest(&self, recipient_did: &str, recipient_key: &HybridPublicKey) -> Result<String>;
 }
 
 /// Signed manifest binding a sealed model's shard set and recipient set.
@@ -874,7 +875,10 @@ mod tests {
         .await
         .unwrap();
         sign_manifest(&mut manifest);
-        assert_eq!(manifest.wrap_alg, "x25519-mlkem768-hkdf-sha256-envelope-aes-256-gcm");
+        assert_eq!(
+            manifest.wrap_alg,
+            "x25519-mlkem768-hkdf-sha256-envelope-aes-256-gcm"
+        );
         let wrapped = &manifest.recipients[0].wrapped_key;
         assert_eq!(wrapped.sealed_key.ml_kem_ciphertext.len(), 1088);
 
@@ -885,7 +889,10 @@ mod tests {
         // Changing the ML-KEM ciphertext in the manifest breaks its hash.
         let dest = path.parent().unwrap().join("restored.gguf");
         let mut tampered = manifest.clone();
-        tampered.recipients[0].wrapped_key.sealed_key.ml_kem_ciphertext[0] ^= 1;
+        tampered.recipients[0]
+            .wrapped_key
+            .sealed_key
+            .ml_kem_ciphertext[0] ^= 1;
         let err = unseal_model_to_file(
             &tampered,
             "did:tenzro:machine:abc",

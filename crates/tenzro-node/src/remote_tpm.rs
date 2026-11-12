@@ -35,11 +35,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tenzro_device_key::HardwareSigner;
 use tenzro_device_key::derive::DerivationRoot;
-use tenzro_device_key::remote::{
-    Audit, Grant, KeyStore, Policy, Provider, RemoteDeriveClient, RemoteTpmSigner, Transport,
-};
-use tenzro_device_key::{DeviceKeyError, HardwareSigner};
+use tenzro_device_key::remote::{Audit, Grant, KeyStore, Policy, Provider, RemoteTpmSigner};
 use tenzro_iroh::TpmSignServer;
 use tracing::{info, warn};
 
@@ -236,8 +234,10 @@ pub fn check_grant<'a>(
 /// A [`Provider`] that serves only requests carrying a valid grant.
 pub struct GrantedProvider<K: KeyStore, A: Audit> {
     provider: Provider<K, A>,
-    enrolled: Vec<EnrolledPasskey>,
+    enrolled: std::sync::RwLock<Vec<EnrolledPasskey>>,
     max_grant_ms: u64,
+    /// Whether a derivation root is attached (decided at start).
+    derivation: bool,
 }
 
 impl<K: KeyStore, A: Audit> GrantedProvider<K, A> {
@@ -264,9 +264,43 @@ impl<K: KeyStore, A: Audit> GrantedProvider<K, A> {
             .collect::<HashMap<_, _>>();
         Self {
             provider: Provider::new(keys, audit, policy),
-            enrolled,
+            enrolled: std::sync::RwLock::new(enrolled),
             max_grant_ms,
+            derivation: false,
         }
+    }
+
+    /// Replaces the enrolled clients while the provider runs. Clients
+    /// kept keep their rate window and any request in flight; a removed
+    /// client is refused from the next request on. Refused, with nothing
+    /// changed, if the new list needs derived keys the provider was not
+    /// started with: that needs a restart.
+    pub fn reload_clients(
+        &self,
+        enrolled: Vec<EnrolledPasskey>,
+    ) -> std::result::Result<(), String> {
+        if !self.derivation && enrolled.iter().any(|e| e.derived) {
+            return Err(
+                "a client uses derived keys but the provider started without a derivation root: \
+                 restart the provider"
+                    .into(),
+            );
+        }
+        let clients = enrolled
+            .iter()
+            .map(|e| {
+                (
+                    e.client_id(),
+                    Grant {
+                        label: e.label.clone(),
+                        derived: e.derived,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        self.provider.replace_clients(clients);
+        *self.enrolled.write().expect("enrolled") = enrolled;
+        Ok(())
     }
 
     /// Lets granted clients that are enrolled for it use derived keys.
@@ -275,6 +309,7 @@ impl<K: KeyStore, A: Audit> GrantedProvider<K, A> {
         root: Arc<dyn tenzro_device_key::derive::RemoteDerive>,
     ) -> Self {
         self.provider = self.provider.with_derivation(root);
+        self.derivation = true;
         self
     }
 
@@ -307,12 +342,16 @@ impl<K: KeyStore, A: Audit> GrantedProvider<K, A> {
             Ok(g) => g,
             Err(_) => return refuse("the grant is malformed"),
         };
-        match check_grant(&self.enrolled, self.max_grant_ms, client, &grant, now_ms) {
+        let checked = {
+            let enrolled = self.enrolled.read().expect("enrolled");
+            check_grant(&enrolled, self.max_grant_ms, client, &grant, now_ms)
+                .map(|enrolment| enrolment.client_id())
+        };
+        match checked {
             // A delegation issued under this grant ends with it.
-            Ok(enrolment) => {
-                self.provider
-                    .handle_capped(&enrolment.client_id(), inner, Some(grant.not_after_ms))
-            }
+            Ok(id) => self
+                .provider
+                .handle_capped(&id, inner, Some(grant.not_after_ms)),
             Err(why) => refuse(&why),
         }
     }
@@ -322,55 +361,13 @@ impl<K: KeyStore, A: Audit> GrantedProvider<K, A> {
 // Client side
 // ---------------------------------------------------------------------------
 
-/// Carries a request to the provider through the local key holder.
-#[derive(Debug, Clone)]
-pub struct HolderTransport {
-    socket: PathBuf,
-}
-
-impl HolderTransport {
-    pub fn new(socket: impl Into<PathBuf>) -> Self {
-        Self {
-            socket: socket.into(),
-        }
-    }
-}
-
-impl Transport for HolderTransport {
-    fn call(&self, request: &[u8]) -> tenzro_device_key::Result<Vec<u8>> {
-        holder_call(&self.socket, request)
-            .map_err(|e| DeviceKeyError::Tpm(format!("remote TPM: {e}")))
-    }
-}
-
-#[cfg(unix)]
-fn holder_call(socket: &Path, request: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    crate::tpm_key_holder::request(socket, crate::tpm_key_holder::OP_CALL, request)
-}
-
-#[cfg(not(unix))]
-fn holder_call(_socket: &Path, _request: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    Err("the TPM key holder needs a Unix socket, which this platform does not have".into())
-}
+pub use tenzro_device_key::remote::HolderTransport;
 
 /// From now on every hardware key and every derived key this process asks
 /// for lives in the providers' TPM: `{label}/{key label}` there.
 pub fn install(config: &RemoteConfig) -> Result<()> {
-    let grant = config.label.clone();
-    let socket = config.key_holder.clone();
-    tenzro_device_key::signer::use_remote_signers(Box::new(move |label| {
-        let signer = RemoteTpmSigner::open(
-            HolderTransport::new(socket.clone()),
-            &format!("{grant}/{label}"),
-        )?;
-        Ok(Box::new(signer) as Box<dyn HardwareSigner>)
-    }))
-    .map_err(|e| NodeError::Config(e.to_string()))?;
-    tenzro_device_key::derive::use_remote_root(Arc::new(RemoteDeriveClient::new(
-        HolderTransport::new(config.key_holder.clone()),
-        &config.label,
-    )))
-    .map_err(|e| NodeError::Config(e.to_string()))
+    tenzro_device_key::remote::use_key_holder(&config.label, &config.key_holder)
+        .map_err(|e| NodeError::Config(e.to_string()))
 }
 
 /// Opens this machine's identity key at the providers.
@@ -608,7 +605,26 @@ impl TpmSignServer for Service {
     }
 }
 
-/// Runs the provider until the process ends.
+/// Re-reads the `[[clients]]` of `file` into a running provider. Only the
+/// client list changes; on any error the provider keeps the list it has.
+pub fn reload_clients_from_file<K: KeyStore, A: Audit>(
+    file: &Path,
+    provider: &GrantedProvider<K, A>,
+) -> Result<usize> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| NodeError::Config(format!("{}: {e}", file.display())))?;
+    let config: ProviderFile =
+        toml::from_str(&text).map_err(|e| NodeError::Config(format!("{}: {e}", file.display())))?;
+    let enrolled = enrolled_passkeys(&config)?;
+    let n = enrolled.len();
+    provider
+        .reload_clients(enrolled)
+        .map_err(|e| NodeError::Config(format!("{}: {e}", file.display())))?;
+    Ok(n)
+}
+
+/// Runs the provider until the process ends. SIGHUP re-reads the client list
+/// from `file` without interrupting any client.
 pub async fn serve(file: &Path) -> Result<()> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| NodeError::Config(format!("{}: {e}", file.display())))?;
@@ -661,6 +677,26 @@ pub async fn serve(file: &Path) -> Result<()> {
         }
     }
     let provider = Arc::new(provider);
+    #[cfg(unix)]
+    {
+        let provider = provider.clone();
+        let file = file.to_path_buf();
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(mut hup) => {
+                tokio::spawn(async move {
+                    while hup.recv().await.is_some() {
+                        match reload_clients_from_file(&file, &provider) {
+                            Ok(n) => info!(clients = n, "tpm provider: client list reloaded"),
+                            Err(e) => {
+                                warn!(error = %e, "tpm provider: reload refused, client list unchanged")
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => warn!(error = %e, "tpm provider: SIGHUP reload unavailable"),
+        }
+    }
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(tenzro_iroh::serve_tpm_sign(
         *secret,

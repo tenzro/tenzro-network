@@ -227,6 +227,7 @@ METHODS: dict[str, Access] = {
     "tenzro_getTreasuryAccounts": "open",
     "tenzro_getTreasuryPayouts": "open",
     "tenzro_getTrustCredentials": "open",
+    "tenzro_getUpdateNotice": "open",
     "tenzro_getUpgradeReadiness": "open",
     "tenzro_getValidatorState": "open",
     "tenzro_getVesting": "open",
@@ -1339,6 +1340,10 @@ class Methods:
     def get_trust_credentials(self, params: Params = None) -> Any:
         """``tenzro_getTrustCredentials``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getTrustCredentials", params)
+
+    def get_update_notice(self, params: Params = None) -> Any:
+        """``tenzro_getUpdateNotice``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_getUpdateNotice", params)
 
     def get_upgrade_readiness(self, params: Params = None) -> Any:
         """``tenzro_getUpgradeReadiness``. Open to any caller the node's access policy admits."""
@@ -3220,6 +3225,10 @@ class AsyncMethods:
     async def get_trust_credentials(self, params: Params = None) -> Any:
         """``tenzro_getTrustCredentials``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getTrustCredentials", params)
+
+    async def get_update_notice(self, params: Params = None) -> Any:
+        """``tenzro_getUpdateNotice``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_getUpdateNotice", params)
 
     async def get_upgrade_readiness(self, params: Params = None) -> Any:
         """``tenzro_getUpgradeReadiness``. Open to any caller the node's access policy admits."""

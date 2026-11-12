@@ -50,10 +50,10 @@ certificate (see "Unsigned installers" below), so the release signature is what 
 
 ```bash
 # Debian, Ubuntu (24.04 or newer)
-sudo apt install ./tenzro-cpu_0.2.0-1_amd64.deb
+sudo apt install ./tenzro-cpu_0.2.1-1_amd64.deb
 
 # Fedora (40 or newer), RHEL 10 and relatives
-sudo dnf install ./tenzro-cpu-0.2.0-1.x86_64.rpm
+sudo dnf install ./tenzro-cpu-0.2.1-1.x86_64.rpm
 ```
 
 Choose the variant that matches the machine:
@@ -86,7 +86,7 @@ At the end of the install the package manager shows the result of the hardware c
 ```text
 Tenzro is installed. Nothing was started and nothing joined the network.
 
-Tenzro hardware check (version 0.2.0-1)
+Tenzro hardware check (version 0.2.1-1)
   package build : cpu
   binary reports: build=CPU gpus=0 onnx=CPU startup=ok
 
@@ -125,7 +125,10 @@ msiexec /i tenzro-0.2.1-windows-x86_64-cuda.msi /qn ADDTOPATH=system INSTALLFOLD
 `ADDTOPATH` is `system`, `user` or `none`. The MSI is per-machine, so it asks for administrator rights; it installs no service, and the hardware check runs only when you tick the final box, choose "Tenzro hardware check" or type `tenzro-check`, never during the install itself. Uninstall from "Apps > Installed apps >
 Tenzro", or `msiexec /x tenzro-0.2.1-windows-x86_64-cuda.msi`; the PATH entry is removed with it. This is the CUDA
 build and needs an NVIDIA GPU with a current driver; on a machine without one the hardware check says so and
-tells you to use the command line only or another build.
+tells you to use the command line only or another build. Language models need the CUDA 13 runtime libraries on
+the machine, and ONNX models on the GPU need cuDNN 9 as well; neither is part of the installer. The installer
+puts `DirectML.dll` and the ONNX Runtime provider libraries beside the programs and the network profile under
+`share\network`; leave them where they are.
 
 #### macOS
 

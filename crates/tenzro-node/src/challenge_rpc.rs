@@ -203,15 +203,24 @@ mod tests {
         let (node, _tmp) = crate::bare_node().await;
         let e = handle_audit_challenge(&node, None).await.unwrap_err();
         assert_eq!(e.code, -32602);
-        let e = handle_audit_challenge(&node, Some(json!({}))).await.unwrap_err();
+        let e = handle_audit_challenge(&node, Some(json!({})))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("challenge_id or a challenge record"));
         let e = handle_audit_challenge(&node, Some(json!({"challenge_id": "ghost"})))
             .await
             .unwrap_err();
-        assert_eq!((e.code, e.message.as_str()), (-32602, "unknown challenge ghost"));
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (-32602, "unknown challenge ghost")
+        );
         let e = handle_audit_challenge(&node, Some(json!({"challenge": {"nonsense": 1}})))
             .await
             .unwrap_err();
-        assert!(e.message.starts_with("challenge record does not parse"), "{}", e.message);
+        assert!(
+            e.message.starts_with("challenge record does not parse"),
+            "{}",
+            e.message
+        );
     }
 }

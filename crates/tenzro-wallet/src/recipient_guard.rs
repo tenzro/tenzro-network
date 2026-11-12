@@ -7,7 +7,7 @@ use crate::history::{TransactionHistory, TxDirection};
 use std::collections::HashSet;
 use tenzro_types::primitives::Address;
 pub use tenzro_types::recipient_guard::{
-    assess_recipient, LookalikeParams, RecipientAssessment, RecipientFlag,
+    LookalikeParams, RecipientAssessment, RecipientFlag, assess_recipient,
 };
 
 /// [`assess_recipient`] fed from this wallet's address book and history. An

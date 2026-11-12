@@ -18,6 +18,54 @@ pub fn active_did() -> String {
         .unwrap_or_else(|| "anonymous".to_string())
 }
 
+/// Where a delegated validator's keys are: the key holder beside its node.
+///
+/// A validator whose machine has no TPM of its own keeps its keys in another
+/// machine's TPM, reached through `tenzro-node tpm key-holder` on a local
+/// socket under a grant the operator's passkey made. The node starts with
+/// `--tpm-key-holder` and `--tpm-label`; a command that signs as that node
+/// takes the same two (and the same environment variables), and from then on
+/// every key it opens, the identity key and the node account alike, signs
+/// through the holder exactly as the node's own transactions do.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct DelegatedKey {
+    /// The node's key holder socket (`tenzro-node tpm key-holder`), when the
+    /// node's keys are in another machine's TPM
+    #[arg(long, value_name = "SOCKET", env = "TENZRO_TPM_KEY_HOLDER")]
+    pub tpm_key_holder: Option<std::path::PathBuf>,
+
+    /// The key label the provider enrolled for this machine
+    #[arg(long, value_name = "LABEL", env = "TENZRO_TPM_LABEL")]
+    pub tpm_label: Option<String>,
+}
+
+static DELEGATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this process signs through a key holder instead of a local TPM.
+pub fn key_is_delegated() -> bool {
+    DELEGATED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+impl DelegatedKey {
+    /// Routes every hardware key this process opens to the key holder.
+    /// Returns whether the keys are delegated. Call before any key is opened.
+    pub fn install(&self) -> Result<bool> {
+        match (&self.tpm_key_holder, &self.tpm_label) {
+            (None, None) => Ok(false),
+            (Some(socket), Some(label)) => {
+                tenzro_device_key::remote::use_key_holder(label, socket)
+                    .map_err(|e| anyhow!("the key holder at {}: {e}", socket.display()))?;
+                DELEGATED.store(true, std::sync::atomic::Ordering::Release);
+                Ok(true)
+            }
+            _ => Err(anyhow!(
+                "--tpm-key-holder and --tpm-label go together: the socket of the key holder and \
+                 the key label the provider enrolled for this machine"
+            )),
+        }
+    }
+}
+
 /// The client account under `namespace`, as `0x` hex, and its composite public
 /// key.
 /// A 32-byte account address from its `0x`-prefixed or bare hex form.
@@ -29,9 +77,72 @@ pub fn address32(addr: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("address {addr} is not 32 bytes"))
 }
 
+/// Pauses between attempts to open a hardware key the TPM was too busy to open. The node on the
+/// same machine uses the same chip, so a command usually only has to wait for its turn.
+const TPM_PAUSES: &[std::time::Duration] = &[
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+];
+
+/// Whether a hardware-key error says the TPM was busy or slow to answer, not that it is broken.
+fn tpm_contended(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    ["tpm busy", "timed out", "timeout", "0x17d", "retry"]
+        .iter()
+        .any(|t| m.contains(t))
+}
+
+/// Runs `open`, trying again after each of `pauses` while the failure is TPM contention. The
+/// last error is returned in plain words, naming the node that shares the chip.
+fn retry_while_contended<T, E: std::fmt::Display>(
+    mut open: impl FnMut() -> std::result::Result<T, E>,
+    pauses: &[std::time::Duration],
+) -> std::result::Result<T, String> {
+    let mut tries = 0;
+    loop {
+        match open() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let msg = e.to_string();
+                if !tpm_contended(&msg) {
+                    return Err(msg);
+                }
+                match pauses.get(tries) {
+                    Some(pause) => {
+                        if tries == 0 {
+                            eprintln!(
+                                "The TPM is busy (a node on this machine may be using it); trying again for a few seconds."
+                            );
+                        }
+                        std::thread::sleep(*pause);
+                        tries += 1;
+                    }
+                    None => {
+                        return Err(format!(
+                            "the TPM stayed busy after {} tries ({msg}). A node running on this machine uses the same chip; wait a minute and run the command again",
+                            tries + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Opens the hardware key `label`, waiting out TPM contention.
+fn open_hybrid(
+    label: &str,
+) -> std::result::Result<tenzro_device_key::HardwareHybridSigner, String> {
+    retry_while_contended(
+        || tenzro_device_key::HardwareHybridSigner::open_or_create(label),
+        TPM_PAUSES,
+    )
+}
+
 /// The hardware signer for the client account under `namespace`.
 pub(crate) fn client_signer(namespace: &str) -> Result<tenzro_device_key::HardwareHybridSigner> {
-    tenzro_device_key::HardwareHybridSigner::open_or_create(&format!("client/{namespace}"))
+    open_hybrid(&format!("client/{namespace}"))
         .map_err(|e| anyhow!("the client account's hardware key: {e}"))
 }
 
@@ -55,10 +166,8 @@ fn node_signer(namespace: Option<&str>) -> Result<tenzro_device_key::HardwareHyb
     if let Some(ns) = namespace {
         select_node_namespace(ns)?;
     }
-    tenzro_device_key::HardwareHybridSigner::open_or_create(
-        tenzro_types::did_derivation::MACHINE_WALLET_KEY_LABEL,
-    )
-    .map_err(|e| anyhow!("the node account's hardware key: {e}"))
+    open_hybrid(tenzro_types::did_derivation::MACHINE_WALLET_KEY_LABEL)
+        .map_err(|e| anyhow!("the node account's hardware key: {e}"))
 }
 
 /// This machine's identity key, the one its machine DID derives from (the
@@ -70,10 +179,8 @@ pub fn machine_identity_signer(
     if let Some(ns) = namespace {
         select_node_namespace(ns)?;
     }
-    tenzro_device_key::HardwareHybridSigner::open_or_create(
-        tenzro_types::did_derivation::MACHINE_KEY_LABEL,
-    )
-    .map_err(|e| anyhow!("the machine's identity key: {e}"))
+    open_hybrid(tenzro_types::did_derivation::MACHINE_KEY_LABEL)
+        .map_err(|e| anyhow!("the machine's identity key: {e}"))
 }
 
 /// The node account of this machine (see [`node_signer`]).
@@ -90,15 +197,49 @@ pub fn machine_identity_registration(
     signer: &tenzro_device_key::HardwareHybridSigner,
     wallet: [u8; 32],
 ) -> Result<(String, serde_json::Value)> {
+    hardware_identity_registration(signer, wallet, "machine root", true)
+}
+
+/// The `RegisterIdentity` transaction of the client account under
+/// `namespace`: the machine DID that the account's hardware key derives, with
+/// the account as its wallet and the registration statement signed by that
+/// key. No TPM attestation is recorded, so the machine's TPM stays free for
+/// the machine root of a node on it. Returns the DID, the account and the
+/// transaction payload; the account submits it and pays the gas.
+pub fn client_identity_registration(
+    namespace: &str,
+    display_name: &str,
+) -> Result<(String, [u8; 32], serde_json::Value)> {
+    use tenzro_crypto::composite::HybridSigner;
+    let signer = client_signer(namespace)?;
+    let account = signer.public_key().account_slot();
+    let (did, register) = hardware_identity_registration(&signer, account, display_name, false)?;
+    Ok((did, account, register))
+}
+
+/// The `RegisterIdentity` transaction of the machine DID that the key of
+/// `signer` derives, paying to `wallet` and signed by that key. With `attest`
+/// it records the machine's TPM attestation, which admits the TPM under this
+/// identity and no other.
+fn hardware_identity_registration(
+    signer: &tenzro_device_key::HardwareHybridSigner,
+    wallet: [u8; 32],
+    display_name: &str,
+    attest: bool,
+) -> Result<(String, serde_json::Value)> {
     use tenzro_crypto::composite::{HybridSigner, SignatureContext};
     let public = signer.public_key().clone();
     let sec1 = [&[0x04u8][..], &public.p256].concat();
     let did = tenzro_types::did_derivation::machine_did(&sec1);
-    let metadata = machine_attestation_metadata(&did, &sec1)?;
+    let metadata = if attest {
+        machine_attestation_metadata(&did, &sec1)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     let mut payload = tenzro_types::identity::RegisterIdentityPayload {
         did: did.clone(),
         identity_type: "machine".into(),
-        display_name: "machine root".into(),
+        display_name: display_name.into(),
         controller_pubkey: sec1,
         key_type: "P-256".into(),
         wallet_id: format!("0x{}", hex::encode(wallet)),
@@ -145,6 +286,14 @@ fn machine_attestation_metadata(
     did: &str,
     identity_key: &[u8],
 ) -> Result<std::collections::BTreeMap<String, String>> {
+    // A delegated validator's identity key is in the provider's TPM, not in
+    // this machine's: this machine's TPM (if it has one) is not the key's
+    // hardware, so it cannot attest for it, and attesting a different TPM
+    // would admit the wrong one under this identity. Register without a TPM
+    // attestation, as a Secure Enclave machine does.
+    if key_is_delegated() {
+        return Ok(std::collections::BTreeMap::new());
+    }
     let (_, att) = tenzro_tee::tpm_attest::attest_local_machine_as(Some(did), identity_key)
         .map_err(|e| anyhow!("attesting this machine's TPM for {did}: {e}"))?;
     let mut metadata = std::collections::BTreeMap::new();
@@ -193,6 +342,12 @@ pub fn machine_attestation_attachment(
     account_nonce: u64,
 ) -> Result<serde_json::Value> {
     use tenzro_crypto::composite::{HybridSigner, SignatureContext};
+    if key_is_delegated() {
+        return Err(anyhow!(
+            "this validator's keys are in another machine's TPM, so this machine cannot attest \
+             for them; the TPM attestation is attached from the machine that owns the TPM"
+        ));
+    }
     let sec1 = [&[0x04u8][..], &signer.public_key().p256].concat();
     let did = tenzro_types::did_derivation::machine_did(&sec1);
     let nonce = tenzro_types::identity::attach_attestation_nonce(&did, &wallet, account_nonce);
@@ -527,6 +682,24 @@ pub async fn send_as_node(
     ))
 }
 
+/// [`send_as_node`] for a transaction built from the account nonce (the
+/// caller reads it, builds, and retries the whole thing with
+/// [`retry_stale_nonce`]): sent once, with the nonce read afresh, and never
+/// resent here with a payload that answers an older nonce.
+pub async fn send_as_node_once(
+    rpc: &crate::rpc::RpcClient,
+    namespace: Option<&str>,
+    to: [u8; 32],
+    tx_type: serde_json::Value,
+    gas_limit: u64,
+) -> Result<(serde_json::Value, String)> {
+    use tenzro_crypto::composite::HybridSigner;
+    let signer = node_signer(namespace)?;
+    let from = format!("0x{}", hex::encode(signer.public_key().account_slot()));
+    let (answer, _) = submit_signed(rpc, &signer, SEND_RAW, to, tx_type, gas_limit).await?;
+    Ok((answer, from))
+}
+
 /// The method every pre-signed transaction is submitted through, but a
 /// revocation (see [`send_revocation`]).
 const SEND_RAW: &str = "tenzro_sendRawTransaction";
@@ -635,9 +808,92 @@ pub async fn enroll_client_pq_key(
     enroll_pq_key(rpc, &client_signer(namespace)?).await
 }
 
+/// How long the CLI waits for a transaction it submitted to be executed.
+pub const RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The hash a node answered a submitted transaction with.
+pub fn submitted_hash(answer: &serde_json::Value) -> Option<String> {
+    answer
+        .as_str()
+        .or_else(|| answer.get("tx_hash").and_then(|v| v.as_str()))
+        .filter(|hash| !hash.is_empty())
+        .map(str::to_string)
+}
+
+/// What a receipt says of its transaction: `Ok` when it took effect, the
+/// reason it reverted otherwise.
+pub fn receipt_outcome(receipt: &serde_json::Value) -> std::result::Result<(), String> {
+    if receipt.get("status").and_then(|v| v.as_str()) == Some("0x1") {
+        return Ok(());
+    }
+    Err(receipt
+        .get("revertReason")
+        .and_then(|v| v.as_str())
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("the node recorded no reason")
+        .to_string())
+}
+
+/// The error text for the transaction `tx_hash` that was executed and
+/// reverted for `reason`. An account with no identity on chain is told how
+/// to register one.
+pub fn revert_message(tx_hash: &str, reason: &str) -> String {
+    let mut text = format!("transaction {tx_hash} was executed and reverted: {reason}");
+    if reason.contains("has no registered identity") {
+        text.push_str(
+            "\nThe sending account has no identity on chain. Register it once with \
+             `tenzro identity register-account` (the same --key-namespace and --rpc), then \
+             send again. A person's passkey account registers with `tenzro identity register`.",
+        );
+    }
+    text
+}
+
+/// Waits up to `wait` for the transaction `tx_hash` to be executed. Returns
+/// its receipt, `None` when it was in no block by then, and an error naming
+/// the reason when it was executed and reverted.
+pub async fn await_receipt(
+    rpc: &crate::rpc::RpcClient,
+    tx_hash: &str,
+    wait: std::time::Duration,
+) -> Result<Option<serde_json::Value>> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let receipt: serde_json::Value = rpc
+            .call("eth_getTransactionReceipt", serde_json::json!([tx_hash]))
+            .await?;
+        if !receipt.is_null() {
+            return match receipt_outcome(&receipt) {
+                Ok(()) => Ok(Some(receipt)),
+                Err(reason) => Err(anyhow!(revert_message(tx_hash, &reason))),
+            };
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Waits for the key enrolment a node answered with `answer` to be executed,
+/// so the transaction that follows it is checked against the enrolled key.
+async fn await_enrollment(rpc: &crate::rpc::RpcClient, answer: &serde_json::Value) -> Result<()> {
+    let hash = submitted_hash(answer).ok_or_else(|| {
+        anyhow!("the node answered the key enrolment without a transaction hash: {answer}")
+    })?;
+    match await_receipt(rpc, &hash, RECEIPT_WAIT).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(anyhow!(
+            "the key enrolment {hash} was in no block after {} seconds; send again once it is",
+            RECEIPT_WAIT.as_secs()
+        )),
+        Err(e) => Err(anyhow!("enrolling the account's ML-DSA-65 key: {e}")),
+    }
+}
+
 /// Sign and submit; an account that has not enrolled its ML-DSA-65 key is
-/// enrolled first and the transaction sent again, so a new account is never
-/// left unable to send.
+/// enrolled first and the transaction sent again once the enrolment has been
+/// executed, so a new account is never left unable to send.
 async fn send_signed(
     rpc: &crate::rpc::RpcClient,
     signer: &tenzro_device_key::HardwareHybridSigner,
@@ -646,14 +902,62 @@ async fn send_signed(
     tx_type: serde_json::Value,
     gas_limit: u64,
 ) -> Result<(serde_json::Value, u64)> {
-    let first = submit_signed(rpc, signer, method, to, tx_type.clone(), gas_limit).await;
+    let first = submit_fresh(rpc, signer, method, to, &tx_type, gas_limit).await;
     match first {
         Err(e) if e.to_string().contains(NOT_ENROLLED) && tx_type.get("AccountKeys").is_none() => {
             eprintln!("  enrolling the account's ML-DSA-65 key first");
-            enroll_pq_key(rpc, signer).await?;
-            submit_signed(rpc, signer, method, to, tx_type, gas_limit).await
+            let enrolled = enroll_pq_key(rpc, signer).await?;
+            await_enrollment(rpc, &enrolled).await?;
+            submit_fresh(rpc, signer, method, to, &tx_type, gas_limit).await
         }
         other => other,
+    }
+}
+
+/// [`submit_signed`], sent again with a freshly read nonce when the node
+/// refuses the nonce it was signed with.
+async fn submit_fresh(
+    rpc: &crate::rpc::RpcClient,
+    signer: &tenzro_device_key::HardwareHybridSigner,
+    method: &str,
+    to: [u8; 32],
+    tx_type: &serde_json::Value,
+    gas_limit: u64,
+) -> Result<(serde_json::Value, u64)> {
+    retry_stale_nonce(|| submit_signed(rpc, signer, method, to, tx_type.clone(), gas_limit)).await
+}
+
+/// How many times an operation that takes the account nonce is tried.
+const NONCE_ATTEMPTS: usize = 4;
+
+/// Whether `e` is the node refusing a transaction for its nonce.
+fn is_stale_nonce(e: &anyhow::Error) -> bool {
+    let m = e.to_string().to_ascii_lowercase();
+    m.contains("invalid nonce") || m.contains("nonce too low") || m.contains("stale nonce")
+}
+
+/// Runs `attempt`, which reads the account nonce itself, again while the node
+/// refuses its nonce. A node account is also the account the node sends from
+/// (its own transactions take the same nonce), so the nonce read a moment ago
+/// can be taken by the time the transaction arrives; the next attempt reads
+/// the nonce afresh. Any other error is returned at once.
+pub async fn retry_stale_nonce<T, F, Fut>(mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut tries = 1;
+    loop {
+        match attempt().await {
+            Err(e) if is_stale_nonce(&e) && tries < NONCE_ATTEMPTS => {
+                eprintln!(
+                    "  the account nonce moved before the transaction arrived; sending again with a fresh one"
+                );
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            other => return other,
+        }
     }
 }
 
@@ -715,4 +1019,106 @@ async fn submit_signed(
     )
     .await
     .map(|result| (result, nonce))
+}
+
+#[cfg(test)]
+mod tpm_contention_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const NO_WAIT: &[Duration] = &[Duration::ZERO, Duration::ZERO, Duration::ZERO];
+
+    #[test]
+    fn a_busy_tpm_is_waited_out() {
+        let mut calls = 0;
+        let got = retry_while_contended(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err("TPM command 0x17d timed out")
+                } else {
+                    Ok(7)
+                }
+            },
+            NO_WAIT,
+        );
+        assert_eq!(got, Ok(7));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn a_real_failure_is_not_retried() {
+        let mut calls = 0;
+        let got: std::result::Result<(), String> = retry_while_contended(
+            || {
+                calls += 1;
+                Err("this machine has no TPM 2.0")
+            },
+            NO_WAIT,
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(got, Err("this machine has no TPM 2.0".to_string()));
+    }
+
+    #[test]
+    fn a_tpm_that_stays_busy_ends_in_plain_words() {
+        let mut calls = 0;
+        let got: std::result::Result<(), String> = retry_while_contended(
+            || {
+                calls += 1;
+                Err("tpm busy: no turn within the wait limit")
+            },
+            NO_WAIT,
+        );
+        assert_eq!(calls, 4);
+        let msg = got.unwrap_err();
+        assert!(msg.contains("stayed busy") && msg.contains("node running on this machine"));
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn a_hash_is_read_from_either_answer_form() {
+        assert_eq!(
+            submitted_hash(&serde_json::json!("0xab")),
+            Some("0xab".to_string())
+        );
+        assert_eq!(
+            submitted_hash(&serde_json::json!({ "tx_hash": "cd" })),
+            Some("cd".to_string())
+        );
+        assert_eq!(submitted_hash(&serde_json::json!({ "status": "ok" })), None);
+        assert_eq!(submitted_hash(&serde_json::json!("")), None);
+    }
+
+    #[test]
+    fn an_executed_transaction_took_effect() {
+        let receipt = serde_json::json!({ "status": "0x1", "revertReason": null });
+        assert_eq!(receipt_outcome(&receipt), Ok(()));
+    }
+
+    #[test]
+    fn a_reverted_transaction_names_its_reason() {
+        let receipt = serde_json::json!({ "status": "0x0", "revertReason": "out of gas" });
+        assert_eq!(receipt_outcome(&receipt), Err("out of gas".to_string()));
+    }
+
+    #[test]
+    fn a_revert_without_a_reason_is_still_a_failure() {
+        let receipt = serde_json::json!({ "status": "0x0", "revertReason": null });
+        assert!(receipt_outcome(&receipt).is_err());
+        assert!(receipt_outcome(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn an_account_without_an_identity_is_told_how_to_register() {
+        let reason = "Invalid transaction: 0xab has no registered identity; register one first";
+        let text = revert_message("0x01", reason);
+        assert!(text.contains(reason));
+        assert!(text.contains("tenzro identity register-account"));
+        assert!(!revert_message("0x01", "out of gas").contains("register-account"));
+    }
 }

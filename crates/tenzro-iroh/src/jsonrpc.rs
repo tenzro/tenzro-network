@@ -47,7 +47,7 @@
 //!
 //! Streaming RPCs (A2A `tasks/stream`, MCP server-sent notifications)
 //! are not yet carried over this transport — they remain on the HTTPS
-//! SSE surface until follow-up work shapes them around iroh's native
+//! SSE surface until they are shaped around iroh's native
 //! bidirectional streams.
 
 use std::sync::Arc;

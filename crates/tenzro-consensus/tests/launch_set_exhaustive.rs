@@ -14,7 +14,9 @@
 //!   covered jointly (the guard is per call): the test pins a set where two
 //!   such stops halt the chain, so the stage scripts must serialise stops.
 
-use tenzro_consensus::launch_check::{LaunchRefusal, LaunchValidator, check_launch_set, check_stop};
+use tenzro_consensus::launch_check::{
+    LaunchRefusal, LaunchValidator, check_launch_set, check_stop,
+};
 
 fn above(part: u128, total: u128) -> bool {
     3 * part > 2 * total
@@ -89,7 +91,11 @@ fn the_launch_rule_matches_the_enumerated_rule_for_every_subset() {
             let set = build(stakes, mask);
             let want = oracle(&set);
             let got = check_launch_set(&set);
-            assert_eq!(got.is_ok(), want, "stakes {stakes:?} live {mask:0n$b}: {got:?}");
+            assert_eq!(
+                got.is_ok(),
+                want,
+                "stakes {stakes:?} live {mask:0n$b}: {got:?}"
+            );
             checked += 1;
             if want {
                 accepted += 1;
@@ -99,7 +105,10 @@ fn the_launch_rule_matches_the_enumerated_rule_for_every_subset() {
                     if set[i].live {
                         let mut s = set.clone();
                         s[i].live = false;
-                        assert!(above(live_stake(&s), total), "{stakes:?} {mask:b} loses {i}");
+                        assert!(
+                            above(live_stake(&s), total),
+                            "{stakes:?} {mask:b} loses {i}"
+                        );
                     }
                 }
                 // Any two simultaneous losses: certifying or a safe halt, and
@@ -121,7 +130,10 @@ fn the_launch_rule_matches_the_enumerated_rule_for_every_subset() {
             }
         }
     }
-    assert!(accepted > 0 && checked > 1_000_000, "checked {checked}, accepted {accepted}");
+    assert!(
+        accepted > 0 && checked > 1_000_000,
+        "checked {checked}, accepted {accepted}"
+    );
 }
 
 #[test]
@@ -198,16 +210,25 @@ fn concurrent_stops_that_each_pass_can_halt_the_chain() {
     for &i in &passing[..2] {
         after[i].live = false;
     }
-    assert!(check_launch_set(&after).is_err(), "two together leave no spare");
+    assert!(
+        check_launch_set(&after).is_err(),
+        "two together leave no spare"
+    );
     let names: Vec<String> = passing[..2].iter().map(|i| format!("v{i}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     assert!(
         tenzro_consensus::launch_check::check_stops(&set, &names).is_err(),
         "the stop set is refused as a whole"
     );
-    assert!(above(live_stake(&after), total), "two together still certify");
+    assert!(
+        above(live_stake(&after), total),
+        "two together still certify"
+    );
     for &i in &passing[..3] {
         after[i].live = false;
     }
-    assert!(!above(live_stake(&after), total), "three together halt the chain");
+    assert!(
+        !above(live_stake(&after), total),
+        "three together halt the chain"
+    );
 }

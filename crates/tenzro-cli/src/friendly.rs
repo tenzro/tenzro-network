@@ -53,7 +53,12 @@ pub fn classify(is_timeout: bool, is_connect: bool, status: Option<u16>, chain: 
     if is_timeout || c.contains("timed out") || c.contains("deadline has elapsed") {
         return Class::Timeout;
     }
-    if c.contains("connection refused") || c.contains("os error 111") || c.contains("os error 61") || c.contains("os error 10061") || c.contains("actively refused") {
+    if c.contains("connection refused")
+        || c.contains("os error 111")
+        || c.contains("os error 61")
+        || c.contains("os error 10061")
+        || c.contains("actively refused")
+    {
         return Class::Refused;
     }
     if is_connect {
@@ -108,19 +113,32 @@ pub fn explain(class: Class, url: &str) -> Explained {
             "The name {host} does not resolve. Either it is misspelled or this machine has no working DNS or internet."
         ),
         Class::Refused if local => {
-            "Nothing is listening on that port: no Tenzro node is running on this machine.".to_string()
+            "Nothing is listening on that port: no Tenzro node is running on this machine."
+                .to_string()
         }
-        Class::Refused => format!("{host} is there but refused the connection; the node is not running or the port is closed."),
-        Class::Timeout => format!("{host} did not answer in time; the network is slow or down, or a firewall drops the traffic."),
-        Class::Tls => format!("The connection to {host} started but its certificate or encryption was refused."),
-        Class::Status(s) => format!("The server returned HTTP {s}; it is up but not serving this request."),
+        Class::Refused => format!(
+            "{host} is there but refused the connection; the node is not running or the port is closed."
+        ),
+        Class::Timeout => format!(
+            "{host} did not answer in time; the network is slow or down, or a firewall drops the traffic."
+        ),
+        Class::Tls => format!(
+            "The connection to {host} started but its certificate or encryption was refused."
+        ),
+        Class::Status(s) => {
+            format!("The server returned HTTP {s}; it is up but not serving this request.")
+        }
         Class::Other => "The request failed before any answer came back.".to_string(),
     };
     let mut fix = Vec::new();
     match class {
         Class::Dns | Class::Timeout | Class::Other if public => {
-            fix.push("Tenzro can run on this machine without the public network: tenzro dev".to_string());
-            fix.push("Or check this machine's internet connection and try again later.".to_string());
+            fix.push(
+                "Tenzro can run on this machine without the public network: tenzro dev".to_string(),
+            );
+            fix.push(
+                "Or check this machine's internet connection and try again later.".to_string(),
+            );
         }
         Class::Dns | Class::Timeout | Class::Other => {
             fix.push("Check the address, and this machine's internet connection.".to_string());
@@ -132,7 +150,9 @@ pub fn explain(class: Class, url: &str) -> Explained {
             fix.push("Or point at a node elsewhere: tenzro --rpc <url> ...".to_string());
         }
         Class::Refused => {
-            fix.push("Start the node on that machine, or check its RPC port and firewall.".to_string());
+            fix.push(
+                "Start the node on that machine, or check its RPC port and firewall.".to_string(),
+            );
         }
         Class::Tls => {
             fix.push("Check that the address starts with https:// only when the node serves TLS, and that this machine's clock is right.".to_string());
@@ -208,10 +228,18 @@ mod tests {
     #[test]
     fn refused_timeout_tls_and_status_are_told_apart() {
         assert_eq!(
-            classify(false, true, None, "tcp connect error: Connection refused (os error 111)"),
+            classify(
+                false,
+                true,
+                None,
+                "tcp connect error: Connection refused (os error 111)"
+            ),
             Class::Refused
         );
-        assert_eq!(classify(true, false, None, "operation timed out"), Class::Timeout);
+        assert_eq!(
+            classify(true, false, None, "operation timed out"),
+            Class::Timeout
+        );
         assert_eq!(
             classify(false, true, None, "invalid peer certificate: UnknownIssuer"),
             Class::Tls
@@ -251,7 +279,11 @@ mod tests {
             Class::Status(500),
             Class::Other,
         ] {
-            for url in ["https://rpc.tenzro.com", "http://127.0.0.1:8545", "https://node.example"] {
+            for url in [
+                "https://rpc.tenzro.com",
+                "http://127.0.0.1:8545",
+                "https://node.example",
+            ] {
                 let e = explain(class, url);
                 assert!(!e.what.is_empty() && !e.why.is_empty() && !e.fix.is_empty());
             }

@@ -87,6 +87,13 @@ impl NetworkGossip {
         self.guard.set_identities(identities);
     }
 
+    /// Whether a neighbour must have a registered identity to deliver
+    /// anything but a verified validator announcement; see
+    /// [`GossipGuard::set_registered_only`].
+    pub fn set_registered_only(&self, on: bool) {
+        self.guard.set_registered_only(on);
+    }
+
     /// Replaces the per-neighbour budgets.
     pub fn set_limits(&self, limits: GossipLimits) {
         self.guard.set_limits(limits);

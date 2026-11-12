@@ -51,7 +51,8 @@
 //! - DMTF SPDM 1.1: <https://www.dmtf.org/standards/spdm>
 
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::error::{Result, TeeError};
 
@@ -282,11 +283,16 @@ type FnDeviceGetConfComputeGpuCertificate =
 type FnDeviceGetConfComputeGpuAttestationReport =
     unsafe extern "C" fn(*mut c_void, *mut NvmlConfComputeGpuAttestationReport) -> c_int;
 
-/// An opened NVML handle with the Confidential Computing entry points resolved.
+/// The process's NVML handle with the Confidential Computing entry points resolved.
 ///
-/// `nvmlInit_v2` is called on construction and `nvmlShutdown` on drop. NVML
-/// reference-counts init/shutdown internally, so more than one live handle in a
-/// process is safe.
+/// The library is loaded and `nvmlInit_v2` is called once, at the first
+/// [`Nvml::open`]; every later `open` returns that same handle, and it lives as
+/// long as the process. NVML is not shut down and unloaded between uses: each
+/// round of init and shutdown leaves an event descriptor and a thread of the
+/// driver behind in the process, so a node that asks its GPU for a report every
+/// epoch would grow without bound. A driver that refuses to initialise leaves
+/// the same descriptor behind, so a process calls `nvmlInit_v2`
+/// [`INITS_AT_MOST`] times at most.
 pub struct Nvml {
     handle: *mut c_void,
     shutdown: FnShutdown,
@@ -342,13 +348,100 @@ unsafe fn sym(handle: *mut c_void, name: &str) -> Result<*mut c_void> {
     Ok(ptr)
 }
 
+/// How long the first refused load is remembered before the library is tried
+/// again.
+const RELOAD_AFTER: Duration = Duration::from_secs(600);
+
+/// How many times a process calls `nvmlInit_v2` at most. Every call leaves an
+/// event descriptor behind, whether the driver accepts it or not, so a driver
+/// that keeps refusing is asked a few times, further apart each time, and then
+/// left alone until the process restarts.
+const INITS_AT_MOST: u32 = 6;
+
+/// How long a refusal stands before the library is tried again, given how
+/// often `nvmlInit_v2` has been called in this process: the wait doubles with
+/// every call, and after the last one the refusal stands for good.
+fn wait_before_reload(inits: u32) -> Option<Duration> {
+    match inits {
+        0 => Some(RELOAD_AFTER),
+        n if n < INITS_AT_MOST => Some(RELOAD_AFTER * 2u32.pow(n - 1)),
+        _ => None,
+    }
+}
+
+/// The one NVML handle of the process, or the last refusal to load it.
+struct Shared {
+    handle: Option<Arc<Nvml>>,
+    refused: Option<(Instant, String)>,
+    /// Calls of `nvmlInit_v2` so far.
+    inits: u32,
+}
+
+static SHARED: Mutex<Shared> = Mutex::new(Shared {
+    handle: None,
+    refused: None,
+    inits: 0,
+});
+
 impl Nvml {
-    /// Open `libnvidia-ml.so.1` and resolve the Confidential Computing entry points.
+    /// The process's NVML handle, loaded at the first call.
     ///
     /// Returns [`TeeError::NotAvailable`] when the library is absent (no NVIDIA
     /// driver installed) or when it predates r535 and therefore exports none of
-    /// the CC symbols.
+    /// the CC symbols. A refusal is remembered, so a host without a usable
+    /// driver is not probed on every call: the library is tried again after
+    /// [`RELOAD_AFTER`], and a driver that was asked to initialise and refused
+    /// is tried again after a wait that doubles each time, [`INITS_AT_MOST`]
+    /// times in all.
     pub fn open() -> Result<Arc<Self>> {
+        let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(nvml) = shared.handle.as_ref() {
+            return Ok(Arc::clone(nvml));
+        }
+        if let Some((at, why)) = shared.refused.as_ref() {
+            let due = wait_before_reload(shared.inits).is_some_and(|wait| at.elapsed() >= wait);
+            if !due {
+                return Err(TeeError::not_available(why.clone()));
+            }
+        }
+        let inits_before = shared.inits;
+        match Self::load(&mut shared.inits) {
+            Ok(nvml) => {
+                let nvml = Arc::new(nvml);
+                shared.handle = Some(Arc::clone(&nvml));
+                shared.refused = None;
+                Ok(nvml)
+            }
+            Err(e) => {
+                let why = match &e {
+                    TeeError::NotAvailable(why) => why.clone(),
+                    other => other.to_string(),
+                };
+                if shared.inits != inits_before {
+                    if wait_before_reload(shared.inits).is_some() {
+                        tracing::info!(
+                            tries = shared.inits,
+                            reason = %why,
+                            "NVML did not initialise; it is tried again later"
+                        );
+                    } else {
+                        tracing::warn!(
+                            tries = shared.inits,
+                            reason = %why,
+                            "NVML did not initialise; it is not tried again until this process restarts"
+                        );
+                    }
+                }
+                shared.refused = Some((Instant::now(), why));
+                Err(e)
+            }
+        }
+    }
+
+    /// Load `libnvidia-ml.so.1`, resolve the Confidential Computing entry
+    /// points and initialise the library. `inits` counts the calls of
+    /// `nvmlInit_v2`.
+    fn load(inits: &mut u32) -> Result<Self> {
         let so_name = CString::new("libnvidia-ml.so.1").expect("static string has no interior nul");
         // RTLD_LOCAL keeps NVML's symbols out of the global namespace so they
         // cannot collide with anything else the process has loaded.
@@ -380,7 +473,7 @@ impl Nvml {
 
         // Every resolution below is fallible; close the library on any miss so a
         // partially-bound handle is never returned.
-        let bind = || -> Result<Nvml> {
+        let mut bind = || -> Result<Nvml> {
             let init: FnInit = unsafe { std::mem::transmute(init_ptr) };
             let shutdown: FnShutdown = unsafe { std::mem::transmute(resolve("nvmlShutdown")?) };
             let device_get_handle_by_index: FnDeviceGetHandleByIndex =
@@ -399,6 +492,7 @@ impl Nvml {
                 std::mem::transmute(resolve("nvmlDeviceGetConfComputeGpuAttestationReport")?)
             };
 
+            *inits += 1;
             let rc = unsafe { init() };
             if rc != ret::SUCCESS {
                 return Err(TeeError::not_available(format!(
@@ -424,7 +518,7 @@ impl Nvml {
         match bind() {
             Ok(nvml) => {
                 tracing::debug!("NVML loaded with Confidential Computing entry points");
-                Ok(Arc::new(nvml))
+                Ok(nvml)
             }
             Err(e) => {
                 unsafe { libc::dlclose(handle) };
@@ -621,6 +715,8 @@ impl Nvml {
     }
 }
 
+// The process's handle is held for the life of the process and never reaches
+// this; it unloads a handle that is given up.
 impl Drop for Nvml {
     fn drop(&mut self) {
         unsafe {
@@ -694,6 +790,35 @@ mod tests {
         assert_eq!(b.attestation_report_size, 0);
         assert!(b.nonce.iter().all(|&x| x == 0));
         assert!(b.attestation_report.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn open_hands_out_one_handle() {
+        // Whatever this host has, a second open is the first one again: the
+        // same handle where NVML loads, the same refusal where it does not.
+        match (Nvml::open(), Nvml::open()) {
+            (Ok(a), Ok(b)) => assert!(Arc::ptr_eq(&a, &b)),
+            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+            _ => panic!("two opens in a row disagreed"),
+        }
+    }
+
+    #[test]
+    fn a_refusing_driver_is_asked_a_bounded_number_of_times() {
+        // Before the driver was ever asked, and after its first refusal, the
+        // library is tried again after the plain wait.
+        assert_eq!(wait_before_reload(0), Some(RELOAD_AFTER));
+        assert_eq!(wait_before_reload(1), Some(RELOAD_AFTER));
+        // Each further refusal doubles the wait.
+        assert_eq!(wait_before_reload(2), Some(RELOAD_AFTER * 2));
+        assert_eq!(wait_before_reload(3), Some(RELOAD_AFTER * 4));
+        assert_eq!(
+            wait_before_reload(INITS_AT_MOST - 1),
+            Some(RELOAD_AFTER * 2u32.pow(INITS_AT_MOST - 2))
+        );
+        // After the last call the refusal stands.
+        assert_eq!(wait_before_reload(INITS_AT_MOST), None);
+        assert_eq!(wait_before_reload(u32::MAX), None);
     }
 
     #[tokio::test]

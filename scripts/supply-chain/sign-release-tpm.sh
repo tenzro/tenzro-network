@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
 done
 die() { echo; echo "STOP: $*"; exit 1; }
 
-# ---- preflight (nothing below writes to the TPM until the owner has approved) ----
+# ---- preflight (nothing below writes to the TPM until the key holder has approved) ----
 case $TCTI in *tpm0*) [ "$TCTI" = "device:/dev/tpmrm0" ] || die "raw /dev/tpm0 is refused; use the resource manager /dev/tpmrm0";; esac
 export TPM2TOOLS_TCTI=$TCTI
 tools="tpm2_sign tpm2_readpublic tpm2_getcap tpm2_flushcontext openssl base64 sha256sum xxd awk"

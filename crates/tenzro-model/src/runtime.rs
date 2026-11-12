@@ -2110,7 +2110,7 @@ impl ModelRuntime {
             // an ordinary model: it reads the block count, walks blocks from
             // zero, and dies on the first one.
             //
-            // Measured 2026-09-01 with Qwen's own Flash-Next MTP head
+            // Measured with Qwen's own Flash-Next MTP head
             // (mtp-Qwen3.8-Flash-Next-Q8_0.gguf). That file holds exactly ONE
             // block, `blk.48` — the head that follows the target's 0..47 — plus
             // token_embd/output and the output_hc_* tensors. The load failed with
@@ -3833,7 +3833,7 @@ mod tests {
     }
 
     /// Single-flight load coalescing: the primitive that prevents a duplicate
-    /// GPU load of the same model (the TOCTOU race that wedged the GPU). Two
+    /// GPU load of the same model (a TOCTOU race that can wedge the GPU). Two
     /// guarantees: (1) all callers for one model id share the SAME load lock,
     /// so a second load waits on the first rather than running concurrently;
     /// (2) distinct model ids get distinct locks, so loading model A never
@@ -4107,9 +4107,9 @@ mod tests {
         assert_eq!(s.finish_parts(None).unwrap().text, "héllo wörld — ünïcode");
     }
 
-    /// The incident: a request found the model cold and began loading it, the
-    /// operator stopped the model, and the load then installed its weights. The
-    /// model sat resident with nothing serving it. A load that took its ticket
+    /// The race: a request finds the model cold and begins loading it, the
+    /// operator stops the model, and the load then installs its weights. The
+    /// model sits resident with nothing serving it. A load that took its ticket
     /// before the stop must not install.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_while_a_request_is_loading_discards_the_load() {

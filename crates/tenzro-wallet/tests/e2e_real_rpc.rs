@@ -24,7 +24,7 @@
 //!
 //! Funded-transfer round-trips are intentionally out of scope here — they
 //! require a funded account + finalized block, which is a separate harness
-//! (the multi-validator soak test in #173).
+//! (a multi-validator test with block production).
 
 #![cfg(feature = "e2e")]
 
@@ -297,8 +297,8 @@ async fn e2e_wallet_state_sync_round_trip() {
 ///      NOT contain that string.
 ///
 /// A funded transfer round-trip (where the tx actually finalizes) requires
-/// a funded account + block production and lives in the multi-validator soak
-/// test in #173.
+/// a funded account + block production and needs a multi-validator network
+/// rather than this test.
 #[tokio::test]
 async fn e2e_signed_transaction_wire_format() {
     let node = TenzroNode::spawn().await.expect("node spawn");

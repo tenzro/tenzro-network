@@ -633,25 +633,131 @@ impl RouterBuilder {
     }
 }
 
+/// Rate limit for the "accepting failed" warning (a Tenzro addition; the log
+/// line used to carry no peer and fired once per failed attempt).
+///
+/// Per remote address: at most one line per [`REFUSAL_LOG_INTERVAL`], keyed by
+/// IP without the port (a scanner changes ports). On top of that, a global cap
+/// of [`REFUSAL_LOG_GLOBAL_MAX`] lines per interval, because the source address
+/// of a QUIC Initial packet is unvalidated and can be spoofed, so per-address
+/// alone does not bound a flood from many addresses. Suppressed attempts are
+/// counted and reported on the next line that is logged for that address (or,
+/// for the global cap, on the next line of the new window).
+const REFUSAL_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const REFUSAL_LOG_GLOBAL_MAX: u32 = 20;
+const REFUSAL_LOG_MAX_KEYS: usize = 4096;
+
+#[derive(Debug, Default)]
+struct RefusalLogLimiter {
+    inner: Mutex<RefusalLogState>,
+}
+
+#[derive(Debug, Default)]
+struct RefusalLogState {
+    per_key: std::collections::HashMap<String, (n0_future::time::Instant, u64)>,
+    window_start: Option<n0_future::time::Instant>,
+    window_logged: u32,
+    /// Attempts dropped by the global cap or the key table since the last line.
+    global_suppressed: u64,
+}
+
+impl RefusalLogLimiter {
+    /// Whether to log an attempt from `key` now. `Some(n)` means log it and
+    /// say that `n` earlier attempts were not logged; `None` means stay quiet.
+    fn check(&self, key: &str, now: n0_future::time::Instant) -> Option<u64> {
+        let mut st = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if st
+            .window_start
+            .is_none_or(|w| now.duration_since(w) >= REFUSAL_LOG_INTERVAL)
+        {
+            st.window_start = Some(now);
+            st.window_logged = 0;
+        }
+        // Per-address check first.
+        if let Some((last, suppressed)) = st.per_key.get_mut(key) {
+            if now.duration_since(*last) < REFUSAL_LOG_INTERVAL {
+                *suppressed += 1;
+                return None;
+            }
+        } else if st.per_key.len() >= REFUSAL_LOG_MAX_KEYS {
+            st.per_key
+                .retain(|_, (last, _)| now.duration_since(*last) < REFUSAL_LOG_INTERVAL);
+            if st.per_key.len() >= REFUSAL_LOG_MAX_KEYS {
+                st.global_suppressed += 1;
+                return None;
+            }
+        }
+        if st.window_logged >= REFUSAL_LOG_GLOBAL_MAX {
+            st.global_suppressed += 1;
+            if let Some((_, suppressed)) = st.per_key.get_mut(key) {
+                *suppressed += 1;
+            }
+            return None;
+        }
+        st.window_logged += 1;
+        let global = std::mem::take(&mut st.global_suppressed);
+        let entry = st.per_key.entry(key.to_string()).or_insert((now, 0));
+        let own = std::mem::take(&mut entry.1);
+        entry.0 = now;
+        Some(own + global)
+    }
+}
+
+fn refusal_limiter() -> &'static RefusalLogLimiter {
+    static LIMITER: std::sync::OnceLock<RefusalLogLimiter> = std::sync::OnceLock::new();
+    LIMITER.get_or_init(RefusalLogLimiter::default)
+}
+
+/// Rate-limit key for a remote address: the IP for a direct connection (port
+/// dropped), the relay peer for a relayed one.
+fn refusal_key(addr: &crate::endpoint::IncomingAddr) -> String {
+    use crate::endpoint::IncomingAddr;
+    match addr {
+        IncomingAddr::Ip(sa) => sa.ip().to_string(),
+        IncomingAddr::Relay { url, endpoint_id } => format!("relay {url} {endpoint_id}"),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Rate-limit key for a handshake stage failure: the stage and ALPN are part
+/// of the key so a peer failing on one protocol does not hide another.
+fn refusal_stage_key(stage: &str, addr: &crate::endpoint::IncomingAddr, alpn: &[u8]) -> String {
+    format!("{stage} {} {}", refusal_key(addr), String::from_utf8_lossy(alpn))
+}
+
 async fn handle_connection(incoming: crate::endpoint::Incoming, protocols: Arc<ProtocolMap>) {
+    // `accept()` consumes the incoming connection, so take its remote address
+    // first; QUIC knows it from the Initial packet, before any handshake.
+    let remote = incoming.remote_addr();
     let mut accepting = match incoming.accept() {
         Ok(conn) => conn,
         Err(err) => {
-            warn!("Ignoring connection: accepting failed: {err:#}");
+            if let Some(suppressed) = refusal_limiter().check(&refusal_key(&remote), n0_future::time::Instant::now())
+            {
+                warn!(
+                    remote_addr = ?remote,
+                    suppressed_since_last = suppressed,
+                    "Ignoring connection: accepting failed: {err:#}"
+                );
+            }
             return;
         }
     };
     let alpn = match accepting.alpn().await {
         Ok(alpn) => alpn,
         Err(err) => {
-            warn!("Ignoring connection: invalid handshake: {err:#}");
+            if let Some(suppressed) = refusal_limiter().check(&refusal_stage_key("hs", &remote, b""), n0_future::time::Instant::now()) {
+                warn!(remote_addr = ?remote, suppressed_since_last = suppressed, "Ignoring connection: invalid handshake: {err:#}");
+            }
             return;
         }
     };
     tracing::Span::current().record("alpn", String::from_utf8_lossy(&alpn).to_string());
 
     let Some(handler) = protocols.get(&alpn) else {
-        warn!("Ignoring connection: unsupported ALPN protocol");
+        if let Some(suppressed) = refusal_limiter().check(&refusal_stage_key("alpn", &remote, &alpn), n0_future::time::Instant::now()) {
+            warn!(remote_addr = ?remote, suppressed_since_last = suppressed, "Ignoring connection: unsupported ALPN protocol");
+        }
         return;
     };
     match handler.on_accepting(accepting).await {
@@ -666,7 +772,9 @@ async fn handle_connection(incoming: crate::endpoint::Incoming, protocols: Arc<P
             }
         }
         Err(err) => {
-            warn!("Accepting incoming connection ended with error: {err}");
+            if let Some(suppressed) = refusal_limiter().check(&refusal_stage_key("accepting", &remote, &alpn), n0_future::time::Instant::now()) {
+                warn!(remote_addr = ?remote, suppressed_since_last = suppressed, "Accepting incoming connection ended with error: {err}");
+            }
         }
     }
 }
@@ -1128,5 +1236,78 @@ mod tests {
         client.close().await;
         router.shutdown().await.unwrap();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod refusal_limiter_tests {
+    use n0_future::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn one_line_per_address_per_interval_with_a_suppressed_count() {
+        let l = RefusalLogLimiter::default();
+        let t0 = Instant::now();
+        assert_eq!(l.check("1.2.3.4", t0), Some(0));
+        // Same address inside the interval: quiet, and counted.
+        for i in 1..=5 {
+            assert_eq!(l.check("1.2.3.4", t0 + Duration::from_secs(i)), None);
+        }
+        // A different address is not affected.
+        assert_eq!(l.check("5.6.7.8", t0 + Duration::from_secs(6)), Some(0));
+        // After the interval the first address logs again and reports 5.
+        assert_eq!(
+            l.check("1.2.3.4", t0 + REFUSAL_LOG_INTERVAL + Duration::from_secs(1)),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn many_addresses_are_bounded_by_the_global_cap_and_reported_after() {
+        let l = RefusalLogLimiter::default();
+        let t0 = Instant::now();
+        let mut logged = 0;
+        for i in 0..200u32 {
+            if l.check(&format!("10.0.0.{i}"), t0 + Duration::from_millis(i as u64)).is_some() {
+                logged += 1;
+            }
+        }
+        assert_eq!(logged, REFUSAL_LOG_GLOBAL_MAX);
+        // Next window: first line reports the 180 dropped by the cap.
+        let later = t0 + REFUSAL_LOG_INTERVAL + Duration::from_secs(1);
+        assert_eq!(l.check("10.9.9.9", later), Some(200 - REFUSAL_LOG_GLOBAL_MAX as u64));
+    }
+
+    #[test]
+    fn the_rate_is_about_43_a_minute_collapsed() {
+        // One address failing 43 times a minute for ten minutes logs once per
+        // minute: ten lines, not 430.
+        let l = RefusalLogLimiter::default();
+        let t0 = Instant::now();
+        let mut logged = 0;
+        for n in 0..430u64 {
+            let at = t0 + Duration::from_millis(n * 60_000 / 43);
+            if l.check("203.0.113.9", at).is_some() {
+                logged += 1;
+            }
+        }
+        assert_eq!(logged, 10);
+    }
+
+    #[test]
+    fn the_key_drops_the_port() {
+        use crate::endpoint::IncomingAddr;
+        let a = IncomingAddr::Ip("198.51.100.7:1111".parse().unwrap());
+        let b = IncomingAddr::Ip("198.51.100.7:2222".parse().unwrap());
+        assert_eq!(refusal_key(&a), refusal_key(&b));
+        assert_ne!(
+            refusal_stage_key("accepting", &a, b"tenzro/consensus"),
+            refusal_stage_key("accepting", &a, b"tenzro/block-sync")
+        );
+        assert_eq!(
+            refusal_stage_key("accepting", &a, b"x"),
+            refusal_stage_key("accepting", &b, b"x")
+        );
     }
 }

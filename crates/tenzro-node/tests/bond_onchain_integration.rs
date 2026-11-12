@@ -20,11 +20,12 @@
 //! hybrid-signed payloads, and submit via HTTP. Tx admission is the success
 //! criterion.
 
+mod hybrid_account;
+
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use tenzro_crypto::composite::testing::TestHybridSigner;
 use tenzro_crypto::composite::{HybridSigner, SignatureContext};
 use tenzro_node::{NodeConfig, RpcServer, TenzroNode};
 use tenzro_types::insurance::InsuranceEvidence;
@@ -134,7 +135,7 @@ fn build_signed_eth_send_params(
     gas_limit: u64,
     gas_price: u64,
 ) -> (Value, Address) {
-    let signer = TestHybridSigner::random();
+    let signer = hybrid_account::fresh_signer();
     let from = signer.address();
 
     let tx = Transaction::new(
@@ -216,6 +217,7 @@ async fn eth_send_raw_admits_post_agent_bond_typed_tx() {
     let (params, sender) =
         build_signed_eth_send_params(Address::zero(), 0, tx_type, 90_000, OPEN_LANE_GAS_PRICE);
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "PostAgentBond");
@@ -241,6 +243,7 @@ async fn eth_send_raw_admits_increase_agent_bond_typed_tx() {
     let (params, sender) =
         build_signed_eth_send_params(Address::zero(), 1, tx_type, 70_000, OPEN_LANE_GAS_PRICE);
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "IncreaseAgentBond");
@@ -265,6 +268,7 @@ async fn eth_send_raw_admits_withdraw_agent_bond_typed_tx() {
     let (params, sender) =
         build_signed_eth_send_params(Address::zero(), 2, tx_type, 50_000, OPEN_LANE_GAS_PRICE);
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "WithdrawAgentBond");
@@ -293,6 +297,7 @@ async fn eth_send_raw_admits_pay_insurance_claim_typed_tx() {
     let (params, sender) =
         build_signed_eth_send_params(Address::zero(), 3, tx_type, 90_000, OPEN_LANE_GAS_PRICE);
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "PayInsuranceClaim");
@@ -341,6 +346,7 @@ async fn eth_send_raw_rejects_post_agent_bond_with_tampered_amount() {
     params["tx_type"] = serde_json::to_value(&forged_tx_type).expect("serialize forged");
 
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
 
@@ -401,6 +407,7 @@ async fn eth_send_raw_rejects_pay_insurance_claim_with_tampered_evidence() {
     params["tx_type"] = serde_json::to_value(&forged_tx_type).expect("serialize forged");
 
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
 

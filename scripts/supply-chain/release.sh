@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Release signing: the supply-chain evidence and signatures over a release
 # matrix that scripts/release/ built and scripts/release/manifest.sh recorded.
-# This is the step that needs the owner's release hardware token; the builds
+# This is the step that needs the key holder's release hardware token; the builds
 # themselves never touch a key.
 #
 #   1. Refuse to start from unpinned inputs (check-pins.sh --release): one Rust

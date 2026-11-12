@@ -108,7 +108,7 @@ fn a_trace_written_reads_back_and_replays_the_same() {
 /// a buyer and a provider's capacity and utilisation to served units; one
 /// byte changed is refused.
 #[test]
-fn the_living_worlds_reader_checks_the_sha256_and_maps_the_rows() {
+fn the_market_stress_reader_checks_the_sha256_and_maps_the_rows() {
     use sha2::{Digest, Sha256};
     let rows = concat!(
         r#"{"tick":0,"actor":"critical-a","kind":"segment","segment":"critical","region":"region-a","demand":10,"supply":8,"clearing_price":2,"utilisation":0.5,"unmet_demand":2}"#,

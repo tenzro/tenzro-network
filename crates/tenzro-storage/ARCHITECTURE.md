@@ -37,31 +37,28 @@ The foundation of the storage layer, providing abstract key-value storage with t
   - Batch write operations
   - Prefix-based key scanning
   - Explicit fsync via `write_batch_sync()` for durability
-- **Column Families (24 total)**:
-  - `blocks` - Block data
-  - `state` - Merkle trie state
-  - `accounts` - Account information
-  - `transactions` - Transaction data
-  - `metadata` - System metadata
-  - `snapshots` - State snapshots
+- **Column Families (21 total)**:
+  - `blocks` - Block data indexed by hash and height
+  - `state` - VM state, committed into the state trie
+  - `state_trie` - State trie nodes, versioned by height
+  - `accounts` - Account state and metadata
+  - `transactions` - Transaction storage and indexing
+  - `metadata` - System metadata and configuration
   - `identities` - TDIP identity registry
   - `delegations` - Identity delegation records
   - `credentials` - Verifiable credentials
-  - `channels` - Micropayment channels
+  - `channels` - Payment channel records
   - `agents` - AI agent registry and state
   - `models` - Model catalog and metadata
   - `providers` - Provider registrations
-  - `tasks` - Task marketplace data
-  - `agent_templates` - Agent template definitions
-  - `skills` - Skill registry
-  - `tools` - Tool definitions
-  - `tokens` - Token registry (ERC-20, SPL, CIP-56)
-  - `settlements` - Settlement receipts and history
   - `model_services` - Served model endpoints
-  - `nfts` - NFT metadata and ownership
-  - `events` - Event store for event sourcing
-  - `webhooks` - Webhook subscriptions
-  - `compliance` - Compliance and audit logs
+  - `tokens` - Token registry
+  - `settlements` - Settlement receipts and history
+  - `events` - Event store
+  - `audit` - Audit log records
+  - `validator_modules` - ERC-7579 validator module configs and state
+  - `da_committee` - Availability certificates and sliver assignments
+  - `challenges` - Filed disputes over an inference commitment
 
 #### MemoryStore
 - **Purpose**: Testing and development
@@ -98,14 +95,14 @@ A cryptographic data structure for state commitment and proof generation.
 - **Proof Verification**: Validates proofs against state root by reconstructing root hash from sibling hashes
 
 #### State Root Computation
-```
-hash(node) = SHA256("node_type" || node_data)
-```
 
-For each node type:
-- Leaf: `SHA256("leaf" || path || value)`
-- Extension: `SHA256("extension" || path || child_hash)`
-- Branch: `SHA256("branch" || child_hashes || value)`
+A binary trie keyed by 31-byte stems, each holding 256 value slots (hash rules
+in `src/state_trie/hashing.rs`):
+
+- An empty subtree hashes to 32 zero bytes.
+- A value slot holds `H(0x00 || value)`.
+- A stem node hashes as `H(0x02 || stem || slots_root)`.
+- An interior node hashes as `H(0x01 || left || right)`.
 
 ### 3. Block Store (block_store.rs)
 
@@ -279,14 +276,15 @@ Account changes → Merkle Trie → {
 ```rust
 StorageConfig {
     db_path: PathBuf,              // Database directory
-    cache_size: usize,             // LRU cache size (512 MB default, 1 GB max)
+    memory_bytes: usize,           // Block cache with memtables charged (512 MiB default)
+    background_write_bytes_per_sec: i64, // Compaction and flush pacing (64 MiB/s default)
+    background_jobs: i32,          // Flush and compaction jobs (2 default)
     compression: bool,             // Enable LZ4 compression
     max_open_files: i32,           // Max open files (1000 default)
     write_buffer_size: usize,      // Write buffer (64 MB default)
     max_write_buffer_number: i32,  // Buffer count (3 default)
     target_file_size_base: u64,    // SST file size (64 MB default)
     enable_statistics: bool,       // Enable stats
-    snapshot_retention: u64,       // Snapshot count (100 default)
     enable_wal: bool,              // Write-ahead log (true default)
 }
 ```

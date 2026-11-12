@@ -131,9 +131,17 @@ mod tests {
     fn the_farewell_names_exactly_one_command() {
         assert_eq!(farewell(&Outcome::Quit), None);
         assert_eq!(
-            farewell(&Outcome::Finished { next: "tenzro dev".into() }).as_deref(),
+            farewell(&Outcome::Finished {
+                next: "tenzro dev".into()
+            })
+            .as_deref(),
             Some("Next, run: tenzro dev")
         );
-        assert_eq!(farewell(&Outcome::Finished { next: "tenzro".into() }), None);
+        assert_eq!(
+            farewell(&Outcome::Finished {
+                next: "tenzro".into()
+            }),
+            None
+        );
     }
 }

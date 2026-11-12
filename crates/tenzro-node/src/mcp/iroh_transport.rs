@@ -132,10 +132,18 @@ mod tests {
         let (node, tmp) = crate::bare_node().await;
         let server = base_builder().bind().await.unwrap();
         let router = iroh::protocol::Router::builder(server.clone())
-            .accept(ALPN_MCP, McpProtocol::new(Arc::new(IrohMcpHandler::new(node)), limits))
+            .accept(
+                ALPN_MCP,
+                McpProtocol::new(Arc::new(IrohMcpHandler::new(node)), limits),
+            )
             .spawn();
         let client = base_builder().bind().await.unwrap();
-        Served { server, client, router, _tmp: tmp }
+        Served {
+            server,
+            client,
+            router,
+            _tmp: tmp,
+        }
     }
 
     async fn open(s: &Served) -> (tenzro_iroh::Connection, SendStream, RecvStream) {
@@ -306,7 +314,12 @@ mod tests {
         let list = session
             .request(&listed_versions()[0], "tools/list", serde_json::json!({}))
             .await;
-        assert!(list["result"]["tools"].as_array().is_some_and(|t| !t.is_empty()), "{list}");
+        assert!(
+            list["result"]["tools"]
+                .as_array()
+                .is_some_and(|t| !t.is_empty()),
+            "{list}"
+        );
         s.router.shutdown().await.unwrap();
     }
 
@@ -342,7 +355,10 @@ mod tests {
             assert_eq!(reply["error"]["data"]["requested"], version);
             assert_eq!(reply["error"]["data"]["opener"], "server/discover");
             assert!(
-                reply["error"]["message"].as_str().unwrap().contains("server/discover"),
+                reply["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("server/discover"),
                 "{reply}"
             );
         }

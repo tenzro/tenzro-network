@@ -755,18 +755,20 @@ pub fn evidence_for(
         ));
     }
     let receipt = &dispute.receipt;
-    Ok(tenzro_types::inference_verification::InferenceFaultEvidence {
-        receipt_digest: receipt.digest(),
-        provider_did,
-        receipt_preimage: hex::encode(receipt.preimage()),
-        batched: hex::encode(
-            serde_json::to_vec(&receipt.signature.batched).map_err(|e| e.to_string())?,
-        ),
-        requester,
-        refund,
-        served_at_ms: receipt.signed_at_ms,
-        dispute: blob,
-    })
+    Ok(
+        tenzro_types::inference_verification::InferenceFaultEvidence {
+            receipt_digest: receipt.digest(),
+            provider_did,
+            receipt_preimage: hex::encode(receipt.preimage()),
+            batched: hex::encode(
+                serde_json::to_vec(&receipt.signature.batched).map_err(|e| e.to_string())?,
+            ),
+            requester,
+            refund,
+            served_at_ms: receipt.signed_at_ms,
+            dispute: blob,
+        },
+    )
 }
 
 /// The filing operation for a fault over `dispute`.

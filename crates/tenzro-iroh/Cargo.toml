@@ -8,6 +8,7 @@ description = "Iroh (QUIC-native content-addressed transport) integration for Te
 
 [dependencies]
 tenzro-types = { workspace = true }
+tenzro-onboarding-types = { workspace = true }
 tenzro-storage = { workspace = true }
 
 # Async + error plumbing for the resolver trait surface.

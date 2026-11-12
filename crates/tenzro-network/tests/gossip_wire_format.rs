@@ -1558,7 +1558,11 @@ mod batched {
         msg.message_id = "id".to_string();
         msg.timestamp = 7;
         let bytes = msg.to_bytes().unwrap();
-        assert_eq!(variant_index(&bytes), 8, "ProviderHeartbeat keeps its index");
+        assert_eq!(
+            variant_index(&bytes),
+            8,
+            "ProviderHeartbeat keeps its index"
+        );
         assert_eq!(hex::encode(&bytes), GOLDEN_HEARTBEAT);
     }
 
@@ -1574,7 +1578,11 @@ mod batched {
 
         let msg = NetworkMessage::new(MessagePayload::ProviderHeartbeat(hb));
         let bytes = msg.to_bytes().unwrap();
-        assert_eq!(variant_index(&bytes), 18, "the batched form is the appended variant");
+        assert_eq!(
+            variant_index(&bytes),
+            18,
+            "the batched form is the appended variant"
+        );
 
         let back = NetworkMessage::from_bytes(&bytes).unwrap();
         assert_eq!(back.topic(), "tenzro/providers");
@@ -1612,7 +1620,10 @@ mod batched {
         let mut moved = got.clone();
         moved.timestamp -= 1;
         moved.machine_did = "did:tenzro:machine:other".to_string();
-        assert!(moved.verify(signer.identity()).is_err(), "changed signer name");
+        assert!(
+            moved.verify(signer.identity()).is_err(),
+            "changed signer name"
+        );
     }
 
     #[test]

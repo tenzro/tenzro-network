@@ -614,7 +614,7 @@ bridge_outflow = [
 # The finality program (RISC Zero image id) whose wrapped proofs the chain
 # accepts: the guest as RISC Zero's guest-builder container builds it, which the
 # prover embeds; `tenzro-finality-prover image-id` prints the same id anywhere.
-finality_program = "578bacf21a7a6a60d75ba661def3099b49231a66f52434b55cc987a18cf6ce39"
+finality_program = "84684b576dcba8ca62548bb2ef545eee3817bc5db36ac5a821847b5bd2b493a3"
 
 # Bridge routes the network starts with. Chain selectors are written as
 # strings, since TOML integers stop at 2^63 - 1. Every route below is a

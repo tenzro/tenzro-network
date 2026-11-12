@@ -14,10 +14,12 @@
 #   TZ_WIN_HOST      ssh target of the Windows machine, for example user@host (required)
 #   TZ_WIN_JUMP      optional ssh jump host (ProxyJump) used to reach it
 #   TZ_WIN_SCRATCH   scratch directory on the Windows machine (default C:/tmp/tz-pkg-msi)
-#   TZ_ZIP           archive file name inside <dist-dir> (default: the single
-#                    tenzro-node-windows-x86_64-*.zip found there)
-#   TZ_VERSION       MSI version (default 0.2.0)
-#   TZ_SOURCE_COMMIT, TZ_PUBLIC_COMMIT   recorded in the MSI and PROVENANCE.txt
+#   TZ_ZIP           archive file name inside <dist-dir> (default
+#                    tenzro-node-windows-x86_64-cuda.zip)
+#   TZ_VERSION       MSI version (default: the version of the node in this repository)
+#   TZ_SOURCE_COMMIT, TZ_PUBLIC_COMMIT   recorded in the MSI and PROVENANCE.txt (defaults: the
+#                    commit in the archive's buildenv.json, and the commit named by
+#                    provenance-*.intoto.json beside the archive)
 #   TZ_COMPRESSION   low | medium | high (default high)
 set -euo pipefail
 
@@ -25,24 +27,20 @@ dist=${1:?usage: build-msi.sh <dist-dir> <out-dir>}
 out=${2:?usage: build-msi.sh <dist-dir> <out-dir>}
 host=${TZ_WIN_HOST:?set TZ_WIN_HOST to the ssh target of the Windows build machine}
 scratch=${TZ_WIN_SCRATCH:-C:/tmp/tz-pkg-msi}
-version=${TZ_VERSION:-0.2.0}
 compression=${TZ_COMPRESSION:-high}
-src_commit=${TZ_SOURCE_COMMIT:-2892200028fd326e87a69ed7dba8bc9f110db8ff}
-pub_commit=${TZ_PUBLIC_COMMIT:-c78bd5fed6129a78285265c7de66b4572a5ceef4}
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 for f in LICENSE NOTICE; do [ -f "$root/$f" ] || { echo "missing $root/$f" >&2; exit 1; }; done
 
-if [ -n "${TZ_ZIP:-}" ]; then
-  zip=$TZ_ZIP
-else
-  shopt -s nullglob
-  zips=("$dist"/tenzro-node-windows-x86_64-*.zip)
-  [ ${#zips[@]} -eq 1 ] || { echo "expected exactly one tenzro-node-windows-x86_64-*.zip in $dist (set TZ_ZIP)" >&2; exit 1; }
-  zip=$(basename "${zips[0]}")
-fi
+zip=${TZ_ZIP:-tenzro-node-windows-x86_64-cuda.zip}
 [ -f "$dist/$zip" ] || { echo "no such archive: $dist/$zip" >&2; exit 1; }
+version=${TZ_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/crates/tenzro-node/Cargo.toml" | head -1)}
+[ -n "$version" ] || { echo "no version: set TZ_VERSION" >&2; exit 1; }
+src_commit=${TZ_SOURCE_COMMIT:-$(jq -r '.commit // empty' "$dist/${zip%.zip}.buildenv.json" 2>/dev/null || true)}
+src_commit=${src_commit:-unknown}
+pub_commit=${TZ_PUBLIC_COMMIT:-$(jq -r '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit // empty' "$dist"/provenance-*.intoto.json 2>/dev/null | head -1 || true)}
+pub_commit=${pub_commit:-unknown}
 mkdir -p "$out"
 
 ssh_opts=(-o BatchMode=yes -o ServerAliveInterval=30)

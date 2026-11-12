@@ -1,4 +1,4 @@
-//! Validator lifecycle integration tests (Dynamic Validator Set, task #413).
+//! Validator lifecycle integration tests (dynamic validator set).
 //!
 //! The unit tests in `tenzro-token` cover the registry state machine
 //! (Candidate → PendingActive → Active → PendingExit → Exited) in isolation,
@@ -102,7 +102,7 @@ async fn full_lifecycle_register_activate_produce_exit() {
     let em = Arc::new(EpochManager::new(vec![genesis_validator], 100).expect("epoch manager"));
 
     // Bootstrap ValidatorRegistry with the genesis validator pre-seeded as
-    // Active (mirrors `Node::start()` post task #413).
+    // Active (mirrors what `Node::start()` does).
     let registry = ValidatorRegistry::new();
     let inserted = registry
         .seed_genesis_active(

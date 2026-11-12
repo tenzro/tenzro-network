@@ -76,6 +76,10 @@ ENV CXX=clang++
 # baseline instruction set instead.
 ENV CMAKE_ARGS="-DGGML_NATIVE=OFF"
 
+# Keep line tables and symbols through the cargo build; the debug files are split off
+# and the shipped binary stripped in the next step (release profile stays strip = "symbols").
+ENV CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+
 # Copy workspace files
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
@@ -93,6 +97,15 @@ COPY vendor/ vendor/
 RUN cargo build --release --locked -p tenzro-node --features tenzro-node/vulkan && \
     cargo build --release --locked -p tenzro-cli
 
+
+# Split the debug information off: the shipped binaries are stripped, the debug files
+# (matched by build-id and .gnu_debuglink) are collected for crash symbolisation.
+RUN set -eux; mkdir -p /debug; \
+    for b in tenzro-node tenzro; do \
+      objcopy --only-keep-debug target/release/$b /debug/$b.debug; \
+      strip --strip-all target/release/$b; \
+      objcopy --add-gnu-debuglink=/debug/$b.debug target/release/$b; \
+    done
 
 # Stage 2: Runtime
 FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS runtime
@@ -112,6 +125,7 @@ RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro
 # Copy binaries from builder
 COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
 COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+COPY --from=builder /debug /usr/local/share/tenzro-debug
 
 # Create data directories
 # One root for everything on the persistent volume. `TENZRO_HOME` moves the

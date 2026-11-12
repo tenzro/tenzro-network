@@ -29,6 +29,22 @@ pub struct PendingStake {
     pub account: String,
 }
 
+/// The last application status this machine saw, so a run while the website
+/// cannot be asked resumes from it instead of from the start. Never believed
+/// past `funded`: the chain decides the rest. See `onboarding::state`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationRecord {
+    /// The wallet that applied, `0x` and 64 hex.
+    pub account: String,
+    /// The role slug applied for, e.g. `validator`.
+    pub role: String,
+    /// An `onboarding::state::ApplicationState` spelling.
+    pub state: String,
+    /// The opaque id on the form's receipt, when the website gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+}
+
 /// Persisted configuration saved to `~/.tenzro/config.json`.
 ///
 /// This struct is the canonical config format shared between the CLI
@@ -47,10 +63,21 @@ pub struct PersistedConfig {
     /// Whether the operator chose to make this node publicly reachable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public: Option<bool>,
-    /// `"autonomous"` (hardware-rooted, no human controller) or `"self"`
-    /// (a human operator holds the passkey).
+    /// `"autonomous"` (hardware-rooted, no human controller), `"self"`
+    /// (a human operator holds the passkey) or `"agentic"` (an agent under a
+    /// human delegation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_mode: Option<String>,
+    /// Who holds the identity and wallet key: `passkey`, `machine-key` or
+    /// `delegated`. A name, never key material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    /// The human who delegates to an agent in the `agentic` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegator: Option<String>,
+    /// Where an unfinished `tenzro setup` resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wizard: Option<crate::onboarding::wizard::WizardRecord>,
     /// Canonical `RoleSet` string, e.g. `"ai,storage,validator"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<String>,
@@ -82,6 +109,16 @@ pub struct PersistedConfig {
     /// The stake a role is waiting on, while its account does not hold it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_stake: Option<PendingStake>,
+    /// Network phase override, `foundation` or `open-stake`; see
+    /// `onboarding::phase`. Absent means the compiled default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_phase: Option<String>,
+    /// Join-form link override; see `onboarding::foundation_config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_join_link: Option<String>,
+    /// The last application status seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<ApplicationRecord>,
     /// Unix socket of the key holder this node signs through, when its keys
     /// are in another machine's TPM. A path, not a secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]

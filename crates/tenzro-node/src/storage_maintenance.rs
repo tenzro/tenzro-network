@@ -11,11 +11,20 @@
 //!   backup there does not hold; the node itself never sends a backup
 //!   anywhere. `tenzro-node restore` rebuilds a store from one and verifies
 //!   its state against the checkpoint it was taken at before the node uses it.
-//! - **Disk watermarks.** At [`StoragePolicy::prune_watermark_pct`] of the data
-//!   volume the node prunes to the retention floor, keeps a single snapshot
-//!   and compacts. At [`StoragePolicy::refuse_watermark_pct`] it also refuses
-//!   non-essential data (model downloads, file uploads) with a warning and a
-//!   `disk` flag in its status. Consensus-critical writes are never refused.
+//! - **Degradation ladder.** The node reads the free bytes and free percent
+//!   of its data volume, the bytes its data grows per block, and the host's
+//!   memory, I/O and inode pressure (all in [`tenzro_storage::resources`]),
+//!   and moves along [`Level`]s with hysteresis: it warns first, then prunes
+//!   to a shorter retention window and compacts, then refuses non-essential
+//!   data (model downloads, relay forwarding, snapshots, public history
+//!   queries), and at the last level releases a ballast file and shouts.
+//!   Levels change on measurements, never on elapsed time, and each change
+//!   is logged once. A level needs free bytes and free percent both under
+//!   its pair, so a large volume that is nearly full by percent and still
+//!   has room is left alone. Consensus-critical writes are never refused.
+//! - **Data classes.** Only data classed expendable, then regenerable, then
+//!   important is ever removed automatically, and only down to its safe
+//!   floor; the tables are [`tenzro_storage::resources::DATA_LAYOUT`].
 //! - **Memory.** The store's block cache and memtables and the consensus
 //!   core's buffers are charged to the node's memory budget, the same ledger
 //!   model loads are admitted against.
@@ -34,6 +43,9 @@ use tenzro_consensus::light_client::{
 };
 use tenzro_model::memory_budget::{MemoryBudget, Tier};
 use tenzro_storage::backup::{self, BackupReport, SnapshotDir};
+use tenzro_storage::resources::{
+    self, Action, GrowthTracker, Ladder, LadderConfig, Level, Reading, StatusReport,
+};
 use tenzro_storage::state_trie::snapshot::{root_from_buckets, verify_bucket};
 use tenzro_storage::{KvStore, RocksDbStore, StateTrie, StorageConfig};
 use tracing::{info, warn};
@@ -67,10 +79,86 @@ pub const INCOMING_CHAIN_PROOF: &str = "incoming-chain.bin";
 /// peer catching up is served recent handovers.
 pub const EPOCH_RECORDS_KEPT: u64 = 12;
 
+/// Segments (of up to 4,096 blocks each) one pass hands over while the
+/// volume has room.
+pub const PRUNE_STEP_SEGMENTS: usize = 4;
+
+/// The fewest recent blocks a node under disk pressure keeps: the governed
+/// minimum of the retention parameter.
+pub const MIN_PRESSURE_RETENTION_BLOCKS: u64 = 10_000;
+
+/// The retention window, in blocks, a node applies at `pressure`, given the
+/// governed `retention`. Under pressure the window shrinks, so a node already
+/// at its retention floor still sheds history to the DA layer; it never keeps
+/// fewer than [`MIN_PRESSURE_RETENTION_BLOCKS`] (or the governed window, when
+/// that is smaller), and an archival node is not asked to call this.
+pub fn pressure_retention(retention: u64, pressure: DiskPressure) -> u64 {
+    let shrunk = match pressure {
+        DiskPressure::Normal => return retention,
+        DiskPressure::Pruning => retention / 4,
+        DiskPressure::Refusing => retention / 16,
+    };
+    shrunk.max(MIN_PRESSURE_RETENTION_BLOCKS.min(retention))
+}
+
+/// The retention window at ladder `level`: the governed one while there is
+/// room, a quarter at the prune level, a sixteenth at the refuse level and
+/// the floor at the last; never below [`MIN_PRESSURE_RETENTION_BLOCKS`].
+pub fn level_retention(retention: u64, level: Level) -> u64 {
+    match level {
+        Level::Ok | Level::Warn => retention,
+        Level::Prune => pressure_retention(retention, DiskPressure::Pruning),
+        Level::Refuse => pressure_retention(retention, DiskPressure::Refusing),
+        Level::Reserve => MIN_PRESSURE_RETENTION_BLOCKS.min(retention),
+    }
+}
+
+/// Default share of the data volume the stored history (blocks, transactions
+/// and events) may take, percent.
+pub const DEFAULT_HISTORY_BUDGET_PCT: u8 = 35;
+
+/// History pruned for the byte budget goes down to this share of the budget,
+/// percent, so the next pass does not prune again for a while.
+pub const HISTORY_BUDGET_LOW_WATER_PCT: u64 = 90;
+
+/// The bytes the stored history takes on disk: the blocks, transactions and
+/// events column families.
+pub fn history_bytes(store: &RocksDbStore) -> u64 {
+    store
+        .cf_sizes()
+        .iter()
+        .filter(|c| resources::PRUNE_COLUMN_FAMILIES.contains(&c.name))
+        .map(|c| c.sst_files + c.blob_files)
+        .sum()
+}
+
+/// The block height history must be pruned below to bring `held_bytes` of
+/// history, held from height `oldest` up to `certified`, under `budget`
+/// bytes; `None` while it is within the budget. The result is the height
+/// that leaves `HISTORY_BUDGET_LOW_WATER_PCT` percent of the budget, and
+/// never leaves fewer than `min_blocks` recent blocks.
+pub fn budget_floor(
+    held_bytes: u64,
+    budget: u64,
+    oldest: u64,
+    certified: u64,
+    min_blocks: u64,
+) -> Option<u64> {
+    if held_bytes <= budget || certified < oldest {
+        return None;
+    }
+    let held_blocks = certified - oldest + 1;
+    let per_block = (held_bytes as f64 / held_blocks as f64).max(1.0);
+    let target = budget / 100 * HISTORY_BUDGET_LOW_WATER_PCT;
+    let shed = ((held_bytes - target.min(held_bytes)) as f64 / per_block).ceil() as u64;
+    let limit = certified.saturating_sub(min_blocks);
+    Some(oldest.saturating_add(shed).min(limit))
+}
+
 const COMPACTION_SPACING: Duration = Duration::from_secs(600);
 
 /// Operator policy for storage, the `[storage]` section of the node config.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StoragePolicy {
     /// Memory for the store's block cache and memtables, MiB. Unset takes a
@@ -87,17 +175,26 @@ pub struct StoragePolicy {
     pub write_buffer_mb: Option<u64>,
     /// Files the store keeps open. Unset takes the tier's.
     pub max_open_files: Option<i32>,
-    /// Epoch snapshots kept on the data volume.
+    /// Epoch snapshots kept on the data volume: one verified snapshot, and
+    /// the one being written beside it for as long as it takes.
     pub snapshots_kept: usize,
-    /// Disk use, percent, at which the node prunes to the retention floor and
-    /// compacts.
-    pub prune_watermark_pct: u8,
-    /// Disk use, percent, at which the node refuses non-essential data.
-    pub refuse_watermark_pct: u8,
+    /// Thresholds of the degradation ladder: free bytes and percent,
+    /// runway in blocks, hysteresis, the ballast and the margin kept beyond
+    /// a large write. Every level is configurable here.
+    pub ladder: LadderConfig,
     /// Keep every block, event and transaction past the retention window.
     /// Off by default: a node keeps the window and hands older history to
     /// the DA layer, or deletes it when it has none. An archive opts in.
     pub archival: bool,
+    /// Bytes the stored history (blocks, transactions and events) may take.
+    /// Unset takes `history_budget_pct` of the data volume. Together with
+    /// the governed block window, whichever is exceeded first prunes the
+    /// oldest history; state and the certificates joiners need stay.
+    pub history_budget_bytes: Option<u64>,
+    /// Share of the data volume the history may take when
+    /// `history_budget_bytes` is unset, percent; 0 turns the byte budget
+    /// off.
+    pub history_budget_pct: u8,
 }
 
 impl Default for StoragePolicy {
@@ -108,15 +205,25 @@ impl Default for StoragePolicy {
             background_jobs: None,
             write_buffer_mb: None,
             max_open_files: None,
-            snapshots_kept: 2,
-            prune_watermark_pct: 75,
-            refuse_watermark_pct: 90,
+            snapshots_kept: 1,
+            ladder: LadderConfig::default(),
             archival: false,
+            history_budget_bytes: None,
+            history_budget_pct: DEFAULT_HISTORY_BUDGET_PCT,
         }
     }
 }
 
 impl StoragePolicy {
+    /// The history budget on a volume of `volume_bytes`; `None` when off.
+    pub fn history_budget(&self, volume_bytes: u64) -> Option<u64> {
+        match (self.history_budget_bytes, self.history_budget_pct) {
+            (Some(b), _) => Some(b),
+            (None, 0) => None,
+            (None, pct) => Some((volume_bytes as u128 * pct.min(100) as u128 / 100) as u64),
+        }
+    }
+
     /// Bytes the store may hold in memory, from the policy or the budget's
     /// pool under the tier's share and bounds.
     pub fn memory_bytes(&self, budget: &MemoryBudget, tuning: &Tuning) -> u64 {
@@ -153,16 +260,6 @@ impl StoragePolicy {
         config.background_jobs = self.background_jobs.unwrap_or(tuning.background_jobs);
         config
     }
-
-    fn pressure(&self, used_pct: u8) -> DiskPressure {
-        if used_pct >= self.refuse_watermark_pct {
-            DiskPressure::Refusing
-        } else if used_pct >= self.prune_watermark_pct {
-            DiskPressure::Pruning
-        } else {
-            DiskPressure::Normal
-        }
-    }
 }
 
 /// Where epoch snapshots live under a data directory.
@@ -174,11 +271,11 @@ pub fn snapshot_root(data_dir: &Path) -> PathBuf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiskPressure {
-    /// Below the prune watermark.
+    /// Above the prune level.
     Normal,
-    /// At or above the prune watermark: pruning to the floor and compacting.
+    /// At the prune level: pruning to the floor and compacting.
     Pruning,
-    /// At or above the refuse watermark: non-essential data is refused.
+    /// At the refuse level or past it: non-essential data is refused.
     Refusing,
 }
 
@@ -187,6 +284,7 @@ pub enum DiskPressure {
 pub struct DiskGuard {
     level: AtomicU8,
     used_pct: AtomicU8,
+    report: parking_lot::Mutex<Option<StatusReport>>,
 }
 
 /// The disk flag as reported in the node status.
@@ -198,20 +296,47 @@ pub struct DiskStatus {
     pub used_pct: u8,
     /// Whether non-essential data is being refused.
     pub refusing_non_essential: bool,
+    /// The ladder level.
+    pub level: Level,
+    /// The last assessment: free space, runway, growth, next class
+    /// sacrificed; absent before the first check.
+    pub assessment: Option<StatusReport>,
 }
 
 impl DiskGuard {
-    fn pressure(&self) -> DiskPressure {
+    /// The ladder level now.
+    pub fn level(&self) -> Level {
         match self.level.load(Ordering::Acquire) {
-            2 => DiskPressure::Refusing,
-            1 => DiskPressure::Pruning,
-            _ => DiskPressure::Normal,
+            0 => Level::Ok,
+            1 => Level::Warn,
+            2 => Level::Prune,
+            3 => Level::Refuse,
+            _ => Level::Reserve,
         }
     }
 
+    fn pressure(&self) -> DiskPressure {
+        match self.level() {
+            Level::Ok | Level::Warn => DiskPressure::Normal,
+            Level::Prune => DiskPressure::Pruning,
+            Level::Refuse | Level::Reserve => DiskPressure::Refusing,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn set(&self, pressure: DiskPressure, used_pct: u8) {
+        let level = match pressure {
+            DiskPressure::Normal => Level::Ok,
+            DiskPressure::Pruning => Level::Prune,
+            DiskPressure::Refusing => Level::Refuse,
+        };
+        self.set_level(level, used_pct, None);
+    }
+
+    pub(crate) fn set_level(&self, level: Level, used_pct: u8, report: Option<StatusReport>) {
         self.used_pct.store(used_pct, Ordering::Release);
-        self.level.store(pressure as u8, Ordering::Release);
+        self.level.store(level as u8, Ordering::Release);
+        *self.report.lock() = report;
     }
 
     /// The flag for the node status.
@@ -221,18 +346,27 @@ impl DiskGuard {
             pressure,
             used_pct: self.used_pct.load(Ordering::Acquire),
             refusing_non_essential: pressure == DiskPressure::Refusing,
+            level: self.level(),
+            assessment: self.report.lock().clone(),
         }
     }
 
     /// `Some(reason)` when non-essential data (`what`) must be refused
-    /// because the disk is past the refuse watermark; the refusal is logged.
+    /// because the disk is past the refuse level; the refusal is logged.
     pub fn refusal(&self, what: &str) -> Option<String> {
-        if self.pressure() != DiskPressure::Refusing {
+        self.refuse(Action::Download, what)
+    }
+
+    /// `Some(reason)` when the ladder does not allow `action` at its level;
+    /// the refusal is logged. Consensus writes never ask.
+    pub fn refuse(&self, action: Action, what: &str) -> Option<String> {
+        if self.level().allows(action) {
             return None;
         }
         let msg = format!(
-            "{what} refused: the node's data volume is {}% full; only consensus-critical writes continue",
-            self.used_pct.load(Ordering::Acquire)
+            "{what} refused: the node's data volume is {}% full (level {}); only consensus-critical writes continue",
+            self.used_pct.load(Ordering::Acquire),
+            self.level().name()
         );
         warn!("{msg}");
         Some(msg)
@@ -280,6 +414,18 @@ pub struct StorageMaintenance {
     incoming_chain_proof: PathBuf,
     budget: &'static MemoryBudget,
     last_compaction: Option<Instant>,
+    data_dir: PathBuf,
+    ladder: Ladder,
+    growth: GrowthTracker,
+    /// The level the last pass left the node at.
+    level: Level,
+    /// Whether the ballast was released and is to be laid again once the
+    /// volume has recovered.
+    ballast_released: bool,
+    /// History was pruned for the byte budget and not yet compacted, so its
+    /// size on disk still counts the pruned rows: the budget waits for the
+    /// compaction before it measures again.
+    history_dirty: bool,
 }
 
 impl StorageMaintenance {
@@ -296,6 +442,14 @@ impl StorageMaintenance {
         budget: &'static MemoryBudget,
     ) -> Self {
         let snapshots = SnapshotDir::new(snapshot_root(data_dir), policy.snapshots_kept);
+        match snapshots.clean_partials() {
+            Ok(0) => {}
+            Ok(freed) => info!(
+                freed_mb = freed >> 20,
+                "removed a snapshot left unfinished by an earlier run"
+            ),
+            Err(e) => warn!(error = %e, "removing unfinished snapshots failed"),
+        }
         let proof_log = match crate::proof_log::ProofLog::open(&data_dir.join("epoch-proof")) {
             Ok(log) => Some(Arc::new(parking_lot::Mutex::new(log))),
             Err(e) => {
@@ -305,7 +459,6 @@ impl StorageMaintenance {
         };
         Self {
             storage,
-            policy,
             guard,
             health,
             snapshots,
@@ -316,6 +469,13 @@ impl StorageMaintenance {
             incoming_chain_proof: data_dir.join("epoch-proof").join(INCOMING_CHAIN_PROOF),
             budget,
             last_compaction: None,
+            data_dir: data_dir.to_path_buf(),
+            ladder: Ladder::new(policy.ladder.clone()),
+            growth: GrowthTracker::new(policy.ladder.growth_window_blocks),
+            level: Level::Ok,
+            ballast_released: false,
+            history_dirty: false,
+            policy,
         }
     }
 
@@ -379,41 +539,105 @@ impl StorageMaintenance {
         }
     }
 
-    /// One pass at `used_pct` disk use: sets the disk flag, prunes history
-    /// below the retention floor, and compacts under pressure.
-    pub async fn pass(&mut self, used_pct: u8) -> PassReport {
+    /// The bytes the node's own data holds, summed from the column families
+    /// of the node store and the consensus records: the figure growth is
+    /// measured on.
+    fn data_bytes(&self) -> u64 {
+        let size = |db: &RocksDbStore| {
+            db.cf_sizes()
+                .iter()
+                .map(|c| c.sst_files + c.blob_files)
+                .sum::<u64>()
+        };
+        size(&self.storage) + self.consensus_records.as_ref().map_or(0, |r| size(r))
+    }
+
+    /// Reads the data volume, the host and the growth at `height`.
+    pub fn measure(&mut self, height: u64) -> std::io::Result<Reading> {
+        let volume = resources::volume_stats(&self.data_dir)?;
+        self.growth.record(height, self.data_bytes());
+        Ok(Reading {
+            volume,
+            host: resources::host_pressure(),
+            bytes_per_block: self.growth.bytes_per_block(),
+        })
+    }
+
+    /// Logs a change of level, once, with what was measured.
+    fn announce(&self, from: Level, a: &resources::Assessment, used_pct: u8) {
+        let summary = a.summary();
+        let why = a
+            .causes
+            .iter()
+            .map(|c| c.what.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        match a.level {
+            Level::Ok => info!(
+                used_pct,
+                from = from.name(),
+                "{summary}: data volume back to normal"
+            ),
+            Level::Warn => warn!(
+                used_pct,
+                from = from.name(),
+                why,
+                "data volume low: {summary}"
+            ),
+            Level::Prune => warn!(
+                used_pct,
+                from = from.name(),
+                why,
+                "data volume past the prune level: shortening the retention window, pruning and compacting: {summary}"
+            ),
+            Level::Refuse => warn!(
+                used_pct,
+                from = from.name(),
+                why,
+                "data volume past the refuse level: refusing non-essential data (snapshots, relay, history queries, downloads); consensus writes continue: {summary}"
+            ),
+            Level::Reserve => tracing::error!(
+                used_pct,
+                from = from.name(),
+                why,
+                "DATA VOLUME NEARLY FULL, last reserve: ballast released, snapshots stopped, only consensus writes continue: {summary}"
+            ),
+        }
+    }
+
+    /// One pass on a measured `reading`: moves along the ladder, sets the
+    /// disk flag, prunes history below the retention floor of the level,
+    /// and compacts under pressure.
+    pub async fn pass_with(&mut self, reading: Reading, used_pct: u8) -> PassReport {
         let mut report = PassReport::default();
-        let pressure = self.policy.pressure(used_pct);
-        let before = self.guard.pressure();
-        self.guard.set(pressure, used_pct);
-        if pressure != before {
-            match pressure {
-                DiskPressure::Normal => {
-                    info!(used_pct, "data volume back below the prune watermark");
-                    self.health.mark_healthy(DISK_SUBSYSTEM);
-                }
-                DiskPressure::Pruning => {
-                    warn!(
-                        used_pct,
-                        "data volume past the prune watermark: pruning to the retention floor and compacting"
-                    );
-                    self.health.mark_degraded(
-                        DISK_SUBSYSTEM,
-                        format!("data volume {used_pct}% full: pruning"),
-                    );
-                }
-                DiskPressure::Refusing => {
-                    warn!(
-                        used_pct,
-                        "data volume past the refuse watermark: refusing non-essential data; consensus writes continue"
-                    );
-                    self.health.mark_degraded(
-                        DISK_SUBSYSTEM,
-                        format!("data volume {used_pct}% full: refusing non-essential data"),
-                    );
-                }
+        // The consensus store and the node store are on the same volume, and
+        // the ladder is the only thing that sets the level.
+        let assessment = self.ladder.assess(&reading);
+        let level = assessment.level;
+        let before = self.level;
+        self.level = level;
+        self.guard
+            .set_level(level, used_pct, Some(assessment.report()));
+        if level != before {
+            self.announce(before, &assessment, used_pct);
+            match level {
+                Level::Ok => self.health.mark_healthy(DISK_SUBSYSTEM),
+                Level::Warn => self.health.mark_degraded(
+                    DISK_SUBSYSTEM,
+                    format!("data volume low: {}", assessment.summary()),
+                ),
+                Level::Prune => self.health.mark_degraded(
+                    DISK_SUBSYSTEM,
+                    format!("data volume {used_pct}% full: pruning"),
+                ),
+                Level::Refuse | Level::Reserve => self.health.mark_degraded(
+                    DISK_SUBSYSTEM,
+                    format!("data volume {used_pct}% full: refusing non-essential data"),
+                ),
             }
         }
+        self.keep_ballast(level, &reading);
+        let pressure = self.guard.status().pressure;
 
         if let Some(consensus) = &self.consensus {
             if let Some(m) = consensus.metrics() {
@@ -421,9 +645,57 @@ impl StorageMaintenance {
                     .charge(CONSENSUS_MEMORY_KEY, Tier::Resident, m.buffered_bytes);
             }
             if let Some(archive) = self.archive.as_ref().filter(|_| !self.policy.archival) {
-                let retention = self.retention_blocks();
-                let floor = consensus.certified_height().saturating_sub(retention);
-                match archive.prune_below(floor).await {
+                let governed = self.retention_blocks();
+                let retention = level_retention(governed, level);
+                let certified = consensus.certified_height();
+                let mut floor = certified.saturating_sub(retention);
+                let mut over_budget = false;
+                if !self.history_dirty
+                    && let Some(budget) = self.policy.history_budget(reading.volume.total_bytes)
+                    && let Some(oldest) = consensus
+                        .checkpoint(archive.next_checkpoint().unwrap_or(0))
+                        .map(|c| c.first_height)
+                {
+                    let held = history_bytes(&self.storage);
+                    if let Some(by_bytes) = budget_floor(
+                        held,
+                        budget,
+                        oldest,
+                        certified,
+                        MIN_PRESSURE_RETENTION_BLOCKS.min(governed),
+                    ) && by_bytes > floor
+                    {
+                        info!(
+                            held_mb = held >> 20,
+                            budget_mb = budget >> 20,
+                            window_floor = floor,
+                            floor = by_bytes,
+                            "history over its byte budget: pruning the oldest"
+                        );
+                        floor = by_bytes;
+                        over_budget = true;
+                    }
+                }
+                if retention < governed {
+                    info!(
+                        used_pct,
+                        level = level.name(),
+                        governed,
+                        retention,
+                        floor,
+                        "disk pressure: retention window shortened"
+                    );
+                }
+                // Small steps while there is room, everything eligible under
+                // pressure; always below what a joining node and the finality
+                // proofs still read (`MIN_PRESSURE_RETENTION_BLOCKS` is the
+                // lowest window any level applies).
+                let steps = if level >= Level::Prune || over_budget {
+                    usize::MAX
+                } else {
+                    PRUNE_STEP_SEGMENTS
+                };
+                match archive.prune_below_limited(floor, steps).await {
                     Ok(r) => {
                         if r.blocks > 0 {
                             info!(
@@ -431,10 +703,13 @@ impl StorageMaintenance {
                                 blocks = r.blocks,
                                 transactions = r.transactions,
                                 floor,
-                                "history below the retention floor handed to the DA layer and pruned"
+                                "history below the retention floor handed to the DA layer and pruned (floor may be pressure-tightened)"
                             );
                         }
                         report.pruned_blocks = r.blocks;
+                        if over_budget && r.blocks > 0 {
+                            self.history_dirty = true;
+                        }
                     }
                     Err(e) => warn!(floor, error = %e, "history pruning stopped"),
                 }
@@ -484,25 +759,96 @@ impl StorageMaintenance {
             }
         }
 
-        if pressure != DiskPressure::Normal {
-            if let Err(e) = self.snapshots.trim(1) {
+        if pressure != DiskPressure::Normal || self.history_dirty {
+            if pressure != DiskPressure::Normal
+                && let Err(e) = self.snapshots.trim(1)
+            {
                 warn!(error = %e, "trimming epoch snapshots failed");
             }
-            if self
-                .last_compaction
-                .is_none_or(|t| t.elapsed() >= COMPACTION_SPACING)
+            // A compaction writes its output before it frees its input: it
+            // needs room, and is not started without it.
+            let need = self.compaction_need_bytes();
+            let room = resources::headroom(&reading.volume, need, &self.policy.ladder);
+            if let Err(short) = &room {
+                warn!(need_mb = need >> 20, "compaction not started: {short}");
+            }
+            if room.is_ok()
+                && level.allows(Action::Compaction)
+                && self
+                    .last_compaction
+                    .is_none_or(|t| t.elapsed() >= COMPACTION_SPACING)
             {
                 let storage = self.storage.clone();
-                if tokio::task::spawn_blocking(move || storage.compact_all())
-                    .await
-                    .is_ok()
+                let everything = pressure != DiskPressure::Normal;
+                if tokio::task::spawn_blocking(move || {
+                    if everything {
+                        storage.compact_all()
+                    } else {
+                        storage.compact_history()
+                    }
+                })
+                .await
+                .is_ok()
                 {
                     report.compacted = true;
+                    self.history_dirty = false;
                 }
                 self.last_compaction = Some(Instant::now());
             }
         }
         report
+    }
+
+    /// Bytes a full compaction may need beyond what the store holds: the
+    /// largest column family, which is rewritten while its input stays.
+    fn compaction_need_bytes(&self) -> u64 {
+        self.storage
+            .cf_sizes()
+            .iter()
+            .map(|c| c.sst_files)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Lays the ballast while the volume has room, releases it at the last
+    /// level, and lays it again once the level is back to normal.
+    fn keep_ballast(&mut self, level: Level, reading: &Reading) {
+        let size = self.policy.ladder.ballast_mb << 20;
+        if size == 0 {
+            return;
+        }
+        if level == Level::Reserve && !self.ballast_released {
+            match resources::release_ballast(&self.data_dir) {
+                Ok(0) => {}
+                Ok(freed) => {
+                    self.ballast_released = true;
+                    tracing::error!(
+                        freed_mb = freed >> 20,
+                        "ballast file released to keep consensus writing: free space now {} MiB",
+                        (reading.volume.free_bytes + freed) >> 20
+                    );
+                }
+                Err(e) => warn!(error = %e, "releasing the ballast failed"),
+            }
+        } else if level == Level::Ok && self.ballast_released {
+            self.lay_ballast();
+        }
+    }
+
+    /// Lays the ballast file if the volume has room for it beyond the first
+    /// level's free bytes. Called at start and after a release, once the
+    /// level is normal again.
+    pub fn lay_ballast(&mut self) {
+        let size = self.policy.ladder.ballast_mb << 20;
+        let keep = self.policy.ladder.warn_free_gib * resources::GIB;
+        match resources::ensure_ballast(&self.data_dir, size, keep) {
+            Ok(true) => {
+                self.ballast_released = false;
+                info!(size_mb = size >> 20, "ballast file laid");
+            }
+            Ok(false) => {}
+            Err(e) => warn!(error = %e, "laying the ballast failed"),
+        }
     }
 
     /// Appends to the proof log the handover of every epoch that closed
@@ -645,6 +991,17 @@ impl StorageMaintenance {
     /// the proof log, extended by the epochs that closed since the last
     /// snapshot, and are streamed into the snapshot.
     pub fn snapshot_epoch(&self, cp: &Checkpoint) -> Result<PathBuf> {
+        if let Some(why) = self.guard.refuse(Action::Snapshot, "epoch snapshot") {
+            return Err(NodeError::Other(why));
+        }
+        let volume = resources::volume_stats(&self.data_dir)
+            .map_err(|e| NodeError::Other(format!("free space of the data volume: {e}")))?;
+        let need = resources::snapshot_need_bytes(
+            &self.data_dir.join("db"),
+            &snapshot_root(&self.data_dir),
+        );
+        resources::headroom(&volume, need, &self.policy.ladder)
+            .map_err(|short| NodeError::Other(format!("epoch snapshot not started: {short}")))?;
         if let (Some(consensus), Some(log)) = (self.consensus.as_ref(), self.proof_log.as_ref()) {
             let missing = || {
                 NodeError::Other(format!(
@@ -711,6 +1068,7 @@ impl StorageMaintenance {
             .map(|c| c.subscribe_epoch_certified());
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        self.lay_ballast();
         loop {
             let epoch = async {
                 match epochs.as_mut() {
@@ -725,16 +1083,27 @@ impl StorageMaintenance {
             tokio::select! {
                 _ = tick.tick() => {
                     self.report_memory();
-                    match disk_used_pct(&data_dir) {
-                        Ok(pct) => {
-                            self.pass(pct).await;
+                    let height = self.consensus.as_ref().map_or(0, |c| c.certified_height());
+                    match self.measure(height) {
+                        Ok(reading) => {
+                            let pct = reading.volume.used_pct();
+                            self.pass_with(reading, pct).await;
                         }
-                        Err(e) => warn!(error = %e, "cannot read data volume usage; disk watermarks not evaluated"),
+                        Err(e) => warn!(error = %e, "cannot read data volume usage; disk levels not evaluated"),
                     }
                 }
                 Some(cp) = epoch => {
                     match self.snapshot_epoch(&cp) {
-                        Ok(dir) => info!(epoch = cp.epoch, index = cp.index, dir = %dir.display(), "epoch snapshot taken"),
+                        Ok(dir) => {
+                            let (_, extra) = resources::unique_bytes(&data_dir.join("db"), &dir);
+                            info!(
+                                epoch = cp.epoch,
+                                index = cp.index,
+                                dir = %dir.display(),
+                                extra_mb = extra >> 20,
+                                "epoch snapshot taken (extra_mb is what it holds beyond the live store)"
+                            );
+                        }
                         Err(e) => warn!(epoch = cp.epoch, error = %e, "epoch snapshot failed"),
                     }
                 }
@@ -918,6 +1287,7 @@ mod tests {
     use crate::health::SubsystemStatus;
     use std::collections::BTreeMap;
     use tenzro_storage::CF_STATE_TRIE;
+    use tenzro_storage::resources::VolumeStats;
 
     fn small_store(dir: &Path) -> Arc<RocksDbStore> {
         Arc::new(
@@ -1067,7 +1437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watermarks_flag_prune_compact_and_refuse_but_never_block_writes() {
+    async fn the_levels_flag_prune_compact_and_refuse_but_never_block_writes() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = small_store(tmp.path());
         let guard = Arc::new(DiskGuard::default());
@@ -1083,13 +1453,29 @@ mod tests {
             tenzro_model::memory_budget::global(),
         );
 
-        let r = m.pass(50).await;
+        // A hundred-gibibyte volume, half free.
+        let r = m.pass_with(volume_reading(100, 50, None), 50).await;
         assert!(!r.compacted);
+        assert_eq!(
+            pressure_retention(1_000_000, DiskPressure::Normal),
+            1_000_000
+        );
+        assert_eq!(
+            pressure_retention(1_000_000, DiskPressure::Pruning),
+            250_000
+        );
+        assert_eq!(
+            pressure_retention(1_000_000, DiskPressure::Refusing),
+            62_500
+        );
+        assert_eq!(pressure_retention(20_000, DiskPressure::Refusing), 10_000);
+        assert_eq!(pressure_retention(10_000, DiskPressure::Refusing), 10_000);
         assert_eq!(guard.status().pressure, DiskPressure::Normal);
         assert!(guard.refusal("model download").is_none());
 
-        let r = m.pass(80).await;
-        assert!(r.compacted, "the prune watermark compacts");
+        // 10 GiB and 10 percent free: under the prune pair, over the refuse pair.
+        let r = m.pass_with(volume_reading(100, 10, None), 90).await;
+        assert!(r.compacted, "the prune level compacts");
         assert_eq!(guard.status().pressure, DiskPressure::Pruning);
         assert!(
             guard.refusal("model download").is_none(),
@@ -1106,7 +1492,8 @@ mod tests {
             Some(SubsystemStatus::Degraded { .. })
         ));
 
-        let r = m.pass(93).await;
+        // 5 GiB and 5 percent free: under the refuse pair.
+        let r = m.pass_with(volume_reading(100, 5, None), 95).await;
         assert!(!r.compacted, "compaction is spaced out");
         let status = guard.status();
         assert_eq!(status.pressure, DiskPressure::Refusing);
@@ -1115,7 +1502,7 @@ mod tests {
             guard
                 .refusal("model download")
                 .unwrap()
-                .contains("93% full")
+                .contains("95% full")
         );
         // Consensus-critical writes go to the store directly and continue.
         storage
@@ -1126,9 +1513,24 @@ mod tests {
             }])
             .unwrap();
 
-        m.pass(40).await;
+        m.pass_with(volume_reading(100, 60, None), 40).await;
         assert!(guard.refusal("model download").is_none());
         assert!(matches!(disk(&health), Some(SubsystemStatus::Healthy)));
+    }
+
+    #[tokio::test]
+    async fn a_large_volume_with_room_is_left_alone_however_full_by_percent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut m, guard) = maintenance(tmp.path(), 0);
+        // 58 of 3700 GiB free is 99 percent used, and more room than the
+        // first level asks for.
+        m.pass_with(volume_reading(3700, 58, None), 99).await;
+        assert_eq!(guard.status().pressure, DiskPressure::Normal);
+        assert!(guard.refusal("snapshot").is_none());
+        // The same percent on a small volume is the last reserve.
+        m.pass_with(volume_reading(100, 1, None), 99).await;
+        assert_eq!(guard.status().pressure, DiskPressure::Refusing);
+        assert!(guard.refusal("snapshot").is_some());
     }
 
     #[test]
@@ -1192,5 +1594,221 @@ mod tests {
             512 << 20,
             "models see less room"
         );
+    }
+
+    fn maintenance(tmp: &Path, ballast_mb: u64) -> (StorageMaintenance, Arc<DiskGuard>) {
+        let storage = small_store(&tmp.join("db"));
+        let guard = Arc::new(DiskGuard::default());
+        let policy = StoragePolicy {
+            ladder: LadderConfig {
+                ballast_mb,
+                ..LadderConfig::default()
+            },
+            ..StoragePolicy::default()
+        };
+        let m = StorageMaintenance::new(
+            storage,
+            tmp,
+            policy,
+            guard.clone(),
+            Arc::new(HealthMonitor::new()),
+            None,
+            None,
+            tenzro_model::memory_budget::global(),
+        );
+        (m, guard)
+    }
+
+    fn volume_reading(total_gib: u64, free_gib: u64, per_block: Option<f64>) -> Reading {
+        Reading {
+            volume: VolumeStats::of(total_gib * resources::GIB, free_gib * resources::GIB),
+            host: Default::default(),
+            bytes_per_block: per_block,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fast_filler_raises_the_level_by_runway_while_the_percent_is_still_fine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut m, guard) = maintenance(tmp.path(), 0);
+        // 500 of 1000 GiB free: 50 percent, no level near by size.
+        m.pass_with(volume_reading(1000, 500, Some(1_000.0)), 50)
+            .await;
+        assert_eq!(guard.level(), Level::Ok);
+        // 230 KB a block leaves about 2.3 million blocks: the first level.
+        m.pass_with(volume_reading(1000, 500, Some(230_000.0)), 50)
+            .await;
+        assert_eq!(guard.level(), Level::Warn);
+        let status = guard.status();
+        assert_eq!(status.pressure, DiskPressure::Normal);
+        let a = status.assessment.expect("an assessment is reported");
+        assert!(a.runway_blocks.unwrap() < 3_000_000);
+        assert!(a.summary.contains("runway"));
+        // 4 MB a block leaves 130,000 blocks: refusing, at 50 percent used.
+        m.pass_with(volume_reading(1000, 500, Some(4_000_000.0)), 50)
+            .await;
+        assert_eq!(guard.level(), Level::Refuse);
+        assert!(guard.refuse(Action::Snapshot, "epoch snapshot").is_some());
+        assert!(guard.refuse(Action::Relay, "relay").is_some());
+        assert_eq!(
+            guard.status().assessment.unwrap().next_sacrificed,
+            Some(resources::DataClass::Regenerable)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_last_level_releases_the_ballast_and_never_a_critical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        for p in [
+            "consensus",
+            "iroh",
+            "device-keys",
+            "wallets",
+            "epoch-proof",
+            "audit",
+        ] {
+            std::fs::create_dir_all(d.join(p)).unwrap();
+            std::fs::write(d.join(p).join("secret"), b"keep").unwrap();
+        }
+        std::fs::write(d.join("genesis.json"), b"{}").unwrap();
+        let (mut m, guard) = maintenance(d, 1);
+        std::fs::write(d.join(resources::BALLAST_FILE), vec![0u8; 1 << 20]).unwrap();
+        std::fs::create_dir_all(d.join("epoch-snapshots/e1.partial")).unwrap();
+        m.pass_with(volume_reading(100, 2, None), 98).await;
+        assert_eq!(guard.level(), Level::Reserve);
+        assert!(
+            !d.join(resources::BALLAST_FILE).exists(),
+            "the ballast is released"
+        );
+        assert!(guard.refuse(Action::Snapshot, "epoch snapshot").is_some());
+        assert!(guard.refuse(Action::Compaction, "compaction").is_some());
+        for p in [
+            "consensus",
+            "iroh",
+            "device-keys",
+            "wallets",
+            "epoch-proof",
+            "audit",
+        ] {
+            assert!(
+                d.join(p).join("secret").exists(),
+                "{p} must survive every level"
+            );
+        }
+        assert!(d.join("genesis.json").exists());
+        assert!(d.join("db").exists(), "the store is never removed");
+    }
+
+    #[test]
+    fn an_unfinished_snapshot_is_removed_when_maintenance_starts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let partial = tmp.path().join("epoch-snapshots/epoch-1-2.partial");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("000001.sst"), vec![0u8; 4096]).unwrap();
+        let done = tmp.path().join("epoch-snapshots/epoch-1-1");
+        std::fs::create_dir_all(&done).unwrap();
+        std::fs::write(done.join(tenzro_storage::backup::SNAPSHOT_META), b"m").unwrap();
+        let _ = maintenance(tmp.path(), 0);
+        assert!(!partial.exists());
+        assert!(done.exists(), "a finished snapshot stays");
+    }
+
+    #[test]
+    fn the_window_shrinks_with_the_level_and_never_below_the_floor() {
+        assert_eq!(level_retention(1_209_600, Level::Ok), 1_209_600);
+        assert_eq!(level_retention(1_209_600, Level::Warn), 1_209_600);
+        assert_eq!(level_retention(1_209_600, Level::Prune), 302_400);
+        assert_eq!(level_retention(1_209_600, Level::Refuse), 75_600);
+        assert_eq!(
+            level_retention(1_209_600, Level::Reserve),
+            MIN_PRESSURE_RETENTION_BLOCKS
+        );
+        assert_eq!(level_retention(5_000, Level::Reserve), 5_000);
+    }
+
+    #[test]
+    fn history_stays_under_a_small_byte_budget_as_the_chain_grows() {
+        let per_block = 100_000u64;
+        let budget = 20_000_000u64;
+        let min_blocks = 10;
+        let (mut oldest, mut certified) = (0u64, 0u64);
+        let mut pruned_at_least_once = false;
+        for _ in 0..400 {
+            certified += 37;
+            let held = (certified - oldest + 1) * per_block;
+            if let Some(floor) = budget_floor(held, budget, oldest, certified, min_blocks) {
+                assert!(floor > oldest && floor <= certified - min_blocks);
+                oldest = floor;
+                pruned_at_least_once = true;
+            }
+            let after = (certified - oldest + 1) * per_block;
+            assert!(
+                after <= budget,
+                "{after} bytes held over a budget of {budget}"
+            );
+        }
+        assert!(pruned_at_least_once);
+        // The pass leaves room below the budget so it does not prune every time.
+        let held = (certified - oldest + 1) * per_block;
+        assert!(held <= budget / 100 * 100);
+    }
+
+    #[test]
+    fn the_budget_never_cuts_below_the_recent_blocks_and_waits_while_within() {
+        assert_eq!(budget_floor(10, 100, 0, 1_000, 10), None);
+        // A budget smaller than the floor of recent blocks keeps the blocks.
+        let floor = budget_floor(1_000_000, 10, 0, 999, 100).unwrap();
+        assert_eq!(floor, 899);
+        assert_eq!(budget_floor(5, 1, 500, 100, 10), None, "nothing held");
+    }
+
+    #[test]
+    fn the_history_budget_is_a_share_of_the_volume_unless_set() {
+        let p = StoragePolicy::default();
+        assert_eq!(
+            p.history_budget(1000 * resources::GIB),
+            Some(350 * resources::GIB)
+        );
+        let own = StoragePolicy {
+            history_budget_bytes: Some(7),
+            ..StoragePolicy::default()
+        };
+        assert_eq!(own.history_budget(1000 * resources::GIB), Some(7));
+        let off = StoragePolicy {
+            history_budget_pct: 0,
+            ..StoragePolicy::default()
+        };
+        assert_eq!(off.history_budget(1000 * resources::GIB), None);
+    }
+
+    #[test]
+    fn history_bytes_counts_blocks_transactions_and_events_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = small_store(tmp.path());
+        // Incompressible values, so the size on disk is the size written.
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut value = vec![0u8; 4096];
+        for i in 0..2_000u32 {
+            for cf in ["blocks", "transactions", "events"] {
+                for b in value.iter_mut() {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    *b = x as u8;
+                }
+                store.put(cf, &i.to_be_bytes(), &value).unwrap();
+            }
+        }
+        store.compact_history();
+        let held = history_bytes(&store);
+        assert!(held > 3 * 2_000 * 2_000, "{held}");
+        let state_only: u64 = store
+            .cf_sizes()
+            .iter()
+            .filter(|c| !resources::PRUNE_COLUMN_FAMILIES.contains(&c.name))
+            .map(|c| c.sst_files)
+            .sum();
+        assert!(held > state_only);
     }
 }

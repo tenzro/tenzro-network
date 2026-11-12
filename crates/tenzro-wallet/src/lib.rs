@@ -95,11 +95,11 @@ pub mod builder;
 pub mod contacts;
 pub mod error;
 pub mod history;
-pub mod recipient_guard;
 pub mod identity_binding;
 pub mod keystore;
 pub mod nonce;
 pub mod pluggable_signer;
+pub mod recipient_guard;
 pub mod rpc_provider;
 pub mod service;
 pub mod state_sync;
@@ -114,9 +114,11 @@ pub use builder::TransactionBuilder;
 pub use contacts::{AddressBook, Contact};
 pub use error::{Result, WalletError};
 pub use history::{HistoryFilter, TransactionHistory, TxDirection, TxRecord, TxStatus};
-pub use recipient_guard::{assess_for_wallet, assess_recipient, LookalikeParams, RecipientAssessment, RecipientFlag};
 pub use keystore::Keystore;
 pub use nonce::NonceManager;
+pub use recipient_guard::{
+    LookalikeParams, RecipientAssessment, RecipientFlag, assess_for_wallet, assess_recipient,
+};
 pub use service::{TenzroWalletService, WalletServiceConfig};
 pub use state_sync::{ChainStateProvider, LocalStateProvider, WalletStateSync};
 pub use traits::WalletService;

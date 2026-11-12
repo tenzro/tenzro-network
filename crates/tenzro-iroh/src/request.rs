@@ -59,6 +59,10 @@ pub const ALPN_KV_CHECKPOINT: &[u8] = b"tenzro/kv-checkpoint";
 /// serving node exports often enough that a delta stays well below it.
 pub const MAX_KV_CHECKPOINT_REQUEST: usize = 64 * 1024 * 1024;
 
+/// Upper bound on a registration request: a signed identity registration
+/// carrying a TPM attestation, plus an owner approval.
+pub const MAX_ONBOARD_REQUEST: usize = 256 * 1024;
+
 /// Upper bound on an agent-key request.
 pub const MAX_AGENT_KEY_REQUEST: usize = 4 * 1024;
 

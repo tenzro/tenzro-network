@@ -22,11 +22,12 @@
 //! production through to balance mutation is asynchronous and is exercised by
 //! the VM unit tests, not here.
 
+mod hybrid_account;
+
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use tenzro_crypto::composite::testing::TestHybridSigner;
 use tenzro_crypto::composite::{HybridSigner, SignatureContext};
 use tenzro_node::{NodeConfig, RpcServer, TenzroNode};
 use tenzro_types::asset::AssetId;
@@ -138,7 +139,7 @@ fn build_signed_eth_send_params(
     gas_limit: u64,
     gas_price: u64,
 ) -> (Value, Address) {
-    let signer = TestHybridSigner::random();
+    let signer = hybrid_account::fresh_signer();
     let from = signer.address();
 
     let tx = Transaction::new(
@@ -228,6 +229,7 @@ async fn eth_send_raw_admits_create_escrow_typed_tx() {
     let (params, sender) =
         build_signed_eth_send_params(Address::zero(), 0, tx_type, 75_000, OPEN_LANE_GAS_PRICE);
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "CreateEscrow");
@@ -256,6 +258,7 @@ async fn eth_send_raw_admits_release_escrow_typed_tx() {
     let (params, sender) =
         build_signed_eth_send_params(Address::zero(), 1, tx_type, 60_000, OPEN_LANE_GAS_PRICE);
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "ReleaseEscrow");
@@ -281,6 +284,7 @@ async fn eth_send_raw_admits_refund_escrow_typed_tx() {
     let (params, sender) =
         build_signed_eth_send_params(Address::zero(), 2, tx_type, 50_000, OPEN_LANE_GAS_PRICE);
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
     assert_admission_succeeded(&resp, "RefundEscrow");
@@ -337,6 +341,7 @@ async fn eth_send_raw_rejects_escrow_tx_with_tampered_amount() {
     params["tx_type"] = serde_json::to_value(&forged_tx_type).expect("serialize forged");
 
     fund_account(&_node, &sender, FIXTURE_BALANCE);
+    hybrid_account::enroll_sender(&_node, &params);
     let body = rpc_request("tenzro_sendRawTransaction", params);
     let resp = rpc_call(&client, &base_url, body).await;
 

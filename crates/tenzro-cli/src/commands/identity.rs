@@ -25,6 +25,8 @@ pub enum IdentityCommand {
     ResolveDocument(IdentityResolveDocumentCmd),
     /// Register a new machine identity
     RegisterMachine(IdentityRegisterMachineCmd),
+    /// Register the on-chain identity of this CLI's own account; the account pays the gas
+    RegisterAccount(IdentityRegisterAccountCmd),
     /// Revoke an identity on its root's authority (a RevokeIdentity transaction)
     Revoke(IdentityRevokeCmd),
     /// Revoke a single JWT by its `jti` (cascades through the act-chain)
@@ -44,10 +46,87 @@ impl IdentityCommand {
             Self::ResolveDid(cmd) => cmd.execute().await,
             Self::ResolveDocument(cmd) => cmd.execute().await,
             Self::RegisterMachine(cmd) => cmd.execute().await,
+            Self::RegisterAccount(cmd) => cmd.execute().await,
             Self::Revoke(cmd) => cmd.execute().await,
             Self::RevokeJwt(cmd) => cmd.execute().await,
             Self::Forget(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Gas the registration of a client account is sent with.
+const REGISTER_ACCOUNT_GAS: u64 = 200_000;
+
+/// Register the identity of this CLI's own account on chain.
+///
+/// The commands of this CLI sign as the client account, held by this
+/// machine's TPM or Secure Enclave under `--key-namespace`. A network that
+/// requires a registered identity refuses a transaction from an account that
+/// has none, so the account registers once before it sends anything else:
+/// the machine identity that its hardware key derives, with the account as
+/// its wallet. The same key signs the registration, and the account submits
+/// it and pays the gas, so it must hold TNZO first; anyone may send TNZO to
+/// an account that is not registered yet. Nothing is sent when the identity
+/// already resolves.
+///
+/// No TPM attestation is recorded: the machine's TPM stays free to be
+/// admitted under the machine root of a node running on it
+/// (`tenzro validator register-machine`). A person registers with a passkey
+/// instead (`tenzro identity register`).
+#[derive(Debug, Parser)]
+pub struct IdentityRegisterAccountCmd {
+    /// Display name recorded with the identity
+    #[arg(long, default_value = "client account")]
+    name: String,
+
+    /// The account's hardware key namespace (a-z, 0-9, '-', '_'). Each
+    /// namespace is its own account.
+    #[arg(long, default_value = "client")]
+    key_namespace: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityRegisterAccountCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let (did, account, register) =
+            crate::keystore::client_identity_registration(&self.key_namespace, &self.name)?;
+        output::print_header("Register Account Identity");
+        output::print_field("DID", &did);
+        output::print_field("Account", &format!("0x{}", hex::encode(account)));
+        if crate::keystore::identity_registered(&rpc, &did).await {
+            output::print_info("already registered");
+            return Ok(());
+        }
+        let answer = crate::keystore::send_as_client(
+            &rpc,
+            &self.key_namespace,
+            [0u8; 32],
+            register,
+            REGISTER_ACCOUNT_GAS,
+        )
+        .await?;
+        let tx_hash = crate::keystore::submitted_hash(&answer).ok_or_else(|| {
+            anyhow::anyhow!("the node answered without a transaction hash: {answer}")
+        })?;
+        output::print_field("Transaction Hash", &tx_hash);
+        let waited = crate::keystore::RECEIPT_WAIT;
+        if crate::keystore::await_receipt(&rpc, &tx_hash, waited)
+            .await?
+            .is_none()
+        {
+            anyhow::bail!(
+                "the registration was in no block after {} seconds; run this again to see \
+                 whether it is registered",
+                waited.as_secs()
+            );
+        }
+        crate::keystore::await_identity(&rpc, &did).await?;
+        output::print_success("account identity registered");
+        Ok(())
     }
 }
 
@@ -139,7 +218,8 @@ impl IdentityRegisterCmd {
         if !self.identity_type.eq_ignore_ascii_case("human") {
             anyhow::bail!(
                 "--identity-type is human or machine; a machine that answers for itself \
-                 registers with `tenzro setup --operator autonomous`"
+                 registers with `tenzro setup --operator autonomous`, and this CLI's own account \
+                 with `tenzro identity register-account`"
             );
         }
         register_human(&self.rpc, &self.name).await

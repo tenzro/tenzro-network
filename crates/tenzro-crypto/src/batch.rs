@@ -273,7 +273,14 @@ impl BatchedSignature {
         } else {
             pq_required_from_ms
         };
-        self.verify_for_record_under(identity, message, made_at_ms, block_ms, skew_ms, required_from)
+        self.verify_for_record_under(
+            identity,
+            message,
+            made_at_ms,
+            block_ms,
+            skew_ms,
+            required_from,
+        )
     }
 
     /// `message` is in the batch the identity signed, which was signed no
@@ -459,6 +466,9 @@ impl Ticket {
     }
 }
 
+/// Most extra time an adaptive wait adds to a signer's base wait.
+pub const MAX_ADAPTIVE_EXTRA: Duration = Duration::from_secs(28);
+
 struct State {
     batcher: HardwareBatcher,
     waiting: Vec<Waiter>,
@@ -476,6 +486,9 @@ pub struct BatchService {
     identity: Arc<dyn HybridSigner>,
     state: Mutex<State>,
     immediate_min_interval_ms: u64,
+    /// Recent worst hardware time for one flush attempt, in ms: it follows
+    /// the slowest attempt up at once and decays a quarter per attempt.
+    slow_flush_ms: AtomicU64,
 }
 
 impl BatchService {
@@ -494,7 +507,21 @@ impl BatchService {
                 refused: false,
             }),
             immediate_min_interval_ms,
+            slow_flush_ms: AtomicU64::new(0),
         })
+    }
+
+    /// Recent worst hardware time of one flush attempt, failed attempts
+    /// included. A signer waits longer while the hardware is slow.
+    pub fn observed_flush_ms(&self) -> u64 {
+        self.slow_flush_ms.load(Ordering::Relaxed)
+    }
+
+    fn note_flush(&self, started: std::time::Instant) {
+        let took = started.elapsed().as_millis() as u64;
+        let prev = self.slow_flush_ms.load(Ordering::Relaxed);
+        self.slow_flush_ms
+            .store(took.max(prev - prev / 4), Ordering::Relaxed);
     }
 
     /// The identity whose hardware key signs.
@@ -523,7 +550,9 @@ impl BatchService {
         }
         st.refused = false;
         if admitting && st.batcher.pending() >= st.batcher.capacity() * Self::QUEUE_FACTOR {
-            return Err(bad("the signing queue is full: the hardware is not signing"));
+            return Err(bad(
+                "the signing queue is full: the hardware is not signing",
+            ));
         }
         Ok(())
     }
@@ -547,7 +576,12 @@ impl BatchService {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Self::gate(&mut st, now_ms, true)?;
         st.waiting.push(tx);
-        if let Ok(Some(sigs)) = st.batcher.submit(message, now_ms) {
+        let started = std::time::Instant::now();
+        let flushed = st.batcher.submit(message, now_ms);
+        if !matches!(flushed, Ok(None)) {
+            self.note_flush(started);
+        }
+        if let Ok(Some(sigs)) = flushed {
             Self::resolve(&mut st.waiting, sigs);
         }
         Ok(Ticket(rx))
@@ -563,7 +597,12 @@ impl BatchService {
         // A failed signature leaves everything pending and the next tick tries
         // the whole queue again; submissions are refused while it is full, so
         // the retry is bounded and the queue empties when the hardware recovers.
-        match st.batcher.tick(now_ms)? {
+        let started = std::time::Instant::now();
+        let ticked = st.batcher.tick(now_ms);
+        if !matches!(ticked, Ok(None)) {
+            self.note_flush(started);
+        }
+        match ticked? {
             Some(sigs) => {
                 let n = sigs.len();
                 Self::resolve(&mut st.waiting, sigs);
@@ -589,7 +628,10 @@ impl BatchService {
         // Keep waiters and pending messages aligned: submit, then force.
         let _ = st.batcher.submit(message, now_ms);
         if st.batcher.pending() > 0 {
-            let sigs = st.batcher.flush(now_ms)?;
+            let started = std::time::Instant::now();
+            let flushed = st.batcher.flush(now_ms);
+            self.note_flush(started);
+            let sigs = flushed?;
             Self::resolve(&mut st.waiting, sigs);
         }
         st.last_immediate_ms = Some(now_ms);
@@ -641,7 +683,8 @@ impl RecordSignature {
 
     /// Verified at `at_ms` (the batch's own date), within the clock skew.
     pub fn verify(&self, identity: &CompositePublicKey, message: &[u8], at_ms: u64) -> Result<()> {
-        self.batched.verify(identity, message, at_ms, batch_skew_ms())
+        self.batched
+            .verify(identity, message, at_ms, batch_skew_ms())
     }
 
     /// Verified now.
@@ -738,7 +781,9 @@ pub struct BatchRecordSigner {
 }
 
 impl BatchRecordSigner {
-    /// `wait` bounds how long one signature waits for its batch.
+    /// `wait` bounds how long one signature waits for its batch while the
+    /// hardware is quick; while it is slow the wait grows by three times the
+    /// slowest recent flush, at most [`MAX_ADAPTIVE_EXTRA`].
     pub fn new(service: Arc<BatchService>, wait: Duration) -> Self {
         Self { service, wait }
     }
@@ -746,6 +791,12 @@ impl BatchRecordSigner {
     /// The batch service behind this signer.
     pub fn service(&self) -> &Arc<BatchService> {
         &self.service
+    }
+
+    /// How long a signature requested now waits for its batch.
+    pub fn current_wait(&self) -> Duration {
+        let extra = Duration::from_millis(self.service.observed_flush_ms().saturating_mul(3));
+        self.wait + extra.min(MAX_ADAPTIVE_EXTRA)
     }
 }
 
@@ -757,7 +808,9 @@ impl RecordSigner for BatchRecordSigner {
         let ticket = self
             .service
             .submit(message.to_vec(), crate::session::now_ms())?;
-        ticket.wait(self.wait).map(RecordSignature::batched)
+        ticket
+            .wait(self.current_wait())
+            .map(RecordSignature::batched)
     }
 }
 
@@ -785,6 +838,52 @@ mod tests {
         max_batch: 4,
         flush_interval_ms: 1_000,
     };
+
+    /// A hardware that takes `delay` per signature.
+    struct Slow(TestHybridSigner, Duration);
+    impl HybridSigner for Slow {
+        fn sign(&self, c: SignatureContext, m: &[u8]) -> Result<CompositeSignature> {
+            std::thread::sleep(self.1);
+            self.0.sign(c, m)
+        }
+        fn public_key(&self) -> &CompositePublicKey {
+            self.0.public_key()
+        }
+        fn sign_external(&self, d: &[u8]) -> Result<Vec<u8>> {
+            self.0.sign_external(d)
+        }
+    }
+
+    #[test]
+    fn a_slow_hardware_lengthens_the_signer_wait_within_the_cap() {
+        let slow = Arc::new(Slow(
+            TestHybridSigner::hybrid(44),
+            Duration::from_millis(80),
+        ));
+        let svc = Arc::new(BatchService::new(slow, P, 0).unwrap());
+        let signer = BatchRecordSigner::new(svc.clone(), Duration::from_millis(500));
+        assert_eq!(signer.current_wait(), Duration::from_millis(500));
+        svc.sign_now(b"a".to_vec(), 10).unwrap();
+        assert!(svc.observed_flush_ms() >= 80);
+        let w = signer.current_wait();
+        assert!(w >= Duration::from_millis(500 + 3 * 80), "{w:?}");
+        assert!(w <= Duration::from_millis(500) + MAX_ADAPTIVE_EXTRA);
+        // A hardware stall far past the cap does not grow the wait without bound.
+        svc.slow_flush_ms.store(600_000, Ordering::Relaxed);
+        assert_eq!(
+            signer.current_wait(),
+            Duration::from_millis(500) + MAX_ADAPTIVE_EXTRA
+        );
+    }
+
+    #[test]
+    fn the_observed_flush_time_decays_as_the_hardware_recovers() {
+        let id = Arc::new(Counted(TestHybridSigner::hybrid(45), AtomicUsize::new(0)));
+        let svc = BatchService::new(id, P, 0).unwrap();
+        svc.slow_flush_ms.store(4_000, Ordering::Relaxed);
+        svc.sign_now(b"a".to_vec(), 10).unwrap();
+        assert_eq!(svc.observed_flush_ms(), 3_000);
+    }
 
     fn rig(seed: u8) -> (Arc<Counted>, HardwareBatcher) {
         let id = Arc::new(Counted(TestHybridSigner::hybrid(seed), AtomicUsize::new(0)));
@@ -954,7 +1053,11 @@ mod tests {
 
     // -- the requirement is judged at block time --------------------------------
 
-    fn classical_batch(seed: u8, message: &[u8], at: u64) -> (CompositePublicKey, BatchedSignature) {
+    fn classical_batch(
+        seed: u8,
+        message: &[u8],
+        at: u64,
+    ) -> (CompositePublicKey, BatchedSignature) {
         let id = Arc::new(TestHybridSigner::p256_only(seed));
         let pk = id.public_key().clone();
         let mut b = HardwareBatcher::new(id, P).unwrap();
@@ -976,14 +1079,30 @@ mod tests {
         // signer's own claim and decides nothing.
         for block in [from, from + 1, from + 60_000, from + age] {
             assert!(
-                sig.verify_for_record_at_block(&pk, b"receipt", from - 1_000, block, skew, age, from)
-                    .is_err(),
+                sig.verify_for_record_at_block(
+                    &pk,
+                    b"receipt",
+                    from - 1_000,
+                    block,
+                    skew,
+                    age,
+                    from
+                )
+                .is_err(),
                 "block {block}"
             );
         }
         // Far enough past the window it is refused for its age as well.
         let err = sig
-            .verify_for_record_at_block(&pk, b"receipt", from - 1_000, from + 10 * age, skew, age, from)
+            .verify_for_record_at_block(
+                &pk,
+                b"receipt",
+                from - 1_000,
+                from + 10 * age,
+                skew,
+                age,
+                from,
+            )
             .unwrap_err()
             .to_string();
         assert!(err.contains("too long before"), "{err}");
@@ -997,15 +1116,33 @@ mod tests {
         let mut b = HardwareBatcher::new(id, P).unwrap();
         b.submit(b"r".to_vec(), from + 10_000).unwrap();
         let sig = b.flush(from + 10_000).unwrap().remove(0);
-        sig.verify_for_record_at_block(&pk, b"r", from + 10_000, from + 20_000, 60_000, 3_600_000, from)
-            .unwrap();
-        assert!(sig
-            .verify_for_record_at_block(&pk, b"r", from + 10_000, from + 10_000_000, 60_000, 3_600_000, from)
-            .is_err());
+        sig.verify_for_record_at_block(
+            &pk,
+            b"r",
+            from + 10_000,
+            from + 20_000,
+            60_000,
+            3_600_000,
+            from,
+        )
+        .unwrap();
+        assert!(
+            sig.verify_for_record_at_block(
+                &pk,
+                b"r",
+                from + 10_000,
+                from + 10_000_000,
+                60_000,
+                3_600_000,
+                from
+            )
+            .is_err()
+        );
         // A record dated long before its root is refused for its own date.
-        assert!(sig
-            .verify_for_record_at_block(&pk, b"r", 1, from + 20_000, 60_000, 3_600_000, from)
-            .is_err());
+        assert!(
+            sig.verify_for_record_at_block(&pk, b"r", 1, from + 20_000, 60_000, 3_600_000, from)
+                .is_err()
+        );
     }
 
     // -- a classical-only node after the moment ----------------------------------
@@ -1032,15 +1169,28 @@ mod tests {
         let before = pq_leg_required_from_ms();
         let t = 2_000_000_000_000_000u64;
         set_pq_leg_required_from_ms(t);
-        let id = Arc::new(Counted(TestHybridSigner::p256_only(13), AtomicUsize::new(0)));
+        let id = Arc::new(Counted(
+            TestHybridSigner::p256_only(13),
+            AtomicUsize::new(0),
+        ));
         let svc = BatchService::new(id.clone(), P, 0).unwrap();
         let ticket = svc.submit(b"a".to_vec(), t - 1).unwrap();
         assert!(svc.tick(t).is_err());
         assert!(svc.refused());
-        assert!(ticket.wait(Duration::from_millis(50)).unwrap_err().to_string().contains("refused"));
+        assert!(
+            ticket
+                .wait(Duration::from_millis(50))
+                .unwrap_err()
+                .to_string()
+                .contains("refused")
+        );
         assert!(svc.submit(b"b".to_vec(), t).is_err());
         assert!(svc.sign_now(b"c".to_vec(), t).is_err());
-        assert_eq!(id.1.load(Ordering::SeqCst), 0, "no hardware signature is spent");
+        assert_eq!(
+            id.1.load(Ordering::SeqCst),
+            0,
+            "no hardware signature is spent"
+        );
         // Governance moving the moment back ends the refusal.
         set_pq_leg_required_from_ms(u64::MAX);
         svc.submit(b"d".to_vec(), t).unwrap();
@@ -1076,7 +1226,11 @@ mod tests {
 
     #[test]
     fn a_full_queue_empties_and_signing_resumes_once_the_hardware_recovers() {
-        let id = Arc::new(Flaky(TestHybridSigner::hybrid(15), AtomicUsize::new(0), 100));
+        let id = Arc::new(Flaky(
+            TestHybridSigner::hybrid(15),
+            AtomicUsize::new(0),
+            100,
+        ));
         let svc = BatchService::new(id.clone(), P, 0).unwrap();
         let cap = P.max_batch * 16;
         // Every full-batch flush fails while the hardware is busy; the queue
@@ -1088,7 +1242,10 @@ mod tests {
             }
         }
         assert_eq!(tickets.len(), cap);
-        assert!(svc.submit(b"more".to_vec(), 1).is_err(), "full queue refuses new messages");
+        assert!(
+            svc.submit(b"more".to_vec(), 1).is_err(),
+            "full queue refuses new messages"
+        );
         // Ticks keep trying, each failing while the hardware is busy, and the
         // queue does not grow.
         let mut failures = 0;
@@ -1103,7 +1260,10 @@ mod tests {
             }
         }
         assert!(failures > 0, "the busy hardware was retried");
-        assert_eq!(signed, cap, "the whole queue is signed in one batch once the hardware works");
+        assert_eq!(
+            signed, cap,
+            "the whole queue is signed in one batch once the hardware works"
+        );
         for t in tickets {
             t.wait(Duration::from_millis(100)).unwrap();
         }

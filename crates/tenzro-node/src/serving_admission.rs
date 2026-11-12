@@ -274,10 +274,10 @@ pub async fn admit_inference_as(
 
                 // The per-model cap, acquired here rather than by the handler.
                 //
-                // Acquiring it separately downstream was a real bug found in
-                // bring-up: this layer admitted, the per-model cap refused,
-                // and the traffic guard dropped as a *completion* — so
-                // goodput reported 100% while most requests failed. A bound
+                // Acquiring it separately downstream goes wrong like this:
+                // this layer admits, the per-model cap refuses,
+                // and the traffic guard drops as a *completion* — so
+                // goodput reports 100% while most requests fail. A bound
                 // that can refuse must be part of the same decision, and a
                 // request that never ran must not be counted as one that did.
                 //

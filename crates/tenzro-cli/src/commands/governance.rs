@@ -574,10 +574,7 @@ impl LeversCmd {
                                 .unwrap_or(&p["value"]);
                             format!("{} from epoch {}", text(to), p["activates_epoch"])
                         });
-                let pending = match l
-                    .get("guardian_pause_until_epoch")
-                    .filter(|e| !e.is_null())
-                {
+                let pending = match l.get("guardian_pause_until_epoch").filter(|e| !e.is_null()) {
                     Some(until) if pending.is_empty() => {
                         format!("guardian pause until epoch {until}")
                     }

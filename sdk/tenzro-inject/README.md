@@ -49,7 +49,7 @@ The EVM provider speaks the standard wallet-call methods, so libraries such as v
 | Method | What it does |
 |---|---|
 | `wallet_getCapabilities` | `{ "<chainId>": { atomic: { status: "supported" }, paymasterService: { supported: false } } }`, answered without a window |
-| `wallet_sendCalls` | Up to 16 calls (`to`, `value`, `data`) as one contract-call transaction from the user's account, approved once by their passkey in the open wallet. Every call applies or none does. The batch id is the transaction hash. |
+| `wallet_sendCalls` | Calls (`to`, `value`, `data`) as one contract-call transaction from the user's account, approved once by their passkey in the open wallet. Every call applies or none does. The batch id is the transaction hash. |
 | `wallet_getCallsStatus` | `100` while pending, `200` confirmed, `500` reverted, from the transaction's receipt; answered without a window |
 | `wallet_showCallsStatus` | Shows the batch in the open wallet |
 | `wallet_getSupportedExecutionPermissions` | `native-token-periodic` with the `expiry` rule |

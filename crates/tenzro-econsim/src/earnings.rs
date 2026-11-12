@@ -1,10 +1,8 @@
 //! Operator-earnings beyond per-call settlement: the spot tier, the standby
-//! fee and the availability (readiness) reward, per
-//! TASK-OPERATOR-EARNINGS-2026-10-23.md and section 9 of
-//! TENZRO-RESEARCH-OPERATOR-EARNINGS-ENERGY-VERIFY-2026-10-23.md.
+//! fee and the availability (readiness) reward.
 //!
-//! None of the three legs is implemented on the ledger yet (the gaps queue
-//! carries them as future build items), so this module cannot replay them
+//! None of the three legs is implemented on the ledger yet,
+//! so this module cannot replay them
 //! through [`crate::economy`] the way [`crate::treasury`] and
 //! [`crate::staking`] replay existing ledger rules. Instead, like
 //! [`crate::growth`] (an aggregate model of the classes and channels the

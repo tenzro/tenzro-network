@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Put the installer packages beside the archives and rebuild the manifest, so the
 # next signed SHA256SUMS lists archives AND packages. Run by the release assembler on
-# the host that holds the dist directory, before the owner signs.
+# the host that holds the dist directory, before the key holder signs.
 #
 #   fold-packages.sh <dist-dir> <packages-dir>
 #

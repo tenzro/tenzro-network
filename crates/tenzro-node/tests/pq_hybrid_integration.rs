@@ -172,5 +172,5 @@ async fn restart_survives_pq_genesis() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Revocation broadcast signature is mandatory (HIGH #96)
+// 4. Revocation broadcast signature is mandatory
 // ---------------------------------------------------------------------------

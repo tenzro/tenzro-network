@@ -514,10 +514,12 @@ mod tests {
         use llama_cpp_2::model::params::LlamaModelParams;
         use std::path::PathBuf;
 
-        let dir = std::env::var("TENZRO_MODELS_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
-                .join(".tenzro/models")
-        });
+        let dir = std::env::var("TENZRO_MODELS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
+                    .join(".tenzro/models")
+            });
         let path = dir.join("nemotron-3.5-bolt-e4b.gguf");
         if !path.exists() {
             eprintln!("skip: {} missing", path.display());
@@ -542,13 +544,34 @@ mod tests {
             enable_thinking: Some(thinking),
             ..Default::default()
         };
-        let on = render_turn(Some(&source), "nemotron-3.5-bolt-e4b", &msgs, &[], &config(true))
-            .expect("render thinking-on");
-        let off = render_turn(Some(&source), "nemotron-3.5-bolt-e4b", &msgs, &[], &config(false))
-            .expect("render thinking-off");
-        eprintln!("ON  tail: {:?}", &on.prompt[on.prompt.len().saturating_sub(80)..]);
-        eprintln!("OFF tail: {:?}", &off.prompt[off.prompt.len().saturating_sub(80)..]);
-        assert_ne!(on.prompt, off.prompt, "enable_thinking must change the prompt");
+        let on = render_turn(
+            Some(&source),
+            "nemotron-3.5-bolt-e4b",
+            &msgs,
+            &[],
+            &config(true),
+        )
+        .expect("render thinking-on");
+        let off = render_turn(
+            Some(&source),
+            "nemotron-3.5-bolt-e4b",
+            &msgs,
+            &[],
+            &config(false),
+        )
+        .expect("render thinking-off");
+        eprintln!(
+            "ON  tail: {:?}",
+            &on.prompt[on.prompt.len().saturating_sub(80)..]
+        );
+        eprintln!(
+            "OFF tail: {:?}",
+            &off.prompt[off.prompt.len().saturating_sub(80)..]
+        );
+        assert_ne!(
+            on.prompt, off.prompt,
+            "enable_thinking must change the prompt"
+        );
         assert!(
             on.prompt.contains("think"),
             "thinking-ON prompt should carry the reasoning marker"

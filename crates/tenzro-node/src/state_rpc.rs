@@ -165,28 +165,27 @@ pub(crate) async fn produce_snapshot(node: &Arc<TenzroNode>) -> Result<Value, Js
     let store = node
         .snapshot_store()
         .ok_or_else(|| err(-32603, "snapshot store not initialised"))?;
-    let consensus = node
-        .consensus()
+    node.consensus()
         .ok_or_else(|| err(-32603, "no consensus engine on this node"))?;
-    let epoch_start = consensus
-        .epoch_manager()
-        .current_epoch()
-        .start_height
-        .as_u64();
     let tip = trie(node)?
         .latest_version()
         .map_err(|e| err(-32603, format!("state trie: {e}")))?
         .unwrap_or(0);
-    if epoch_start == 0 || epoch_start + tenzro_consensus::STATE_ROOT_LAG > tip {
-        return Err(err(
+    let storage = node
+        .storage()
+        .ok_or_else(|| err(-32603, "storage not initialised"))?;
+    let epoch_start = crate::snapshot::latest_epoch_open(
+        storage,
+        tip.saturating_sub(tenzro_consensus::STATE_ROOT_LAG),
+    )
+    .await
+    .map_err(|e| err(-32603, format!("epoch start: {e}")))?
+    .ok_or_else(|| {
+        err(
             -32000,
-            format!(
-                "no snapshot can be taken yet: the current epoch starts at {epoch_start}, and \
-                 blocks up to {} must be committed first",
-                epoch_start + tenzro_consensus::STATE_ROOT_LAG
-            ),
-        ));
-    }
+            "no snapshot can be taken: no epoch has opened with its blocks committed",
+        )
+    })?;
     let manifest = store
         .produce(epoch_start)
         .await

@@ -112,6 +112,9 @@ Write-Output ("target dir: $TargetDir ($freeGB GB free, $Jobs jobs)")
 $env:CARGO_TARGET_DIR = $TargetDir
 $env:CARGO_BUILD_JOBS = "$Jobs"
 $env:CARGO_TERM_COLOR = "never"
+# Keep line tables so the linker writes a .pdb beside each .exe; the .pdb ships in a separate debug zip.
+$env:CARGO_PROFILE_RELEASE_STRIP = "none"
+$env:CARGO_PROFILE_RELEASE_DEBUG = "line-tables-only"
 
 # --- build -----------------------------------------------------------------
 $started = Get-Date
@@ -154,6 +157,7 @@ Write-Output ("tenzro-node.exe is " + [math]::Round($bytes.Length / 1MB, 1) + " 
 # target box needs a matching toolkit, or those DLLs shipped beside it.
 $dumpbin = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
            Select-Object -First 1 -ExpandProperty FullName
+$deps = @()
 if ($dumpbin) {
     Write-Output "--- runtime DLL dependencies ---"
     $deps = & $dumpbin /DEPENDENTS $exe | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
@@ -169,6 +173,38 @@ Remove-Item -Recurse -Force (Join-Path $TargetDir "stage") -ErrorAction Silently
 New-Item -ItemType Directory -Force -Path (Join-Path $stage "bin") | Out-Null
 Copy-Item $exe (Join-Path $stage "bin\tenzro-node.exe")
 Copy-Item (Join-Path $TargetDir "release\tenzro.exe") (Join-Path $stage "bin\tenzro.exe")
+# The libraries the build leaves beside the binary, which the node loads from
+# its own folder: DirectML.dll (ONNX Runtime on Windows imports it in every
+# flavour, and an older Windows has none of its own or one too old) and, in the
+# CUDA build, the ONNX Runtime execution providers. Without the providers an
+# installed CUDA node has no ONNX path on its GPU. Only the CUDA flavour
+# builds providers, so only it ships them.
+$libs = @(Get-ChildItem (Join-Path $TargetDir "release") -File | Where-Object {
+    $_.Name -ieq "DirectML.dll" -or ($Flavour -eq "cuda" -and $_.Name -like "onnxruntime*.dll") })
+$libs | ForEach-Object { Copy-Item $_.FullName (Join-Path $stage "bin") }
+$libNames = @($libs | ForEach-Object { $_.Name.ToLower() } | Sort-Object)
+if ($Flavour -eq "cuda") {
+    foreach ($need in "onnxruntime_providers_shared.dll", "onnxruntime_providers_cuda.dll") {
+        if ($libNames -notcontains $need) { throw "REFUSING: the CUDA build left no $need beside the binary" }
+    }
+    # What the CUDA provider needs from the machine it is installed on (the
+    # CUDA runtime and cuDNN are the machine's, never shipped).
+    if ($dumpbin) {
+        Write-Output "--- CUDA provider DLL dependencies ---"
+        & $dumpbin /DEPENDENTS (Join-Path $TargetDir "release\onnxruntime_providers_cuda.dll") |
+            Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
+    }
+}
+if (($deps | Where-Object { $_ -ieq "DirectML.dll" }) -and ($libNames -notcontains "directml.dll")) {
+    throw "REFUSING: the binary imports DirectML.dll and the build left none beside it"
+}
+Write-Output ("libraries shipped: " + $(if ($libNames) { $libNames -join ", " } else { "none" }))
+# The network profile a node started without --boot-nodes joins through (as the Linux and macOS archives ship it).
+$profiles = Get-ChildItem (Join-Path $src "config\network") -Filter "*.toml" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^[0-9]+\.toml$' }
+if (-not $profiles) { throw "REFUSING: no config\network\<chain_id>.toml to ship" }
+New-Item -ItemType Directory -Force -Path (Join-Path $stage "share\network") | Out-Null
+$profiles | ForEach-Object { Copy-Item $_.FullName (Join-Path $stage "share\network") }
 $epoch = [DateTimeOffset]::FromUnixTimeSeconds([long]$commitTime).UtcDateTime
 Get-ChildItem -Recurse $stage | ForEach-Object { $_.LastWriteTimeUtc = $epoch }
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
@@ -188,6 +224,9 @@ Expand-Archive -Path $zip -DestinationPath $gate
 # The node logs to stderr; under ErrorActionPreference=Stop Windows PowerShell turns
 # redirected native stderr into a terminating error, so the redirect happens in cmd.
 $gateExe = Join-Path $gate "$name\bin\tenzro-node.exe"
+foreach ($l in $libNames) {
+    if (-not (Test-Path (Join-Path $gate "$name\bin\$l"))) { throw "install gate: the archive has no bin\$l" }
+}
 $report = @(cmd.exe /c "`"$gateExe`" hardware 2>nul")
 $want = @{ cpu = "CPU"; cuda = "CUDA"; vulkan = "Vulkan" }[$Flavour]
 if (-not ($report -contains "build: $want")) { throw "install gate: the archive does not report a $want build: $($report -join '; ')" }
@@ -197,4 +236,14 @@ Remove-Item -Recurse -Force $gate
    role = $(if ($Flavour -eq "cpu") { "cpu" } else { "gpu" }); host = "Windows-x86_64"; verdict = "pass";
    checked = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"); report = $report } |
     ConvertTo-Json | Set-Content -Encoding ascii (Join-Path $DistDir "$name.install.json")
+# --- debug symbols: the .pdb files, matched to the .exe by their GUID, in a separate archive ---
+$dbgStage = Join-Path $TargetDir "stage-debug\$name-debug"
+Remove-Item -Recurse -Force (Join-Path $TargetDir "stage-debug") -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $dbgStage | Out-Null
+Get-ChildItem (Join-Path $TargetDir "release") -Filter "tenzro*.pdb" | ForEach-Object { Copy-Item $_.FullName $dbgStage }
+if (-not (Get-ChildItem $dbgStage -Filter *.pdb)) { throw "no .pdb produced: the debug profile did not apply" }
+Get-ChildItem -Recurse $dbgStage | ForEach-Object { $_.LastWriteTimeUtc = $epoch }
+$dbgZip = Join-Path $DistDir "$name-debug.zip"
+Remove-Item $dbgZip -ErrorAction SilentlyContinue
+Compress-Archive -Path $dbgStage -DestinationPath $dbgZip
 Write-Output ("BUILD OK: " + $zip)

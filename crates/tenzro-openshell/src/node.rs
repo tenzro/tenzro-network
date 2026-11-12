@@ -165,6 +165,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::authority::{Authority, Proposed, StateAuthority};
+    use tenzro_crypto::composite::CompositePublicKey;
 
     const AGENT: &str = "did:tenzro:machine:a:b";
 
@@ -211,7 +212,15 @@ mod tests {
         let answer = Arc::new(parking_lot::Mutex::new(reply("active", "0")));
         let url = node(answer.clone()).await;
         let d = Arc::new(NodeDelegations::new(url).unwrap());
-        let a = StateAuthority::over(crate::credential_driver::tests::MACHINE, vec![], 1337, d);
+        let a = StateAuthority::over(
+            crate::credential_driver::tests::MACHINE,
+            CompositePublicKey {
+                p256: vec![],
+                pq: None,
+            },
+            1337,
+            d,
+        );
         let now = crate::now_ms();
         assert!(a.authorize(AGENT, &fetch(0), now).is_ok());
         assert_eq!(
@@ -239,7 +248,15 @@ mod tests {
         let answer = Arc::new(parking_lot::Mutex::new(reply("active", "990")));
         let url = node(answer).await;
         let d = Arc::new(NodeDelegations::new(url).unwrap());
-        let a = StateAuthority::over(crate::credential_driver::tests::MACHINE, vec![], 1337, d);
+        let a = StateAuthority::over(
+            crate::credential_driver::tests::MACHINE,
+            CompositePublicKey {
+                p256: vec![],
+                pq: None,
+            },
+            1337,
+            d,
+        );
         let now = crate::now_ms();
         assert!(a.check(AGENT, &fetch(5), now).is_ok());
         assert!(
@@ -251,7 +268,15 @@ mod tests {
     #[test]
     fn an_unreachable_node_refuses_everything() {
         let d = Arc::new(NodeDelegations::new("http://127.0.0.1:9/").unwrap());
-        let a = StateAuthority::over(crate::credential_driver::tests::MACHINE, vec![], 1337, d);
+        let a = StateAuthority::over(
+            crate::credential_driver::tests::MACHINE,
+            CompositePublicKey {
+                p256: vec![],
+                pq: None,
+            },
+            1337,
+            d,
+        );
         let now = crate::now_ms();
         let r = a.check(AGENT, &fetch(0), now).unwrap_err();
         assert!(r.0.contains("could not be read"), "{r}");

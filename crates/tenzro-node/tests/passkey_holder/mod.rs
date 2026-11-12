@@ -53,8 +53,8 @@ impl PasskeyHolder {
     }
 
     /// A user-verified, device-bound assertion over the `webauthn_challenge`
-    /// of a `tenzro_createCustodyChallenge` result; for an `enroll_passkey`
-    /// challenge, with the ML-DSA-65 leg over the same digest.
+    /// of a `tenzro_createCustodyChallenge` result, with the ML-DSA-65 leg over
+    /// the same digest.
     pub fn authorize(&self, issued: &Value) -> Value {
         let challenge_id = issued["challenge_id"]
             .as_str()
@@ -78,22 +78,20 @@ impl PasskeyHolder {
             &authenticator_data,
             &cdj,
         ));
-        let ml_dsa_signature_hex = (issued["operation"] == "enroll_passkey").then(|| {
-            let digest = hex::decode(
-                issued["challenge_hex"]
-                    .as_str()
-                    .expect("challenge_hex")
-                    .trim_start_matches("0x"),
-            )
-            .expect("challenge_hex is hex");
-            hex::encode(self.pq.sign(
-                tenzro_crypto::composite::LABEL_MLDSA65_P256,
-                &tenzro_crypto::composite::message_representative(
-                    tenzro_crypto::composite::SignatureContext::AccountOwner,
-                    &digest,
-                ),
-            ))
-        });
+        let digest = hex::decode(
+            issued["challenge_hex"]
+                .as_str()
+                .expect("challenge_hex")
+                .trim_start_matches("0x"),
+        )
+        .expect("challenge_hex is hex");
+        let ml_dsa_signature_hex = hex::encode(self.pq.sign(
+            tenzro_crypto::composite::LABEL_MLDSA65_P256,
+            &tenzro_crypto::composite::message_representative(
+                tenzro_crypto::composite::SignatureContext::AccountOwner,
+                &digest,
+            ),
+        ));
         json!({
             "challenge_id": challenge_id,
             "credential_id_hex": hex::encode(&self.credential_id),
@@ -131,7 +129,8 @@ impl PasskeyHolder {
             hex::decode(s.trim_start_matches("0x")).expect("hex")
         };
         let nonce: [u8; 16] = unhex("nonce_hex").try_into().expect("16-byte nonce");
-        let assertion = &self.authorize(issued)["assertion"];
+        let authorization = self.authorize(issued);
+        let assertion = &authorization["assertion"];
         let bytes = |field: &str| -> Vec<u8> {
             serde_json::from_value(assertion[field].clone()).expect("assertion bytes")
         };
@@ -145,7 +144,14 @@ impl PasskeyHolder {
                     client_data_json: bytes("client_data_json"),
                     signature: bytes("signature"),
                 },
-                pq: None,
+                pq: Some(
+                    hex::decode(
+                        authorization["ml_dsa_signature_hex"]
+                            .as_str()
+                            .expect("ml_dsa_signature_hex"),
+                    )
+                    .expect("hex"),
+                ),
             },
         }
     }

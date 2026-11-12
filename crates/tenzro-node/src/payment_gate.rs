@@ -157,7 +157,9 @@ mod tests {
     #[tokio::test]
     async fn a_node_without_a_payment_gateway_mints_no_challenge() {
         let (node, _tmp) = crate::bare_node().await;
-        let err = mint_for_resource(&node, "/functions/f1", 5).await.unwrap_err();
+        let err = mint_for_resource(&node, "/functions/f1", 5)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, PaymentError::ConfigError(ref m) if m.contains("gateway unavailable")),
             "{err}"

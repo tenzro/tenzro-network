@@ -212,8 +212,7 @@ where
 /// chaos seed 3054677367 under a 206s, 10%-loss netem window: 44 "channel
 /// is down" events and 25 "inbound channel closed" events in 3.5 minutes,
 /// every one of them this exact `read_frame` call timing out mid-transfer
-/// of a frame that was still arriving (TENZRO-INFLIGHT.md, 2026-10-21,
-/// `LIVENESS-3054677367-2026-10-21.md`).
+/// of a frame that was still arriving.
 pub async fn read_frame_idle<R>(
     recv: &mut R,
     max: usize,

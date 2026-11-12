@@ -3,7 +3,8 @@
   Builds the Tenzro MSI from a signed release archive (runs on Windows).
 
 .DESCRIPTION
-  Extracts the archive, verifies it holds exactly the two expected binaries,
+  Extracts the archive, verifies it holds the two programs, the libraries they
+  load from their own folder and the network profile, and nothing else,
   stages the license, notice and provenance files, and runs the WiX v4
   compiler. The binaries are packaged byte for byte; nothing is rebuilt.
 
@@ -14,9 +15,9 @@ param(
     [Parameter(Mandatory)][string]$OutMsi,
     [Parameter(Mandatory)][string]$WorkDir,
     [string]$ExpectedZipSha256 = '',
-    [string]$Version = '0.2.0',
-    [string]$SourceCommit = '2892200028fd326e87a69ed7dba8bc9f110db8ff',
-    [string]$PublicCommit = 'c78bd5fed6129a78285265c7de66b4572a5ceef4',
+    [string]$Version = '',
+    [string]$SourceCommit = 'unknown',
+    [string]$PublicCommit = 'unknown',
     [string]$LicensePath = '',
     [string]$NoticePath = '',
     [ValidateSet('low', 'medium', 'high')][string]$Compression = 'high'
@@ -24,6 +25,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $Version) {
+    # Run from a checkout: the version of the node, as the other packages take it.
+    $nodeToml = Join-Path $here '..\..\crates\tenzro-node\Cargo.toml'
+    if (Test-Path -LiteralPath $nodeToml) {
+        $m = Select-String -LiteralPath $nodeToml -Pattern '^version = "(.*)"' | Select-Object -First 1
+        if ($m) { $Version = $m.Matches[0].Groups[1].Value }
+    }
+    if (-not $Version) { throw 'no -Version given and no crates\tenzro-node\Cargo.toml to read it from' }
+}
 if (-not $LicensePath) { $LicensePath = Join-Path $here 'LICENSE' }
 if (-not $NoticePath) { $NoticePath = Join-Path $here 'NOTICE' }
 $UpgradeCode = '6B1E5A52-3C0D-4F0B-9C5E-7A1D2F8B4E91'
@@ -61,8 +71,18 @@ $top = Get-ChildItem -LiteralPath $extract -Directory
 if ($top.Count -ne 1) { throw 'unexpected archive layout (expected one top-level directory)' }
 $payload = $top[0].FullName
 $files = Get-ChildItem -LiteralPath $payload -Recurse -File | ForEach-Object { $_.FullName.Substring($payload.Length + 1).ToLower() } | Sort-Object
-if ($files.Count -ne 2 -or ($files -notcontains 'bin\tenzro.exe') -or ($files -notcontains 'bin\tenzro-node.exe')) {
+# The archive holds the two programs, the libraries they load from their own
+# folder, and the network profile. Anything else is not repackaged blindly.
+$libFiles = @($files | Where-Object { $_ -match '^bin\\(onnxruntime[a-z0-9_]*|directml)\.dll$' })
+$netFiles = @($files | Where-Object { $_ -match '^share\\network\\[0-9]+\.toml$' })
+$known = @('bin\tenzro.exe', 'bin\tenzro-node.exe') + $libFiles + $netFiles
+$unknown = @($files | Where-Object { $known -notcontains $_ })
+if (($files -notcontains 'bin\tenzro.exe') -or ($files -notcontains 'bin\tenzro-node.exe') -or $unknown) {
     throw "unexpected archive contents: $($files -join ', ')"
+}
+if (-not $netFiles) { throw 'the archive ships no network profile (share\network\<chain_id>.toml)' }
+foreach ($need in 'bin\onnxruntime_providers_shared.dll', 'bin\onnxruntime_providers_cuda.dll') {
+    if ($libFiles -notcontains $need) { throw "the CUDA archive has no $need" }
 }
 $exeSha = @{}
 foreach ($f in $files) { $exeSha[$f] = Get-Sha256 (Join-Path $payload $f) }
@@ -100,9 +120,8 @@ public repository head: $PublicCommit
 source archive        : $(Split-Path -Leaf $ZipPath)
 source archive sha256 : $zipSha
 
-binary sha256:
-  bin\tenzro.exe       $($exeSha['bin\tenzro.exe'])
-  bin\tenzro-node.exe  $($exeSha['bin\tenzro-node.exe'])
+file sha256:
+$((@($files | ForEach-Object { "  {0}  {1}" -f $exeSha[$_], $_ })) -join "`n")
 
 Verify the download against the release signature (cosign on SHA256SUMS)
 as described in the release verification guide before installing.
@@ -114,6 +133,29 @@ this machine can run the CUDA build.
 [IO.File]::WriteAllText((Join-Path $stage 'PROVENANCE.txt'), ($prov -replace "`r?`n", "`r`n"), [Text.Encoding]::ASCII)
 
 $productCode = '{' + (New-NameGuid $UpgradeCode "tenzro-windows-x86_64-cuda-$Version") + '}'
+
+# The libraries and network profiles differ from archive to archive, so their
+# components are written here and compiled with Tenzro.wxs.
+function New-FileComponents([string]$GroupId, [string]$DirectoryId, [string]$Prefix, [string[]]$Relative) {
+    $x = "    <ComponentGroup Id=`"$GroupId`" Directory=`"$DirectoryId`">`r`n"
+    foreach ($rel in $Relative) {
+        # The archive listing above is lower-cased; the file keeps its own name.
+        $file = Get-ChildItem -LiteralPath (Split-Path -Parent (Join-Path $payload $rel)) -File |
+                Where-Object { $_.Name -ieq (Split-Path -Leaf $rel) } | Select-Object -First 1
+        $id = $Prefix + ($file.Name -replace '[^A-Za-z0-9_.]', '_')
+        $source = [Security.SecurityElement]::Escape($file.FullName)
+        $x += "      <Component Id=`"Cmp$id`" Bitness=`"always64`">`r`n"
+        $x += "        <File Id=`"$id`" Source=`"$source`" KeyPath=`"yes`" />`r`n"
+        $x += "      </Component>`r`n"
+    }
+    return $x + "    </ComponentGroup>`r`n"
+}
+$payloadWxs = Join-Path $WorkDir 'Payload.wxs'
+$fragment = "<Wix xmlns=`"http://wixtoolset.org/schemas/v4/wxs`">`r`n  <Fragment>`r`n" +
+    (New-FileComponents 'PayloadLibs' 'BINDIR' 'Lib_' $libFiles) +
+    (New-FileComponents 'NetworkProfiles' 'NETWORKDIR' 'Net_' $netFiles) +
+    "  </Fragment>`r`n</Wix>`r`n"
+[IO.File]::WriteAllText($payloadWxs, $fragment, [Text.Encoding]::ASCII)
 
 $wix = Get-Command wix -ErrorAction Stop
 Write-Host "wix: $(& wix --version)"
@@ -132,7 +174,7 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
     -d "Version=$Version" -d "ProductCode=$productCode" -d "Compression=$Compression" `
     -d "PayloadDir=$payload" -d "StageDir=$stage" -d "ScriptDir=$here" `
     -d "SourceCommit=$SourceCommit" -d "PublicCommit=$PublicCommit" -d "ArchiveSha256=$zipSha" `
-    (Join-Path $here 'Tenzro.wxs')
+    (Join-Path $here 'Tenzro.wxs') $payloadWxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
 
 & wix msi validate -sice ICE34 -sice ICE38 -sice ICE43 -sice ICE57 $OutMsi

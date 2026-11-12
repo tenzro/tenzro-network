@@ -465,8 +465,8 @@ pub(crate) mod tests {
         Arc<RecordLog>,
         Arc<TestHybridSigner>,
     ) {
-        let id = Arc::new(TestHybridSigner::p256_only(21));
-        let authority = StateAuthority::new(MACHINE, id.public_key().p256.clone(), 1337);
+        let id = Arc::new(TestHybridSigner::hybrid(21));
+        let authority = StateAuthority::new(MACHINE, id.public_key().clone(), 1337);
         let mut t = terms(&["pay", "fetch"]);
         t.delegation_scope.max_transaction_value = Some(cap.to_string());
         // AP2 mandate payments are checked as the `ap2` protocol too.

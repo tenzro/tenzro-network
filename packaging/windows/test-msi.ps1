@@ -87,7 +87,8 @@ $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\T
 
 function Verify-Installed([string]$mode, [string]$version) {
     $bin = Join-Path $InstallDir 'bin'
-    foreach ($f in 'bin\tenzro.exe', 'bin\tenzro-node.exe', 'bin\tenzro-check.cmd', 'LICENSE.txt', 'NOTICE.txt', 'PROVENANCE.txt', 'tenzro-check.ps1', 'tenzro-terminal.cmd') {
+    Check 'network profile present: share\network\<chain_id>.toml' (@(Get-ChildItem -LiteralPath (Join-Path $InstallDir 'share\network') -Filter '*.toml' -ErrorAction SilentlyContinue).Count -ge 1)
+    foreach ($f in 'bin\tenzro.exe', 'bin\tenzro-node.exe', 'bin\DirectML.dll', 'bin\onnxruntime_providers_shared.dll', 'bin\onnxruntime_providers_cuda.dll', 'bin\tenzro-check.cmd', 'LICENSE.txt', 'NOTICE.txt', 'PROVENANCE.txt', 'tenzro-check.ps1', 'tenzro-terminal.cmd') {
         Check "file present: $f" (Test-Path -LiteralPath (Join-Path $InstallDir $f))
     }
     $arp = @(ArpEntries)

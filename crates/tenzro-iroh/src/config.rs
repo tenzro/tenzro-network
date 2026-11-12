@@ -107,6 +107,53 @@ pub struct TenzroIrohConfig {
     /// the QUIC limits each runs under: idle timeout, concurrent streams and
     /// the connection-wide receive window. The `[iroh.connection]` table.
     pub connection: crate::connection_limits::ConnectionLimits,
+
+    /// Relays to use besides the ones the boot list and the genesis name.
+    /// A relay that does not answer at start is asked again every round and
+    /// joins the running endpoint when it does.
+    pub relay_urls: Vec<url::Url>,
+
+    /// Direct addresses fixed for named peers, by machine DID, for networks
+    /// where discovery cannot find them. Used besides what peers publish.
+    pub peer_addrs: std::collections::BTreeMap<String, Vec<SocketAddr>>,
+
+    /// What the relay this node serves may hold at once. The `[iroh.relay_limits]` table.
+    pub relay_limits: RelayLimitsConfig,
+}
+
+/// The relay limits as they appear in the configuration file; each value
+/// is the [`crate::relay::RelayLimits`] default when omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelayLimitsConfig {
+    /// Most client connections served at once.
+    pub max_connections: usize,
+    /// Bytes per second read from one client.
+    pub client_bytes_per_second: u32,
+    /// Bytes one client may send in a burst above that rate.
+    pub client_burst_bytes: u32,
+}
+
+impl Default for RelayLimitsConfig {
+    fn default() -> Self {
+        let d = crate::relay::RelayLimits::default();
+        Self {
+            max_connections: d.max_connections,
+            client_bytes_per_second: d.client_bytes_per_second,
+            client_burst_bytes: d.client_burst_bytes,
+        }
+    }
+}
+
+impl RelayLimitsConfig {
+    /// The limits a relay runs under.
+    pub fn limits(&self) -> crate::relay::RelayLimits {
+        crate::relay::RelayLimits {
+            max_connections: self.max_connections,
+            client_bytes_per_second: self.client_bytes_per_second,
+            client_burst_bytes: self.client_burst_bytes,
+        }
+    }
 }
 
 impl TenzroIrohConfig {
@@ -181,6 +228,9 @@ impl Default for TenzroIrohConfig {
             proxy: None,
             admission: crate::limits::AdmissionLimits::default(),
             connection: crate::connection_limits::ConnectionLimits::default(),
+            relay_urls: Vec::new(),
+            peer_addrs: std::collections::BTreeMap::new(),
+            relay_limits: RelayLimitsConfig::default(),
             endpoint_secret: EndpointSecret::default(),
         }
     }

@@ -682,8 +682,9 @@ impl BlockSyncEngine {
                 // fault, and nothing more to gain from it now. An import
                 // that only ended an epoch made progress: its next committee
                 // verifies the next range.
+                let tip_now = self.local_tip().await?;
                 info!(
-                    peer = %hex::encode(&peer[..8]), height = %our, known_epoch, target = %target,
+                    peer = %hex::encode(&peer[..8]), height = %tip_now, started_at = %our, known_epoch, target = %target,
                     "Block-sync: the range imported nothing new"
                 );
                 return Ok(false);

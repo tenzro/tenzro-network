@@ -6,7 +6,7 @@
 #
 # One tenzro-<version>-macos.pkg holds both payloads and installs the one that
 # matches the Mac (Apple silicon: Metal build; Intel: CPU build). It is unsigned.
-# Environment: TENZRO_VERSION (default: the workspace version), PUBLIC_COMMIT, RELEASE_COMMIT.
+# Environment: TENZRO_VERSION (default: the version of the node), PUBLIC_COMMIT, RELEASE_COMMIT.
 set -euo pipefail
 [ "$(uname -s)" = Darwin ] || { echo "REFUSING: pkgbuild and productbuild only run on macOS" >&2; exit 1; }
 arm=${1:?usage: build-pkg.sh <aarch64-metal.tar.gz> <x86_64-cpu.tar.gz> <out-dir>}
@@ -14,7 +14,7 @@ x86=${2:?}; out=${3:?}
 here=$(cd "$(dirname "$0")" && pwd)
 pk=$(cd "$here/.." && pwd); repo=$(cd "$pk/.." && pwd)
 mkdir -p "$out"; out=$(cd "$out" && pwd)
-version=${TENZRO_VERSION:-$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -1)}
+version=${TENZRO_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/crates/tenzro-node/Cargo.toml" | head -1)}
 release_commit=${RELEASE_COMMIT:-unknown}; public_commit=${PUBLIC_COMMIT:-unknown}
 packaging_commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo unknown)
 w=$(mktemp -d "${TMPDIR:-/tmp}/tzpkg.XXXXXX"); trap 'rm -rf "$w"' EXIT
@@ -29,6 +29,8 @@ stage() { # archive flavour id
     root=$w/root-$flavour
     mkdir -p "$root/usr/local/lib/tenzro/bin" "$root/usr/local/lib/tenzro/share/doc" "$root/usr/local/bin" "$root/Applications/Tenzro.app/Contents/MacOS"
     install -m755 "$src/bin/tenzro" "$src/bin/tenzro-node" "$root/usr/local/lib/tenzro/bin/"
+    # The network profile, found by the node at <bin dir>/../share/network.
+    if [ -d "$src/share" ]; then cp -a "$src/share/." "$root/usr/local/lib/tenzro/share/"; fi
     install -m755 "$pk/common/tenzro-check" "$root/usr/local/lib/tenzro/bin/tenzro-check"
     install -m755 "$here/tenzro-uninstall" "$root/usr/local/lib/tenzro/bin/tenzro-uninstall"
     for b in tenzro tenzro-node tenzro-check tenzro-uninstall; do ln -s "../lib/tenzro/bin/$b" "$root/usr/local/bin/$b"; done

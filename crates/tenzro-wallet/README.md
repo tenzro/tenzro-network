@@ -34,15 +34,14 @@ Each wallet is bound to an identity, and the classical key is held by that ident
 
 - **Identity Binding**: A `WalletIdentity` is either `Human` (passkey / WebAuthn) or `Machine` (TPM 2.0 / Apple Secure Enclave). The wallet cannot exist without one.
 - **Hardware-Held Classical Key**: The classical private key is generated and used inside the identity's secure element. The `Wallet` type deliberately holds only the classical *public* key — there is no secret half to reconstruct and nothing to distribute.
-- **Hybrid Legs**: Alongside the hardware classical leg, a `HybridSigner` bound to the wallet produces an ML-DSA-65 signature from a key derived on demand from the hardware root. Signing produces a `HybridSignatureBytes` carrying both legs.
+- **Hybrid Legs**: Alongside the hardware classical leg, a `HybridSigner` bound to the wallet produces an ML-DSA-65 signature from a key derived on demand from the hardware root. Signing produces a `CompositeSignature` carrying both legs.
 - **Signature Output**: A standard 64-byte Ed25519 signature (or secp256k1, per key type) from the device key, verified under the identity's public key, plus the ML-DSA-65 leg.
 - **Security**: The network / node never holds the signing key. Compromising the node cannot forge signatures because the private half never leaves the hardware root.
 
 ### Components
 
 - **WalletService**: Main service for wallet operations (provision, sign, balance)
-- **DeviceCustodySigner / HybridSigner**: The signing seam over the hardware-held key — `device_custody` drives the classical leg through the identity's `DeviceBackend` (Secure Enclave, TPM, passkey) and aggregates the ML-DSA-65 leg
-- **SecureEnclaveBackend**: Apple Secure Enclave `DeviceBackend` implementation
+- **HybridSigner** (`tenzro_crypto`): The signing seam over the hardware-held key; the wallet holds only public keys and signatures come from a signer bound to it
 - **TransactionValidator**: Validates transactions against security policies
 - **TransactionBuilder**: Type-safe transaction construction with validation
 - **NonceManager**: Per-address nonce tracking with replay protection
@@ -207,9 +206,6 @@ Core wallet types including `Wallet` (hardware classical key + ML-DSA-65 verifyi
 ### `identity_binding`
 `WalletIdentity` — `Human { credential_id, public_key }` (passkey / WebAuthn) and `Machine { machine_id, public_key }` (TPM 2.0 / Apple Secure Enclave). A wallet is always bound to one.
 
-### `device_custody` / `device_custody_se`
-`DeviceCustodySigner` implements the `HybridSigner` seam over the identity's hardware-held key via a `DeviceBackend`. `SecureEnclaveBackend` is the Apple Secure Enclave backend; TPM and passkey backends plug in the same way. The signer produces the classical leg without the classical secret ever entering process memory.
-
 ### `validation`
 Transaction validation with chain ID, nonce, gas, address, and data size checks.
 
@@ -238,10 +234,7 @@ Encrypted storage of each wallet's public record using the Argon2id KDF. The cla
 On-chain balance/nonce synchronization via the `ChainStateProvider` trait, plus `LocalStateProvider` for offline use.
 
 ### `rpc_provider`
-`TenzroRpcChainProvider` — a `reqwest`-backed `ChainStateProvider` that talks to a live node over JSON-RPC. It reads balances (`eth_getBalance`, `tenzro_tokenBalance`), the sender nonce (`eth_getTransactionCount` at the pending block tag), transaction status (`eth_getTransactionReceipt`), and block height (`eth_blockNumber`), and submits signed transactions via `tenzro_sendRawTransaction`. Also builds ABI calldata for the cross-VM bridge precompile, with `DestVm` naming the destination runtime.
-
-### `signing`
-`HybridSigner` and `HybridSignatureBytes` — the output type carrying both the classical leg and the ML-DSA-65 leg. Admission gates verify both against the `pq_public_key` on the transaction.
+`TenzroRpcChainProvider` — a `reqwest`-backed `ChainStateProvider` that talks to a live node over JSON-RPC. It reads balances (`eth_getBalance`, `tenzro_tokenBalance`), the sender nonce (`eth_getTransactionCount` at the pending block tag), transaction status (`eth_getTransactionReceipt`), and block height (`eth_blockNumber`), and submits signed transactions via `tenzro_sendRawTransaction`.
 
 ### `pluggable_signer`
 `PluggableSigner` — the hardware-signer seam for advanced custody. Ledger and Trezor speak APDU over HID, GridPlus Lattice1 a REST API, YubiKey FIDO2/CTAP; the trait reduces all of them to `device_kind()`, `public_key()`, `sign_hash(hash)`, and an optional `attest()`, so the rest of the wallet and the on-chain hardware validator module deal only with a public key and a signature over a 32-byte hash. `GenericSigner` covers backends with no device-specific protocol; `HardwareDeviceKind` and `HardwareAttestation` carry the device identifier and its attestation.

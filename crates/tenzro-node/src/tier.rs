@@ -147,7 +147,9 @@ impl Tier {
                 background_jobs: 2,
                 background_write_mb_per_sec: 64,
                 max_open_files: 1000,
-                worker_threads: 2,
+                // RPC, consensus and the event loop share these; two starved
+                // them whenever one task kept a worker busy.
+                worker_threads: cores.clamp(2, 8),
                 max_blocking_threads: 512,
             },
         }
@@ -217,7 +219,9 @@ mod tests {
         let t = Tier::Validator.tuning(20);
         assert_eq!(t.storage_memory_min, 256 << 20);
         assert_eq!(t.background_jobs, 2);
-        assert_eq!(t.worker_threads, 2);
+        assert_eq!(t.worker_threads, 8);
+        assert_eq!(Tier::Validator.tuning(1).worker_threads, 2);
+        assert_eq!(Tier::Validator.tuning(4).worker_threads, 4);
         assert_eq!(Tier::Provider.tuning(20), t);
     }
 

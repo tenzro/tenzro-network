@@ -116,7 +116,7 @@ Language inference is exposed six ways over one runtime:
 - `tenzro_chat` JSON-RPC (the canonical Tenzro chat shape, with `params.custom["draft_n"]` for MTP and `params.custom["chat_session"]` for the persisted session id)
 - `POST /v1/chat/completions` — OpenAI-compatible HTTP endpoint (handler: `handle_openai_chat_completions`)
 - `POST /v1/responses` — the Responses shape over the same handler (handler: `handle_openai_responses`, translation in `openai_responses.rs`)
-- MCP `chat_completion` tool, A2A `inference` skill, CLI `tenzro chat`
+- MCP `chat` tool, A2A `inference` skill, CLI `tenzro chat`
 
 Each surface is a thin wrapper over the same router and runtime — the model and provider are the same underneath.
 
@@ -223,9 +223,8 @@ that compiles, links, reports `compiled backends: cpu`, and runs every layer on 
 still exits 0.
 
 The `CC=clang` / `CXX=clang++` / `CUDAHOSTCXX=g++` trio in `Dockerfile.cuda` is calibrated to the
-image that file pins (CUDA 13.0 on Ubuntu 24.04). On a newer host it can break unrelated crates:
-`aws-lc-sys` 0.40.0 does not build under clang 21, and a failed attempt leaves a CMake cache that
-breaks the following build too. Outside that image, the system compiler is fine — CUDA compiles
+image that file pins (CUDA 13.0 on Ubuntu 24.04). On a newer host it can break unrelated crates, and
+a failed attempt leaves a CMake cache that breaks the following build too. Outside that image, the system compiler is fine — CUDA compiles
 under gcc.
 
 Verify the result rather than trusting the exit code. `nm -D` reports nothing on a stripped release
@@ -265,7 +264,7 @@ Backends without a Dockerfile variant (SYCL, OpenVINO, OpenCL, MUSA, CANN, WebGP
 
 The non-LLM modalities (forecast / vision / text-embed / segmentation / detection / ASR / video) run on ONNX Runtime. The `cuda` feature links the CUDA and TensorRT execution providers alongside llama.cpp's CUDA backend, so on an NVIDIA machine every modality runs on the GPU; `onnx-coreml` adds CoreML on Apple machines. A node whose ONNX Runtime cannot use the NVIDIA GPU it runs on refuses to start, and a model whose provider fails to register refuses to load instead of running on the CPU. `Dockerfile.cuda` builds a CUDA and TensorRT ONNX Runtime from source on both architectures.
 
-On x86_64 the ONNX Runtime GPU binary comes from the prebuilt distribution the `ort` crate downloads. No such distribution exists for aarch64 — the CPU build is served in its place without an error — so `Dockerfile.cuda` compiles ONNX Runtime with the CUDA execution provider from source in a separate stage on that architecture, targeting Grace Hopper (sm_90), Jetson Thor (sm_110), and Grace-Blackwell GB10 (sm_121). That stage needs CUDA 13.0 or newer and roughly an extra hour and 60 GB of RAM; trim `ORT_CUDA_ARCHITECTURES` to the single target when building for one machine.
+The `ort` crate's prebuilt distribution has no CUDA build for aarch64 — the CPU build is served in its place without an error — so `Dockerfile.cuda` compiles ONNX Runtime with the CUDA and TensorRT execution providers from source in a separate stage, on both architectures. On aarch64 the default targets are Grace Hopper (sm_90), Jetson Thor (sm_110), and Grace-Blackwell GB10 (sm_121). That stage needs CUDA 13.0 or newer and roughly an extra hour and 60 GB of RAM; trim `ORT_CUDA_ARCHITECTURES` to the single target when building for one machine.
 
 ---
 
@@ -301,6 +300,7 @@ MoE pipeline roles are typed on `ProviderCapacity.moe_roles: Vec<MoeProviderRole
 - `PrefillDecode` — runs both prefill and decode phases co-located.
 - `Prefill` — prefill phase only.
 - `Decode` — decode phase only.
+- `PipelineStage` — executes a contiguous layer range as one stage of a LAN layer pipeline (§3.5); the role members of a local-network cluster take.
 
 `Prefill` and `Decode` are declarations only. No KV or recurrent state is handed between peers yet: that needs the engine to export and import a sequence's state, so a provider declaring either role is counted but not routed to as a split.
 
@@ -509,7 +509,7 @@ Natively-multimodal chat models (the Gemma 4 family, Kimi K3, muse-glimmer-30B, 
 
 The runtime loads it in-process rather than shelling out to a server binary. `ModelRuntime::load_projector` runs at model load: it resolves `<id>.mmproj.gguf` (checking both the flat storage directory and the per-model directory a gguf-split set uses), initializes an `MtmdContext` against the already-loaded `LlamaModel`, and records the model id in a lock-free set that `ModelRuntime::supports_media` probes. The projector moves into the batch engine with the model: each media chunk is encoded and decoded for its one sequence on its own step (the projector may switch the context to non-causal attention, which cannot be shared with other sequences' tokens), while the text around it and every other request's decode run in the ordinary batch. When the projector is declared but absent on disk, or fails to initialize, the load logs a warning and the model serves text — `supports_media` returns false and an attachment is refused by name rather than silently dropped.
 
-`ModelRuntime::generate_chat_multimodal` is the generation path: it renders the chat prompt, places one media marker per attachment in the last user turn when the caller sent none, encodes each image into an `MtmdBitmap`, and prefills the interleaved text-and-image chunks before sampling. Attachments bind positionally — the nth image in traversal order is the nth marker in the prompt. Four surfaces reach it: `tenzro_chat` in its rich shape (streaming and not), the OpenAI-compatible `/v1/chat/completions` `image_url` content part, the MCP `chat_completion` tool, and `tenzro chat`'s `/image <path>` REPL command. The simple `tenzro_chat` shape and the web `/chat` route carry a bare text message with no field an attachment could ride on, so both serve text regardless of the model's projector. The `mtmd` cargo feature on `tenzro-model` compiles the path in and is on by default; a build without it refuses an attachment and names the feature to rebuild with.
+`ModelRuntime::generate_chat_multimodal` is the generation path: it renders the chat prompt, places one media marker per attachment in the last user turn when the caller sent none, encodes each image into an `MtmdBitmap`, and prefills the interleaved text-and-image chunks before sampling. Attachments bind positionally — the nth image in traversal order is the nth marker in the prompt. Four surfaces reach it: `tenzro_chat` in its rich shape (streaming and not), the OpenAI-compatible `/v1/chat/completions` `image_url` content part, the MCP `chat` tool, and `tenzro chat`'s `/image <path>` REPL command. The simple `tenzro_chat` shape and the web `/chat` route carry a bare text message with no field an attachment could ride on, so both serve text regardless of the model's projector. The `mtmd` cargo feature on `tenzro-model` compiles the path in and is on by default; a build without it refuses an attachment and names the feature to rebuild with.
 
 ### 4.1a Hybrid and recurrent models, and the quantisation tiers
 
@@ -605,41 +605,13 @@ What it does not prove:
 - what the training data contained, its licence or its origin: the commitment fixes which batches were used, not what they are;
 - that rounds outside the receipt did not also shape the weights, or that the job's buyer accepted the result.
 
-### Trained model provenance
-
-A model a training job produced carries a receipt that says where it came from. `tenzro_trainedModelProvenance { model_id, base_sha256, output_sha256, rounds }`, called on the trainer machine by its operator, signs the receipt with the machine's hardware identity and returns it in a provenance pack:
-
-| Field | Content |
-|---|---|
-| `model_id`, `base_sha256` | the catalog model the job trained from and the SHA-256 of its weights |
-| `output_sha256` | the SHA-256 of the weights file the job produced |
-| `trainer_did` | the trainer machine |
-| `rounds` | the receipt ids of the job's committed rounds, first to last |
-| `end_checkpoint` | the state the last round ended at, read from chain state |
-
-The pack carries, under a certified state root with its proof from genesis, each round's record on chain and the trainer's identity registration. The node refuses to hand out a pack that would not verify.
-
-`tenzro provenance model --file pack.json --chain-id <id> --genesis-hash <hex> --genesis-committee-root <hex> [--weights adapter.gguf]` checks it with nothing but the chain's genesis anchor: the trainer's signature against the key registered for its DID; every round committed on chain by that trainer, in order, each starting where the one before it ended, the last ending at the receipt's end state; every round's milestone escrow released (its challenge window closed with no upheld fault); and, with `--weights`, that the file is the one the receipt names. It reports each round's dataset commitment (the Merkle root over the batches it trained on) and whether the round ran in an attested environment (its receipt carried a confidential-compute attestation consensus accepted).
-
-What a verified pack proves:
-
-- the trainer machine, holding the hardware identity registered for its DID, signed that these weights are the export of the state its last round ended at, trained from these base weights;
-- each round was committed against its escrow on chain, survived its challenge window, and was paid;
-- the rounds form one unbroken chain of states, each trained on the batches its dataset commitment names.
-
-What it does not prove:
-
-- that the export of the end state is these weights: that is the trainer's signed statement, backed by its compute bond; a challenger who replays the rounds can check it;
-- what the training data contained, its licence or its origin: the commitment fixes which batches were used, not what they are;
-- that rounds outside the receipt did not also shape the weights, or that the job's buyer accepted the result.
-
 ## 7. Generative media
 
 Image, video, audio and 3D generation served by a node as one more model-serving modality. A node loads a media model from the catalog (`tenzro_loadMediaModel`) and renders with it in process; a caller asks for one render with `tenzro_mediaGen_render`, here or on a provider serving the model, and gets the output with a signed receipt over what was produced.
 
 ### 7.1 Renders and engines
 
-Every media model runs on the node's native engine (the in-process Praecise diffusion engine) through one dispatch slot; a ported pipeline plugs into that slot, and the node starts no media helper process. A catalog entry whose port has not shipped stays listed with status `planned`, and every use of it (load, render) is refused with `this media model is planned: its native engine port has not shipped, so it cannot be used yet`.
+Every media model runs on the node's native engine (the in-process Praecise diffusion engine) through one dispatch slot; a ported pipeline plugs into that slot, and the node starts no media helper process.
 
 A render is seeded, so another provider holding the same weights renders the same output up to its hardware's numeric drift. The answer commits, under a signed inference receipt for the task `media`, to the output's MIME type, SHA-256 and length, its perceptual fingerprint and the tolerance two renders must agree within. Anyone holding the receipt can re-render through the same method on another provider and file an inference fault when the fingerprints disagree; the fault refunds the caller from the provider's bond. The output is stored in the node's content store and returned as `output_blake3`, fetched with `tenzro_iroh_fetchBlob`.
 
@@ -657,38 +629,32 @@ Two pipelines are not diffusion pipelines. A unified model that writes images as
 
 ### 7.3 Catalog
 
-Read through `tenzro_mediaGen_listCatalog`. Each row carries its `status` (`native` or `planned`) and names the HuggingFace repo, the pipeline class, the kinds it serves, default and maximum resolutions, default step count and guidance scale, frame count and fps for video, a VRAM floor, and — for split models — the expert pair.
+Read through `tenzro_mediaGen_listCatalog`. Each row names the HuggingFace repo, the pipeline class, the kinds it serves, default and maximum resolutions, default step count and guidance scale, frame count and fps for video, a VRAM floor, and — for split models — the expert pair.
 
 An entry's `status` says whether this release runs it; `tenzro_mediaGen_listCatalog` is the current list. The table shows a selection.
 
 | ID                 | Repo                                                    | Pipeline class              | Kinds                   | Default w×h | Steps | Guidance | Frames / fps | VRAM  | Expert pair |
 | ------------------ | ------------------------------------------------------- | --------------------------- | ----------------------- | ----------- | ----- | -------- | ------------ | ----- | ----------- |
-| `qwen-image`       | `Qwen/Qwen-Image`                                       | `QwenImagePipeline`         | text2image              | 1328 × 1328 | 50    | 4.0      | —            | 48 GB | —           |
+| `qwen-image`       | `Qwen/Qwen-Image-2512`                                  | `QwenImagePipeline`         | text2image              | 1328 × 1328 | 50    | 4.0      | —            | 48 GB | —           |
 | `qwen-image-gguf`  | `Qwen/Qwen-Image-2512` + `unsloth/Qwen-Image-2512-GGUF` | `QwenImagePipeline`         | text2image              | 1328 × 1328 | 50    | 4.0      | —            | 18 GB | —           |
 | `qwen-image-flash` | `nvidia/Qwen-Image-Flash`                               | `QwenImagePipeline`         | text2image              | 1024 × 1024 | 4     | 1.0      | —            | 48 GB | —           |
-| `qwen-image-edit`  | `Qwen/Qwen-Image-Edit-2511`                             | `QwenImageEditPlusPipeline` | image2image             | 1328 × 1328 | 40    | 4.0      | —            | 48 GB | —           |
+| `qwen-image-edit`  | `Qwen/Qwen-Image-Edit-2511`                             | `QwenImageEditPlusPipeline` | image2image             | 1328 × 1328 | 40    | 4.0      | —            | 64 GB | —           |
 | `z-image-turbo`    | `Tongyi-MAI/Z-Image-Turbo`                              | `ZImagePipeline`            | text2image              | 1024 × 1024 | 9     | 0.0      | —            | 16 GB | —           |
 | `flux2-klein-4b`   | `black-forest-labs/FLUX.2-klein-4B`                     | `Flux2KleinPipeline`        | text2image, image2image | 1024 × 1024 | 4     | 1.0      | —            | 12 GB | —           |
-| `flux-3-image-klein` | `black-forest-labs/flux-3-image-klein`              | `Flux3DistilledModularPipeline` | text2image, image2image | 1024 × 1024 | 16 | 1.0   | —            | 31 GB | —           |
-| `wan2.2-t2v-a14b`  | `Wan-AI/Wan2.2-T2V-A14B-Diffusers`                      | `WanPipeline`               | text2video              | 1280 × 720  | 40    | 4.0      | 81 / 16      | 80 GB | 48 GB each  |
-| `wan2.2-i2v-a14b`  | `Wan-AI/Wan2.2-I2V-A14B-Diffusers`                      | `WanImageToVideoPipeline`   | image2video             | 1280 × 720  | 40    | 3.5      | 81 / 16      | 80 GB | 48 GB each  |
 | `wan2.2-ti2v-5b`   | `Wan-AI/Wan2.2-TI2V-5B-Diffusers`                       | `WanPipeline`               | text2video, image2video, world_model | 1280 × 704  | 50    | 5.0      | 121 / 24     | 48 GB | —           |
-| `matrix-game-3`    | `Skywork/Matrix-Game-3.0`                               | `MatrixGame3I2VPipeline`    | world_model | 1280 × 704  | 3     | 1.0      | 57 / 24      | 32 GB | —           |
 | `janus-pro-1b`     | `deepseek-community/Janus-Pro-1B` + `mradermacher/Janus-Pro-1B-GGUF` | `JanusProPipeline` | text2image | 384 × 384 | 576 | 5.0 | — | 8 GB | — |
 | `trellis2-4b`      | `microsoft/TRELLIS.2-4B` + `microsoft/TRELLIS-image-large` + `facebook/dinov3-vitl16-pretrain-lvd1689m` | `Trellis2ImageTo3DPipeline` | image23d | (reference) | 12 | 7.5 | — | 16 GB | — |
-| `hunyuan-image-3.0` | `tencent/HunyuanImage-3.0`                             | `HunyuanImage3Pipeline`     | text2image              | 1024 × 1024 | 50    | 5.0      | —            | 192 GB | —          |
 
-`matrix-game-3` carries only its world transformer; its catalog entry `requires` the text encoder, tokenizer, autoencoder and scheduler parts of `wan2.2-ti2v-5b`, which a node fetches into that entry's own directory, so both models read one copy. Both world models are permissive (Apache-2.0 weights; MIT reference code for Matrix-Game). `wan2.2-ti2v-5b` runs natively; `matrix-game-3` stays planned until its native port passes its check. Wan2.2 TI2V 5B is trained around 1280 × 704: far below that (256 × 256) the reference implementation itself produces saturated color blocks, so serve it near its default size.
+`wan2.2-ti2v-5b` has permissive (Apache-2.0) weights and runs natively. Wan2.2 TI2V 5B is trained around 1280 × 704: far below that (256 × 256) the reference implementation itself produces saturated color blocks, so serve it near its default size.
 
 A required part is a top-level directory (`vae`) or a single file (`transformer/config.json`), and a component may name where it sits in the checkpoint (`at`, for a release that ships a transformer, prompt encoder or autoencoder as one file beside other parts). A pipeline that reads one directory, MiniMax-H3 for one, loads its entry's checkpoint view: the node links every own and required file at its view path into `media/<model>/checkpoint` (hard links into the fetched copies, each linked only after its SHA-256 matches its pin; anything else in that directory is removed). The GGUF and float8 MiniMax-H3 entries load that way: weights under `transformer/` or `transformer_ref/` beside the base config, the GGUF prompt encoder and the single-file autoencoders beside their base configs.
 
-`janus-pro-1b` reads its image head, decoder and token ids from the checkpoint and its language backbone from the f16 GGUF its entry names, the two fetched into a directory each. `trellis2-4b` loads one checkpoint view: its pipeline's models at their paths, the structure decoder it names in `microsoft/TRELLIS-image-large` and the DINOv3 image encoder each at the path `pipeline.json` names them by. The DINOv3 weights are gated by their origin behind Meta's DINOv3 License, stricter than the MIT of TRELLIS.2's own, so the entry is gated by that licence: a node fetches it once its operator has accepted `dinov3`, from network providers or with the operator's own origin credential. `hunyuan-image-3.0` stays `planned`: an 80B Mixture-of-Experts backbone (about 169 GB at bf16, still about 45 GB at 4 bits) needs a large host and is not served from one consumer GPU; its licence excludes the European Union, the United Kingdom and South Korea, for weights and outputs.
+`janus-pro-1b` reads its image head, decoder and token ids from the checkpoint and its language backbone from the f16 GGUF its entry names, the two fetched into a directory each. `trellis2-4b` loads one checkpoint view: its pipeline's models at their paths, the structure decoder it names in `microsoft/TRELLIS-image-large` and the DINOv3 image encoder each at the path `pipeline.json` names them by. The DINOv3 weights are gated by their origin behind Meta's DINOv3 License, stricter than the MIT of TRELLIS.2's own, so the entry is gated by that licence: a node fetches it once its operator has accepted `dinov3`, from network providers or with the operator's own origin credential.
 
-FLUX 3 Image Klein is listed as four `planned` entries, every file pinned at one commit: `flux-3-image-klein` (distilled, bfloat16), `flux-3-image-klein-fp8` and `flux-3-image-klein-nvfp4` (their own transformer, the bfloat16 entry's text encoder and autoencoder as a dependency) and `flux-3-image-klein-base` (undistilled, for fine-tuning). Multi-reference edits are `image2image` jobs with several edit sources in order; bounding boxes are written into the prompt. The model takes full scene captions, and its card recommends writing them with `flux-3-image-klein-pup`, a 9B vision-language model listed in the language catalog: a caller that wants upsampling calls it and passes the caption on, the node never chains the two. The image and action weights are gated at their origin under the FLUX Kommunity License (`flux-kommunity-1.0`, `CommercialCustom`): a node fetches them with its operator's own Hugging Face credential, from an account that has accepted the terms, and serves them once the operator has accepted `flux-kommunity-1.0`; whether a use is non-commercial or within the Qualifying User grant is the operator's to judge from the licence the entry carries.
 
 Rows with an image-conditioned kind resolve to a sibling pipeline class where the family provides one — `WanPipeline` becomes `WanImageToVideoPipeline` for an `image2video` job against `wan2.2-ti2v-5b`, while a class that already covers image input keeps it.
 
-`qwen-image-flash` is `qwen-image` distilled onto a four-step trajectory with guidance disabled — the same 20.4B transformer and the same VRAM floor, one twelfth of the pixel-steps, so it meters at one twelfth of the work. It is the one row not under a permissive license: the NVIDIA Open Model License puts it in the `CommercialCustom` tier, and a node serves it only when started with `--accept-license nvidia-open-model`. Every other row is admitted by default. The check runs when the node loads the model (`tenzro_loadMediaModel`).
+`qwen-image-flash` is `qwen-image` distilled onto a four-step trajectory with guidance disabled — the same 20.4B transformer and the same VRAM floor, one twelfth of the pixel-steps, so it meters at one twelfth of the work. It is not under a permissive license: the NVIDIA Open Model License puts it in the `CommercialCustom` tier, and a node serves it only when started with `--accept-license nvidia-open-model`. A row under another custom licence needs its own acceptance the same way. The check runs when the node loads the model (`tenzro_loadMediaModel`).
 
 ### 7.4 Precision
 
@@ -712,7 +678,6 @@ t >= boundary_ratio × scheduler.config.num_train_timesteps
 
 Timesteps descend through the schedule, so that set is always a prefix and one integer index splits it. `boundary_ratio` is a fraction of the scheduler's _training_ timestep count — for Wan 2.2 A14B, `0.875` of 1000. A 40-step job and a 100-step job therefore split at the same noise level and at different indices, so the split point is computed per render rather than assumed as a fixed fraction.
 
-Split-expert models are `planned` until their pipeline is ported to the native engine.
 
 **One render, one machine.** A split model renders on a node that holds both experts; the node refuses to render a model whose catalog entry splits it across two machines.
 

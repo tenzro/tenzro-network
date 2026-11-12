@@ -15,7 +15,6 @@ use tenzro_crypto::session::SessionSignature;
 use tenzro_openshell::records::RecordLog;
 use tenzro_types::agent_audit::{ActionKind, AuditEntry, Mmr, SignedAuditEntry};
 
-
 fn path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sdk/fixtures/openshell/vectors.json")
 }

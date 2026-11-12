@@ -112,7 +112,7 @@ tenzro node mempool-stats
 
 # Resolve which admission lane an address falls in, plus its current
 # token-bucket state.
-tenzro node mempool-lane --address 0xabc...
+tenzro node mempool-lane 0xabc...
 ```
 
 ### Live Status
@@ -224,12 +224,8 @@ tenzro node storage retrieve --object-id corpus-1 --out ./restored.jsonl
 # Check balance (calls eth_getBalance)
 tenzro wallet balance --address <address>
 
-# the node looks up the live nonce and gas price, computes Transaction::hash() with
-# the canonical timestamp-inclusive preimage, signs with Ed25519 + ML-DSA-65,
-# verifies both legs synchronously, and returns -32003 on a bad signature. `value`
-# and `amount` are accepted aliases. Self-sends (to == from) return a
-# `cannot transfer to self` validation error.
-tenzro wallet send <to-address> <amount> --asset TNZO --private-key <hex>
+# Send TNZO, signed in this machine's TPM or Secure Enclave (see Self-Custody below).
+tenzro wallet send <to-address> <amount> --asset TNZO
 
 ```
 
@@ -238,8 +234,8 @@ tenzro wallet send <to-address> <amount> --asset TNZO --private-key <hex>
 The node never signs for the account. Its Ed25519 and ML-DSA-65 keys are derived
 from this machine's TPM or Secure Enclave under a client key namespace
 (`--key-namespace`, default `client`), used for one signature and wiped; nothing is
-stored. The account address commits to both public keys. `wallet send
---self-custody` builds the canonical `Transaction::hash()` preimage (nonce and
+stored. The account address commits to both public keys. `wallet send`
+builds the canonical `Transaction::hash()` preimage (nonce and
 chain id fetched from the node, PQ verifying key included), signs both legs locally,
 and submits via `tenzro_sendRawTransaction`; the node verifies both signatures and that
 they derive the `from` account. A machine with neither a TPM nor a Secure Enclave
@@ -250,8 +246,15 @@ is refused.
 tenzro wallet create-local --key-namespace payer-1
 
 # Send TNZO signed as that account.
-tenzro wallet send <to-account> <amount> --self-custody --key-namespace payer-1
+tenzro wallet send <to-account> <amount> --key-namespace payer-1
 ```
+
+`wallet send` reads the amount as an exact decimal, waits for the transfer to be
+executed and fails with the revert reason. `--no-wait` returns once the node has
+accepted it. A recipient that is new to the account needs `--confirm-address`, and
+an amount at or above `wallet.step_up_threshold_tnzo` needs `--confirm-amount`
+(a terminal asks for both to be typed). The account must have a registered
+identity first: run `tenzro identity register-account` once, after funding it.
 
 ### Model Management
 
@@ -296,12 +299,12 @@ no token; see docs/GUIDE.md 9.12.
 # List all available models
 tenzro model list
 
-# Filter by modality
-tenzro model list --modality text
-tenzro model list --modality image
+# Filter by family
+tenzro model list --family qwen3
+tenzro model list --family gemma3
 
 # Show model details
-tenzro model info gemma4-9b --providers
+tenzro model info gemma4-9b
 
 # Download a model (local HuggingFace + remote RPC)
 tenzro model download gemma4-9b
@@ -334,7 +337,7 @@ tenzro model delete gemma4-9b
 
 ```bash
 # 1. Find a model.
-tenzro model list --modality text
+tenzro model list
 
 # 2. Download the weights. Peer-first over the network (BLAKE3-verified),
 #    falling back to HuggingFace. --source pins one path.
@@ -510,13 +513,13 @@ tenzro governance params
 tenzro governance propose-param --key dispute.max_rounds --value 4 --memo "why"
 
 # Open any other proposal (a GovernancePropose transaction)
-tenzro governance propose --from <address> \
+tenzro governance propose \
   --action '{"action":"treasury_grant", ...}'
 
 # Vote, enact once the timelock has run, or veto as a guardian
-tenzro governance vote <proposal_id> --from <address> --yes
-tenzro governance execute <proposal_id> --from <address>
-tenzro governance veto <proposal_id> --from <address>
+tenzro governance vote <proposal_id> --yes
+tenzro governance execute <proposal_id>
+tenzro governance veto <proposal_id>
 
 # Voting power and enacted network policy
 tenzro governance voting-power <address>
@@ -601,9 +604,9 @@ tenzro device revoke <did> <credential-id>
 # interchangeable: holding the hardware cannot take a machine that has an
 # accountable party.
 tenzro device transfer <machine-did> <new-owner-did> \
-  --authority controller --controller-did <did>
+  --authority controller --controller-did <did> --challenge-id <id> --authorization <file>
 tenzro device transfer <machine-did> <new-owner-did> \
-  --authority hardware_root --hardware-root-hex <64-hex>
+  --authority machine_key --challenge-id <id> --machine-signature-hex <hex>
 ```
 
 Binding a device (`tenzro_bindDevice`) happens through the browser ceremony
@@ -688,10 +691,10 @@ tenzro auth refresh --refresh-token <token>
 
 ```bash
 # Post a stake bond for an agent (refundable on clean exit, slashable on fraud).
-tenzro bond post --agent-id <id> --amount <tnzo>
-tenzro bond increase --agent-id <id> --amount <tnzo>
-tenzro bond withdraw --agent-id <id>
-tenzro bond get --agent-id <id>
+tenzro bond post --agent-did <did> --amount <tnzo>
+tenzro bond increase --agent-did <did> --amount <tnzo>
+tenzro bond withdraw --agent-did <did>
+tenzro bond get <agent-did>
 tenzro bond list
 
 # Claim a leg's value a reconciliation mismatch of an attested route cost you.
@@ -727,7 +730,7 @@ Q6_K), and publishes them for holders to load.
 ```bash
 # Planning
 tenzro moe shard-map --model-id <id>            # live expert → holder map
-tenzro moe plan-dispatch --model-id <id> --routing ./routing.json
+tenzro moe plan-dispatch --model-id <id> --routings-json ./routing.json
 tenzro moe replication-policy                   # governance-tuned policy
 tenzro moe catalog-shape --model-id <id>        # catalog MoE topology
 
@@ -743,7 +746,7 @@ tenzro moe load-gate --model-id <id> --layer <l> --file ./gate.safetensors
 tenzro moe unload-expert --model-id <id> --layer <l> --expert <e>
 tenzro moe unload-gate --model-id <id> --layer <l>
 tenzro moe status                               # resident experts + gates, per-expert tier + memory budget
-tenzro moe forward --model-id <id> --layer <l> --d-model <dim> --hidden ./hidden.f32
+tenzro moe forward --model-id <id> --layer <l> --d-model <dim> --hidden-file ./hidden.f32
 ```
 
 ### Generative media
@@ -819,7 +822,7 @@ tenzro provenance get 0x<sha256_hex>
 ```bash
 
 # Fund an agent's wallet: a transfer signed as this machine's client account
-tenzro agent fund --agent-id <id> --amount-wei <wei>
+tenzro agent fund --agent-did <did> --amount-wei <wei>
 
 ```
 
@@ -834,15 +837,15 @@ cascading to descendants under `children:<parent_id>`.
 ```bash
 # Pause an agent (reversible). Optional pause_until expiry.
 tenzro agent pause \
-  --controller-address 0xabc... \
+  --controller 0xabc... \
   --controller-did <did> \
   --agent-did <did:tenzro:machine:...> \
   --reason-code <code> \
-  --pause-until <unix_ms>
+  --until <unix_ms>
 
 # Quarantine an agent (reversible). Optional 32-byte SHA-256 evidence hash.
 tenzro agent quarantine \
-  --controller-address 0xabc... \
+  --controller 0xabc... \
   --controller-did <did> \
   --agent-did <did:tenzro:machine:...> \
   --reason-code <code> \
@@ -850,7 +853,7 @@ tenzro agent quarantine \
 
 # Terminate an agent (irreversible). Slashes stake by slash_bps (0..=10000).
 tenzro agent terminate \
-  --controller-address 0xabc... \
+  --controller 0xabc... \
   --controller-did <did> \
   --agent-did <did:tenzro:machine:...> \
   --reason-code <code> \
@@ -909,26 +912,24 @@ original payer can release or refund.
 ```bash
 # Create on-chain escrow (signed CreateEscrow tx, gas: 75,000)
 tenzro escrow create \
-  --payer 0xabc... \
   --payee 0xdef... \
   --amount 1000000000000000000 \
   --asset TNZO \
   --expires-at 1735689600000 \
-  --release timeout \
-  --private-key 0x...   # or omit to be prompted
+  --release timeout
 
 # Release escrowed funds to the payee (signed ReleaseEscrow tx, gas: 60,000)
-tenzro escrow release <escrow_id> --payer 0xabc... --proof 0x... --private-key 0x...
+tenzro escrow release <escrow_id> --payer 0xabc... --proof 0x...
 
 # Refund escrowed funds back to the payer (signed RefundEscrow tx, gas: 50,000)
 # Requires expiry passed OR release condition is Timeout/Custom.
-tenzro escrow refund <escrow_id> --payer 0xabc... --private-key 0x...
+tenzro escrow refund <escrow_id> --payer 0xabc...
 
 # Inspect an escrow record by id (read RPC, no signing)
 tenzro escrow get <escrow_id>
 
 # Open payment channel
-tenzro escrow open-channel --counterparty <address> --deposit <amount>
+tenzro escrow open-channel --channel-id <escrow_id>
 
 # Close channel
 tenzro escrow close-channel <channel_id>
@@ -940,25 +941,21 @@ The `escrow_id` is derived deterministically by the VM as
 `SHA-256("tenzro/escrow/id" || payer || nonce_le)` and emitted in the
 receipt log of the `CreateEscrow` transaction.
 
-### ZK Proofs (Plonky3 STARKs over KoalaBear)
+### ZK Proofs (Plonky3 STARKs)
 
 ```bash
-# List available AIRs
+# List available circuits (identity, settlement)
 tenzro zk circuits
 
-# Generate a Plonky3 STARK proof
-tenzro zk prove \
-  --circuit-id inference \
-  --witness '{"model_checksum":1,"input_checksum":2,"computed_output":3}'
+# Generate a proof in every proof system. The 32-byte witness is read from
+# stdin; the output is the proof bundle `tenzro zk verify` takes.
+tenzro zk prove --circuit-id identity --binding <32-byte hex>
 
-# Verify a proof
-tenzro zk verify \
-  --circuit-id inference \
-  --inputs '["0x01000000","0x02000000","0x03000000"]' \
-  --proof <hex>
+# Verify a proof bundle saved to a file
+tenzro zk verify --bundle bundle.json
 ```
 
-Public inputs are passed as a JSON array of hex strings, each a 4-byte little-endian KoalaBear field-element chunk. Plonky3 STARKs require no trusted setup — there is no ceremony or keygen command.
+Public inputs are `[digest, binding]`, 32 bytes each. Plonky3 STARKs require no trusted setup — there is no ceremony or keygen command.
 
 ### Network Duties and Evidence
 
@@ -991,7 +988,7 @@ tenzro token balance <token_id> <address>
 
 # Calls across VMs as one all-or-nothing transaction (a token moves between
 # VMs through its interface in the sending VM)
-tenzro contract call --from <address> \
+tenzro contract call \
   --call evm:<contract hex>:<calldata hex> \
   --call svm:<program hex>:<instruction hex>
 ```
@@ -1010,10 +1007,8 @@ tenzro contract deploy --bytecode <hex> [--args <hex>]
 tenzro bridge routes
 tenzro bridge route --adapter ccip --chain ethereum
 
-# Send TNZO out: prepare, sign the printed bytes with the holder's key, send
-tenzro bridge send --from <addr> --amount <amount> --to-chain base \
-  --recipient <hex> --nonce 1 --chain-id 13380 --request-out send.json
-tenzro bridge send --request-in send.json --public-key <hex> --signature <hex>
+# Send TNZO out: a Bridge transaction signed in hardware as the client account
+tenzro bridge send --target-chain base --recipient <hex> --amount <amount>
 
 # Deliver a committee-attested inbound transfer
 tenzro bridge deliver --adapter ccip --from-chain ethereum --delivery <hex>
@@ -1023,7 +1018,7 @@ tenzro bridge deliver --adapter ccip --from-chain ethereum --delivery <hex>
 
 ```bash
 # Event monitoring
-tenzro events subscribe --topics <topics>
+tenzro events subscribe --topic <topic0-hex>
 ```
 
 ### Crypto Operations
@@ -1038,15 +1033,15 @@ tenzro crypto verify --message <message> --signature <sig> --key <pubkey>
 ```bash
 # TEE operations
 tenzro tee attest
-tenzro tee verify --attestation <attestation>
+tenzro tee verify --report <hex> --nonce <nonce>
 ```
 
 ### ZK Operations
 
 ```bash
 # ZK operations
-tenzro zk prove --circuit <circuit> --inputs <inputs>
-tenzro zk verify --proof <proof>
+tenzro zk prove --circuit-id <circuit> --binding <hex>
+tenzro zk verify --bundle <file>
 ```
 
 ### VRF Operations
@@ -1170,7 +1165,6 @@ the supported way to run a second environment without touching your real state.
 | `--data-dir <DIR>`              | per-instance directory; a leading `~` is expanded       |
 | `models_dir` in the node config | shared model store, e.g. weights on a separate NVMe     |
 | `HF_HOME`                       | HuggingFace cache, for a site-wide cache outside Tenzro |
-| `TENZRO_TRAINER_CACHE`          | dataset shard cache                                     |
 
 ## Examples
 
@@ -1197,7 +1191,7 @@ tenzro-node --roles validator --data-dir ~/.tenzro/validator
 tenzro model download gemma4-9b
 
 # 3. Start serving models (local or remote)
-tenzro model serve gemma4-9b --gpus 0
+tenzro model serve gemma4-9b
 
 # 4. Monitor provider status
 tenzro provider status --detailed
@@ -1210,16 +1204,13 @@ tenzro provider status --detailed
 tenzro stake info
 
 # 2. List active proposals
-tenzro governance list --active --detailed
+tenzro governance list
 
 # 3. Vote on proposals
-tenzro governance vote prop_001 yes --reason "Good for the network"
+tenzro governance vote <proposal_id> --validator <account> --yes
 
 # 4. Create your own proposal
-tenzro governance propose \
-  "Add new stablecoin support" \
-  "Proposal to add DAI as supported stablecoin" \
-  --type parameter
+tenzro governance propose --action '{"action":"parameter_change","key":"...","value":1,"memo":"..."}'
 ```
 
 ## Development

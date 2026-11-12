@@ -9,6 +9,10 @@
     Version       product version, for example 0.2.0
     ProductCode   GUID, stable for a given version
     PayloadDir    directory holding bin\tenzro.exe and bin\tenzro-node.exe
+
+  The libraries beside the programs and the network profiles differ from
+  archive to archive: build-msi.ps1 writes their components (the groups
+  PayloadLibs and NetworkProfiles) and compiles them with this file.
     StageDir      directory holding LICENSE.txt, NOTICE.txt, PROVENANCE.txt, License.rtf
     ScriptDir     directory holding the scripts from this folder
     Compression   cab compression level: low, medium or high
@@ -62,6 +66,9 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Tenzro">
         <Directory Id="BINDIR" Name="bin" />
+        <Directory Id="SHAREDIR" Name="share">
+          <Directory Id="NETWORKDIR" Name="network" />
+        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -146,6 +153,8 @@
 
     <Feature Id="Main" Title="Tenzro" Level="1" AllowAbsent="no" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentGroupRef Id="BinFiles" />
+      <ComponentGroupRef Id="PayloadLibs" />
+      <ComponentGroupRef Id="NetworkProfiles" />
       <ComponentGroupRef Id="RootFiles" />
       <ComponentGroupRef Id="Shortcuts" />
     </Feature>

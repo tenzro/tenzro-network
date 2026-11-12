@@ -155,14 +155,17 @@ pub use veto_escrow::{
 };
 pub mod upgrade;
 pub use upgrade::{
+    PROTOCOL_VERSION_KEY, PROTOCOL_VERSION_TOPIC, PendingProtocolVersion, ProtocolVersionRecord,
     Readiness, ReadySignal, SELECTOR_SECURITY_DISCLOSURE, SELECTOR_UPGRADE_READY,
-    SecurityCommitment, UPGRADE_SCHEDULED_TOPIC, read_security_commitment, read_upgrade_activation,
-    readiness,
+    SecurityCommitment, UPGRADE_SCHEDULED_TOPIC, genesis_protocol_version, protocol_version_at,
+    read_protocol_version, read_security_commitment, read_upgrade_activation, readiness,
 };
 #[cfg(test)]
 mod confidential_job_tests;
 #[cfg(test)]
 mod hardware_level_tests;
+#[cfg(test)]
+mod identity_mode_tests;
 #[cfg(test)]
 mod key_release_tests;
 #[cfg(test)]
@@ -171,6 +174,8 @@ mod machine_attestation_tests;
 mod passkey_identity_tests;
 #[cfg(test)]
 mod payout_gates_tests;
+#[cfg(test)]
+mod protocol_version_tests;
 #[cfg(test)]
 mod sponsored_bond_tests;
 #[cfg(test)]
@@ -1799,7 +1804,7 @@ impl NativeExecutor {
                 crate::governance::joint_change_allowed(key, *value, &scheduled_of)
                     .map_err(|e| VmError::InvalidTransaction(e.to_string()))?;
                 sla_energy_budget::param_change_allowed(state, key, *value, &scheduled_of)?;
-                schedule_param_change(state, param, *value, &proposal.id, &mut state_changes)?;
+                schedule_param_change(state, key, param, *value, &proposal.id, &mut state_changes)?;
                 // Setting validator mode again is how governance re-arms the
                 // rate after the dispersion breaker fell back to its own rate.
                 if key == economy::RATE_MODE_PARAM && *value == 1 {
@@ -4668,25 +4673,11 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_VALIDATOR_REGISTER)?;
 
-        // While admission needs approval, only an account an enacted
-        // ApproveValidators proposal named may register; one already
-        // registered (a genesis validator, or one re-registering) is not held
-        // back.
-        if network_param(state, VALIDATOR_ADMISSION_APPROVAL_PARAM) != 0
-            && !validator_approved(state, &tx.from)
-            && state
-                .get_storage(
-                    &SYSTEM_ADDRESS,
-                    format!("validator_register:{}", hex::encode(&tx.from)).as_bytes(),
-                )
-                .filter(|b| !b.is_empty())
-                .is_none()
-        {
-            return Err(VmError::InvalidTransaction(format!(
-                "{} is not approved to register as a validator; admission needs an enacted ApproveValidators proposal",
-                hex::encode(&tx.from)
-            )));
-        }
+        // While validator admission is closed, only an account on the
+        // admitted set (the genesis validators and the accounts an enacted
+        // ApproveValidators proposal named) may register
+        // (crate::validator_admission).
+        crate::validator_admission::check(state, &tx.from)?;
 
         let payload: ValidatorRegisterPayload =
             serde_json::from_slice(&tx.data[4..]).map_err(|e| {
@@ -4757,6 +4748,10 @@ impl NativeExecutor {
         // the registry's configurable `min_self_stake`, so it is NOT hardcoded
         // here — that would drift from governance. The VM enforces only the
         // correctness invariant: you hold and escrow what you declare.
+        // While validator admission is closed only an admitted account may
+        // bond as a validator (crate::validator_admission).
+        crate::validator_admission::check(state, &tx.from)?;
+
         let stake = payload.self_stake;
         if stake == 0 {
             return Err(VmError::InvalidTransaction(
@@ -6711,7 +6706,8 @@ pub const ESCROW_CLOSE_GRACE_PARAM: &str = "escrow.close_grace_hours";
 /// Governed: 1 while a new validator needs an enacted approval to register.
 pub const VALIDATOR_ADMISSION_APPROVAL_PARAM: &str = "validator.admission_approval";
 
-fn validator_approval_key(account: &[u8]) -> String {
+/// The storage key of `account`'s validator approval.
+pub fn validator_approval_key(account: &[u8]) -> String {
     format!("validator_approved:{}", hex::encode(account))
 }
 
@@ -7574,14 +7570,13 @@ pub fn stored_param(state: &dyn VmState, key: &str) -> Option<u64> {
 }
 
 pub fn network_param(state: &dyn VmState, key: &str) -> u64 {
-    stored_param(state, key)
-        .unwrap_or_else(|| {
-            debug_assert!(
-                crate::governance::governed_param(key).is_some(),
-                "{key} is not in the governed parameter registry"
-            );
-            crate::governance::governed_param(key).map_or(0, |p| p.genesis)
-        })
+    stored_param(state, key).unwrap_or_else(|| {
+        debug_assert!(
+            crate::governance::governed_param(key).is_some(),
+            "{key} is not in the governed parameter registry"
+        );
+        crate::governance::governed_param(key).map_or(0, |p| p.genesis)
+    })
 }
 
 /// The status a status lever (`<feature>.status`) holds in `state`: what
@@ -7686,15 +7681,16 @@ pub(crate) fn loosens_capture_guard(
 /// the rule binds. A later enacted change of the same key replaces it.
 fn schedule_param_change(
     state: &mut dyn VmState,
+    key: &str,
     param: &crate::governance::GovernedParam,
     value: u64,
     proposal_id: &str,
     changes: &mut Vec<StateChange>,
 ) -> Result<u64> {
-    let current = network_param(state, param.key);
+    let current = network_param(state, key);
     let grace = if param.tighten.tightens(current, value) {
         network_param(state, crate::governance::TIGHTENING_GRACE_PARAM)
-    } else if crate::governance::loosens_guard(param.key, current, value) {
+    } else if crate::governance::loosens_guard(key, current, value) {
         network_param(state, crate::governance::GUARD_LOOSENING_GRACE_PARAM)
     } else {
         0
@@ -7705,21 +7701,21 @@ fn schedule_param_change(
         activates_epoch,
         proposal_id: proposal_id.to_string(),
     };
-    let key = pending_param_key(param.key);
+    let storage_key = pending_param_key(key);
     let blob = serde_json::to_vec(&pending)
         .map_err(|e| VmError::Internal(format!("encoding pending parameter: {e}")))?;
-    let previous = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes());
-    state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), blob.clone());
+    let previous = state.get_storage(&SYSTEM_ADDRESS, storage_key.as_bytes());
+    state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), blob.clone());
     changes.push(StateChange::new(
         SYSTEM_ADDRESS.to_vec(),
-        key.into_bytes(),
+        storage_key.into_bytes(),
         previous,
         Some(blob),
     ));
 
     let mut index = pending_param_keys(state);
-    if !index.iter().any(|k| k == param.key) {
-        index.push(param.key.to_string());
+    if !index.iter().any(|k| k == key) {
+        index.push(key.to_string());
         let blob = serde_json::to_vec(&index)
             .map_err(|e| VmError::Internal(format!("encoding pending index: {e}")))?;
         let previous = state.get_storage(&SYSTEM_ADDRESS, PENDING_PARAMS_INDEX_KEY.as_bytes());
@@ -10020,6 +10016,184 @@ mod tests {
         }
     }
 
+    /// Writes the approvals a genesis writes for its validators.
+    /// A registration reads the approval under the account's bytes as they
+    /// arrive, so a 20-byte test account is approved under those.
+    fn admit_as_genesis_does(state: &mut StateAdapter, who: &[u8]) {
+        let Ok(who) = <[u8; 32]>::try_from(who) else {
+            state.set_storage(
+                &SYSTEM_ADDRESS,
+                validator_approval_key(who).as_bytes(),
+                vec![1u8],
+            );
+            return;
+        };
+        for (key, value) in crate::validator_admission::genesis_entries(&[who]) {
+            state.set_storage(&SYSTEM_ADDRESS, &key, value);
+        }
+    }
+
+    fn registration_outcome(r: Result<ExecutionResult>) -> Option<String> {
+        match r {
+            Err(e) => Some(e.to_string()),
+            Ok(x) if !x.success => Some("failed".to_string()),
+            Ok(_) => None,
+        }
+    }
+
+    /// Closed: a registration from an account that is not admitted is refused
+    /// with the admission code before anything is debited; an admitted
+    /// account registers.
+    #[tokio::test]
+    async fn validator_admission_closed_refuses_an_account_that_is_not_admitted() {
+        use crate::validator_admission::REFUSAL_CODE;
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        set_genesis_param(&mut state, VALIDATOR_ADMISSION_APPROVAL_PARAM, 1);
+        let stake: u128 = 1_000_000_000_000_000;
+        let start: u128 = 10_000_000_000_000_000_000;
+        state.set_balance(&account(1), start);
+        state.set_balance(&account(2), start);
+        admit_as_genesis_does(&mut state, &account(2));
+
+        let refused = registration_outcome(
+            executor
+                .execute_transaction(&register_tx(1, stake, 0), &mut state)
+                .await,
+        )
+        .expect("refused");
+        assert!(refused.contains(REFUSAL_CODE), "{refused}");
+        assert!(refused.contains("team@tenzro.com"), "{refused}");
+        assert_eq!(state.get_balance(&account(1)), start, "nothing debited");
+
+        assert!(
+            registration_outcome(
+                executor
+                    .execute_transaction(&register_tx(2, stake, 0), &mut state)
+                    .await
+            )
+            .is_none()
+        );
+    }
+
+    /// Open: today's bond rules apply, with or without the parameter stored.
+    #[tokio::test]
+    async fn validator_admission_open_behaves_as_before() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let stake: u128 = 1_000_000_000_000_000;
+        for stored in [None, Some(0u64)] {
+            let mut state = StateAdapter::new();
+            if let Some(v) = stored {
+                set_genesis_param(&mut state, VALIDATOR_ADMISSION_APPROVAL_PARAM, v);
+            }
+            state.set_balance(&account(1), 10_000_000_000_000_000_000);
+            assert!(
+                registration_outcome(
+                    executor
+                        .execute_transaction(&register_tx(1, stake, 0), &mut state)
+                        .await
+                )
+                .is_none(),
+                "{stored:?}"
+            );
+        }
+    }
+
+    /// The admitted set is extended and shrunk by an enacted
+    /// ApproveValidators proposal, and the registration check follows it.
+    #[tokio::test]
+    async fn validator_admission_set_changes_by_governance_apply_once_enacted() {
+        use crate::validator_admission::{is_admitted, is_on_admitted_set};
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let voter = vec![1u8; 20];
+        gov_bond(&mut state, &voter, GOV_STAKE);
+        begin_block_params(&mut state, 5).unwrap();
+        set_genesis_param(&mut state, VALIDATOR_ADMISSION_APPROVAL_PARAM, 1);
+        let (genesis, candidate) = ([0x31u8; 32], [0x32u8; 32]);
+        admit_as_genesis_does(&mut state, &genesis);
+        assert!(is_admitted(&state, &genesis));
+        assert!(!is_admitted(&state, &candidate));
+
+        let approve =
+            |who: [u8; 32], approve: bool| crate::governance::ProposalAction::ApproveValidators {
+                accounts: vec![tenzro_types::primitives::Address::new(who)],
+                approve,
+                memo: "m".into(),
+            };
+        let r = gov_carry(&executor, &mut state, &voter, &approve(candidate, true))
+            .await
+            .unwrap();
+        assert!(r.success);
+        assert!(is_on_admitted_set(&state, &candidate));
+        assert!(is_on_admitted_set(&state, &genesis));
+
+        let r = gov_carry(&executor, &mut state, &voter, &approve(genesis, false))
+            .await
+            .unwrap();
+        assert!(r.success);
+        assert!(!is_admitted(&state, &genesis), "shrunk by governance");
+        assert!(is_admitted(&state, &candidate));
+    }
+
+    /// The gate flips both ways by governed parameter changes alone, on the
+    /// governance timings and with no genesis change: opening applies from
+    /// the next epoch, closing after the tightening grace window.
+    #[tokio::test]
+    async fn validator_admission_flips_without_a_genesis_change() {
+        use crate::validator_admission::{is_admitted, is_closed};
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let voter = vec![1u8; 20];
+        gov_bond(&mut state, &voter, GOV_STAKE);
+        begin_block_params(&mut state, 5).unwrap();
+        set_genesis_param(&mut state, VALIDATOR_ADMISSION_APPROVAL_PARAM, 1);
+        let stranger = [0x40u8; 32];
+        assert!(is_closed(&state) && !is_admitted(&state, &stranger));
+
+        let key = VALIDATOR_ADMISSION_APPROVAL_PARAM;
+        gov_carry(&executor, &mut state, &voter, &param_change(key, 0))
+            .await
+            .unwrap();
+        assert!(is_closed(&state), "nothing changes mid-epoch");
+        assert_eq!(
+            pending_param(&state, key).map(|p| p.activates_epoch),
+            Some(6)
+        );
+        begin_block_params(&mut state, 6).unwrap();
+        assert!(!is_closed(&state) && is_admitted(&state, &stranger));
+
+        gov_carry(&executor, &mut state, &voter, &param_change(key, 1))
+            .await
+            .unwrap();
+        let due = pending_param(&state, key)
+            .expect("closing is scheduled")
+            .activates_epoch;
+        assert!(due > 7, "closing waits the tightening grace window");
+        begin_block_params(&mut state, due - 1).unwrap();
+        assert!(!is_closed(&state));
+        begin_block_params(&mut state, due).unwrap();
+        assert!(is_closed(&state) && !is_admitted(&state, &stranger));
+    }
+
+    /// A genesis that seats five validators admits exactly those five.
+    #[test]
+    fn validator_admission_genesis_seeds_the_five_validators() {
+        use crate::validator_admission::{genesis_entries, is_on_admitted_set};
+        let five: Vec<[u8; 32]> = (1u8..=5).map(|i| [i; 32]).collect();
+        let entries = genesis_entries(&five);
+        assert_eq!(entries.len(), 5);
+        let mut state = StateAdapter::new();
+        for (key, value) in entries {
+            state.set_storage(&SYSTEM_ADDRESS, &key, value);
+        }
+        for a in &five {
+            assert!(is_on_admitted_set(&state, a));
+        }
+        assert!(!is_on_admitted_set(&state, &[6u8; 32]));
+        assert!(genesis_entries(&[]).is_empty());
+    }
+
     /// Pausing a feature is a pause-only change on the expedited track, and
     /// applies at the next epoch with no grace window; resuming it takes the
     /// standard track.
@@ -12281,6 +12455,98 @@ mod tests {
         )
     }
 
+    /// A first registration is what enrols the controller's ML-DSA-65 key:
+    /// the key is in state once the transaction has executed. That a later
+    /// approval then needs both legs is the next test.
+    #[tokio::test]
+    async fn a_first_registration_enrols_the_controllers_ml_dsa_key() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![1u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000);
+        assert!(crate::account_keys::enrolled_pq_key(&state, &controller_pk(9)).is_none());
+
+        let first = identity_register_tx(from.clone(), 9, 0);
+        assert!(
+            executor
+                .execute_transaction(&first, &mut state)
+                .await
+                .unwrap()
+                .success
+        );
+        let pq =
+            tenzro_crypto::composite::testing::TestHybridSigner::hybrid_pq_key(&controller_pk(9))
+                .expect("seed 9 hybrid key");
+        assert_eq!(
+            crate::account_keys::enrolled_pq_key(&state, &controller_pk(9)),
+            Some(pq)
+        );
+    }
+
+    /// A second registration for a controller that already has an ML-DSA-65
+    /// key enrolled, naming a different key, never replaces the enrolled one:
+    /// the registration by the same controller is accepted as a refresh of the
+    /// identity record, and the enrolled key is unchanged.
+    #[tokio::test]
+    async fn a_second_registration_naming_another_key_does_not_replace_the_enrolled_key() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let from = vec![1u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000);
+        let first = identity_register_tx(from.clone(), 9, 0);
+        assert!(
+            executor
+                .execute_transaction(&first, &mut state)
+                .await
+                .unwrap()
+                .success
+        );
+        let enrolled = crate::account_keys::enrolled_pq_key(&state, &controller_pk(9))
+            .expect("first registration enrols a key");
+
+        let signer = controller(9);
+        let mut payload: tenzro_types::identity::RegisterIdentityPayload = serde_json::from_slice(
+            &make_identity_register_data(&did_of(9), &controller_pk(9), &signer, 7)
+                [SELECTOR_IDENTITY_REGISTER.len()..],
+        )
+        .unwrap();
+        let other =
+            tenzro_crypto::composite::testing::TestHybridSigner::hybrid_pq_key(&controller_pk(10))
+                .expect("seed 10 hybrid key");
+        assert_ne!(other, enrolled);
+        payload.pq_verifying_key = other;
+        let statement = tenzro_types::identity::registration_statement(&payload);
+        payload.proof = sign_registration(&signer, &statement);
+        let mut data = SELECTOR_IDENTITY_REGISTER.to_vec();
+        data.extend(serde_json::to_vec(&payload).unwrap());
+        let second = VmTransaction::new(
+            from.clone(),
+            None,
+            0,
+            data,
+            300_000,
+            1_000_000_000,
+            1,
+            VmType::Tenzro,
+            1337,
+        );
+        // The same controller re-registering refreshes the identity record, so
+        // the second registration is accepted; the key enrolled for the
+        // account is held in account_keys and is not touched by it.
+        let outcome = executor
+            .execute_transaction(&second, &mut state)
+            .await
+            .unwrap();
+        assert!(
+            outcome.success,
+            "the same controller's re-registration is accepted"
+        );
+        assert_eq!(
+            crate::account_keys::enrolled_pq_key(&state, &controller_pk(9)),
+            Some(enrolled)
+        );
+    }
+
     #[tokio::test]
     async fn test_identity_register_stores_record_and_emits_log() {
         let executor = NativeExecutor::new(VmConfig::default()).unwrap();
@@ -12310,6 +12576,40 @@ mod tests {
                 .any(|l| l.topics.first().map(|t| t.as_slice())
                     == Some(b"IdentityRegister".as_ref())),
             "IdentityRegister log must be emitted"
+        );
+    }
+
+    /// A sponsor can pay a machine's first registration with no change to the
+    /// protocol: the registration statement is signed by the machine's key and
+    /// binds the wallet the record pays to, not the account that pays gas. The
+    /// machine's wallet holds nothing and is registered when the sponsor's
+    /// transaction executes (sponsored first registration).
+    #[tokio::test]
+    async fn a_sponsor_pays_the_registration_and_the_machines_wallet_holds_nothing() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let sponsor = vec![1u8; 20];
+        let start = 10_000_000_000_000_000_000u128;
+        state.set_balance(&sponsor, start);
+        let machine_wallet = [7u8; 32];
+        assert_eq!(state.get_balance(&machine_wallet), 0);
+        assert_eq!(identity_of_wallet(&state, &machine_wallet), None);
+
+        let did = did_of(9);
+        // `identity_register_tx` signs with wallet_tag 7: the machine's wallet.
+        let tx = identity_register_tx(sponsor.clone(), 9, 0);
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert!(result.success);
+
+        assert_eq!(identity_of_wallet(&state, &machine_wallet), Some(did));
+        assert_eq!(
+            state.get_balance(&machine_wallet),
+            0,
+            "the machine never held a balance"
+        );
+        assert!(
+            state.get_balance(&sponsor) < start,
+            "the sponsor paid the fee"
         );
     }
 
@@ -13819,7 +14119,9 @@ mod tests {
             .enumerate()
             .map(|(i, k)| VerifierMember {
                 address: quorum_member_address(k),
-                pq_public_key: tenzro_bridge::route::attestation::testing::pq_key(&k.to_bytes()).verifying_key_bytes().to_vec(),
+                pq_public_key: tenzro_bridge::route::attestation::testing::pq_key(&k.to_bytes())
+                    .verifying_key_bytes()
+                    .to_vec(),
                 operator: format!("operator-{i}"),
                 rpc_provider: format!("participant-{i}"),
             })
@@ -14365,6 +14667,35 @@ mod tests {
         let votes = rewards::read_epoch_votes(&state, 0).unwrap();
         assert_eq!(votes.last_index, Some(1));
         assert_eq!(votes.certified_rounds, 8);
+    }
+
+    /// What the node sends the VM for a record whose certificate did not
+    /// verify (event_loop: the selector with no payload) is refused with the
+    /// parse error seen in validator logs, charges nothing and spends the
+    /// nonce. The empty payload is the node's refusal marker, not a malformed
+    /// certificate from the submitter.
+    #[tokio::test]
+    async fn a_record_with_no_payload_is_refused_as_unparsable_and_spends_its_nonce() {
+        let runtime = crate::MultiVmRuntime::new(VmConfig::default())
+            .await
+            .unwrap();
+        let mut state = StateAdapter::new();
+        let validator = vec![0x50u8; 32];
+        gov_bond(&mut state, &validator, 1_000);
+        let mut tx = checkpoint_record(&validator, 0, 3);
+        tx.data = SELECTOR_CHECKPOINT_SIGNERS.to_vec();
+        let mut fees = crate::ledger::BlockFees::default();
+        match crate::ledger::execute_in_block(&runtime, &mut state, &tx, 1, &mut fees).await {
+            crate::ledger::TxOutcome::Reverted { fee, reason, .. } => {
+                assert_eq!(fee, 0);
+                assert!(
+                    format!("{reason:?}").contains("EOF while parsing a value"),
+                    "{reason:?}"
+                );
+            }
+            other => panic!("not refused: {other:?}"),
+        }
+        assert_eq!(state.get_nonce(&validator), 1);
     }
 
     #[tokio::test]

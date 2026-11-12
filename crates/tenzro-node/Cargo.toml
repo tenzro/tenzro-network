@@ -19,6 +19,8 @@ required-features = ["test-passkey"]
 # (single_instance.rs) — flock on Unix, LockFileEx on Windows.
 fs4 = { workspace = true }
 tenzro-types = { workspace = true }
+tenzro-onboarding-types = { workspace = true }
+tenzro-update-notice = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-tee = { workspace = true }
 # The hardware signer (TPM / Secure Enclave keys) and TPM command encoding.
@@ -163,6 +165,7 @@ svm-full = ["tenzro-vm/svm-full"]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+tenzro-update-notice = { workspace = true, features = ["fixture"] }
 # tests/tls_roots.rs: a local TLS server under a test authority.
 rcgen = "0.14"
 tokio-rustls = { workspace = true }

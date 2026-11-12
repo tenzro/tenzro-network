@@ -16,7 +16,7 @@ Every flag and subcommand of the `tenzro-node` binary, from its own argument def
 | `--resident-ceiling-gb` | `GB` | `TENZRO_RESIDENT_CEILING_GB` |  | GiB ceiling for always-resident models (language models, embeddings, forecasting, ASR, TTS). Omit to use 60% of what remains after the reserve. Also settable via `$TENZRO_RESIDENT_CEILING_GB`; the flag wins when both are given. |
 | `--on-demand-ceiling-gb` | `GB` | `TENZRO_ON_DEMAND_CEILING_GB` |  | GiB ceiling for pipelines loaded per job and evicted afterwards — image and video generation. Omit to use whatever the resident tier does not take. Also settable via `$TENZRO_ON_DEMAND_CEILING_GB`; the flag wins when both are given. Separate from the resident ceiling on purpose: a chat model must not be able to crowd out the diffusion worker, and a video pipeline must not evict the model currently answering requests. On a memory-constrained box, the 60/40 default split can leave this tier too small for a single on-demand pipeline — raise it explicitly when that happens. |
 | `--tier` | `TIER` | `TENZRO_TIER` |  | Resource tier: `auto` (default), `edge`, `validator` or `provider`. Sets the defaults for the store's memory and background work and the runtime's threads; `auto` picks `provider` for roles that run models, `edge` on a machine with at most 8 GiB of memory, `validator` otherwise. Values set under `[storage]` win over the tier. |
-| `--worker-threads` | `N` | `TENZRO_WORKER_THREADS` |  | Async runtime worker threads. Omit for the tier's: 2, or 1 on a one-core edge device. |
+| `--worker-threads` | `N` | `TENZRO_WORKER_THREADS` |  | Async runtime worker threads. Omit for the tier's: the core count, 2 to 8 on a validator or provider, 1 to 2 on an edge device. |
 | `--roles` / `-r` | `ROLES` |  |  | Node roles, comma-separated (e.g. "validator,storage,ai"). A node may serve any combination of roles under a single stake. Aliases accepted: validator, model-provider/ai, tee-provider/tee, storage, edge/ingress, user/light. |
 | `--validator-self-stake` | `WEI` |  |  | Self-stake in wei to auto-register this node as a validator on boot (permissionless / first-boot onboarding). Requires the validator role; the node's validator-derived account must hold this stake plus gas. Omit to disable self-registration. |
 | `--consensus-key-scheme` | `SCHEME` |  |  | Signature scheme of this node's consensus key: COMPSIG-MLDSA65-ECDSA-P256 (the default) or COMPSIG-MLDSA87-ECDSA-P384, which needs a TPM implementing ML-DSA and P-384. A validator registered under another scheme rotates to the key of this one. |
@@ -37,6 +37,7 @@ Every flag and subcommand of the `tenzro-node` binary, from its own argument def
 | `--external-rpc-addr` | `URL` |  |  | Public https URL of your own edge (reverse proxy) in front of this node's loopback RPC listener, if you expose it. The only RPC URL the node publishes; without it none is published. Refused at startup when it is not https or names a loopback, private, CGNAT or link-local host. |
 | `--external-mcp-addr` | `URL` |  |  | Public https URL of your own edge in front of this node's loopback MCP listener, if you expose it. Same rules as `--external-rpc-addr`. |
 | `--state-sync-from` | `ENDPOINT_ID[@IP:PORT]` |  |  | State sync: restore the committed state from these peers (their current iroh `EndpointId`s, as their signed announcements give them; repeat the flag for several) before starting consensus, instead of replaying blocks. `<EndpointId>@<ip:port>` dials that address directly, for a network with no discovery (repeat it to give several addresses of one peer); a bare id is found by discovery. Also settable as `state_sync_from` in the config file. The snapshot is fetched as BLAKE3-verified blobs from any peer that has them and checked bucket by bucket against the state root that the `--checkpoint-hash` block commits. The recovery after a corrupt store (`scripts/repair-validator-store.sh`, then restart with this flag) works on a fixed `bind_addr` too: the state-sync endpoint is released before the node's own endpoint binds. Requires `--checkpoint-height` and `--checkpoint-hash`. |
+| `--no-state-sync` |  |  |  | Replay the chain from the local tip even on a role that would join by snapshot. A node without the validator role restores the committed state from a peer's snapshot by default when a weak-subjectivity checkpoint is configured (`--checkpoint-height`/`--checkpoint-hash` or genesis `[weak_subjectivity]`); a validator always replays. Also settable as `state_sync = "off"` in the config file. |
 | `--checkpoint-hash` | `HEX` |  |  | Weak-subjectivity checkpoint: the hash (hex, with or without `0x`) of a finalized block the operator has verified out of band, at `--checkpoint-height`. Every import path refuses any other block at that height, which defeats a long-range fork that passes certificate verification, and state sync restores the state this block commits. |
 | `--checkpoint-height` | `HEIGHT` |  |  | Height of the `--checkpoint-hash` block. |
 | `--recovery-manifest` | `FILE` |  |  | Recovery restart after a halt below quorum: the manifest file (JSON) that the surviving operators and the successor validators agreed on. Applied once at start, before consensus is seated, and only at the manifest's anchor block, so it does nothing on a chain that has moved on. Needs `--recovery-digest` and the anchor as `--checkpoint-height` and `--checkpoint-hash`. See docs/RECOVERY-BELOW-QUORUM.md. |
@@ -47,9 +48,9 @@ Every flag and subcommand of the `tenzro-node` binary, from its own argument def
 | `--accept-license` | `ID` |  |  | Admit a CommercialCustom-tier model family by its license id (repeatable / comma-separated), e.g. `--accept-license gemma --accept-license dinov3`. Custom-license families (Gemma Terms, DINOv3, Meta SAM) require the operator to have read and accepted the upstream terms; the node refuses to load them until their id appears here. |
 | `--catalog-publisher` | `DID` |  |  | DID of a publisher this node serves catalog models from; repeat or comma-separate for several. Without any, every bonded publisher. |
 | `--release-publisher` | `DID` |  |  | DID of a publisher whose engine releases this node reports as available; repeat or comma-separate for several. |
-| `--kyc-asset` | `TOKEN_ID` |  |  | Token id (hex) of an asset whose policy names the KYC issuers this node recognizes; repeat or comma-separate for several. Without any, every identity's KYC tier is unverified. |
+| `--kyc-asset` | `TOKEN_ID` |  |  | Token id (hex) of an asset whose policy names the KYC issuers this node recognises; repeat or comma-separate for several. Without any, every identity's KYC tier is unverified. |
 | `--territory-mode` | `MODE` |  | `enforce` | How to handle models whose licence restricts the territories they may be served to. Most licences carry no such term — seven of the eight custom licences in the catalog are unrestricted — so this affects only the few that do, and costs nothing for everything else. * `enforce` (default) — check the caller's territory per request. Requires `--territory-db`. * `refuse-restricted` — do not serve territorially-restricted models at all. Needs no database: it removes the obligation rather than the enforcement of it, and is the right setting for an operator who does not want these models. |
-| `--territory-db` | `PATH` |  |  | Path to an mmdb country database for territorial enforcement. Use a database you may redistribute: DB-IP Lite Country (CC BY 4.0) or sapics/ip-location-db `user-country` (PDDL-1.0, public domain). MaxMind GeoLite2 is **not** suitable — its EULA requires deleting superseded databases within 30 days of a release, which a distributed binary cannot honor, and redistribution needs a paid licence. Without one, `enforce` refuses territorially-restricted models — and only those. Every other model keeps serving. |
+| `--territory-db` | `PATH` |  |  | Path to an mmdb country database for territorial enforcement. Use a database you may redistribute: DB-IP Lite Country (CC BY 4.0) or sapics/ip-location-db `user-country` (PDDL-1.0, public domain). MaxMind GeoLite2 is **not** suitable — its EULA requires deleting superseded databases within 30 days of a release, which a distributed binary cannot honour, and redistribution needs a paid licence. Without one, `enforce` refuses territorially-restricted models — and only those. Every other model keeps serving. |
 | `--territory-db-label` | `LABEL` |  |  | A label for the territory database, recorded on every decision (e.g. `dbip-country-lite-2026-08`). A decision has to stay interpretable after the database is updated underneath it: both a bloc's membership and an address's allocation can change, so "which data said so" is part of the record. |
 | `--trusted-proxy` | `IP` |  |  | Reverse proxies whose `X-Forwarded-For` this node will believe. Without this, the header is ignored entirely and the socket address is used — which is correct: any client can set `X-Forwarded-For`, so trusting it unconditionally turns the whole check into a no-op. |
 | `--local-territory` | `CC` |  |  | Territory to record for callers on this machine or its private network (ISO 3166-1 alpha-2, e.g. `SG`). Local addresses cannot be geolocated. Absent this, they are treated like any other unresolvable caller and refused for restricted models. Setting it is an operator attestation about their own deployment, and is recorded as such rather than as a measurement. |
@@ -96,6 +97,17 @@ Copy the node's newest epoch snapshot to DEST. Only SST files no earlier backup 
 | `--data-dir` | `DIR` | `TENZRO_DATA_DIR` |  | The node's data directory. |
 | `--dest` | `DEST` |  |  | Destination directory for backups. |
 | `--rate-mb` | `u64` |  | `64` | Copy rate, MiB per second (0 for unpaced). |
+
+### `tenzro-node registry-undo`
+
+List, or discard, the validator registry's undo records. A node that stops between a registry change and its commit puts the registry back from these records at its next start. If a record cannot be read the start fails and keeps them. This command, with the node stopped, shows the chain tip and the records. `--discard --yes` removes the unreadable ones; the readable ones too only with `--force`. Nothing is put back: the registry stays as the last run left it, which may include the changes of a block that never committed. Prefer restoring from a snapshot.
+
+| Flag | Value | Environment | Default | Description |
+|---|---|---|---|---|
+| `--data-dir` | `DIR` | `TENZRO_DATA_DIR` |  | The node's data directory. |
+| `--discard` |  |  | `false` | Remove the unreadable records. |
+| `--force` |  |  | `false` | With --discard, remove the readable records as well. |
+| `--yes` |  |  | `false` | Confirm the removal. |
 
 ### `tenzro-node access`
 
@@ -236,7 +248,7 @@ otherwise.
 | Background flush and compaction jobs | 1 | 2 | `[storage] background_jobs` |
 | Background write rate | 16 MiB/s | 64 MiB/s | `[storage] background_write_mb_per_sec` |
 | Open files | 256 | 1000 | `[storage] max_open_files` |
-| Runtime worker threads | 2 (1 on a one-core machine) | 2 | `--worker-threads` / `TENZRO_WORKER_THREADS` |
+| Runtime worker threads | 2 (1 on a one-core machine) | core count, 2 to 8 | `--worker-threads` / `TENZRO_WORKER_THREADS` |
 | Runtime blocking threads | 32 | 512 | |
 
 The memory pool is what the node's memory budget lends out: on a machine with
@@ -247,9 +259,11 @@ tiers.
 
 History retention is a network parameter (governance), not a preset: every
 non-archival node keeps the governed window, prunes to it and compacts when
-the data volume passes `[storage] prune_watermark_pct` (75%), and refuses
-non-essential data past `refuse_watermark_pct` (90%). On a small SD card or
-eMMC those watermarks are what keep the node inside its disk.
+the data volume runs low (under 20 GiB and 12 percent free by default), and
+refuses non-essential data when it runs lower still (under 8 GiB and 6
+percent). A level also trips when the measured growth leaves too few blocks
+of room. The levels are set in `[storage.ladder]`. On a small SD card or
+eMMC they are what keep the node inside its disk.
 
 The background tasks a node starts are already gated by role: audit
 watchers, fee-rate reporting, SLA probes and attestations, data-availability
@@ -294,37 +308,22 @@ session continuity or the MoE repair loop.
   passkey never holds a consensus key: the operator's passkey grants and
   approves, and the key stays in a TPM or Secure Enclave.
 
-  **Session delegation.** A TPM command takes seconds, so the key holder does
-  not ask the provider for every signature. With `tenzro-node tpm key-holder
-  --identity <did> --label <label>` it asks the provider once per session for
-  a delegation: a statement signed by the identity key (its Ed25519 and its
-  ML-DSA-65 leg) that binds a session key pair the holder made in its own
-  locked memory, for a bounded time and under the identity's current key
-  version. The holder then signs each message with the session key
-  (`OP_SESSION_SIGN`, no round trip), and a peer traces the signature to the
-  identity key through the delegation. The session key is made at start,
-  wiped on drop, never written and never exported; it is a credential for
-  one delegation, not an identity key. The delegation ends at its expiry, at
-  its revocation, at the end of the grant it was issued under, or when the
-  identity rotates to a new key version, whichever comes first. The holder
-  renews before expiry (`--session-renew-before-secs`), checks the provider
-  for revocation and rotation every `--session-check-secs`, and a provider
-  that cannot be reached changes nothing until the delegation expires, after
-  which signing fails closed. A cold start with the provider down is refused.
-  After a reboot the holder has a new transport key; the operator makes one
-  new passkey grant (`tpm grant-request`, `tpm grant-install`) and the
-  session starts from it with nothing else to do. The grant and the session
-  key are kept in memory only. `tpm session-status` prints the delegation's
-  end and id; `tpm revoke --config <provider file> --delegation <id>`
-  revokes one.
+  **Batch signing.** A TPM command takes seconds, so the identity key does
+  not sign every message on its own. It signs, in hardware, one statement per
+  batch (both the Ed25519 and the ML-DSA-65 leg) over the Merkle root of the
+  messages the batch collected, and each message travels with its inclusion
+  proof and the one signature the batch shares. No session key exists in
+  memory. A verifier traces the signature to the identity's current key
+  version; a signature under a rotated key is refused. After a reboot of the
+  key holder the operator makes one new passkey grant (`tpm grant-request`,
+  `tpm grant-install`).
 
-  The provider issues delegations when its file names an `issuer_file`, a
-  JSON file the identity's on-chain key update rewrites:
+  The provider signs batch roots for the identities its file names in an
+  `issuer_file`, a JSON file the identity's on-chain key update rewrites:
   `{"identities": {"<did>": {"version": 2, "label": "<key label>"}}}`. The
   provider derives the identity key under that label in its TPM; no handle or
   key id is configured anywhere. The limits are provider-file values, not
-  constants: `delegation_max_lifetime_secs`, `delegation_min_lifetime_secs`,
-  `revocation_file`, and for the TPM command queue `tpm_queue_max_waiting`,
+  constants: for the TPM command queue `tpm_queue_max_waiting`,
   `tpm_queue_max_wait_secs`, `tpm_retries`, `tpm_backoff_base_ms`,
   `tpm_backoff_cap_ms`. The provider runs one TPM command at a time; a
   request that finds the line full, or that waits its limit, is refused with
@@ -393,3 +392,36 @@ core; the full node serving the relay held 365 MiB and 85% of a core.
 Check a build against its budget with `scripts/edge-budget.sh <binary>
 [<measurement>]` (the release gate runs it as row L4): 100 MB stripped, and
 256 MiB idle and 320 MiB loaded resident memory for a `--roles light` node.
+
+## Joining a new network by snapshot
+
+A node that is not a validator, joining a network that has already run, can restore the committed
+state from a peer's snapshot instead of replaying every block. It needs three things, all
+published by the operators at launch and repeated on the release page and the operators'
+channels (docs/operations/GENESIS-PUBLICATION.md):
+
+| What | Value |
+|---|---|
+| Checkpoint height (`--checkpoint-height`) | published at launch |
+| Checkpoint block hash (`--checkpoint-hash`) | published at launch |
+| Peers to fetch the snapshot from (`--state-sync-from ENDPOINT_ID[@IP:PORT]`, repeatable) | published at launch |
+
+The checkpoint is a finalized block the operator has verified out of band. Compare the hash with
+at least two independent sources before using it: the node refuses any other block at that height,
+which is what protects a new node from a forged history. Start with:
+
+```
+tenzro-node --genesis genesis.toml \
+  --checkpoint-height <height> --checkpoint-hash <hash> \
+  --state-sync-from <endpoint-id>@<ip:port>
+```
+
+Check the genesis file first (`launch-manifest.sh verify`, same page). A validator always replays
+the chain and does not join by snapshot; `--no-state-sync` forces a replay on any role.
+
+## Testnet use and reporting a vulnerability
+
+The testnet is for testing. Test tokens reach an operator through the
+sponsorship request at the project's join page, and they carry no value. Report a security issue privately to the contact in
+[SECURITY.md](../SECURITY.md), as described there, and do not test against other people's
+accounts or nodes.

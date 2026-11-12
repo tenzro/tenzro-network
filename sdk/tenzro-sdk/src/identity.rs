@@ -390,6 +390,8 @@ pub const PQ_ROTATION_CONTEXT: &[u8] = b"tenzro/identity/pq-rotation";
 /// A hardware-held ML-DSA-65 key an identity rotates to. The SDK never holds
 /// the private key; this is implemented over the TPM or Secure Enclave.
 #[async_trait::async_trait]
+// The async_trait expansion already marks the returned future must_use.
+#[allow(clippy::double_must_use)]
 pub trait PqRotationKey: Send + Sync {
     /// The ML-DSA-65 verifying key (1952 bytes).
     fn verifying_key(&self) -> Vec<u8>;

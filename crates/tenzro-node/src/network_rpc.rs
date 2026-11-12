@@ -107,10 +107,7 @@ pub(crate) fn transferred(tx_type: &TransactionType) -> String {
 }
 
 fn stored_tx(store: &dyn KvStore, hash: &str) -> Option<SignedTransaction> {
-    store
-        .get(CF_TRANSACTIONS, hash.as_bytes())
-        .ok()
-        .flatten()
+    crate::tx_record::stored_transaction_json(store, hash)
         .and_then(|b| serde_json::from_slice(&b).ok())
 }
 

@@ -21,7 +21,7 @@
 //! [`WIRE_VERSION`], and an unknown version is refused.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
@@ -340,6 +340,9 @@ pub struct Provider<K: KeyStore, A: Audit> {
     keys: K,
     audit: A,
     policy: Policy,
+    /// The enrolled clients. Starts as `policy.clients`; [`Self::replace_clients`]
+    /// swaps it while the provider runs, so enrolling a device needs no restart.
+    clients: RwLock<HashMap<Vec<u8>, Grant>>,
     derive: Option<Arc<dyn RemoteDerive>>,
     window: Mutex<HashMap<Vec<u8>, (Instant, u32)>>,
     /// One TPM command at a time; the rest wait in a bounded line.
@@ -359,6 +362,7 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
         Self {
             keys,
             audit,
+            clients: RwLock::new(policy.clients.clone()),
             policy,
             derive: None,
             window: Mutex::new(HashMap::new()),
@@ -400,6 +404,14 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
     pub fn with_derivation(mut self, root: Arc<dyn RemoteDerive>) -> Self {
         self.derive = Some(root);
         self
+    }
+
+    /// Replaces the enrolled clients. Requests already running finish under
+    /// the grant they were admitted with; rate windows, the TPM queue and
+    /// everything else are untouched, so a client present before and after
+    /// notices nothing.
+    pub fn replace_clients(&self, clients: HashMap<Vec<u8>, Grant>) {
+        *self.clients.write().expect("clients") = clients;
     }
 
     fn within_rate(&self, client: &[u8]) -> bool {
@@ -447,7 +459,7 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
             KIND_SIGN_ROOT => "sign-root",
             _ => return refuse("unknown", "unknown request kind"),
         };
-        let Some(grant) = self.policy.clients.get(client) else {
+        let Some(grant) = self.clients.read().expect("clients").get(client).cloned() else {
             return refuse(kind, "client is not enrolled");
         };
         let own = req.label == grant.label
@@ -461,7 +473,7 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
         // Everything below reaches the TPM: one command at a time, in order,
         // the rest waiting a bounded time in a bounded line.
         let run = self.queue.run(
-            || self.after_policy(client, kind, grant, &req, not_after_cap_ms),
+            || self.after_policy(client, kind, &grant, &req, not_after_cap_ms),
             |e: &DeviceKeyError| is_transient(&e.to_string()),
         );
         match run {
@@ -783,9 +795,7 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
             },
             KIND_MLDSA_PUBLIC => root.ml_dsa65_public(&label),
             KIND_KEM_PUBLIC => root.ml_kem768_public(&label),
-            KIND_KEM_DECAPSULATE => root
-                .ml_kem768_decapsulate(&label, args)
-                .map(|s| s.to_vec()),
+            KIND_KEM_DECAPSULATE => root.ml_kem768_decapsulate(&label, args).map(|s| s.to_vec()),
             KIND_MLDSA_SIGN => {
                 let Some((&ctx_len, rest)) = args.split_first() else {
                     return refuse("short ML-DSA request");
@@ -946,6 +956,122 @@ impl<T: Transport> RemoteDerive for RemoteDeriveClient<T> {
         }
         Ok(sig)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The key holder's local socket
+// ---------------------------------------------------------------------------
+//
+// A node, and any other process on the machine that signs for it (the CLI's
+// `validator register-machine`), reaches the provider through the key
+// holder's local socket. The client side of that socket lives here so the
+// node and the CLI share one implementation; the holder itself (the server)
+// is `tenzro-node tpm key-holder`.
+
+/// The key holder operation that carries a signing request to the provider.
+pub const HOLDER_OP_CALL: u8 = 1;
+
+const HOLDER_STATUS_OK: u8 = 0;
+
+/// Largest frame either side of the holder socket sends.
+const HOLDER_MAX_FRAME: usize = 1 << 20;
+
+/// Longest one holder operation may take: the holder's own request timeout
+/// (20 s) with room for its retries.
+const HOLDER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Sends one operation to the key holder at `socket` and returns its answer.
+#[cfg(unix)]
+pub fn holder_request(
+    socket: &std::path::Path,
+    op: u8,
+    payload: &[u8],
+) -> std::result::Result<Vec<u8>, String> {
+    use std::io::{Read, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| {
+        format!(
+            "the key holder at {} is not reachable: {e}",
+            socket.display()
+        )
+    })?;
+    let timeout = Some(HOLDER_TIMEOUT);
+    stream
+        .set_read_timeout(timeout)
+        .and_then(|()| stream.set_write_timeout(timeout))
+        .map_err(|e| format!("key holder socket: {e}"))?;
+    let mut out = vec![op];
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    stream
+        .write_all(&out)
+        .map_err(|e| format!("key holder socket: {e}"))?;
+    let mut head = [0u8; 5];
+    stream
+        .read_exact(&mut head)
+        .map_err(|e| format!("the key holder did not answer: {e}"))?;
+    let len = u32::from_be_bytes(head[1..5].try_into().expect("four bytes")) as usize;
+    if len > HOLDER_MAX_FRAME {
+        return Err("the key holder's answer is too large".into());
+    }
+    let mut body = vec![0u8; len];
+    stream
+        .read_exact(&mut body)
+        .map_err(|e| format!("the key holder did not answer: {e}"))?;
+    match head[0] {
+        HOLDER_STATUS_OK => Ok(body),
+        _ => Err(String::from_utf8_lossy(&body).into_owned()),
+    }
+}
+
+/// Sends one operation to the key holder at `socket` and returns its answer.
+#[cfg(not(unix))]
+pub fn holder_request(
+    _socket: &std::path::Path,
+    _op: u8,
+    _payload: &[u8],
+) -> std::result::Result<Vec<u8>, String> {
+    Err("the TPM key holder needs a Unix socket, which this platform does not have".into())
+}
+
+/// Carries a request to the provider through the local key holder.
+#[derive(Debug, Clone)]
+pub struct HolderTransport {
+    socket: std::path::PathBuf,
+}
+
+impl HolderTransport {
+    pub fn new(socket: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            socket: socket.into(),
+        }
+    }
+}
+
+impl Transport for HolderTransport {
+    fn call(&self, request: &[u8]) -> Result<Vec<u8>> {
+        holder_request(&self.socket, HOLDER_OP_CALL, request)
+            .map_err(|e| DeviceKeyError::Tpm(format!("remote TPM: {e}")))
+    }
+}
+
+/// From now on every hardware key and every derived key this process asks
+/// for lives in the providers' TPM, reached through the key holder at
+/// `socket`: `{grant_label}/{key label}` there. Set once per process, before
+/// any key use.
+pub fn use_key_holder(grant_label: &str, socket: &std::path::Path) -> Result<()> {
+    let grant = grant_label.to_string();
+    let path = socket.to_path_buf();
+    crate::signer::use_remote_signers(Box::new(move |label| {
+        let signer = RemoteTpmSigner::open(
+            HolderTransport::new(path.clone()),
+            &format!("{grant}/{label}"),
+        )?;
+        Ok(Box::new(signer) as Box<dyn HardwareSigner>)
+    }))?;
+    crate::derive::use_remote_root(Arc::new(RemoteDeriveClient::new(
+        HolderTransport::new(socket),
+        grant_label,
+    )))
 }
 
 #[cfg(test)]
@@ -1648,5 +1774,92 @@ mod delegation_tests {
             IDENTITY,
         );
         assert!(other.sign_root(&[1; 32], 1, 0).is_err());
+    }
+}
+
+/// Guard: two clients of one provider asking for the consensus key get
+/// two different keys, because the node asks for `{grant}/{label}` and the
+/// provider opens exactly that label.
+#[cfg(test)]
+mod consensus_label_tests {
+    use super::*;
+    use crate::signer::tests::SoftwareTestSigner;
+    use p256::ecdsa::SigningKey;
+    use sha2::{Digest, Sha256};
+
+    /// The consensus key label every node uses.
+    const CONSENSUS: &str = "tenzro/consensus/validator";
+
+    /// A provider key store whose key depends on the label it is asked for,
+    /// as a TPM's does.
+    struct PerLabel;
+    impl KeyStore for PerLabel {
+        fn open(&self, label: &str) -> Result<Box<dyn HardwareSigner>> {
+            let seed: [u8; 32] = Sha256::digest(label.as_bytes()).into();
+            Ok(Box::new(SoftwareTestSigner(
+                SigningKey::from_slice(&seed).unwrap(),
+            )))
+        }
+    }
+
+    struct Quiet;
+    impl Audit for Quiet {
+        fn record(&self, _: &[u8], _: &str, _: &str) {}
+    }
+
+    struct As<'a>(&'a Provider<PerLabel, Quiet>, &'static [u8]);
+    impl Transport for As<'_> {
+        fn call(&self, request: &[u8]) -> Result<Vec<u8>> {
+            Ok(self.0.handle(self.1, request))
+        }
+    }
+
+    fn provider() -> Provider<PerLabel, Quiet> {
+        let grant = |label: &str| Grant {
+            label: label.into(),
+            derived: false,
+        };
+        Provider::new(
+            PerLabel,
+            Quiet,
+            Policy {
+                clients: HashMap::from([
+                    (b"pi".to_vec(), grant("pi")),
+                    (b"tpm-host".to_vec(), grant("tpm-host")),
+                ]),
+                allowed_prefixes: vec![b"tenzro/".to_vec()],
+                allow_prehash: false,
+                per_minute: 60,
+                derived_prefixes: vec!["tenzro/".to_string()],
+            },
+        )
+    }
+
+    /// What `remote_tpm::install` asks for: `{grant}/{label}`.
+    fn consensus_key(p: &Provider<PerLabel, Quiet>, client: &'static [u8], grant: &str) -> Vec<u8> {
+        RemoteTpmSigner::open(As(p, client), &format!("{grant}/{CONSENSUS}"))
+            .expect("the client opens its own consensus key")
+            .public_key_sec1()
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn two_clients_of_one_provider_get_two_consensus_keys() {
+        let p = provider();
+        assert_ne!(
+            consensus_key(&p, b"pi", "pi"),
+            consensus_key(&p, b"tpm-host", "tpm-host")
+        );
+    }
+
+    #[test]
+    fn no_client_may_ask_for_the_shared_literal_consensus_label() {
+        let p = provider();
+        for client in [b"pi".as_slice(), b"tpm-host".as_slice()] {
+            let t = As(&p, if client == b"pi" { b"pi" } else { b"tpm-host" });
+            let err = RemoteTpmSigner::open(t, CONSENSUS).err().expect("refused");
+            assert!(err.to_string().contains("may not use that key"), "{err}");
+        }
     }
 }

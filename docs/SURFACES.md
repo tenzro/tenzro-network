@@ -54,8 +54,8 @@ explores the surface.
 | Rust       | `tenzro-sdk` (crates)   | `network::connect_to_network()`, `TenzroClient::new()` | one client per area (`client.wallet()`, `client.inference()`, ...)  | `client.gateway().call()`  |
 | Python     | `tenzro` (PyPI)         | `RpcClient`, `AsyncRpcClient`              | one method per RPC method, generated from the method table, plus subpackages  | `client.call()`            |
 
-The MCP server carries 403 tools: 248 typed tools with their own input schema
-and 155 mirror tools that forward a `params` object to one method (see
+The MCP server carries 430 tools: 255 typed tools with their own input schema
+and 175 mirror tools that forward a `params` object to one method (see
 [MCP.md](MCP.md)). Adding a tool per method is deliberately not the rule there:
 tool-selection accuracy falls as the list grows, so methods without a typed
 tool are reached through `call_rpc`.

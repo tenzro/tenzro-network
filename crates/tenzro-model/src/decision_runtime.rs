@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
-use praecise_runtime::decision::{DecisionHead, DecisionOptions, decide};
 pub use praecise_runtime::decision::{
     Answer as DecisionAnswer, DecisionOption, MAX_OPTIONS as MAX_DECISION_OPTIONS,
     MAX_QUESTIONS as MAX_DECISION_QUESTIONS, MAX_SCORE_LEVELS, MIN_SCORE_LEVELS, Question,
     QuestionKind,
 };
+use praecise_runtime::decision::{DecisionHead, DecisionOptions, decide};
 
 use crate::error::{ModelError, Result};
 use crate::model_host::{Engine, EngineModels, ModelHost};

@@ -76,9 +76,20 @@ impl World {
         )
         .with_authorization_list(auths);
         match self.rt.execute_transaction(&tx, &mut self.state).await {
-            Ok(r) => Ok(r.success),
+            Ok(r) => refusal(r).map(|r| r.success),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+/// A transaction a rule refuses is final: it spends its nonce, pays the base
+/// gas and comes back as a failed result carrying the rule's message.
+fn refusal(r: tenzro_vm::ExecutionResult) -> Result<tenzro_vm::ExecutionResult, String> {
+    match r.revert_reason.as_deref() {
+        Some(reason) if !r.success && reason.starts_with("Invalid transaction") => {
+            Err(reason.to_string())
+        }
+        _ => Ok(r),
     }
 }
 
@@ -203,10 +214,10 @@ impl World {
         )
         .with_authorization_list(auths);
         tx.block_timestamp_ms = Some(now_ms);
-        self.rt
-            .execute_transaction(&tx, &mut self.state)
-            .await
-            .map_err(|e| e.to_string())
+        match self.rt.execute_transaction(&tx, &mut self.state).await {
+            Ok(r) => refusal(r),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 

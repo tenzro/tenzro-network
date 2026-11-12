@@ -102,6 +102,9 @@ impl Gateway {
             config.roles.insert(tenzro_types::NetworkRole::Validator);
             config.consensus = Some(tenzro_consensus::ConsensusConfig::default());
             config.genesis = Some(tenzro_node::config::GenesisConfig {
+                protocol: None,
+                consensus: Default::default(),
+                validator_registry: Default::default(),
                 version: tenzro_node::config::GENESIS_SCHEMA_VERSION,
                 chain_id: 1337,
                 timestamp: 0,
@@ -121,6 +124,23 @@ impl Gateway {
             });
         }
         let mut node = TenzroNode::new(config).await.expect("node creation");
+        // A fixed quiet reading, so the machine running the tests does not
+        // decide whether the node takes model work.
+        node.set_load_reading(std::sync::Arc::new(|s| {
+            *s = tenzro_node::load_monitor::LoadSample {
+                cores: 8,
+                load_per_core: Some(0.0),
+                runnable_per_core: Some(0.0),
+                cpu_psi: Some(0.0),
+                mem_psi_some: Some(0.0),
+                mem_psi_full: Some(0.0),
+                io_psi: Some(0.0),
+                mem_total: 64 << 30,
+                mem_available: 60 << 30,
+                loop_lag_ms: Some(0.0),
+                ..Default::default()
+            };
+        }));
         node.start().await.expect("node start");
         let node = Arc::new(node);
         let (shutdown, shutdown_rx) = broadcast::channel::<()>(1);
@@ -137,7 +157,7 @@ impl Gateway {
         // pass the egress guard: a forward that tried HTTP would reach it.
         let client = reqwest::Client::new();
         let base_url = format!("http://{addr}");
-        owner.enroll(&client, &base_url).await;
+        owner.enroll(&client, &base_url, &node).await;
         owner.register_machine(&node).await;
         let granted = owner
             .signed(
@@ -918,7 +938,9 @@ async fn receipting_provider() -> MockProvider {
         .await
         .unwrap();
     let handler = Arc::new(ReceiptingProvider {
-        signer: tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::random())),
+        signer: tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(
+            tenzro_crypto::composite::testing::TestHybridSigner::random(),
+        )),
         seen: seen.clone(),
     });
     let router = Router::builder(endpoint)

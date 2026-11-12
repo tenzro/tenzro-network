@@ -242,7 +242,9 @@ mod tests {
     use super::*;
 
     fn signer() -> tenzro_crypto::batch::ImmediateRecordSigner {
-        tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::random()))
+        tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
+            tenzro_crypto::composite::testing::TestHybridSigner::random(),
+        ))
     }
 
     #[test]

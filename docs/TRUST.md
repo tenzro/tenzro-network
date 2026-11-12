@@ -130,8 +130,8 @@ The model catalog is data. Each model is a `TenzroCatalogEntry` a publisher sign
 ```
 
 The `entry` names the engine family and that engine's description of the model (`model: { engine, spec }`, with `engine` one of `gguf`,
-`onnx-vision`, `onnx-forecast`, `onnx-text-embedding`, `onnx-segmentation`, `onnx-text-segmentation`, `onnx-detection`, `onnx-audio`, `tts`,
-`onnx-video`, `media-gen`), the licence (`licence: { name, id, tier }`, tier `permissive`, `attribution`, `commercial_custom` or
+`rerank`, `decision`, `onnx-vision`, `onnx-forecast`, `onnx-text-embedding`, `embed`, `onnx-segmentation`, `onnx-text-segmentation`, `onnx-detection`, `onnx-audio`, `tts`,
+`omni`, `onnx-video`, `media-gen`), the licence (`licence: { name, id, tier }`, tier `permissive`, `attribution`, `commercial_custom` or
 `non_commercial`), whether the weights are `gated` at their origin, every file the model downloads (`components: [{ repo, path, revision,
 size, sha256 }]`, each fixed to a 40-hex commit), capability tags, published-benchmark priors (basis points) and, for a Mixture-of-Experts
 model, the checkpoint its experts are extracted from. Unlike other trust documents an entry may carry fractional numbers (sampler

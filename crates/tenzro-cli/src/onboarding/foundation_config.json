@@ -1,0 +1,11 @@
+{
+  "_comment": "THE one place for the initial-phase onboarding values. Read by the CLI (onboarding/foundation_config.rs, compiled in) and imported by the wallet app (apps/tenzro-control/src/lib/onboarding.ts). Editing this file is the whole change.",
+  "foundation_contact_channels": [
+    ["Email", "team@tenzro.com"],
+    ["GitHub", "https://github.com/tenzro/tenzro-network/discussions"]
+  ],
+  "join_link": "https://tenzro.com/join",
+  "expected_reply_time": "within 2 working days",
+  "status_endpoint_base": "https://tenzro.com/api/join",
+  "default_phase": "foundation"
+}

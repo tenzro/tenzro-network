@@ -29,6 +29,9 @@ use tenzro_trust::ledger::RecordKind;
 /// publisher whose DID the identity registry revokes drops out.
 pub const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a rebuild requested by a new record waits for more to arrive.
+pub const REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// A published model the node does not serve, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refused {
@@ -68,6 +71,8 @@ pub struct CatalogSync {
     admits: ChainAdmits,
     did_revoked: DidRevoked,
     status: RwLock<CatalogStatus>,
+    /// Wakes the background rebuild task; set once it is running.
+    wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 impl CatalogSync {
@@ -83,6 +88,7 @@ impl CatalogSync {
             admits,
             did_revoked,
             status: RwLock::new(CatalogStatus::default()),
+            wake: std::sync::OnceLock::new(),
         }
     }
 
@@ -198,15 +204,42 @@ impl CatalogSync {
         status
     }
 
-    /// Re-assemble the catalog every [`REFRESH_INTERVAL`].
+    /// Ask for the catalog to be re-assembled. With the background task
+    /// running (see [`Self::spawn_periodic`]) this only wakes it, so a burst of
+    /// records, one per model, costs one rebuild rather than one each; without
+    /// it the catalog is rebuilt here, at once.
+    pub fn request_refresh(&self) {
+        match self.wake.get() {
+            Some(wake) => wake.notify_one(),
+            None => {
+                self.refresh();
+            }
+        }
+    }
+
+    /// Re-assemble the catalog every [`REFRESH_INTERVAL`], and shortly after
+    /// [`Self::request_refresh`]. The rebuild verifies every entry's signature
+    /// and reads chain state for each, so it runs on the blocking pool, never
+    /// on an async worker that serves RPC and consensus.
     pub fn spawn_periodic(self: &Arc<Self>) {
         let sync = Arc::clone(self);
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let _ = self.wake.set(wake.clone());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(REFRESH_INTERVAL);
             tick.tick().await;
             loop {
-                tick.tick().await;
-                sync.refresh();
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = wake.notified() => {
+                        // Let the rest of a burst arrive; they share this rebuild.
+                        tokio::time::sleep(REFRESH_DEBOUNCE).await;
+                    }
+                }
+                let s = Arc::clone(&sync);
+                if let Err(e) = tokio::task::spawn_blocking(move || s.refresh()).await {
+                    tracing::warn!(error = %e, "model catalog rebuild failed");
+                }
             }
         });
     }

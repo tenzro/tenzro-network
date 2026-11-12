@@ -75,6 +75,32 @@ pub(crate) async fn handle_get_network_params(
             .and_then(Value::as_str)
             .map(str::to_owned)
     });
+    // `{ "validator_admission": true, "address"?: hex }`: whether validators
+    // are admitted now, and whether `address` is.
+    if params
+        .as_ref()
+        .and_then(|p| p.get("validator_admission"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        let address = match params.as_ref().and_then(|p| p.get("address")) {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_str()
+                    .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+                    .filter(|b| b.len() == 32)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "address must be 32 bytes of hex".to_string(),
+                        data: None,
+                    })?,
+            ),
+        };
+        return Ok(crate::validator_admission::status_json(
+            &chain,
+            address.as_deref(),
+        ));
+    }
     if let Some(key) = key {
         let p = governed_param(&key).ok_or_else(|| JsonRpcError {
             code: -32602,

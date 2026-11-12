@@ -29,8 +29,15 @@ use super::ui;
 #[derive(Debug, Clone)]
 pub enum Reading<T> {
     Pending,
-    Ok { value: T, at: Instant },
-    Err { error: String, at: Instant, last: Option<(T, Instant)> },
+    Ok {
+        value: T,
+        at: Instant,
+    },
+    Err {
+        error: String,
+        at: Instant,
+        last: Option<(T, Instant)>,
+    },
 }
 
 impl<T: Clone> Reading<T> {
@@ -44,7 +51,11 @@ impl<T: Clone> Reading<T> {
                     Reading::Err { last, .. } => last.clone(),
                     Reading::Pending => None,
                 };
-                Reading::Err { error, at: now, last }
+                Reading::Err {
+                    error,
+                    at: now,
+                    last,
+                }
             }
         }
     }
@@ -53,7 +64,9 @@ impl<T: Clone> Reading<T> {
     pub fn value(&self) -> Option<&T> {
         match self {
             Reading::Ok { value, .. } => Some(value),
-            Reading::Err { last: Some((v, _)), .. } => Some(v),
+            Reading::Err {
+                last: Some((v, _)), ..
+            } => Some(v),
             _ => None,
         }
     }
@@ -84,6 +97,8 @@ pub struct Snapshot {
     pub status: Reading<Value>,
     pub chain_id: Reading<String>,
     pub syncing: Reading<bool>,
+    /// While syncing: the block the node is at and the block it is heading for.
+    pub sync_range: Option<(u64, u64)>,
     pub finalized: Reading<u64>,
     pub models: Reading<Vec<Value>>,
     pub validators: Reading<Vec<Value>>,
@@ -99,6 +114,7 @@ impl Snapshot {
             status: Reading::Pending,
             chain_id: Reading::Pending,
             syncing: Reading::Pending,
+            sync_range: None,
             finalized: Reading::Pending,
             models: Reading::Pending,
             validators: Reading::Pending,
@@ -108,6 +124,17 @@ impl Snapshot {
             grant: Reading::Pending,
         }
     }
+}
+
+/// The two heights in an `eth_syncing` answer, when the node reports them.
+pub fn sync_range_of(v: &Value) -> Option<(u64, u64)> {
+    let height = |key: &str| match v.get(key)? {
+        Value::String(s) => Some(hex_u64(s)),
+        Value::Number(n) => n.as_u64(),
+        _ => None,
+    };
+    let (cur, high) = (height("currentBlock")?, height("highestBlock")?);
+    (high > 0).then_some((cur.min(high), high))
 }
 
 fn hex_u64(s: &str) -> u64 {
@@ -126,12 +153,19 @@ fn list_of(v: Value, key: &str) -> Vec<Value> {
 }
 
 /// Read everything the screens show.
-pub async fn collect(url: &str, account: Option<String>, prev: &Snapshot, holder: Option<(String, String)>) -> Snapshot {
+pub async fn collect(
+    url: &str,
+    account: Option<String>,
+    prev: &Snapshot,
+    holder: Option<(String, String)>,
+) -> Snapshot {
     let rpc = crate::rpc::RpcClient::new(url);
     let call = |method: &'static str, params: Value| {
         let rpc = &rpc;
         async move {
-            match tokio::time::timeout(Duration::from_secs(4), rpc.call::<Value>(method, params)).await {
+            match tokio::time::timeout(Duration::from_secs(4), rpc.call::<Value>(method, params))
+                .await
+            {
                 Err(_) => Err("timed out".to_string()),
                 Ok(Err(e)) => Err(e.to_string()),
                 Ok(Ok(v)) => Ok(v),
@@ -148,10 +182,18 @@ pub async fn collect(url: &str, account: Option<String>, prev: &Snapshot, holder
         call("tenzro_listProposals", json!({ "limit": 25 })),
     );
     let balance = match &account {
-        Some(a) => Some((a.clone(), call("eth_getBalance", json!([a, "latest"])).await)),
+        Some(a) => Some((
+            a.clone(),
+            call("eth_getBalance", json!([a, "latest"])).await,
+        )),
         None => None,
     };
-    let payee = status.as_ref().ok().and_then(|s| s.get("payee")).and_then(Value::as_str).map(str::to_string);
+    let payee = status
+        .as_ref()
+        .ok()
+        .and_then(|s| s.get("payee"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let is_validator = status
         .as_ref()
         .ok()
@@ -166,12 +208,25 @@ pub async fn collect(url: &str, account: Option<String>, prev: &Snapshot, holder
         None => Ok(Grant::NotUsed),
         Some((socket, label)) => Ok(check_grant(&socket, &label).await),
     };
+    let sync_range = sync.as_ref().ok().and_then(sync_range_of);
     Snapshot {
+        sync_range,
         status: Reading::from(status, &prev.status),
-        chain_id: Reading::from(chain.map(|v| v.as_str().unwrap_or("").to_string()), &prev.chain_id),
-        syncing: Reading::from(sync.map(|v| !(v == Value::Bool(false) || v.is_null())), &prev.syncing),
+        chain_id: Reading::from(
+            chain.map(|v| v.as_str().unwrap_or("").to_string()),
+            &prev.chain_id,
+        ),
+        syncing: Reading::from(
+            sync.map(|v| !(v == Value::Bool(false) || v.is_null())),
+            &prev.syncing,
+        ),
         finalized: Reading::from(
-            fin.map(|v| v.get("number").and_then(Value::as_str).map(hex_u64).unwrap_or(0)),
+            fin.map(|v| {
+                v.get("number")
+                    .and_then(Value::as_str)
+                    .map(hex_u64)
+                    .unwrap_or(0)
+            }),
             &prev.finalized,
         ),
         models: Reading::from(models.map(|v| list_of(v, "models")), &prev.models),
@@ -187,7 +242,12 @@ pub async fn collect(url: &str, account: Option<String>, prev: &Snapshot, holder
         ),
         balance: match balance {
             Some((a, r)) => Reading::from(
-                r.map(|v| (a.clone(), crate::rpc::parse_hex_u128(v.as_str().unwrap_or("0x0")))),
+                r.map(|v| {
+                    (
+                        a.clone(),
+                        crate::rpc::parse_hex_u128(v.as_str().unwrap_or("0x0")),
+                    )
+                }),
                 &prev.balance,
             ),
             None => Reading::Pending,
@@ -209,7 +269,14 @@ async fn check_grant(socket: &str, label: &str) -> Grant {
     let (socket, label) = (socket.to_string(), label.to_string());
     let run = tokio::task::spawn_blocking(move || {
         std::process::Command::new(node)
-            .args(["tpm", "remote-check", "--key-holder", &socket, "--label", &label])
+            .args([
+                "tpm",
+                "remote-check",
+                "--key-holder",
+                &socket,
+                "--label",
+                &label,
+            ])
             .stdin(std::process::Stdio::null())
             .output()
     });
@@ -217,7 +284,11 @@ async fn check_grant(socket: &str, label: &str) -> Grant {
         Ok(Ok(Ok(out))) if out.status.success() => Grant::Valid,
         Ok(Ok(Ok(out))) => {
             let msg = String::from_utf8_lossy(&out.stderr);
-            let first = msg.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("the check failed");
+            let first = msg
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("the check failed");
             Grant::Failed(first.trim().to_string())
         }
         _ => Grant::Failed("the check did not finish".into()),
@@ -228,10 +299,18 @@ async fn check_grant(socket: &str, label: &str) -> Grant {
 pub fn headline(s: &Snapshot) -> (Word, String) {
     match &s.status {
         Reading::Pending => (Word::Unknown, "waiting for the first answer".into()),
-        Reading::Err { error, last: None, .. } => (Word::Down, error.lines().next().unwrap_or("").to_string()),
-        Reading::Err { last: Some(_), .. } => (Word::Unknown, "the node stopped answering; showing the last values".into()),
+        Reading::Err {
+            error, last: None, ..
+        } => (Word::Down, error.lines().next().unwrap_or("").to_string()),
+        Reading::Err { last: Some(_), .. } => (
+            Word::Unknown,
+            "the node stopped answering; showing the last values".into(),
+        ),
         Reading::Ok { value, .. } => {
-            let state = value.get("state").and_then(Value::as_str).unwrap_or("Running");
+            let state = value
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("Running");
             if state != "Running" {
                 return (Word::Watch, format!("node state is {state}"));
             }
@@ -241,10 +320,24 @@ pub fn headline(s: &Snapshot) -> (Word, String) {
                 return (Word::Watch, format!("node health is {h}"));
             }
             if s.syncing.value() == Some(&true) {
-                return (Word::Watch, "the node is catching up with the network".into());
+                return (
+                    Word::Watch,
+                    "the node is catching up with the network".into(),
+                );
             }
-            if let Reading::Ok { value: Grant::Failed(why), .. } | Reading::Err { last: Some((Grant::Failed(why), _)), .. } = &s.grant {
-                return (Word::Action, format!("the key holder's grant does not work: {why}"));
+            if let Reading::Ok {
+                value: Grant::Failed(why),
+                ..
+            }
+            | Reading::Err {
+                last: Some((Grant::Failed(why), _)),
+                ..
+            } = &s.grant
+            {
+                return (
+                    Word::Action,
+                    format!("the key holder's grant does not work: {why}"),
+                );
             }
             (Word::Ok, "the node is running and healthy".into())
         }
@@ -276,7 +369,14 @@ pub fn short_id(s: &str, head: usize, tail: usize) -> String {
         s.to_string()
     } else {
         let h: String = s.chars().take(head).collect();
-        let t: String = s.chars().rev().take(tail).collect::<Vec<_>>().into_iter().rev().collect();
+        let t: String = s
+            .chars()
+            .rev()
+            .take(tail)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("{h}..{t}")
     }
 }
@@ -298,6 +398,8 @@ pub struct Console {
     pub snap: Snapshot,
     pub leave: Option<Leave>,
     pub account: Arc<Mutex<Option<String>>>,
+    /// The release notice for the header, when one is due today (see `update::notice`).
+    pub update: Option<String>,
     rx: Receiver<Snapshot>,
     refresh: Arc<Notify>,
     tick_started: Instant,
@@ -314,11 +416,21 @@ impl Console {
             (Some(s), Some(l)) => Some((s.clone(), l.clone())),
             _ => None,
         };
-        spawn_reader(handle, url.to_string(), account.clone(), refresh.clone(), tx, holder);
+        spawn_reader(
+            handle,
+            url.to_string(),
+            account.clone(),
+            refresh.clone(),
+            tx,
+            holder,
+        );
         let mut c = Self::offline(url, theme);
         c.rx = rx;
         c.refresh = refresh;
         c.account = account;
+        c.update = crate::commands::update::notice::console_line(
+            &crate::commands::update::notice::data_dir(),
+        );
         c
     }
 
@@ -335,6 +447,7 @@ impl Console {
             snap: Snapshot::empty(),
             leave: None,
             account: Arc::new(Mutex::new(None)),
+            update: None,
             rx,
             refresh: Arc::new(Notify::new()),
             tick_started: Instant::now(),
@@ -369,7 +482,9 @@ impl Console {
             }
             return;
         }
-        let Some(act) = keys::act_for(CONSOLE, name) else { return };
+        let Some(act) = keys::act_for(CONSOLE, name) else {
+            return;
+        };
         if self.help {
             match act {
                 Act::Help | Act::Close => self.help = false,
@@ -392,7 +507,12 @@ impl Console {
                 self.screen = (self.screen + n - 1) % n;
                 self.sel = 0;
             }
-            Act::Down => self.sel = self.sel.saturating_add(1).min(self.rows().saturating_sub(1)),
+            Act::Down => {
+                self.sel = self
+                    .sel
+                    .saturating_add(1)
+                    .min(self.rows().saturating_sub(1))
+            }
             Act::Up => self.sel = self.sel.saturating_sub(1),
             Act::Refresh => self.refresh.notify_one(),
             Act::Edit if self.screen == 1 => self.edit = Some(String::new()),
@@ -421,7 +541,12 @@ impl Console {
         }
         let (h, body, ft) = ui::bands(f.area());
         let (word, reason) = headline(&self.snap);
-        let height = self.snap.status.value().and_then(|s| s.get("block_height")).and_then(Value::as_u64);
+        let height = self
+            .snap
+            .status
+            .value()
+            .and_then(|s| s.get("block_height"))
+            .and_then(Value::as_u64);
         let mut right = vec![Span::styled(format!(" {} ", word.text()), t.status(word))];
         if let Some(hh) = height {
             right.push(Span::styled(format!(" height {hh} "), t.muted()));
@@ -429,14 +554,32 @@ impl Console {
         if self.snap.status.is_stale() {
             right.push(Span::styled(" STALE ", t.status(Word::Watch)));
         }
-        let right_w = right.iter().map(|s| s.width() as u16).sum::<u16>().min(h.width / 2);
+        if let Some(u) = &self.update {
+            right.push(Span::styled(format!(" {u} "), t.status(Word::Watch)));
+        }
+        let right_w = right
+            .iter()
+            .map(|s| s.width() as u16)
+            .sum::<u16>()
+            .min(h.width / 2);
         let prefix_w = " tenzro ".len() as u16 + 1 + self.url.len() as u16 + 2;
         let reason_w = h.width.saturating_sub(right_w).saturating_sub(prefix_w) as usize;
-        ui::header(f, h, t, &format!("{}  {}", self.url, ui::clip(&reason, reason_w)), right);
-        let [tabs, content] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+        ui::header(
+            f,
+            h,
+            t,
+            &format!("{}  {}", self.url, ui::clip(&reason, reason_w)),
+            right,
+        );
+        let [tabs, content] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
         let mut spans = Vec::new();
         for (i, (k, name)) in SCREENS.iter().enumerate() {
-            let style = if i == self.screen { t.selected() } else { t.muted() };
+            let style = if i == self.screen {
+                t.selected()
+            } else {
+                t.muted()
+            };
             spans.push(Span::styled(format!(" {k} {name} "), style));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), tabs);
@@ -460,16 +603,24 @@ impl Console {
     }
 
     fn kv(&self, k: &str, v: String) -> Line<'static> {
-        Line::from(vec![Span::styled(format!(" {k:<14}"), self.theme.muted()), Span::raw(v)])
+        Line::from(vec![
+            Span::styled(format!(" {k:<14}"), self.theme.muted()),
+            Span::raw(v),
+        ])
     }
 
     fn down_notice(&self, width: usize) -> Option<Vec<Line<'static>>> {
         let t = &self.theme;
         match &self.snap.status {
-            Reading::Err { error, last: None, .. } => {
+            Reading::Err {
+                error, last: None, ..
+            } => {
                 let mut v = vec![
                     Line::from(""),
-                    Line::from(vec![Span::styled(" DOWN ", t.status(Word::Down)), Span::styled("Cannot reach a Tenzro node", t.bold())]),
+                    Line::from(vec![
+                        Span::styled(" DOWN ", t.status(Word::Down)),
+                        Span::styled("Cannot reach a Tenzro node", t.bold()),
+                    ]),
                     Line::from(""),
                 ];
                 for l in error.lines() {
@@ -477,13 +628,25 @@ impl Console {
                     let lead = l.chars().take_while(|c| *c == ' ').count() + 1;
                     let body = l.trim_start();
                     let label = body.find(": ").filter(|i| *i <= 4).map_or(0, |i| i + 2);
-                    v.extend(hang(vec![Span::raw(" ".repeat(lead))], lead + label, body, width, Style::default()));
+                    v.extend(hang(
+                        vec![Span::raw(" ".repeat(lead))],
+                        lead + label,
+                        body,
+                        width,
+                        Style::default(),
+                    ));
                 }
                 v.push(Line::from(""));
-                v.push(Line::from(Span::styled(" This screen refreshes by itself; press r to try now.", t.muted())));
+                v.push(Line::from(Span::styled(
+                    " This screen refreshes by itself; press r to try now.",
+                    t.muted(),
+                )));
                 Some(v)
             }
-            Reading::Pending => Some(vec![Line::from(""), Line::from(Span::styled(" Waiting for the node ...", t.muted()))]),
+            Reading::Pending => Some(vec![
+                Line::from(""),
+                Line::from(Span::styled(" Waiting for the node ...", t.muted())),
+            ]),
             _ => None,
         }
     }
@@ -497,26 +660,77 @@ impl Console {
         let s = self.snap.status.value().cloned().unwrap_or(Value::Null);
         let g = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("-").to_string();
         let roles = match s.get("roles") {
-            Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "),
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             Some(Value::String(x)) => x.clone(),
             _ => "-".into(),
         };
         let mut left = vec![Line::from(Span::styled(" Node", t.title()))];
         left.push(self.kv("State", g("state")));
         left.push(self.kv("Health", g("health_status")));
-        left.push(self.kv("Uptime", s.get("uptime_secs").and_then(Value::as_u64).map_or("-".into(), fmt_duration)));
+        left.push(
+            self.kv(
+                "Uptime",
+                s.get("uptime_secs")
+                    .and_then(Value::as_u64)
+                    .map_or("-".into(), fmt_duration),
+            ),
+        );
         left.push(self.kv("Roles", roles));
         left.push(Line::from(""));
         left.push(Line::from(Span::styled(" Identity", t.title())));
         left.push(self.kv("Machine", short_id(&g("machine_did"), 24, 8)));
         left.push(self.kv("Pays out to", short_id(&g("payee"), 12, 8)));
         let mut right = vec![Line::from(Span::styled(" Chain", t.title()))];
-        right.push(self.kv("Chain id", self.snap.chain_id.value().map_or("-".into(), |c| if c.starts_with("0x") { hex_u64(c).to_string() } else { c.clone() })));
-        right.push(self.kv("Height", s.get("block_height").and_then(Value::as_u64).map_or("-".into(), |h| h.to_string())));
-        right.push(self.kv("Finalized", self.snap.finalized.value().map_or("-".into(), |h| h.to_string())));
-        right.push(self.kv("Syncing", self.snap.syncing.value().map_or("-".into(), |b| if *b { "yes".into() } else { "no".into() })));
-        right.push(self.kv("Peers", s.get("peer_count").and_then(Value::as_u64).map_or("-".into(), |p| p.to_string())));
-        let [l, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+        right.push(self.kv(
+            "Chain id",
+            self.snap.chain_id.value().map_or("-".into(), |c| {
+                if c.starts_with("0x") {
+                    hex_u64(c).to_string()
+                } else {
+                    c.clone()
+                }
+            }),
+        ));
+        right.push(
+            self.kv(
+                "Height",
+                s.get("block_height")
+                    .and_then(Value::as_u64)
+                    .map_or("-".into(), |h| h.to_string()),
+            ),
+        );
+        right.push(
+            self.kv(
+                "Finalized",
+                self.snap
+                    .finalized
+                    .value()
+                    .map_or("-".into(), |h| h.to_string()),
+            ),
+        );
+        right.push(
+            self.kv(
+                "Syncing",
+                self.snap
+                    .syncing
+                    .value()
+                    .map_or("-".into(), |b| if *b { "yes".into() } else { "no".into() }),
+            ),
+        );
+        right.push(
+            self.kv(
+                "Peers",
+                s.get("peer_count")
+                    .and_then(Value::as_u64)
+                    .map_or("-".into(), |p| p.to_string()),
+            ),
+        );
+        let [l, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .areas(area);
         f.render_widget(Paragraph::new(left), l);
         f.render_widget(Paragraph::new(right), r);
     }
@@ -524,24 +738,47 @@ impl Console {
     fn wallet(&self, f: &mut Frame, area: Rect) {
         let t = &self.theme;
         let acct = self.account.lock().ok().and_then(|a| a.clone());
-        let mut v = vec![Line::from(Span::styled(" Wallet", t.title())), Line::from("")];
+        let mut v = vec![
+            Line::from(Span::styled(" Wallet", t.title())),
+            Line::from(""),
+        ];
         if let Some(b) = &self.edit {
-            v.push(Line::from(vec![Span::raw(" Account: "), Span::styled(format!("{b}_"), t.bold())]));
+            v.push(Line::from(vec![
+                Span::raw(" Account: "),
+                Span::styled(format!("{b}_"), t.bold()),
+            ]));
         } else if acct.is_none() {
-            v.push(Line::from(" No account is chosen yet. Press e and type an address."));
-            v.push(Line::from(Span::styled(" Setup saves yours; sending and signing stay in the tenzro commands.", t.muted())));
+            v.push(Line::from(
+                " No account is chosen yet. Press e and type an address.",
+            ));
+            v.push(Line::from(Span::styled(
+                " Setup saves yours; sending and signing stay in the tenzro commands.",
+                t.muted(),
+            )));
         } else {
             match &self.snap.balance {
-                Reading::Ok { value: (a, wei), .. } | Reading::Err { last: Some(((a, wei), _)), .. } => {
+                Reading::Ok {
+                    value: (a, wei), ..
+                }
+                | Reading::Err {
+                    last: Some(((a, wei), _)),
+                    ..
+                } => {
                     v.push(self.kv("Account", a.clone()));
                     v.push(self.kv("Balance", format!("{} TNZO", crate::rpc::format_tnzo(*wei))));
                     if self.snap.balance.is_stale() {
-                        v.push(Line::from(Span::styled(" STALE: the node did not answer the last time.", t.status(Word::Watch))));
+                        v.push(Line::from(Span::styled(
+                            " STALE: the node did not answer the last time.",
+                            t.status(Word::Watch),
+                        )));
                     }
                 }
                 Reading::Err { error, .. } => {
                     v.push(self.kv("Account", acct.unwrap_or_default()));
-                    v.push(Line::from(format!(" Could not read the balance: {}", error.lines().next().unwrap_or(""))));
+                    v.push(Line::from(format!(
+                        " Could not read the balance: {}",
+                        error.lines().next().unwrap_or("")
+                    )));
                 }
                 Reading::Pending => v.push(Line::from(" Reading ...")),
             }
@@ -549,14 +786,29 @@ impl Console {
         f.render_widget(Paragraph::new(v), area);
     }
 
-    fn table(&self, f: &mut Frame, area: Rect, heads: &[&str], widths: &[Constraint], rows: Vec<Vec<String>>, empty: &str) {
+    fn table(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        heads: &[&str],
+        widths: &[Constraint],
+        rows: Vec<Vec<String>>,
+        empty: &str,
+    ) {
         let t = &self.theme;
         if rows.is_empty() {
-            f.render_widget(Paragraph::new(vec![Line::from(""), Line::from(format!(" {empty}"))]), area);
+            f.render_widget(
+                Paragraph::new(vec![Line::from(""), Line::from(format!(" {empty}"))]),
+                area,
+            );
             return;
         }
-        let head = Row::new(heads.iter().map(|h| Cell::from(*h)).collect::<Vec<_>>()).style(t.title());
-        let body: Vec<Row> = rows.into_iter().map(|r| Row::new(r.into_iter().map(Cell::from).collect::<Vec<_>>())).collect();
+        let head =
+            Row::new(heads.iter().map(|h| Cell::from(*h)).collect::<Vec<_>>()).style(t.title());
+        let body: Vec<Row> = rows
+            .into_iter()
+            .map(|r| Row::new(r.into_iter().map(Cell::from).collect::<Vec<_>>()))
+            .collect();
         let mut st = TableState::default();
         st.select(Some(self.sel));
         let table = Table::new(body, widths.to_vec())
@@ -567,11 +819,29 @@ impl Console {
     }
 
     fn models(&self, f: &mut Frame, area: Rect) {
-        if let Some(e) = self.snap.models.error().filter(|_| self.snap.models.value().is_none()) {
-            f.render_widget(Paragraph::new(format!(" Could not read models: {}", e.lines().next().unwrap_or(""))), area);
+        if let Some(e) = self
+            .snap
+            .models
+            .error()
+            .filter(|_| self.snap.models.value().is_none())
+        {
+            f.render_widget(
+                Paragraph::new(format!(
+                    " Could not read models: {}",
+                    e.lines().next().unwrap_or("")
+                )),
+                area,
+            );
             return;
         }
-        let yn = |v: &Value, k: &str| if v.get(k).and_then(Value::as_bool).unwrap_or(false) { "yes" } else { "no" }.to_string();
+        let yn = |v: &Value, k: &str| {
+            if v.get(k).and_then(Value::as_bool).unwrap_or(false) {
+                "yes"
+            } else {
+                "no"
+            }
+            .to_string()
+        };
         let rows = self
             .snap
             .models
@@ -580,10 +850,23 @@ impl Console {
                 m.iter()
                     .map(|x| {
                         vec![
-                            x.get("model_id").and_then(Value::as_str).unwrap_or("-").to_string(),
-                            x.get("type").or_else(|| x.get("model_type")).and_then(Value::as_str).unwrap_or("-").to_string(),
-                            x.get("engine").and_then(Value::as_str).unwrap_or("-").to_string(),
-                            x.get("visibility").and_then(Value::as_str).unwrap_or("-").to_string(),
+                            x.get("model_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("-")
+                                .to_string(),
+                            x.get("type")
+                                .or_else(|| x.get("model_type"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("-")
+                                .to_string(),
+                            x.get("engine")
+                                .and_then(Value::as_str)
+                                .unwrap_or("-")
+                                .to_string(),
+                            x.get("visibility")
+                                .and_then(Value::as_str)
+                                .unwrap_or("-")
+                                .to_string(),
                             yn(x, "loaded"),
                             yn(x, "serving"),
                         ]
@@ -592,9 +875,17 @@ impl Console {
             })
             .unwrap_or_default();
         self.table(
-            f, area,
+            f,
+            area,
             &["MODEL", "TYPE", "ENGINE", "VISIBLE", "LOADED", "SERVING"],
-            &[Constraint::Min(24), Constraint::Length(10), Constraint::Length(12), Constraint::Length(9), Constraint::Length(7), Constraint::Length(8)],
+            &[
+                Constraint::Min(24),
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(9),
+                Constraint::Length(7),
+                Constraint::Length(8),
+            ],
             rows,
             "This node holds no models yet. `tenzro model list` shows what can be served.",
         );
@@ -608,21 +899,40 @@ impl Console {
             .map(|m| {
                 m.iter()
                     .map(|x| {
-                        let wei = x.get("self_stake").and_then(Value::as_str).and_then(|s| s.parse::<u128>().ok()).unwrap_or(0);
+                        let wei = x
+                            .get("self_stake")
+                            .and_then(Value::as_str)
+                            .and_then(|s| s.parse::<u128>().ok())
+                            .unwrap_or(0);
                         vec![
-                            short_id(x.get("address").and_then(Value::as_str).unwrap_or("-"), 12, 8),
-                            x.get("status").and_then(Value::as_str).unwrap_or("-").to_string(),
+                            short_id(
+                                x.get("address").and_then(Value::as_str).unwrap_or("-"),
+                                12,
+                                8,
+                            ),
+                            x.get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("-")
+                                .to_string(),
                             format!("{} TNZO", crate::rpc::format_tnzo(wei)),
-                            x.get("activated_at_epoch").and_then(Value::as_u64).map_or("-".into(), |e| format!("epoch {e}")),
+                            x.get("activated_at_epoch")
+                                .and_then(Value::as_u64)
+                                .map_or("-".into(), |e| format!("epoch {e}")),
                         ]
                     })
                     .collect()
             })
             .unwrap_or_default();
         self.table(
-            f, area,
+            f,
+            area,
             &["ADDRESS", "STATUS", "SELF STAKE", "ACTIVE SINCE"],
-            &[Constraint::Length(24), Constraint::Length(12), Constraint::Length(24), Constraint::Min(12)],
+            &[
+                Constraint::Length(24),
+                Constraint::Length(12),
+                Constraint::Length(24),
+                Constraint::Min(12),
+            ],
             rows,
             "No validators are registered yet.",
         );
@@ -639,11 +949,22 @@ impl Console {
                     .map(|x| {
                         let p = x.get("proposal").unwrap_or(x);
                         let tally = x.get("tally").unwrap_or(&Value::Null);
-                        let n = |k: &str| tally.get(k).and_then(Value::as_str).and_then(|s| s.parse::<u128>().ok()).unwrap_or(0);
+                        let n = |k: &str| {
+                            tally
+                                .get(k)
+                                .and_then(Value::as_str)
+                                .and_then(|s| s.parse::<u128>().ok())
+                                .unwrap_or(0)
+                        };
                         vec![
                             short_id(p.get("id").and_then(Value::as_str).unwrap_or("-"), 6, 6),
-                            x.get("kind").and_then(Value::as_str).unwrap_or("-").to_string(),
-                            p.get("status").map(|s| s.as_str().map(str::to_string).unwrap_or(s.to_string())).unwrap_or("-".into()),
+                            x.get("kind")
+                                .and_then(Value::as_str)
+                                .unwrap_or("-")
+                                .to_string(),
+                            p.get("status")
+                                .map(|s| s.as_str().map(str::to_string).unwrap_or(s.to_string()))
+                                .unwrap_or("-".into()),
                             format!("{} TNZO", crate::rpc::format_tnzo(n("yes"))),
                             format!("{} TNZO", crate::rpc::format_tnzo(n("no"))),
                         ]
@@ -652,9 +973,16 @@ impl Console {
             })
             .unwrap_or_default();
         self.table(
-            f, area,
+            f,
+            area,
             &["PROPOSAL", "KIND", "STATUS", "YES", "NO"],
-            &[Constraint::Length(16), Constraint::Min(20), Constraint::Length(12), Constraint::Length(18), Constraint::Length(18)],
+            &[
+                Constraint::Length(16),
+                Constraint::Min(20),
+                Constraint::Length(12),
+                Constraint::Length(18),
+                Constraint::Length(18),
+            ],
             rows,
             "No proposals yet.",
         );
@@ -670,7 +998,10 @@ impl Console {
         let width = area.width as usize;
         let line = |w: Word, label: &str, text: String| {
             hang(
-                vec![Span::styled(format!(" {:<8}", w.text()), t.status(w)), Span::styled(format!("{label:<14}"), t.bold())],
+                vec![
+                    Span::styled(format!(" {:<8}", w.text()), t.status(w)),
+                    Span::styled(format!("{label:<14}"), t.bold()),
+                ],
                 23,
                 &text,
                 width,
@@ -686,24 +1017,59 @@ impl Console {
         });
         let height = s.get("block_height").and_then(Value::as_u64);
         v.extend(match (height, self.snap.syncing.value()) {
-            (_, Some(true)) => line(Word::Watch, "Sync", "catching up with the network".into()),
-            (Some(0), _) if peers.unwrap_or(0) > 0 => line(Word::Ok, "Sync", "height 0 with peers is normal on a quiet chain; it moves at the next block".into()),
+            (_, Some(true)) => {
+                let text = match self.snap.sync_range {
+                    Some((cur, high)) => {
+                        use crate::progress::fmt as pf;
+                        format!(
+                            "catching up {} {}%, block {} of {}",
+                            pf::bar(18, cur, high),
+                            pf::percent(cur, high),
+                            pf::count(cur),
+                            pf::count(high)
+                        )
+                    }
+                    None => "catching up with the network".into(),
+                };
+                line(Word::Watch, "Sync", text)
+            }
+            (Some(0), _) if peers.unwrap_or(0) > 0 => line(
+                Word::Ok,
+                "Sync",
+                "height 0 with peers is normal on a quiet chain; it moves at the next block".into(),
+            ),
             (Some(h), _) => line(Word::Ok, "Sync", format!("at the tip, height {h}")),
             _ => line(Word::Unknown, "Sync", "unknown".into()),
         });
         let roles = match s.get("roles") {
-            Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "),
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             Some(Value::String(x)) => x.clone(),
             _ => String::new(),
         };
-        v.extend(line(if roles.is_empty() { Word::Watch } else { Word::Ok }, "Roles", if roles.is_empty() { "none".into() } else { roles.clone() }));
+        v.extend(line(
+            if roles.is_empty() {
+                Word::Watch
+            } else {
+                Word::Ok
+            },
+            "Roles",
+            if roles.is_empty() {
+                "none".into()
+            } else {
+                roles.clone()
+            },
+        ));
         if roles.contains("alidator") {
             let vs = self.snap.validator_state.value();
             let st = vs.and_then(|x| x.get("status")).and_then(Value::as_str);
             v.extend(match st {
                 Some("Active") => line(Word::Ok, "Validator", "active: your node votes".into()),
-                Some(other) => line(Word::Watch, "Validator", format!("{other}: not voting yet. Registration needs approval during the preview; see the validator steps in tenzro setup")),
-                None => line(Word::Action, "Validator", "not registered. Ask for admission at https://tenzro.com/join, then restart the node with --validator-self-stake (see the validator steps in tenzro)".into()),
+                Some(other) => line(Word::Watch, "Validator", format!("{other}: not voting yet. Registration needs approval while validator admission is closed; see the validator steps in tenzro setup")),
+                None => line(Word::Action, "Validator", "not registered. Validator admission is closed while the network stabilises: write to team@tenzro.com to ask to be admitted, then restart the node with --validator-self-stake (see the validator steps in tenzro)".into()),
             });
         }
         v.extend(match self.snap.grant.value() {
@@ -719,7 +1085,7 @@ impl Console {
         v.extend(hang(
             vec![Span::raw(" ")],
             1,
-            &format!("Updated {age}. To stop cleanly: tenzro-node graceful-exit. To leave the validator set: tenzro validator exit."),
+            &format!("Updated {age}. To stop cleanly: tenzro-node graceful-exit. To leave the validator set: tenzro validator exit --node-account (tenzro validator exit --help names the other case)."),
             width,
             t.muted(),
         ));
@@ -729,7 +1095,13 @@ impl Console {
 
 /// Wrap `text` to `width` columns after the `lead` spans, indenting every
 /// continuation line by `cont` columns (a hanging indent).
-fn hang(lead: Vec<Span<'static>>, cont: usize, text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+fn hang(
+    lead: Vec<Span<'static>>,
+    cont: usize,
+    text: &str,
+    width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
     let first: usize = lead.iter().map(|s| s.width()).sum();
     let indent = cont;
     let room = width.saturating_sub(first.max(indent)).max(10);
@@ -757,7 +1129,11 @@ fn hang(lead: Vec<Span<'static>>, cont: usize, text: &str, width: usize, style: 
     }
     let mut out = Vec::new();
     for (i, r) in rows.into_iter().enumerate() {
-        let mut spans = if i == 0 { lead.clone() } else { vec![Span::raw(" ".repeat(indent))] };
+        let mut spans = if i == 0 {
+            lead.clone()
+        } else {
+            vec![Span::raw(" ".repeat(indent))]
+        };
         spans.push(Span::styled(r, style));
         out.push(Line::from(spans));
     }
@@ -778,7 +1154,8 @@ fn spawn_reader(
         loop {
             let acct = account.lock().ok().and_then(|a| a.clone());
             // The grant check asks the provider's TPM: once a minute, not every refresh.
-            let check_now = holder.is_some() && last_grant.is_none_or(|t| t.elapsed() > Duration::from_secs(60));
+            let check_now = holder.is_some()
+                && last_grant.is_none_or(|t| t.elapsed() > Duration::from_secs(60));
             let h = if check_now { holder.clone() } else { None };
             let mut next = collect(&url, acct, &prev, h).await;
             if holder.is_some() && !check_now {
@@ -803,12 +1180,36 @@ fn spawn_reader(
 mod tests {
     use super::*;
     use crate::tui::theme::Depth;
+
+    #[test]
+    fn the_sync_range_is_read_from_hex_or_numbers_and_never_runs_past_the_tip() {
+        assert_eq!(
+            sync_range_of(&json!({"currentBlock": "0x64", "highestBlock": "0xc8"})),
+            Some((100, 200))
+        );
+        assert_eq!(
+            sync_range_of(&json!({"currentBlock": 50, "highestBlock": 40})),
+            Some((40, 40))
+        );
+        assert_eq!(sync_range_of(&json!({"currentBlock": "0x1"})), None);
+        assert_eq!(
+            sync_range_of(&json!({"currentBlock": "0x0", "highestBlock": "0x0"})),
+            None
+        );
+        assert_eq!(sync_range_of(&json!(false)), None);
+    }
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     #[test]
     fn hang_wraps_with_indent_and_never_exceeds_width() {
-        let lines = hang(vec![Span::raw(" Key       ")], 11, "kept in this machine's own hardware; there is no grant to expire", 40, Style::default());
+        let lines = hang(
+            vec![Span::raw(" Key       ")],
+            11,
+            "kept in this machine's own hardware; there is no grant to expire",
+            40,
+            Style::default(),
+        );
         assert!(lines.len() > 1);
         for (i, l) in lines.iter().enumerate() {
             assert!(l.width() <= 40, "{l:?}");
@@ -823,7 +1224,13 @@ mod tests {
         t.draw(|f| c.view(f)).unwrap();
         let buf = t.backend().buffer().clone();
         (0..h)
-            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -835,13 +1242,35 @@ mod tests {
             value: json!({"state":"Running","health_status":"Healthy","block_height":42,"peer_count":3,"roles":["validator"],"uptime_secs":3700,"payee":"0xabc","machine_did":"did:tenzro:machine:xyz"}),
             at: now,
         };
-        c.snap.chain_id = Reading::Ok { value: "0x539".into(), at: now };
-        c.snap.syncing = Reading::Ok { value: false, at: now };
+        c.snap.chain_id = Reading::Ok {
+            value: "0x539".into(),
+            at: now,
+        };
+        c.snap.syncing = Reading::Ok {
+            value: false,
+            at: now,
+        };
         c.snap.finalized = Reading::Ok { value: 40, at: now };
-        c.snap.models = Reading::Ok { value: vec![json!({"model_id":"qwen","type":"text","loaded":true,"serving":true,"visibility":"public"})], at: now };
-        c.snap.validators = Reading::Ok { value: vec![json!({"address":"0x1234567890abcdef1234567890abcdef","status":"Active","self_stake":"10000000000000000000000"})], at: now };
-        c.snap.proposals = Reading::Ok { value: (vec![], 0), at: now };
-        c.snap.grant = Reading::Ok { value: Grant::NotUsed, at: now };
+        c.snap.models = Reading::Ok {
+            value: vec![
+                json!({"model_id":"qwen","type":"text","loaded":true,"serving":true,"visibility":"public"}),
+            ],
+            at: now,
+        };
+        c.snap.validators = Reading::Ok {
+            value: vec![
+                json!({"address":"0x1234567890abcdef1234567890abcdef","status":"Active","self_stake":"10000000000000000000000"}),
+            ],
+            at: now,
+        };
+        c.snap.proposals = Reading::Ok {
+            value: (vec![], 0),
+            at: now,
+        };
+        c.snap.grant = Reading::Ok {
+            value: Grant::NotUsed,
+            at: now,
+        };
         c
     }
 
@@ -864,12 +1293,21 @@ mod tests {
         let mut c = Console::offline("http://127.0.0.1:8545", Theme::with_depth(Depth::None));
         let u = crate::friendly::explain(crate::friendly::Class::Refused, "http://127.0.0.1:8545");
         c.snap.status = Reading::Err {
-            error: crate::friendly::Unreachable { url: "x".into(), class: crate::friendly::Class::Refused, detail: String::new(), explained: u }.to_string(),
+            error: crate::friendly::Unreachable {
+                url: "x".into(),
+                class: crate::friendly::Class::Refused,
+                detail: String::new(),
+                explained: u,
+            }
+            .to_string(),
             at: Instant::now(),
             last: None,
         };
         let s = screen(&c, 80, 24);
-        assert!(s.contains("DOWN") && s.contains("Cannot reach") && s.contains("tenzro dev"), "{s}");
+        assert!(
+            s.contains("DOWN") && s.contains("Cannot reach") && s.contains("tenzro dev"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -885,7 +1323,10 @@ mod tests {
     #[test]
     fn a_failed_key_holder_grant_is_an_action_not_ok() {
         let mut c = live();
-        c.snap.grant = Reading::Ok { value: Grant::Failed("grant expired".into()), at: Instant::now() };
+        c.snap.grant = Reading::Ok {
+            value: Grant::Failed("grant expired".into()),
+            at: Instant::now(),
+        };
         assert_eq!(headline(&c.snap).0, Word::Action);
         c.on_key("6");
         let s = screen(&c, 80, 24);

@@ -105,17 +105,7 @@ impl NodeStartCmd {
         let roles = RoleSet::from_str(&self.roles)
             .map_err(|e| anyhow::anyhow!("Invalid --roles \"{}\": {}", self.roles, e))?;
 
-        // Create spinner
-        let spinner = output::create_spinner("Initializing node...");
-
-        spinner.set_message("Loading configuration...");
-        spinner.set_message("Initializing storage...");
-        spinner.set_message("Starting P2P networking...");
-        spinner.set_message("Starting RPC server...");
-        spinner.finish_and_clear();
-
         // Print node info
-        output::print_success("Node started successfully!");
         println!();
         output::print_field("Roles", &roles.to_string());
         output::print_field(
@@ -136,8 +126,6 @@ impl NodeStartCmd {
         }
 
         println!();
-        output::print_info("Node is now running. Press Ctrl+C to stop.");
-        output::print_info(&format!("RPC endpoint: http://{}", self.rpc_addr));
 
         // Start the actual node process
         output::print_info("Starting tenzro-node binary...");
@@ -162,11 +150,18 @@ impl NodeStartCmd {
             args.push(config.display().to_string());
         }
 
-        // Exec into tenzro-node (this blocks until the node exits)
-        let status = tokio::process::Command::new("tenzro-node")
+        let mut child = tokio::process::Command::new("tenzro-node")
             .args(&args)
-            .status()
-            .await;
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to start tenzro-node: {}. Is it installed?", e))?;
+
+        // The node writes its own log to this terminal, so the wait is shown
+        // as calm lines rather than a redrawing bar.
+        let early_exit = wait_until_ready(&mut child, &self.rpc_addr).await;
+        let status = match early_exit {
+            Some(status) => status,
+            None => child.wait().await,
+        };
 
         match status {
             Ok(s) if s.success() => output::print_success("Node exited successfully"),
@@ -183,6 +178,48 @@ impl NodeStartCmd {
         }
 
         Ok(())
+    }
+}
+
+/// How long the start waits for the node's RPC before saying so and carrying on.
+const START_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Wait until the node started as `child` answers on `rpc_addr`. Returns the
+/// exit status if the node stopped first; `None` once it answers, or once the
+/// wait has run out (the node keeps running either way).
+async fn wait_until_ready(
+    child: &mut tokio::process::Child,
+    rpc_addr: &str,
+) -> Option<std::io::Result<std::process::ExitStatus>> {
+    let rpc = crate::rpc::RpcClient::new(&format!("http://{rpc_addr}"));
+    let waiting = crate::progress::Progress::calm().wait(
+        "Starting the node",
+        &format!("waiting for its RPC at {rpc_addr}"),
+    );
+    let started = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                waiting.fail("the node stopped before it was ready");
+                return Some(status);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+        }
+        if let Ok(height) = rpc
+            .call::<String>("eth_blockNumber", serde_json::json!([]))
+            .await
+        {
+            let height = crate::rpc::parse_hex_u64(&height);
+            waiting.finish_with(&format!("the node answers at block {height}"));
+            output::print_info(&format!(
+                "RPC endpoint: http://{rpc_addr}. Press Ctrl+C to stop."
+            ));
+            return None;
+        }
+        if started.elapsed() >= START_WAIT {
+            waiting.fail("the node did not answer within 3 minutes; it is still starting");
+            return None;
+        }
     }
 }
 

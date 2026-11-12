@@ -390,7 +390,7 @@ pub mod svm_gas_costs {
     pub const MAX_COMPUTE_UNITS: u64 = 1_400_000;
 }
 
-/// Gas normalizer for consistent metering across VMs (MEDIUM #122)
+/// Gas normalizer for consistent metering across VMs
 ///
 /// Different VMs use incompatible units:
 /// - **EVM:** Gas (max 30,000,000 per block)

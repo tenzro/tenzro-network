@@ -135,8 +135,12 @@ fn counts() -> BTreeMap<String, usize> {
                         _ => {}
                     }
                 }
-                if (opened && depth <= 0) || (!opened && t.ends_with(';')) {
+                // A test-only struct field or argument is one line ending in `,`; without this
+                // the skip would run on to the closing brace of the enclosing literal and leave
+                // the depth off, so later test modules would be scanned as production code.
+                if (opened && depth <= 0) || (!opened && (t.ends_with(';') || t.ends_with(','))) {
                     skipping = false;
+                    depth = 0;
                 }
                 continue;
             }
@@ -280,6 +284,11 @@ const ALLOWED_FILE_OPS: &[(&str, usize, &str)] = &[
         "tenzro-econsim/src/bin/tenzro-econsim.rs",
         1,
         "not a key: reads seeds.jsonl, simulation seeds of a tool binary",
+    ),
+    (
+        "tenzro-cli/src/commands/update/tests.rs",
+        3,
+        "compiled only under cfg(test) (update/mod.rs gates the module); writes placeholder bytes named like a key handle and a hybrid key record into a temporary directory to check an update leaves the device-keys folder and that record alone; no key is generated or read",
     ),
     (
         "tenzro-openshell/src/gateway_auth.rs",

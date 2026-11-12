@@ -315,7 +315,7 @@ impl WalletService for TenzroWalletService {
         // Nothing is minted here. The signing key belongs to the identity and
         // this service never sees its secret half; a post-quantum key, when the
         // holder has one, is the holder's own and is added by a rotation the
-        // holder signs. A key generated in this process would be a key this
+        // holder signs. A key made in this process would be a key this
         // process holds.
         let wallet = Wallet::new(WalletId::new(), identity.public_key().clone());
 

@@ -10,8 +10,8 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
-use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_crypto::batch::{RecordSignature, RecordSigner};
+use tenzro_crypto::composite::CompositePublicKey;
 
 const PREFIX: &str = "tzs1";
 const DOMAIN: &[u8] = b"tenzro/openshell/credential/v1";
@@ -45,7 +45,9 @@ fn message(claims_json: &[u8]) -> Vec<u8> {
 /// Mint a credential for `claims`.
 pub fn mint(signer: &dyn RecordSigner, claims: &Claims) -> Result<String, String> {
     let json = serde_json::to_vec(claims).map_err(|e| e.to_string())?;
-    let sig = signer.sign_record(&message(&json)).map_err(|e| e.to_string())?;
+    let sig = signer
+        .sign_record(&message(&json))
+        .map_err(|e| e.to_string())?;
     let sig = serde_json::to_vec(&sig).map_err(|e| e.to_string())?;
     Ok(format!("{PREFIX}.{}.{}", B64.encode(json), B64.encode(sig)))
 }

@@ -229,6 +229,18 @@ every node runs once it activates.
   `getUpgradeReadiness`) shows the signals, the ready and required shares,
   and the scheduled activation.
 
+### The protocol version range
+
+The chain's protocol version is in state (`network:protocol_version`), seeded
+by the genesis `[protocol] version` (optional; the header carries the same
+number) and raised by an enacted protocol upgrade to the major number of its
+`version` from its activation height; it never falls. Each binary declares the
+inclusive range it supports (`MIN_SUPPORTED_PROTOCOL_VERSION`..=
+`MAX_SUPPORTED_PROTOCOL_VERSION`, in `tenzro-vm`). A node refuses to start, and
+stops executing blocks from the activation height, when the chain's version at
+the next height is outside it, with a message naming both. A genesis without
+`[protocol]` records no version and is not range-checked.
+
 A policy change carries `track`: `standard`, `expedited`, or
 `security_fix { basis }`. The security-fix track is for a protocol upgrade
 only, runs on the expedited window, timelock and four-fifths threshold, and

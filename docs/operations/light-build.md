@@ -12,7 +12,8 @@ serves GPU providers.
 One `tenzro-node` source builds for three tiers. A tier is a build (which
 cargo features are compiled in) and a resource preset (what the node takes of
 the machine at run time). The build decides which roles a node can fill; the
-preset only sizes it.
+preset only sizes it. See [docs/HARDWARE-COVERAGE.md](HARDWARE-COVERAGE.md)
+for which specific platforms each release archive is built and tested for.
 
 | Tier | Machines | Build | Roles it refuses |
 |---|---|---|---|
@@ -67,7 +68,7 @@ otherwise.
 | Background flush and compaction jobs | 1 | 2 | `[storage] background_jobs` |
 | Background write rate | 16 MiB/s | 64 MiB/s | `[storage] background_write_mb_per_sec` |
 | Open files | 256 | 1000 | `[storage] max_open_files` |
-| Runtime worker threads | 2 (1 on a one-core machine) | 2 | `--worker-threads` / `TENZRO_WORKER_THREADS` |
+| Runtime worker threads | 2 (1 on a one-core machine) | core count, 2 to 8 | `--worker-threads` / `TENZRO_WORKER_THREADS` |
 | Runtime blocking threads | 32 | 512 | |
 
 The memory pool is what the node's memory budget lends out: on a machine with
@@ -78,9 +79,11 @@ tiers.
 
 History retention is a network parameter (governance), not a preset: every
 non-archival node keeps the governed window, prunes to it and compacts when
-the data volume passes `[storage] prune_watermark_pct` (75%), and refuses
-non-essential data past `refuse_watermark_pct` (90%). On a small SD card or
-eMMC those watermarks are what keep the node inside its disk.
+the data volume runs low (under 20 GiB and 12 percent free by default), and
+refuses non-essential data when it runs lower still (under 8 GiB and 6
+percent). A level also trips when the measured growth leaves too few blocks
+of room. The levels are set in `[storage.ladder]`. On a small SD card or
+eMMC they are what keep the node inside its disk.
 
 The background tasks a node starts are already gated by role: audit
 watchers, fee-rate reporting, SLA probes and attestations, data-availability
@@ -125,37 +128,22 @@ session continuity or the MoE repair loop.
   passkey never holds a consensus key: the operator's passkey grants and
   approves, and the key stays in a TPM or Secure Enclave.
 
-  **Session delegation.** A TPM command takes seconds, so the key holder does
-  not ask the provider for every signature. With `tenzro-node tpm key-holder
-  --identity <did> --label <label>` it asks the provider once per session for
-  a delegation: a statement signed by the identity key (its Ed25519 and its
-  ML-DSA-65 leg) that binds a session key pair the holder made in its own
-  locked memory, for a bounded time and under the identity's current key
-  version. The holder then signs each message with the session key
-  (`OP_SESSION_SIGN`, no round trip), and a peer traces the signature to the
-  identity key through the delegation. The session key is made at start,
-  wiped on drop, never written and never exported; it is a credential for
-  one delegation, not an identity key. The delegation ends at its expiry, at
-  its revocation, at the end of the grant it was issued under, or when the
-  identity rotates to a new key version, whichever comes first. The holder
-  renews before expiry (`--session-renew-before-secs`), checks the provider
-  for revocation and rotation every `--session-check-secs`, and a provider
-  that cannot be reached changes nothing until the delegation expires, after
-  which signing fails closed. A cold start with the provider down is refused.
-  After a reboot the holder has a new transport key; the operator makes one
-  new passkey grant (`tpm grant-request`, `tpm grant-install`) and the
-  session starts from it with nothing else to do. The grant and the session
-  key are kept in memory only. `tpm session-status` prints the delegation's
-  end and id; `tpm revoke --config <provider file> --delegation <id>`
-  revokes one.
+  **Batch signing.** A TPM command takes seconds, so the identity key does
+  not sign every message on its own. It signs, in hardware, one statement per
+  batch (both the Ed25519 and the ML-DSA-65 leg) over the Merkle root of the
+  messages the batch collected, and each message travels with its inclusion
+  proof and the one signature the batch shares. No session key exists in
+  memory. A verifier traces the signature to the identity's current key
+  version; a signature under a rotated key is refused. After a reboot of the
+  key holder the operator makes one new passkey grant (`tpm grant-request`,
+  `tpm grant-install`).
 
-  The provider issues delegations when its file names an `issuer_file`, a
-  JSON file the identity's on-chain key update rewrites:
+  The provider signs batch roots for the identities its file names in an
+  `issuer_file`, a JSON file the identity's on-chain key update rewrites:
   `{"identities": {"<did>": {"version": 2, "label": "<key label>"}}}`. The
   provider derives the identity key under that label in its TPM; no handle or
   key id is configured anywhere. The limits are provider-file values, not
-  constants: `delegation_max_lifetime_secs`, `delegation_min_lifetime_secs`,
-  `revocation_file`, and for the TPM command queue `tpm_queue_max_waiting`,
+  constants: for the TPM command queue `tpm_queue_max_waiting`,
   `tpm_queue_max_wait_secs`, `tpm_retries`, `tpm_backoff_base_ms`,
   `tpm_backoff_cap_ms`. The provider runs one TPM command at a time; a
   request that finds the line full, or that waits its limit, is refused with

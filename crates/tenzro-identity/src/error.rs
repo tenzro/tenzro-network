@@ -59,7 +59,7 @@ pub enum IdentityError {
 
     /// Trust chain is broken — an issuer in the chain is not Active,
     /// is not in the registry, has no key the credential could verify
-    /// against, or its signature does not verify (CRITICAL #41).
+    /// against, or its signature does not verify.
     #[error("trust chain broken at issuer {issuer}: {reason}")]
     TrustChainBroken {
         /// DID of the issuer where the chain broke
@@ -68,7 +68,7 @@ pub enum IdentityError {
         reason: String,
     },
 
-    /// A cycle was detected during trust chain traversal (CRITICAL #41).
+    /// A cycle was detected during trust chain traversal.
     /// Contains the DID that was revisited.
     #[error("trust chain cycle detected at issuer {issuer}")]
     TrustChainCycle {
@@ -77,7 +77,7 @@ pub enum IdentityError {
     },
 
     /// Trust chain exceeded the configured maximum traversal depth
-    /// (CRITICAL #41). Acts as a DoS guard against arbitrarily long
+    /// Acts as a DoS guard against arbitrarily long
     /// or maliciously crafted issuer chains.
     #[error("trust chain exceeded max depth of {max_depth}")]
     TrustChainTooDeep {
@@ -86,12 +86,12 @@ pub enum IdentityError {
     },
 
     /// Trust chain terminated without reaching a recognized trust root
-    /// (CRITICAL #41). The credential chain is internally consistent but
+    /// The credential chain is internally consistent but
     /// does not anchor to any DID the verifier was configured to trust.
     #[error("trust chain did not reach a recognized trust root")]
     NoTrustRoot,
 
-    /// Invalid service endpoint URL (MEDIUM #128)
+    /// Invalid service endpoint URL
     #[error("invalid service endpoint: {0}")]
     InvalidServiceEndpoint(String),
 

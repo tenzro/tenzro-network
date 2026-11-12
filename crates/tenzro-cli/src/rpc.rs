@@ -434,12 +434,16 @@ pub fn parse_hex_u64(hex: &str) -> u64 {
 
 /// Format wei to TNZO (18 decimals)
 pub fn format_tnzo(wei: u128) -> String {
-    let tnzo = wei as f64 / 1e18;
-    if tnzo == (tnzo as u128) as f64 {
-        format!("{} TNZO", tnzo as u128)
-    } else {
-        format!("{:.6} TNZO", tnzo)
+    // Integer arithmetic: going through f64 turned 100000 TNZO (1e23 wei, not
+    // representable) into "100000.000000 TNZO", which is the amount the RPC
+    // operator and attestor roles need.
+    const ONE: u128 = 1_000_000_000_000_000_000;
+    if wei.is_multiple_of(ONE) {
+        return format!("{} TNZO", wei / ONE);
     }
+    // Six decimals, rounded to the nearest micro-TNZO.
+    let micro = (wei + 500_000_000_000) / 1_000_000_000_000;
+    format!("{}.{:06} TNZO", micro / 1_000_000, micro % 1_000_000)
 }
 
 #[cfg(test)]
@@ -448,6 +452,14 @@ mod tests {
 
     fn response(body: &str) -> JsonRpcResponse {
         serde_json::from_str(body).expect("a JSON-RPC response")
+    }
+
+    #[test]
+    fn format_tnzo_is_exact_for_large_whole_amounts() {
+        let one = 1_000_000_000_000_000_000u128;
+        assert_eq!(format_tnzo(100_000 * one), "100000 TNZO");
+        assert_eq!(format_tnzo(5 * one / 2), "2.500000 TNZO");
+        assert_eq!(format_tnzo(0), "0 TNZO");
     }
 
     #[test]

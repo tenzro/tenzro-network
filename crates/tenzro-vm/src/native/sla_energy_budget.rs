@@ -3,7 +3,7 @@
 //!
 //! # Scope, named precisely
 //!
-//! `TENZRO-RESEARCH-OPERATOR-EARNINGS-ENERGY-VERIFY-2026-10-23.md` section 9
+//! The operator-earnings design
 //! recommends per-tier Poisson challenge rates (warm 1-8/day, cool 0.5-2/day)
 //! against readiness tiers that are not built on chain yet (no `warm`/`cool`/
 //! `cold` concept exists anywhere in consensus state today -- that is a
@@ -92,8 +92,7 @@ pub const DEFAULT_SLA_CHALLENGE_ENERGY_BUDGET_BPS: u64 = 0;
 /// a good operating point.
 pub const MAX_SLA_CHALLENGE_ENERGY_BUDGET_BPS: u64 = 1_000;
 
-/// Energy one SLA probe costs, joules: the cool-tier reload estimate from
-/// `TENZRO-RESEARCH-OPERATOR-EARNINGS-ENERGY-VERIFY-2026-10-23.md` section 4
+/// Energy one SLA probe costs, joules: the cool-tier reload estimate
 /// (~4 kJ), the larger of the two GPU-tier per-probe figures in that table.
 /// Not governed -- see the module doc.
 pub const SLA_CHALLENGE_JOULES_PER_PROBE: u128 = 4_000;

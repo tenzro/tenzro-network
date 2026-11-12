@@ -355,8 +355,9 @@ pub fn parameter_change_proposal(
 }
 
 fn address_bytes(validator: &str) -> SdkResult<Vec<u8>> {
-    let bytes = hex::decode(validator.trim_start_matches("0x"))
-        .map_err(|e| crate::error::SdkError::InvalidParameter(format!("validator is not hex: {e}")))?;
+    let bytes = hex::decode(validator.trim_start_matches("0x")).map_err(|e| {
+        crate::error::SdkError::InvalidParameter(format!("validator is not hex: {e}"))
+    })?;
     if bytes.len() != 32 {
         return Err(crate::error::SdkError::InvalidParameter(format!(
             "validator must be 32 bytes, got {}",
@@ -452,7 +453,10 @@ pub fn revoke_operator_proposal(operator: &str, memo: &str) -> SdkResult<crate::
 /// boundary, ahead of the end of its jail term. It is admitted again like any
 /// candidate; slashing is not undone. For a validator that is not jailed it
 /// does nothing.
-pub fn reinstate_validator_proposal(validator: &str, memo: &str) -> SdkResult<crate::TypedTransaction> {
+pub fn reinstate_validator_proposal(
+    validator: &str,
+    memo: &str,
+) -> SdkResult<crate::TypedTransaction> {
     proposal_tx(json!({
         "action": "reinstate_validator",
         "validator": address_bytes(validator)?,
@@ -891,13 +895,15 @@ mod proposal_tests {
     use super::*;
 
     fn action(tx: &crate::TypedTransaction) -> Value {
-        let bytes: Vec<u8> = serde_json::from_value(tx.fields["proposal"].clone()).expect("proposal bytes");
+        let bytes: Vec<u8> =
+            serde_json::from_value(tx.fields["proposal"].clone()).expect("proposal bytes");
         serde_json::from_slice(&bytes).expect("the proposal is JSON")
     }
 
     #[test]
     fn reinstate_validator_carries_the_account_as_32_bytes() {
-        let tx = reinstate_validator_proposal(&format!("0x{}", "ab".repeat(32)), "wrongly jailed").unwrap();
+        let tx = reinstate_validator_proposal(&format!("0x{}", "ab".repeat(32)), "wrongly jailed")
+            .unwrap();
         assert_eq!(
             action(&tx),
             json!({ "action": "reinstate_validator", "validator": vec![0xabu8; 32], "memo": "wrongly jailed" })
@@ -907,7 +913,10 @@ mod proposal_tests {
     #[test]
     fn reinstate_validator_refuses_a_malformed_account() {
         for bad in ["ab".repeat(31), "zz".repeat(32), String::new()] {
-            assert!(reinstate_validator_proposal(&bad, "memo").is_err(), "{bad:?}");
+            assert!(
+                reinstate_validator_proposal(&bad, "memo").is_err(),
+                "{bad:?}"
+            );
         }
     }
 }

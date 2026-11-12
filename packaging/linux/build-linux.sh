@@ -8,13 +8,14 @@
 # Layout (the binaries' $ORIGIN/../lib run path is kept):
 #   /usr/lib/tenzro/bin/{tenzro,tenzro-node,tenzro-check}
 #   /usr/lib/tenzro/lib/libonnxruntime*      (CUDA builds)
+#   /usr/lib/tenzro/share/network/<chain_id>.toml  the network profile the node joins through
 #   /usr/lib/tenzro/PACKAGE-INFO             (version, source archive sha256, commits)
 #   /usr/bin/{tenzro,tenzro-node,tenzro-check}  symlinks into /usr/lib/tenzro/bin
 #   /usr/bin/tenzro-node-install             the archive's own installer, unchanged
 #   /usr/share/doc/<package>/                licence, notice, first-run text
 #
 # Environment:
-#   TENZRO_VERSION   default: version of the workspace in the repository
+#   TENZRO_VERSION   default: the version of the node in the repository
 #   PKG_REVISION     package revision, default 1
 #   PUBLIC_COMMIT    default: the commit named by provenance-*.intoto.json beside the archive
 #   DEB_ONLY / RPM_ONLY   build one kind
@@ -43,7 +44,7 @@ case "$arch" in
 esac
 pkg=tenzro-$flavour
 other=tenzro-$([ "$flavour" = cpu ] && echo cuda || echo cpu)
-version=${TENZRO_VERSION:-$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -1)}
+version=${TENZRO_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/crates/tenzro-node/Cargo.toml" | head -1)}
 [ -n "$version" ] || { echo "REFUSING: no version" >&2; exit 1; }
 rev=${PKG_REVISION:-1}
 
@@ -92,6 +93,8 @@ root=$work/root
 install -d "$root/usr/lib/tenzro/bin" "$root/usr/bin" "$root/usr/share/doc/$pkg"
 install -m755 "$src/bin/tenzro" "$src/bin/tenzro-node" "$root/usr/lib/tenzro/bin/"
 if [ -d "$src/lib" ]; then cp -a "$src/lib" "$root/usr/lib/tenzro/lib"; fi
+# The network profile, found by the node at <bin dir>/../share/network.
+if [ -d "$src/share" ]; then cp -a "$src/share" "$root/usr/lib/tenzro/share"; fi
 install -m755 "$pk/common/tenzro-check" "$root/usr/lib/tenzro/bin/tenzro-check"
 install -m755 "$src/tenzro-node-install" "$root/usr/bin/tenzro-node-install"
 for b in tenzro tenzro-node tenzro-check; do ln -s "../lib/tenzro/bin/$b" "$root/usr/bin/$b"; done

@@ -228,7 +228,8 @@ mod peer_tests {
     fn repeated_entries_for_one_id_merge() {
         let a = parse_peer(&format!("{}@127.0.0.1:1", id())).unwrap();
         let b = parse_peer(&format!("{}@127.0.0.1:2", id())).unwrap();
-        let other = parse_peer(&iroh::SecretKey::from_bytes(&[8; 32]).public().to_string()).unwrap();
+        let other =
+            parse_peer(&iroh::SecretKey::from_bytes(&[8; 32]).public().to_string()).unwrap();
         let merged = merge_peers(vec![a, other, b]);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].ip_addrs().count(), 2);

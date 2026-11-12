@@ -485,14 +485,14 @@ pub struct Core {
     // Instrumentation.
     round_durations_ms: VecDeque<u64>,
     // diag: why enter_after most recently refused to advance the round,
-    // cleared on an accepted advance. Local-only diagnostic, this session.
+    // cleared on an accepted advance. Local-only diagnostic, not persisted.
     diag_advance_refusal: &'static str,
     // diag: FetchBatches requests this core answered with nothing held.
     diag_empty_batch_replies: u64,
     // diag: Frontier repair requests sent, received, and answered; and the
     // (vertices, signals) counts of the most recent answer. Local-only
     // diagnostic, added to chase chaos seed 3054677367's round-1 RBC
-    // delivery stall (TENZRO-INFLIGHT.md, 2026-10-21).
+    // delivery stall.
     diag_frontier_sent: u64,
     diag_frontier_received: u64,
     diag_frontier_answered: u64,
@@ -915,6 +915,12 @@ impl Core {
             asked_ms: 0,
         });
         core
+    }
+
+    /// When this epoch's last checkpoint is due, in block time
+    /// (milliseconds).
+    pub fn epoch_ends_ms(&self) -> u64 {
+        self.epoch_ends_ms
     }
 
     /// The round from which this core still needs what its peers hold:

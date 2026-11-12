@@ -176,11 +176,10 @@ async fn a_policy_account_takes_no_delegation_so_no_sweeper_runs_as_it() {
     )
     .with_authorization_list(vec![a]);
     tx.block_timestamp_ms = Some(T0 + 10);
-    let e =
-        w.rt.execute_transaction(&tx, &mut w.state)
-            .await
-            .unwrap_err();
-    assert!(e.to_string().contains("outflow policy"), "{e}");
+    let r = w.rt.execute_transaction(&tx, &mut w.state).await.unwrap();
+    assert!(!r.success, "a refused transaction does not succeed");
+    let reason = r.revert_reason.unwrap_or_default();
+    assert!(reason.contains("outflow policy"), "{reason}");
 }
 
 #[tokio::test]

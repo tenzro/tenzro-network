@@ -69,6 +69,7 @@ pub mod da_backend;
 pub mod discovery;
 pub mod error;
 pub mod gossip;
+pub mod identity_gate;
 pub mod identity_record;
 pub mod identity_transport;
 pub mod jsonrpc;
@@ -83,6 +84,7 @@ pub mod request;
 pub mod resolver;
 pub mod state_sync;
 pub mod tpm_sign;
+pub mod update_advert;
 
 pub use block_sync::{
     ALPN_BLOCK_SYNC, BlockSyncServer, DeferredBlockSyncServer, block_sync_request,
@@ -95,6 +97,7 @@ pub use consensus::{
 pub use da_backend::IrohBlobsDaBackend;
 pub use discovery::{ALPN_DISCOVERY, DiscoveryStore};
 pub use error::{IrohError, IrohResult};
+pub use identity_gate::{ALPN_ONBOARD, Admit, AlpnAccess, IdentityGate, RegistryView, alpn_access};
 pub use identity_record::{
     BootIdentity, EndpointKey, EndpointRecord, RecordError, RecordScope, RelayRef, parse_boot_list,
 };

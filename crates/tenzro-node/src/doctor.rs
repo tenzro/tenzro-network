@@ -46,6 +46,29 @@ impl PortMapping {
     }
 }
 
+/// The load level the running node reports on `/load`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct LoadStatus {
+    /// GREEN, ELEVATED, HIGH or CRITICAL.
+    pub level: String,
+    /// Classes of work being shed, lowest priority first.
+    pub shedding: Vec<String>,
+}
+
+/// The running node's load level.
+async fn node_load(rpc_addr: &str) -> Option<LoadStatus> {
+    let resp = crate::http_client::shared()
+        .get(format!("http://{rpc_addr}/load"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    serde_json::from_str(&resp.text().await.ok()?).ok()
+}
+
 /// The whole report.
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -67,6 +90,12 @@ pub struct DoctorReport {
     pub node: Option<Connectivity>,
     /// Why the running node could not be read.
     pub node_error: Option<String>,
+    /// How the node's TPM is answering: its summary line, when the node
+    /// reported it.
+    pub tpm: Option<String>,
+    /// The running node's load level and what it is shedding, when it
+    /// answered.
+    pub load: Option<LoadStatus>,
     /// What to do, in order.
     pub fixes: Vec<String>,
 }
@@ -138,7 +167,30 @@ async fn node_connectivity(rpc_addr: &str, data_dir: &Path) -> Result<Connectivi
 pub fn fixes(report: &DoctorReport) -> Vec<String> {
     let mut out = Vec::new();
     let port = report.port;
+    if let Some(l) = &report.load
+        && (l.level == "HIGH" || l.level == "CRITICAL")
+    {
+        out.push(format!(
+            "The node is at load {} and is shedding {}. Consensus and signing are protected; \
+             stop other services on this machine or move them to tenzro-aux.slice \
+             (docs/LOAD-PROTECTION.md), and check swap with `free -h`.",
+            l.level,
+            l.shedding.join(", ")
+        ));
+    }
     let inbound_hint = report.firewall.allows_node == Some(false);
+    if report
+        .tpm
+        .as_deref()
+        .is_some_and(|t| t.starts_with("stalled"))
+    {
+        out.push(
+            "The TPM stopped answering. The node holds normal commands back and probes it; \
+             votes keep waiting for the chip. Check the machine's load and memory (swap), and the \
+             kernel log for `tpm` messages; no restart is needed once it answers."
+                .to_string(),
+        );
+    }
     if report.ipv4_route.is_none() && report.ipv6_route.is_none() {
         out.push(
             "This machine has no route to the internet. Check its network connection.".to_string(),
@@ -217,6 +269,23 @@ fn optional_inbound(report: &DoctorReport) -> String {
     }
 }
 
+/// How the running node's TPM is answering, from its loopback admin page.
+async fn node_tpm(rpc_addr: &str, data_dir: &Path) -> Option<String> {
+    let ticket = ticket(data_dir).ok()?;
+    let resp = crate::http_client::shared()
+        .get(format!("http://{rpc_addr}/access/tpm"))
+        .header(crate::access::PAGE_TICKET_HEADER, ticket)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
+    v.get("summary")?.as_str().map(str::to_string)
+}
+
 /// Builds the report for a node with `config`.
 pub async fn report(config: &crate::config::NodeConfig, binary: &Path) -> DoctorReport {
     let port = config.iroh.bind_addr.port();
@@ -232,9 +301,11 @@ pub async fn report(config: &crate::config::NodeConfig, binary: &Path) -> Doctor
                 fix: None,
             })
     };
-    let (port_mapping, node) = tokio::join!(
+    let (port_mapping, node, tpm, load) = tokio::join!(
         probe_port_mapping(),
-        node_connectivity(&config.rpc_addr, &config.data_dir)
+        node_connectivity(&config.rpc_addr, &config.data_dir),
+        node_tpm(&config.rpc_addr, &config.data_dir),
+        node_load(&config.rpc_addr)
     );
     let (node, node_error) = match node {
         Ok(c) => (Some(c), None),
@@ -250,6 +321,8 @@ pub async fn report(config: &crate::config::NodeConfig, binary: &Path) -> Doctor
         firewall,
         node,
         node_error,
+        tpm,
+        load,
         fixes: Vec::new(),
     };
     report.fixes = fixes(&report);
@@ -289,6 +362,16 @@ pub fn render(r: &DoctorReport) -> String {
     let yes = |o: &Option<IpAddr>| o.map_or("no".to_string(), |ip| format!("yes ({ip})"));
     line("IPv4", yes(&r.ipv4_route));
     line("IPv6", yes(&r.ipv6_route));
+    if let Some(l) = &r.load {
+        line(
+            "load",
+            if l.shedding.is_empty() {
+                l.level.clone()
+            } else {
+                format!("{}: shedding {}", l.level, l.shedding.join(", "))
+            },
+        );
+    }
     line(
         "port mapping",
         match &r.port_mapping {
@@ -301,6 +384,9 @@ pub fn render(r: &DoctorReport) -> String {
         "firewall",
         format!("{}: {}", r.firewall.system, r.firewall.detail),
     );
+    if let Some(t) = &r.tpm {
+        line("TPM", t.clone());
+    }
     match &r.node {
         Some(n) => {
             line("reachable", reach_words(n.reachability).to_string());
@@ -426,6 +512,8 @@ mod tests {
             },
             node,
             node_error: None,
+            tpm: None,
+            load: None,
             fixes: Vec::new(),
         }
     }
@@ -533,5 +621,26 @@ mod tests {
         if let Some(ip) = route_source(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))) {
             assert!(!ip.is_loopback());
         }
+    }
+
+    #[test]
+    fn a_node_at_high_load_gets_a_fix_that_names_what_it_sheds() {
+        let mut r = base(None);
+        r.load = Some(LoadStatus {
+            level: "HIGH".into(),
+            shedding: vec!["background".into(), "model_serving".into()],
+        });
+        let f = fixes(&r);
+        assert!(f[0].contains("HIGH") && f[0].contains("background, model_serving"));
+        assert!(render(&r).contains("HIGH: shedding background, model_serving"));
+        r.load = Some(LoadStatus {
+            level: "GREEN".into(),
+            shedding: vec![],
+        });
+        assert!(
+            !fixes(&r)
+                .iter()
+                .any(|x| x.contains("load GREEN") || x.contains("shedding"))
+        );
     }
 }

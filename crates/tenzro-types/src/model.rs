@@ -1947,7 +1947,7 @@ pub struct MoeExpertHolding {
 /// discovery and are admitted only when the list names them, and the
 /// layer-range assignment is computed deterministically from each
 /// member's declared VRAM (a bin-packing over `pipeline_stage`s). Every
-/// member computes the identical assignment with no coordinator round —
+/// member computes the identical assignment with no negotiation round —
 /// the determinism is deliberate, so two members never disagree on who
 /// owns which layers (a split assignment would corrupt the pipeline).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

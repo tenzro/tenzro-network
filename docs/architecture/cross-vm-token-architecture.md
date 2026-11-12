@@ -41,8 +41,7 @@ sender, inside the single undo log block execution opens for the transaction
   transaction's gas price, so the ledger's per-transaction value rule holds.
 - The logs of all calls, in call order, are the transaction's logs, under its
   one transaction id.
-- RPC scope checks run once per call, on the call's target
-  (`intents_for_transaction`).
+- RPC scope checks run once per call, on the call's target.
 
 A delegated agent's `AgentAct` may carry calls too. They run from the agent's
 wallet after the action is accepted, and each is held to the agent's terms on
@@ -76,12 +75,11 @@ Addresses are 20-byte big-endian numbers.
 | `0x1009` | RANDOMNESS_BEACON | Randomness from finalized chain state |
 | `0x1010` | TEE_VERIFY | Strict TEE attestation report verification |
 | `0x1011` | ZK_VERIFY | ZK proof attestations recorded in state |
-| `0x101a`-`0x101c` | uRWA hooks | ERC-7943 freeze, forced transfer, kill switch (`erc7943.rs`) |
 
 ERC-8004 registries are ordinary predeployed EVM contracts
-(`tenzro_identity::erc8004::addresses`), not precompiles, so `0x101a` belongs
-only to the uRWA freeze hook. There are no settlement, model-inference,
-staking or governance precompiles.
+(`tenzro_identity::erc8004::addresses`), not precompiles. The ERC-7943
+(uRWA) functions are part of TOKEN_FACTORY. There are no settlement,
+model-inference, staking or governance precompiles.
 
 ### wTNZO pointer (`0x1001`)
 

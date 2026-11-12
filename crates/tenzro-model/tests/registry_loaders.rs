@@ -258,7 +258,12 @@ async fn every_registry_architecture_loads_and_decodes() {
     let out = PathBuf::from(std::env::var("TENZRO_LOADER_OUT").expect("TENZRO_LOADER_OUT"));
     let only_ids: Vec<String> = std::env::var("TENZRO_LOADER_IDS")
         .ok()
-        .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let max_bytes: u64 = std::env::var("TENZRO_LOADER_MAX_BYTES")
         .ok()

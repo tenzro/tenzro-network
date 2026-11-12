@@ -15,12 +15,12 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 - **JSON-RPC API**: `eth_*`, `net_*`, `web3_*` and `solana_*` compatibility methods plus the `tenzro_*` methods; the full generated list is `docs/RPC.md`. Writes are client-signed typed transactions built by the SDKs.
 - **OpenAI-compatible HTTP**: mounted on the same port as the JSON-RPC surface — `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, `/v1/files`, `/v1/audio/transcriptions`, `/v1/audio/speech`, plus the Tenzro-modality routes `/tenzro/{forecasts,detections,segmentations,rerank,video/embeddings,realtime/turn,realtime/transcribe}`. There are no `/v1/images` or `/v1/videos` routes; image and video generation is the `tenzro_mediaGen_render` RPC method. The inference routes sit behind the HTTP 402 payment gate when payments are enabled
 - **MCP Server**: Model Context Protocol server on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
-- **A2A Server**: Agent-to-Agent protocol server with 40 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
+- **A2A Server**: Agent-to-Agent protocol server with 21 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
 - **Web Verification API**: REST endpoints for ZK proof, TEE attestation, and transaction verification (port 8080)
 - **Graceful Shutdown**: Clean shutdown sequence for all subsystems
 - **TEE Integration**: Optional Trusted Execution Environment support (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
 - **AI Infrastructure**: Built-in model registry, inference routing, and agent runtime with durable persistence
-- **Fail-closed access hardening**: HTTP RPC / web / MCP-sidecar binds default to loopback (off-box access is opt-in); the iroh overlay is credential-gated per ALPN (MCP allowlist, `moe/execute` gate, `tenzro/infer` admission). Inference admission (`inference_admission.rs`) classifies each request by the caller the access policy names and the model's visibility before the x402 charge; database and storage resources share one per-resource `ResourceAccess` (Open / Gated / Private) authorization gate (`resource_authz.rs`). Inbound, a node needs only its iroh endpoint (`9001/udp`) reachable; a host firewall can drop everything else.
+- **Fail-closed access hardening**: HTTP RPC / web / MCP-sidecar binds default to loopback (off-box access is opt-in); the iroh overlay is credential-gated per ALPN (MCP allowlist, `moe/execute` gate, `tenzro/infer` admission). Inference admission (`inference_admission.rs`) classifies each request by the caller the access policy names and the model's visibility before the x402 charge. Inbound, a node needs only its iroh endpoint (`9001/udp`) reachable; a host firewall can drop everything else.
 
 ## Node Roles
 
@@ -105,7 +105,7 @@ OPTIONS:
 Create a configuration file (config.toml):
 
 ```toml
-role = "Validator"
+roles = ["validator"]
 data_dir = "./data/validator"
 log_level = "info"
 rpc_addr = "127.0.0.1:8545"
@@ -115,9 +115,6 @@ a2a_addr = "127.0.0.1:3002"
 tee_enabled = false
 metrics_enabled = true
 health_enabled = true
-
-[network]
-# Network configuration...
 
 [consensus]
 # Consensus configuration (for validators)...
@@ -143,11 +140,9 @@ The node orchestrates subsystems in the following startup order:
 8. **Settlement** - Payment settlement engine
 9. **AI Infrastructure** - Model registry, provider management, agent runtime, and swarm manager (durable persistence via `init_ai_infrastructure()`; restored model, agent, and swarm counts logged at startup)
 10. **Bridge** - Cross-chain bridge router
-11. **App Hosting** - App registry (`app_registry`), static sites (`sites`), `wasi:http` functions (`functions`), Firecracker machines (`machines`), the `ingress` router that resolves a hostname to whichever of the three answers, and the `placement` engine that decides which nodes hold a lease
-13. **Databases** - `db_engine_registry` + `db_engines` + `db_holder_dispatch`, the node-side surface over `tenzro-database`
-14. **Storage & Cluster Serving** - `storage_provider_runtime` (content-addressed artifact holding and hash recording; compute rental is a stream escrow, see `docs/COMPUTE.md`), `cluster_serving_runtime` (LAN pipeline serving over `tenzro-cluster`)
-15. **Inference Dispatch** - `infer` and `moe` — the request path into `tenzro-model`, including distributed mixture-of-experts dispatch — plus `network_catalog`, the gossiped view of which models the network can serve
-16. **DA Committee** - `da_committee` + `da_committee_surface`, the sampling committee over offloaded receipt payloads
+11. **Storage** - `storage_provider_runtime` (content-addressed artifact holding and hash recording; compute rental is a stream escrow, see `docs/COMPUTE.md`)
+12. **Inference Dispatch** - `infer` and `moe` — the request path into `tenzro-model`, including distributed mixture-of-experts dispatch — plus `network_catalog`, the gossiped view of which models the network can serve
+13. **DA Committee** - `da_committee` + `da_committee_surface`, the sampling committee over offloaded receipt payloads
 
 Shutdown occurs in reverse order to ensure clean resource cleanup.
 
@@ -215,7 +210,7 @@ The same address holds TNZO natively and is the source of truth for all VM proje
 
 ### Why no `chain` parameter
 
-Adding a `chain` field would imply Tenzro keeps separate per-chain key material, which it does not. The pointer-token model (Sei V2 architecture) means wTNZO ERC-20 at `0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93`, and the wTNZO SPL adapter on SVM both share the **same** underlying native balance through the `TnzoToken` layer. No bridge risk, no liquidity fragmentation, no per-chain wallet provisioning. Apps that prompt the user to "pick a chain" at wallet-creation time are modeling something that doesn't exist on Tenzro.
+Adding a `chain` field would imply Tenzro keeps separate per-chain key material, which it does not. The pointer-token model (Sei V2 architecture) means wTNZO ERC-20 at `0x1001`, and the wTNZO SPL adapter on SVM both share the **same** underlying native balance through the `TnzoToken` layer. No bridge risk, no liquidity fragmentation, no per-chain wallet provisioning. Apps that prompt the user to "pick a chain" at wallet-creation time are modeling something that doesn't exist on Tenzro.
 
 ### Sending and tracking transactions
 
@@ -246,7 +241,7 @@ Every JSON-RPC method the node serves has a tool (typed, or mirrored from `crate
 | **Stakes & Providers** | `get_role_stakes`, `get_provider_stats` |
 | **Tokens & Contracts** | `get_token_info`, `list_tokens`, `deploy_contract`, `get_token_balance` |
 
-### Claude Desktop / Claude Code
+### MCP clients
 
 ```json
 {

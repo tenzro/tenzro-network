@@ -36,6 +36,12 @@ Execution
     Praecise Engine: praecise-runtime, llama-cpp-2, llama-cpp-sys-2 and the
     llama.cpp sources it builds (language-model serving; MIT OR Apache-2.0,
     llama.cpp under MIT; github.com/Praecise/praecise-engine)
+    Windows archives and the Windows installer also carry, unchanged, the
+    libraries the node loads from its own folder: DirectML.dll (the
+    Microsoft DirectML redistributable, Microsoft Corporation, under the
+    licence terms of the Microsoft.AI.DirectML package) and, in the CUDA
+    build, the ONNX Runtime execution provider libraries (Microsoft
+    Corporation, MIT).
 
 Consensus and cryptography
     ed25519-dalek, k256, p256, p384, curve25519-dalek, ecdsa, signature

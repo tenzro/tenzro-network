@@ -150,7 +150,10 @@ mod tests {
         let e = seller.price("some-model/output_tokens", 10).unwrap_err();
         assert_eq!(e, "this node does not serve some-model");
         let e = seller.price("org/some-model/output_tokens", 1).unwrap_err();
-        assert_eq!(e, "this node does not serve org/some-model", "the unit is the last segment");
+        assert_eq!(
+            e, "this node does not serve org/some-model",
+            "the unit is the last segment"
+        );
     }
 
     #[tokio::test]
@@ -158,7 +161,10 @@ mod tests {
         let (seller, _tmp) = seller().await;
         let r = seller.requirement("session-7", 1234, "TNZO");
         assert_eq!(r.scheme, tenzro_payments::x402::DEFAULT_SCHEME);
-        assert_eq!(r.network, format!("tenzro:{}", seller.node.config().chain_id()));
+        assert_eq!(
+            r.network,
+            format!("tenzro:{}", seller.node.config().chain_id())
+        );
         assert_eq!(r.amount, "1234");
         assert_eq!(r.asset, "TNZO");
         assert_eq!(r.pay_to, seller.node.config().payments.recipient);
@@ -178,7 +184,10 @@ mod tests {
         let out = seller.settle(&requirement, &payload).await;
         assert!(!out.success);
         assert_eq!(out.network, requirement.network);
-        assert_eq!(out.error_reason.as_deref(), Some("this node settles no payments yet"));
+        assert_eq!(
+            out.error_reason.as_deref(),
+            Some("this node settles no payments yet")
+        );
         assert!(out.transaction.is_empty());
     }
 }

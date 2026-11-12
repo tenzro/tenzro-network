@@ -343,7 +343,7 @@ impl RecommendationAction {
 /// Output of `compute_recommendation`. `magnitude_bps` is signed: positive =
 /// raise burn pct, negative = lower it. For alarm/no-change/disabled the
 /// magnitude is 0 (the alarm itself is the signal — the magnitude of the
-/// follow-up proposal is set by the auto-proposal generator using
+/// resulting proposal is set by the auto-proposal generator using
 /// `magnitude_cap_alarm_bps`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BurnRateRecommendation {

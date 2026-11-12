@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 const CHALLENGE_KEY_PREFIX: &str = "challenge:";
 
 /// Thread-safe challenge store for payment protocols with optional
-/// RocksDB persistence (MEDIUM #127).
+/// RocksDB persistence.
 ///
 /// Both MPP and x402 servers use this to:
 /// 1. Store challenges when they are created

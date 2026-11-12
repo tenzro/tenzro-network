@@ -32,7 +32,7 @@ const YEAR_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 const BASE_MS: i64 = 1_800_000_000_000;
 /// Spacing between proposals: past the voting period, the timelock and any
 /// per-proposer pacing.
-const STEP_MS: i64 = 40 * 24 * 60 * 60 * 1000;
+pub(super) const STEP_MS: i64 = 40 * 24 * 60 * 60 * 1000;
 
 fn set_param(state: &mut StateAdapter, key: &str, value: u64) {
     set_governed_param_for_test(state, key, value);
@@ -53,7 +53,7 @@ fn registered_validator(state: &mut StateAdapter, who: &[u8], own: u128) {
 
 /// A funded treasury, a large voting validator and an identity for each
 /// grantee. No cap is set: the genesis zeros are in force.
-fn chain() -> StateAdapter {
+pub(super) fn chain() -> StateAdapter {
     let mut state = StateAdapter::new();
     state.set_balance(derive_treasury_address().as_bytes(), TREASURY);
     registered_validator(&mut state, &VOTER, 1_000_000 * TNZO);
@@ -231,7 +231,7 @@ async fn try_enact(
     Ok(result)
 }
 
-async fn enact_ok(
+pub(super) async fn enact_ok(
     executor: &NativeExecutor,
     state: &mut StateAdapter,
     action: &ProposalAction,

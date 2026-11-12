@@ -3148,3 +3148,54 @@ pub struct ResolvedIdentityOutput {
     pub services: Vec<IdentityService>,
     pub metadata: std::collections::BTreeMap<String, String>,
 }
+
+/// Where the node is in its epoch, as `tenzro_getUpdateNotice` reports it.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UpdateNoticeEpoch {
+    /// The current epoch number.
+    pub epoch: u64,
+    /// Blocks until the epoch ends, when known.
+    #[serde(default)]
+    pub blocks_to_boundary: Option<u64>,
+}
+
+/// One signature on a release notice.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UpdateNoticeSignature {
+    /// Hex SHA-256 of the signer's uncompressed SEC1 public key.
+    pub keyid: String,
+    /// ECDSA P-256 signature over the notice domain string and the payload: hex raw `r || s` or hex DER.
+    pub sig: String,
+}
+
+/// A signed release notice as it was issued.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UpdateNoticeEnvelope {
+    /// Base64 of the exact bytes that were signed.
+    pub payload: String,
+    /// The signatures over the payload, each naming its key.
+    pub signatures: Vec<UpdateNoticeSignature>,
+}
+
+/// The newest signed release notice a node holds.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UpdateNoticeOutput {
+    /// The signed notice envelope (payload and signatures); null when the node holds none.
+    #[serde(default)]
+    pub notice: Option<UpdateNoticeEnvelope>,
+    /// Hash of the signed bytes, to ask again with `if_none_match`.
+    #[serde(default)]
+    pub etag: Option<String>,
+    /// The release the notice names.
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    /// `normal`, `security` or `required_by_epoch`.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// How long the answer may be kept, in seconds.
+    #[serde(default)]
+    pub cache_ttl_secs: u64,
+    /// The node's position in its epoch, when it runs consensus.
+    #[serde(default)]
+    pub epoch: Option<UpdateNoticeEpoch>,
+}

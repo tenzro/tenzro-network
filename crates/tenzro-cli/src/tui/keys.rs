@@ -35,8 +35,18 @@ pub struct Binding {
     pub hint: &'static str,
 }
 
-const fn b(act: Act, keys: &'static [&'static str], label: &'static str, hint: &'static str) -> Binding {
-    Binding { act, keys, label, hint }
+const fn b(
+    act: Act,
+    keys: &'static [&'static str],
+    label: &'static str,
+    hint: &'static str,
+) -> Binding {
+    Binding {
+        act,
+        keys,
+        label,
+        hint,
+    }
 }
 
 /// The console screens, in order, with their keys.
@@ -52,26 +62,71 @@ pub const SCREENS: [(&str, &str); 6] = [
 pub const CONSOLE: &[Binding] = &[
     b(Act::Screen(0), &["1"], "Overview: node, chain, peers", ""),
     b(Act::Screen(1), &["2"], "Wallet: balance of one account", ""),
-    b(Act::Screen(2), &["3"], "Models: what this node holds and serves", ""),
+    b(
+        Act::Screen(2),
+        &["3"],
+        "Models: what this node holds and serves",
+        "",
+    ),
     b(Act::Screen(3), &["4"], "Validators: the registered set", ""),
-    b(Act::Screen(4), &["5"], "Governance: proposals and tallies", ""),
-    b(Act::Screen(5), &["6"], "Health: peers, sync, roles, key grant", ""),
+    b(
+        Act::Screen(4),
+        &["5"],
+        "Governance: proposals and tallies",
+        "",
+    ),
+    b(
+        Act::Screen(5),
+        &["6"],
+        "Health: peers, sync, roles, key grant",
+        "",
+    ),
     b(Act::Next, &["Tab", "Right"], "Next screen", "Tab next"),
     b(Act::Prev, &["Shift-Tab", "Left"], "Previous screen", ""),
-    b(Act::Down, &["Down", "j"], "Move down in a list", "Up/Down move"),
+    b(
+        Act::Down,
+        &["Down", "j"],
+        "Move down in a list",
+        "Up/Down move",
+    ),
     b(Act::Up, &["Up", "k"], "Move up in a list", ""),
-    b(Act::Refresh, &["r"], "Refresh now (it also refreshes every 5 s)", "r refresh"),
-    b(Act::Edit, &["e"], "Wallet: choose the account to show", "e account"),
-    b(Act::More, &["m"], "More commands: the full command menu", "m more"),
+    b(
+        Act::Refresh,
+        &["r"],
+        "Refresh now (it also refreshes every 5 s)",
+        "r refresh",
+    ),
+    b(
+        Act::Edit,
+        &["e"],
+        "Wallet: choose the account to show",
+        "e account",
+    ),
+    b(
+        Act::More,
+        &["m"],
+        "More commands: the full command menu",
+        "m more",
+    ),
     b(Act::Help, &["?"], "Show or hide this help", "? help"),
     b(Act::Close, &["Esc"], "Close help or cancel an edit", ""),
-    b(Act::Quit, &["q", "Ctrl-C"], "Quit and restore the terminal", "q quit"),
+    b(
+        Act::Quit,
+        &["q", "Ctrl-C"],
+        "Quit and restore the terminal",
+        "q quit",
+    ),
 ];
 
 pub const SETUP: &[Binding] = &[
     b(Act::Go, &["Enter"], "Do this step, or continue", "Enter go"),
     b(Act::Back, &["b", "Backspace"], "Back one step", "b back"),
-    b(Act::Skip, &["s"], "Skip this step (only where it is safe)", "s skip"),
+    b(
+        Act::Skip,
+        &["s"],
+        "Skip this step (only where it is safe)",
+        "s skip",
+    ),
     b(Act::Down, &["Down", "j"], "Move down in a list", ""),
     b(Act::Up, &["Up", "k"], "Move up in a list", ""),
     b(Act::Pick(0), &["1"], "Choose the first answer", ""),
@@ -79,8 +134,18 @@ pub const SETUP: &[Binding] = &[
     b(Act::Pick(2), &["3"], "Choose the third answer", ""),
     b(Act::Pick(3), &["4"], "Choose the fourth answer", ""),
     b(Act::Help, &["?"], "Show or hide this help", "? help"),
-    b(Act::Close, &["Esc"], "Close help, or cancel a typed confirmation", ""),
-    b(Act::Quit, &["q", "Ctrl-C"], "Quit and restore the terminal", "q quit"),
+    b(
+        Act::Close,
+        &["Esc"],
+        "Close help, or cancel a typed confirmation",
+        "",
+    ),
+    b(
+        Act::Quit,
+        &["q", "Ctrl-C"],
+        "Quit and restore the terminal",
+        "q quit",
+    ),
 ];
 
 /// Normalised name of a key press, `None` for releases and repeats.
@@ -126,7 +191,10 @@ pub fn problems(table: &[Binding]) -> Vec<String> {
         if let Some((_, prior)) = labels.iter().find(|(l, _)| *l == x.label)
             && *prior != x.act
         {
-            out.push(format!("label {:?} is used by {prior:?} and {:?}", x.label, x.act));
+            out.push(format!(
+                "label {:?} is used by {prior:?} and {:?}",
+                x.label, x.act
+            ));
         }
         labels.push((x.label, x.act));
     }
@@ -162,10 +230,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_is_caught() {
-        let bad = [
-            b(Act::Next, &["x"], "a", ""),
-            b(Act::Prev, &["x"], "b", ""),
-        ];
+        let bad = [b(Act::Next, &["x"], "a", ""), b(Act::Prev, &["x"], "b", "")];
         assert_eq!(problems(&bad).len(), 1);
     }
 

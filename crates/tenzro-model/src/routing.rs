@@ -2243,9 +2243,9 @@ mod tests {
 
         let provider = Address::new([0x42; 32]);
         let session = |seed| {
-            Arc::new(
-                tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(tenzro_crypto::testing::TestHybridSigner::hybrid(seed))),
-            )
+            Arc::new(tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(
+                tenzro_crypto::testing::TestHybridSigner::hybrid(seed),
+            )))
         };
         let honest = session(1);
         let registered = honest.identity().clone();

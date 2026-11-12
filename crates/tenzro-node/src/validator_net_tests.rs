@@ -134,8 +134,9 @@ struct Net {
     signed: Arc<Mutex<Vec<(u64, u64, Vec<u16>)>>>,
     /// Checkpoint-signers records a validator submitted, and why any it
     /// tried was not admitted.
-    recorded: Arc<AtomicU64>,
-    record_refusals: Arc<Mutex<Vec<String>>>,
+    stats: Arc<crate::checkpoint_recorder::RecorderStats>,
+    /// How long each recorder rank behind the first waits.
+    fallback: Duration,
     boot: Vec<BootIdentity>,
     genesis: crate::config::GenesisConfig,
     /// How many of the machines are in the genesis validator set; the rest
@@ -175,6 +176,28 @@ impl Net {
         own: Accounts,
         params: std::collections::BTreeMap<String, u64>,
     ) -> Self {
+        Self::start_recording(
+            founding,
+            spares,
+            accounts,
+            rules,
+            own,
+            params,
+            Duration::from_secs(120),
+        )
+        .await
+    }
+
+    /// [`Net::start_configured`] with the recorders' fallback interval.
+    async fn start_recording(
+        founding: usize,
+        spares: usize,
+        accounts: Vec<Address>,
+        rules: TimeRules,
+        own: Accounts,
+        params: std::collections::BTreeMap<String, u64>,
+        fallback: Duration,
+    ) -> Self {
         let n = founding + spares;
         // The relay every machine boots through, on a machine of its own.
         let relay_key: &'static dyn HardwareSigner =
@@ -210,9 +233,9 @@ impl Net {
             let dir = tempfile::tempdir().unwrap();
             let storage = Arc::new(RocksDbStore::open_default(dir.path().join("db")).unwrap());
             let account = (own != Accounts::Silent).then(|| {
-                Arc::new(
-                    tenzro_crypto::composite::testing::TestHybridSigner::hybrid(0x80 + i as u8),
-                )
+                Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::hybrid(
+                    0x80 + i as u8,
+                ))
             });
             let address = account
                 .as_ref()
@@ -236,6 +259,9 @@ impl Net {
             });
         }
         let genesis = crate::config::GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: CHAIN_ID,
             timestamp: (chrono::Utc::now().timestamp() as u64).max(1),
@@ -245,7 +271,11 @@ impl Net {
             accounts: accounts
                 .iter()
                 .copied()
-                .chain(machines.iter().filter_map(|m| m.account.as_ref().map(|a| a.address())))
+                .chain(
+                    machines
+                        .iter()
+                        .filter_map(|m| m.account.as_ref().map(|a| a.address())),
+                )
                 .map(|a| crate::config::GenesisAccount {
                     address: hex::encode(a.as_bytes()),
                     balance: 1_000_000,
@@ -263,8 +293,8 @@ impl Net {
             validators,
             gossip: Arc::new(Mutex::new(Gossip::default())),
             signed: Arc::new(Mutex::new(Vec::new())),
-            recorded: Arc::new(AtomicU64::new(0)),
-            record_refusals: Arc::new(Mutex::new(Vec::new())),
+            stats: Arc::default(),
+            fallback,
             boot,
             genesis,
             founding,
@@ -396,15 +426,47 @@ impl Net {
             let gossip = self.gossip.clone();
             let signed = self.signed.clone();
             let publisher = consensus.clone();
+            // The validator's own transactions reach every other running
+            // node's pool, as the transactions topic carries them.
+            let tx_gossip: crate::payment_rails::GossipSlot = Arc::default();
+            {
+                let (sender, mut admitted) = mpsc::channel::<NodeEvent>(1024);
+                *tx_gossip.lock() = Some(sender);
+                let gossip = self.gossip.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = admitted.recv().await {
+                        let NodeEvent::LocallyAdmittedTransaction(tx) = event else {
+                            continue;
+                        };
+                        let peers: Vec<_> = gossip
+                            .lock()
+                            .nodes
+                            .iter()
+                            .filter(|(j, _)| **j != i)
+                            .map(|(_, (c, _))| c.clone())
+                            .collect();
+                        for c in peers {
+                            let _ = c.submit_transaction(tx.clone());
+                        }
+                    }
+                });
+            }
             let recorder = m
                 .account
                 .clone()
                 .map(|a| a as Arc<dyn tenzro_crypto::composite::HybridSigner>);
-            let record_store = m.storage.clone();
-            let record_nonces = crate::payment_rails::NonceReservation::default();
-            let record_gossip: crate::payment_rails::GossipSlot = Arc::default();
-            let recorded = self.recorded.clone();
-            let refusals = self.record_refusals.clone();
+            let recorder = recorder.map(|signer| {
+                crate::checkpoint_recorder::CheckpointRecorder::new(
+                    publisher.clone(),
+                    signer,
+                    m.storage.clone(),
+                    CHAIN_ID,
+                    Arc::default(),
+                    tx_gossip,
+                    self.fallback,
+                    self.stats.clone(),
+                )
+            });
             tokio::spawn(async move {
                 while let Some(cert) = formed_rx.recv().await {
                     signed.lock().push((
@@ -412,31 +474,8 @@ impl Net {
                         cert.checkpoint.index,
                         cert.signers.to_vec(),
                     ));
-                    if let Some(signer) = recorder.as_ref()
-                        && publisher.records_signers_of(&cert)
-                    {
-                        let record = publisher.signers_record(cert.clone());
-                        let tx_type =
-                            tenzro_types::transaction::TransactionType::RecordCheckpointSigners {
-                                certificate: bincode::serialize(&record).unwrap(),
-                            };
-                        match crate::node::submit_validator_transaction(
-                            &publisher,
-                            signer,
-                            &record_store,
-                            CHAIN_ID,
-                            &record_nonces,
-                            &record_gossip,
-                            tx_type,
-                            100_000,
-                        ) {
-                            Ok(Some(_)) => {
-                                recorded.fetch_add(1, Ordering::AcqRel);
-                            }
-                            // The key enrolment of the account is on its way.
-                            Ok(None) => {}
-                            Err(e) => refusals.lock().push(e.to_string()),
-                        }
+                    if let Some(recorder) = recorder.as_ref() {
+                        recorder.on_certificate(&cert);
                     }
                     let published: PublishedCertificate = publisher.publication(cert.clone());
                     let peers: Vec<_> = gossip
@@ -717,15 +756,35 @@ async fn relay_endpoint(transport: &Arc<IdentityTransport>) -> iroh::protocol::R
         .spawn()
 }
 
+/// An endpoint on a loopback port. The port of a loopback configuration was
+/// free when the configuration was made and can be taken by another socket
+/// on the host before the endpoint binds it, so a bind that fails is tried
+/// again on a newly probed port.
+async fn bind_loopback(
+    dir: &std::path::Path,
+    identity: Option<&IdentityTransport>,
+    port_mapping: bool,
+) -> Arc<IrohBackedResolver> {
+    let mut failures = Vec::new();
+    for _ in 0..5 {
+        let mut cfg = tenzro_iroh::TenzroIrohConfig::loopback();
+        cfg.data_dir = dir.to_path_buf();
+        if !port_mapping {
+            cfg.port_mapping = false;
+        }
+        match IrohBackedResolver::bind_with_config(&cfg, identity).await {
+            Ok(resolver) => return resolver,
+            Err(e) => failures.push(format!("{}: {e:?}", cfg.bind_addr)),
+        }
+    }
+    panic!("no loopback endpoint in five tries: {failures:?}");
+}
+
 async fn bind(
     transport: &Arc<IdentityTransport>,
     dir: &std::path::Path,
 ) -> Arc<IrohBackedResolver> {
-    let mut cfg = tenzro_iroh::TenzroIrohConfig::loopback();
-    cfg.data_dir = dir.to_path_buf();
-    let resolver = IrohBackedResolver::bind_with_config(&cfg, Some(transport.as_ref()))
-        .await
-        .expect("iroh endpoint");
+    let resolver = bind_loopback(dir, Some(transport.as_ref()), true).await;
     if !transport.relays().is_empty() {
         tokio::time::timeout(Duration::from_secs(20), resolver.endpoint().online())
             .await
@@ -967,9 +1026,6 @@ async fn every_transfer_executes_under_load_on(
 ) -> Net {
     use tenzro_consensus::mempool::AccountStateReader;
     use tenzro_crypto::composite::testing::TestHybridSigner;
-    use tenzro_crypto::composite::{HybridSigner, SignatureContext};
-    use tenzro_types::primitives::{ChainId, Nonce};
-    use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
     const N: usize = 4;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -995,6 +1051,15 @@ async fn every_transfer_executes_under_load_on(
         |n| (0..N).all(|i| n.certified(i).0 >= 1),
     )
     .await;
+
+    // Every sender holds a registered identity, as RegisterIdentity leaves
+    // it: the wallet index names its identity in each machine's chain store.
+    for m in &net.machines {
+        let store = m.storage.clone() as Arc<dyn KvStore>;
+        for (i, a) in addresses.iter().enumerate() {
+            register_in_chain_store(&store, a, &format!("did:tenzro:machine:sender{i}"));
+        }
+    }
 
     // Each sender's first transaction enrols its ML-DSA-65 key; the load of
     // transfers starts once every key is enrolled.
@@ -1271,9 +1336,6 @@ fn a_validator_stopped_mid_epoch_rejoins_the_same_epoch() {
             ..TimeRules::default()
         };
         use tenzro_crypto::composite::testing::TestHybridSigner;
-        use tenzro_crypto::composite::{HybridSigner, SignatureContext};
-        use tenzro_types::primitives::{ChainId, Nonce};
-        use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
         let signers: Vec<TestHybridSigner> = (1..=40u8).map(TestHybridSigner::hybrid).collect();
         let addresses: Vec<Address> = signers.iter().map(|s| s.address()).collect();
         let mut net = Net::start_with(N, addresses, rules).await;
@@ -1400,11 +1462,18 @@ fn a_restarted_validator_learns_its_peers_endpoints_soon_after_its_mesh_forms() 
                 })
             })
         };
-        net.wait_for("the validators know each other", Duration::from_secs(90), meshed)
-            .await;
+        net.wait_for(
+            "the validators know each other",
+            Duration::from_secs(90),
+            meshed,
+        )
+        .await;
         net.down(LATE).await;
         let deaf = Duration::from_secs(10);
-        net.gossip.lock().deaf.insert(LATE, Instant::now() + deaf + Duration::from_secs(5));
+        net.gossip
+            .lock()
+            .deaf
+            .insert(LATE, Instant::now() + deaf + Duration::from_secs(5));
         let back = Instant::now();
         net.up(LATE).await;
         net.wait_for(
@@ -1439,9 +1508,8 @@ fn only_a_current_announcement_of_a_known_validator_is_vouched_for() {
         )
         .await;
         let published = net.gossip.lock().published.get(&1).cloned().unwrap();
-        let encode = |p: &tenzro_consensus::announce::PublishedAnnouncement| {
-            bincode::serialize(p).unwrap()
-        };
+        let encode =
+            |p: &tenzro_consensus::announce::PublishedAnnouncement| bincode::serialize(p).unwrap();
         let node = &net.node(0).consensus;
         assert!(
             node.vouches_for_announcement(&encode(&published)),
@@ -1477,6 +1545,8 @@ fn only_a_current_announcement_of_a_known_validator_is_vouched_for() {
 #[test]
 fn a_network_from_the_launch_genesis_runs_with_every_post_quantum_switch_on() {
     network_test(async {
+        // Every launch value applies, the identity rule live from block 0
+        // included: the senders hold registered identities.
         let switches = crate::genesis::launch_switches();
         let started = Instant::now();
         let net = every_transfer_executes_under_load_on(
@@ -1505,6 +1575,22 @@ fn a_network_from_the_launch_genesis_runs_with_every_post_quantum_switch_on() {
             started.elapsed()
         );
     });
+}
+
+/// Writes what `RegisterIdentity` leaves in chain state for `account`: the
+/// wallet index entry naming `did`.
+fn register_in_chain_store(store: &Arc<dyn KvStore>, account: &Address, did: &str) {
+    let key = format!(
+        "storage:{}:{}",
+        hex::encode(tenzro_vm::native::SYSTEM_ADDRESS),
+        hex::encode(format!(
+            "identity_wallet:{}",
+            hex::encode(account.as_bytes())
+        ))
+    );
+    store
+        .put(tenzro_storage::CF_STATE, key.as_bytes(), did.as_bytes())
+        .expect("write the wallet index");
 }
 
 /// The sender's transaction at `nonce`: the account's first transaction is
@@ -1572,6 +1658,127 @@ fn signed_transfer(
     SignedTransaction::new(tx, signer.public_key().p256.clone(), sig)
 }
 
+/// A registration submitted as a transaction, ordered into a block and
+/// executed by every validator, leaves the controller's ML-DSA-65 key enrolled
+/// in each one's chain state: the path a node's identity registration takes
+/// before a later approval by that controller needs both legs.
+#[test]
+fn a_registration_in_a_block_enrols_the_controllers_key_on_every_validator() {
+    network_test(async {
+        use tenzro_consensus::mempool::AccountStateReader;
+        use tenzro_crypto::composite::testing::TestHybridSigner;
+        use tenzro_crypto::composite::{HybridSigner, SignatureContext};
+        use tenzro_types::primitives::{ChainId, Nonce};
+        use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
+        const N: usize = 4;
+        let sender = TestHybridSigner::hybrid(1);
+        let controller = TestHybridSigner::hybrid(7);
+        let controller_p256 = controller.public_key().p256.clone();
+        let expected_pq = TestHybridSigner::hybrid_pq_key(&controller_p256).expect("a hybrid key");
+        let net = Net::start_with(N, vec![sender.address()], time_rules()).await;
+        net.wait_for(
+            "the network certifies an epoch",
+            Duration::from_secs(180),
+            |n| (0..N).all(|i| n.certified(i).0 >= 1),
+        )
+        .await;
+        let reader = crate::lane_resolver::NodeAccountStateReader::new(
+            net.machines[0].storage.clone() as Arc<dyn KvStore>,
+        );
+        let submit = |tx: &SignedTransaction| {
+            for i in 0..N {
+                net.node(i).consensus.submit_transaction(tx.clone()).ok();
+            }
+        };
+        // The sender's first transaction enrols its own key.
+        submit(&signed_transfer(&sender, 0, 0));
+        net.wait_for(
+            "the sender's key is enrolled",
+            Duration::from_secs(120),
+            |_| reader.account_nonce(&sender.address()) > 0,
+        )
+        .await;
+
+        let mut payload = tenzro_types::identity::RegisterIdentityPayload {
+            did: format!(
+                "did:tenzro:human:{}",
+                tenzro_types::did_derivation::human_id(&controller_p256)
+            ),
+            identity_type: "human".to_string(),
+            display_name: "Controller".to_string(),
+            controller_pubkey: controller_p256.clone(),
+            key_type: "P256".to_string(),
+            wallet_id: "wallet-1".to_string(),
+            wallet_address: Address::new([0x77; 32]),
+            pq_verifying_key: controller.public_key().pq.clone().expect("a hybrid key"),
+            metadata: Default::default(),
+            proof: tenzro_types::identity::RegistrationProof::Hardware {
+                signature: tenzro_types::account_signature::CompositeSignature::classical(
+                    tenzro_types::account_signature::ClassicalProof::Raw {
+                        signature: Vec::new(),
+                    },
+                ),
+            },
+        };
+        let statement = tenzro_types::identity::registration_statement(&payload);
+        payload.proof = tenzro_types::identity::RegistrationProof::Hardware {
+            signature: controller
+                .sign(SignatureContext::IdentityRegistration, &statement)
+                .unwrap(),
+        };
+        let tx = Transaction::new(
+            ChainId::from(CHAIN_ID),
+            sender.address(),
+            Address::new([0u8; 32]),
+            Nonce::from(1),
+            TransactionType::RegisterIdentity {
+                did: payload.did,
+                identity_type: payload.identity_type,
+                display_name: payload.display_name,
+                controller_pubkey: payload.controller_pubkey,
+                key_type: payload.key_type,
+                wallet_id: payload.wallet_id,
+                wallet_address: payload.wallet_address,
+                pq_verifying_key: payload.pq_verifying_key,
+                metadata: payload.metadata,
+                proof: payload.proof,
+            },
+            200_000,
+            10_000_000_000,
+        );
+        let sig = sender
+            .sign(SignatureContext::Transaction, tx.hash().as_bytes())
+            .unwrap();
+        submit(&SignedTransaction::new(
+            tx,
+            sender.public_key().p256.clone(),
+            sig,
+        ));
+        net.wait_for(
+            "the registration executes",
+            Duration::from_secs(120),
+            |_| reader.account_nonce(&sender.address()) > 1,
+        )
+        .await;
+
+        // Every validator, once it has executed the block, holds the key.
+        net.wait_for(
+            "every validator holds the controller's enrolled key",
+            Duration::from_secs(60),
+            |n| {
+                (0..N).all(|i| {
+                    let state = tenzro_vm::StateAdapter::with_storage(
+                        n.machines[i].storage.clone() as Arc<dyn KvStore>,
+                    );
+                    tenzro_vm::account_keys::enrolled_pq_key(&state, &controller_p256).as_deref()
+                        == Some(expected_pq.as_slice())
+                })
+            },
+        )
+        .await;
+    });
+}
+
 /// Four validators; gossip delivers to each, once, a transfer of `amount`
 /// from a funded sender at a nonce just past the window a validator holds
 /// for it, which every one refuses; then the sender's transactions before it
@@ -1600,10 +1807,7 @@ async fn refused_once_then_earlier_ones_execute(
     // is then refused for its nonce alone.
     let enrol = signed_transfer(&signer, 0, 0);
     for i in 0..N {
-        net.node(i)
-            .consensus
-            .submit_transaction(enrol.clone())
-            .ok();
+        net.node(i).consensus.submit_transaction(enrol.clone()).ok();
     }
     let enrolled = crate::lane_resolver::NodeAccountStateReader::new(
         net.machines[0].storage.clone() as Arc<dyn KvStore>,
@@ -1782,7 +1986,21 @@ fn validators_with_nothing_to_spend_advance_and_record_their_checkpoints() {
             )
             .with_test_writer()
             .try_init();
-        let net = Net::start_full(N, Vec::new(), time_rules(), Accounts::RecordBonded).await;
+        // A signers record is made only for a checkpoint that certifies
+        // real work, so a funded account feeds the chain its transfers: the
+        // validators' records of those checkpoints are the rest of the blocks.
+        let feeder_account = tenzro_crypto::composite::testing::TestHybridSigner::hybrid(1);
+        let net = Net::start_full(
+            N,
+            vec![feeder_account.address()],
+            time_rules(),
+            Accounts::RecordBonded,
+        )
+        .await;
+        let feeder = feed_transfers(
+            (0..N).map(|i| net.node(i).consensus.clone()).collect(),
+            net.machines[0].storage.clone() as Arc<dyn KvStore>,
+        );
         for m in &net.machines {
             let state = tenzro_vm::StateAdapter::with_storage(m.storage.clone());
             let account = m.account.as_ref().unwrap().address();
@@ -1803,27 +2021,42 @@ fn validators_with_nothing_to_spend_advance_and_record_their_checkpoints() {
         )
         .await;
         assert!(
-            net.record_refusals.lock().is_empty(),
+            net.stats.refusals.lock().is_empty(),
             "records not admitted: {:?}",
-            net.record_refusals.lock()
+            net.stats.refusals.lock()
         );
-        assert!(net.recorded.load(Ordering::Acquire) >= 4);
+        assert!(net.stats.submitted.load(Ordering::Acquire) >= 1);
         for m in &net.machines {
             let state = tenzro_vm::StateAdapter::with_storage(m.storage.clone());
             let account = m.account.as_ref().unwrap().address();
             // The account paid for its key enrolment (nonce 0) and nothing
             // after it: the records pay no fee.
+            // One member records each checkpoint, so only some accounts
+            // have records; every one has its enrolment.
             assert!(
-                state.get_nonce(account.as_bytes()) > 1,
-                "no record executed"
+                state.get_nonce(account.as_bytes()) >= 1,
+                "no enrolment executed"
             );
             assert!(
                 tenzro_vm::account_keys::enrolled_pq_key(
                     &state,
-                    &tenzro_crypto::composite::HybridSigner::public_key(m.account.as_ref().unwrap().as_ref()).p256
+                    &tenzro_crypto::composite::HybridSigner::public_key(
+                        m.account.as_ref().unwrap().as_ref()
+                    )
+                    .p256
                 )
                 .is_some(),
                 "the account enrolled no ML-DSA-65 key"
+            );
+        }
+        feeder.abort();
+        {
+            let state = tenzro_vm::StateAdapter::with_storage(net.machines[0].storage.clone());
+            assert!(
+                net.machines
+                    .iter()
+                    .any(|m| state.get_nonce(m.account.as_ref().unwrap().address().as_bytes()) > 1),
+                "no record executed"
             );
         }
         // Every validator signed rounds the records credited.
@@ -1840,6 +2073,1046 @@ fn validators_with_nothing_to_spend_advance_and_record_their_checkpoints() {
                 "no vote work recorded for {account}"
             );
         }
+    });
+}
+
+/// Every signers record in blocks `0..=tip` of `i`'s chain, in block order,
+/// as (epoch, index, anchor round, first height, last height of the
+/// checkpoint), and the number of other transactions.
+/// Whether `t` executed in the block at `height`: its first inclusion, as
+/// the transaction index records it. Validators batch what their pools hold,
+/// so a transaction can be ordered in more than one block; a later copy is
+/// skipped and is not a second transaction.
+fn executed_in(
+    storage: &RocksDbStore,
+    t: &tenzro_types::transaction::SignedTransaction,
+    height: u64,
+) -> bool {
+    storage
+        .get(
+            tenzro_storage::CF_TRANSACTIONS,
+            format!("idx:{}", t.transaction.hash()).as_bytes(),
+        )
+        .unwrap()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("block_height").and_then(|h| h.as_u64()))
+        == Some(height)
+}
+
+/// A signers record in a block: where it executed, who sent it and the
+/// certificate it carries.
+struct RecordAt {
+    height: u64,
+    from: Address,
+    published: PublishedCertificate,
+}
+
+/// The positions in `records` of the records the chain refused as the second
+/// of their checkpoint. `records` is every signers record in chain order as
+/// (block, epoch, index, sender); `first_block` is the block in which each
+/// account's first transaction executed, which for a validator is its key
+/// enrolment.
+///
+/// A member sends a record only when neither the chain's tally nor its own
+/// pool holds one for that checkpoint, and the members take turns, so a
+/// checkpoint has one record. One crossing is left. A member kept from its
+/// turn because its own key enrolment had not executed sends as soon as it
+/// has, which can be the moment the next member's turn comes. Each node then
+/// holds only its own record, both are ordered, the chain takes the first
+/// and refuses the second, and the checkpoint is counted once.
+///
+/// That crossing is accepted in exactly that form: two records of one
+/// checkpoint from two members, one of them enrolled in a later block than
+/// the other and sending in the block of its first record. Any other repeat
+/// is an error that names the checkpoint.
+fn refused_crossings(
+    records: &[(u64, u64, u64, Address)],
+    first_block: &HashMap<Address, u64>,
+) -> Result<Vec<usize>, String> {
+    let who = |a: &Address| hex::encode(&a.as_bytes()[..2]);
+    let mut first_record: HashMap<Address, u64> = HashMap::new();
+    for (height, _, _, from) in records {
+        first_record.entry(*from).or_insert(*height);
+    }
+    let mut first_of: HashMap<(u64, u64), usize> = HashMap::new();
+    let mut crossed = std::collections::HashSet::new();
+    let mut refused = Vec::new();
+    for (pos, (height, epoch, index, from)) in records.iter().enumerate() {
+        let Some(&at) = first_of.get(&(*epoch, *index)) else {
+            first_of.insert((*epoch, *index), pos);
+            continue;
+        };
+        let (taken_height, _, _, taken_from) = &records[at];
+        if !crossed.insert((*epoch, *index)) {
+            return Err(format!(
+                "checkpoint {epoch}/{index} has more than two records"
+            ));
+        }
+        if taken_from == from {
+            return Err(format!(
+                "checkpoint {epoch}/{index} recorded twice by {}",
+                who(from)
+            ));
+        }
+        let (Some(&taken_enrolled), Some(&enrolled)) =
+            (first_block.get(taken_from), first_block.get(from))
+        else {
+            return Err(format!(
+                "checkpoint {epoch}/{index} recorded twice, by {} and {}, one of them with no transaction on chain",
+                who(taken_from),
+                who(from)
+            ));
+        };
+        if taken_enrolled == enrolled {
+            return Err(format!(
+                "checkpoint {epoch}/{index} recorded twice, by {} and {}, both enrolled in block {enrolled}",
+                who(taken_from),
+                who(from)
+            ));
+        }
+        let (late, late_height) = if taken_enrolled > enrolled {
+            (taken_from, taken_height)
+        } else {
+            (from, height)
+        };
+        if first_record.get(late) != Some(late_height) {
+            return Err(format!(
+                "checkpoint {epoch}/{index} recorded twice, by {} and {}, and {} had recorded before block {late_height}",
+                who(taken_from),
+                who(from),
+                who(late)
+            ));
+        }
+        refused.push(pos);
+    }
+    Ok(refused)
+}
+
+#[test]
+fn a_record_crossed_by_a_late_enrolment_is_the_only_repeat_accepted() {
+    let (a, b, c) = (
+        Address::new([1; 32]),
+        Address::new([2; 32]),
+        Address::new([3; 32]),
+    );
+    let enrolled =
+        |pairs: &[(Address, u64)]| pairs.iter().copied().collect::<HashMap<Address, u64>>();
+    let late = enrolled(&[(a, 2), (b, 1), (c, 1)]);
+    // The late member's record is taken and the next member's refused.
+    let late_first = [(3, 0, 2, a), (3, 0, 2, b), (4, 1, 3, b)];
+    assert_eq!(refused_crossings(&late_first, &late), Ok(vec![1]));
+    // The other way round, a block apart.
+    let late_second = [(3, 0, 2, b), (4, 0, 2, a)];
+    assert_eq!(refused_crossings(&late_second, &late), Ok(vec![1]));
+    // The late member held two records and sent both at once.
+    let both = [(3, 0, 2, a), (3, 0, 2, b), (3, 0, 3, b), (3, 0, 3, a)];
+    assert_eq!(refused_crossings(&both, &late), Ok(vec![1, 3]));
+    // No repeat.
+    let none = [(3, 0, 2, a), (4, 0, 3, a), (5, 1, 1, b)];
+    assert_eq!(refused_crossings(&none, &late), Ok(vec![]));
+    // Members enrolled in the same block.
+    let together = enrolled(&[(a, 1), (b, 1)]);
+    assert!(refused_crossings(&late_first, &together).is_err());
+    // One member twice.
+    let twice = [(3, 0, 2, a), (4, 0, 2, a)];
+    assert!(refused_crossings(&twice, &late).is_err());
+    // The late member had already recorded.
+    let later = [(3, 0, 2, a), (4, 0, 3, a), (4, 0, 3, b)];
+    assert!(refused_crossings(&later, &late).is_err());
+    // Three records of one checkpoint.
+    let three = [(3, 0, 2, a), (3, 0, 2, b), (3, 0, 2, c)];
+    assert!(refused_crossings(&three, &late).is_err());
+    // A sender with no transaction on chain cannot be placed.
+    assert!(refused_crossings(&late_first, &enrolled(&[(a, 2)])).is_err());
+}
+
+/// The signers records in a validator's blocks.
+struct ChainRecords {
+    /// The records the chain took, in chain order.
+    taken: Vec<RecordAt>,
+    /// How many it refused as the second of their checkpoint
+    /// ([`refused_crossings`]).
+    crossings: usize,
+    /// Every other transaction.
+    others: usize,
+}
+
+/// Reads `i`'s blocks through `tip`. Panics when a checkpoint has a second
+/// record that [`refused_crossings`] does not accept.
+async fn chain_records(net: &Net, i: usize, tip: u64) -> ChainRecords {
+    let store = BlockStoreImpl::new(net.machines[i].storage.clone()).unwrap();
+    let mut all = Vec::new();
+    let mut first_block: HashMap<Address, u64> = HashMap::new();
+    let mut others = 0;
+    for h in 0..=tip {
+        let Some(block) = store.get_block_by_height(BlockHeight(h)).await.unwrap() else {
+            continue;
+        };
+        for t in block
+            .transactions
+            .iter()
+            .filter(|t| executed_in(&net.machines[i].storage, t, h))
+        {
+            first_block.entry(t.transaction.from).or_insert(h);
+            match &t.transaction.tx_type {
+                tenzro_types::transaction::TransactionType::RecordCheckpointSigners {
+                    certificate,
+                } => all.push(RecordAt {
+                    height: h,
+                    from: t.transaction.from,
+                    published: bincode::deserialize(certificate).unwrap(),
+                }),
+                _ => others += 1,
+            }
+        }
+    }
+    let keys: Vec<(u64, u64, u64, Address)> = all
+        .iter()
+        .map(|r| {
+            let cp = &r.published.certificate.checkpoint;
+            (r.height, cp.epoch, cp.index, r.from)
+        })
+        .collect();
+    let refused = refused_crossings(&keys, &first_block).unwrap_or_else(|e| {
+        let listed: Vec<String> = keys
+            .iter()
+            .map(|(h, epoch, index, from)| {
+                format!(
+                    "block {h}: {epoch}/{index} from {}",
+                    hex::encode(&from.as_bytes()[..2])
+                )
+            })
+            .collect();
+        panic!("{e}; records on chain: {listed:?}")
+    });
+    let mut at = 0usize;
+    all.retain(|_| {
+        let keep = !refused.contains(&at);
+        at += 1;
+        keep
+    });
+    ChainRecords {
+        taken: all,
+        crossings: refused.len(),
+        others,
+    }
+}
+
+/// The signers records the chain took in `i`'s blocks through `tip` as
+/// (epoch, index, anchor round, first height, last height), and the count of
+/// every other transaction. A record refused as the second of its checkpoint
+/// is left out ([`refused_crossings`]); any other repeat panics.
+async fn records_on_chain(
+    net: &Net,
+    i: usize,
+    tip: u64,
+) -> (Vec<(u64, u64, u64, u64, u64)>, usize) {
+    let chain = chain_records(net, i, tip).await;
+    let records = chain
+        .taken
+        .iter()
+        .map(|r| {
+            let cp = &r.published.certificate.checkpoint;
+            (
+                cp.epoch,
+                cp.index,
+                cp.anchor_round,
+                cp.first_height,
+                cp.last_height,
+            )
+        })
+        .collect();
+    (records, chain.others)
+}
+
+/// An idle committee goes quiet. Four validators bonded at genesis; one
+/// funded account sends a few transactions and stops. Every checkpoint that
+/// certified them is recorded exactly once, by one validator each, in an
+/// order the VM accepts (no record is refused as stale, and none as a
+/// duplicate but the one crossing [`refused_crossings`] accepts), the
+/// records of those checkpoints are not themselves recorded, and once the
+/// last of them has landed the height stops advancing.
+#[test]
+fn an_idle_committee_stops_producing_blocks_and_records_each_checkpoint_once() {
+    network_test(async {
+        use tenzro_consensus::mempool::AccountStateReader;
+        use tenzro_crypto::composite::testing::TestHybridSigner;
+        const N: usize = 4;
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_test_writer()
+            .try_init();
+        let sender = TestHybridSigner::hybrid(1);
+        // The fallback step is the production one, so the test measures the
+        // protocol at its real margin.
+        let net = Net::start_recording(
+            N,
+            0,
+            vec![sender.address()],
+            time_rules(),
+            Accounts::RecordBonded,
+            Default::default(),
+            crate::checkpoint_recorder::RANK_STEP,
+        )
+        .await;
+        let reader = crate::lane_resolver::NodeAccountStateReader::new(
+            net.machines[0].storage.clone() as Arc<dyn KvStore>,
+        );
+        const TRANSFERS: u64 = 5;
+        for nonce in 0..TRANSFERS {
+            // The first is the key enrolment; each waits for the one before.
+            let tx = signed_transfer(&sender, nonce, 1);
+            for i in 0..N {
+                net.node(i).consensus.submit_transaction(tx.clone()).ok();
+            }
+            net.wait_for(
+                "the sender's transaction executes",
+                Duration::from_secs(120),
+                |_| reader.account_nonce(&sender.address()) > nonce,
+            )
+            .await;
+        }
+
+        // Quiet: the height holds still for a long stretch, a good deal
+        // longer than a record takes to land.
+        let mut last = (net.height(0), Instant::now());
+        net.wait_for("the chain goes quiet", Duration::from_secs(240), |n| {
+            let h = n.height(0);
+            if h != last.0 {
+                last = (h, Instant::now());
+            }
+            last.1.elapsed() >= Duration::from_secs(20) && (0..N).all(|i| n.height(i) == h)
+        })
+        .await;
+        let tip = net.height(0);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        for i in 0..N {
+            assert_eq!(
+                net.height(i),
+                tip,
+                "validator {i} still made blocks while idle"
+            );
+        }
+
+        let (records, others) = records_on_chain(&net, 0, tip).await;
+        assert!(
+            others >= TRANSFERS as usize,
+            "the real transactions are on chain"
+        );
+        assert!(
+            !records.is_empty(),
+            "the real transactions' checkpoints were recorded"
+        );
+        // The VM's rule, replayed: strictly rising index and anchor round
+        // within an epoch, or the record is refused.
+        let mut seen: HashMap<u64, (u64, u64)> = HashMap::new();
+        let mut indices = std::collections::HashSet::new();
+        for (epoch, index, anchor, first, last_h) in &records {
+            assert!(
+                indices.insert((*epoch, *index)),
+                "checkpoint {index} recorded twice"
+            );
+            if let Some((li, nr)) = seen.get(epoch) {
+                assert!(
+                    index > li && anchor >= nr,
+                    "checkpoint {index} of epoch {epoch} would be refused"
+                );
+            }
+            seen.insert(*epoch, (*index, anchor + 1));
+            // Only a checkpoint that covers a block with a real transaction.
+            assert!(
+                first <= last_h,
+                "a record of a checkpoint covering no block"
+            );
+        }
+        // No checkpoint was recorded for a block holding only records: every
+        // recorded checkpoint covers at least one block that is not a record
+        // block.
+        let store = BlockStoreImpl::new(net.machines[0].storage.clone()).unwrap();
+        for (_, index, _, first, last_h) in &records {
+            let mut real = false;
+            for h in *first..=*last_h {
+                let b = store
+                    .get_block_by_height(BlockHeight(h))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                real |= b.transactions.iter().any(|t| {
+                    !matches!(
+                        t.transaction.tx_type,
+                        tenzro_types::transaction::TransactionType::RecordCheckpointSigners { .. }
+                    )
+                });
+            }
+            assert!(
+                real,
+                "checkpoint {index} was recorded but certifies only records"
+            );
+        }
+        // Stored size per block (the store keeps a block as JSON), for sizing
+        // history retention: record-only blocks against blocks of real work.
+        let (mut rec_bytes, mut rec_n, mut real_bytes, mut real_n) =
+            (0usize, 0usize, 0usize, 0usize);
+        for h in 1..=tip {
+            if let Some(b) = store.get_block_by_height(BlockHeight(h)).await.unwrap() {
+                let n = serde_json::to_vec(&b).unwrap().len();
+                let all_records = b.transactions.iter().all(|t| {
+                    matches!(
+                        t.transaction.tx_type,
+                        tenzro_types::transaction::TransactionType::RecordCheckpointSigners { .. }
+                    )
+                });
+                let only_records = !b.transactions.is_empty() && all_records;
+                if only_records {
+                    rec_bytes += n;
+                    rec_n += 1;
+                } else {
+                    real_bytes += n;
+                    real_n += 1;
+                }
+            }
+        }
+        eprintln!(
+            "BLOCKSIZE record-only blocks: {rec_n} avg {} B; other blocks: {real_n} avg {} B; \
+             tip {tip}; records {}",
+            rec_bytes / rec_n.max(1),
+            real_bytes / real_n.max(1),
+            records.len()
+        );
+        // The chain holds the real work's tally, the same on every validator.
+        let epoch = records.iter().map(|r| r.0).max().unwrap();
+        for i in 0..N {
+            assert!(
+                recorded_votes(&net, i, epoch).1 > 0,
+                "validator {i} holds no tally"
+            );
+        }
+        assert!(
+            net.stats.refusals.lock().is_empty(),
+            "records not admitted: {:?}",
+            net.stats.refusals.lock()
+        );
+        assert!(
+            net.stats.skipped_idle.load(Ordering::Relaxed) > 0,
+            "idle checkpoints were left unrecorded"
+        );
+    });
+}
+
+/// Every block of `i`'s chain through `tip`, with its epoch, the types of its
+/// transactions as (is a signers record, is a transfer), and its height.
+async fn block_kinds(net: &Net, i: usize, tip: u64) -> Vec<(u64, u64, Vec<(bool, bool)>)> {
+    let store = BlockStoreImpl::new(net.machines[i].storage.clone()).unwrap();
+    let mut out = Vec::new();
+    for h in 1..=tip {
+        let Some(block) = store.get_block_by_height(BlockHeight(h)).await.unwrap() else {
+            continue;
+        };
+        let kinds = block
+            .transactions
+            .iter()
+            .filter(|t| executed_in(&net.machines[i].storage, t, h))
+            .map(|t| {
+                (
+                    crate::checkpoint_recorder::is_signers_record(&t.transaction.tx_type),
+                    matches!(
+                        t.transaction.tx_type,
+                        tenzro_types::transaction::TransactionType::Transfer { .. }
+                    ),
+                )
+            })
+            .collect();
+        out.push((h, block.header.epoch, kinds));
+    }
+    out
+}
+
+/// Waits until no validator in `up` has made a block for `quiet`.
+async fn wait_quiet(net: &Net, up: &[usize], quiet: Duration, limit: Duration) {
+    let mut last = (net.height(up[0]), Instant::now());
+    net.wait_for("the chain goes quiet", limit, |n| {
+        let h = n.height(up[0]);
+        if h != last.0 {
+            last = (h, Instant::now());
+        }
+        last.1.elapsed() >= quiet && up.iter().all(|i| n.height(*i) == h)
+    })
+    .await;
+}
+
+/// The accounts a record's certificate credits, with the epoch and index.
+fn credited(net: &Net, records: &[(u64, u64, Vec<u16>)]) -> Vec<(u64, u64, Vec<Address>)> {
+    records
+        .iter()
+        .map(|(epoch, index, signers)| {
+            let committee = net.node(0).consensus.committee(*epoch).expect("committee");
+            let accounts = signers
+                .iter()
+                .map(|s| committee.member(*s).expect("member").address)
+                .collect();
+            (*epoch, *index, accounts)
+        })
+        .collect()
+}
+
+/// The signers records the chain took in `i`'s blocks through `tip` as
+/// (epoch, index, signer positions its certificate names). A record refused
+/// as the second of its checkpoint is left out ([`refused_crossings`]), so
+/// its signers are not counted twice.
+async fn recorded_signers(net: &Net, i: usize, tip: u64) -> Vec<(u64, u64, Vec<u16>)> {
+    chain_records(net, i, tip)
+        .await
+        .taken
+        .iter()
+        .map(|r| {
+            (
+                r.published.certificate.checkpoint.epoch,
+                r.published.certificate.checkpoint.index,
+                r.published.certificate.signers.to_vec(),
+            )
+        })
+        .collect()
+}
+
+/// Four validators and no traffic from anyone: the only transactions are the
+/// validators' own key enrolments. Their records are held and leave in a
+/// block of their own: at the flush point of the epoch, or at once when the
+/// enrolments were certified after it or too late for their own epoch. A
+/// block of records is not work, so its checkpoint is not recorded, nothing
+/// follows it and the chain is quiet for good: there are never more blocks
+/// of records than blocks of work. None is dropped as stale, and the records
+/// the chain takes reach it in checkpoint order, each once. One record can
+/// be refused: a validator whose enrolment landed a block after the others'
+/// sends its record the moment it can, which can be the moment the next
+/// validator's turn comes, and the chain takes the first of the two
+/// ([`refused_crossings`]).
+#[test]
+fn a_net_with_no_traffic_makes_no_blocks_after_one_flush_block() {
+    network_test(async {
+        const N: usize = 4;
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_test_writer()
+            .try_init();
+        let net = Net::start_recording(
+            N,
+            0,
+            Vec::new(),
+            time_rules(),
+            Accounts::RecordBonded,
+            Default::default(),
+            Duration::from_secs(2),
+        )
+        .await;
+        let up: Vec<usize> = (0..N).collect();
+        // Past the first two epochs, so the enrolments and the flush for
+        // them have been and gone, then quiet for two and a half epochs.
+        net.wait_for("two epochs certify", Duration::from_secs(120), |n| {
+            (0..N).all(|i| n.certified(i).0 >= 2)
+        })
+        .await;
+        wait_quiet(&net, &up, Duration::from_secs(25), Duration::from_secs(240)).await;
+        let tip = net.height(0);
+        assert!(tip >= 1, "the validators' enrolments made blocks");
+        // What each block held and who sent it, so a failure below says
+        // which records made a block of their own.
+        let block_store = BlockStoreImpl::new(net.machines[0].storage.clone()).unwrap();
+        let mut layout = Vec::new();
+        let mut work_blocks = 0usize;
+        let mut record_blocks = 0usize;
+        for h in 1..=tip {
+            let Some(b) = block_store
+                .get_block_by_height(BlockHeight(h))
+                .await
+                .unwrap()
+            else {
+                continue;
+            };
+            if crate::checkpoint_recorder::covers_real_work(
+                b.transactions.iter().map(|t| &t.transaction.tx_type),
+            ) {
+                work_blocks += 1;
+            }
+            let records: Vec<(u64, u64)> = b
+                .transactions
+                .iter()
+                .filter_map(|t| {
+                    crate::checkpoint_recorder::pooled_record_of(&t.transaction.tx_type)
+                })
+                .collect();
+            if !records.is_empty() && records.len() == b.transactions.len() {
+                record_blocks += 1;
+            }
+            let held: Vec<String> = b
+                .transactions
+                .iter()
+                .map(|t| {
+                    let from = hex::encode(&t.transaction.from.as_bytes()[..2]);
+                    match crate::checkpoint_recorder::pooled_record_of(&t.transaction.tx_type) {
+                        Some((e, i)) => format!("record {e}/{i} from {from}"),
+                        None => format!("other from {from}"),
+                    }
+                })
+                .collect();
+            layout.push(format!(
+                "block {h} epoch {} round {}: {held:?}",
+                b.header.epoch, b.header.round
+            ));
+        }
+        let layout = layout.join("; ");
+        eprintln!(
+            "tip {tip}; {record_blocks} blocks of records for {work_blocks} blocks of work; \
+             layout: {layout}; held {} flushed {} submitted {} suppressed {} idle {}",
+            net.stats.held.load(Ordering::Relaxed),
+            net.stats.flushed.load(Ordering::Relaxed),
+            net.stats.submitted.load(Ordering::Relaxed),
+            net.stats.suppressed_duplicate.load(Ordering::Relaxed),
+            net.stats.skipped_idle.load(Ordering::Relaxed),
+        );
+        // A block of records is not work to record. Each record covers at
+        // least one block of work no other record covers, so however the
+        // enrolments fell in their epochs there are no more blocks of
+        // records than blocks of work, and a record never causes another.
+        // A record refused as the second of its checkpoint can add one block.
+        let chain = chain_records(&net, 0, tip).await;
+        let on_chain: Vec<(u64, u64)> = chain
+            .taken
+            .iter()
+            .map(|r| {
+                let cp = &r.published.certificate.checkpoint;
+                (cp.epoch, cp.index)
+            })
+            .collect();
+        assert!(
+            !on_chain.is_empty(),
+            "no record reached the chain: {layout}"
+        );
+        assert!(
+            record_blocks <= work_blocks + chain.crossings,
+            "{record_blocks} blocks of records for {work_blocks} blocks of work: {layout}"
+        );
+        // The records the chain took reach it in checkpoint order.
+        assert!(
+            on_chain.windows(2).all(|w| w[0] < w[1]),
+            "records out of checkpoint order: {layout}"
+        );
+        assert!(
+            net.stats.refusals.lock().is_empty(),
+            "records not admitted: {:?}",
+            net.stats.refusals.lock()
+        );
+        assert_eq!(net.stats.dropped_stale.load(Ordering::Relaxed), 0);
+        assert_eq!(net.stats.dropped_overflow.load(Ordering::Relaxed), 0);
+        assert!(
+            net.stats.held.load(Ordering::Relaxed) >= 1,
+            "nothing was held"
+        );
+        // Every record on chain is the first of its checkpoint.
+        let records = recorded_signers(&net, 0, tip).await;
+        let mut seen = std::collections::HashSet::new();
+        for (epoch, index, _) in &records {
+            assert!(
+                seen.insert((*epoch, *index)),
+                "checkpoint {index} recorded twice"
+            );
+        }
+    });
+}
+
+/// A beacon contribution signed by `signer` with `nonce` for `round`. The
+/// proof is not a valid VRF output, so the contribution is refused when it
+/// executes; it is ordered and fills a block all the same, as a validator's
+/// beacon round does.
+fn signed_beacon(
+    signer: &tenzro_crypto::composite::testing::TestHybridSigner,
+    nonce: u64,
+    round: u64,
+) -> tenzro_types::transaction::SignedTransaction {
+    use tenzro_crypto::composite::{HybridSigner, SignatureContext};
+    use tenzro_types::primitives::{ChainId, Nonce};
+    use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
+    let tx = Transaction::new(
+        ChainId::from(CHAIN_ID),
+        signer.address(),
+        Address::new([0xee; 32]),
+        Nonce::from(nonce),
+        TransactionType::BeaconContribute {
+            round,
+            proof: vec![0x5a; 80],
+        },
+        tenzro_vm::native::beacon::GAS_BEACON_CONTRIBUTE,
+        10_000_000_000,
+    );
+    let sig = signer
+        .sign(SignatureContext::Transaction, tx.hash().as_bytes())
+        .unwrap();
+    SignedTransaction::new(tx, signer.public_key().p256.clone(), sig)
+}
+
+/// A net whose only activity is beacon contributions records nothing: a
+/// checkpoint covering only beacon contributions is upkeep, not work, so no
+/// signers record is sent for it and no block is made for one. The blocks
+/// after the quiet point are the contributions' own and nothing else.
+#[test]
+fn beacon_contributions_alone_make_no_records_and_no_record_blocks() {
+    network_test(async {
+        use tenzro_consensus::mempool::AccountStateReader;
+        use tenzro_crypto::composite::testing::TestHybridSigner;
+        const N: usize = 4;
+        const CONTRIBUTIONS: u64 = 12;
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_test_writer()
+            .try_init();
+        let contributor = TestHybridSigner::hybrid(1);
+        let net = Net::start_recording(
+            N,
+            0,
+            vec![contributor.address()],
+            time_rules(),
+            Accounts::RecordBonded,
+            Default::default(),
+            Duration::from_secs(2),
+        )
+        .await;
+        let up: Vec<usize> = (0..N).collect();
+        let reader = crate::lane_resolver::NodeAccountStateReader::new(
+            net.machines[0].storage.clone() as Arc<dyn KvStore>,
+        );
+        net.wait_for("two epochs certify", Duration::from_secs(120), |n| {
+            (0..N).all(|i| n.certified(i).0 >= 2)
+        })
+        .await;
+        wait_quiet(&net, &up, Duration::from_secs(25), Duration::from_secs(240)).await;
+        // The contributor's key enrolment is real work and is recorded; the
+        // chain goes quiet again after it.
+        let enrolment = signed_transfer(&contributor, 0, 1);
+        for i in 0..N {
+            net.node(i)
+                .consensus
+                .submit_transaction(enrolment.clone())
+                .ok();
+        }
+        net.wait_for("the enrolment executes", Duration::from_secs(120), |_| {
+            reader.account_nonce(&contributor.address()) > 0
+        })
+        .await;
+        wait_quiet(&net, &up, Duration::from_secs(25), Duration::from_secs(240)).await;
+        let base = net.height(0);
+        let submitted = net.stats.submitted.load(Ordering::Acquire);
+
+        // Contributions only, spread over more than two epochs.
+        for k in 0..CONTRIBUTIONS {
+            let tx = signed_beacon(&contributor, k + 1, k);
+            for i in 0..N {
+                net.node(i).consensus.submit_transaction(tx.clone()).ok();
+            }
+            net.wait_for(
+                "the contribution is ordered",
+                Duration::from_secs(120),
+                |_| reader.account_nonce(&contributor.address()) > k + 1,
+            )
+            .await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        wait_quiet(&net, &up, Duration::from_secs(25), Duration::from_secs(240)).await;
+        let tip = net.height(0);
+        assert!(tip > base, "the contributions made blocks");
+
+        let blocks = block_kinds(&net, 0, tip).await;
+        let store = BlockStoreImpl::new(net.machines[0].storage.clone()).unwrap();
+        let mut contributions = 0u64;
+        for (h, epoch, kinds) in blocks.iter().filter(|(h, ..)| *h > base) {
+            assert!(
+                kinds.iter().all(|(record, _)| !*record),
+                "block {h} of epoch {epoch} holds a signers record"
+            );
+            let b = store
+                .get_block_by_height(BlockHeight(*h))
+                .await
+                .unwrap()
+                .unwrap();
+            let is_beacon = |t: &&tenzro_types::transaction::SignedTransaction| {
+                matches!(
+                    t.transaction.tx_type,
+                    tenzro_types::transaction::TransactionType::BeaconContribute { .. }
+                )
+            };
+            assert!(
+                b.transactions.iter().any(|t| is_beacon(&t)),
+                "block {h} of epoch {epoch} holds no beacon contribution"
+            );
+            let beacon = b
+                .transactions
+                .iter()
+                .filter(is_beacon)
+                .filter(|t| executed_in(&net.machines[0].storage, t, *h))
+                .count() as u64;
+            contributions += beacon;
+        }
+        eprintln!("blocks {base}..={tip}: {contributions} contributions");
+        assert_eq!(contributions, CONTRIBUTIONS);
+        assert_eq!(
+            net.stats.submitted.load(Ordering::Acquire),
+            submitted,
+            "a signers record was sent for a beacon-only checkpoint"
+        );
+        assert!(net.stats.refusals.lock().is_empty());
+    });
+}
+
+/// One real transaction on an otherwise quiet net: the checkpoint that
+/// certifies it is recorded exactly once, in a block of its own epoch, by one
+/// member, and every validator its certificate names is credited in the
+/// epoch's tally.
+#[test]
+fn one_real_transaction_is_recorded_once_and_credits_its_signers() {
+    network_test(async {
+        use tenzro_consensus::mempool::AccountStateReader;
+        use tenzro_crypto::composite::testing::TestHybridSigner;
+        const N: usize = 4;
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_test_writer()
+            .try_init();
+        let sender = TestHybridSigner::hybrid(1);
+        let net = Net::start_recording(
+            N,
+            0,
+            vec![sender.address()],
+            time_rules(),
+            Accounts::RecordBonded,
+            Default::default(),
+            Duration::from_secs(2),
+        )
+        .await;
+        let up: Vec<usize> = (0..N).collect();
+        let reader = crate::lane_resolver::NodeAccountStateReader::new(
+            net.machines[0].storage.clone() as Arc<dyn KvStore>,
+        );
+        // The validators' enrolments settle first, so the one transfer is
+        // alone in its block.
+        net.wait_for("two epochs certify", Duration::from_secs(120), |n| {
+            (0..N).all(|i| n.certified(i).0 >= 2)
+        })
+        .await;
+        wait_quiet(&net, &up, Duration::from_secs(25), Duration::from_secs(240)).await;
+        // The sender's enrolment, then one transfer.
+        for nonce in 0..2 {
+            let tx = signed_transfer(&sender, nonce, 1);
+            for i in 0..N {
+                net.node(i).consensus.submit_transaction(tx.clone()).ok();
+            }
+            net.wait_for(
+                "the sender's transaction executes",
+                Duration::from_secs(120),
+                |_| reader.account_nonce(&sender.address()) > nonce,
+            )
+            .await;
+        }
+        wait_quiet(&net, &up, Duration::from_secs(25), Duration::from_secs(240)).await;
+        let tip = net.height(0);
+
+        let blocks = block_kinds(&net, 0, tip).await;
+        let (height, transfer_epoch, _) = blocks
+            .iter()
+            .find(|(_, _, kinds)| kinds.iter().any(|(_, transfer)| *transfer))
+            .expect("the transfer is on chain")
+            .clone();
+        let store = BlockStoreImpl::new(net.machines[0].storage.clone()).unwrap();
+        let (records, _) = records_on_chain(&net, 0, tip).await;
+        let covering: Vec<_> = records
+            .iter()
+            .filter(|(_, _, _, first, last)| *first <= height && height <= *last)
+            .collect();
+        assert_eq!(
+            covering.len(),
+            1,
+            "the transfer's checkpoint is recorded once: {covering:?}"
+        );
+        let (record_epoch, record_index, ..) = *covering[0];
+        assert_eq!(
+            record_epoch, transfer_epoch,
+            "recorded in the epoch it was certified in"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for (epoch, index, ..) in &records {
+            assert!(
+                seen.insert((*epoch, *index)),
+                "checkpoint {index} recorded twice"
+            );
+        }
+        // The transfer's record, of work certified mid-epoch, landed in a
+        // block of its own epoch. Every other record landed in its own epoch
+        // or, for work certified as its epoch ended, the next one, as a
+        // block admits; none later.
+        for h in 1..=tip {
+            let b = store
+                .get_block_by_height(BlockHeight(h))
+                .await
+                .unwrap()
+                .unwrap();
+            for t in b
+                .transactions
+                .iter()
+                .filter(|t| executed_in(&net.machines[0].storage, t, h))
+            {
+                if let tenzro_types::transaction::TransactionType::RecordCheckpointSigners {
+                    certificate,
+                } = &t.transaction.tx_type
+                {
+                    let p: PublishedCertificate = bincode::deserialize(certificate).unwrap();
+                    let cp = &p.certificate.checkpoint;
+                    if (cp.epoch, cp.index) == (record_epoch, record_index) {
+                        assert_eq!(
+                            cp.epoch, b.header.epoch,
+                            "the transfer's record reached a block of another epoch"
+                        );
+                    } else {
+                        assert!(
+                            b.header.epoch == cp.epoch || b.header.epoch == cp.epoch + 1,
+                            "checkpoint {} of epoch {} reached a block of epoch {}",
+                            cp.index,
+                            cp.epoch,
+                            b.header.epoch
+                        );
+                    }
+                }
+            }
+        }
+        // Every signer the recorded certificate names is credited.
+        let signed = recorded_signers(&net, 0, tip).await;
+        let named = credited(&net, &signed);
+        let state = tenzro_vm::StateAdapter::with_storage(net.machines[1].storage.clone());
+        let votes = tenzro_vm::native::rewards::read_epoch_votes(&state, record_epoch).unwrap();
+        let (_, _, accounts) = named
+            .iter()
+            .find(|(e, i, _)| (*e, *i) == (record_epoch, record_index))
+            .expect("the record is on chain");
+        assert!(accounts.len() >= 3, "a quorum signed: {}", accounts.len());
+        for account in accounts {
+            assert!(
+                votes.participation_bps(account).is_some_and(|bps| bps > 0),
+                "signer {account} is not credited for epoch {record_epoch}: {votes:?}"
+            );
+        }
+        assert!(net.stats.refusals.lock().is_empty());
+        assert_eq!(net.stats.dropped_stale.load(Ordering::Relaxed), 0);
+    });
+}
+
+/// A validator that was down when a real transaction was certified is not
+/// credited for it, and the three that signed are, whichever of the four
+/// held the epoch's first turn to record.
+#[test]
+fn a_validator_that_was_down_is_not_credited_and_the_others_are() {
+    network_test(async {
+        use tenzro_consensus::mempool::AccountStateReader;
+        use tenzro_crypto::composite::testing::TestHybridSigner;
+        const N: usize = 4;
+        const DOWN: usize = 3;
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_test_writer()
+            .try_init();
+        let sender = TestHybridSigner::hybrid(1);
+        let rules = TimeRules {
+            checkpoint_interval_ms: 500,
+            epoch_checkpoints: 40,
+            handover_confirmations: 2,
+            idle_round_interval_ms: 1_000,
+            ..TimeRules::default()
+        };
+        let mut net = Net::start_recording(
+            N,
+            0,
+            vec![sender.address()],
+            rules,
+            Accounts::RecordBonded,
+            Default::default(),
+            Duration::from_secs(2),
+        )
+        .await;
+        let up: Vec<usize> = (0..N).filter(|i| *i != DOWN).collect();
+        let reader = crate::lane_resolver::NodeAccountStateReader::new(
+            net.machines[0].storage.clone() as Arc<dyn KvStore>,
+        );
+        net.wait_for("an epoch certifies", Duration::from_secs(120), |n| {
+            (0..N).all(|i| n.certified(i).0 >= 1)
+        })
+        .await;
+        net.down(DOWN).await;
+        let (down_epoch, _) = net.certified(0);
+        // The transfer is sent in an epoch the validator missed whole.
+        net.wait_for("the epoch passes", Duration::from_secs(180), |n| {
+            up.iter().all(|i| n.certified(*i).0 > down_epoch)
+        })
+        .await;
+        for nonce in 0..2 {
+            let tx = signed_transfer(&sender, nonce, 1);
+            for i in &up {
+                net.node(*i).consensus.submit_transaction(tx.clone()).ok();
+            }
+            net.wait_for(
+                "the sender's transaction executes",
+                Duration::from_secs(120),
+                |_| reader.account_nonce(&sender.address()) > nonce,
+            )
+            .await;
+        }
+        wait_quiet(&net, &up, Duration::from_secs(45), Duration::from_secs(300)).await;
+        let tip = net.height(0);
+        let blocks = block_kinds(&net, 0, tip).await;
+        let (_, transfer_epoch, _) = blocks
+            .iter()
+            .find(|(_, _, kinds)| kinds.iter().any(|(_, transfer)| *transfer))
+            .expect("the transfer is on chain")
+            .clone();
+        assert!(transfer_epoch > down_epoch);
+        let signed = recorded_signers(&net, 0, tip).await;
+        let named = credited(&net, &signed);
+        let down_account = net.machines[DOWN].account.as_ref().unwrap().address();
+        let state = tenzro_vm::StateAdapter::with_storage(net.machines[0].storage.clone());
+        let votes = tenzro_vm::native::rewards::read_epoch_votes(&state, transfer_epoch).unwrap();
+        assert!(
+            votes.certified_rounds > 0,
+            "the epoch's work was recorded: {votes:?}"
+        );
+        assert!(
+            named
+                .iter()
+                .filter(|(e, ..)| *e == transfer_epoch)
+                .all(|(_, _, accounts)| !accounts.contains(&down_account)),
+            "a certificate names the validator that was down"
+        );
+        assert_eq!(
+            votes.participation_bps(&down_account),
+            Some(0),
+            "the validator that was down is credited: {votes:?}"
+        );
+        for i in &up {
+            let account = net.machines[*i].account.as_ref().unwrap().address();
+            assert!(
+                votes.participation_bps(&account).is_some_and(|bps| bps > 0),
+                "validator {i} is not credited: {votes:?}"
+            );
+        }
+        assert_eq!(net.stats.dropped_stale.load(Ordering::Relaxed), 0);
     });
 }
 
@@ -1935,7 +3208,7 @@ fn refused_validator_records_never_hold_up_the_chain() {
 
         // The validators' records were made, refused, spent their nonces and
         // charged nothing; none was credited.
-        assert!(net.recorded.load(Ordering::Acquire) > 0);
+        assert!(net.stats.submitted.load(Ordering::Acquire) > 0);
         let state = tenzro_vm::StateAdapter::with_storage(net.machines[0].storage.clone());
         assert!(
             net.machines
@@ -1998,11 +3271,19 @@ fn a_chain_halted_below_quorum_resumes_under_a_recovery_manifest() {
             })
         };
         tokio::time::sleep(Duration::from_secs(3)).await;
-        net.wait_for("a checkpoint covers every block", Duration::from_secs(60), covered)
-            .await;
+        net.wait_for(
+            "a checkpoint covers every block",
+            Duration::from_secs(60),
+            covered,
+        )
+        .await;
         tokio::time::sleep(Duration::from_secs(2)).await;
-        net.wait_for("the checkpoints still cover every block", Duration::from_secs(60), covered)
-            .await;
+        net.wait_for(
+            "the checkpoints still cover every block",
+            Duration::from_secs(60),
+            covered,
+        )
+        .await;
 
         // Two validators are lost for good. Nothing more is certified.
         net.down(2).await;
@@ -2217,7 +3498,9 @@ fn a_non_validator_node_account_enrols_its_key_and_then_its_settlement_executes(
         use tenzro_consensus::mempool::AccountStateReader;
         use tenzro_crypto::composite::HybridSigner;
         const N: usize = 4;
-        let account = Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::hybrid(0x42));
+        let account = Arc::new(tenzro_crypto::composite::testing::TestHybridSigner::hybrid(
+            0x42,
+        ));
         let net = Net::start_with(N, vec![account.address()], time_rules()).await;
         net.wait_for(
             "the network certifies an epoch",
@@ -2278,12 +3561,460 @@ fn a_non_validator_node_account_enrols_its_key_and_then_its_settlement_executes(
             if let Some(receipt) = submitter.receipt(&tx_hash) {
                 break receipt;
             }
-            assert!(Instant::now() < deadline + Duration::from_secs(60), "the settlement transaction never executed");
+            assert!(
+                Instant::now() < deadline + Duration::from_secs(60),
+                "the settlement transaction never executed"
+            );
             tokio::time::sleep(Duration::from_millis(500)).await;
         };
         assert!(executed.success, "the settlement transaction reverted");
         // Nonce 0 is the one enrolment, nonce 1 the settlement: the key was
         // enrolled once, not once per submission.
         assert_eq!(reader.account_nonce(&account.address()), 2);
+    });
+}
+
+/// Bytes the node store holds by column family (tables and blob files),
+/// after a full compaction so superseded versions are gone.
+fn stored_bytes(store: &RocksDbStore) -> std::collections::BTreeMap<&'static str, u64> {
+    store.compact_all();
+    store
+        .cf_sizes()
+        .into_iter()
+        .map(|c| (c.name, c.sst_files + c.blob_files))
+        .filter(|(_, b)| *b > 0)
+        .collect()
+}
+
+/// What the blocks column family holds by key family (the first two
+/// `/`-separated parts of the key when it is text): record count and bytes.
+fn blocks_by_family(store: &RocksDbStore) -> std::collections::BTreeMap<String, (u64, u64)> {
+    let mut out = std::collections::BTreeMap::<String, (u64, u64)>::new();
+    for (k, v) in store.scan_prefix(tenzro_storage::CF_BLOCKS, b"").unwrap() {
+        let text: String = k
+            .iter()
+            .take_while(|b| b.is_ascii_graphic())
+            .map(|b| *b as char)
+            .collect();
+        let family = text.split('/').take(2).collect::<Vec<_>>().join("/");
+        let family: String = family.chars().take(32).collect();
+        let e = out.entry(family).or_default();
+        e.0 += 1;
+        e.1 += (k.len() + v.len()) as u64;
+    }
+    out
+}
+
+/// The release growth gate on a running validator network: what a block and
+/// a transfer cost in the store by column family, that the body of a
+/// transaction is stored once, that an idle chain adds nothing, that a
+/// snapshot costs under five percent of the store, and the runway the
+/// measured growth leaves. The budgets are in
+/// `docs/operations/disk-growth-budgets.md`.
+#[test]
+fn the_store_stays_within_its_byte_budgets_and_an_idle_chain_adds_nothing() {
+    /// Bytes the store may grow by per executed transfer in a block of its
+    /// own, all column families, one validator's copy: the measured 27,276
+    /// (the block about 13 KB, the state trie versions it writes about 13 KB,
+    /// the rest about 1 KB) with a fifth of headroom.
+    const BYTES_PER_TRANSFER_BUDGET: u64 = 32 * 1024;
+    /// Bytes of noise an idle store may move by (compaction rounding).
+    const IDLE_NOISE_BYTES: u64 = 256 * 1024;
+    /// Bytes the epoch-scoped consensus records may add per epoch that went
+    /// by during the traffic: the measured 67,000 (journal, session and kept
+    /// certificates) with headroom for where epochs fall in the window.
+    const EPOCH_RECORDS_BUDGET: u64 = 128 * 1024;
+    network_test(async {
+        use tenzro_consensus::mempool::AccountStateReader;
+        use tenzro_crypto::composite::testing::TestHybridSigner;
+        use tenzro_storage::resources::{self, EPOCH_BLOCKS};
+        const N: usize = 4;
+        const TRANSFERS: u64 = 40;
+        let sender = TestHybridSigner::hybrid(1);
+        let net = Net::start_full(N, vec![sender.address()], time_rules(), Accounts::Silent).await;
+        let store = net.machines[0].storage.clone();
+        let reader =
+            crate::lane_resolver::NodeAccountStateReader::new(store.clone() as Arc<dyn KvStore>);
+
+        // Idle: nothing is sent, and the store does not move.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let idle_from = (net.height(0), stored_bytes(&store));
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let idle_to = (net.height(0), stored_bytes(&store));
+        let idle_total = |m: &std::collections::BTreeMap<&str, u64>| m.values().sum::<u64>();
+        let idle_blocks = idle_to.0 - idle_from.0;
+        let idle_added = idle_total(&idle_to.1).saturating_sub(idle_total(&idle_from.1));
+        println!("GROWTH idle: {idle_blocks} blocks, {idle_added} bytes added");
+        assert!(
+            idle_added <= IDLE_NOISE_BYTES,
+            "an idle chain added {idle_added} bytes over {idle_blocks} blocks"
+        );
+
+        // Traffic: the first transaction enrols the sender's key, then
+        // transfers, each after the one before.
+        let before = (net.height(0), stored_bytes(&store));
+        let families_before = blocks_by_family(&store);
+        let traffic_from = std::time::Instant::now();
+        for nonce in 0..TRANSFERS {
+            let tx = signed_transfer(&sender, nonce, 1);
+            for i in 0..N {
+                net.node(i).consensus.submit_transaction(tx.clone()).ok();
+            }
+            net.wait_for(
+                "the sender's transaction executes",
+                Duration::from_secs(120),
+                |_| reader.account_nonce(&sender.address()) > nonce,
+            )
+            .await;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let after = (net.height(0), stored_bytes(&store));
+        let blocks = (after.0 - before.0).max(1);
+        let added = idle_total(&after.1).saturating_sub(idle_total(&before.1));
+        let per_tx = added / TRANSFERS;
+        let per_block = added / blocks;
+        println!(
+            "GROWTH traffic took {} ms",
+            traffic_from.elapsed().as_millis()
+        );
+        for (family, (count, bytes)) in blocks_by_family(&store) {
+            let (c0, b0) = families_before.get(&family).copied().unwrap_or((0, 0));
+            println!(
+                "GROWTH blocks cf {family:?}: +{} records, +{} bytes",
+                count - c0,
+                bytes.saturating_sub(b0)
+            );
+        }
+        println!(
+            "GROWTH traffic: {TRANSFERS} transfers in {blocks} blocks added {added} bytes: {per_tx} per transaction, {per_block} per block"
+        );
+        for (cf, bytes) in &after.1 {
+            let was = before.1.get(cf).copied().unwrap_or(0);
+            println!(
+                "GROWTH cf {cf}: {} -> {} (+{})",
+                was,
+                bytes,
+                bytes.saturating_sub(was)
+            );
+        }
+        // The consensus records of an epoch (journal, session certificates,
+        // kept certificates, boundaries) are written as rounds and epochs go
+        // by, not as transfers execute, and are pruned by epoch: how many
+        // there are depends on how long the transfers took. The per-transfer
+        // budget holds the rest.
+        let epoch_scoped = |m: &std::collections::BTreeMap<String, (u64, u64)>| -> u64 {
+            m.iter()
+                .filter(|(f, _)| f.starts_with("consensus/") && *f != "consensus/checkpoint")
+                .map(|(_, (_, bytes))| *bytes)
+                .sum()
+        };
+        let scoped_added =
+            epoch_scoped(&blocks_by_family(&store)).saturating_sub(epoch_scoped(&families_before));
+        let per_tx_executed = added.saturating_sub(scoped_added) / TRANSFERS;
+        println!(
+            "GROWTH epoch-scoped consensus records: +{scoped_added} bytes; {per_tx_executed} per transaction without them"
+        );
+        // The records are pruned by epoch (`prune_epoch_records_below`,
+        // exercised by `a_checkpoint_past_pruned_records_is_certified_from_the_proof_log`),
+        // so what bounds them is what one epoch writes. The window spans the
+        // epochs that went by, counting the one it began in.
+        let epoch_ms = time_rules().epoch_checkpoints * time_rules().checkpoint_interval_ms;
+        let epochs_in_window = traffic_from.elapsed().as_millis() as u64 / epoch_ms + 1;
+        println!(
+            "GROWTH epoch-scoped: {} bytes per epoch over {epochs_in_window} epochs",
+            scoped_added / epochs_in_window
+        );
+        assert!(
+            scoped_added <= EPOCH_RECORDS_BUDGET * epochs_in_window,
+            "{scoped_added} bytes of epoch-scoped consensus records over {epochs_in_window} epochs is over {EPOCH_RECORDS_BUDGET} per epoch"
+        );
+        assert!(
+            per_tx_executed <= BYTES_PER_TRANSFER_BUDGET,
+            "{per_tx_executed} bytes per transaction (epoch-scoped consensus records left out) is over the budget of {BYTES_PER_TRANSFER_BUDGET}"
+        );
+
+        // A transaction body is stored once, in its block: the transaction
+        // column family holds no record under the bare hash of the new ones.
+        let bare = store
+            .scan_prefix(tenzro_storage::CF_TRANSACTIONS, b"")
+            .unwrap()
+            .into_iter()
+            .filter(|(k, _)| k.len() == 64 && k.iter().all(u8::is_ascii_hexdigit))
+            .count();
+        assert_eq!(
+            bare, 0,
+            "{bare} transaction bodies are stored a second time"
+        );
+        // ... and every one still reads back through the block that holds it.
+        let tip = net.height(0);
+        let block_store = BlockStoreImpl::new(store.clone()).unwrap();
+        let mut read_back = 0;
+        for h in before.0..=tip {
+            if let Some(b) = block_store
+                .get_block_by_height(BlockHeight(h))
+                .await
+                .unwrap()
+            {
+                for t in &b.transactions {
+                    let hash = t.transaction.hash().to_string();
+                    let json = crate::tx_record::stored_transaction_json(store.as_ref(), &hash);
+                    if matches!(
+                        t.transaction.tx_type,
+                        tenzro_types::transaction::TransactionType::Transfer { .. }
+                    ) {
+                        assert!(json.is_some(), "transfer {hash} cannot be read back");
+                        read_back += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            read_back >= TRANSFERS as usize - 1,
+            "only {read_back} transfers read back"
+        );
+
+        // The runway the measured growth leaves on a 100 GiB volume with a
+        // third free, and at idle (no growth), in epochs.
+        let free = 33 * resources::GIB;
+        let runway = resources::runway_blocks(free, Some(per_block as f64)).unwrap_or(u64::MAX);
+        println!(
+            "GROWTH runway at {per_block} B/block with 33 GiB free: {} epochs",
+            runway / EPOCH_BLOCKS
+        );
+        assert!(
+            resources::runway_blocks(free, Some(0.0)).is_none(),
+            "an idle store has no end"
+        );
+
+        // A snapshot on the same volume holds the live files by hardlink.
+        let snaps = tenzro_storage::backup::SnapshotDir::new(
+            net.machines[0].dir.path().join("epoch-snapshots"),
+            1,
+        );
+        let snap = snaps
+            .take(
+                &store,
+                "epoch-00000000000000000001-00000000000000000001",
+                b"meta",
+            )
+            .unwrap();
+        let db_dir = net.machines[0].dir.path().join("db");
+        let (_, extra) = resources::unique_bytes(&db_dir, &snap);
+        let db_bytes = idle_total(&after.1);
+        println!("GROWTH snapshot: {extra} extra bytes over a store of {db_bytes}");
+        assert!(
+            extra * 20 < db_bytes.max(1) + 20 * IDLE_NOISE_BYTES,
+            "the snapshot holds {extra} bytes beyond the live store of {db_bytes}"
+        );
+    });
+}
+
+#[cfg(test)]
+#[path = "load_protection_net_tests.rs"]
+mod load_protection_net_tests;
+
+/// A wiped node that is not a validator restores a validator's
+/// snapshot, checked against the block hash it trusts, and block-syncs the
+/// rest, over real consensus, real block sync and real iroh endpoints. A
+/// second wiped node replays from genesis beside it, for the comparison.
+#[test]
+fn a_wiped_non_validator_joins_by_snapshot_and_reaches_the_head() {
+    snapshot_join(false);
+}
+
+/// The same join from a snapshot cut at the first block of an epoch, the
+/// height a producer takes snapshots at: the joiner restores that epoch's
+/// record and the registry, then follows the chain through later epochs.
+#[test]
+fn a_node_restored_at_an_epoch_start_follows_the_chain_through_later_epochs() {
+    snapshot_join(true);
+}
+
+fn snapshot_join(at_epoch_open: bool) {
+    network_test(async {
+        let feeder_account = tenzro_crypto::composite::testing::TestHybridSigner::hybrid(1);
+        let tail_blocks: u64 = std::env::var("F29_TAIL_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40);
+        let mut net = Net::start_configured(
+            4,
+            2,
+            vec![feeder_account.address()],
+            time_rules(),
+            Accounts::Silent,
+            Default::default(),
+        )
+        .await;
+        let feeder = feed_transfers(
+            (0..4).map(|i| net.node(i).consensus.clone()).collect(),
+            net.machines[0].storage.clone() as Arc<dyn KvStore>,
+        );
+        net.wait_for("some history", Duration::from_secs(120), |n| {
+            (0..4).all(|i| n.height(i) >= 30)
+        })
+        .await;
+
+        // A snapshot of validator 0's committed state a few blocks back, as
+        // its producer takes one at an epoch start.
+        let tip = net
+            .height(0)
+            .saturating_sub(tenzro_consensus::STATE_ROOT_LAG);
+        let state_height = if at_epoch_open {
+            // The newest epoch start with its blocks.
+            crate::snapshot::latest_epoch_open(&net.machines[0].storage, tip)
+                .await
+                .unwrap()
+                .expect("an epoch has opened")
+        } else {
+            // The first epoch start a producer can cut a snapshot at.
+            let mut found = None;
+            for h in 2..=tip {
+                if crate::snapshot::can_snapshot_at(&net.machines[0].storage, h)
+                    .await
+                    .unwrap()
+                {
+                    found = Some(h);
+                    break;
+                }
+            }
+            found.expect("an epoch has opened")
+        };
+        let anchor_height = state_height + tenzro_consensus::STATE_ROOT_LAG;
+        let producer = net.node(0).resolver.clone();
+        let snapshots = Arc::new(crate::snapshot::SnapshotStore::new(
+            net.machines[0].storage.clone(),
+            Arc::new(crate::snapshot::IrohSnapshotTransport::new(
+                producer.clone(),
+                None,
+            )),
+            crate::snapshot::SnapshotConfig::default().resolved(true),
+        ));
+        producer.snapshot_directory().set(snapshots.clone());
+        let t = Instant::now();
+        let manifest = snapshots.produce(state_height).await.expect("produce");
+        eprintln!(
+            "SNAPSHOT-METRIC harness_produce_secs={:.3} buckets={} published_bytes={}",
+            t.elapsed().as_secs_f64(),
+            manifest.buckets.len(),
+            snapshots.published_bytes().unwrap()
+        );
+        let anchor = {
+            let store = BlockStoreImpl::new(net.machines[0].storage.clone()).unwrap();
+            store
+                .get_block_by_height(BlockHeight::from(anchor_height))
+                .await
+                .unwrap()
+                .expect("anchor block")
+                .hash()
+        };
+
+        // Let the chain move on, so the joiner has a tail to sync.
+        let target = anchor_height + tail_blocks;
+        net.wait_for("a tail past the snapshot", Duration::from_secs(180), |n| {
+            n.height(0) >= target
+        })
+        .await;
+
+        // Node 4: wiped, restores the snapshot, then follows by block sync.
+        let joined = Instant::now();
+        let genesis_block =
+            crate::genesis::initialize_genesis(&net.machines[4].storage, &net.genesis)
+                .await
+                .expect("genesis");
+        assert_eq!(genesis_block.height().0, 0);
+        let dial_dir = tempfile::tempdir().unwrap();
+        let dialer = bind_loopback(dial_dir.path(), None, false).await;
+        dialer
+            .remember_addr(producer.endpoint().addr())
+            .expect("producer address");
+        let transport = crate::snapshot::IrohSnapshotTransport::new(
+            dialer.clone(),
+            Some(producer.endpoint_id()),
+        );
+        let synced = crate::snapshot::state_sync(
+            &net.machines[4].storage,
+            &transport,
+            &transport,
+            anchor_height,
+            anchor,
+            10_000,
+        )
+        .await
+        .expect("the wiped node restores the snapshot");
+        let restored_at = joined.elapsed();
+        assert_eq!(synced.height, state_height);
+        let _ = dialer.shutdown().await;
+
+        net.sync_from = vec![0, 1, 2, 3];
+        net.up(4).await;
+        net.wait_for("node 4 reaches the head", Duration::from_secs(300), |n| {
+            n.height(4) + 3 >= n.height(0)
+        })
+        .await;
+        let snapshot_join = joined.elapsed();
+
+        // Node 5: wiped, replays every block from genesis.
+        let replayed = Instant::now();
+        net.up(5).await;
+        net.wait_for("node 5 reaches the head", Duration::from_secs(600), |n| {
+            n.height(5) + 3 >= n.height(0)
+        })
+        .await;
+        let replay_join = replayed.elapsed();
+        let head = net.height(0);
+        eprintln!(
+            "SNAPSHOT-METRIC harness_state_restore_secs={:.3} harness_snapshot_join_to_head_secs={:.3} \
+             harness_tail_blocks_synced={} harness_replay_to_head_secs={:.3} harness_replay_blocks={} head={}",
+            restored_at.as_secs_f64(),
+            snapshot_join.as_secs_f64(),
+            head.saturating_sub(anchor_height),
+            replay_join.as_secs_f64(),
+            head,
+            head
+        );
+
+        // The joiner's chain is the network's: same block at a common height,
+        // and its state root at the snapshot height equals the producer's.
+        let hash_at = async |i: usize, h: u64| {
+            let store = BlockStoreImpl::new(net.machines[i].storage.clone()).unwrap();
+            store
+                .get_block_by_height(BlockHeight::from(h))
+                .await
+                .unwrap()
+                .map(|b| b.hash())
+        };
+        let common = net.height(4).min(net.height(0)).saturating_sub(5);
+        assert_eq!(hash_at(4, common).await, hash_at(0, common).await);
+        let root_at = |i: usize| {
+            tenzro_storage::StateTrie::new(net.machines[i].storage.clone() as Arc<dyn KvStore>)
+                .root_at(state_height)
+                .unwrap()
+        };
+        assert_eq!(root_at(4), root_at(0));
+        assert!(
+            net.height(4) > anchor_height,
+            "node 4 went past its snapshot by block sync"
+        );
+
+        // The joiner went on past at least one epoch boundary after its
+        // snapshot, so it learned a later epoch's validators from the blocks
+        // it imported.
+        let epoch_of = async |i: usize, h: u64| -> Option<u64> {
+            let store = BlockStoreImpl::new(net.machines[i].storage.clone()).unwrap();
+            store
+                .get_block_by_height(BlockHeight::from(h))
+                .await
+                .unwrap()
+                .map(|b| b.header.epoch)
+        };
+        let at_snapshot = epoch_of(0, state_height).await.expect("the snapshot block");
+        let at_tip = epoch_of(4, net.height(4)).await.expect("the joiner's tip");
+        assert!(
+            at_tip > at_snapshot,
+            "the joiner is still in epoch {at_tip}, the snapshot's epoch is {at_snapshot}"
+        );
+
+        feeder.abort();
     });
 }

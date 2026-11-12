@@ -2435,8 +2435,13 @@ fn a_committee_attestation_forged_on_the_classical_leg_alone_is_refused() {
 
     // Nothing was minted by any attempt, and the honest delivery still lands.
     let honest = signed_evm_delivery(&route, 5);
-    f.admit_inbound(&mut s, BridgeRouteAdapter::Ccip, "ethereum", &honest.encode())
-        .unwrap();
+    f.admit_inbound(
+        &mut s,
+        BridgeRouteAdapter::Ccip,
+        "ethereum",
+        &honest.encode(),
+    )
+    .unwrap();
 }
 
 #[test]

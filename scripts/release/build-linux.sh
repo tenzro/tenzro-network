@@ -9,7 +9,7 @@
 #                           providers for the host architecture
 #   edge  Dockerfile with NODE_BUILD=edge (aarch64 only): the light build for
 #         the edge tier, no model engines, the edge profile; the CLI as for cpu
-#   vulkan Dockerfile.vulkan (Debian bookworm, glibc 2.36 floor); llama.cpp's
+#   vulkan Dockerfile.vulkan (Ubuntu 24.04, glibc 2.39 floor); llama.cpp's
 #                           Vulkan backend for AMD, Intel and NVIDIA GPUs,
 #                           linked against the Vulkan loader (libvulkan.so.1)
 #
@@ -32,8 +32,8 @@
 # Usage: scripts/release/build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|edge> [ref] [dist-dir]
 set -euo pipefail
 
-ARCH=${1:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan> [ref] [dist-dir]}
-FLAVOUR=${2:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan> [ref] [dist-dir]}
+ARCH=${1:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|edge> [ref] [dist-dir]}
+FLAVOUR=${2:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|edge> [ref] [dist-dir]}
 REF=${3:-HEAD}
 DIST=${4:-$HOME/dist}
 MEM=${MEM:-24g}
@@ -67,7 +67,7 @@ case "$FLAVOUR" in cpu) ;; edge) features="light (no default features, edge prof
 ctx=$(mktemp -d)
 stage=$(mktemp -d)/$name
 mkdir -p "$stage/bin"
-cleanup() { rm -rf "$ctx" "$(dirname "$stage")"; [ -n "${cid:-}" ] && $CT rm -f "$cid" >/dev/null 2>&1 || true; }
+cleanup() { rm -rf "$ctx" "$(dirname "$stage")" ${dbg:+$(dirname "$dbg")}; [ -n "${cid:-}" ] && $CT rm -f "$cid" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 git archive --format=tar "$commit" | tar -x -C "$ctx"
 
@@ -95,8 +95,13 @@ $CT build "${limits[@]}" --file "$ctx/$file" --tag "$image" \
 cid=$($CT create "$image")
 $CT cp "$cid:/usr/local/bin/tenzro-node" "$stage/bin/tenzro-node"
 $CT cp "$cid:/usr/local/bin/tenzro-cli" "$stage/bin/tenzro"
+# Split debug information (build-id matched), packed beside the archive, never inside it.
+dbg=$(mktemp -d)/$name-debug
+mkdir -p "$dbg"
+$CT cp "$cid:/usr/local/share/tenzro-debug/." "$dbg/"
 # The installer travels with the archive it installs.
 install -m 755 "$ctx/scripts/release/tenzro-node-install" "$stage/tenzro-node-install"
+release_network_profile "$ctx" "$stage"
 if [ "$FLAVOUR" = cuda ]; then
     mkdir -p "$stage/lib"
     # ONNX Runtime and its providers, symlinks kept; stdout carries only the tar.
@@ -142,6 +147,8 @@ echo "glibc floor: $(objdump -T "$node" | grep -o 'GLIBC_[0-9.]*' | sort -uV | t
 
 mkdir -p "$DIST"
 release_pack "$stage" "$DIST/$name.tar.gz" "$epoch"
+for b in tenzro-node tenzro; do readelf -n "$stage/bin/$b" | grep -i "build id" | sed "s/^ */$b /" >> "$dbg/BUILD-IDS.txt"; done
+release_pack "$dbg" "$DIST/$name-debug.tar.gz" "$epoch"
 release_buildenv "$DIST/$name.buildenv.json" "$name" "$commit" "$FLAVOUR" "$ARCH-unknown-linux-gnu" \
     "$features" "$image@$($CT image inspect --format '{{.Id}}' "$image")"
 echo "BUILD OK: $DIST/$name.tar.gz"

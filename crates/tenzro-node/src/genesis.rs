@@ -390,6 +390,24 @@ async fn create_genesis(
         ));
     }
 
+    // The chain's protocol version, when the genesis names one. A version
+    // this binary cannot execute refuses the genesis outright.
+    if let Some(protocol) = genesis_config.protocol {
+        tenzro_vm::protocol_range::ProtocolRange::this_binary()
+            .check(protocol.version)
+            .map_err(|e| NodeError::Config(format!("genesis [protocol]: {e}")))?;
+        let db_key = format!(
+            "storage:{}:{}",
+            hex::encode(tenzro_vm::native::SYSTEM_ADDRESS),
+            hex::encode(tenzro_vm::native::PROTOCOL_VERSION_KEY.as_bytes())
+        );
+        state_entries.push((
+            db_key.into_bytes(),
+            tenzro_vm::native::genesis_protocol_version(protocol.version)
+                .map_err(|e| NodeError::Config(format!("genesis [protocol]: {e}")))?,
+        ));
+    }
+
     // The payout schedule, sized to the genesis epoch length so each
     // schedule year spans one calendar year.
     {
@@ -423,6 +441,25 @@ async fn create_genesis(
         .economy
         .check_tpm_roots()
         .map_err(|e| NodeError::Config(format!("genesis [economy]: {e}")))?;
+    genesis_config
+        .consensus
+        .rules()
+        .map_err(|e| NodeError::Config(format!("genesis: {e}")))?;
+    let registry_config = genesis_config
+        .validator_registry_config()
+        .map_err(|e| NodeError::Config(format!("genesis: {e}")))?;
+    // The validator registry starts from the genesis's configuration, so no
+    // node reads a default its own release compiled in.
+    if let Some(cfg) = &registry_config {
+        token_entries.push(WriteOp::Put {
+            cf: tenzro_storage::CF_TOKENS.to_string(),
+            key: tenzro_token::validator_registry::VALIDATOR_CONFIG_KEY
+                .as_bytes()
+                .to_vec(),
+            value: bincode::serialize(cfg)
+                .map_err(|e| NodeError::Config(format!("genesis [validator_registry]: {e}")))?,
+        });
+    }
     for (key, value) in genesis_config
         .network_params()
         .map_err(|e| NodeError::Config(format!("genesis: {e}")))?
@@ -752,8 +789,13 @@ async fn create_genesis(
                 amount,
             ));
         }
-        let (entries, bonded) = tenzro_vm::native::genesis_validator_bonds(&bonds)
+        let (mut entries, bonded) = tenzro_vm::native::genesis_validator_bonds(&bonds)
             .map_err(|e| NodeError::Config(format!("genesis validators: {e}")))?;
+        // The genesis validators are the admitted set while validator
+        // admission is closed (validator.admission_approval, set by the
+        // genesis file): each one is written as approved.
+        let admitted: Vec<[u8; 32]> = bonds.iter().map(|b| b.0).collect();
+        entries.extend(tenzro_vm::validator_admission::genesis_entries(&admitted));
         if bonded > 0 {
             let system = hex::encode(tenzro_vm::native::SYSTEM_ADDRESS);
             for (key, value) in entries {
@@ -869,7 +911,9 @@ async fn create_genesis(
                 gas_used: 0,
                 gas_limit: 0,
                 tx_count: 0,
-                protocol_version: PQ_HYBRID_PROTOCOL_VERSION,
+                protocol_version: genesis_config
+                    .protocol
+                    .map_or(PQ_HYBRID_PROTOCOL_VERSION, |p| p.version),
                 // EIP-1559 base fee at genesis (1 Gwei). Every later block
                 // stamps the base fee its execution charges.
                 base_fee_per_gas: Some(
@@ -1196,6 +1240,27 @@ fn compute_genesis_inputs_digest(genesis: &GenesisConfig) -> Hash {
     for g in &genesis.economy.guardians {
         field(&mut h, &serde_json::to_vec(g).unwrap_or_default());
     }
+    // Committed only when named, so a genesis without `[protocol]` keeps the
+    // digest it always had.
+    if let Some(p) = &genesis.protocol {
+        field(&mut h, b"protocol_version");
+        h.update(p.version.to_le_bytes());
+    }
+    // The ordering rules, committed only when the genesis names one.
+    if genesis.consensus.is_named() {
+        field(&mut h, b"consensus");
+        field(
+            &mut h,
+            &serde_json::to_vec(&genesis.consensus).unwrap_or_default(),
+        );
+    }
+    if genesis.validator_registry.is_named() {
+        field(&mut h, b"validator_registry");
+        field(
+            &mut h,
+            &serde_json::to_vec(&genesis.validator_registry).unwrap_or_default(),
+        );
+    }
     Hash::from_bytes(h.finalize().as_slice()).expect("SHA-256 always produces 32 bytes")
 }
 
@@ -1270,6 +1335,29 @@ fn compute_genesis_state_root(genesis: &GenesisConfig, predeploys_commitment: &H
         hasher.update(&seat);
     }
 
+    // Bind the protocol version, only when the genesis names one, so a
+    // genesis without `[protocol]` keeps the root it always had.
+    if let Some(p) = &genesis.protocol {
+        hasher.update(b"protocol_version");
+        hasher.update(p.version.to_le_bytes());
+    }
+
+    // Bind the ordering rules, only when the genesis names one, so a genesis
+    // without `[consensus]` keeps the root it always had.
+    if genesis.consensus.is_named() {
+        let rules = serde_json::to_vec(&genesis.consensus).unwrap_or_default();
+        hasher.update(b"consensus");
+        hasher.update((rules.len() as u64).to_le_bytes());
+        hasher.update(&rules);
+    }
+    // Bind the validator registry rules, only when the genesis names them.
+    if genesis.validator_registry.is_named() {
+        let rules = serde_json::to_vec(&genesis.validator_registry).unwrap_or_default();
+        hasher.update(b"validator_registry");
+        hasher.update((rules.len() as u64).to_le_bytes());
+        hasher.update(&rules);
+    }
+
     let result = hasher.finalize();
     Hash::from_bytes(result.as_slice()).expect("SHA-256 always produces 32 bytes")
 }
@@ -1283,7 +1371,8 @@ fn calendar_epoch_ms(time: &tenzro_consensus::TimeRules) -> u64 {
 }
 
 /// The governed parameters the launch genesis sets apart from the
-/// production genesis: its post-quantum switches.
+/// production genesis: its post-quantum switches, the identity rule and its
+/// mode, and the local block history window.
 #[cfg(test)]
 pub(crate) fn launch_switches() -> std::collections::BTreeMap<String, u64> {
     let prod: GenesisConfig =
@@ -1369,6 +1458,54 @@ mod tests {
     use super::*;
     use tenzro_storage::StorageConfig;
 
+    /// The local block history window the launch genesis names.
+    const LAUNCH_HISTORY_RETENTION_BLOCKS: u64 = 100_000;
+
+    /// The launch genesis seeds the history window storage maintenance reads,
+    /// so the registry value of two weeks of blocks does not apply on the new
+    /// network; both digests commit to it.
+    #[tokio::test]
+    async fn the_launch_genesis_seeds_the_history_retention_storage_maintenance_reads() {
+        use tenzro_vm::governance::{DEFAULT_HISTORY_RETENTION_BLOCKS, HISTORY_RETENTION_PARAM};
+        let launch: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-launch.toml")).unwrap();
+        assert_eq!(
+            launch.network_params.get(HISTORY_RETENTION_PARAM).copied(),
+            Some(LAUNCH_HISTORY_RETENTION_BLOCKS)
+        );
+        assert_ne!(
+            LAUNCH_HISTORY_RETENTION_BLOCKS,
+            DEFAULT_HISTORY_RETENTION_BLOCKS
+        );
+        let p = tenzro_vm::governance::governed_param(HISTORY_RETENTION_PARAM).unwrap();
+        assert!((p.min..=p.max).contains(&LAUNCH_HISTORY_RETENTION_BLOCKS));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(RocksDbStore::open(&StorageConfig::new(dir.path().to_path_buf())).unwrap());
+        initialize_genesis(&store, &launch).await.unwrap();
+        let state = tenzro_vm::StateAdapter::with_storage(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>
+        );
+        // The value storage maintenance reads for its pruning window.
+        assert_eq!(
+            tenzro_vm::native::network_param(&state, HISTORY_RETENTION_PARAM),
+            LAUNCH_HISTORY_RETENTION_BLOCKS
+        );
+
+        let mut bare = launch.clone();
+        bare.network_params.remove(HISTORY_RETENTION_PARAM);
+        assert_ne!(
+            compute_genesis_inputs_digest(&launch),
+            compute_genesis_inputs_digest(&bare)
+        );
+        let bundle = compute_erc8004_bundle_commitment();
+        assert_ne!(
+            compute_genesis_state_root(&launch, &bundle),
+            compute_genesis_state_root(&bare, &bundle)
+        );
+    }
+
     /// The launch genesis is the production genesis with every post-quantum
     /// switch on from block 0, and nothing else apart; the production
     /// genesis keeps every one of them off.
@@ -1382,6 +1519,44 @@ mod tests {
         let params =
             |v: &mut toml::Value| v.as_table_mut().unwrap().remove("network_params").unwrap();
         let (prod_params, launch_params) = (params(&mut prod), params(&mut launch));
+        // The launch genesis names the ordering rules at this release's
+        // defaults, so every node applies the same ones.
+        let rules = launch
+            .as_table_mut()
+            .unwrap()
+            .remove("consensus")
+            .expect("[consensus]");
+        let d = tenzro_consensus::ConsensusConfig::default();
+        assert_eq!(
+            rules.get("gc_depth").and_then(|v| v.as_integer()),
+            Some(d.gc_depth as i64)
+        );
+        assert_eq!(
+            rules.get("seat_budget").and_then(|v| v.as_integer()),
+            Some(d.seat_budget as i64)
+        );
+        prod.as_table_mut().unwrap().remove("consensus");
+        // And the validator registry rules at this release's defaults.
+        let reg = launch
+            .as_table_mut()
+            .unwrap()
+            .remove("validator_registry")
+            .expect("[validator_registry]");
+        let d = tenzro_token::ValidatorRegistryConfig::default();
+        let int = |k: &str| reg.get(k).and_then(|v| v.as_integer()).unwrap() as u128;
+        assert!(
+            reg.get("min_rpc_provider_stake_tnzo").is_none(),
+            "governed: stake.rpc_tnzo"
+        );
+        assert_eq!(
+            int("activation_churn_bps"),
+            u128::from(d.activation_churn_bps)
+        );
+        assert_eq!(
+            int("reentry_cooldown_epochs"),
+            u128::from(d.reentry_cooldown_epochs)
+        );
+        prod.as_table_mut().unwrap().remove("validator_registry");
         assert_eq!(
             prod, launch,
             "the launch genesis differs from production outside [network_params]"
@@ -1404,6 +1579,15 @@ mod tests {
             .collect();
         expected.insert(HYBRID_RECORDS_FROM_PARAM.to_string(), 0);
         expected.insert(schemes.to_string(), 3);
+        // The identity rule is live from the first block of the launch genesis,
+        // enforced, with its governed mode named so both digests commit to it.
+        expected.insert(tenzro_vm::identity_required::KEY.to_string(), 0);
+        expected.insert(tenzro_vm::identity_required::MODE_KEY.to_string(), 0);
+        // A new network keeps 100,000 recent blocks locally.
+        expected.insert(
+            tenzro_vm::governance::HISTORY_RETENTION_PARAM.to_string(),
+            LAUNCH_HISTORY_RETENTION_BLOCKS,
+        );
         assert_eq!(launch_switches(), expected);
 
         let value = |src: &str, key: &str| {
@@ -1430,6 +1614,280 @@ mod tests {
         assert_eq!(value(prod_src, HYBRID_RECORDS_FROM_PARAM), u64::MAX);
         // ML-DSA-87 / P-256 is the second scheme bit.
         assert_ne!(value(launch_src, schemes) & 2, 0);
+    }
+
+    /// The launch genesis names the identity gate at epoch 0, so the state root and
+    /// `genesis_inputs_digest` commit to it; the production genesis stays dormant.
+    #[test]
+    fn the_launch_genesis_seeds_the_identity_gate_at_epoch_zero_and_both_digests_commit_to_it() {
+        let key = tenzro_vm::identity_required::KEY;
+        let launch: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-launch.toml")).unwrap();
+        let prod: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-prod.toml")).unwrap();
+        let carried = |g: &GenesisConfig| {
+            g.network_params()
+                .unwrap()
+                .into_iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v)
+        };
+        assert_eq!(carried(&launch), Some(0));
+        assert_eq!(carried(&prod), None, "production is not seeded");
+
+        let mut bare = launch.clone();
+        bare.network_params.remove(key);
+        assert_eq!(carried(&bare), None);
+        assert_ne!(
+            compute_genesis_inputs_digest(&launch),
+            compute_genesis_inputs_digest(&bare)
+        );
+        let bundle = compute_erc8004_bundle_commitment();
+        assert_ne!(
+            compute_genesis_state_root(&launch, &bundle),
+            compute_genesis_state_root(&bare, &bundle)
+        );
+    }
+
+    /// The launch genesis enforces the identity rule from block 1 without
+    /// locking anyone out: a genesis validator's bond exempts it, the public
+    /// node account can send its registration and pay for it, and a vote can
+    /// relax the rule later with no new genesis.
+    #[tokio::test]
+    async fn the_launch_genesis_enforces_identity_from_block_one_without_locking_anyone_out() {
+        use tenzro_vm::identity_required::{self as rule, MODE_KEY, Mode};
+        use tenzro_vm::{VmState, VmType, types::VmTransaction};
+        const WEI: u128 = 1_000_000_000_000_000_000;
+        let public_node = "570cfa8892003dbd2c71913d2f3d32fa03d569a6000000000000000000000000";
+        let mut cfg: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-launch.toml")).unwrap();
+        cfg.accounts = vec![crate::config::GenesisAccount {
+            address: public_node.into(),
+            balance: 100,
+        }];
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(RocksDbStore::open(&StorageConfig::new(dir.path().to_path_buf())).unwrap());
+        initialize_genesis(&store, &cfg).await.unwrap();
+        let mut state = tenzro_vm::StateAdapter::with_storage(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>
+        );
+        assert!(tenzro_vm::feature_gate::is_live(&state, rule::KEY, 0));
+        assert_eq!(rule::mode(&state), Mode::Enforce);
+        assert_eq!(
+            tenzro_vm::native::stored_param(&state, MODE_KEY),
+            Some(Mode::Enforce as u64),
+            "the mode is in the genesis state"
+        );
+
+        let tx = |from: Vec<u8>, data: Vec<u8>| {
+            let mut tx = VmTransaction::new(
+                from,
+                Some(vec![9; 32]),
+                1,
+                data,
+                200_000,
+                1,
+                0,
+                VmType::Tenzro,
+                cfg.chain_id,
+            );
+            tx.signing_digest = Some(vec![1; 32]);
+            tx
+        };
+        let account = hex::decode(public_node).unwrap();
+        assert!(rule::check(&tx(account.clone(), vec![]), &state).is_err());
+        let register = tenzro_vm::native::SELECTOR_IDENTITY_REGISTER.to_vec();
+        assert!(rule::check(&tx(account.clone(), register), &state).is_ok());
+        assert_eq!(state.get_balance(&account), 100 * WEI);
+
+        // What genesis writes for a founding validator exempts its account.
+        let validator = [0x33u8; 32];
+        let (entries, _) = tenzro_vm::native::genesis_validator_bonds(&[(
+            validator,
+            [1; 32],
+            [2; 32],
+            10_000 * WEI,
+        )])
+        .unwrap();
+        for (k, v) in entries {
+            state.set_storage(&tenzro_vm::native::SYSTEM_ADDRESS, &k, v);
+        }
+        assert!(rule::check(&tx(validator.to_vec(), vec![]), &state).is_ok());
+    }
+
+    /// The ordering rules are the network's: two validators whose own
+    /// `[consensus]` tables name different values, on the same genesis, run
+    /// the same DAG depth and committee seats, so they derive the same
+    /// committee root and feed the ordering state the same rules. A genesis
+    /// that names the rules commits to them in both digests.
+    #[test]
+    fn two_validators_with_different_local_ordering_values_derive_the_same_committee_and_ordering()
+    {
+        use tenzro_consensus::{ConsensusConfig, TimeRules};
+        let launch: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-launch.toml")).unwrap();
+        let (gc_depth, seat_budget) = launch.consensus.rules().unwrap();
+        let a_local = ConsensusConfig {
+            gc_depth: 7,
+            seat_budget: 4,
+            ..Default::default()
+        };
+        let b_local = ConsensusConfig {
+            gc_depth: 900,
+            seat_budget: 64_000,
+            leader_timeout_ms: 3_000,
+            ..Default::default()
+        };
+        let a = crate::config::network_consensus_config(Some(&a_local), Some(&launch)).unwrap();
+        let b = crate::config::network_consensus_config(Some(&b_local), Some(&launch)).unwrap();
+        assert_eq!((a.gc_depth, a.seat_budget), (gc_depth, seat_budget));
+        assert_eq!((b.gc_depth, b.seat_budget), (gc_depth, seat_budget));
+        assert_eq!(b.leader_timeout_ms, 3_000, "local timing stays the node's");
+        let none = crate::config::network_consensus_config(None, Some(&launch)).unwrap();
+        assert_eq!((none.gc_depth, none.seat_budget), (gc_depth, seat_budget));
+
+        // Committee root: one validator set, unequal stakes.
+        let set = {
+            use tenzro_consensus::validator_key::test_signer::SoftwareTestSigner;
+            use tenzro_consensus::{ValidatorInfo, ValidatorSet, ValidatorSigner};
+            let infos = [5u128, 3, 2, 1]
+                .iter()
+                .enumerate()
+                .map(|(i, stake)| {
+                    let mut a = [0u8; 32];
+                    a[0] = i as u8 + 1;
+                    ValidatorInfo::new(
+                        Address::new(a),
+                        SoftwareTestSigner::from_seed(i as u64).public_key().clone(),
+                        a,
+                        stake * 1_000_000_000_000_000_000_000,
+                    )
+                })
+                .collect();
+            ValidatorSet::new(0, infos).unwrap()
+        };
+        let root = |seats| {
+            tenzro_consensus::committee::from_validator_set(&set, seats)
+                .unwrap()
+                .root()
+        };
+        assert_eq!(root(a.seat_budget), root(b.seat_budget));
+        assert_ne!(
+            root(a_local.seat_budget),
+            root(b_local.seat_budget),
+            "the local values alone would split the committee"
+        );
+
+        // Ordering: the protocol core's rules, the DAG floor included.
+        let time = TimeRules::default();
+        let same_timing = ConsensusConfig {
+            leader_timeout_ms: a.leader_timeout_ms,
+            ..b.clone()
+        };
+        let (ca, cb) = (
+            a.core(9, [1; 32], &time),
+            same_timing.core(9, [1; 32], &time),
+        );
+        assert_eq!(ca.gc_depth, gc_depth);
+        assert_eq!(format!("{ca:?}"), format!("{cb:?}"));
+
+        // Both digests commit to named rules; a genesis without them keeps
+        // the digests it had.
+        let mut bare = launch.clone();
+        bare.consensus = Default::default();
+        let bundle = compute_erc8004_bundle_commitment();
+        assert_ne!(
+            compute_genesis_inputs_digest(&launch),
+            compute_genesis_inputs_digest(&bare)
+        );
+        assert_ne!(
+            compute_genesis_state_root(&launch, &bundle),
+            compute_genesis_state_root(&bare, &bundle)
+        );
+        let mut zero = launch.clone();
+        zero.consensus.seat_budget = Some(0);
+        assert!(crate::config::network_consensus_config(None, Some(&zero)).is_err());
+    }
+
+    /// The validator registry configuration is the genesis's: a node whose
+    /// release compiles other defaults, started on the same genesis, hydrates
+    /// the same configuration, because genesis writes it where the registry
+    /// reads it. A genesis without the table writes nothing and keeps its
+    /// digests; one naming only part of it is refused.
+    #[tokio::test]
+    async fn two_nodes_with_different_compiled_defaults_derive_the_same_registry_config() {
+        use tenzro_token::{ValidatorRegistry, ValidatorRegistryConfig};
+        let launch: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-launch.toml")).unwrap();
+        let expected = launch.validator_registry_config().unwrap().expect("named");
+        let bytes = |c: &ValidatorRegistryConfig| bincode::serialize(c).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(RocksDbStore::open(&StorageConfig::new(dir.path().to_path_buf())).unwrap());
+        initialize_genesis(&store, &launch).await.unwrap();
+        let kv = store.clone() as Arc<dyn tenzro_storage::KvStore>;
+
+        // The configuration is a row of the chain store, written by genesis:
+        // a registry of any release reads that row instead of its compiled
+        // defaults, so two nodes whose releases compile different defaults
+        // hold the same configuration.
+        let row = kv
+            .get(
+                tenzro_storage::CF_TOKENS,
+                tenzro_token::validator_registry::VALIDATOR_CONFIG_KEY.as_bytes(),
+            )
+            .unwrap()
+            .expect("genesis writes the registry configuration");
+        assert_eq!(row, bytes(&expected));
+        let other_release = ValidatorRegistryConfig {
+            min_self_stake: 1,
+            min_rpc_provider_stake: 2,
+            activation_churn_bps: 3,
+            exit_churn_bps: 4,
+            reentry_cooldown_epochs: 5,
+            jail_term_epochs: 6,
+        };
+        let hydrated: ValidatorRegistryConfig = bincode::deserialize(&row).unwrap();
+        assert_ne!(bytes(&hydrated), bytes(&other_release));
+        let a = ValidatorRegistry::with_storage(kv.clone()).config();
+        assert_eq!(bytes(&a), bytes(&expected));
+        assert_eq!(expected.min_rpc_provider_stake, launch.stake_ladder().rpc);
+        assert_eq!(expected.min_self_stake, launch.stake_ladder().validator);
+
+        // A genesis without the table writes no row: the registry keeps its
+        // compiled configuration, as before.
+        let dir = tempfile::tempdir().unwrap();
+        let bare_store =
+            Arc::new(RocksDbStore::open(&StorageConfig::new(dir.path().to_path_buf())).unwrap());
+        let mut bare = launch.clone();
+        bare.validator_registry = Default::default();
+        initialize_genesis(&bare_store, &bare).await.unwrap();
+        assert!(
+            (bare_store.clone() as Arc<dyn tenzro_storage::KvStore>)
+                .get(
+                    tenzro_storage::CF_TOKENS,
+                    tenzro_token::validator_registry::VALIDATOR_CONFIG_KEY.as_bytes(),
+                )
+                .unwrap()
+                .is_none()
+        );
+
+        // ...and keeps its digests.
+        assert!(bare.validator_registry_config().unwrap().is_none());
+        let bundle = compute_erc8004_bundle_commitment();
+        assert_ne!(
+            compute_genesis_inputs_digest(&launch),
+            compute_genesis_inputs_digest(&bare)
+        );
+        assert_ne!(
+            compute_genesis_state_root(&launch, &bundle),
+            compute_genesis_state_root(&bare, &bundle)
+        );
+        let mut part = launch.clone();
+        part.validator_registry.activation_churn_bps = None;
+        assert!(part.validator_registry_config().is_err());
     }
 
     /// The first schedule year issues 60M TNZO of rights on every shipped
@@ -1528,6 +1986,9 @@ mod tests {
         let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
 
         let genesis_config = GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
@@ -1567,6 +2028,9 @@ mod tests {
         let store = Arc::new(RocksDbStore::open(&storage_config).unwrap());
 
         let genesis_config = GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
@@ -1618,6 +2082,9 @@ mod tests {
     #[test]
     fn test_compute_state_root() {
         let config1 = GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
@@ -1634,6 +2101,9 @@ mod tests {
         };
 
         let config2 = GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,
@@ -1670,6 +2140,9 @@ mod tests {
 
     fn chain_compat_genesis(chain_id: u64, balance: u128) -> GenesisConfig {
         GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id,
             timestamp: 0,
@@ -1796,6 +2269,103 @@ mod tests {
                 "{role} {stake}"
             );
         }
+    }
+
+    /// The launch genesis bonds the rpc role of each initial rpc operator the
+    /// same way: one `[[role_stakes]]` entry with the stake left out, so each
+    /// bonds the governed `stake.rpc_tnzo` (100,000 TNZO) into the role-stake
+    /// vault, minted at genesis and not taken from its balance. Each node then
+    /// boots with `--roles rpc`, and an operator account funded with 100 TNZO
+    /// keeps all of it to pay its identity registration, its machine
+    /// attestation and their gas.
+    #[tokio::test]
+    async fn the_launch_genesis_bonds_each_rpc_operator_alike_without_touching_its_balance() {
+        use tenzro_types::network::{NetworkRole, RoleSet};
+        use tenzro_vm::VmState;
+        const WEI: u128 = 1_000_000_000_000_000_000;
+        const RPC_BOND_TNZO: u128 = 100_000;
+        const OPERATOR_TNZO: u128 = 100;
+        // Two operators, in no particular order; the second stands for any
+        // account an operator names before assembly.
+        let operators = [
+            "570cfa8892003dbd2c71913d2f3d32fa03d569a6000000000000000000000000",
+            "4242424242424242424242424242424242424242000000000000000000000000",
+        ];
+        let mut cfg: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-launch.toml")).unwrap();
+        cfg.accounts = operators
+            .iter()
+            .map(|a| crate::config::GenesisAccount {
+                address: a.to_string(),
+                balance: OPERATOR_TNZO,
+            })
+            .collect();
+        cfg.role_stakes = operators
+            .iter()
+            .map(|a| crate::config::GenesisRoleStake {
+                address: a.to_string(),
+                role: "rpc".into(),
+                stake: None,
+                capacity: Default::default(),
+                endpoint: None,
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(RocksDbStore::open(&StorageConfig::new(dir.path().to_path_buf())).unwrap());
+        initialize_genesis(&store, &cfg).await.unwrap();
+        let state = tenzro_vm::StateAdapter::with_storage(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>
+        );
+
+        assert_eq!(
+            tenzro_vm::native::network_param(&state, "stake.rpc_tnzo") as u128,
+            RPC_BOND_TNZO
+        );
+        assert_eq!(
+            state.get_balance(tenzro_vm::native::role_stake_vault().as_bytes()),
+            operators.len() as u128 * RPC_BOND_TNZO * WEI,
+            "both bonds are in the vault"
+        );
+        let roles = RoleSet::from_roles([NetworkRole::Rpc]);
+        for a in operators {
+            let account = hex::decode(a).unwrap();
+            assert!(tenzro_vm::native::role_bonded(
+                &state,
+                &account,
+                NetworkRole::Rpc
+            ));
+            let operator = Address::new(account.clone().try_into().unwrap());
+            assert!(
+                crate::role_bonds::unbonded_roles(&state, &roles, Some(&operator), &[]).is_empty(),
+                "--roles rpc boots"
+            );
+            assert_eq!(
+                state.get_balance(&account),
+                OPERATOR_TNZO * WEI,
+                "balance untouched"
+            );
+        }
+
+        // Registration and machine attestation at the posted price, plus the
+        // gas of both at the highest base fee the genesis allows.
+        let fees = tenzro_vm::native::economy::posted_fee(
+            &state,
+            tenzro_vm::native::SELECTOR_IDENTITY_REGISTER,
+        ) + tenzro_vm::native::economy::posted_fee(
+            &state,
+            tenzro_vm::native::SELECTOR_ATTACH_MACHINE_ATTESTATION,
+        );
+        assert!(fees > 0, "registration is priced");
+        let max_base_fee = u128::from(tenzro_vm::native::network_param(
+            &state,
+            "fees.max_base_fee",
+        ));
+        let gas = 2 * u128::from(crate::identity_gate::SPONSOR_REGISTER_GAS) * max_base_fee;
+        assert!(
+            fees + gas < OPERATOR_TNZO * WEI,
+            "fees {fees} + gas {gas} fit in {OPERATOR_TNZO} TNZO"
+        );
     }
 
     #[tokio::test]

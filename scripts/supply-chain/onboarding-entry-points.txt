@@ -1,0 +1,155 @@
+# R35: every way in, and why none of them lets a participant act without a hardware-rooted wallet
+# and identity (TPM, delegated TPM, Secure Enclave, passkey). check-onboarding.sh fails on an entry
+# that is not listed here. Line format: <kind> <name> <reason>. A reason is a sentence, not a word.
+#
+# The start gate is crates/tenzro-node/src/main.rs run(): after the config and role checks and the
+# optional --tpm-key-holder, `require_hardware_key_store`, the TPM provisioning check and
+# `require_hardware_identity` run before node_config, storage, networking, RPC or any role. There is
+# no keyless mode. crates/tenzro-node/tests/onboarding_guard.rs starts the binary with each
+# bypass-shaped combination and asserts it is refused on a machine with no hardware key.
+#
+# Adding a line here is a review decision: say what the entry does before the gate (it should do
+# nothing) and what stops it after.
+
+# --- tenzro-node flags (all are read by clap before the gate and applied only after it) ---
+node-flag --a2a-addr applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --accept-license applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --accept-non-commercial applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --admin applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --allow-inbound applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --allow-uid applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --authenticator-data applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --boot-nodes isolated mode (empty value) dials no one; applied after the start gate
+node-flag --busy-retries applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --catalog-publisher applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --chain-id applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --checkpoint-hash applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --checkpoint-height applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --client-data-json applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --config config file; deny_unknown_fields, holds no identity or hardware switch
+node-flag --consensus-key-scheme applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --credential-id applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --data-dir applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --dest applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --dev developer chain: parsed after the start gate, same refusal on a machine with no hardware key; started by `tenzro dev`, which refuses first
+node-flag --external-mcp-addr applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --external-rpc-addr applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --force applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --format applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --fund developer-chain genesis funding; only with --dev, after the start gate
+node-flag --genesis genesis file; applied after the start gate
+node-flag --genesis-committee-root applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --genesis-hash applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --handover-program applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --json applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --key-holder applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --kyc-asset applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --label applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --local-territory applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --log-format applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --log-level applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --max-wait-secs applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --mcp-addr applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --not-after-ms applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --on-demand-ceiling-gb applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --out applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --page applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --preset applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --proof applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --proof-from applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --provider applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --rate-mb applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --recovery-check applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --recovery-confirm applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --recovery-digest applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --recovery-manifest applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --relay-listen applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --relay-udp-port applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --relay-url applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --release-publisher applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --remove-admin applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --request-timeout-secs applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --reserve-gb applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --resident-ceiling-gb applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --roles which roles to serve; applied after the start gate
+node-flag --rpc-addr applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --rpc-url applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --show applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --signature applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --snapshot applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --socket applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --solo solo chain: parsed after the start gate (main.rs require_hardware_key_store / require_hardware_identity), so a machine with no hardware or delegated key is refused with it; its validator and identity keys are the hardware ones
+node-flag --stake applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --state-sync-from applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --territory-db applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --territory-db-label applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --territory-mode applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --tier applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --token-ttl-secs applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --tpm-key-holder the delegated-TPM root: the node signs through another machine's TPM under an operator passkey grant; start fails without a valid grant
+node-flag --tpm-label the key label of the delegated-TPM root; needs --tpm-key-holder
+node-flag --trusted-proxy applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --valid-hours applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --validator-self-stake self-registration as a validator; applied after the start gate, signs with the hardware keys
+node-flag --web-addr applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --worker-threads applied after the start gate; starts, registers, stakes or serves nothing before it
+
+# --- tenzro-node subcommands ---
+node-sub access administers who may use a node; the node checks the caller
+node-sub backup copies the local store; starts or registers nothing
+node-sub clear credentials clear; removes a credential
+node-sub credentials stores upstream credentials in the data directory
+node-sub doctor reachability report; read-only except --allow-inbound, a host firewall rule
+node-sub graceful-exit RPC client of a running node (a node past the start gate)
+node-sub grant-install installs a grant only with the operator passkey's assertion
+node-sub grant-request prints the challenge an operator passkey must sign; nothing is granted
+node-sub hardware reports what this binary can use on this machine; read-only
+node-sub init prints this machine's validator entry from its hardware keys (from_local_hardware); refuses on a machine with none
+node-sub key-holder carries a delegated node's signing requests to the provider; signs nothing itself
+node-sub prover-inputs prints inputs for a prover run; read-only
+node-sub provision creates the three persistent TPM keys; the hardware root itself
+node-sub remote-check asks the provider to sign through the key holder; read-only proof
+node-sub restore verifies and restores a store snapshot; starts or registers nothing
+node-sub serve a provider serving its own TPM to delegated nodes; needs that TPM
+node-sub set credentials set; stores a credential
+node-sub status credentials status or tpm status; read-only
+node-sub tpm TPM subcommands; each listed on its own
+node-sub validator-entry prints this machine's genesis entry from its hardware keys; refuses on a machine with none
+
+# --- environment variables read by non-test code ---
+env TENZRO_AGENT_TOKEN a token the SDK presents; issued by the node
+env TENZRO_ALLOW_VOICE_CLONING speech policy; not identity
+env TENZRO_BATCH_DRAFT_N tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_BATCH_SPECULATION tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_BEARER_JWT a token the CLI/SDK presents; issued by the node after a passkey or hardware proof
+env TENZRO_BOOT_NODES boot identities appended to --boot-nodes; applied after the start gate
+env TENZRO_DATA_DIR data directory; the setup identity step no longer depends on it (SCOPED_IDENTITY_NEEDS_RPC)
+env TENZRO_DEVICE_KEY_DIR where TPM-wrapped key blobs live; the key still has to open in the TPM or Secure Enclave
+env TENZRO_DPOP_PROOF a proof presented with that token
+env TENZRO_GPU_LAYERS tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_GROUND_MARGIN_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_HOME root of the per-user tree
+env TENZRO_HUGGINGFACE_CREDENTIAL model download credential; not an identity
+env TENZRO_KV_CACHE_TYPE tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_MAX_CONTEXT tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_MCP_AUTH tiered or full; can only raise the MCP edge to full authentication
+env TENZRO_MODELS_DIR tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_NOTHINK_MODELS tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_NO_BANNER hides the CLI banner
+env TENZRO_ON_DEMAND_CEILING_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_PREFER_SPECULATION tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_REASONING_EFFORT tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_RESERVE_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_RESIDENT_CEILING_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_RPC which node the CLI talks to
+env TENZRO_RPC_URL which node `tenzro passkey` talks to
+env TENZRO_SKIP_MODEL_ADMISSION skips the memory admission of a model load only (runtime.rs check_memory_admission); not identity, wallet, role, stake or grant
+env TENZRO_SWIFTC build-time Swift compiler path for the Secure Enclave shim
+env TENZRO_TIER tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_TOOL_GRAMMAR tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_TPM_KEY_HOLDER --tpm-key-holder; the delegated-TPM root, see the flag
+env TENZRO_TPM_LABEL --tpm-label; see the flag
+env TENZRO_UPSTREAM_API_KEY operator connector credential; not an identity
+env TENZRO_USE_MMAP tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_WARM_WAIT_SECS tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_WORKER_THREADS tuning or path setting; does not touch identity, wallet, role, stake or grant

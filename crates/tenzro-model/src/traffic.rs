@@ -1224,7 +1224,7 @@ mod tests {
 
     #[test]
     fn a_lease_holder_gets_capacity_public_traffic_cannot_take() {
-        // The whole point of #55: before this, a renter paying for dedicated
+        // The point of leases: without one, a renter paying for dedicated
         // access competed in the same pool as free traffic.
         let tm = TrafficManager::new(leased_cfg(8, 4, 2));
         tm.reserve_for_lease("lease-a", 4)
@@ -1667,9 +1667,9 @@ mod tests {
 
     #[test]
     fn an_aborted_request_is_counted_as_refused_not_completed() {
-        // Found in bring-up: a request admitted here but refused by a bound
-        // further down had its guard dropped as a COMPLETION, so goodput
-        // reported success for work that never ran.
+        // Regression test: a request admitted here but refused by a bound
+        // further down must not have its guard dropped as a COMPLETION, or goodput
+        // reports success for work that never ran.
         let tm = TrafficManager::new(cfg(4, 2));
         let g = tm
             .admit("m", QosClass::Interactive, None, sh())

@@ -62,6 +62,16 @@ pub const CF_CHALLENGES: &str = "challenges";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
+    /// Shrinks the read caches to `keep_percent` of their normal size and
+    /// returns the bytes given back. A cache refills from disk, so nothing is
+    /// lost. Stores without a cache return zero.
+    fn shrink_caches(&self, _keep_percent: u8) -> u64 {
+        0
+    }
+
+    /// Returns the read caches to their normal size.
+    fn restore_caches(&self) {}
+
     /// Gets a value by key from a column family
     fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
@@ -187,6 +197,8 @@ pub struct CfSize {
     pub name: &'static str,
     /// Its SST files.
     pub sst_files: u64,
+    /// Its blob files, where large values are kept apart from the SST files.
+    pub blob_files: u64,
     /// RocksDB's estimate of the live data in it: what the SST files shrink
     /// to once deleted and overwritten keys are compacted away.
     pub live_data: u64,
@@ -209,6 +221,9 @@ pub struct RocksDbStore {
     // The block cache every column family and the write-buffer manager
     // share; held so it lives exactly as long as the database.
     _cache: Cache,
+    // The capacity the cache was opened with, which `restore_caches` returns
+    // it to.
+    cache_bytes: usize,
 }
 
 /// Every column family this store manages. Single source of truth so the
@@ -282,6 +297,19 @@ impl RocksDbStore {
             .iter()
             .map(|name| ColumnFamilyDescriptor::new(*name, Self::cf_options(config, cache)))
             .collect()
+    }
+
+    /// Opens the store at `config.db_path` only if one is already there. A
+    /// wrong path is an error, where [`Self::open`] would make a new empty
+    /// store in it.
+    pub fn open_existing(config: &StorageConfig) -> Result<Self> {
+        if !config.db_path.join("CURRENT").is_file() {
+            return Err(StorageError::DatabaseError(format!(
+                "there is no store at {}",
+                config.db_path.display()
+            )));
+        }
+        Self::open(config)
     }
 
     /// Opens a RocksDB store with the given configuration
@@ -449,6 +477,7 @@ impl RocksDbStore {
         Ok(Self {
             db: Arc::new(db),
             _cache: cache,
+            cache_bytes: config.memory_bytes,
         })
     }
 
@@ -527,6 +556,7 @@ impl RocksDbStore {
                 Some(CfSize {
                     name,
                     sst_files: read("rocksdb.total-sst-files-size"),
+                    blob_files: read("rocksdb.total-blob-file-size"),
                     live_data: read("rocksdb.estimate-live-data-size"),
                 })
             })
@@ -598,6 +628,17 @@ impl RocksDbStore {
     /// Compacts every column family end to end, so space held by deleted
     /// and overwritten keys is returned to the filesystem. Paced by the
     /// store's background write rate like any other compaction.
+    /// Compacts the column families history pruning deletes from, so the
+    /// space of pruned blocks, transactions and events is returned to the
+    /// volume.
+    pub fn compact_history(&self) {
+        for name in crate::resources::PRUNE_COLUMN_FAMILIES {
+            if let Some(cf) = self.db.cf_handle(name) {
+                self.db.compact_range_cf(cf, None::<&[u8]>, None::<&[u8]>);
+            }
+        }
+    }
+
     pub fn compact_all(&self) {
         for name in ALL_CFS {
             if let Some(cf) = self.db.cf_handle(name) {
@@ -608,6 +649,18 @@ impl RocksDbStore {
 }
 
 impl KvStore for RocksDbStore {
+    fn shrink_caches(&self, keep_percent: u8) -> u64 {
+        let before = self.memory_usage().block_cache;
+        let mut cache = self._cache.clone();
+        cache.set_capacity(self.cache_bytes / 100 * keep_percent.min(100) as usize);
+        before.saturating_sub(self.memory_usage().block_cache)
+    }
+
+    fn restore_caches(&self) {
+        let mut cache = self._cache.clone();
+        cache.set_capacity(self.cache_bytes);
+    }
+
     fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let cf_handle = self.cf_handle(cf)?;
         Ok(self.db.get_cf(cf_handle, key)?)
@@ -683,7 +736,7 @@ impl KvStore for RocksDbStore {
         // This is the whole point of `write_batch_sync` — without `set_sync(true)`,
         // RocksDB only writes to the OS page cache and the data is lost on a
         // hard reboot. The previous `set_sync(false)` made this method
-        // indistinguishable from `write_batch` (HIGH #78 in the production audit).
+        // indistinguishable from `write_batch`.
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(true);
         self.db.write_opt(batch, &write_opts)?;
@@ -984,8 +1037,8 @@ mod tests {
     fn test_rocksdb_write_batch_sync_durability() {
         // Verifies that `write_batch_sync` actually persists data and that
         // we can reopen the DB and read what we wrote. This is the regression
-        // test for HIGH #78 — the previous implementation called
-        // `write_opts.set_sync(false)`, which made the API silently
+        // test that sync writes are durable: calling
+        // `write_opts.set_sync(false)` would make the API silently
         // non-durable.
         let path = unique_temp_db_path("sync");
 
@@ -1081,7 +1134,7 @@ mod tests {
 
     #[test]
     fn test_rocksdb_repair_recovers_from_truncated_wal() {
-        // Verifies WAL recovery (HIGH #78). We open a DB, write some data,
+        // Verifies WAL recovery. We open a DB, write some data,
         // close it, corrupt one of the SST or log files by truncating it,
         // then call `repair_database` and confirm we can reopen the DB.
         // RocksDB repair is best-effort: finalized writes generally survive,

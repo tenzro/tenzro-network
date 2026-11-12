@@ -287,6 +287,12 @@ def handler_bodies(arm):
         mod = qual.rstrip(":").split("::")[-1] if qual else None
         pick = [b for m, b in cands if m == mod] or ([cands[0][1]] if len(cands) == 1 else [])
         bodies.extend(pick[:1])
+    # A handler that hands its parameters on is read one call further.
+    for body in list(bodies[1:]):
+        for name in re.findall(r"\b([a-z_][a-z0-9_]*)\s*\(\s*&?params\b", body):
+            cands = FN_BODIES.get(name, [])
+            if name not in SKIP_CALLS and len(cands) == 1 and cands[0][1] not in bodies:
+                bodies.append(cands[0][1])
     # A handler that forwards to a provider first serves the rest on this
     # node in `<name>_here`, which the light build replaces with a refusal;
     # the facts are the standard build's, the longest of the definitions.
@@ -307,7 +313,11 @@ ERR_PATTERNS = [
 PARAM_PATTERNS = [
     re.compile(r'\b(?:params|p|obj|args|req|body)\s*\.get\(\s*"([A-Za-z0-9_]+)"\s*\)'),
     re.compile(r'\b(?:params|p|obj|args|req|body)\s*\[\s*"([A-Za-z0-9_]+)"\s*\]'),
-    re.compile(r'\b(?:req_str|opt_str|req_u64|opt_u64|req_bool|opt_bool|req_hex|opt_hex|param_[a-z_]+|parse_[a-z0-9_]+)\(\s*&?[a-z_]+\s*,\s*"([A-Za-z0-9_]+)"'),
+    re.compile(r'\b(?:req_str|opt_str|req_u64|opt_u64|req_bool|opt_bool|req_hex|opt_hex|param_[a-z_]+|[a-z]+_param|parse_[a-z0-9_]+)\(\s*&?[a-z_]+\s*,\s*"([A-Za-z0-9_]+)"'),
+    # `Some(Value::Object(m)) => m.get("key")`
+    re.compile(r'Value::Object\(\s*[a-z]\s*\)\s*\)\s*=>\s*[a-z]\.get\(\s*"([A-Za-z0-9_]+)"\s*\)'),
+    # `params.as_ref().and_then(|v| v.get("key"))`
+    re.compile(r'\bparams\s*\.as_ref\(\)\s*\.and_then\(\s*\|\s*[a-z]\s*\|\s*[a-z]\.get\(\s*"([A-Za-z0-9_]+)"\s*\)'),
 ]
 
 
@@ -681,7 +691,7 @@ def render():
 MCP_OUT = os.path.join(ROOT, "docs/MCP.md")
 NODE_OUT = os.path.join(ROOT, "docs/NODE.md")
 # Hand-written sections appended to NODE.md, in order.
-NODE_PROSE = ["docs/operations/light-build.md"]
+NODE_PROSE = ["docs/operations/light-build.md", "docs/operations/node-joining.md"]
 METHODS_OUT = os.path.join(ROOT, "docs/rpc-methods.json")
 CLI_OUT = os.path.join(ROOT, "docs/cli-commands.json")
 

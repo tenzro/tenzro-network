@@ -1472,9 +1472,9 @@ impl DaCommitteeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenzro_crypto::batch::ImmediateRecordSigner;
     use tenzro_crypto::composite::HybridSigner;
     use tenzro_crypto::composite::testing::TestHybridSigner;
-    use tenzro_crypto::batch::ImmediateRecordSigner;
 
     /// A member's identity key is a test hybrid signer named by its seed.
     fn clone_kp(seed: &u8) -> u8 {

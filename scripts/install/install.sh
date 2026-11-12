@@ -160,6 +160,29 @@ fetch() {
     fail "could not download $1" "$why" "check your connection and run this again. Offline: download the archive, SHA256SUMS and SHA256SUMS.sig on another machine and run: sh install.sh --from <folder>"
 }
 
+# ---------------------------------------------------------------- what to choose from
+# (defined before the machine is probed: detect_orin is called below)
+# pick_pref OS ARCH GPU LIBC ORIN: the build kinds to try, best first, on a machine of this kind.
+# On aarch64 Linux the Ubuntu 24.04 builds need glibc 2.39; an older glibc (Raspberry Pi OS or Debian 12 Bookworm,
+# 2.36) takes the Bookworm CPU build, which is the only one built against glibc 2.36. A Jetson Orin (ORIN=1)
+# takes the Orin CUDA build first, since the general CUDA build carries no sm_87 ONNX Runtime kernels.
+# pick_pref begin
+detect_orin() {
+    for f in "$1/proc/device-tree/compatible" "$1/sys/firmware/devicetree/base/compatible"; do
+        [ -r "$f" ] && tr '\0' '\n' < "$f" 2>/dev/null | grep -qx 'nvidia,tegra234' && return 0
+    done
+    return 1
+}
+pick_pref() {
+    if [ "$1" = linux ] && [ "$3" = nvidia ]; then pp="cuda vulkan cpu"; else pp="cpu metal edge"; fi
+    if [ "$1" = linux ] && [ "$2" = aarch64 ]; then
+        if [ "$3" = nvidia ] && [ "$5" = 1 ]; then pp="cuda-orin $pp"; fi
+        if [ -n "$4" ] && [ "$(printf '%s\n%s\n' 2.39 "$4" | sort -V | head -1)" != 2.39 ]; then pp="cpu-bookworm"; fi
+    fi
+    echo "$pp"
+}
+# pick_pref end
+
 # ---------------------------------------------------------------- this machine
 OS=$(uname -s) ARCH=$(uname -m)
 case "$OS" in
@@ -193,26 +216,6 @@ HAS_TPM=unknown
 if [ "$OSN" = linux ]; then if [ -e /dev/tpmrm0 ]; then HAS_TPM=yes; else HAS_TPM=no; fi
 elif [ "$ARCHN" = aarch64 ]; then HAS_TPM=secure-enclave; fi
 
-# pick_pref OS ARCH GPU LIBC ORIN: the build kinds to try, best first, on a machine of this kind.
-# On aarch64 Linux the Ubuntu 24.04 builds need glibc 2.39; an older glibc (Raspberry Pi OS or Debian 12 Bookworm,
-# 2.36) takes the Bookworm CPU build, which is the only one built against glibc 2.36. A Jetson Orin (ORIN=1)
-# takes the Orin CUDA build first, since the general CUDA build carries no sm_87 ONNX Runtime kernels.
-# pick_pref begin
-detect_orin() {
-    for f in "$1/proc/device-tree/compatible" "$1/sys/firmware/devicetree/base/compatible"; do
-        [ -r "$f" ] && tr '\0' '\n' < "$f" 2>/dev/null | grep -qx 'nvidia,tegra234' && return 0
-    done
-    return 1
-}
-pick_pref() {
-    if [ "$1" = linux ] && [ "$3" = nvidia ]; then pp="cuda vulkan cpu"; else pp="cpu metal edge"; fi
-    if [ "$1" = linux ] && [ "$2" = aarch64 ]; then
-        if [ "$3" = nvidia ] && [ "$5" = 1 ]; then pp="cuda-orin $pp"; fi
-        if [ -n "$4" ] && [ "$(printf '%s\n%s\n' 2.39 "$4" | sort -V | head -1)" != 2.39 ]; then pp="cpu-bookworm"; fi
-    fi
-    echo "$pp"
-}
-# pick_pref end
 
 # ---------------------------------------------------------------- the signed list
 WORK=""

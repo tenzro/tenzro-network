@@ -656,11 +656,24 @@ pub async fn forwarder_answers(
     let probe = async {
         let conn = endpoint.connect(forwarder, ALPN_PEER_RELAY).await.ok()?;
         let nonce: [u8; 16] = rand::random();
-        conn.send_datagram(frame(&endpoint.id(), &nonce)).ok()?;
-        let answer = conn.read_datagram().await.ok()?;
-        let (_, echoed) = unframe(&answer)?;
+        // A datagram may be lost on the way there or back, so it is sent
+        // again until one comes back.
+        let mut again = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                _ = again.tick() => {
+                    conn.send_datagram(frame(&endpoint.id(), &nonce)).ok()?;
+                }
+                answer = conn.read_datagram() => {
+                    let answer = answer.ok()?;
+                    if unframe(&answer).is_some_and(|(_, echoed)| echoed.as_ref() == nonce) {
+                        break;
+                    }
+                }
+            }
+        }
         conn.close(0u32.into(), b"checked");
-        Some(echoed.as_ref() == nonce)
+        Some(true)
     };
     matches!(tokio::time::timeout(wait, probe).await, Ok(Some(true)))
 }

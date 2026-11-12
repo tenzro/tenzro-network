@@ -1,7 +1,7 @@
 # Zero-knowledge proof systems
 
 Status: implemented in `crates/tenzro-zk`. This document records what the
-circuits prove, the parameters of the two proof systems, how their soundness
+circuits prove, the parameters of the three proof systems, how their soundness
 was computed, and why the hashes were chosen.
 
 ## 1. Statements
@@ -98,8 +98,6 @@ whole instance column in the transcript, so a proof for one binding does not
 verify for another. Halo2 blinds every advice column, so the proof is
 zero-knowledge. `MockProver` checks that the constraints hold for the true
 digest and fail for a digest with one flipped bit.
-
-HALO2_MEASUREMENTS
 
 ### k-of-n acceptance
 
@@ -227,7 +225,7 @@ report-data field and are refused for TEE-bound proofs.
 
 The `pq-qc` AIR is deleted. It let the prover write `verified[i] = 1` for any
 signer and so proved nothing about ML-DSA signatures. Quorum certificates
-remain BLS-only; per-vote ML-DSA binding is unchanged. A value-binding PQ
+carry composite ML-DSA-65 + P-256 signatures (see consensus.md); per-vote ML-DSA binding is unchanged. A value-binding PQ
 certificate needs either in-circuit signature verification (ML-DSA in-circuit
 is expensive; hash-based signatures of the XMSS/leanSig family are the
 STARK-friendly option) or native re-verification of every vote.

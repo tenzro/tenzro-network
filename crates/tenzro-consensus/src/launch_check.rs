@@ -3,9 +3,9 @@
 //! A set that is exactly large enough to certify when everyone is up has no
 //! fault tolerance: the first machine that stops halts the chain, and a halt
 //! cannot be repaired from inside, because replacing a validator takes a
-//! block. The network of 2026-10-19 launched like that: four equal
+//! block. A network that launches like that has four equal
 //! validators, quorum three, one of the four permanently gone, so the
-//! failure of any one of the three live ones stopped it for good.
+//! failure of any one of the three live ones stops it for good.
 //!
 //! [`check_launch_set`] refuses a set unless, at launch:
 //!
@@ -273,13 +273,25 @@ mod tests {
     fn headroom_follows_the_arithmetic_of_the_launch_check() {
         // seven equal: all live -> two losses survived; 6 live -> one; 5 -> none; 4 -> halted
         assert_eq!(headroom(&set(&[true; 7])), Headroom::Healthy);
-        assert_eq!(headroom(&set(&[true, true, true, true, true, true, false])), Headroom::One);
-        assert_eq!(headroom(&set(&[true, true, true, true, true, false, false])), Headroom::Zero);
-        assert_eq!(headroom(&set(&[true, true, true, true, false, false, false])), Headroom::Halted);
+        assert_eq!(
+            headroom(&set(&[true, true, true, true, true, true, false])),
+            Headroom::One
+        );
+        assert_eq!(
+            headroom(&set(&[true, true, true, true, true, false, false])),
+            Headroom::Zero
+        );
+        assert_eq!(
+            headroom(&set(&[true, true, true, true, false, false, false])),
+            Headroom::Halted
+        );
         // four equal: all live is one loss from halt's margin -> Zero after one loss
         assert_eq!(headroom(&set(&[true; 4])), Headroom::One);
         assert_eq!(headroom(&set(&[true, true, true, false])), Headroom::Zero);
-        assert_eq!(headroom(&set(&[true, true, false, false])), Headroom::Halted);
+        assert_eq!(
+            headroom(&set(&[true, true, false, false])),
+            Headroom::Halted
+        );
     }
 
     /// The alert rules in deploy/monitoring/alerts.yml count equal-stake
@@ -312,7 +324,10 @@ mod tests {
         assert_eq!(adv.len(), 1, "{adv:?}");
         let seven = set(&[true; 7]);
         assert!(founding_advisories(&seven, &["a", "a", "b", "b", "c", "c", "d"]).is_empty());
-        assert_eq!(founding_advisories(&seven, &["a", "a", "a", "b", "b", "c", "c"]).len(), 1);
+        assert_eq!(
+            founding_advisories(&seven, &["a", "a", "a", "b", "b", "c", "c"]).len(),
+            1
+        );
         assert_eq!(founding_advisories(&seven, &["a"]).len(), 1);
     }
 
@@ -320,7 +335,10 @@ mod tests {
     fn the_refusal_message_states_the_founding_requirement() {
         let err = check_launch_set(&set(&[true; 3])).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("at least 7") && msg.contains("4 or more independent operators"), "{msg}");
+        assert!(
+            msg.contains("at least 7") && msg.contains("4 or more independent operators"),
+            "{msg}"
+        );
     }
 
     /// The set the network launched with: four equal validators, one of them
@@ -373,7 +391,7 @@ mod tests {
     }
 
     /// Stopping a validator of the 2026 set (three live of four) is refused:
-    /// the unit stopped on 19 Oct was the third of three.
+    /// the unit stopped was the third of three.
     #[test]
     fn stopping_a_validator_of_the_2026_set_is_refused() {
         let s = set(&[true, true, true, false]);

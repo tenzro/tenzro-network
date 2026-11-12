@@ -14,6 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 tenzro-types = { workspace = true }
+tenzro-onboarding-types = { workspace = true }
+tenzro-update-notice = { workspace = true }
 tenzro-bridge = { workspace = true }
 tenzro-finality = { workspace = true }
 tenzro-crypto = { workspace = true }
@@ -62,8 +64,14 @@ reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 dirs = "5"
 sysinfo = "0.31"
 sha2 = { workspace = true }
+# Release-key parsing and signature decoding for `tenzro update`; the check itself is
+# tenzro_device_key::signer::verify_p256, the verifier the node uses.
+p256 = { workspace = true }
+thiserror = { workspace = true }
 chrono = "0.4"
 rand = { workspace = true }
+# The terminal QR code for the passkey ceremony link.
+qrcode = { workspace = true }
 # Keeps a root out of the CLI process memory once it has been stored.
 
 [features]
@@ -83,6 +91,9 @@ default = []
 workspace = true
 
 [dev-dependencies]
+tenzro-update-notice = { workspace = true, features = ["fixture"] }
+# Tests only: a software derivation root standing in for the key holder's provider.
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0", features = ["test-root"] }
 # Tests only: an in-memory hybrid signer for payment credentials.
 tenzro-crypto = { workspace = true, features = ["test-keys"] }
 # Tests only: keysets from the test identity root (release builds refuse them).
@@ -91,5 +102,3 @@ tenzro-keygen = { workspace = true, features = ["test-keys"] }
 # code that will actually receive them rather than against a fixture.
 tenzro-auth = { workspace = true }
 tempfile = { workspace = true }
-# Test stand-in for the hardware DPoP key.
-p256 = { workspace = true }

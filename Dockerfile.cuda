@@ -151,6 +151,10 @@ ENV CC=clang
 ENV CXX=clang++
 ENV CUDAHOSTCXX=g++
 
+# Keep line tables and symbols through the cargo build; the debug files are split off
+# and the shipped binary stripped in the next step (release profile stays strip = "symbols").
+ENV CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+
 # CUDAARCHS is deliberately unset. ggml picks the architecture list itself when
 # CMAKE_CUDA_ARCHITECTURES is undefined (ggml/src/ggml-cuda/CMakeLists.txt),
 # covering Turing through Blackwell and appending 121a-real on CUDA >= 12.9 —
@@ -211,6 +215,15 @@ RUN set -eux; \
     ! grep -qa ggml_cuda_init target/release/tenzro
 
 
+# Split the debug information off: the shipped binaries are stripped, the debug files
+# (matched by build-id and .gnu_debuglink) are collected for crash symbolisation.
+RUN set -eux; mkdir -p /debug; \
+    for b in tenzro-node tenzro; do \
+      objcopy --only-keep-debug target/release/$b /debug/$b.debug; \
+      strip --strip-all target/release/$b; \
+      objcopy --add-gnu-debuglink=/debug/$b.debug target/release/$b; \
+    done
+
 # Stage 2: Runtime
 FROM docker.io/nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04@sha256:14f6d08d1cd4a96effbfe3101d0b56326f552c199d05e4979ee0bd616df5811b AS runtime
 
@@ -228,6 +241,7 @@ RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro
 # Copy binaries from builder
 COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
 COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+COPY --from=builder /debug /usr/local/share/tenzro-debug
 
 # tenzro-node links ONNX Runtime dynamically against the prefix built in the
 # ort-cuda stage, resolved through its only run path, $ORIGIN/../lib: here

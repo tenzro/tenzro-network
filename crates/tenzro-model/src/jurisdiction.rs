@@ -108,8 +108,7 @@ impl Ed25519JurisdictionSigner {
     #[cfg(test)]
     pub fn generate() -> Result<Self, JurisdictionError> {
         let identity = tenzro_crypto::testing::TestHybridSigner::random();
-        let signer =
-            tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(identity));
+        let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(identity));
         Ok(Self::new(Arc::new(signer)))
     }
 
@@ -264,7 +263,6 @@ mod tests {
                 &claim(),
             )
             .unwrap();
-
 
         assert_eq!(receipt.provider, provider);
         assert_eq!(receipt.jurisdiction.country, "DE");

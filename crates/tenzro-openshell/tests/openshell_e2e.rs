@@ -41,8 +41,8 @@ use std::time::Duration;
 
 use openshell_e2e::harness::binary::openshell_cmd;
 use openshell_e2e::harness::sandbox::SandboxGuard;
-use tenzro_crypto::composite::HybridSigner;
 use tenzro_crypto::batch::ImmediateRecordSigner;
+use tenzro_crypto::composite::HybridSigner;
 use tenzro_openshell::authority::StateAuthority;
 use tenzro_openshell::credential_driver::TenzroCredentialDriver;
 use tenzro_openshell::gateway_auth::{CallerKind, GatewayKey, Guard, PeerRule, TokenRule};
@@ -221,9 +221,10 @@ async fn an_openshell_sandbox_acts_under_tenzro_terms() {
         tenzro_device_key::signer::HardwareHybridSigner::open_or_create("tenzro-openshell-e2e")
             .expect("a TPM-held identity"),
     );
-    let p256 = identity.public_key().p256.clone();
-    let session =
-        Arc::new(tenzro_crypto::batch::ImmediateRecordSigner::new(identity.clone()));
+    let serving_key = identity.public_key().clone();
+    let session = Arc::new(tenzro_crypto::batch::ImmediateRecordSigner::new(
+        identity.clone(),
+    ));
     let nonce = digest(b"e2e-nonce", &[uuid::Uuid::new_v4().as_bytes()]);
     let (_, host) =
         attestation::attest_local_tpm(identity.public_key(), &nonce).expect("TPM quote");
@@ -261,7 +262,7 @@ async fn an_openshell_sandbox_acts_under_tenzro_terms() {
     // The extensions read every delegation from the node, as its serving
     // host; principals and balances are this host's.
     let delegations = Arc::new(NodeDelegations::new(node.url.clone()).expect("node reader"));
-    let authority = StateAuthority::over(node.machine_did.clone(), p256, 1337, delegations);
+    let authority = StateAuthority::over(node.machine_did.clone(), serving_key, 1337, delegations);
     authority.fund(StateAuthority::wallet(&agent), 100_000);
     authority.bind_principal("openshell-client", &root);
     let provider_payee = Address::new([0x7e; 32]);

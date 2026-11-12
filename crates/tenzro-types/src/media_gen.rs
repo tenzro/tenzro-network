@@ -524,7 +524,7 @@ impl MediaGenParams {
 /// Some pipelines carry two full transformers instead of one and switch between
 /// them partway down the noise schedule — the high-noise expert denoises the
 /// coarse early steps, the low-noise expert finishes. Because the switch
-/// happens once, the whole handoff between them is a single latent tensor.
+/// happens once, the whole transfer between them is a single latent tensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MediaGenExpertRole {
     /// Denoises from the start of the schedule down to the model's boundary.

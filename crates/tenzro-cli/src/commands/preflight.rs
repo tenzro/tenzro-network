@@ -147,7 +147,10 @@ impl Facts {
 }
 
 fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(program).args(args).output().ok()?;
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -459,6 +462,10 @@ mod tests {
         let mut lines = Vec::new();
         render(&evaluate(&linux()), |l| lines.push(l));
         assert!(lines.contains(&Line::Fix("tenzro-node tpm provision".into())));
-        assert!(!lines.iter().any(|l| matches!(l, Line::Fix(s) if s.contains("usermod"))));
+        assert!(
+            !lines
+                .iter()
+                .any(|l| matches!(l, Line::Fix(s) if s.contains("usermod")))
+        );
     }
 }

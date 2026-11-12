@@ -13,6 +13,7 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 tenzro-types = { workspace = true }
+tenzro-onboarding-types = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-iroh = { workspace = true }
 tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0" }

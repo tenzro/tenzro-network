@@ -305,7 +305,11 @@ pub mod testing {
     }
 
     /// `key`'s ML-DSA-65 signature over `digest` for the member `address`.
-    pub fn sign_pq(key: &MlDsaSigningKey, address: [u8; 20], digest: &[u8; 32]) -> PqMemberSignature {
+    pub fn sign_pq(
+        key: &MlDsaSigningKey,
+        address: [u8; 20],
+        digest: &[u8; 32],
+    ) -> PqMemberSignature {
         (address, key.sign(ROUTE_ATTESTATION_PQ_CONTEXT, digest))
     }
 }

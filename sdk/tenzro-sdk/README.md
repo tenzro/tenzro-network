@@ -8,7 +8,7 @@ The official Tenzro SDK for Rust: a typed client for every JSON-RPC method the n
 
 ## Compatibility
 
-crates.io currently serves **0.7.0**: `TenzroClient::new(url)` plus `get_chain_id()`/`get_balance()` and the rest of the registry-era surface — it does not yet have the `network` module (`connect_to_network`, `NetworkOptions`) shown below, which lands with the next publish. `cargo add tenzro-sdk` installs 0.7.0 today; to build against the current source (this page), depend on the git repository instead:
+crates.io currently serves **0.7.0**: `TenzroClient::new(url)` plus `get_chain_id()`/`get_balance()` and the rest of the registry-era surface — the `network` module (`connect_to_network`, `NetworkOptions`) shown below is in the current source. `cargo add tenzro-sdk` installs 0.7.0 today; to build against the current source (this page), depend on the git repository instead:
 
 ```toml
 [dependencies]
@@ -139,10 +139,10 @@ let quarantine = agent.get_quarantine("did:tenzro:agent:example").await?;
 ### NVIDIA OpenShell
 
 `tenzro_sdk::openshell` maps an OpenShell sandbox policy to agent Terms
-(`openshell_policy_terms`), carries credentials minted under those Terms with
+(`openshell_terms`), carries credentials minted under those Terms with
 the controller's passkey, names a sandbox session (`openshell_session_id`) and
 verifies the supervisor's signed, hash-chained session records offline
-(`parse_openshell_records`, `verify_openshell_records`), then lists the
+(`parse_openshell_entries`, `verify_openshell_session`), then lists the
 payments the session made (`openshell_payments`). See
 [docs/OPENSHELL.md](../../docs/OPENSHELL.md).
 

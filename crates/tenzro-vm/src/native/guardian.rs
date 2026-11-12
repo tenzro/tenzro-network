@@ -1459,7 +1459,10 @@ mod tests {
         state.set_balance(&candidate, GAS);
         require_approval(&mut state);
         let refused = registration_refusal(&executor, &mut state, &candidate, 0).await;
-        assert!(refused.contains("not approved"), "{refused}");
+        assert!(
+            refused.contains(crate::validator_admission::REFUSAL_CODE),
+            "{refused}"
+        );
 
         let approve = |approve: bool| ProposalAction::ApproveValidators {
             accounts: vec![tenzro_types::primitives::Address::from_bytes(&candidate).unwrap()],
@@ -1474,7 +1477,10 @@ mod tests {
         assert!(validator_approved(&state, &candidate));
         // Past the gate: what refuses it now is the empty registration.
         let next = registration_refusal(&executor, &mut state, &candidate, ready + 1).await;
-        assert!(!next.contains("not approved"), "{next}");
+        assert!(
+            !next.contains(crate::validator_admission::REFUSAL_CODE),
+            "{next}"
+        );
 
         let (id, ready) = queue(&executor, &mut state, &voter, &approve(false), ready + 2).await;
         enact(&executor, &mut state, &voter, &id, ready)
@@ -1482,7 +1488,10 @@ mod tests {
             .expect("withdrawal enacts");
         assert!(!validator_approved(&state, &candidate));
         let again = registration_refusal(&executor, &mut state, &candidate, ready + 1).await;
-        assert!(again.contains("not approved"), "{again}");
+        assert!(
+            again.contains(crate::validator_admission::REFUSAL_CODE),
+            "{again}"
+        );
     }
 
     #[tokio::test]

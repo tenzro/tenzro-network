@@ -62,7 +62,6 @@ tenzro-node/
 ├── README.md            # User documentation
 ├── QUICKSTART.md        # Getting started guide
 ├── ARCHITECTURE.md      # This file
-├── config.example.json  # Example configuration
 └── tenzro-node.service  # systemd service file
 ```
 

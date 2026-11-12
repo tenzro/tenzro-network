@@ -31,9 +31,9 @@ Cryptographic primitives for the Tenzro Network.
 
 ### Encryption
 - `SymmetricKey` - AES-256-GCM symmetric encryption
-- `aes_gcm_encrypt()`/`aes_gcm_decrypt()` - AES-256-GCM operations
+- `encrypt_aes()`/`decrypt_aes()` - AES-256-GCM operations (also `SymmetricKey::encrypt`/`decrypt`)
 - `X25519KeyPair` - X25519 ECDH key exchange
-- `x25519_key_exchange()` - Key agreement protocol
+- `X25519KeyPair::diffie_hellman()` - Key agreement
 - `envelope_encrypt()`/`envelope_decrypt()` - Hybrid envelope encryption
 
 - `hybrid_seal` - seal a secret to an in-memory X25519 + ML-KEM-768 key (`x25519-mlkem768-hkdf-sha256-aes-256-gcm`); reading it needs both exchanges broken

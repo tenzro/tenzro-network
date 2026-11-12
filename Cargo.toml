@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
   "crates/tenzro-types",
+  "crates/tenzro-onboarding-types",
+  "crates/tenzro-update-notice",
   "crates/tenzro-crypto",
   "crates/tenzro-secure-enclave",
     "crates/tenzro-tee",
@@ -92,6 +94,8 @@ result_large_err = "allow"
 # builds keep using the local source. Bump versions in lockstep across
 # the workspace when cutting a coordinated release.
 tenzro-types = { path = "crates/tenzro-types", version = "0.2.0" }
+tenzro-onboarding-types = { path = "crates/tenzro-onboarding-types", version = "0.2.0" }
+tenzro-update-notice = { path = "crates/tenzro-update-notice", version = "0.2.0" }
 tenzro-crypto = { path = "crates/tenzro-crypto", version = "0.2.0" }
 tenzro-tee = { path = "crates/tenzro-tee", version = "0.2.0" }
 tenzro-zk = { path = "crates/tenzro-zk", version = "0.2.0" }

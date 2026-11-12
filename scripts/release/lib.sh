@@ -20,6 +20,27 @@ release_rust() {
     sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml
 }
 
+# The network profile(s) a release ships: share/network/<chain_id>.toml beside
+# bin/, which a node started without --boot-nodes joins the network through
+# (crates/tenzro-node/src/network_profile.rs). Taken from config/network/ of the
+# source tree. A release with none leaves every fresh node at zero peers until an
+# operator hand-edits its boot list, so it is refused; ALLOW_NO_NETWORK_PROFILE=1
+# builds one for a network that has no profile yet.
+release_network_profile() { # source-tree staging-dir
+    local src=$1 stage=$2 f n=0
+    for f in "$src"/config/network/[0-9]*.toml; do
+        [ -e "$f" ] || continue
+        mkdir -p "$stage/share/network"
+        install -m644 "$f" "$stage/share/network/$(basename "$f")"
+        n=$((n + 1))
+    done
+    if [ "$n" = 0 ] && [ "${ALLOW_NO_NETWORK_PROFILE:-0}" != 1 ]; then
+        echo "REFUSING: no config/network/<chain_id>.toml to ship (see config/network/README.md); ALLOW_NO_NETWORK_PROFILE=1 to build without" >&2
+        return 1
+    fi
+    echo "network profiles shipped: $n"
+}
+
 # Deterministic tar.gz of a staging directory: sorted names, fixed owner, the
 # commit time on every entry, no gzip timestamp.
 release_pack() { # staging-dir out.tar.gz epoch

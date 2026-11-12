@@ -211,6 +211,7 @@
  "tenzro_getTreasuryAccounts": "open",
  "tenzro_getTreasuryPayouts": "open",
  "tenzro_getTrustCredentials": "open",
+ "tenzro_getUpdateNotice": "open",
  "tenzro_getUpgradeReadiness": "open",
  "tenzro_getValidatorState": "open",
  "tenzro_getVesting": "open",

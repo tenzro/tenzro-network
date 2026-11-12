@@ -117,6 +117,14 @@ fn endpoint_secret(dir: &std::path::Path) -> tenzro_iroh::EndpointSecret {
     tenzro_iroh::EndpointSecret(Some(seed))
 }
 
+/// The onboarding table with a handshake window short enough that a peer
+/// with no identity record is admitted without a minute's wait.
+fn quick_admission() -> tenzro_node::identity_gate::OnboardingConfig {
+    let mut cfg = tenzro_node::identity_gate::OnboardingConfig::default();
+    cfg.policy.handshake_timeout = std::time::Duration::from_millis(500);
+    cfg
+}
+
 fn free_udp_port() -> std::net::SocketAddr {
     std::net::UdpSocket::bind("127.0.0.1:0")
         .and_then(|s| s.local_addr())
@@ -405,6 +413,10 @@ async fn connector(upstream_url: &str) -> Node {
             endpoint_secret: endpoint_secret(tmp.path()),
             ..Default::default()
         },
+        // These nodes publish no identity record, so the identity gate waits
+        // its handshake window for a name before it admits a dial; the
+        // window is shortened so a dial is admitted at once.
+        onboarding: quick_admission(),
         connector: Some(ConnectorConfig {
             upstream_url: upstream_url.to_string(),
             request_timeout_secs: 2,
@@ -444,6 +456,10 @@ async fn gateway() -> Node {
             endpoint_secret: endpoint_secret(tmp.path()),
             ..Default::default()
         },
+        // These nodes publish no identity record, so the identity gate waits
+        // its handshake window for a name before it admits a dial; the
+        // window is shortened so a dial is admitted at once.
+        onboarding: quick_admission(),
         ..Default::default()
     };
     Node::boot(config, tmp).await
@@ -958,7 +974,7 @@ async fn an_image_is_served_from_the_endpoint_as_a_render() {
     let reply = conn
         .rpc(
             "tenzro_mediaGen_render",
-            json!({"model_id": "acme/image", "kind": "text2image",
+            json!({"model_id": "acme/image", "kind": "text2image", "verification": "receipt",
                    "params": {"prompt": "a lighthouse", "negative_prompt": null, "width": 64,
                               "height": 64, "num_frames": null, "fps": null, "steps": 4,
                               "guidance_scale": 3.5, "seed": 7}}),

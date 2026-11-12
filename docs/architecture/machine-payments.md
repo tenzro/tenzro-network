@@ -52,7 +52,7 @@ gross divide it identically. Read it with `tenzro_getPayeeSplit { payee }`
 
 An agent's evidence pack carries the payments it made in a `commerce`
 section: `tenzro_exportEvidencePack { agent_did, payments: [pay_ref] }` (CLI
-`tenzro evidence export --payment <pay_ref>`) proves each record under the
+`tenzro agent audit evidence export --payment <pay_ref>`) proves each record under the
 pack's certified state root, and the offline verifier refuses a record
 proven at another reference or made by an agent the pack does not cover.
 

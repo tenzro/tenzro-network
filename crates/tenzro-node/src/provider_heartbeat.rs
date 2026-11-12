@@ -72,6 +72,46 @@ pub fn model_load(
         .collect()
 }
 
+/// Throttles the log of heartbeat signing failures: the first failure of a
+/// streak and then every `every`-th, with a note when signing recovers. A
+/// missed beat is retried by the next tick, so a streak needs no line per beat.
+#[derive(Debug)]
+pub struct SigningFailureLog {
+    consecutive: std::sync::atomic::AtomicU64,
+    every: u64,
+}
+
+impl SigningFailureLog {
+    /// A log that reports every `every`-th consecutive failure (at least 1).
+    pub fn new(every: u64) -> Self {
+        Self {
+            consecutive: std::sync::atomic::AtomicU64::new(0),
+            every: every.max(1),
+        }
+    }
+
+    /// Records a failure. `Some(n)` when it should be logged, `n` being the
+    /// number of consecutive failures so far.
+    pub fn failed(&self) -> Option<u64> {
+        let n = self
+            .consecutive
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        (n == 1 || n.is_multiple_of(self.every)).then_some(n)
+    }
+
+    /// Records a success. `Some(n)` when `n` failures preceded it.
+    pub fn recovered(&self) -> Option<u64> {
+        match self
+            .consecutive
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            n => Some(n),
+        }
+    }
+}
+
 /// This node's heartbeat, signed as its machine identity.
 pub fn build(
     provider_address: &str,
@@ -124,6 +164,19 @@ pub fn accept(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_streak_of_signing_failures_logs_the_first_and_every_tenth_then_recovery() {
+        let log = SigningFailureLog::new(10);
+        assert_eq!(log.recovered(), None);
+        let logged: Vec<u64> = (0..25).filter_map(|_| log.failed()).collect();
+        assert_eq!(logged, vec![1, 10, 20]);
+        assert_eq!(log.recovered(), Some(25));
+        assert_eq!(log.recovered(), None);
+        // A new streak starts over.
+        assert_eq!(log.failed(), Some(1));
+        assert_eq!(log.failed(), None);
+    }
 
     fn signer() -> crate::event_loop::AnnounceIdentity {
         let hw = tenzro_crypto::composite::testing::TestHybridSigner::random();

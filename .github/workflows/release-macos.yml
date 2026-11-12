@@ -109,6 +109,7 @@ jobs:
             ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.tar.gz
             ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.tar.gz.sha256
             ${{ runner.temp }}/dist/${{ env.ARTIFACT }}.buildenv.json
+            ${{ runner.temp }}/dist/${{ env.ARTIFACT }}-debug.tar.gz
           if-no-files-found: error
 
   check:

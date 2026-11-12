@@ -53,6 +53,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 use tenzro_iroh::EndpointId;
 use tenzro_iroh::gossip::{GossipValidator, MAX_GOSSIP_MESSAGE, Verdict};
+use tenzro_onboarding_types::onboarding::Standing as RegistryStanding;
 
 use crate::message::NetworkMessage;
 use crate::metrics::NetworkMetrics;
@@ -111,6 +112,14 @@ pub trait PeerIdentities: Send + Sync + 'static {
     /// before any record can name it.
     fn vouches_for_announcement(&self, _announcement: &[u8]) -> bool {
         false
+    }
+
+    /// What the identity registry says about the machine identity `did`.
+    /// Read only when the guard is set to deliver from registered
+    /// neighbours only ([`GossipGuard::set_registered_only`]); the default
+    /// is for sources that predate the identity gate.
+    fn registry_standing(&self, _did: &str) -> RegistryStanding {
+        RegistryStanding::Registered
     }
 }
 
@@ -224,6 +233,9 @@ pub struct GossipGuard {
     unidentified: Mutex<Budget>,
     limits: RwLock<GossipLimits>,
     protected: Mutex<HashSet<EndpointId>>,
+    /// Whether a neighbour must have a registered identity to deliver
+    /// anything but a verified validator announcement.
+    registered_only: std::sync::atomic::AtomicBool,
     metrics: Arc<NetworkMetrics>,
 }
 
@@ -245,7 +257,42 @@ impl GossipGuard {
             unidentified: Mutex::new(Budget::default()),
             limits: RwLock::new(limits),
             protected: Mutex::new(HashSet::new()),
+            registered_only: std::sync::atomic::AtomicBool::new(false),
             metrics,
+        }
+    }
+
+    /// Whether a neighbour must have a registered identity (the registry the
+    /// installed [`PeerIdentities`] reads) to deliver anything on any topic.
+    /// A neighbour that has none may still deliver a validator's verified
+    /// endpoint announcement, from the budget all such neighbours share:
+    /// that is how a node learns the records that name the others. Node-local
+    /// policy; off until the node turns it on.
+    pub fn set_registered_only(&self, on: bool) {
+        self.registered_only
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn registered_only(&self) -> bool {
+        self.registered_only
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether `peer`'s messages are held to the unvetted rules: a source of
+    /// identities is installed, the peer is not protected, and either no
+    /// record names it or (with [`Self::set_registered_only`]) the registry
+    /// does not list the machine its record names as registered.
+    fn is_unvetted(&self, peer: EndpointId) -> bool {
+        let identities = self.identities.read();
+        let Some(source) = identities.as_ref() else {
+            return false;
+        };
+        if self.is_protected(&peer) {
+            return false;
+        }
+        match source.machine_did(peer) {
+            None => true,
+            Some(did) => self.registered_only() && !source.registry_standing(&did).is_registered(),
         }
     }
 
@@ -269,14 +316,6 @@ impl GossipGuard {
             Some(did) => Subject::Machine(did),
             None => Subject::Endpoint(peer),
         }
-    }
-
-    /// Whether a source of identities is installed and no record names `peer`
-    /// (and it is not one of the peers this node joined through).
-    fn is_unidentified(&self, peer: EndpointId) -> bool {
-        self.identities.read().is_some()
-            && !self.is_protected(&peer)
-            && self.machine_did(peer).is_none()
     }
 
     /// Whether `peer` is banned: by its machine's standing, or by the
@@ -347,10 +386,7 @@ impl GossipValidator for GossipGuard {
             self.metrics.gossip_rejected_invalid.inc();
             return Verdict::Reject;
         }
-        if class == Class::Consensus
-            && self.identities.read().is_some()
-            && self.machine_did(from).is_none()
-        {
+        if self.is_unvetted(from) && (class == Class::Consensus || self.registered_only()) {
             // Endpoint announcements are what lets a record name a
             // neighbour, so they are heard from one no record names yet,
             // from a budget shared by all such neighbours and passed on only
@@ -362,8 +398,17 @@ impl GossipValidator for GossipGuard {
                     limits.consensus_messages,
                 );
             if !heard {
-                tracing::debug!(peer = %from, topic, "Consensus gossip from a neighbour no record names shed");
-                self.metrics.gossip_shed_unidentified.inc();
+                tracing::debug!(
+                    peer = %from,
+                    topic,
+                    reason = "no registered identity",
+                    "Gossip from a neighbour no record names, or whose machine is not registered, shed"
+                );
+                if self.machine_did(from).is_some() || class == Class::General {
+                    self.metrics.gossip_shed_unregistered.inc();
+                } else {
+                    self.metrics.gossip_shed_unidentified.inc();
+                }
                 return Verdict::Ignore;
             }
             return Verdict::Accept;
@@ -402,7 +447,7 @@ impl GossipValidator for GossipGuard {
 
     fn check(&self, topic: &str, from: EndpointId, content: &[u8]) -> Verdict {
         let mut verdict = validate_gossip_message(content);
-        if verdict == Verdict::Accept && topic == VALIDATORS_TOPIC && self.is_unidentified(from) {
+        if verdict == Verdict::Accept && topic == VALIDATORS_TOPIC && self.is_unvetted(from) {
             // Nothing a neighbour no record names sends is passed on unless
             // it is a validator's signed announcement.
             let vouched = NetworkMessage::from_bytes(content)
@@ -904,5 +949,98 @@ mod tests {
         let bytes = nested_approval_gossip(1);
         assert!(NetworkMessage::from_bytes(&bytes).is_ok());
         assert!(NetworkMessage::from_bytes(&nested_approval_gossip(2)).is_err());
+    }
+
+    /// Records plus a registry: which named machines are registered/revoked.
+    #[derive(Default)]
+    struct Registered {
+        names: Mutex<HashMap<EndpointId, String>>,
+        standing: Mutex<HashMap<String, RegistryStanding>>,
+    }
+
+    impl PeerIdentities for Registered {
+        fn machine_did(&self, endpoint: EndpointId) -> Option<String> {
+            self.names.lock().get(&endpoint).cloned()
+        }
+        fn vouches_for_announcement(&self, announcement: &[u8]) -> bool {
+            announcement.first() == Some(&1)
+        }
+        fn registry_standing(&self, did: &str) -> RegistryStanding {
+            self.standing
+                .lock()
+                .get(did)
+                .copied()
+                .unwrap_or(RegistryStanding::Unregistered)
+        }
+    }
+
+    #[test]
+    fn registered_only_gossip_sheds_every_neighbour_without_a_registered_identity() {
+        let g = guard();
+        let r = Arc::new(Registered::default());
+        g.set_identities(r.clone());
+        let (registered, unregistered, revoked, stranger, boot) =
+            (peer(60), peer(61), peer(62), peer(63), peer(64));
+        for (p, did, st) in [
+            (
+                registered,
+                "did:tenzro:machine:r",
+                RegistryStanding::Registered,
+            ),
+            (
+                unregistered,
+                "did:tenzro:machine:u",
+                RegistryStanding::Unregistered,
+            ),
+            (revoked, "did:tenzro:machine:x", RegistryStanding::Revoked),
+        ] {
+            r.names.lock().insert(p, did.to_string());
+            r.standing.lock().insert(did.to_string(), st);
+        }
+        g.protect(&[boot]);
+
+        // Off (today): the unregistered and the stranger deliver transactions.
+        assert_eq!(g.admit(TXS, unregistered), Verdict::Accept);
+        assert_eq!(g.admit(TXS, stranger), Verdict::Accept);
+
+        g.set_registered_only(true);
+        assert_eq!(g.admit(TXS, registered), Verdict::Accept);
+        assert_eq!(g.admit(CERTS, registered), Verdict::Accept);
+        assert_eq!(
+            g.admit(TXS, boot),
+            Verdict::Accept,
+            "protected peers need no entry"
+        );
+        for (who, why) in [
+            (unregistered, "named but not registered"),
+            (revoked, "revoked"),
+            (stranger, "no record"),
+        ] {
+            assert_eq!(g.admit(TXS, who), Verdict::Ignore, "{why}: transactions");
+            assert_eq!(g.admit(CERTS, who), Verdict::Ignore, "{why}: consensus");
+            assert_eq!(g.score(who), 0, "{why}: shed without blame");
+        }
+        assert!(g.metrics.gossip_shed_unregistered.get() >= 3);
+    }
+
+    #[test]
+    fn registered_only_gossip_still_hears_a_verified_validator_announcement_from_anyone() {
+        let g = guard();
+        let r = Arc::new(Registered::default());
+        g.set_identities(r.clone());
+        g.set_registered_only(true);
+        let stranger = peer(70);
+        // Announcements are how records that name neighbours come to exist.
+        assert_eq!(g.admit(VALIDATORS_TOPIC, stranger), Verdict::Accept);
+        assert_eq!(
+            g.check(VALIDATORS_TOPIC, stranger, &announcement(1)),
+            Verdict::Accept
+        );
+        // Anything else on that topic from the same neighbour is rejected.
+        assert_eq!(
+            g.check(VALIDATORS_TOPIC, stranger, &announcement(9)),
+            Verdict::Reject
+        );
+        assert_eq!(g.check(VALIDATORS_TOPIC, stranger, &tx(1)), Verdict::Reject);
     }
 }

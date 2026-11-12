@@ -439,7 +439,12 @@ mod tests {
             [0xab; 20]
         );
         assert!(eth_address_param(&json!({"owner": "ab".repeat(20)}), "owner").is_ok());
-        for bad in ["ab".repeat(19), "ab".repeat(21), "zz".repeat(20), String::new()] {
+        for bad in [
+            "ab".repeat(19),
+            "ab".repeat(21),
+            "zz".repeat(20),
+            String::new(),
+        ] {
             let e = eth_address_param(&json!({"owner": bad}), "owner").unwrap_err();
             assert_eq!(e.code, -32602);
         }
@@ -455,11 +460,13 @@ mod tests {
             hex::encode(b"agent_account_chain:")
         );
         store
-            .put(CF_STATE, format!("{prefix}eip155:1").as_bytes(), b"not json")
+            .put(
+                CF_STATE,
+                format!("{prefix}eip155:1").as_bytes(),
+                b"not json",
+            )
             .unwrap();
-        store
-            .put(CF_STATE, b"storage:other:key", b"{}")
-            .unwrap();
+        store.put(CF_STATE, b"storage:other:key", b"{}").unwrap();
         assert!(chains_in(&store).is_empty());
     }
 
@@ -478,21 +485,30 @@ mod tests {
         let (node, _tmp) = crate::bare_node().await;
         let e = agent_accounts(&node, None).await.unwrap_err();
         assert_eq!((e.code, e.message.as_str()), (-32602, "missing 'did'"));
-        let e = agent_accounts(&node, Some(json!({"did": "d"}))).await.unwrap_err();
+        let e = agent_accounts(&node, Some(json!({"did": "d"})))
+            .await
+            .unwrap_err();
         assert_eq!(e.code, -32603);
 
-        let e = get_agent_grant_proof(&node, Some(json!({"did": "d"}))).await.unwrap_err();
+        let e = get_agent_grant_proof(&node, Some(json!({"did": "d"})))
+            .await
+            .unwrap_err();
         assert_eq!(e.message, "missing 'chain'");
         let e = get_agent_grant_proof(&node, Some(json!({"did": "d", "chain": "eip155:1"})))
             .await
             .unwrap_err();
-        assert_eq!((e.code, e.message.as_str()), (-32603, "consensus is not running"));
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (-32603, "consensus is not running")
+        );
     }
 
     #[tokio::test]
     async fn a_remote_grant_request_needs_a_chain_and_a_parsable_grant() {
         let (node, _tmp) = crate::bare_node().await;
-        let e = request_remote_grant(&node, None, Some(json!({}))).await.unwrap_err();
+        let e = request_remote_grant(&node, None, Some(json!({})))
+            .await
+            .unwrap_err();
         assert_eq!(e.message, "missing 'chain'");
         let e = request_remote_grant(&node, None, Some(json!({"chain": "eip155:1"})))
             .await
@@ -518,9 +534,13 @@ mod tests {
             p[k] = v;
             p
         };
-        let e = build_remote_action(&node, Some(base.clone())).await.unwrap_err();
+        let e = build_remote_action(&node, Some(base.clone()))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("'nonce'"), "{}", e.message);
-        let e = build_remote_action(&node, Some(with("nonce", json!(1)))).await.unwrap_err();
+        let e = build_remote_action(&node, Some(with("nonce", json!(1))))
+            .await
+            .unwrap_err();
         assert_eq!(e.message, "missing 'action'");
         let mut p = with("nonce", json!(1));
         p["action"] = json!({"target": "zz"});
@@ -531,7 +551,10 @@ mod tests {
             "target": "00", "selector": "00", "amount": "1", "relay_refund": "0", "data": ""
         });
         let e = build_remote_action(&node, Some(p)).await.unwrap_err();
-        assert_eq!(e.code, -32603, "no chain state on a node that is not running");
+        assert_eq!(
+            e.code, -32603,
+            "no chain state on a node that is not running"
+        );
     }
 
     #[tokio::test]
@@ -551,20 +574,42 @@ mod tests {
             .unwrap_err();
         assert!(e.message.contains("EVM chain"), "{}", e.message);
         assert_eq!(
-            agent_wallet_consent(&node, Some(without("agent_id"))).await.unwrap_err().message,
+            agent_wallet_consent(&node, Some(without("agent_id")))
+                .await
+                .unwrap_err()
+                .message,
             "missing 'agent_id'"
         );
-        let e = agent_wallet_consent(&node, Some(without("owner"))).await.unwrap_err();
+        let e = agent_wallet_consent(&node, Some(without("owner")))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("'owner'"), "{}", e.message);
         let mut bad = ok.clone();
         bad["owner"] = json!("0x1234");
-        assert_eq!(agent_wallet_consent(&node, Some(bad)).await.unwrap_err().code, -32602);
-        let e = agent_wallet_consent(&node, Some(without("deadline"))).await.unwrap_err();
+        assert_eq!(
+            agent_wallet_consent(&node, Some(bad))
+                .await
+                .unwrap_err()
+                .code,
+            -32602
+        );
+        let e = agent_wallet_consent(&node, Some(without("deadline")))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("'deadline'"), "{}", e.message);
         let mut bad = ok.clone();
         bad["registry"] = json!("0x12");
-        assert_eq!(agent_wallet_consent(&node, Some(bad)).await.unwrap_err().code, -32602);
+        assert_eq!(
+            agent_wallet_consent(&node, Some(bad))
+                .await
+                .unwrap_err()
+                .code,
+            -32602
+        );
         let e = agent_wallet_consent(&node, Some(ok)).await.unwrap_err();
-        assert_eq!(e.code, -32603, "no chain state on a node that is not running");
+        assert_eq!(
+            e.code, -32603,
+            "no chain state on a node that is not running"
+        );
     }
 }

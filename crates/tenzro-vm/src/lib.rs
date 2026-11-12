@@ -70,6 +70,7 @@ pub mod native;
 pub mod parallel;
 pub mod permit2;
 pub mod precompiles;
+pub mod protocol_range;
 pub mod runtime;
 pub mod state_adapter;
 pub mod svm;
@@ -77,6 +78,7 @@ pub mod token_ledger;
 
 pub mod account_outflow;
 pub mod delegation_guard;
+pub mod identity_required;
 /// Kani proof harnesses; see `proofs/mod.rs`.
 #[cfg(all(kani, feature = "kani"))]
 #[path = "../proofs/mod.rs"]
@@ -84,6 +86,7 @@ mod proofs;
 pub mod traits;
 pub mod tx_validity;
 pub mod types;
+pub mod validator_admission;
 
 // Re-export commonly used types
 pub use aa_execution::{

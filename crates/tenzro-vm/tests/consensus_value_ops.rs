@@ -267,7 +267,9 @@ fn quorum(seed_base: u8, label: &str) -> (Vec<k256::ecdsa::SigningKey>, Verifier
             .enumerate()
             .map(|(i, k)| VerifierMember {
                 address: member_address(k),
-                pq_public_key: tenzro_bridge::route::attestation::testing::pq_key(&k.to_bytes()).verifying_key_bytes().to_vec(),
+                pq_public_key: tenzro_bridge::route::attestation::testing::pq_key(&k.to_bytes())
+                    .verifying_key_bytes()
+                    .to_vec(),
                 operator: format!("{label}-op-{i}"),
                 rpc_provider: format!("{label}-rpc-{i}"),
             })
@@ -406,8 +408,18 @@ fn deliver(
         .take(signers)
         .map(|k| sign(k, &digest))
         .collect();
-    d.committee_pq = keys.verifiers.iter().take(signers).map(|k| sign_pq(k, &digest)).collect();
-    d.blessing_pq = keys.blessing.iter().take(signers).map(|k| sign_pq(k, &digest)).collect();
+    d.committee_pq = keys
+        .verifiers
+        .iter()
+        .take(signers)
+        .map(|k| sign_pq(k, &digest))
+        .collect();
+    d.blessing_pq = keys
+        .blessing
+        .iter()
+        .take(signers)
+        .map(|k| sign_pq(k, &digest))
+        .collect();
     d
 }
 

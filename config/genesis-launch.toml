@@ -1,8 +1,10 @@
 # Launch genesis: the production genesis with every post-quantum switch on
 # from block 0. A new network has no older nodes to stay compatible with, so
-# the switches built opt-in start enabled (see the end of [network_params]).
-# Everything else is the production genesis; a test holds the two files
-# equal outside those switches.
+# the switches built opt-in start enabled, the identity rule is live and
+# enforced from block 0, and the local block history window is 100,000 blocks
+# (see the end of [network_params]); [consensus] names the ordering rules.
+# Everything else is the production genesis; a test holds the two files equal
+# outside those values.
 #
 # Validators hold their consensus keys in hardware. Replace `validators = []`
 # with one `[[validators]]` entry per founding validator, each printed on its
@@ -31,6 +33,22 @@ compact_handoff_ms = 90000
 leader_slots = 2
 calendar_scale = 1
 idle_round_interval_ms = 5000
+
+# Ordering rules every validator applies alike: the DAG rounds kept below the
+# last committed leader and the seats a committee apportions by stake. They
+# decide the committee root and the ordering state, so they are fixed here and
+# a node's own [consensus] table cannot change them.
+[consensus]
+gc_depth = 50
+seat_budget = 1000
+
+# Validator registry rules that have no governed parameter and a release would
+# otherwise compile in. The registry configuration is committed chain state,
+# so they are fixed here. Its other rules (self-stake floor, the RPC provider
+# minimum stake.rpc_tnzo, exit churn, jail term) are governed parameters.
+[validator_registry]
+activation_churn_bps = 400
+reentry_cooldown_epochs = 4
 
 [network_params]
 # Starting values of governed network parameters. Each is changed only by an
@@ -278,6 +296,23 @@ idle_round_interval_ms = 5000
 # parameter turns it off. The hardware root stays classical: TPM attestation
 # keys are ECDSA P-256, and no TPM in the field implements the ML-DSA objects
 # of TPM 2.0 library v1.85 yet.
+
+# Recent blocks every node keeps locally: 100,000 (about 46 days at idle). The
+# registry value, 1,209,600, does not apply on this network; a vote changes it
+# later with no new genesis (registry floor 10,000).
+"storage.history_retention_blocks" = 100000
+
+# The identity rule from block 0: a transaction from an account with no registered
+# identity is refused at execution (RegisterIdentity, key enrolment and protocol
+# records stay open; a bonded validator is exempt). The registry's own genesis value
+# stays dormant so a running chain is untouched; naming the key here seeds it into
+# this genesis, in the state root and in genesis_inputs_digest like any parameter.
+"feature.identity_required.activation_epoch" = 0
+# The rule's mode once live: 0 enforce. A vote moves it to 1 (audit: nothing is
+# refused, what enforce would refuse is logged; expedited track, applies at the next
+# epoch) or 2 (off), and back to 0, with no new genesis. Every node's peer, mempool
+# and edge admission follow the same value.
+"feature.identity_required.mode" = 0
 
 [economy]
 # TPM manufacturer EK roots (PEM) a machine's endorsement certificate must
@@ -638,7 +673,7 @@ bridge_outflow = [
 # The finality program (RISC Zero image id) whose wrapped proofs the chain
 # accepts: the guest as RISC Zero's guest-builder container builds it, which the
 # prover embeds; `tenzro-finality-prover image-id` prints the same id anywhere.
-finality_program = "578bacf21a7a6a60d75ba661def3099b49231a66f52434b55cc987a18cf6ce39"
+finality_program = "84684b576dcba8ca62548bb2ef545eee3817bc5db36ac5a821847b5bd2b493a3"
 
 # Bridge routes the network starts with. Chain selectors are written as
 # strings, since TOML integers stop at 2^63 - 1. Every route below is a

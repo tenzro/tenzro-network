@@ -87,9 +87,19 @@ impl MachineOwner {
             &authenticator_data,
             &cdj,
         ));
+        // The owner's hardware ML-DSA-65 key is enrolled, so every approval
+        // carries its leg over the same digest.
+        let ml_dsa_signature = self.pq.sign(
+            tenzro_crypto::composite::LABEL_MLDSA65_P256,
+            &tenzro_crypto::composite::message_representative(
+                tenzro_crypto::composite::SignatureContext::AccountOwner,
+                digest,
+            ),
+        );
         json!({
             "challenge_id": challenge_id,
             "credential_id_hex": hex::encode(&self.credential_id),
+            "ml_dsa_signature_hex": hex::encode(ml_dsa_signature),
             "assertion": {
                 "authenticator_data": authenticator_data,
                 "client_data_json": cdj,
@@ -143,7 +153,12 @@ impl MachineOwner {
     }
 
     /// Enroll the owner's passkey account. Returns the account address.
-    pub async fn enroll(&mut self, client: &reqwest::Client, base_url: &str) -> String {
+    pub async fn enroll(
+        &mut self,
+        client: &reqwest::Client,
+        base_url: &str,
+        node: &TenzroNode,
+    ) -> String {
         let xy = self.passkey.public_key_bytes().to_vec();
         let (challenge_id, digest) = Self::challenge(
             client,
@@ -153,14 +168,7 @@ impl MachineOwner {
             &hex::encode(&self.credential_id),
         )
         .await;
-        let mut authorization = self.authorize(&challenge_id, &digest);
-        authorization["ml_dsa_signature_hex"] = json!(hex::encode(self.pq.sign(
-            tenzro_crypto::composite::LABEL_MLDSA65_P256,
-            &tenzro_crypto::composite::message_representative(
-                tenzro_crypto::composite::SignatureContext::AccountOwner,
-                &digest,
-            ),
-        )));
+        let authorization = self.authorize(&challenge_id, &digest);
         let resp = rpc(
             client,
             base_url,
@@ -175,10 +183,23 @@ impl MachineOwner {
             }),
         )
         .await;
-        resp["result"]["smart_account_address"]
+        let account = resp["result"]["smart_account_address"]
             .as_str()
             .unwrap_or_else(|| panic!("enroll failed: {resp}"))
-            .to_string()
+            .to_string();
+        // The identity registration an enrolment submits is a transaction no
+        // block carries in these harnesses, so the enrolled ML-DSA-65 key is
+        // recorded in chain state as that transaction would.
+        let mut state =
+            tenzro_vm::StateAdapter::with_storage(node.storage().expect("node storage").clone());
+        tenzro_vm::account_keys::set_enrolled_pq_key(
+            &mut state,
+            &xy,
+            self.pq.verifying_key_bytes().to_vec(),
+            &mut Vec::new(),
+        );
+        state.commit().expect("commit enrolled key");
+        account
     }
 
     /// The authenticatorData `navigator.credentials.create()` returns for the

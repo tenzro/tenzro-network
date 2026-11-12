@@ -176,7 +176,7 @@ impl EpochManager {
     /// `with_store` so that the validator-set history survives restarts —
     /// without that, a node catching up across an epoch boundary cannot
     /// verify historical commit-QCs and gets stuck in `InvalidHeight`
-    /// rejection (the May 2026 testnet stall).
+    /// rejection (a liveness stall).
     pub fn new(initial_validators: Vec<ValidatorInfo>, epoch_duration: u64) -> Result<Self> {
         let validator_set = ValidatorSet::new(0, initial_validators)?;
 
@@ -303,7 +303,7 @@ impl EpochManager {
             if current.start_height.as_u64() != canonical_start
                 || current.end_height.as_u64() != canonical_start + epoch_duration
             {
-                tracing::warn!(
+                tracing::debug!(
                     epoch = current.number,
                     start_height = %current.start_height,
                     end_height = %current.end_height,
@@ -422,6 +422,19 @@ impl EpochManager {
         height: BlockHeight,
         time_up: Option<u64>,
     ) -> Result<Option<ValidatorSet>> {
+        self.transition_epoch_checked(height, time_up, None)
+    }
+
+    /// As [`Self::transition_epoch_timed`], but the new validator set is
+    /// first offered to `check`, and a set it rejects fails the transition
+    /// before anything has changed: the epoch, the history and the pending
+    /// queues stay as they were, so the caller can try again.
+    pub fn transition_epoch_checked(
+        &self,
+        height: BlockHeight,
+        time_up: Option<u64>,
+        check: Option<&dyn Fn(&ValidatorSet) -> bool>,
+    ) -> Result<Option<ValidatorSet>> {
         // Acquire write lock for atomic transition
         // This prevents any concurrent reads or writes to the current epoch
         let mut current = self.current_epoch.write();
@@ -447,8 +460,14 @@ impl EpochManager {
         // (matching address replaces; new address appends subject to the
         // entrant budget). Pending entries are deltas rather than a full
         // replacement, so a single stake event doesn't reset the set.
-        let pending_adds: Vec<ValidatorInfo> = self.pending_validators.read().clone();
-        let pending_drops: Vec<Address> = self.pending_removals.read().clone();
+        // Both queues are taken in address order, so the set this builds
+        // depends on what is queued and never on the order or the epochs it
+        // was queued in: a node that restarted, and re-queued from the
+        // registry, builds the same set as one that kept its queue.
+        let mut pending_adds: Vec<ValidatorInfo> = self.pending_validators.read().clone();
+        pending_adds.sort_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()));
+        let mut pending_drops: Vec<Address> = self.pending_removals.read().clone();
+        pending_drops.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
 
         let old_set = &current.validator_set;
         let old_total_stake = old_set.total_stake();
@@ -581,6 +600,13 @@ impl EpochManager {
 
         // Create new validator set - this can fail, so we do it before modifying state
         let validator_set = ValidatorSet::new(next_epoch_number, next_validators)?;
+        if let Some(check) = check
+            && !check(&validator_set)
+        {
+            return Err(crate::error::ConsensusError::EpochTransition(format!(
+                "the validator set derived for epoch {next_epoch_number} is not the one expected"
+            )));
+        }
 
         // Calculate next epoch boundaries canonically from the epoch number —
         // NOT from the height the caller happened to transition at, and NOT
@@ -837,6 +863,15 @@ impl EpochManager {
     /// Returns the pending validator additions/updates for the next epoch
     pub fn pending_validators(&self) -> Vec<ValidatorInfo> {
         self.pending_validators.read().clone()
+    }
+
+    /// Empties both queues. The node does this at the start of each
+    /// boundary's staging and fills them again from the registry, so what is
+    /// queued is a function of the registry, the seated set and the chain
+    /// state alone, and never of what this process happened to keep.
+    pub fn clear_pending(&self) {
+        self.pending_validators.write().clear();
+        self.pending_removals.write().clear();
     }
 
     /// Returns the pending validator removals for the next epoch
@@ -1478,8 +1513,7 @@ mod tests {
     fn a_cohort_with_unbounded_stake_needs_several_epochs_to_own_the_set() {
         let honest: Vec<ValidatorInfo> = (0..6).map(|_| create_test_validator(1000)).collect();
         let manager = EpochManager::new(honest, 100).unwrap();
-        let cohort: Vec<ValidatorInfo> =
-            (0..12).map(|_| create_test_validator(100_000)).collect();
+        let cohort: Vec<ValidatorInfo> = (0..12).map(|_| create_test_validator(100_000)).collect();
         for c in &cohort {
             manager.add_pending_validator(c.clone());
         }
@@ -1825,5 +1859,64 @@ mod tests {
                 .install_recovery_epoch(5, BlockHeight::from(60), vec![create_test_validator(1)])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_transition_whose_set_fails_the_check_changes_nothing() {
+        let a = create_test_validator(1000);
+        let b = create_test_validator(1000);
+        let manager = EpochManager::new(vec![a.clone(), b.clone()], 100).unwrap();
+        let extra = create_test_validator(300);
+        manager.add_pending_validator(extra.clone());
+
+        let refused = manager.transition_epoch_checked(
+            BlockHeight::from(100),
+            None,
+            Some(&|_: &ValidatorSet| false),
+        );
+        assert!(refused.is_err());
+        assert_eq!(manager.current_epoch().number, 0, "the epoch did not move");
+        assert_eq!(manager.pending_validators().len(), 1, "the queue is intact");
+
+        let set = manager
+            .transition_epoch_checked(BlockHeight::from(100), None, Some(&|_: &ValidatorSet| true))
+            .unwrap()
+            .expect("due");
+        assert!(set.get_by_address(&extra.address).is_some());
+        assert_eq!(manager.current_epoch().number, 1);
+    }
+
+    /// Whatever order and in whichever epochs the changes were queued, the
+    /// next set is the same: queued entries are taken in address order.
+    #[test]
+    fn the_next_set_does_not_depend_on_the_order_changes_were_queued_in() {
+        let base: Vec<_> = (0..3).map(|_| create_test_validator(1000)).collect();
+        let adds: Vec<_> = (0..5).map(|_| create_test_validator(900)).collect();
+        let drops = [base[0].address, base[1].address];
+        let order = |perm: &[usize]| -> Vec<Address> {
+            let manager = EpochManager::new(base.clone(), 100).unwrap();
+            for i in perm {
+                manager.add_pending_validator(adds[*i].clone());
+            }
+            let removals: Vec<Address> = if perm[0] % 2 == 0 {
+                drops.to_vec()
+            } else {
+                drops.iter().rev().copied().collect()
+            };
+            for d in &removals {
+                manager.remove_pending_validator(d);
+            }
+            manager
+                .transition_epoch(BlockHeight::from(100))
+                .unwrap()
+                .unwrap()
+                .iter()
+                .map(|v| v.address)
+                .collect()
+        };
+        let first = order(&[0, 1, 2, 3, 4]);
+        for perm in [[4, 3, 2, 1, 0], [2, 0, 4, 1, 3], [1, 3, 0, 4, 2]] {
+            assert_eq!(order(&perm), first);
+        }
     }
 }

@@ -1,6 +1,6 @@
 //! Regression tests for cross-epoch validator-set persistence and lookup.
 //!
-//! These guard the May 2026 testnet stall fix: a node falling behind across
+//! These guard the liveness of catch-up: a node falling behind across
 //! one or more epoch transitions must be able to verify each historical
 //! block's commit-QC against the validator set that signed it, not the
 //! current epoch's set. Without persistent epoch history, a restart would

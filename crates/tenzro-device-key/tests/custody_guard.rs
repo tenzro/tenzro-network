@@ -62,6 +62,11 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "compiled only under cfg(test) (lib.rs gates the module); a test validator node key",
     ),
     (
+        "crates/tenzro-node/src/validator_admission_tests.rs",
+        "",
+        "compiled only under cfg(test) (lib.rs gates the module)",
+    ),
+    (
         "crates/tenzro-vm/src/native/machine_payment_tests.rs",
         "",
         "compiled only under cfg(test) (payment_settlement.rs gates the module)",

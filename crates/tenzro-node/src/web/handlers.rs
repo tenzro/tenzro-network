@@ -896,7 +896,7 @@ pub async fn node_did_document(State(state): State<Arc<WebState>>) -> axum::resp
 }
 
 pub async fn health(State(state): State<Arc<WebState>>) -> Json<HealthResponse> {
-    let (status, verification_service) = if let Some(ref node) = state.node {
+    let (status, verification_service, reasons) = if let Some(ref node) = state.node {
         let monitor = node.health_monitor();
         let overall = monitor.check_health();
         let status_str = match overall {
@@ -914,16 +914,53 @@ pub async fn health(State(state): State<Arc<WebState>>) -> Json<HealthResponse> 
             && monitor.subsystem_is_ok("identity")
             && monitor.subsystem_is_ok("vm");
 
-        (status_str, verify_ok)
+        let reasons = unhealthy_reasons(&monitor.list_subsystems());
+        (status_str, verify_ok, reasons)
     } else {
-        ("healthy".to_string(), true)
+        ("healthy".to_string(), true, Vec::new())
     };
 
     Json(HealthResponse {
         status,
         version: state.node_version.clone(),
         verification_service,
+        reasons,
     })
+}
+
+/// `subsystem: reason` for each subsystem that is degraded or unhealthy.
+fn unhealthy_reasons(subsystems: &[(String, crate::health::SubsystemStatus, u64)]) -> Vec<String> {
+    use crate::health::SubsystemStatus;
+    subsystems
+        .iter()
+        .filter_map(|(name, status, _)| match status {
+            SubsystemStatus::Healthy => None,
+            SubsystemStatus::Degraded { reason } => Some(format!("{name}: degraded: {reason}")),
+            SubsystemStatus::Unhealthy { reason } => Some(format!("{name}: unhealthy: {reason}")),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod health_reason_tests {
+    use super::*;
+    use crate::health::SubsystemStatus;
+
+    #[test]
+    fn a_degraded_status_says_why() {
+        let list = vec![
+            ("vm".to_string(), SubsystemStatus::Healthy, 1),
+            (
+                "tee".to_string(),
+                SubsystemStatus::Degraded {
+                    reason: "no TEE".into(),
+                },
+                1,
+            ),
+        ];
+        assert_eq!(unhealthy_reasons(&list), ["tee: degraded: no TEE"]);
+        assert!(unhealthy_reasons(&list[..1]).is_empty());
+    }
 }
 
 /// Readiness endpoint for K8s readinessProbe / load-balancer gating.
@@ -1225,7 +1262,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<WebState>>) -> axum::res
         }
     }
 
-    // Append stream-level SLO metrics (P1.3): tenzro_inference_ttft_seconds,
+    // Append stream-level SLO metrics: tenzro_inference_ttft_seconds,
     // tenzro_inference_intertoken_seconds (histograms), and the
     // started/completed/failed counters. Labels: (provider, model).
     // Observations are made inline by the SSE handlers in `rpc.rs` —

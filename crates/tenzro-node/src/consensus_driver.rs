@@ -79,8 +79,7 @@ const MAX_CHANNELS_PER_PEER: usize = 4;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Multiple of a connection's measured rtt the application handshake is
 /// given, once the QUIC connection is up: generous enough that one lost
-/// packet's PTO backoff does not throw the whole attempt away (LIVENESS-
-/// ROUND3-2026-10-22.md).
+/// packet's PTO backoff does not throw the whole attempt away.
 const HANDSHAKE_RTT_FACTOR: u32 = 16;
 /// Longest a handshake retry's rtt-scaled budget is allowed to grow to,
 /// across repeated timeouts on the same peer.
@@ -96,7 +95,7 @@ const HANDSHAKE_RETRY_CAP: Duration = Duration::from_secs(60);
 /// one likely to run out, which left the lower-index validator's own dial
 /// still in flight past ANSWER_GRACE and the higher-index side dialling
 /// too, creating the duplicate channels `OpenPeer`'s doc comment describes
-/// (TENZRO-INFLIGHT.md, 2026-10-21 research note).
+///.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The frames queued to one peer's channel, bounded in number and in bytes.
@@ -297,8 +296,7 @@ const INBOUND_BUDGET_STALL: Duration = Duration::from_secs(30);
 /// its source, but this is the backstop for any similar disagreement
 /// between the dialler's and the engine's own view that nothing else
 /// catches: past this long, the route is force-closed and left to redial
-/// fresh rather than trusted a moment longer (TENZRO-INFLIGHT.md,
-/// 2026-10-21 research note; Mysticeti's subscriber uses the same
+/// fresh rather than trusted a moment longer (Mysticeti's subscriber uses the same
 /// progress-based pattern, reconnecting when no block arrives within its
 /// own 30s SUBSCRIPTION_TIMEOUT).
 const PEER_ROUTE_STALL: Duration = Duration::from_secs(30);
@@ -515,9 +513,36 @@ pub struct OrderedSegment {
 /// Stages the validator registry's changes into the epoch manager, right
 /// before the next committee is derived.
 pub trait EpochPlanner: Send + Sync {
-    /// Queues the next epoch's entrants and exits.
-    fn stage_next_epoch(&self);
+    /// Queues the next epoch's entrants and exits, and returns the token that
+    /// names what it changed. Staging starts from the registry as it stood
+    /// before the boundary, so staging again gives the same result as staging
+    /// once. An error means the registry was left unchanged and no committee
+    /// is derived.
+    fn stage_next_epoch(&self) -> std::result::Result<String, String>;
+
+    /// Undoes what the staging named by `token` changed, after a derivation
+    /// that failed, so the next try starts from the registry as it was.
+    fn unstage_next_epoch(&self, _token: &str) {}
 }
+
+/// Backoff of the retries of a failed epoch-end derivation.
+#[derive(Debug)]
+struct CloseRetry {
+    next: Instant,
+    step: Duration,
+}
+
+impl Default for CloseRetry {
+    fn default() -> Self {
+        Self {
+            next: Instant::now(),
+            step: Duration::ZERO,
+        }
+    }
+}
+
+const CLOSE_RETRY_FIRST: Duration = Duration::from_secs(1);
+const CLOSE_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// What a node with a hardware validator key needs to run consensus, kept so
 /// it can start whenever it is seated: at genesis, or at the first epoch
@@ -668,6 +693,13 @@ const STUCK_BEHIND_MS: u64 = 60_000;
 /// How many rounds past its reach such a certificate's anchor must lie.
 const STUCK_MIN_LAG_ROUNDS: u64 = 4;
 
+/// How long this node's committed tip may stand still while block sync is
+/// served a verified certificate of the running epoch covering blocks past
+/// it before the core stands down and the node imports them as a follower.
+/// Unlike [`STUCK_BEHIND_MS`] it looks at the tip, which only moves with
+/// real progress, not at the core's reach round.
+const TIP_STALL_MS: u64 = 20_000;
+
 /// Latency samples kept for the ordered percentiles.
 const LATENCY_WINDOW: usize = 4_096;
 
@@ -739,6 +771,28 @@ const LATENCY_HORIZON: Duration = Duration::from_secs(60);
 /// ordered or handed back: as long as a batch is timed at all.
 const IN_FLIGHT_LEASE: Duration = LATENCY_HORIZON;
 
+/// What a cut makes of a pooled transaction this validator batched before,
+/// `None` when it did not.
+///
+/// One already ordered lets the sender's next transaction follow it: any
+/// part cut now is ordered after it. One in a part not yet ordered holds the
+/// sender's later transactions back, since that part can still be handed
+/// back or lost with its core, and a later part ordered ahead of it would
+/// execute ahead of its nonce and fail.
+fn already_batched(
+    h: &Hash,
+    in_flight: &HashMap<Hash, Instant>,
+    ordered: &HashMap<Hash, u64>,
+) -> Option<Pick> {
+    if ordered.contains_key(h) {
+        Some(Pick::Taken)
+    } else if in_flight.contains_key(h) {
+        Some(Pick::Wait)
+    } else {
+        None
+    }
+}
+
 /// How many of its own batches a validator holds unordered before it stops
 /// cutting more: well above what ordering at full load leaves outstanding,
 /// far below what a network stalled for minutes would pile up.
@@ -777,6 +831,8 @@ pub struct ConsensusHandle {
     /// boundaries, certificates and session certificates. A store of their
     /// own, so a write to the node's store never holds a consensus write.
     records: Option<Arc<dyn KvStore>>,
+    /// The thread the journal is written on, over `records`.
+    journal: Option<Arc<crate::journal_writer::JournalWriter>>,
     ordered: AtomicU64,
     /// The highest height this node executed, from its own ordering or
     /// imported. `ordered` also counts the heights a certificate covers,
@@ -810,6 +866,8 @@ pub struct ConsensusHandle {
     launcher: RwLock<Option<Launcher>>,
     /// Epoch of the running core, while one runs.
     running_epoch: AtomicU64,
+    /// When the running core's epoch ends, in block time (milliseconds).
+    epoch_ends_ms: AtomicU64,
     round: AtomicU64,
     /// The running core's reach round (see `Core::reach_round`): what it
     /// still needs from its peers starts above it.
@@ -818,6 +876,11 @@ pub struct ConsensusHandle {
     /// running core started: how long this validator's core has made no
     /// progress, for [`Self::on_certificate_while_validating`].
     last_reach_change_ms: AtomicU64,
+    /// The node tip block sync last saw served against, and the wall-clock
+    /// milliseconds it was first seen at that height: how long the tip has
+    /// stood still, for [`Self::on_served_certificate`].
+    tip_seen: AtomicU64,
+    tip_seen_ms: AtomicU64,
     last_certified: RwLock<Option<Instant>>,
     equivocations: AtomicU64,
     /// Consensus frames dropped because the queue to their peer was full.
@@ -858,6 +921,14 @@ pub struct ConsensusHandle {
     /// execution, so the epoch's end is acted on exactly once, right after
     /// its last block and before any later one.
     closing: parking_lot::Mutex<Option<u64>>,
+    /// Held while a committee is derived, from staging to the transition, so
+    /// two callers at one boundary derive it one after the other.
+    derivation: parking_lot::Mutex<()>,
+    /// When a pending epoch end is tried again after a failure, and how long
+    /// the wait grows to: from a second, doubling, to half a minute.
+    close_retry: parking_lot::Mutex<CloseRetry>,
+    /// A timer-started retry is under way.
+    close_retry_in_flight: std::sync::atomic::AtomicBool,
     /// The last executed blocks, (height, hash, post-state root), oldest
     /// first: what a core entering an epoch late starts from.
     executed_tail: parking_lot::Mutex<std::collections::VecDeque<(u64, [u8; 32], [u8; 32])>>,
@@ -947,6 +1018,9 @@ impl ConsensusHandle {
             mempool,
             epoch_manager,
             storage,
+            journal: records
+                .clone()
+                .map(|r| Arc::new(crate::journal_writer::JournalWriter::spawn(r))),
             records,
             ordered: AtomicU64::new(certified),
             executed: AtomicU64::new(0),
@@ -968,9 +1042,12 @@ impl ConsensusHandle {
             planner: RwLock::new(None),
             launcher: RwLock::new(None),
             running_epoch: AtomicU64::new(0),
+            epoch_ends_ms: AtomicU64::new(0),
             round: AtomicU64::new(0),
             committed_round: AtomicU64::new(0),
             last_reach_change_ms: AtomicU64::new(unix_ms()),
+            tip_seen: AtomicU64::new(u64::MAX),
+            tip_seen_ms: AtomicU64::new(unix_ms()),
             last_certified: RwLock::new(None),
             equivocations: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
@@ -985,6 +1062,9 @@ impl ConsensusHandle {
             session_cert: Arc::new(parking_lot::Mutex::new(None)),
             metrics: RwLock::new(None),
             closing: parking_lot::Mutex::new(None),
+            derivation: parking_lot::Mutex::new(()),
+            close_retry: parking_lot::Mutex::new(CloseRetry::default()),
+            close_retry_in_flight: std::sync::atomic::AtomicBool::new(false),
             executed_tail: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             awaiting_handover: AtomicBool::new(false),
             fast_forward_to: AtomicU64::new(0),
@@ -1091,8 +1171,9 @@ impl ConsensusHandle {
     }
 
     /// Shares this machine's endpoint record only with the machines of the
-    /// committee members that disclosed their endpoints to this node, so the
-    /// validator's endpoint resolves for the committee and no one else.
+    /// committee members that disclosed their endpoints to this node and with
+    /// the machines on its own boot list, so the validator's endpoint
+    /// resolves for the committee and its entry points and no one else.
     fn share_record_with_committee(&self) {
         let Some(launcher) = self.launcher.read().clone() else {
             return;
@@ -1365,6 +1446,32 @@ impl ConsensusHandle {
             self.stand_down();
             return true;
         }
+        // A stalled tip: the tip has not moved for [`TIP_STALL_MS`] while a
+        // verified certificate of the running epoch covers blocks past it.
+        // The core runs but does not order them (it cannot reach a quorum),
+        // and no other trigger fires for a certificate within its reach.
+        let now = unix_ms();
+        if self.tip_seen.swap(tip, Ordering::AcqRel) != tip {
+            self.tip_seen_ms.store(now, Ordering::Release);
+        }
+        let stalled_ms = now.saturating_sub(self.tip_seen_ms.load(Ordering::Acquire));
+        if stalled_ms >= TIP_STALL_MS
+            && epoch == self.running_epoch.load(Ordering::Acquire)
+            && cert.checkpoint.last_height > tip
+            && self.verify_certificate(cert).is_ok()
+        {
+            info!(
+                epoch,
+                index = cert.checkpoint.index,
+                last_height = cert.checkpoint.last_height,
+                tip,
+                stalled_ms,
+                "this validator's tip stalled while the network certified past it; following to catch up"
+            );
+            self.tip_seen_ms.store(now, Ordering::Release);
+            self.stand_down();
+            return true;
+        }
         self.on_certificate_while_validating(cert)
     }
 
@@ -1610,7 +1717,17 @@ impl ConsensusHandle {
     /// Deriving it moves the epoch manager on, so it happens once per epoch:
     /// a validator that derived it when its epoch closed, then fell behind
     /// and follows, takes the set it derived then.
-    fn derive_next_committee(&self, closing: u64, last_height: u64) -> Result<Committee> {
+    ///
+    /// With `expected_root`, the set the transition derives is checked
+    /// against it before the epoch manager moves; a set that does not match
+    /// leaves the manager where it was.
+    fn derive_next_committee(
+        &self,
+        closing: u64,
+        last_height: u64,
+        expected_root: Option<[u8; 32]>,
+    ) -> Result<Committee> {
+        let _derivation = self.derivation.lock();
         let em = &self.epoch_manager;
         if em.current_epoch().number > closing {
             let set = em.get_validator_set(closing + 1).ok_or_else(|| {
@@ -1624,15 +1741,48 @@ impl ConsensusHandle {
                 self.config.seat_budget,
             )?);
         }
-        if let Some(p) = self.planner.read().clone() {
-            p.stage_next_epoch();
+        // The committee is derived from the state at `last_height`, the epoch's
+        // last block. A node that has executed further, or not as far, would
+        // read other state and derive another committee: it refuses.
+        let executed = self.executed_height();
+        if executed != last_height {
+            return Err(NodeError::Other(format!(
+                "the next committee is derived from the state at height {last_height}, but this node has executed through height {executed}"
+            )));
         }
-        let set = match em.transition_epoch_timed(
+        let planner = self.planner.read().clone();
+        let token = match &planner {
+            Some(p) => Some(p.stage_next_epoch().map_err(|e| {
+                NodeError::Other(format!("the next epoch could not be staged: {e}"))
+            })?),
+            None => None,
+        };
+        let seat_budget = self.config.seat_budget;
+        let matches = |set: &tenzro_consensus::ValidatorSet| match expected_root {
+            None => true,
+            Some(root) => tenzro_consensus::committee::from_validator_set(set, seat_budget)
+                .is_ok_and(|c| c.root() == root),
+        };
+        // Staging changed the registry; a derivation that fails or does not
+        // happen puts it back, so a retry does not apply the boundary twice.
+        let set = match em.transition_epoch_checked(
             tenzro_types::primitives::BlockHeight::from(last_height),
             Some(closing),
-        )? {
-            Some(set) => set,
-            None => em.current_validator_set(),
+            Some(&matches),
+        ) {
+            Ok(Some(set)) => set,
+            Ok(None) => {
+                if let (Some(p), Some(t)) = (&planner, &token) {
+                    p.unstage_next_epoch(t);
+                }
+                em.current_validator_set()
+            }
+            Err(e) => {
+                if let (Some(p), Some(t)) = (&planner, &token) {
+                    p.unstage_next_epoch(t);
+                }
+                return Err(e.into());
+            }
         };
         Ok(tenzro_consensus::committee::from_validator_set(
             &set,
@@ -1644,8 +1794,11 @@ impl ConsensusHandle {
     /// derives the next committee and hands it to the running core, whose
     /// last checkpoint of the epoch commits its root.
     pub fn close_epoch(&self, last_height: u64) -> Result<()> {
-        let committee =
-            self.derive_next_committee(self.running_epoch.load(Ordering::Acquire), last_height)?;
+        let committee = self.derive_next_committee(
+            self.running_epoch.load(Ordering::Acquire),
+            last_height,
+            None,
+        )?;
         if let Some(tx) = self.inputs.read().as_ref() {
             let _ = tx.send(Input::NextCommittee(committee));
         }
@@ -1669,7 +1822,7 @@ impl ConsensusHandle {
             }
             return Ok(());
         }
-        let committee = self.derive_next_committee(last.epoch, last.last_height)?;
+        let committee = self.derive_next_committee(last.epoch, last.last_height, Some(root))?;
         if committee.root() != root {
             return Err(NodeError::Other(format!(
                 "checkpoint {} commits a next committee this node does not derive from its state",
@@ -1867,7 +2020,19 @@ impl ConsensusHandle {
     }
 
     /// Admits a transaction to the mempool.
+    ///
+    /// A beacon contribution for a round the beacon has left behind is
+    /// refused here: it could only revert, and a reverted transaction still
+    /// takes a place in a block and spends its sender's nonce.
     pub fn submit_transaction(&self, tx: SignedTransaction) -> Result<()> {
+        if let Some(storage) = self.storage.as_ref() {
+            let chain = tenzro_vm::StateAdapter::with_storage(storage.clone());
+            if crate::beacon::is_stale_contribution(&chain, &tx.transaction.tx_type) {
+                return Err(NodeError::from(tenzro_consensus::ConsensusError::Mempool(
+                    "the beacon has moved past the round this contribution is for".to_string(),
+                )));
+            }
+        }
         self.mempool.add_transaction(tx).map_err(NodeError::from)
     }
 
@@ -2315,18 +2480,54 @@ impl ConsensusHandle {
         self.me.read().is_some()
     }
 
-    /// Whether this validator is the one that records `cert`'s signers on
-    /// chain: the committee member whose position is the checkpoint index
-    /// modulo the committee size, so each checkpoint is recorded once.
-    pub fn records_signers_of(&self, cert: &Certificate) -> bool {
-        let Some(me) = *self.me.read() else {
-            return false;
-        };
-        let Some(committee) = self.committees.read().get(&cert.checkpoint.epoch).cloned() else {
-            return false;
-        };
+    /// This validator's turn to record the signers of `cert`'s epoch on
+    /// chain: 0 for the committee member whose position is the epoch number
+    /// modulo the committee size, 1 for the member after it, and so on round
+    /// the committee. `None` when this node is no member of the
+    /// checkpoint's epoch. Every member computes the same ranking, so
+    /// exactly one holds rank 0 for all of an epoch's checkpoints; the
+    /// others are the fallbacks, each waiting for its turn.
+    ///
+    /// The turn belongs to the epoch and not to the checkpoint. With one
+    /// member per checkpoint, consecutive checkpoints fell to different
+    /// members, whose records were ordered in any order: a later checkpoint's
+    /// record that landed first made the earlier one's refused as "at or
+    /// below one already recorded". One member sends an epoch's records in
+    /// index order from one account, so they cannot overtake each other.
+    pub fn record_rank(&self, cert: &Certificate) -> Option<u64> {
+        let me = (*self.me.read())?;
+        let committee = self
+            .committees
+            .read()
+            .get(&cert.checkpoint.epoch)
+            .cloned()?;
         let size = committee.members().len() as u64;
-        size > 0 && committee.member(me).is_some() && cert.checkpoint.index % size == u64::from(me)
+        if size == 0 || committee.member(me).is_none() {
+            return None;
+        }
+        Some((u64::from(me) + size - cert.checkpoint.epoch % size) % size)
+    }
+
+    /// Whether this validator is the one that records the signers of
+    /// `cert`'s epoch on chain first (see [`Self::record_rank`]).
+    pub fn records_signers_of(&self, cert: &Certificate) -> bool {
+        self.record_rank(cert) == Some(0)
+    }
+
+    /// The epoch of the running core and when it ends, in block time
+    /// (milliseconds). `None` while this node runs no core, so it is no
+    /// validator at the moment.
+    pub fn epoch_window(&self) -> Option<(u64, u64)> {
+        if !self.is_validator() {
+            return None;
+        }
+        let ends = self.epoch_ends_ms.load(Ordering::Acquire);
+        (ends > 0).then(|| (self.running_epoch.load(Ordering::Acquire), ends))
+    }
+
+    /// The genesis time rules.
+    pub fn time_rules(&self) -> &TimeRules {
+        &self.time
     }
 
     /// `cert` with the session certificate of every signer, as a
@@ -2451,9 +2652,7 @@ impl ConsensusHandle {
         let mut closing = self.closing.lock();
         if *closing == Some(height) {
             *closing = None;
-            if let Err(e) = self.close_epoch(height) {
-                warn!(height, error = %e, "the next committee could not be derived");
-            }
+            self.try_close(height, &mut closing);
         }
     }
 
@@ -2461,29 +2660,79 @@ impl ConsensusHandle {
     /// that height is executed, or right after it is.
     fn epoch_ends(&self, last_height: u64) {
         let mut closing = self.closing.lock();
-        let executed = self
-            .storage
-            .as_ref()
-            .and_then(|s| {
-                tenzro_storage::StateTrie::new(s.clone())
-                    .root_at(last_height)
-                    .ok()
-                    .flatten()
-            })
-            .is_some()
-            || self
-                .executed_tail
-                .lock()
-                .back()
-                .is_some_and(|(h, ..)| *h >= last_height);
-        if executed {
+        // Only the executed height decides: a state root already in the trie
+        // is written before the height is raised, and deriving in between
+        // would be refused with nothing left to derive it later.
+        if self.executed_height() >= last_height {
             *closing = None;
-            if let Err(e) = self.close_epoch(last_height) {
-                warn!(height = last_height, error = %e, "the next committee could not be derived");
-            }
+            self.try_close(last_height, &mut closing);
         } else {
             *closing = Some(last_height);
         }
+    }
+
+    /// Derives the next committee at `last_height`. When that fails the end
+    /// stays pending and is tried again by [`Self::retry_close`], which the
+    /// event loop calls each time it is still waiting to execute the next epoch's
+    /// first block. A node that has executed past `last_height` without having
+    /// derived the committee cannot derive it from the state it holds: that is
+    /// reported loudly and the node has to be resynchronised.
+    fn try_close(&self, last_height: u64, closing: &mut Option<u64>) {
+        let result = self.close_epoch(last_height);
+        if result.is_ok() {
+            *self.close_retry.lock() = CloseRetry::default();
+        }
+        if let Err(e) = result {
+            let executed = self.executed_height();
+            if executed > last_height {
+                tracing::error!(
+                    height = last_height,
+                    executed,
+                    error = %e,
+                    "this node executed past the end of an epoch without deriving the next committee; it must be resynchronised"
+                );
+            } else {
+                let mut retry = self.close_retry.lock();
+                retry.step = if retry.step.is_zero() {
+                    CLOSE_RETRY_FIRST
+                } else {
+                    (retry.step * 2).min(CLOSE_RETRY_MAX)
+                };
+                retry.next = Instant::now() + retry.step;
+                warn!(
+                    height = last_height,
+                    error = %e,
+                    retry_in_s = retry.step.as_secs(),
+                    "the next committee could not be derived; trying again"
+                );
+                *closing = Some(last_height);
+            }
+        }
+    }
+
+    /// Tries again to derive the next committee of an epoch whose end is
+    /// pending because an earlier try failed, once the wait after the last
+    /// failure is over. Storage work: call it off the async workers.
+    pub fn retry_close(&self) {
+        let mut closing = self.closing.lock();
+        if let Some(last_height) = *closing
+            && self.executed_height() == last_height
+            && Instant::now() >= self.close_retry.lock().next
+        {
+            *closing = None;
+            self.try_close(last_height, &mut closing);
+        }
+    }
+
+    /// Whether a pending epoch end is due for another try. The engine asks on
+    /// every tick, so a derivation that failed on a third of the validators
+    /// is tried again without waiting for a block that cannot come.
+    pub fn close_retry_due(&self) -> bool {
+        let Some(closing) = self.closing.try_lock() else {
+            return false;
+        };
+        closing.is_some_and(|l| self.executed_height() == l)
+            && Instant::now() >= self.close_retry.lock().next
     }
 
     /// Verifies `cert` against the committee of its epoch and, if it is new,
@@ -3237,6 +3486,7 @@ impl ConsensusHandle {
             last_metrics: (Instant::now(), 0, 0),
             buffers_over: false,
             journal_seq,
+            slow_journal: Default::default(),
             executed_through,
             sent_through: executed_through,
             catching_up: None,
@@ -3247,6 +3497,8 @@ impl ConsensusHandle {
         };
         self.committed_round
             .store(engine.core.reach_round().unwrap_or(0), Ordering::Release);
+        self.epoch_ends_ms
+            .store(engine.core.epoch_ends_ms(), Ordering::Release);
         self.running_epoch.store(committee_epoch, Ordering::Release);
         DIAG_WATCH.call_once(|| {
             tokio::spawn(async {
@@ -3292,7 +3544,7 @@ struct Links {
     channels: EpochChannels,
     /// diag: per-peer keep_dialled() activity, added to chase chaos seed
     /// 3054677367's peer set collapsing to one or two live channels and
-    /// never recovering (TENZRO-INFLIGHT.md, 2026-10-21). (attempts,
+    /// never recovering. (attempts,
     /// is_open skips, last activity ms, last dial result).
     dial_diag: parking_lot::Mutex<HashMap<ValidatorIndex, (u64, u64, u64, String)>>,
     /// diag: the stage name and start time (ms) of each peer's currently
@@ -3308,8 +3560,7 @@ struct Links {
 /// epoch; only a channel of the running epoch counts as up.
 ///
 /// Holds every live channel's own outbound sender, not just a count: under
-/// loss both sides can dial at once (TENZRO-INFLIGHT.md, 2026-10-21 research
-/// note), so two channels to the same peer can both be up while the engine
+/// loss both sides can dial at once, so two channels to the same peer can both be up while the engine
 /// (`Engine.peers`) keeps only the sender of whichever one's `PeerUp`
 /// arrived last. If that one later dies, its `PeerDown` used to remove the
 /// engine's only route to the peer even though an older channel was still
@@ -3638,7 +3889,7 @@ impl Links {
         // specifically on the handshake: a path whose rtt alone is not
         // enough margin (a lost packet's PTO backoff pushed it over) gets a
         // bigger budget next time instead of failing at the same one
-        // forever (LIVENESS-ROUND3-2026-10-22.md). Any other kind of dial
+        // forever. Any other kind of dial
         // failure (connect, endpoint lookup, ...) leaves it as is; a success
         // resets it.
         let mut hs_scale: u32 = 1;
@@ -3866,7 +4117,7 @@ impl Links {
     /// actual handover, while this node's own committee is still the one
     /// running, so a slow handshake under loss has the rest of the epoch to
     /// finish in rather than the few seconds between the handover
-    /// certificate and round 0 (LIVENESS-ROUND3-2026-10-22.md). `me` is this
+    /// certificate and round 0. `me` is this
     /// node's own index in `next`, already resolved by the caller. Nothing
     /// here retries: a peer this reaches is simply already open by the time
     /// `enter_epoch`'s own `dial_all` looks for it (`EpochChannels::open_now`
@@ -4111,7 +4362,7 @@ impl Links {
                 // while still arriving steadily the whole time. Wrapping
                 // the whole read in one outer CHANNEL_SILENCE, as this used
                 // to, tore the channel down mid-transfer under exactly that
-                // condition (TENZRO-INFLIGHT.md, 2026-10-21).
+                // condition.
                 read = tenzro_iroh::read_frame_idle(&mut recv, MAX_WIRE_FRAME, silence) => read,
                 end = &mut writer => break Err(NodeError::Other(match end {
                     Ok(end) => format!("the channel's send side {end}"),
@@ -4171,8 +4422,7 @@ impl Links {
                 // keeps just one sender per peer, so a dying channel whose
                 // own PeerUp happened to be the one the engine is still
                 // using must not leave the peer unreachable while a healthy
-                // sibling sits there unused (TENZRO-INFLIGHT.md, 2026-10-21
-                // research note; `OpenPeer`'s doc comment above).
+                // sibling sits there unused (`OpenPeer`'s doc comment above).
                 let survivor = lease.retire();
                 drop(lease);
                 let _ = self.inputs.send(Input::PeerDown { peer, sender: down });
@@ -4343,6 +4593,8 @@ struct Engine {
     buffers_over: bool,
     /// Sequence number of the next recovery journal entry.
     journal_seq: u64,
+    /// Spaces out the warnings about slow journal writes.
+    slow_journal: crate::journal_writer::SlowWriteLog,
     /// Heights executed before a recovery: segments up to here are not
     /// executed again; their hashes and roots come from storage.
     executed_through: u64,
@@ -4363,7 +4615,7 @@ struct Engine {
     /// force-closed and left to redial fresh rather than trusted a moment
     /// longer: the backstop for a disagreement between the dialler and the
     /// engine's own routing table that nothing else caught in time
-    /// (TENZRO-INFLIGHT.md, 2026-10-21 research note).
+    ///.
     peer_route_missing_since: HashMap<ValidatorIndex, u64>,
 }
 
@@ -4373,7 +4625,7 @@ impl Engine {
     /// `PEER_ROUTE_STALL`: the progress-based backstop for a disagreement
     /// between the dialler's and the engine's own view of which channels
     /// are actually serving traffic that the duplicate-channel fix did not
-    /// anticipate (TENZRO-INFLIGHT.md, 2026-10-21 research note).
+    /// anticipate.
     fn check_peer_routes(&mut self, now: u64) {
         let me = self.core.me();
         let epoch = self.core.committee().epoch;
@@ -4466,6 +4718,18 @@ impl Engine {
                         }
                     }
                     self.check_peer_routes(now);
+                    if self.handle.close_retry_due()
+                        && !self
+                            .handle
+                            .close_retry_in_flight
+                            .swap(true, Ordering::AcqRel)
+                    {
+                        let handle = self.handle.clone();
+                        tokio::task::spawn_blocking(move || {
+                            handle.retry_close();
+                            handle.close_retry_in_flight.store(false, Ordering::Release);
+                        });
+                    }
                     self.retry_fast_forward();
                     self.pace_to_execution();
                     self.core.on_tick(now);
@@ -4501,7 +4765,7 @@ impl Engine {
                 }
             }
             if self.stopping {
-                self.flush();
+                self.flush().await;
                 info!(epoch = self.core.committee().epoch, "consensus stopped");
                 return;
             }
@@ -4533,13 +4797,13 @@ impl Engine {
                 return;
             }
             self.beat.mark(4);
-            if !self.flush() {
+            if !self.flush().await {
                 return;
             }
             self.beat.mark(5);
             let seated = self.handle_events().await;
             self.beat.mark(9);
-            if !self.flush() || !seated {
+            if !self.flush().await || !seated {
                 return;
             }
         }
@@ -4878,7 +5142,7 @@ impl Engine {
             .retain(|_, at| now.duration_since(*at) < IN_FLIGHT_LEASE);
         // The mempool shows each sender's transactions in nonce order from
         // its executed nonce, and a later one only once the one before it is
-        // batched or already in flight: once one waits, every later one of
+        // batched in this part or already ordered: once one waits, every later one of
         // that sender waits with it, since batched without it they would
         // execute ahead of their nonce and fail. The walk ends when the part
         // is full, so a cut costs what it takes, not the size of the pool.
@@ -4891,8 +5155,34 @@ impl Engine {
             &self.stepped_in,
         );
         let mut stepping_in: Vec<Address> = Vec::new();
+        // A beacon contribution whose round the beacon has passed would only
+        // revert, taking a place in the block. It is dropped, unless the
+        // sender has a later transaction pooled: that one needs the nonce
+        // this one spends, even by reverting.
+        let chain = self
+            .handle
+            .storage
+            .as_ref()
+            .map(|s| tenzro_vm::StateAdapter::with_storage(s.clone()));
+        let mempool_ref = &self.handle.mempool;
+        let mut stale: Vec<Hash> = Vec::new();
         self.handle.mempool.select_with(|h, tx| {
-            if in_flight.contains_key(h) || ordered.contains_key(h) {
+            if let Some(pick) = already_batched(h, in_flight, ordered) {
+                return pick;
+            }
+            // A signers record for a checkpoint another validator's copy has
+            // already put on the chain is dropped the same way.
+            if let Some(chain) = chain.as_ref()
+                && (crate::beacon::is_stale_contribution(chain, &tx.transaction.tx_type)
+                    || crate::checkpoint_recorder::is_recorded_checkpoint(
+                        chain,
+                        &tx.transaction.tx_type,
+                    ))
+                && !mempool_ref.has_pending_from(&tx.transaction.from, |o| {
+                    o.transaction.nonce.0 > tx.transaction.nonce.0
+                })
+            {
+                stale.push(*h);
                 return Pick::Taken;
             }
             let from = tx.transaction.from;
@@ -4919,6 +5209,13 @@ impl Engine {
         });
         for from in stepping_in {
             self.stepped_in.insert(from, now);
+        }
+        if !stale.is_empty() {
+            debug!(
+                dropped = stale.len(),
+                "stale beacon contributions left the mempool"
+            );
+            self.handle.mempool.remove_transactions(&stale);
         }
         let mempool = &self.handle.mempool;
         self.first_seen.retain(|h, _| mempool.contains(h));
@@ -4962,11 +5259,15 @@ impl Engine {
     /// written: the core then holds state that is not on disk, and a
     /// validator that carried on from it could contradict itself after a
     /// restart, so it stops instead.
-    fn flush(&mut self) -> bool {
+    ///
+    /// The synced write runs on the journal's own thread, which joins it
+    /// with any other write waiting; this waits for it without holding an
+    /// executor thread, and sends only once it is durable.
+    async fn flush(&mut self) -> bool {
         let epoch = self.core.committee().epoch;
         let records = self.core.take_journal();
         if !records.is_empty()
-            && let Some(s) = &self.handle.records
+            && let Some(writer) = self.handle.journal.clone()
         {
             let started = Instant::now();
             let value = bincode::serialize(&records).expect("records encode");
@@ -4977,15 +5278,22 @@ impl Engine {
                 key: journal_key(epoch, self.journal_seq),
                 value,
             };
-            let written = s.write_batch_sync(vec![op]);
+            let written = writer.write(vec![op]).await;
             let took_ms = started.elapsed().as_millis() as u64;
-            if took_ms >= 1_000 {
+            let threshold_ms =
+                crate::journal_writer::slow_threshold_ms(self.handle.config.leader_timeout_ms);
+            if let Some(held_back) = self
+                .slow_journal
+                .warn(took_ms, threshold_ms, Instant::now())
+            {
                 warn!(
                     validator = self.core.me(),
                     records = records.len(),
                     bytes,
                     encoded_ms,
                     took_ms,
+                    threshold_ms,
+                    held_back,
                     "diag: consensus journal write was slow"
                 );
             }
@@ -5457,6 +5765,9 @@ impl Engine {
                     me,
                     start,
                 );
+                self.handle
+                    .epoch_ends_ms
+                    .store(self.core.epoch_ends_ms(), Ordering::Release);
                 // Parts the last core took but neither ordered nor handed
                 // back are gone with it: their transactions are batched
                 // again. Kept in flight, the sender would wait on them for
@@ -5987,8 +6298,7 @@ pub(crate) mod tests {
     /// If the newer one dies, the older one -- still live -- must be handed
     /// back to the engine rather than left orphaned: this seed stalled
     /// chaos runs for 840-966s with exactly this signature (dial_stage
-    /// "running the channel" for peers missing from `peers`, run
-    /// 20261021T0406Z, TENZRO-INFLIGHT.md 2026-10-21).
+    /// "running the channel" for peers missing from `peers`).
     #[tokio::test]
     async fn a_peers_older_channel_survives_its_newer_sibling_dying() {
         let channels = EpochChannels::new(0);
@@ -6338,7 +6648,7 @@ pub(crate) mod tests {
     /// The dialling side used to carry no timeout at all (only the
     /// answering side did, see the test above) - so a peer that went
     /// silent right after accepting a connection, exactly what
-    /// netem-induced packet loss can cause mid-epoch, could wedge that
+    /// packet loss can cause mid-epoch, could wedge that
     /// peer's `keep_dialled` task permanently: no error, no backoff, no
     /// further redial ever attempted, for the rest of the run.
     #[tokio::test]
@@ -6432,8 +6742,7 @@ pub(crate) mod tests {
         // Raw: the handshake itself carries no bound at all - that is the
         // bug. It is still pending once a generous bound runs out. The
         // connect step is out of dial_handshake's own scope now (split from
-        // it so a slow connect and a slow handshake get separate budgets,
-        // TENZRO-INFLIGHT.md 2026-10-21), so the test opens the stream
+        // it so a slow connect and a slow handshake get separate budgets), so the test opens the stream
         // itself, the same way dial_inner does just before calling it.
         let (send, recv) = tenzro_iroh::open_consensus_stream(&links.endpoint, server.addr())
             .await
@@ -6605,6 +6914,102 @@ pub(crate) mod tests {
             Some(records),
         )
         .expect("consensus handle")
+    }
+
+    /// A handle seated as validator 0 of its one-member committee, as a
+    /// running core leaves it.
+    pub(crate) fn seated_validator() -> Arc<ConsensusHandle> {
+        let handle = handle_with_one_validator();
+        *handle.me.write() = Some(0);
+        handle
+    }
+
+    struct AtNonce(u64);
+
+    impl tenzro_consensus::mempool::AccountStateReader for AtNonce {
+        fn account_nonce(&self, _: &Address) -> u64 {
+            self.0
+        }
+        fn account_balance(&self, _: &Address) -> u128 {
+            u128::MAX / 4
+        }
+        fn block_base_fee(&self) -> u128 {
+            0
+        }
+    }
+
+    /// A sender's later transaction is not cut into a new part while the
+    /// part holding the one before it is not yet ordered: that part can be
+    /// handed back or lost with its core, and the later part ordered ahead
+    /// of it would execute ahead of its nonce and fail. Once the earlier
+    /// part is ordered the later one follows it; once it is handed back the
+    /// whole run is cut again in nonce order.
+    #[test]
+    fn a_later_nonce_is_not_cut_while_the_one_before_it_is_unordered() {
+        use tenzro_crypto::composite::HybridSigner as _;
+        use tenzro_types::transaction::{Transaction, TransactionType};
+        let mempool = tenzro_consensus::mempool::Mempool::new(Arc::new(
+            tenzro_consensus::ConsensusConfig::default(),
+        ));
+        mempool.set_state_reader(Arc::new(AtNonce(0))).unwrap();
+        let signer = tenzro_crypto::composite::testing::TestHybridSigner::p256_only(1);
+        let tx = |nonce: u64| {
+            let tx = Transaction::new(
+                tenzro_types::primitives::ChainId::from(1),
+                Address::default(),
+                Address::default(),
+                tenzro_types::primitives::Nonce::from(nonce),
+                TransactionType::Transfer { amount: 1 },
+                21_000,
+                1_000_000_000,
+            );
+            let sig = signer
+                .sign(
+                    tenzro_crypto::composite::SignatureContext::Transaction,
+                    tx.hash().as_bytes(),
+                )
+                .unwrap();
+            SignedTransaction::new(tx, signer.public_key().p256.clone(), sig)
+        };
+        let cut = |in_flight: &HashMap<Hash, Instant>, ordered: &HashMap<Hash, u64>| {
+            let mut out = Vec::new();
+            mempool.select_with(|h, t| {
+                if let Some(pick) = already_batched(h, in_flight, ordered) {
+                    return pick;
+                }
+                out.push((*h, t.transaction.nonce.0));
+                Pick::Take
+            });
+            out
+        };
+        let nonces = |cut: &[(Hash, u64)]| cut.iter().map(|(_, n)| *n).collect::<Vec<_>>();
+        let mut in_flight = HashMap::new();
+        let mut ordered = HashMap::new();
+
+        for n in 0..2 {
+            mempool.add_transaction(tx(n)).unwrap();
+        }
+        let first = cut(&in_flight, &ordered);
+        assert_eq!(nonces(&first), vec![0, 1], "in order, in one part");
+        for (h, _) in &first {
+            in_flight.insert(*h, Instant::now());
+        }
+        mempool.add_transaction(tx(2)).unwrap();
+        assert_eq!(
+            nonces(&cut(&in_flight, &ordered)),
+            Vec::<u64>::new(),
+            "nonce 2 waits while the part holding 0 and 1 is unordered"
+        );
+
+        for (h, _) in &first {
+            in_flight.remove(h);
+            ordered.insert(*h, 1);
+        }
+        assert_eq!(nonces(&cut(&in_flight, &ordered)), vec![2]);
+
+        // Handed back unordered instead: everything is cut again, in order.
+        ordered.clear();
+        assert_eq!(nonces(&cut(&in_flight, &ordered)), vec![0, 1, 2]);
     }
 
     /// A consensus record goes to the records store and never to the node's
@@ -7208,9 +7613,12 @@ pub(crate) mod tests {
     #[test]
     fn the_next_committee_is_derived_once_per_epoch() {
         let handle = handle_with_one_validator();
-        let first = handle.derive_next_committee(0, 3).expect("derives");
+        handle.executed.store(3, Ordering::Release);
+        let first = handle.derive_next_committee(0, 3, None).expect("derives");
         assert_eq!(handle.epoch_manager.current_epoch().number, 1);
-        let again = handle.derive_next_committee(0, 3).expect("derives again");
+        let again = handle
+            .derive_next_committee(0, 3, None)
+            .expect("derives again");
         assert_eq!(
             handle.epoch_manager.current_epoch().number,
             1,
@@ -7218,6 +7626,32 @@ pub(crate) mod tests {
         );
         assert_eq!(first.root(), again.root());
         assert_eq!(first.epoch, 1);
+    }
+
+    /// A committee is derived only from the state at the epoch's last block:
+    /// a node that executed past it, or not up to it, refuses and the epoch
+    /// manager stays where it was.
+    #[test]
+    fn the_next_committee_is_not_derived_from_other_state_than_the_closing_block() {
+        let handle = handle_with_one_validator();
+        handle.executed.store(5, Ordering::Release);
+        assert!(
+            handle.derive_next_committee(0, 3, None).is_err(),
+            "ahead of the closing block"
+        );
+        handle.executed.store(2, Ordering::Release);
+        assert!(
+            handle.derive_next_committee(0, 3, None).is_err(),
+            "behind it"
+        );
+        assert_eq!(
+            handle.epoch_manager.current_epoch().number,
+            0,
+            "nothing moved"
+        );
+        handle.executed.store(3, Ordering::Release);
+        assert!(handle.derive_next_committee(0, 3, None).is_ok());
+        assert_eq!(handle.epoch_manager.current_epoch().number, 1);
     }
 
     /// The high-water mark of a validator that never signed before.
@@ -7647,6 +8081,42 @@ pub(crate) mod tests {
         assert_eq!(net.handed_to_core(), None);
     }
 
+    /// A validator whose core runs but cannot reach a quorum, served a
+    /// verified certificate of its running epoch for blocks past its tip,
+    /// within the DAG's reach and not closing the epoch: no other trigger
+    /// fires. Once its tip has stood still for [`TIP_STALL_MS`] it stands
+    /// down and imports them; before that, or with its tip moving, it
+    /// leaves its core alone.
+    #[test]
+    fn a_validator_whose_tip_stalls_while_certificates_run_ahead_follows() {
+        let mut net = Committee4::new();
+        let ahead = net.certify(0, 10, 12);
+        // First sighting of the tip: the clock starts, the core is left alone.
+        assert!(!net.handle.on_served_certificate(&ahead, 3));
+        assert!(net.handle.is_validator());
+        assert!(!net.stood_down());
+
+        // A tip that moves restarts the clock, however old it was.
+        net.handle
+            .tip_seen_ms
+            .store(unix_ms() - TIP_STALL_MS - 1_000, Ordering::Release);
+        assert!(!net.handle.on_served_certificate(&ahead, 4));
+        assert!(net.handle.is_validator(), "the tip moved");
+
+        // A certificate covering nothing past the tip changes nothing.
+        net.handle
+            .tip_seen_ms
+            .store(unix_ms() - TIP_STALL_MS - 1_000, Ordering::Release);
+        let behind = net.certify(0, 2, 12);
+        assert!(!net.handle.on_served_certificate(&behind, 4));
+        assert!(net.handle.is_validator(), "nothing past the tip");
+
+        // The tip stood still past the window while the network is ahead.
+        assert!(net.handle.on_served_certificate(&ahead, 4));
+        assert!(!net.handle.is_validator(), "it follows");
+        assert!(net.stood_down());
+    }
+
     /// The handover is served to a peer short of its epoch's last blocks
     /// only with every body between the end and it: without one, the peer
     /// could not authenticate the end's blocks, and is served the end.
@@ -7734,8 +8204,9 @@ pub(crate) mod tests {
         .expect("consensus handle");
         let mut derived = Vec::new();
         for closing in 0..40u64 {
+            handle.executed.store(10 * (closing + 1), Ordering::Release);
             let next = handle
-                .derive_next_committee(closing, 10 * (closing + 1))
+                .derive_next_committee(closing, 10 * (closing + 1), None)
                 .expect("the next committee");
             handle.add_committee(next.clone());
             derived.push(next);
@@ -7775,12 +8246,8 @@ pub(crate) mod tests {
             1 << 80,
         )];
         let open = || {
-            let db = Arc::new(
-                tenzro_storage::RocksDbStore::open(&tenzro_storage::StorageConfig::new(
-                    dir.path().to_path_buf(),
-                ))
-                .expect("store"),
-            );
+            let config = tenzro_storage::StorageConfig::new(dir.path().to_path_buf());
+            let db = Arc::new(tenzro_storage::RocksDbStore::open(&config).expect("store"));
             let em = Arc::new(
                 EpochManager::with_store(
                     validators.clone(),
@@ -7808,8 +8275,9 @@ pub(crate) mod tests {
         // Three epochs end, the last two having ordered no block.
         let mut derived = Vec::new();
         for closing in 0..3u64 {
+            handle.executed.store(10 * (closing + 1), Ordering::Release);
             let next = handle
-                .derive_next_committee(closing, 10 * (closing + 1))
+                .derive_next_committee(closing, 10 * (closing + 1), None)
                 .expect("the next committee");
             handle.add_committee(next.clone());
             derived.push(next);
@@ -7827,5 +8295,175 @@ pub(crate) mod tests {
                 next.epoch
             );
         }
+    }
+
+    /// The epoch's end reaches the driver while the closing block is being
+    /// executed: the state root is in the trie but the executed height is still
+    /// to be raised. The committee is derived when the height is raised, not
+    /// lost.
+    #[test]
+    fn a_committee_is_derived_when_the_closing_block_is_reported_after_the_epoch_end() {
+        let handle = handle_with_one_validator();
+        handle.executed.store(4, Ordering::Release);
+        handle.epoch_ends(5);
+        assert_eq!(
+            handle.epoch_manager.current_epoch().number,
+            0,
+            "waits for the block"
+        );
+        assert_eq!(*handle.closing.lock(), Some(5));
+        handle.on_executed(5, Hash::zero(), Hash::zero());
+        assert_eq!(
+            handle.epoch_manager.current_epoch().number,
+            1,
+            "derived once it is executed"
+        );
+    }
+
+    #[derive(Default)]
+    struct CountingPlanner {
+        staged: std::sync::atomic::AtomicUsize,
+        unstaged: std::sync::atomic::AtomicUsize,
+        fail_first: std::sync::atomic::AtomicBool,
+        /// Fails this many stagings from the first.
+        fail_times: std::sync::atomic::AtomicUsize,
+    }
+
+    impl EpochPlanner for CountingPlanner {
+        fn stage_next_epoch(&self) -> std::result::Result<String, String> {
+            let n = self.staged.fetch_add(1, Ordering::SeqCst);
+            if (self.fail_first.load(Ordering::SeqCst) && n == 0)
+                || n < self.fail_times.load(Ordering::SeqCst)
+            {
+                return Err("the staging failed".to_string());
+            }
+            Ok(format!("boundary:{n}"))
+        }
+        fn unstage_next_epoch(&self, _token: &str) {
+            self.unstaged.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A derivation that fails after staging undoes the staging, and the retry
+    /// stages from the start again.
+    #[test]
+    fn a_failed_derivation_undoes_its_staging_and_the_retry_stages_again() {
+        let handle = handle_with_one_validator();
+        let planner = Arc::new(CountingPlanner::default());
+        handle.set_epoch_planner(planner.clone());
+        handle.executed.store(3, Ordering::Release);
+        assert!(handle.derive_next_committee(0, 3, Some([9; 32])).is_err());
+        assert_eq!(planner.staged.load(Ordering::SeqCst), 1);
+        assert_eq!(planner.unstaged.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.epoch_manager.current_epoch().number, 0);
+        assert!(handle.derive_next_committee(0, 3, None).is_ok());
+        assert_eq!(planner.staged.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            planner.unstaged.load(Ordering::SeqCst),
+            1,
+            "a derivation that held is kept"
+        );
+    }
+
+    /// Two callers at one boundary derive the committee one after the other:
+    /// the registry is staged once and both get the same committee.
+    #[test]
+    fn two_concurrent_derivations_at_one_boundary_stage_once() {
+        let handle = handle_with_one_validator();
+        let planner = Arc::new(CountingPlanner::default());
+        handle.set_epoch_planner(planner.clone());
+        handle.executed.store(3, Ordering::Release);
+        let roots: Vec<[u8; 32]> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| handle.derive_next_committee(0, 3, None).unwrap().root()))
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        assert!(roots.windows(2).all(|w| w[0] == w[1]));
+        assert_eq!(planner.staged.load(Ordering::SeqCst), 1, "staged once");
+        assert_eq!(handle.epoch_manager.current_epoch().number, 1);
+    }
+
+    /// A derivation that fails at the closing height is tried again, and
+    /// succeeds, without waiting for a restart.
+    #[test]
+    fn a_derivation_that_fails_once_is_retried() {
+        let handle = handle_with_one_validator();
+        let planner = Arc::new(CountingPlanner::default());
+        planner.fail_first.store(true, Ordering::SeqCst);
+        handle.set_epoch_planner(planner.clone());
+        handle.executed.store(3, Ordering::Release);
+        handle.epoch_ends(3);
+        assert_eq!(
+            handle.epoch_manager.current_epoch().number,
+            0,
+            "the first try failed"
+        );
+        assert_eq!(*handle.closing.lock(), Some(3), "the end is still pending");
+        // The wait after the failure is not over: nothing is tried.
+        assert!(!handle.close_retry_due());
+        handle.retry_close();
+        assert_eq!(handle.epoch_manager.current_epoch().number, 0, "backed off");
+        handle.close_retry.lock().next = Instant::now();
+        assert!(handle.close_retry_due());
+        handle.retry_close();
+        assert_eq!(
+            handle.epoch_manager.current_epoch().number,
+            1,
+            "the retry derived it"
+        );
+        assert_eq!(*handle.closing.lock(), None);
+    }
+
+    /// A node that executed past the end of an epoch without deriving the next
+    /// committee cannot derive it from the state it holds: it is refused and
+    /// the end is not tried again.
+    #[test]
+    fn a_node_that_executed_past_an_epoch_end_without_deriving_it_is_refused() {
+        let handle = handle_with_one_validator();
+        handle.executed.store(7, Ordering::Release);
+        assert!(handle.derive_next_committee(0, 3, None).is_err());
+        handle.epoch_ends(3);
+        assert_eq!(handle.epoch_manager.current_epoch().number, 0);
+        assert_eq!(
+            *handle.closing.lock(),
+            None,
+            "no retry that could never succeed"
+        );
+    }
+
+    /// With no block coming, a derivation that fails twice is tried again by
+    /// the timer, after a wait that doubles, and succeeds.
+    #[test]
+    fn a_derivation_that_fails_twice_is_retried_by_the_timer_with_backoff() {
+        let handle = handle_with_one_validator();
+        let planner = Arc::new(CountingPlanner::default());
+        planner.fail_times.store(2, Ordering::SeqCst);
+        handle.set_epoch_planner(planner.clone());
+        handle.executed.store(3, Ordering::Release);
+        handle.epoch_ends(3);
+        assert_eq!(handle.close_retry.lock().step, CLOSE_RETRY_FIRST);
+        // What the engine does on a tick, once the wait is over.
+        handle.close_retry.lock().next = Instant::now();
+        assert!(handle.close_retry_due());
+        handle.retry_close();
+        assert_eq!(
+            handle.close_retry.lock().step,
+            CLOSE_RETRY_FIRST * 2,
+            "the wait doubled"
+        );
+        assert_eq!(handle.epoch_manager.current_epoch().number, 0);
+        handle.close_retry.lock().next = Instant::now();
+        handle.retry_close();
+        assert_eq!(
+            handle.epoch_manager.current_epoch().number,
+            1,
+            "the third try held"
+        );
+        assert!(
+            handle.close_retry.lock().step.is_zero(),
+            "the wait is reset"
+        );
+        assert!(!handle.close_retry_due());
     }
 }

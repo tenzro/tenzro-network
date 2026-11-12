@@ -549,13 +549,9 @@ impl RouteFramework {
             &d.committee_pq,
         )?;
         match &route.blessing {
-            Some(blessing) => verify_committee(
-                blessing,
-                "blessing",
-                &digest,
-                &d.blessing,
-                &d.blessing_pq,
-            )?,
+            Some(blessing) => {
+                verify_committee(blessing, "blessing", &digest, &d.blessing, &d.blessing_pq)?
+            }
             None if !d.blessing.is_empty() || !d.blessing_pq.is_empty() => {
                 return Err(refuse(
                     "blessing signatures on a route without a blessing committee",

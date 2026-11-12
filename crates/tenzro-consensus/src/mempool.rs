@@ -37,6 +37,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
+use tenzro_onboarding_types::onboarding::Standing;
 use tenzro_types::primitives::{Address, Hash};
 use tenzro_types::transaction::{SignedTransaction, TransactionType};
 
@@ -58,6 +59,31 @@ pub trait AccountStateReader: Send + Sync {
     /// Base fee the next block charges, per unit of gas. A transaction
     /// offering less is never executed, so it is not admitted either.
     fn block_base_fee(&self) -> u128;
+}
+
+/// What the identity registry says about the account that sends a
+/// transaction, so the mempool admits only registered senders.
+///
+/// Implemented by the node over consensus chain state (the wallet-to-identity
+/// index `RegisterIdentity` writes, and the revocation markers) and wired
+/// post-construction with [`Mempool::set_sender_registry`]. Unwired, the
+/// mempool admits any sender, as before.
+pub trait SenderRegistry: Send + Sync {
+    /// The standing of `sender`. The implementation decides the carve-outs
+    /// that keep the chain live (an account already bonded as a validator).
+    fn sender_standing(&self, sender: &Address) -> Standing;
+}
+
+/// Whether `tx` is part of getting registered, or a record the protocol
+/// asks a validator to make, and so is admitted from an account that has no
+/// registered identity yet. The VM still applies its own rules to each: the
+/// registration is checked against the key it names, the record against the
+/// sender's bond.
+pub fn is_registration_path(tx: &TransactionType) -> bool {
+    matches!(
+        tx,
+        TransactionType::RegisterIdentity { .. } | TransactionType::AccountKeys { .. }
+    ) || tx.pays_no_fee()
 }
 
 /// Where a pooled transaction stands in selection order: the higher
@@ -149,6 +175,10 @@ pub struct Mempool {
     /// invalid transactions.
     state_reader: OnceLock<Arc<dyn AccountStateReader>>,
 
+    /// The identity registry as the mempool reads it. Wired once by the
+    /// node when the identity gate is on; when unset, any sender is admitted.
+    sender_registry: OnceLock<Arc<dyn SenderRegistry>>,
+
     /// Pending-transaction count per sender address. Enforces
     /// `ConsensusConfig::mempool_max_per_sender` so a single account cannot
     /// monopolize shared mempool capacity. Incremented on insert,
@@ -168,6 +198,7 @@ impl Mempool {
             total_size: Arc::new(RwLock::new(0)),
             admission: OnceLock::new(),
             state_reader: OnceLock::new(),
+            sender_registry: OnceLock::new(),
             sender_counts: Arc::new(DashMap::new()),
         }
     }
@@ -178,6 +209,16 @@ impl Mempool {
     pub fn set_state_reader(&self, reader: Arc<dyn AccountStateReader>) -> Result<()> {
         self.state_reader
             .set(reader)
+            .map_err(|_| ConsensusError::AlreadyStarted)
+    }
+
+    /// Wire the identity registry into a live `Mempool`: from here only a
+    /// registered sender's transaction is admitted (see
+    /// [`is_registration_path`] for what is admitted from anyone). Same
+    /// at-most-once contract as [`Self::set_admission`].
+    pub fn set_sender_registry(&self, registry: Arc<dyn SenderRegistry>) -> Result<()> {
+        self.sender_registry
+            .set(registry)
             .map_err(|_| ConsensusError::AlreadyStarted)
     }
 
@@ -222,6 +263,21 @@ impl Mempool {
         next
     }
 
+    /// Whether `sender` has a transaction waiting here for which `matches`
+    /// holds.
+    pub fn has_pending_from(
+        &self,
+        sender: &Address,
+        matches: impl Fn(&SignedTransaction) -> bool,
+    ) -> bool {
+        if self.sender_counts.get(sender).is_none_or(|c| *c == 0) {
+            return false;
+        }
+        self.transactions
+            .iter()
+            .any(|e| &e.value().tx.transaction.from == sender && matches(&e.value().tx))
+    }
+
     /// The least gas price a transaction in `lane` is admitted at: the
     /// lane's multiple of the base fee the next block charges, never below
     /// that base fee.
@@ -262,7 +318,7 @@ impl Mempool {
 
     /// Adds a transaction to the mempool
     ///
-    /// # Security (Issue #73 - RESOLVED)
+    /// # Security (count and size limits)
     ///
     /// This method enforces strict mempool size limits to prevent resource exhaustion:
     /// - **Count limit**: Default 10,000 transactions (configurable via mempool_max_transactions)
@@ -288,6 +344,29 @@ impl Mempool {
             return Err(ConsensusError::Mempool(
                 "Transaction expired (valid_until has passed)".to_string(),
             ));
+        }
+
+        // The sender must have a registered identity, except for the
+        // transactions that are how one is registered. Checked before any
+        // lane, bucket or size work, so an unregistered sender spends none
+        // of them. The refusal names its reason; nothing is charged.
+        if let Some(registry) = self.sender_registry.get()
+            && !is_registration_path(&transaction.transaction.tx_type)
+        {
+            let standing = registry.sender_standing(&transaction.transaction.from);
+            if !standing.is_registered() {
+                tracing::debug!(
+                    target: "mempool::admission",
+                    hash = %hash,
+                    sender = %transaction.transaction.from,
+                    reason = standing.refusal(),
+                    "Rejected: sender has no registered identity"
+                );
+                return Err(ConsensusError::SenderNotRegistered {
+                    sender: transaction.transaction.from.to_string(),
+                    reason: standing.refusal(),
+                });
+            }
         }
 
         // per-DID admission lane + token bucket + fee floor.
@@ -463,7 +542,7 @@ impl Mempool {
         let tx_size = self.estimate_transaction_size(&transaction);
         let gas_price = priority(&transaction, fee_free);
 
-        // SECURITY (Issue #73 - RESOLVED): Mempool count limit with eviction
+        // SECURITY: Mempool count limit with eviction
         // Check count limit and evict if necessary
         if self.transactions.len() >= self.config.mempool_max_transactions {
             // Try to evict the lowest-gas-price transaction
@@ -478,7 +557,7 @@ impl Mempool {
             }
         }
 
-        // SECURITY (Issue #73 - RESOLVED): Mempool size limit with eviction
+        // SECURITY: Mempool size limit with eviction
         // Check size limit
         let current_size = *self.total_size.read();
         if current_size + tx_size > self.config.mempool_size_limit {
@@ -701,6 +780,12 @@ impl Mempool {
                 *count.get_mut() -= 1;
             }
         }
+    }
+
+    /// Whether any pooled transaction satisfies `pred`. Reads the pool as it
+    /// stands and takes none of the locks ordering and admission use.
+    pub fn any_transaction(&self, pred: impl Fn(&SignedTransaction) -> bool) -> bool {
+        self.transactions.iter().any(|e| pred(&e.value().tx))
     }
 
     /// Removes a transaction from the mempool
@@ -1869,6 +1954,19 @@ mod tests {
         mempool
     }
 
+    /// What a sender has waiting is found by predicate, and only for that sender.
+    #[test]
+    fn pending_from_finds_a_waiting_transaction_of_the_sender_only() {
+        let mempool = mempool_at_nonce(0);
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 0))
+            .unwrap();
+        let sender = Address::default();
+        assert!(mempool.has_pending_from(&sender, |t| t.transaction.nonce.0 == 0));
+        assert!(!mempool.has_pending_from(&sender, |t| t.transaction.nonce.0 == 7));
+        assert!(!mempool.has_pending_from(&Address::new([9u8; 32]), |_| true));
+    }
+
     fn nonces(selected: &[SignedTransaction]) -> Vec<u64> {
         selected.iter().map(|t| t.transaction.nonce.0).collect()
     }
@@ -2051,6 +2149,157 @@ mod tests {
         mempool.add_transaction(tx2).unwrap();
         let stats = admission.stats();
         assert_eq!(stats.admitted(Lane::Open), 1);
+    }
+
+    // ---- identity gate: only registered senders are pooled -------------
+
+    struct Registry(HashMap<Address, Standing>);
+
+    impl SenderRegistry for Registry {
+        fn sender_standing(&self, sender: &Address) -> Standing {
+            self.0
+                .get(sender)
+                .copied()
+                .unwrap_or(Standing::Unregistered)
+        }
+    }
+
+    fn from_sender(sender: u8, nonce: u64, tx_type: TransactionType) -> SignedTransaction {
+        sign_test(Transaction::new(
+            ChainId::from(1),
+            Address::new([sender; 32]),
+            Address::default(),
+            Nonce::from(nonce),
+            tx_type,
+            21_000,
+            1_000_000_000,
+        ))
+    }
+
+    fn registration() -> TransactionType {
+        use tenzro_types::account_signature::{ClassicalProof, CompositeSignature};
+        use tenzro_types::identity::RegistrationProof;
+        TransactionType::RegisterIdentity {
+            did: "did:tenzro:machine:aa".into(),
+            identity_type: "machine".into(),
+            display_name: "machine root".into(),
+            controller_pubkey: vec![4; 65],
+            key_type: "P-256".into(),
+            wallet_id: "0x00".into(),
+            wallet_address: Address::new([9; 32]),
+            pq_verifying_key: Vec::new(),
+            metadata: Default::default(),
+            proof: RegistrationProof::Hardware {
+                signature: CompositeSignature::classical(ClassicalProof::Raw {
+                    signature: Vec::new(),
+                }),
+            },
+        }
+    }
+
+    fn gated_pool() -> Mempool {
+        let mempool = Mempool::new(Arc::new(ConsensusConfig::default()));
+        let mut standings = HashMap::new();
+        standings.insert(Address::new([1; 32]), Standing::Registered);
+        standings.insert(Address::new([3; 32]), Standing::Revoked);
+        mempool
+            .set_sender_registry(Arc::new(Registry(standings)))
+            .unwrap();
+        mempool
+    }
+
+    #[test]
+    fn an_unwired_registry_admits_any_sender_as_before() {
+        let mempool = Mempool::new(Arc::new(ConsensusConfig::default()));
+        mempool
+            .add_transaction(from_sender(2, 0, TransactionType::Transfer { amount: 1 }))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_transaction_from_a_sender_with_no_registered_identity_is_refused_with_its_reason() {
+        let mempool = gated_pool();
+        let err = mempool
+            .add_transaction(from_sender(2, 0, TransactionType::Transfer { amount: 1 }))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConsensusError::SenderNotRegistered {
+                    reason: "no registered identity",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(mempool.len(), 0);
+        mempool
+            .add_transaction(from_sender(1, 0, TransactionType::Transfer { amount: 1 }))
+            .expect("a registered sender is admitted");
+    }
+
+    #[test]
+    fn every_kind_of_action_is_refused_for_an_unregistered_sender() {
+        use tenzro_types::token::StakeOp;
+        let mempool = gated_pool();
+        let actions = [
+            TransactionType::Transfer { amount: 1 },
+            TransactionType::Stake {
+                op: StakeOp::Bond {
+                    role: tenzro_types::network::NetworkRole::ModelProvider,
+                    amount: 1,
+                    capacity: Default::default(),
+                },
+            },
+            TransactionType::GovernanceVote {
+                proposal_id: "p".into(),
+                vote: true,
+                validator: Address::new([2; 32]),
+                root_approval: None,
+            },
+            TransactionType::Funding { op: vec![1] },
+            TransactionType::ExitValidator,
+        ];
+        for (i, tx) in actions.into_iter().enumerate() {
+            assert!(
+                matches!(
+                    mempool.add_transaction(from_sender(2, i as u64, tx)),
+                    Err(ConsensusError::SenderNotRegistered { .. })
+                ),
+                "action {i} was admitted"
+            );
+        }
+        assert_eq!(mempool.len(), 0);
+    }
+
+    #[test]
+    fn a_revoked_identity_is_refused_and_says_so() {
+        let mempool = gated_pool();
+        let err = mempool
+            .add_transaction(from_sender(3, 0, TransactionType::Transfer { amount: 1 }))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConsensusError::SenderNotRegistered {
+                    reason: "identity revoked",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn registering_an_identity_is_admitted_from_an_account_that_has_none() {
+        let mempool = gated_pool();
+        mempool
+            .add_transaction(from_sender(2, 0, registration()))
+            .expect("the way in must not need the thing it creates");
+        assert!(is_registration_path(&registration()));
+        assert!(!is_registration_path(&TransactionType::Transfer {
+            amount: 1
+        }));
     }
 }
 

@@ -161,7 +161,7 @@ the router, or forward UDP `9001` to the node's machine.
 ### How the peer relay path is built
 
 The peer relay path is iroh's custom transport, implemented in one module of
-the node (`crates/tenzro-iroh/src/paths.rs`). iroh 1.3 opens paths only to
+the node (`crates/tenzro-iroh/src/paths/mod.rs`). iroh 1.3 opens paths only to
 the addresses hole punching finds and to the relay, so the node carries a
 vendored copy of iroh 1.3.0 that also opens a custom-transport path on every
 connection to a peer as soon as the path is named (`vendor/iroh`, one change

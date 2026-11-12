@@ -45,30 +45,28 @@ The VM layer is designed with a pluggable executor architecture that implements 
 - **Automatic Routing**: Transactions are automatically routed to the correct VM based on address format
 - **Gas Accounting**: Gas metering and pricing
 - **Standard EVM Precompiles (0x01-0x09)**: ecRecover, SHA-256, RIPEMD-160, Identity, ModExp, EC_ADD, EC_MUL, EC_PAIRING, BLAKE2F
-- **BLS12-381 Precompiles (0x0a-0x10, EIP-2537)**: G1ADD, G1MSM, G2ADD, G2MSM, PAIRING_CHECK, MAP_FP_TO_G1, MAP_FP2_TO_G2 using blst
+- **BLS12-381 Precompiles (0x0b-0x11, EIP-2537)**: G1ADD, G1MSM, G2ADD, G2MSM, PAIRING_CHECK, MAP_FP_TO_G1, MAP_FP2_TO_G2 using blst
 - **EIP-7951 P256VERIFY (0x100)**: secp256r1 ECDSA signature verification (Fusaka Dec 2025) — bit-exact compatibility with FIDO2 / WebAuthn / Apple Secure Enclave / Android Keystore P-256 signatures
 - **Tenzro-Specific Precompiles**:
-  - TEE attestation verification (0x010000)
-  - ZK proof verification (0x010001) — O(1) HashSet lookup against `ZkCommitmentRegistry`
-  - AI model inference triggering (0x010002)
-  - Settlement processing (0x010003)
-  - TNZO_BRIDGE (0x1001)
+  - wTNZO pointer (0x1001)
   - TOKEN_FACTORY (0x1002)
-  - STAKING (0x1004)
-  - GOVERNANCE (0x1005)
   - NFT_FACTORY (0x1006)
   - VRF_VERIFY (0x1007) — ECVRF-EDWARDS25519-SHA512-TAI per RFC 9381
+  - RANDOMNESS_BEACON (0x1009)
+  - TEE_VERIFY (0x1010)
+  - ZK_VERIFY (0x1011) — `statementSystems(bytes32)` counts the distinct proof systems with an attested proof of a statement, read from consensus state
 - **ERC-8004 System Contracts**:
-  - IDENTITY (0x101a) — `registerAgent` / `getAgent` for native Tenzro agent discovery
-  - REPUTATION (0x101b) — `submitFeedback` / `getFeedback` for peer-to-peer agent reputation
-  - VALIDATION (0x101c) — `validationRequest` / `validationResponse` / `getValidation` for verifiable agent work attestation
+  - IDENTITY — `registerAgent` / `getAgent` for native Tenzro agent discovery
+  - REPUTATION — `submitFeedback` / `getFeedback` for peer-to-peer agent reputation
+  - VALIDATION — `validationRequest` / `validationResponse` / `getValidation` for verifiable agent work attestation
+  - ordinary predeployed EVM contracts at `tenzro_identity::erc8004::addresses`, not precompiles
 - **NFT Factory**: `mintRandom()` (selector 0x52517e21) for collision-checked VRF-randomized token ID assignment and rarity tier derivation
-- **Cross-VM Token Architecture (Sei V2 pointer model)**: wTNZO ERC-20 pointer at 0x7a4bcb13a6b2b384c284b5caa6e5ef3126527f93, SPL Token Adapter with 9-decimal truncation — both share same underlying native TNZO balance
+- **Cross-VM Token Architecture (Sei V2 pointer model)**: wTNZO ERC-20 pointer at 0x1001, SPL Token Adapter with 9-decimal truncation — both share same underlying native TNZO balance
 - **Unified Token Registry**: DashMap-indexed catalog across all VMs with RocksDB persistence (CF_TOKENS)
 - **Block-STM Parallel Execution**: MVCC multi-version data, conflict detection, automatic sequential fallback
 - **EIP-1559 Fee Market**: Dynamic base fee adjustment (±12.5%), fee burning, priority fee suggestions, min/max bounds
 - **ERC-4337 and ERC-7579 encodings** (`account_abstraction.rs`, `erc7579.rs`, `aa_execution.rs`): the EntryPoint v0.9 `PackedUserOperation` layout and user operation hash (paymaster signature suffix, EIP-7702 init code), validation-data ranges by time or block, and the ERC-7579 account, module and validator selectors and execution encoding, so EVM contracts and Ethereum tooling compute the same values on Tenzro. Accounts and modules deployed in the EVM run in consensus like any contract; the node runs no user operation mempool or bundler.
-- **EIP-7702 Type-4 Delegation** (`eip7702.rs`): `DelegationRegistry` records authority → target pointers applied via the Pectra spec. `Authorization { chain_id, delegate_address, nonce, signature }` recovers via secp256k1 over `MAGIC(0x05) || rlp([chain_id, address, nonce])`. `delegate_address == 0x0` is a revocation. EVM executor consults `resolve_target` when an account's code begins with the 23-byte `0xef0100 || target20` designator
+- **EIP-7702 Type-4 Delegation** (`eip7702.rs`): a delegation is installed only by a standard EIP-7702 transaction, whose authorization list writes the designator `0xef0100 || target20` into the authority's code; `is_delegation_designator` and `extract_delegation_target` read it back from account code.
 - **Permit2 SignatureTransfer** (`permit2.rs`): canonical Tenzro Permit2 verifying contract at `0x0000…00001023`. Full EIP-712 typed-data — `TokenPermissions`, `PermitTransferFrom`, `PermitWitnessTransferFrom` — with deterministic typehashes; Uniswap-layout 256-bit-per-word `Permit2NonceBitmap`. The witness path binds extra typed data into the same signature that authorizes the token pull
 - **State Caching**: High-performance state adapter with caching layer
 
@@ -149,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Implementation**: revm
 - **Gas Costs**: Ethereum-compatible gas costs
 - **Bytecode**: EVM opcodes
-- **Precompiles**: Standard Ethereum precompiles (0x01-0x09), BLS12-381 (0x0a-0x10, EIP-2537), EIP-7951 P256VERIFY (0x100), Tenzro service precompiles (0x010000+), Tenzro token-system precompiles (0x1001+), ERC-8004 system contracts (0x101a-0x101c)
+- **Precompiles**: Standard Ethereum precompiles (0x01-0x09), BLS12-381 (0x0b-0x11, EIP-2537), EIP-7951 P256VERIFY (0x100), Tenzro precompiles (0x1001-0x1011)
 
 ### SVM (Solana Virtual Machine)
 
@@ -185,37 +183,31 @@ All 9 standard precompiles fully implemented per EIPs 196/197/198/1108/2565/152:
 - `0x08` - ecPairing (BN254 pairing check)
 - `0x09` - BLAKE2f (BLAKE2b compression function)
 
-### BLS12-381 Precompiles (0x0a-0x10, EIP-2537)
+### BLS12-381 Precompiles (0x0b-0x11, EIP-2537)
 
 7 BLS12-381 precompiles using blst library:
 
-- `0x0a` - BLS12_G1ADD
-- `0x0b` - BLS12_G1MSM
-- `0x0c` - BLS12_G2ADD
-- `0x0d` - BLS12_G2MSM
-- `0x0e` - BLS12_PAIRING_CHECK
-- `0x0f` - BLS12_MAP_FP_TO_G1
-- `0x10` - BLS12_MAP_FP2_TO_G2
+- `0x0b` - BLS12_G1ADD
+- `0x0c` - BLS12_G1MSM
+- `0x0d` - BLS12_G2ADD
+- `0x0e` - BLS12_G2MSM
+- `0x0f` - BLS12_PAIRING_CHECK
+- `0x10` - BLS12_MAP_FP_TO_G1
+- `0x11` - BLS12_MAP_FP2_TO_G2
 
 ### EIP-7951 P256VERIFY (0x100)
 
 - `0x100` - secp256r1 ECDSA signature verification (Fusaka Dec 2025) — bit-exact compatibility with FIDO2 / WebAuthn / Apple Secure Enclave / Android Keystore
 
-### Tenzro Service Precompiles (0x010000+)
+### Tenzro Precompiles (0x1001+)
 
-- `0x010000` - TEE Attestation Verification (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
-- `0x010001` - ZK Proof Verification (O(1) HashSet lookup against `ZkCommitmentRegistry`; Plonky3 STARK proofs are verified off-EVM by validators, who record 32-byte SHA-256 commitments)
-- `0x010002` - AI Model Inference (simulation)
-- `0x010003` - Settlement Processing
-
-### Tenzro Token-System Precompiles (0x1001+)
-
-- `0x1001` - TNZO Bridge (wTNZO pointer operations)
+- `0x1001` - wTNZO pointer (ERC-20 view of native TNZO)
 - `0x1002` - Token Factory (ERC-20/SPL token creation)
-- `0x1004` - Staking (validator/provider staking)
-- `0x1005` - Governance (proposal voting)
 - `0x1006` - NFT Factory (ERC-721/1155 creation, mintRandom)
 - `0x1007` - VRF Verify (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI)
+- `0x1009` - Randomness Beacon
+- `0x1010` - TEE Verify (strict attestation report verification)
+- `0x1011` - ZK Verify (`statementSystems(bytes32)` returns the number of distinct proof systems with an attested proof of the statement, read from consensus state; it never parses a proof. Attestations are written only by the native `AttestZkProof` transaction, which every validator re-verifies)
 
 ### ERC-8004 System Contracts
 
@@ -307,7 +299,7 @@ Unit tests cover the EVM, SVM, native, precompile, fee-market, and account-abstr
 
 ## Known Limitations
 
-- Model Inference precompile returns simulated results (full inference routing works via RPC/MCP)
+- There is no model-inference or settlement precompile; inference routing runs over RPC/MCP
 
 ## Dependencies
 

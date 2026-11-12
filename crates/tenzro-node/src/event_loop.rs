@@ -140,6 +140,49 @@ fn verify_announcement_in<A: tenzro_network::SignedAnnouncement>(
     ann.verify(&announcer_key_in(registry, ann.machine_did())?)
 }
 
+/// Whether `tx` carries a nonce below its sender's account nonce in
+/// `state`: one the account has already spent, so it can never execute.
+fn spent_nonce(state: &dyn tenzro_vm::traits::VmState, tx: &VmTransaction) -> bool {
+    tx.nonce < state.get_nonce(&tx.from)
+}
+
+/// How loudly a transaction the VM refused to execute is reported.
+///
+/// Every validator orders and executes the same blocks, so a refusal is the
+/// same everywhere and changes no state. A nonce behind the account is a
+/// transaction ordered twice (a validator stepped in for the one assigned
+/// to its sender) whose first copy has executed. A nonce ahead of the
+/// account is one whose predecessor is ordered later; it stays in the
+/// mempool and executes once the predecessor has. Neither breaks an
+/// invariant; anything else is reported as an error.
+fn refusal_level(e: &tenzro_vm::VmError) -> tracing::Level {
+    match e {
+        tenzro_vm::VmError::InvalidNonce { expected, got } if got < expected => {
+            tracing::Level::DEBUG
+        }
+        tenzro_vm::VmError::InvalidNonce { .. } => tracing::Level::WARN,
+        _ => tracing::Level::ERROR,
+    }
+}
+
+fn log_refused_transaction(tx_hash: &Hash, e: &tenzro_vm::VmError) {
+    let level = refusal_level(e);
+    if level == tracing::Level::DEBUG {
+        debug!(tx_hash = %tx_hash, error = %e, "Transaction not executed: already executed");
+    } else if level == tracing::Level::WARN {
+        warn!(
+            tx_hash = %tx_hash,
+            error = %e,
+            "Transaction not executed: ordered ahead of its nonce, kept for a later block"
+        );
+    } else {
+        error!(tx_hash = %tx_hash, error = %e, "Transaction execution failed");
+    }
+}
+
+/// Certificates held until the blocks they cover have executed, at most.
+const MAX_HELD_CERTIFICATES: usize = 256;
+
 /// Segments ordered past the local tip kept while the blocks before them
 /// are imported, at most.
 const MAX_ORDERED_AHEAD: usize = 65_536;
@@ -887,6 +930,9 @@ pub struct EventLoop {
     /// Blocks received from peers and not yet covered by a verified
     /// certificate, by height, bounded in bytes.
     uncertified: HeldBlocks,
+    /// Certificates this validator's consensus formed over blocks it has
+    /// not executed yet, by checkpoint index.
+    held_certificates: std::collections::BTreeMap<u64, Certificate>,
     /// Segments this validator's consensus ordered past the local tip: its
     /// core resumed from a certified checkpoint whose blocks are still being
     /// imported. Each executes once the tip reaches it.
@@ -1133,6 +1179,7 @@ impl EventLoop {
             unsynced: Vec::new(),
             certificates_rx: None,
             uncertified: HeldBlocks::default(),
+            held_certificates: std::collections::BTreeMap::new(),
             ordered_ahead: std::collections::BTreeMap::new(),
             parked: Parked::default(),
             ingress: None,
@@ -1517,12 +1564,12 @@ impl EventLoop {
     }
 
     /// Produces a snapshot of the committed state at `height -
-    /// STATE_ROOT_LAG` when one is due: that height starts an epoch, and the
+    /// STATE_ROOT_LAG` when one is due: that height opens an epoch (its block
+    /// is the first to carry the epoch in its header), and the
     /// blocks up to `height` that commit its root are all stored. Runs off
     /// the event loop; the trie version it reads is immutable.
     fn maybe_produce_snapshot(&self, height: BlockHeight) {
-        let (Some(store), Some(consensus)) = (self.snapshot_store.clone(), self.consensus.as_ref())
-        else {
+        let Some(store) = self.snapshot_store.clone() else {
             return;
         };
         let Some(state_height) = height
@@ -1531,11 +1578,9 @@ impl EventLoop {
         else {
             return;
         };
-        let starts_epoch = consensus
-            .epoch_manager()
-            .get_epoch_for_height(BlockHeight::from(state_height))
-            .is_some_and(|e| e.start_height.as_u64() == state_height);
-        match store.due(state_height, starts_epoch) {
+        // Cheap checks first (enabled, spacing); whether the height opens an
+        // epoch is read from the stored headers off the event loop.
+        match store.due(state_height, true) {
             Ok(true) => {}
             Ok(false) => return,
             Err(e) => {
@@ -1543,7 +1588,26 @@ impl EventLoop {
                 return;
             }
         }
+        if let Some(disk) = &self.shard_gate.disk
+            && disk
+                .refuse(
+                    tenzro_storage::resources::Action::Snapshot,
+                    "state snapshot",
+                )
+                .is_some()
+        {
+            return;
+        }
+        let blocks = self.storage.clone();
         tokio::spawn(async move {
+            match crate::snapshot::can_snapshot_at(&blocks, state_height).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => {
+                    warn!(error = %e, "Snapshot height unreadable");
+                    return;
+                }
+            }
             match store.produce(state_height).await {
                 Ok(m) => info!(
                     height = m.height,
@@ -1556,6 +1620,96 @@ impl EventLoop {
                 }
             }
         });
+    }
+
+    /// Whether the undo record `tag` covers a change that never committed.
+    /// A block's record is final once the node's tip has reached that block. A
+    /// boundary's record is final once the next epoch has started: the epoch
+    /// manager holds it, or a block of it is in the chain. The chain is
+    /// consulted too because the manager's own write can be the one that was
+    /// lost.
+    pub(crate) fn registry_tag_uncommitted(
+        tag: &str,
+        tip: u64,
+        manager_epoch: Option<u64>,
+        tip_epoch: u64,
+    ) -> bool {
+        if let Some(h) = tag
+            .strip_prefix("block:")
+            .and_then(|h| h.parse::<u64>().ok())
+        {
+            h > tip
+        } else if let Some(n) = tag
+            .strip_prefix("boundary:")
+            .and_then(|n| n.parse::<u64>().ok())
+        {
+            !(manager_epoch.is_some_and(|e| e >= n) || tip_epoch >= n)
+        } else {
+            false
+        }
+    }
+
+    /// The epoch the tip block carries (0 with no block).
+    async fn tip_epoch(&self) -> u64 {
+        match BlockStoreImpl::new(self.storage.clone()) {
+            Ok(store) => store
+                .get_block_by_height(BlockHeight(self.current_height))
+                .await
+                .ok()
+                .flatten()
+                .map_or(0, |b| b.header.epoch),
+            Err(_) => 0,
+        }
+    }
+
+    /// Brings the epoch manager up to the newest epoch the chain has
+    /// committed, from the epoch records in the state. An epoch with no record
+    /// cannot be rebuilt this way; that is an error and the node has to be
+    /// resynchronised.
+    async fn hydrate_epochs_from_chain(&self) -> Result<()> {
+        let Some(consensus) = self.consensus.as_ref() else {
+            return Ok(());
+        };
+        let em = consensus.epoch_manager();
+        let tip_epoch = self.tip_epoch().await;
+        let Some(version) = self
+            .state_trie
+            .latest_version()
+            .map_err(NodeError::Storage)?
+        else {
+            return Ok(());
+        };
+        while em.current_epoch().number < tip_epoch {
+            let next = em.current_epoch().number + 1;
+            let bytes = self
+                .state_trie
+                .get(
+                    version,
+                    tenzro_storage::state_trie::NS_EPOCH,
+                    &crate::state_commitment::epoch_key(next),
+                )
+                .map_err(NodeError::Storage)?
+                .ok_or_else(|| {
+                    NodeError::Other(format!(
+                        "the chain is in epoch {tip_epoch} but this node's epochs end at {} and the state holds no record of epoch {next}; resynchronise this node",
+                        next - 1
+                    ))
+                })?;
+            let record: crate::state_commitment::EpochRecord = bincode::deserialize(&bytes)
+                .map_err(|e| NodeError::Other(format!("epoch record {next}: {e}")))?;
+            let set = record.validator_set().map_err(NodeError::Other)?;
+            em.install_recovery_epoch(
+                next - 1,
+                BlockHeight(record.start_height),
+                set.iter().cloned().collect(),
+            )
+            .map_err(|e| NodeError::Other(format!("epoch {next} could not be restored: {e}")))?;
+            warn!(
+                epoch = next,
+                "The epoch manager was brought up to the committed epoch record"
+            );
+        }
+        Ok(())
     }
 
     /// Syncs the current block height from storage on startup.
@@ -1630,6 +1784,37 @@ impl EventLoop {
 
         // Sync block height from persistent storage
         self.sync_height_from_storage().await?;
+        // The epoch manager writes its epochs through to its store on a best
+        // effort, apart from the block commit: if the last of those writes was
+        // lost, the chain is ahead of it. The committed epoch records are what
+        // the chain says, so the manager is brought up to them first.
+        self.hydrate_epochs_from_chain().await?;
+        // A stop between a block's registry changes and its commit, or between
+        // an epoch boundary's registry plan and the transition, leaves the
+        // registry ahead of the chain: put it back before anything runs again.
+        if let Some(registry) = self.validator_registry.as_ref() {
+            let tip = self.current_height;
+            let epoch = self
+                .consensus
+                .as_ref()
+                .map(|c| c.epoch_manager().current_epoch().number);
+            let tip_epoch = self.tip_epoch().await;
+            let undone = registry
+                .recover_uncommitted(|tag| Self::registry_tag_uncommitted(tag, tip, epoch, tip_epoch))
+                .map_err(|e| {
+                    NodeError::Other(format!(
+                        "the validator registry could not be put back after a stop before a commit: {e}. \
+                         `tenzro-node registry-undo` lists the undo records; `tenzro-node registry-undo --discard` \
+                         removes them and starts the registry from what the last run left, which may hold the changes of a block that never committed"
+                    ))
+                })?;
+            if undone > 0 {
+                warn!(
+                    undone,
+                    "The validator registry was put back after a stop before a commit"
+                );
+            }
+        }
         // The consensus driver bases an epoch start on the last executed
         // block: hand it the tip this node executed before it stopped.
         if let Some(consensus) = self.consensus.clone() {
@@ -1732,6 +1917,7 @@ impl EventLoop {
 
         // Proof of life: a signed heartbeat every few seconds, so peers stop
         // routing to this node within seconds of it failing.
+        let heartbeat_failures = Arc::new(crate::provider_heartbeat::SigningFailureLog::new(10));
         let mut liveness_heartbeat =
             tokio::time::interval(crate::provider_heartbeat::HEARTBEAT_INTERVAL);
         liveness_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2297,6 +2483,7 @@ impl EventLoop {
                         let provider_address = ctx.provider_address.clone();
                         let endpoint_id = resolver.endpoint_id().to_string();
                         let (network, signer) = (network.clone(), signer.clone());
+                        let failures = heartbeat_failures.clone();
                         lanes.liveness.submit(move || {
                             match crate::provider_heartbeat::build(
                                 &provider_address,
@@ -2305,15 +2492,25 @@ impl EventLoop {
                                 load,
                                 &signer,
                             ) {
-                                Ok(hb) => crate::announce::emit_paced(
-                                    network,
-                                    "tenzro/providers",
-                                    vec![tenzro_network::NetworkMessage::new(
-                                        tenzro_network::MessagePayload::ProviderHeartbeat(hb),
-                                    )],
-                                    std::time::Duration::ZERO,
-                                ),
-                                Err(e) => warn!(error = %e, "Skipping provider heartbeat: signing failed"),
+                                Ok(hb) => {
+                                    if let Some(n) = failures.recovered() {
+                                        info!(missed = n, "Provider heartbeat signing recovered");
+                                    }
+                                    crate::announce::emit_paced(
+                                        network,
+                                        "tenzro/providers",
+                                        vec![tenzro_network::NetworkMessage::new(
+                                            tenzro_network::MessagePayload::ProviderHeartbeat(hb),
+                                        )],
+                                        std::time::Duration::ZERO,
+                                    )
+                                }
+                                // The next tick builds and signs a fresh beat.
+                                Err(e) => {
+                                    if let Some(n) = failures.failed() {
+                                        warn!(error = %e, consecutive = n, "Skipping provider heartbeat: signing failed; retrying on the next tick");
+                                    }
+                                }
                             }
                         });
                     }
@@ -2410,6 +2607,7 @@ impl EventLoop {
                             }
                         }
                         self.execute_ordered_run(run).await;
+                        self.check_held_certificates().await;
                     }
                 }
                 // A certificate: import the uncertified blocks it covers.
@@ -2423,6 +2621,7 @@ impl EventLoop {
                         && let Err(e) = self.handle_certificate(certificate).await {
                             warn!("Certificate import failed: {}", e);
                         }
+                    self.check_held_certificates().await;
                 }
                 // Held transactions the ingress task hands back.
                 held = async {
@@ -2999,7 +3198,7 @@ impl EventLoop {
     async fn report_executed(&mut self, height: u64, hash: Hash, post_root: Hash) -> Result<()> {
         if !self.sync_deferred {
             if let Some(consensus) = self.consensus.as_ref() {
-                consensus.on_executed(height, hash, post_root);
+                crate::consensus_runtime::scoped(|| consensus.on_executed(height, hash, post_root));
             }
             return Ok(());
         }
@@ -3027,7 +3226,7 @@ impl EventLoop {
             .map_err(NodeError::Storage)?;
         if let Some(consensus) = self.consensus.clone() {
             for (height, hash, post_root) in self.unsynced.drain(..) {
-                consensus.on_executed(height, hash, post_root);
+                crate::consensus_runtime::scoped(|| consensus.on_executed(height, hash, post_root));
             }
         }
         self.unsynced.clear();
@@ -3218,6 +3417,10 @@ impl EventLoop {
             sessions,
         }) = certificate
         else {
+            info!(
+                height = self.current_height,
+                "Block-sync: blocks held, the peer served no certificate with them"
+            );
             return Ok(());
         };
         let consensus = self
@@ -3232,6 +3435,12 @@ impl EventLoop {
         // the network certified past what its core can still order: then it
         // stands down and imports them like any follower.
         if self.orders_blocks() && !consensus.on_served_certificate(&cert, self.current_height) {
+            info!(
+                height = self.current_height,
+                index = cert.checkpoint.index,
+                last_height = cert.checkpoint.last_height,
+                "Block-sync: blocks not imported, this validator's own consensus orders them"
+            );
             return Ok(());
         }
         consensus.accept_certificate(&cert)?;
@@ -3272,9 +3481,9 @@ impl EventLoop {
         consensus: &Arc<ConsensusHandle>,
         cp: &tenzro_consensus::Checkpoint,
     ) -> Result<()> {
-        consensus.adopt_next_committee(cp)?;
+        crate::consensus_runtime::scoped(|| consensus.adopt_next_committee(cp))?;
         let base = self.recent_executed_blocks().await?;
-        consensus.on_imported(cp, base)
+        crate::consensus_runtime::scoped(|| consensus.on_imported(cp, base))
     }
 
     /// Holds a block received from a peer until a certificate covering its
@@ -3319,6 +3528,11 @@ impl EventLoop {
                 consensus.note_behind_hint(cert.checkpoint.first_height);
             }
             consensus.accept_certificate(&cert)?;
+        } else if cert.checkpoint.last_height > self.current_height {
+            // Formed by the quorum ahead of this node's execution of its own
+            // ordering: checked once those blocks have executed here.
+            self.hold_certificate(cert);
+            return Ok(());
         }
         self.import_certified_range(&cert.checkpoint).await?;
         if follower {
@@ -3326,6 +3540,50 @@ impl EventLoop {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Holds a certificate this validator's consensus formed over blocks it
+    /// has not executed yet. The lowest checkpoints are kept when too many
+    /// wait.
+    fn hold_certificate(&mut self, cert: Certificate) {
+        debug!(
+            index = cert.checkpoint.index,
+            last_height = cert.checkpoint.last_height,
+            tip = self.current_height,
+            "certificate held until the blocks it covers have executed"
+        );
+        self.held_certificates.insert(cert.checkpoint.index, cert);
+        while self.held_certificates.len() > MAX_HELD_CERTIFICATES {
+            if let Some((index, _)) = self.held_certificates.pop_last() {
+                debug!(index, "held certificate dropped: too many held");
+            }
+        }
+    }
+
+    /// Checks, in checkpoint order, every held certificate whose blocks have
+    /// executed here; what each check came to, by checkpoint index.
+    async fn import_held_certificates(&mut self) -> Vec<(u64, Result<()>)> {
+        let mut done = Vec::new();
+        while let Some(entry) = self.held_certificates.first_entry() {
+            if entry.get().checkpoint.last_height > self.current_height {
+                break;
+            }
+            let (index, cert) = entry.remove_entry();
+            done.push((index, self.import_certified_range(&cert.checkpoint).await));
+        }
+        done
+    }
+
+    /// [`Self::import_held_certificates`], reporting each check that failed.
+    async fn check_held_certificates(&mut self) {
+        if self.held_certificates.is_empty() {
+            return;
+        }
+        for (_, result) in self.import_held_certificates().await {
+            if let Err(e) = result {
+                warn!("Certificate import failed: {}", e);
+            }
+        }
     }
 
     /// Imports the range an authenticated checkpoint covers: the held blocks
@@ -3373,7 +3631,15 @@ impl EventLoop {
                     .state_trie
                     .root_at(tenzro_consensus::state_root_height(block.height().0))
                     .map_err(NodeError::Storage)?;
-                crate::certified_import::check_state_root(&block, local_root)
+                let restored_at = self
+                    .storage
+                    .get(
+                        tenzro_storage::CF_METADATA,
+                        crate::snapshot::RESTORED_HEIGHT_KEY,
+                    )
+                    .map_err(NodeError::Storage)?
+                    .and_then(|v| v.as_slice().try_into().ok().map(u64::from_be_bytes));
+                crate::certified_import::check_state_root(&block, local_root, restored_at)
                     .map_err(NodeError::Other)?;
                 crate::certified_import::check_checkpoint(&block, self.weak_subjectivity_anchor)
                     .map_err(NodeError::Other)?;
@@ -3383,7 +3649,7 @@ impl EventLoop {
                     .await?
                     && let Some(consensus) = self.consensus.as_ref()
                 {
-                    consensus.on_executed(h, hash, post_root);
+                    crate::consensus_runtime::scoped(|| consensus.on_executed(h, hash, post_root));
                 }
                 self.uncertified.remove(&h);
             }
@@ -3392,7 +3658,16 @@ impl EventLoop {
             .state_trie
             .root_at(cp.state_height)
             .map_err(NodeError::Storage)?;
-        crate::certified_import::check_certified_state(cp, local).map_err(NodeError::Other)?;
+        let restored_at = self
+            .storage
+            .get(
+                tenzro_storage::CF_METADATA,
+                crate::snapshot::RESTORED_HEIGHT_KEY,
+            )
+            .map_err(NodeError::Storage)?
+            .and_then(|v| v.as_slice().try_into().ok().map(u64::from_be_bytes));
+        crate::certified_import::check_certified_state(cp, local, restored_at)
+            .map_err(NodeError::Other)?;
         self.uncertified.drop_through(self.current_height);
         Ok(())
     }
@@ -3418,15 +3693,67 @@ impl EventLoop {
         })
     }
 
-    /// Epoch and registry records to commit with block `height`; empty unless
-    /// `height` starts an epoch. See [`crate::state_commitment`].
-    fn epoch_start_records(
+    /// The record of the epoch `block` opens, if it opens one. Read from the
+    /// chain (the block's epoch and its parent's) and checked before the
+    /// block executes, so a node that cannot name the epoch's validators
+    /// refuses the block with nothing to undo. See [`crate::state_commitment`].
+    async fn epoch_open(
         &self,
-        height: BlockHeight,
-    ) -> tenzro_storage::state_trie::capture::Writes {
+        block: &Block,
+    ) -> Result<Option<crate::state_commitment::EpochRecord>> {
+        let height = block.height();
         let Some(consensus) = self.consensus.as_ref() else {
-            return Default::default();
+            return Ok(None);
         };
+        let parent_epoch = if height.as_u64() <= 1 {
+            0
+        } else {
+            BlockStoreImpl::new(self.storage.clone())
+                .map_err(NodeError::Storage)?
+                .get_block_by_height(BlockHeight(height.as_u64() - 1))
+                .await
+                .map_err(NodeError::Storage)?
+                .ok_or_else(|| {
+                    NodeError::Other(format!("the parent of block {height} is not stored"))
+                })?
+                .header
+                .epoch
+        };
+        let record = crate::state_commitment::epoch_open_record(
+            consensus.epoch_manager(),
+            height,
+            block.header.epoch,
+            parent_epoch,
+        );
+        match record {
+            Ok(record) => Ok(record),
+            Err(_) => {
+                // The committee of the epoch this block opens is still to be
+                // derived; if its derivation failed earlier, try it again now, off
+                // the async workers (it reads and writes the registry's store),
+                // and only when its backoff allows.
+                let handle = consensus.clone();
+                let _ = tokio::task::spawn_blocking(move || handle.retry_close()).await;
+                crate::state_commitment::epoch_open_record(
+                    consensus.epoch_manager(),
+                    height,
+                    block.header.epoch,
+                    parent_epoch,
+                )
+                .map_err(NodeError::Other)
+            }
+        }
+    }
+
+    /// The writes that commit the epoch record `record` and the registry as
+    /// it stands once the opening block has executed.
+    fn epoch_open_writes(
+        &self,
+        record: Option<crate::state_commitment::EpochRecord>,
+    ) -> tenzro_storage::state_trie::capture::Writes {
+        if record.is_none() {
+            return Default::default();
+        }
         let previous_index = self
             .state_trie
             .latest_version()
@@ -3443,12 +3770,25 @@ impl EventLoop {
                     .flatten()
             })
             .and_then(|b| bincode::deserialize(&b).ok());
-        crate::state_commitment::epoch_start_records(
-            consensus.epoch_manager(),
+        crate::state_commitment::epoch_open_writes(
+            record,
             self.validator_registry.as_deref(),
-            height,
             previous_index,
         )
+    }
+
+    /// Puts the validator registry back as it was before the block being
+    /// refused changed it. A failure to write it back is logged loudly: the
+    /// checkpoint stays held by the caller and the refusal stands.
+    fn undo_registry_changes(
+        &self,
+        checkpoint: Option<&tenzro_token::validator_registry::RegistryCheckpoint>,
+    ) {
+        if let (Some(r), Some(cp)) = (self.validator_registry.as_ref(), checkpoint)
+            && let Err(e) = r.restore(cp)
+        {
+            error!(error = %e, "The validator registry could not be put back after a refused block");
+        }
     }
 
     /// Stages the validator-registry transition plan for the next epoch onto
@@ -3464,6 +3804,10 @@ impl EventLoop {
         admitted: &dyn Fn(&[u8]) -> bool,
     ) {
         let next_epoch = em.current_epoch().number + 1;
+        // What is queued is rebuilt from the registry at every boundary: a
+        // queue a running node kept and a restarted node lost must not make
+        // their next sets differ.
+        em.clear_pending();
         let plan = registry.compute_epoch_transition_with(next_epoch, admitted);
         debug!(
             next_epoch = next_epoch,
@@ -3475,12 +3819,45 @@ impl EventLoop {
         // Exits first: a validator that has left must not be re-seated by the
         // reconcile below on the strength of a stale registry row.
         // Effective exits → drop from active set in next epoch.
-        for addr in &plan.effective_exits {
+        // Every list below is taken in address order: the registry's maps
+        // iterate in an order that differs from process to process, and the
+        // order entries are queued in is the order the next set is built in.
+        let mut effective_exits = plan.effective_exits.clone();
+        effective_exits.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for addr in &effective_exits {
             em.remove_pending_validator(addr);
         }
         // A key whose scheme governance retired leaves the set once its
         // grace has passed; a rotated key is restaged by the reconcile below.
-        for addr in &plan.unseated {
+        let mut unseated = plan.unseated.clone();
+        unseated.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for addr in &unseated {
+            em.remove_pending_validator(addr);
+        }
+
+        // A seated validator the registry holds Jailed, Exited or back to
+        // Candidate leaves. Whatever was queued for it earlier, and however
+        // much of that the churn budget has already applied, the removal is
+        // taken from the registry here, so a node that restarted queues the
+        // same removals as one that kept running and the queue need not be
+        // part of the committed state.
+        let mut leaving: Vec<tenzro_types::primitives::Address> = em
+            .current_validator_set()
+            .iter()
+            .filter(|v| {
+                registry.get(&v.address).is_some_and(|e| {
+                    matches!(
+                        e.status,
+                        tenzro_token::validator_registry::ValidatorRegistryStatus::Jailed
+                            | tenzro_token::validator_registry::ValidatorRegistryStatus::Exited
+                            | tenzro_token::validator_registry::ValidatorRegistryStatus::Candidate
+                    )
+                })
+            })
+            .map(|v| v.address)
+            .collect();
+        leaving.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for addr in &leaving {
             em.remove_pending_validator(addr);
         }
 
@@ -3505,7 +3882,9 @@ impl EventLoop {
         // Entries that already match are skipped, so the common boundary
         // where nothing moved stages nothing.
         let live_set = em.current_validator_set();
-        for entry in registry.list_active() {
+        let mut active = registry.list_active();
+        active.sort_unstable_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()));
+        for entry in active {
             let power = Self::consensus_voting_power(entry.self_stake);
             let seated = live_set.get_by_address(&entry.address);
             // A seat matches when its power, its composite key and its node
@@ -3609,19 +3988,30 @@ impl EventLoop {
 
         // From an upgrade's activation height the network runs the binary it
         // names; executing on with another one would fork this node off.
-        if let Some(upgrade) = self
+        // The same stop covers a chain protocol version outside the range
+        // this binary supports, from the height that version activates.
+        if let Some(reason) = self
             .policy_applier
             .as_ref()
-            .and_then(|p| p.superseded_at(block_height.0))
+            .and_then(|p| p.stop_reason(block_height.0))
         {
-            return Err(NodeError::Other(format!(
-                "protocol upgrade {} (binary {}) activated at height {}; this node runs another binary \
-                 and stops executing blocks until it is replaced",
-                upgrade.version, upgrade.code_hash, upgrade.activation_height
-            )));
+            return Err(NodeError::Other(reason));
         }
 
-        info!(
+        // The record of the epoch this block opens, if it opens one. A node
+        // that cannot name the epoch's validators refuses the block here,
+        // before anything is executed, so a retry starts from the same state.
+        let epoch_open = self.epoch_open(&block).await?;
+        // Executing a block changes the validator registry in memory and on
+        // disk as it goes; a block refused after that undoes those changes
+        // with the state it discards.
+        let registry_checkpoint = self
+            .validator_registry
+            .as_ref()
+            .filter(|_| tx_count > 0)
+            .map(|r| r.checkpoint());
+
+        debug!(
             height = %block_height,
             hash = %block_hash,
             tx_count = tx_count,
@@ -3685,23 +4075,43 @@ impl EventLoop {
 
         let mut admitted = Vec::with_capacity(block.transactions.len());
         let mut vm_txs = Vec::with_capacity(block.transactions.len());
-        // Transactions a block carries that were already included at an
-        // earlier height. Validators batch what their mempools hold, so one
-        // transaction can be ordered in more than one segment; the copy could
-        // only fail on its spent nonce, so it is not executed again and the
-        // first inclusion keeps its index and receipt.
+        // Transactions whose nonce the sender's account has already spent.
+        // Validators batch what their mempools hold, so one transaction can
+        // be ordered in more than one segment, and any batcher can order an
+        // old transaction again. Such a copy is decided from chain state
+        // alone, so every node decides it alike whatever history it keeps:
+        // it is not executed, and it gets no receipt, no events and no index
+        // entry (an earlier inclusion keeps its own). This holds for any
+        // transaction behind its account's nonce, a copy or not: it gets
+        // nothing, where it used to get a failure receipt. A native
+        // transaction is decided before its signature is checked, so such
+        // copies cost a validator a state read each. No transaction type is
+        // exempt: a sponsored registration is the machine's own transaction
+        // at its own nonce, a protocol record and an external transaction
+        // are held to their sender's account nonce by the VM, and the check
+        // here reads the same sender and nonce the VM does.
         let mut repeated: std::collections::HashSet<Hash> = std::collections::HashSet::new();
-        for signed_tx in &block.transactions {
+        // Positions of later copies of a transaction the block already
+        // carries: only the first copy executes and is indexed.
+        let mut copies: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut carried: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+        for (position, signed_tx) in block.transactions.iter().enumerate() {
             let tx_hash = signed_tx.transaction.hash();
-
-            if self
-                .storage
-                .get(CF_TRANSACTIONS, format!("idx:{tx_hash}").as_bytes())
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                debug!(tx_hash = %tx_hash, "Skipping a transaction included at an earlier height");
+            if !carried.insert(tx_hash) {
+                debug!(tx_hash = %tx_hash, "Skipping a second copy of a transaction in one block");
+                copies.insert(position);
+                continue;
+            }
+            if !signed_tx.transaction.tx_type.is_external() && {
+                use tenzro_vm::traits::VmState as _;
+                signed_tx.transaction.nonce.0
+                    < self
+                        .state_adapter
+                        .lock()
+                        .await
+                        .get_nonce(signed_tx.transaction.from.as_bytes())
+            } {
+                debug!(tx_hash = %tx_hash, "Skipping a transaction whose nonce is spent");
                 repeated.insert(tx_hash);
                 continue;
             }
@@ -3773,6 +4183,11 @@ impl EventLoop {
                 }
                 vm_tx.data = data;
             }
+            if spent_nonce(&*self.state_adapter.lock().await, &vm_tx) {
+                debug!(tx_hash = %tx_hash, nonce = vm_tx.nonce, "Skipping a transaction whose nonce is spent");
+                repeated.insert(tx_hash);
+                continue;
+            }
             vm_txs.push(vm_tx);
             admitted.push((signed_tx, tx_hash));
         }
@@ -3810,12 +4225,18 @@ impl EventLoop {
                     )
                     .map(|logs| {
                         for log in &logs {
-                            warn!(
-                                height = %block_height,
-                                topic = %String::from_utf8_lossy(log.topics.first().map(Vec::as_slice).unwrap_or_default()),
-                                data = %String::from_utf8_lossy(&log.data),
-                                "Epoch close event"
-                            );
+                            let topic = String::from_utf8_lossy(
+                                log.topics.first().map(Vec::as_slice).unwrap_or_default(),
+                            )
+                            .into_owned();
+                            let data = String::from_utf8_lossy(&log.data);
+                            // Insurance coverage and validator cost cover
+                            // are routine accounting, not a fault.
+                            if topic == "InsuranceCoverage" || topic == "ValidatorCostCovered" {
+                                info!(height = %block_height, topic = %topic, data = %data, "Epoch close event");
+                            } else {
+                                warn!(height = %block_height, topic = %topic, data = %data, "Epoch close event");
+                            }
                         }
                     })
                     .map_err(|e| format!("reward accounting failed: {e}"))
@@ -3841,6 +4262,14 @@ impl EventLoop {
                     )
                     .map(|_| ())
                     .map_err(|e| format!("participation accounting failed: {e}")),
+                    // The epoch just closed can only go uncounted when the
+                    // roster is unknown on a block that opens an epoch; a
+                    // node refuses that block, as it does when the epoch's
+                    // own validators are unknown.
+                    None if epoch > 0 && epoch_open.is_some() => Err(format!(
+                        "the validator set of epoch {} is not known when epoch {epoch} opens",
+                        epoch - 1
+                    )),
                     None => Ok(()),
                 }
             })
@@ -3960,7 +4389,13 @@ impl EventLoop {
                         // ValidatorMetadataUpdate logs — drive the off-chain
                         // ValidatorRegistry from VM-emitted events. The VM
                         // has already deducted gas and persisted markers.
-                        self.process_validator_logs(&result, block_height).await;
+                        self.process_validator_logs(
+                            &result,
+                            block_height,
+                            block.header.epoch,
+                            registry_checkpoint.as_ref(),
+                        )
+                        .await;
 
                         // Identities — mirror the consensus-decided DID record
                         // into the local IdentityRegistry read model so an
@@ -4029,12 +4464,16 @@ impl EventLoop {
                 }
                 Err(e) => {
                     failed_txs += 1;
-                    error!(
-                        tx_hash = %tx_hash,
-                        error = %e,
-                        "Transaction execution failed"
-                    );
+                    log_refused_transaction(&tx_hash, &e);
 
+                    // Behind its account's nonce once the transactions
+                    // before it in this block executed: decided as a spent
+                    // nonce is decided before the block runs.
+                    if matches!(&e, tenzro_vm::VmError::InvalidNonce { expected, got } if got < expected)
+                    {
+                        repeated.insert(tx_hash);
+                        continue;
+                    }
                     // A transaction that never executed stays in the mempool
                     // only when a later block can still run it: its nonce is
                     // ahead of the account (the predecessor may yet arrive),
@@ -4119,6 +4558,7 @@ impl EventLoop {
             || block.header.logs_bloom != logs_bloom
         {
             self.state_adapter.lock().await.rollback();
+            self.undo_registry_changes(registry_checkpoint.as_ref());
             error!(
                 height = %block_height,
                 committed = %block.header.event_root,
@@ -4127,6 +4567,20 @@ impl EventLoop {
             );
             return Err(NodeError::Other(format!(
                 "block {block_height} refused: its events do not match the header's event root, receipts root and logs bloom"
+            )));
+        }
+        // A write of the registry's that the store refused leaves memory ahead
+        // of disk: refuse the block and put the registry back.
+        if let Some(why) = self
+            .validator_registry
+            .as_ref()
+            .and_then(|r| r.take_storage_error())
+        {
+            self.state_adapter.lock().await.rollback();
+            self.undo_registry_changes(registry_checkpoint.as_ref());
+            error!(height = %block_height, error = %why, "Refusing block: the validator registry could not be written");
+            return Err(NodeError::Other(format!(
+                "block {block_height} refused: the validator registry could not be written: {why}"
             )));
         }
         // Settle the block's fees in state and hold the whole block to the
@@ -4139,6 +4593,7 @@ impl EventLoop {
             let settlement = tenzro_vm::ledger::settle_block(&mut state_adapter, &block_fees);
             if let Err(e) = tenzro_vm::ledger::verify_executed_block(&state_adapter) {
                 state_adapter.rollback();
+                self.undo_registry_changes(registry_checkpoint.as_ref());
                 error!(height = %block_height, error = %e, "Refusing block");
                 return Err(NodeError::Other(format!(
                     "block {block_height} refused: {e}"
@@ -4161,7 +4616,7 @@ impl EventLoop {
         // The records a node derives at an epoch's first block (the epoch's
         // validator set, and the registry the next transition is computed
         // from) are committed with this block's writes.
-        let epoch_records = self.epoch_start_records(block_height);
+        let epoch_records = self.epoch_open_writes(epoch_open);
 
         let executed_at = Instant::now();
 
@@ -4180,9 +4635,9 @@ impl EventLoop {
             .transactions
             .iter()
             .enumerate()
-            .filter(|(_, t)| {
+            .filter(|(i, t)| {
                 let h = t.transaction.hash();
-                !repeated.contains(&h) && !pending_again.contains(&h)
+                !copies.contains(i) && !repeated.contains(&h) && !pending_again.contains(&h)
             })
             .map(|(i, t)| (i, t.clone()))
             .collect();
@@ -4203,132 +4658,129 @@ impl EventLoop {
         let writes = block_writes.clone();
         let version = block_height.as_u64();
         let storage = self.storage.clone();
-        let (state_root, committed_at) =
-            tokio::task::spawn_blocking(move || -> std::result::Result<(Hash, Instant), NodeError> {
-                let (root, ops) = storage.hold_synced_writes(|| -> std::result::Result<Hash, NodeError> {
-                    let state_adapter = state_arc.blocking_lock();
-                    tenzro_storage::state_trie::capture::in_thread(writes.clone(), || {
-                        state_adapter.commit()
-                    })
-                    .map_err(|e| NodeError::Other(format!("State commit error: {}", e)))?;
-                    let mut committed = writes.take();
-                    committed.extend(epoch_records);
-                    // A protocol version that names another node hash
-                    // re-commits the whole state under it at its first block.
-                    let trie_scheme = tenzro_types::hash_scheme::block_hash_scheme(
-                        block_for_store.header.metadata.protocol_version,
-                        tenzro_types::hash_scheme::STATE_TRIE_HASH_SCHEMES,
-                    );
-                    if trie
-                        .scheme_at(version)
-                        .map_err(|e| NodeError::Other(format!("State trie scheme: {e}")))?
-                        != trie_scheme
-                    {
-                        trie.recommit_under(version, trie_scheme).map_err(|e| {
-                            NodeError::Other(format!("State trie re-commit error: {e}"))
-                        })?;
-                    }
-                    let root = trie
-                        .commit(version, &committed)
-                        .map_err(|e| NodeError::Other(format!("State trie commit error: {}", e)))?;
-
-                    tokio::runtime::Handle::current().block_on(async {
-                        BlockStoreImpl::new(storage.clone())
-                            .map_err(NodeError::Storage)?
-                            .put_block(&block_for_store)
-                            .await
-                            .map_err(NodeError::Storage)
-                    })?;
-                    if !txs_for_index.is_empty() {
-                        let block_hash_hex = block_hash.to_string();
-                        let block_height_u64 = block_height.0;
-                        let mut ops: Vec<WriteOp> = Vec::with_capacity(txs_for_index.len() * 3);
-                        for (tx_index, signed_tx) in &txs_for_index {
-                            let tx_hash = signed_tx.transaction.hash();
-                            let hex_key = tx_hash.to_string();
-                            match serde_json::to_vec(signed_tx) {
-                                Ok(value) => ops.push(WriteOp::Put {
-                                    cf: CF_TRANSACTIONS.to_string(),
-                                    key: hex_key.as_bytes().to_vec(),
-                                    value,
-                                }),
-                                Err(e) => {
-                                    warn!(
-                                        tx_hash = %tx_hash,
-                                        error = %e,
-                                        "Failed to serialize transaction for CF_TRANSACTIONS index; skipping"
-                                    );
-                                    continue;
-                                }
-                            }
-                            let idx_value = serde_json::json!({
-                                "block_height": block_height_u64,
-                                "block_hash": block_hash_hex,
-                                "tx_index": tx_index,
-                            });
-                            if let Ok(idx_bytes) = serde_json::to_vec(&idx_value) {
-                                ops.push(WriteOp::Put {
-                                    cf: CF_TRANSACTIONS.to_string(),
-                                    key: format!("idx:{}", hex_key).into_bytes(),
-                                    value: idx_bytes,
-                                });
-                            }
-                        }
-
-                        // Persist per-tx receipts. A sig-invalid tx in a finalized
-                        // block has no receipt entry by design (see exec loop).
-                        for (tx_hash, receipt) in &receipts_for_persist {
-                            let hex_key = tx_hash.to_string();
-                            match serde_json::to_vec(receipt) {
-                                Ok(value) => ops.push(WriteOp::Put {
-                                    cf: CF_TRANSACTIONS.to_string(),
-                                    key: format!("receipt:{}", hex_key).into_bytes(),
-                                    value,
-                                }),
-                                Err(e) => {
-                                    warn!(
-                                        tx_hash = %tx_hash,
-                                        error = %e,
-                                        "Failed to serialize tx receipt; skipping"
-                                    );
-                                }
-                            }
-                        }
-
-                        // Each transaction under its sender and recipient.
-                        ops.extend(
-                            crate::transaction_index::block_ops(
-                                storage.as_ref(),
-                                block_height_u64,
-                                &txs_for_index,
-                            )
-                            .map_err(NodeError::Other)?,
+        let (state_root, committed_at) = tokio::task::spawn_blocking(
+            move || -> std::result::Result<(Hash, Instant), NodeError> {
+                let (root, ops) =
+                    storage.hold_synced_writes(|| -> std::result::Result<Hash, NodeError> {
+                        let state_adapter = state_arc.blocking_lock();
+                        tenzro_storage::state_trie::capture::in_thread(writes.clone(), || {
+                            state_adapter.commit()
+                        })
+                        .map_err(|e| NodeError::Other(format!("State commit error: {}", e)))?;
+                        let mut committed = writes.take();
+                        committed.extend(epoch_records);
+                        // A protocol version that names another node hash
+                        // re-commits the whole state under it at its first block.
+                        let trie_scheme = tenzro_types::hash_scheme::block_hash_scheme(
+                            block_for_store.header.metadata.protocol_version,
+                            tenzro_types::hash_scheme::STATE_TRIE_HASH_SCHEMES,
                         );
+                        if trie
+                            .scheme_at(version)
+                            .map_err(|e| NodeError::Other(format!("State trie scheme: {e}")))?
+                            != trie_scheme
+                        {
+                            trie.recommit_under(version, trie_scheme).map_err(|e| {
+                                NodeError::Other(format!("State trie re-commit error: {e}"))
+                            })?;
+                        }
+                        let root = trie.commit(version, &committed).map_err(|e| {
+                            NodeError::Other(format!("State trie commit error: {}", e))
+                        })?;
 
-                        if !ops.is_empty() {
+                        tokio::runtime::Handle::current().block_on(async {
+                            BlockStoreImpl::new(storage.clone())
+                                .map_err(NodeError::Storage)?
+                                .put_block(&block_for_store)
+                                .await
+                                .map_err(NodeError::Storage)
+                        })?;
+                        if !txs_for_index.is_empty() {
+                            let block_hash_hex = block_hash.to_string();
+                            let block_height_u64 = block_height.0;
+                            let mut ops: Vec<WriteOp> = Vec::with_capacity(txs_for_index.len() * 3);
+                            for (tx_index, signed_tx) in &txs_for_index {
+                                let tx_hash = signed_tx.transaction.hash();
+                                let hex_key = tx_hash.to_string();
+                                // The body is not written again here: the block
+                                // holds it, and `idx:` below says where (see
+                                // `crate::tx_record`). Records from before this
+                                // change keep their own copy and are read first.
+                                let idx_value = serde_json::json!({
+                                    "block_height": block_height_u64,
+                                    "block_hash": block_hash_hex,
+                                    "tx_index": tx_index,
+                                });
+                                if let Ok(idx_bytes) = serde_json::to_vec(&idx_value) {
+                                    ops.push(WriteOp::Put {
+                                        cf: CF_TRANSACTIONS.to_string(),
+                                        key: format!("idx:{}", hex_key).into_bytes(),
+                                        value: idx_bytes,
+                                    });
+                                }
+                            }
+
+                            // Persist per-tx receipts. A sig-invalid tx in a finalized
+                            // block has no receipt entry by design (see exec loop).
+                            for (tx_hash, receipt) in &receipts_for_persist {
+                                let hex_key = tx_hash.to_string();
+                                match serde_json::to_vec(receipt) {
+                                    Ok(value) => ops.push(WriteOp::Put {
+                                        cf: CF_TRANSACTIONS.to_string(),
+                                        key: format!("receipt:{}", hex_key).into_bytes(),
+                                        value,
+                                    }),
+                                    Err(e) => {
+                                        warn!(
+                                            tx_hash = %tx_hash,
+                                            error = %e,
+                                            "Failed to serialize tx receipt; skipping"
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Each transaction under its sender and recipient.
+                            ops.extend(
+                                crate::transaction_index::block_ops(
+                                    storage.as_ref(),
+                                    block_height_u64,
+                                    &txs_for_index,
+                                )
+                                .map_err(NodeError::Other)?,
+                            );
+
+                            if !ops.is_empty() {
+                                storage.write_batch_sync(ops).map_err(NodeError::Storage)?;
+                            }
+                        }
+
+                        // The block's events, and the event log's tip at this height.
+                        if let Some(ops) = event_log_writes {
                             storage.write_batch_sync(ops).map_err(NodeError::Storage)?;
                         }
-                    }
-
-                    // The block's events, and the event log's tip at this height.
-                    if let Some(ops) = event_log_writes {
-                        storage.write_batch_sync(ops).map_err(NodeError::Storage)?;
-                    }
-                    Ok(root)
-                });
+                        Ok(root)
+                    });
                 let root = root?;
                 let committed_at = Instant::now();
                 storage.write_held(ops, sync).map_err(NodeError::Storage)?;
-                if version.is_multiple_of(STATE_TRIE_PRUNE_EVERY) && version > STATE_TRIE_RETAIN_HEIGHTS {
+                if version.is_multiple_of(STATE_TRIE_PRUNE_EVERY)
+                    && version > STATE_TRIE_RETAIN_HEIGHTS
+                {
                     trie.prune(version - STATE_TRIE_RETAIN_HEIGHTS)
                         .map_err(|e| NodeError::Other(format!("State trie prune error: {}", e)))?;
                 }
                 Ok((root, committed_at))
-            })
-            .await
-            .map_err(|e| NodeError::Other(format!("Block commit task panicked: {}", e)))??;
+            },
+        )
+        .await
+        .map_err(|e| NodeError::Other(format!("Block commit task panicked: {}", e)))??;
+        // The block is final: the registry change it made needs no undo.
+        if sync && let Some(r) = self.validator_registry.as_ref() {
+            r.clear_undo_prefix("block:");
+        }
 
-        info!(
+        debug!(
             height = %block_height,
             state_root = %state_root,
             "State committed"
@@ -4379,7 +4831,7 @@ impl EventLoop {
 
         self.maybe_produce_snapshot(block_height);
 
-        info!(
+        debug!(
             height = %block_height,
             hash = %block_hash,
             tx_count = tx_count,
@@ -4388,6 +4840,14 @@ impl EventLoop {
             gas_used = gas_used_total,
             state_root = %state_root,
             "Block finalized and persisted"
+        );
+        // One summary line per run of blocks at the default level, in place
+        // of the per-block lines above (which are kept at debug).
+        crate::block_summary::record(
+            block_height.0,
+            tx_count as u64,
+            failed_txs as u64,
+            gas_used_total,
         );
 
         // Mirror the block's settled fees into the gas oracle, which serves
@@ -4451,7 +4911,7 @@ impl EventLoop {
                         "Failed to broadcast finalized block over gossip"
                     );
                 } else {
-                    info!(
+                    debug!(
                         height = %height_for_log,
                         hash = %hash_for_log,
                         "Broadcast finalized block to network"
@@ -4835,6 +5295,8 @@ impl EventLoop {
         &self,
         result: &tenzro_vm::ExecutionResult,
         block_height: BlockHeight,
+        block_epoch: u64,
+        undo: Option<&tenzro_token::validator_registry::RegistryCheckpoint>,
     ) {
         let any_validator = result.logs.iter().any(|l| {
             l.topics
@@ -4866,16 +5328,20 @@ impl EventLoop {
                 return;
             }
         };
+        // The registry is about to change outside the block's atomic commit:
+        // keep how it stands now, so a stop before the commit can undo it.
+        if let Some(undo) = undo
+            && !registry.write_undo(&format!("block:{}", block_height.0), undo)
+        {
+            // No record, no change: the failure is reported and the block is
+            // refused after execution.
+            return;
+        }
 
-        // Map block height → epoch via the consensus engine, falling back to
-        // 0 when no consensus is wired (e.g. unit tests). The registry only
-        // uses the epoch number for ordering and cooldown gating, so a
-        // monotonic stand-in is acceptable in degraded mode.
-        // EpochManager::current_epoch() is sync and returns Epoch (with .number).
-        let current_epoch = match self.consensus.as_ref() {
-            Some(c) => c.epoch_manager().current_epoch().number,
-            None => 0,
-        };
+        // The epoch the block carries: what the registry records and orders
+        // by is chain data, the same on every node, and never the epoch this
+        // node's consensus has reached when it happens to execute the block.
+        let current_epoch = block_epoch;
 
         for log in &result.logs {
             let topic = match log.topics.first() {
@@ -5082,11 +5548,7 @@ impl EventLoop {
                     let epoch = u64::from_be_bytes(log.data[..8].try_into().expect("8 bytes"));
                     let index = u64::from_be_bytes(log.data[8..16].try_into().expect("8 bytes"));
                     let (p256, ml_dsa) = log.data[16..].split_at(65);
-                    let Some(entry) = registry
-                        .list()
-                        .into_iter()
-                        .find(|e| e.p256_pubkey == p256 && e.ml_dsa_pubkey == ml_dsa)
-                    else {
+                    let Some(entry) = registry.find_by_key(ml_dsa, p256) else {
                         warn!(
                             epoch,
                             index, "Checkpoint equivocation by a key the registry does not hold"
@@ -5094,7 +5556,12 @@ impl EventLoop {
                         continue;
                     };
                     if let Some(jailer) = self.equivocation_jailer.as_ref() {
-                        jailer.report_checkpoint_equivocation(&entry.address, epoch, index);
+                        jailer.report_checkpoint_equivocation(
+                            &entry.address,
+                            epoch,
+                            index,
+                            current_epoch,
+                        );
                     }
                 }
 
@@ -6830,6 +7297,71 @@ mod epoch_staging_reconcile_tests {
             Some(10_000_000)
         );
     }
+    /// The registry lists its validators in an order that differs from one
+    /// process to the next. The next set, and so the record, the committee root
+    /// and every node's view of the epoch, must not depend on it.
+    #[tokio::test]
+    async fn the_next_set_is_the_same_whatever_order_the_registry_lists_its_validators() {
+        let (seated_addr, seated_key, seated_endpoint) = keys(0x01);
+        let entrants: Vec<_> = (0x10u8..0x18).map(keys).collect();
+        let mut reference: Option<Vec<Address>> = None;
+        for round in 0..12usize {
+            let em = Arc::new(
+                EpochManager::new(
+                    vec![ValidatorInfo::new(
+                        seated_addr,
+                        seated_key.clone(),
+                        seated_endpoint,
+                        10_000_000,
+                    )],
+                    100,
+                )
+                .expect("epoch manager"),
+            );
+            let registry = Arc::new(ValidatorRegistry::new());
+            registry
+                .seed_genesis_active(
+                    seated_addr,
+                    seated_key.ml_dsa.clone(),
+                    seated_key.p256.clone(),
+                    seated_endpoint,
+                    seated_addr,
+                    10_000 * ONE_TNZO,
+                    String::new(),
+                )
+                .unwrap();
+            // A different insertion order every round (3 is coprime with 8).
+            let n = entrants.len();
+            for k in 0..n {
+                let (addr, key, endpoint) = &entrants[(k * 3 + round) % n];
+                registry
+                    .seed_genesis_active(
+                        *addr,
+                        key.ml_dsa.clone(),
+                        key.p256.clone(),
+                        *endpoint,
+                        *addr,
+                        10_000 * ONE_TNZO,
+                        String::new(),
+                    )
+                    .unwrap();
+            }
+            EventLoop::stage_registry_epoch_plan(&em, &registry, &|_| true);
+            let queued: Vec<Address> = em.pending_validators().iter().map(|v| v.address).collect();
+            let mut sorted = queued.clone();
+            sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            assert_eq!(queued, sorted, "staged in address order");
+            let set = em
+                .transition_epoch(BlockHeight::from(100))
+                .unwrap()
+                .expect("due");
+            let order: Vec<Address> = set.iter().map(|v| v.address).collect();
+            match &reference {
+                None => reference = Some(order),
+                Some(first) => assert_eq!(&order, first, "round {round}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6840,7 +7372,7 @@ mod validator_power_unit_tests {
 
     /// The genesis validator is seated with 10,000,000 and the registry holds
     /// 10^25 for it. They are the same stake, and staging must not report the
-    /// difference as a change — which is exactly what was observed live:
+    /// difference as a change — which would show up as:
     /// `seated=10000000 registry=10000000000000000000000000`.
     #[test]
     fn the_registry_and_the_seated_set_agree_after_conversion() {
@@ -7055,6 +7587,40 @@ mod tests {
         assert!(verify_announcement_in(Some(&registry), &forged).is_err());
     }
 
+    #[tokio::test]
+    async fn an_announcement_from_an_unregistered_machine_is_refused_until_it_registers() {
+        // A validator whose machine identity never reached the chain
+        // signs correctly, yet every receiver refuses it because the DID
+        // resolves to nothing. Registering the identity is what fixes it.
+        let a = machine_keys(60);
+        let registry = IdentityRegistry::new();
+
+        let identity = announcer(&a);
+        let mut ann = tenzro_network::ModelRegistrationMessage {
+            model_id: "qwen3-0.6b".into(),
+            ..Default::default()
+        };
+        tenzro_network::SignedAnnouncement::sign(
+            &mut ann,
+            identity.machine_did(),
+            identity.signer(),
+        )
+        .unwrap();
+
+        let err = verify_announcement_in(Some(&registry), &ann)
+            .expect_err("an announcer with no registered identity is refused");
+        assert!(
+            err.contains("has no registered identity"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains(identity.machine_did()));
+
+        let did = register_machine(&registry, &a).await;
+        assert_eq!(did, identity.machine_did());
+        verify_announcement_in(Some(&registry), &ann)
+            .expect("the same announcement verifies once the machine is registered");
+    }
+
     #[test]
     fn supply_metrics_follow_the_consensus_counters() {
         let at = tenzro_types::primitives::Timestamp::new(1_000);
@@ -7112,6 +7678,85 @@ mod tests {
             },
         };
         Block::new(header, transactions)
+    }
+
+    /// A block that orders an old transaction again executes alike on a node
+    /// that keeps the transaction's records and on one that pruned them (or
+    /// restored from a snapshot without them): the copy's spent nonce, read
+    /// from chain state, decides it. Both commit the same receipts, events,
+    /// state and block hash, and neither writes a receipt for the copy.
+    #[tokio::test]
+    async fn an_old_transaction_ordered_again_executes_alike_with_or_without_its_records() {
+        let (mut archival, genesis, transfer) = funded_sender().await;
+        let (mut pruned, same_genesis, _) = funded_sender().await;
+        assert_eq!(genesis, same_genesis);
+        let old = transfer(0);
+        let hash = old.transaction.hash();
+
+        let first = block_now(1, genesis, vec![old.clone()]);
+        let a1 = archival
+            .handle_block_finalized_inner(first.clone(), BlockSource::Ordered)
+            .await
+            .unwrap();
+        let p1 = pruned
+            .handle_block_finalized_inner(first, BlockSource::Ordered)
+            .await
+            .unwrap();
+        assert_eq!(a1, p1);
+        // The records pruning deletes for a transaction of a pruned block.
+        for key in [
+            hash.to_string(),
+            format!("idx:{hash}"),
+            format!("receipt:{hash}"),
+        ] {
+            pruned
+                .storage
+                .delete(CF_TRANSACTIONS, key.as_bytes())
+                .unwrap();
+        }
+        let receipt = |el: &EventLoop| {
+            el.storage
+                .get(CF_TRANSACTIONS, format!("receipt:{hash}").as_bytes())
+                .unwrap()
+        };
+        let kept = receipt(&archival).expect("the archival node keeps the receipt");
+
+        let next = transfer(1);
+        let second = block_now(2, archival.last_block_hash(), vec![next.clone(), old]);
+        let a2 = archival
+            .handle_block_finalized_inner(second.clone(), BlockSource::Ordered)
+            .await
+            .unwrap()
+            .expect("executed");
+        let p2 = pruned
+            .handle_block_finalized_inner(second, BlockSource::Ordered)
+            .await
+            .unwrap()
+            .expect("executed");
+        assert_eq!(a2, p2, "same block hash and post-state root");
+        let stored = |el: &EventLoop| {
+            let store = BlockStoreImpl::new(el.storage.clone()).unwrap();
+            async move {
+                store
+                    .get_block_by_height(BlockHeight::from(2))
+                    .await
+                    .unwrap()
+                    .expect("block 2 stored")
+                    .header
+            }
+        };
+        let (ha, hp) = (stored(&archival).await, stored(&pruned).await);
+        assert_eq!(ha.receipts_root, hp.receipts_root);
+        assert_eq!(ha.event_root, hp.event_root);
+        assert_eq!(ha.state_root, hp.state_root);
+        assert!(receipt_of(&archival, &next.transaction.hash()).success);
+        assert!(receipt_of(&pruned, &next.transaction.hash()).success);
+        assert_eq!(
+            receipt(&archival),
+            Some(kept),
+            "the first inclusion keeps its receipt"
+        );
+        assert_eq!(receipt(&pruned), None, "no receipt is written for the copy");
     }
 
     /// One transaction ordered in two segments lands in two blocks. The copy
@@ -7609,7 +8254,11 @@ mod tests {
         let classical = signed(&p256_alone, transfer(), 0);
         verify_transaction_signature(&classical).unwrap();
         let err = verify_transaction_pq_leg(&classical, &state).unwrap_err();
-        assert!(err.to_string().contains("requires the hardware ML-DSA-65 leg"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("requires the hardware ML-DSA-65 leg"),
+            "{err}"
+        );
 
         // A fresh account's transfer carries the leg but has no key to check
         // it against: it enrols first.
@@ -7769,6 +8418,164 @@ mod tests {
 
     // ---- AgentBond log decoders + reflection scan -----------------
 
+    /// A certificate over `first..=last` committing `state_root` at `last`.
+    fn certificate_over(
+        index: u64,
+        first_height: u64,
+        last_height: u64,
+        state_root: [u8; 32],
+    ) -> Certificate {
+        Certificate {
+            checkpoint: tenzro_consensus::Checkpoint {
+                chain_id: 7,
+                genesis_hash: [1; 32],
+                epoch: 0,
+                index,
+                prev: [0; 32],
+                first_height,
+                last_height,
+                blocks_root: [0; 32],
+                state_height: last_height,
+                state_root,
+                statement_root: [0; 32],
+                next_committee_root: None,
+                anchor_round: 0,
+                timestamp_ms: 0,
+                ordering_root: [0; 32],
+            },
+            signers: Vec::new(),
+            sessions: Vec::new(),
+            signatures: Vec::new(),
+        }
+    }
+
+    /// A validator's consensus can form a certificate before the segments
+    /// it covers have executed here (the quorum ran ahead of this node): the
+    /// certificate is held, not refused, and checked against this node's
+    /// state once those blocks have executed.
+    #[tokio::test]
+    async fn a_certificate_ahead_of_execution_is_held_until_its_blocks_execute() {
+        let consensus = crate::consensus_driver::tests::seated_validator();
+        let (mut el, _, transfer) = funded_sender().await;
+        let (mut twin, _, _) = funded_sender().await;
+        el.consensus = Some(consensus.clone());
+        twin.consensus = Some(consensus);
+        assert!(el.orders_blocks());
+        let segments = ordered_segments(2, &transfer);
+        twin.execute_ordered_run(segments.clone()).await;
+        let root = twin.state_trie.root_at(2).unwrap().expect("root at 2").0;
+
+        el.handle_certificate(certificate_over(0, 1, 2, root))
+            .await
+            .expect("held until its blocks execute, not refused");
+        // One whose state root this node does not compute is held too, and
+        // refused once checked.
+        el.handle_certificate(certificate_over(1, 1, 2, [9; 32]))
+            .await
+            .expect("held");
+        assert_eq!(el.held_certificates.len(), 2);
+        assert!(
+            el.import_held_certificates().await.is_empty(),
+            "nothing is checked before its blocks execute"
+        );
+
+        el.execute_ordered_run(segments).await;
+        assert_eq!(el.current_height, 2);
+        let done = el.import_held_certificates().await;
+        assert!(el.held_certificates.is_empty());
+        assert_eq!(done.len(), 2);
+        assert_eq!(done[0].0, 0);
+        assert!(done[0].1.is_ok(), "{:?}", done[0].1);
+        assert_eq!(done[1].0, 1);
+        assert!(done[1].1.is_err(), "a state root this node did not compute");
+
+        // A certificate over blocks already executed is checked at once.
+        el.handle_certificate(certificate_over(2, 1, 2, root))
+            .await
+            .expect("checked at once");
+        assert!(el.held_certificates.is_empty());
+    }
+
+    /// Held certificates stay under a fixed count, keeping the lowest.
+    #[tokio::test]
+    async fn held_certificates_stay_under_a_count() {
+        let mut el = make_event_loop().await;
+        for index in (0..MAX_HELD_CERTIFICATES as u64 + 10).rev() {
+            el.hold_certificate(certificate_over(index, index + 1, index + 1, [0; 32]));
+        }
+        assert_eq!(el.held_certificates.len(), MAX_HELD_CERTIFICATES);
+        assert_eq!(el.held_certificates.keys().next(), Some(&0));
+    }
+
+    /// A transaction refused for its nonce is an ordering race, not a
+    /// failure: one ahead of the account is kept for a later block and
+    /// reported as a warning, a copy of one already executed only for
+    /// debugging. Any other refusal is an error.
+    #[test]
+    fn a_nonce_refusal_is_not_reported_as_an_error() {
+        use tenzro_vm::VmError;
+        assert_eq!(
+            refusal_level(&VmError::InvalidNonce {
+                expected: 15321,
+                got: 15323
+            }),
+            tracing::Level::WARN
+        );
+        assert_eq!(
+            refusal_level(&VmError::InvalidNonce {
+                expected: 15323,
+                got: 15321
+            }),
+            tracing::Level::DEBUG
+        );
+        assert_eq!(
+            refusal_level(&VmError::InsufficientBalance {
+                required: 2,
+                available: 1
+            }),
+            tracing::Level::ERROR
+        );
+    }
+
+    /// A sender's transactions in nonce order in one block all execute; one
+    /// ordered ahead of its nonce is not executed, gets no receipt, and
+    /// executes in a later block once the one before it has.
+    #[tokio::test]
+    async fn in_order_transactions_execute_and_one_ahead_waits_for_a_later_block() {
+        let (mut el, _, transfer) = funded_sender().await;
+        let now_ms = tenzro_types::primitives::Timestamp::now().as_millis() as u64;
+        let segment = |height: u64, transactions: Vec<SignedTransaction>| OrderedSegment {
+            height,
+            epoch: 0,
+            round: height * 2,
+            anchor: Hash::new([height as u8; 32]),
+            proposer: Address::zero(),
+            timestamp_ms: now_ms + height,
+            transactions,
+        };
+        let in_order: Vec<SignedTransaction> = (0..3).map(&transfer).collect();
+        el.execute_ordered_run(vec![segment(1, in_order.clone())])
+            .await;
+        for tx in &in_order {
+            assert!(receipt_of(&el, &tx.transaction.hash()).success);
+        }
+
+        let (ahead, next) = (transfer(4), transfer(3));
+        el.execute_ordered_run(vec![segment(2, vec![ahead.clone(), next.clone()])])
+            .await;
+        assert!(receipt_of(&el, &next.transaction.hash()).success);
+        let ahead_hash = ahead.transaction.hash();
+        assert!(
+            el.storage
+                .get(CF_TRANSACTIONS, format!("receipt:{ahead_hash}").as_bytes())
+                .unwrap()
+                .is_none(),
+            "not executed, so no receipt"
+        );
+        el.execute_ordered_run(vec![segment(3, vec![ahead])]).await;
+        assert!(receipt_of(&el, &ahead_hash).success);
+    }
+
     /// Block-sync evidence reaches the nearest kept certificate, which may
     /// lie past the blocks served with it. The bodies whose blocks are held
     /// import; the first one that runs past them ends the import there,
@@ -7899,8 +8706,8 @@ mod tests {
         assert_eq!(start.elapsed(), 3 * SHARD_FETCH_TIMEOUT);
     }
 
-    /// A resolver whose fetches fail the way the blob store did on
-    /// 2026-10-29 after a write hit a full disk: the entry is poisoned and
+    /// A resolver whose fetches fail the way a blob store does
+    /// after a write hit a full disk: the entry is poisoned and
     /// the store either errors or panics on every later request.
     struct PoisonedResolver {
         calls: std::sync::atomic::AtomicUsize,
@@ -7960,7 +8767,7 @@ mod tests {
         assert_eq!(r.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// The failing shape of 2026-10-30: the same shard objects announced
+    /// The failing shape: the same shard objects announced
     /// over and over against a poisoned store. Attempts are bounded, then
     /// the object is quarantined and no longer reaches the store.
     #[tokio::test(start_paused = true)]
@@ -8012,6 +8819,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
         let genesis = crate::config::GenesisConfig {
+            protocol: None,
+            consensus: Default::default(),
+            validator_registry: Default::default(),
             version: crate::config::GENESIS_SCHEMA_VERSION,
             chain_id: 1337,
             timestamp: 0,

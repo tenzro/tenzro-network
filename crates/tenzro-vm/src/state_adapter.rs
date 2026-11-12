@@ -424,7 +424,7 @@ impl StateAdapter {
             .map(|entry| entry.value().len())
             .sum();
 
-        tracing::info!(
+        tracing::debug!(
             "Committing changes: {} code, {} balance, {} nonce, {} storage",
             dirty_code_count,
             dirty_balance_count,

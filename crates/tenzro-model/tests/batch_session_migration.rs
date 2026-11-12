@@ -21,6 +21,19 @@ use tenzro_model::{
     SequenceEngine, SessionTurn, SourcePolicy, get_model_by_id,
 };
 
+/// Loading a model starts this executable again as the model parser. This
+/// initialiser runs before the test harness and turns that child into the
+/// parser, so the harness never starts in it.
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static ENTER_PARSE_JAIL_CHILD: extern "C" fn() = enter_parse_jail_child;
+
+#[cfg(target_os = "linux")]
+extern "C" fn enter_parse_jail_child() {
+    tenzro_model::parse_jail::enter_if_requested();
+}
+
 const MODEL: &str = "qwen3.5-0.8b";
 const SESSION: &str = "session-under-test";
 

@@ -13,9 +13,9 @@
 //! vec — meaning the validator-set history for past epochs was unrecoverable.
 //! A node that fell behind across an epoch boundary then verified incoming
 //! block-sync responses against the **current** validator set, rejecting every
-//! historical block with `InvalidValidatorSet`. That asymmetry caused the
-//! May 2026 testnet stall: 4 of 10 nodes stuck mid-epoch, quorum impossible,
-//! liveness deadlock for 3 days.
+//! historical block with `InvalidValidatorSet`. That asymmetry stalls the
+//! chain: nodes stuck mid-epoch, quorum impossible,
+//! a liveness deadlock.
 //!
 //! ## Key layout
 //!

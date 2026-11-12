@@ -52,6 +52,13 @@ DeviceAllow=/dev/nsm rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LimitNOFILE=65536
 MemoryMin=1G
+# The node is the machine's purpose in this image: last to be killed, first for
+# CPU and disk. It sheds its own load by priority (docs/LOAD-PROTECTION.md).
+OOMScoreAdjust=-900
+CPUWeight=800
+IOWeight=800
+TasksMax=16384
+TimeoutStopSec=90
 Restart=on-failure
 RestartSec=10s
 StandardOutput=journal+console

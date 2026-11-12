@@ -27,6 +27,8 @@ use crate::node::TenzroNode;
 const TICK: Duration = Duration::from_secs(60);
 /// How long a sent proof is left to land before it is sent again.
 const RESEND_AFTER: Duration = Duration::from_secs(600);
+/// How long a GPU that gave no report is left alone before it is asked again.
+const ASK_GPU_AGAIN_AFTER: Duration = Duration::from_secs(600);
 
 /// Quote this epoch's challenge and send it, when the node's account is a
 /// machine identity that has not yet answered it. Returns the epoch proven.
@@ -95,10 +97,12 @@ pub(crate) fn gpu_proof(
 
 /// Have this machine's GPU sign this epoch's GPU challenge and send it, when
 /// the node's account is a machine identity whose GPU has not answered it.
-/// Returns the epoch proven.
+/// Returns the epoch proven. A GPU that gives no report is noted in `refused`
+/// and is not asked again until [`ASK_GPU_AGAIN_AFTER`] has passed.
 async fn prove_gpu_once(
     node: &Arc<TenzroNode>,
     sent: Option<(u64, Instant)>,
+    refused: &mut Option<Instant>,
 ) -> Result<Option<u64>, String> {
     let Some(submitter) = node.ledger_submitter() else {
         return Ok(None);
@@ -117,8 +121,18 @@ async fn prove_gpu_once(
     if sent.is_some_and(|(e, at)| e == epoch && at.elapsed() < RESEND_AFTER) {
         return Ok(None);
     }
+    if refused.is_some_and(|at| at.elapsed() < ASK_GPU_AGAIN_AFTER) {
+        return Ok(None);
+    }
     let nonce = gpu_challenge(&possession);
-    let (report, certs) = gpu_report(nonce).await?;
+    let (report, certs) = match gpu_report(nonce).await {
+        Ok(evidence) => evidence,
+        Err(e) => {
+            *refused = Some(Instant::now());
+            return Err(e);
+        }
+    };
+    *refused = None;
     let op = gpu_proof(epoch, &nonce, report, certs)?;
     crate::rpc::submit_as_validator(
         node,
@@ -169,6 +183,7 @@ pub fn spawn(node: Arc<TenzroNode>) {
     tokio::spawn(async move {
         let mut sent: Option<(u64, Instant)> = None;
         let mut gpu_sent: Option<(u64, Instant)> = None;
+        let mut gpu_refused: Option<Instant> = None;
         loop {
             match prove_once(&node, sent).await {
                 Ok(Some(epoch)) => {
@@ -178,7 +193,7 @@ pub fn spawn(node: Arc<TenzroNode>) {
                 Ok(None) => {}
                 Err(e) => debug!(target: "hardware", error = %e, "no possession quote this round"),
             }
-            match prove_gpu_once(&node, gpu_sent).await {
+            match prove_gpu_once(&node, gpu_sent, &mut gpu_refused).await {
                 Ok(Some(epoch)) => {
                     gpu_sent = Some((epoch, Instant::now()));
                     info!(target: "hardware", epoch, "sent this epoch's GPU report");

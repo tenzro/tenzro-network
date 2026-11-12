@@ -39,10 +39,18 @@ impl Path {
 
     pub fn blurb(self) -> &'static str {
         match self {
-            Path::UseNetwork => "Get a wallet and identity, then use models, payments and agents. No special hardware.",
-            Path::Provide => "Serve AI models from this machine and get paid for the work. Needs a hardware key and a node.",
-            Path::Validate => "Help run the chain. Needs a hardware key, a node, stake, and approval during the preview.",
-            Path::Local => "Run a private chain on this machine to learn and build. Nothing leaves the machine.",
+            Path::UseNetwork => {
+                "Get a wallet and identity, then use models, payments and agents. No special hardware."
+            }
+            Path::Provide => {
+                "Serve AI models from this machine and get paid for the work. Needs a hardware key and a node."
+            }
+            Path::Validate => {
+                "Help run the chain. Needs a hardware key, a node, stake, and approval while validator admission is closed."
+            }
+            Path::Local => {
+                "Run a private chain on this machine to learn and build. Nothing leaves the machine."
+            }
         }
     }
 }
@@ -128,7 +136,14 @@ impl Step {
         }
     }
 
-    fn exec(id: &'static str, title: &str, what: String, why: &str, prog: Prog, args: &[&str]) -> Self {
+    fn exec(
+        id: &'static str,
+        title: &str,
+        what: String,
+        why: &str,
+        prog: Prog,
+        args: &[&str],
+    ) -> Self {
         let mut s = Self::info(id, title, what, why);
         s.action = Action::Exec {
             prog,
@@ -173,7 +188,10 @@ pub fn display_command(prog: &str, args: &[String]) -> String {
     let mut s = prog.to_string();
     for a in args {
         s.push(' ');
-        if a.is_empty() || a.chars().any(|c| c.is_whitespace() || "\"'$`\\".contains(c)) {
+        if a.is_empty()
+            || a.chars()
+                .any(|c| c.is_whitespace() || "\"'$`\\".contains(c))
+        {
             s.push('"');
             s.push_str(&a.replace('"', "\\\""));
             s.push('"');
@@ -286,8 +304,20 @@ fn blocked(what: &str, why: &str, fix: &[&str], offers: Vec<Offer>, path: Path) 
 
 fn setup_args(mode: &str, operator: &str, o: &Opts) -> Vec<String> {
     let mut a: Vec<String> = [
-        "setup", "--yes", "--path", "network", "--mode", mode, "--operator", operator,
-        "--visibility", "private", "--name", &o.name, "--machine-name", &o.machine_name,
+        "setup",
+        "--yes",
+        "--path",
+        "network",
+        "--mode",
+        mode,
+        "--operator",
+        operator,
+        "--visibility",
+        "private",
+        "--name",
+        &o.name,
+        "--machine-name",
+        &o.machine_name,
     ]
     .iter()
     .map(|s| s.to_string())
@@ -308,7 +338,9 @@ fn key_steps(m: &Machine, o: &Opts) -> Result<Vec<Step>, Box<Plan>> {
             return Err(Box::new(blocked(
                 "A key holder cannot run on Windows.",
                 "It talks to the other machine's TPM over a Unix socket, which Windows does not have.",
-                &["Use a machine with its own TPM 2.0, or a Linux or macOS machine as the key holder."],
+                &[
+                    "Use a machine with its own TPM 2.0, or a Linux or macOS machine as the key holder.",
+                ],
                 vec![],
                 path,
             )));
@@ -471,21 +503,31 @@ fn node_ready(m: &Machine, path: Path) -> Result<(), Box<Plan>> {
         (None, _) => Err(Box::new(blocked(
             "The node program is missing.",
             "tenzro-node was not found next to tenzro or on PATH.",
-            &["Install the Tenzro package for this machine (it puts tenzro and tenzro-node together), then run tenzro again."],
+            &[
+                "Install the Tenzro package for this machine (it puts tenzro and tenzro-node together), then run tenzro again.",
+            ],
             vec![],
             path,
         ))),
         (Some(_), Some(b)) if !b.startup_ok => {
-            let why = b.refusal.clone().unwrap_or_else(|| "its hardware check refused".into());
+            let why = b
+                .refusal
+                .clone()
+                .unwrap_or_else(|| "its hardware check refused".into());
             let gpu_cpu = !m.gpus.is_empty() && b.flavour.to_lowercase().contains("cpu");
             Err(Box::new(blocked(
                 "This build of the node would refuse to start on this machine.",
                 &if gpu_cpu {
-                    format!("It is the CPU build and this machine has a GPU ({}). {why}", m.gpus[0])
+                    format!(
+                        "It is the CPU build and this machine has a GPU ({}). {why}",
+                        m.gpus[0]
+                    )
                 } else {
                     why
                 },
-                &["Install the package that matches this machine: the CUDA package on an NVIDIA GPU machine, the CPU package otherwise."],
+                &[
+                    "Install the package that matches this machine: the CUDA package on an NVIDIA GPU machine, the CPU package otherwise.",
+                ],
                 vec![],
                 path,
             )))
@@ -519,7 +561,10 @@ fn network_down(path: Path, net: &Net, o: &Opts) -> Option<Plan> {
     Some(blocked(
         "The network is not reachable yet.",
         &why,
-        &["Come back and run tenzro again when the network is announced.", "Meanwhile you can try Tenzro on this machine: it runs its own local chain."],
+        &[
+            "Come back and run tenzro again when the network is announced.",
+            "Meanwhile you can try Tenzro on this machine: it runs its own local chain.",
+        ],
         vec![Offer::SwitchTo(Path::Local), Offer::Finish],
         path,
     ))
@@ -546,7 +591,12 @@ fn plan_use(m: &Machine, net: &Net, o: &Opts) -> Plan {
             &setup_args("consume", "self", o).iter().map(String::as_str).collect::<Vec<_>>(),
         ),
     ];
-    Plan { path: Path::UseNetwork, steps, blocked: None, next: "tenzro".into() }
+    Plan {
+        path: Path::UseNetwork,
+        steps,
+        blocked: None,
+        next: "tenzro".into(),
+    }
 }
 
 fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
@@ -574,7 +624,11 @@ fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
             m.cores,
             m.ram_gb,
             m.disk_free_gb,
-            if m.gpus.is_empty() { ", no GPU".to_string() } else { format!(", {}", m.gpus.join(", ")) }
+            if m.gpus.is_empty() {
+                ", no GPU".to_string()
+            } else {
+                format!(", {}", m.gpus.join(", "))
+            }
         ),
         if validate {
             "A validator needs a hardware key and a node that stays up; a GPU is not needed."
@@ -583,7 +637,11 @@ fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
         },
     ));
     steps.extend(keys);
-    let operator = if o.delegated || !m.root.has_local_hardware() { "self" } else { "autonomous" };
+    let operator = if o.delegated || !m.root.has_local_hardware() {
+        "self"
+    } else {
+        "autonomous"
+    };
     steps.push(Step::exec(
         "setup",
         "Save your setup",
@@ -592,24 +650,43 @@ fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
         Prog::Cli,
         &setup_args(if validate { "validate" } else { "provide" }, operator, o).iter().map(String::as_str).collect::<Vec<_>>(),
     ));
-    let mut start_args = vec!["--roles".to_string(), roles.to_string(), "--data-dir".to_string(), o.data_dir.display().to_string()];
+    let mut start_args = vec![
+        "--roles".to_string(),
+        roles.to_string(),
+        "--data-dir".to_string(),
+        o.data_dir.display().to_string(),
+    ];
     if o.delegated {
-        start_args.extend(["--tpm-key-holder".into(), o.holder_socket.clone(), "--tpm-label".into(), o.holder_label.clone()]);
+        start_args.extend([
+            "--tpm-key-holder".into(),
+            o.holder_socket.clone(),
+            "--tpm-label".into(),
+            o.holder_label.clone(),
+        ]);
     }
     let mut start = Step::info(
         "start-node",
         "Start the node",
-        format!("Starts tenzro-node with the {roles} role in the background and writes its log next to its data."),
+        format!(
+            "Starts tenzro-node with the {roles} role in the background and writes its log next to its data."
+        ),
         "The node syncs the chain and serves its role. You join as a verify-only node first; that is normal. It may sit at block 0 on a quiet chain until the next block.",
     );
-    start.action = Action::Exec { prog: Prog::Node, args: start_args, detached: true, save_as: None };
+    start.action = Action::Exec {
+        prog: Prog::Node,
+        args: start_args,
+        detached: true,
+        save_as: None,
+    };
     steps.push(start);
     steps.push(Step {
         id: "wait-node",
         title: "Wait for the node".into(),
         what: "Waits until the node answers on this machine.".into(),
         why: "Registering and bonding need the node running.".into(),
-        action: Action::WaitRpc { url: crate::endpoint::LOCAL_RPC.into() },
+        action: Action::WaitRpc {
+            url: crate::endpoint::LOCAL_RPC.into(),
+        },
         gate: Gate::Free,
         skippable: true,
         manual: vec![],
@@ -620,26 +697,39 @@ fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
             Step::info(
                 "admission",
                 "Admission needs approval",
-                "During the preview a new validator is admitted by governance: an ApproveValidators proposal must name your account before you can register. Ask for approval with the operator request form at https://tenzro.com/join.".into(),
-                "It keeps the early validator set small and known. Everything else (syncing, following the chain) works without approval.",
+                "Validator admission is closed while the network stabilises: only the admitted set may register, and governance extends the set with an ApproveValidators proposal. Run as an operator or a participant now, and write to team@tenzro.com to ask to be admitted.".into(),
+                "It keeps the early validator set small and known until the network is stable. Everything else (syncing, following the chain, serving as an operator) works without approval.",
             )
             .manual(&[
                 "tenzro validator keys --stake 10000".to_string(),
                 "tenzro sponsor status".to_string(),
                 "tenzro validator get <your account address>".to_string(),
             ])
-            .caution("Those commands check your status: your keys to put in the form, the sponsorship state, and whether your account is on the validator list."),
+            .caution("Those commands check your status: your keys to send with the request, the sponsorship state, and whether your account is on the validator list."),
         );
         // Registration is the node registering itself: it boots with
         // --validator-self-stake and registers with its own keys once the
         // account holds the stake plus gas (the same thing `tenzro setup
         // --mode validate` writes into its unit). `tenzro validator register`
         // takes eight pasted key arguments and is the manual route.
-        let mut args = vec!["--roles".to_string(), "validator".to_string(), "--data-dir".to_string(), o.data_dir.display().to_string()];
+        let mut args = vec![
+            "--roles".to_string(),
+            "validator".to_string(),
+            "--data-dir".to_string(),
+            o.data_dir.display().to_string(),
+        ];
         if o.delegated {
-            args.extend(["--tpm-key-holder".into(), o.holder_socket.clone(), "--tpm-label".into(), o.holder_label.clone()]);
+            args.extend([
+                "--tpm-key-holder".into(),
+                o.holder_socket.clone(),
+                "--tpm-label".into(),
+                o.holder_label.clone(),
+            ]);
         }
-        args.extend(["--validator-self-stake".into(), "10000000000000000000000".into()]);
+        args.extend([
+            "--validator-self-stake".into(),
+            "10000000000000000000000".into(),
+        ]);
         let mut reg = Step::info(
             "register",
             "Stake and register as a validator",
@@ -649,7 +739,12 @@ fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
         .skip()
         .typed("stake")
         .manual(&["tenzro-node graceful-exit   (stops the verify-only node first)".to_string()]);
-        reg.action = Action::Exec { prog: Prog::Node, args, detached: true, save_as: None };
+        reg.action = Action::Exec {
+            prog: Prog::Node,
+            args,
+            detached: true,
+            save_as: None,
+        };
         reg.caution = Some("This moves funds. Stop the running node with the command above first. Skip it now if you are not approved yet or the account is not funded; do it later with the same command.".into());
         steps.push(reg);
     } else {
@@ -661,33 +756,47 @@ fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
                 "The bond is what a buyer is protected by if a provider fails to deliver.",
             )
             .manual(&["tenzro provider status".to_string(), "tenzro join --provider".to_string()])
-            .caution("There is no faucet. Fund the wallet, or ask for sponsorship with the operator request form at https://tenzro.com/join, then run `tenzro join --provider`."),
+            .caution("Fund the wallet, or ask for sponsorship with the operator request form at https://tenzro.com/join, then run `tenzro join --provider`."),
         );
     }
     let mut leave = Step::info(
         "leave",
         "How to leave",
         if validate {
-            "To stop being a validator: tenzro validator exit. To stop the node cleanly: tenzro-node graceful-exit (it waits until it leads no coming round, then shuts down).".into()
+            "To stop being a validator: tenzro validator exit --node-account. To stop the node cleanly: tenzro-node graceful-exit (it waits until it leads no coming round, then shuts down).".into()
         } else {
             "To stop the node cleanly: tenzro-node graceful-exit (it waits until it leads no coming round, then shuts down).".into()
         },
         "Stopping cleanly avoids missed rounds. Leaving the set is a transaction, and unstaking takes the unbonding period.",
     );
     leave.manual = if validate {
-        vec!["tenzro validator exit".into(), "tenzro-node graceful-exit".into()]
+        vec![
+            "tenzro validator exit --node-account".into(),
+            "tenzro-node graceful-exit".into(),
+        ]
     } else {
         vec!["tenzro-node graceful-exit".into()]
     };
     steps.push(leave);
-    Plan { path, steps, blocked: None, next: "tenzro".into() }
+    Plan {
+        path,
+        steps,
+        blocked: None,
+        next: "tenzro".into(),
+    }
 }
 
 fn plan_local(m: &Machine, o: &Opts) -> Plan {
     if let Err(b) = node_ready(m, Path::Local) {
         return *b;
     }
-    let keys = match key_steps(m, &Opts { delegated: false, ..o.clone() }) {
+    let keys = match key_steps(
+        m,
+        &Opts {
+            delegated: false,
+            ..o.clone()
+        },
+    ) {
         Ok(k) => k,
         Err(mut b) => {
             if let Some(bl) = b.blocked.as_mut() {
@@ -708,7 +817,10 @@ fn plan_local(m: &Machine, o: &Opts) -> Plan {
     steps.push(Step {
         id: "save",
         title: "Save the setting".into(),
-        what: format!("Points tenzro at the chain on this machine ({}).", crate::endpoint::LOCAL_RPC),
+        what: format!(
+            "Points tenzro at the chain on this machine ({}).",
+            crate::endpoint::LOCAL_RPC
+        ),
         why: "So the console and every command talk to your local chain.".into(),
         action: Action::SaveLocalConfig,
         gate: Gate::Free,
@@ -716,7 +828,12 @@ fn plan_local(m: &Machine, o: &Opts) -> Plan {
         manual: vec![],
         caution: None,
     });
-    Plan { path: Path::Local, steps, blocked: None, next: "tenzro dev".into() }
+    Plan {
+        path: Path::Local,
+        steps,
+        blocked: None,
+        next: "tenzro dev".into(),
+    }
 }
 
 #[cfg(test)]
@@ -728,12 +845,18 @@ mod tests {
         let mut m = Machine::blank();
         m.root = root;
         m.node_binary = Some(PathBuf::from("/usr/bin/tenzro-node"));
-        m.node_build = Some(NodeBuild { flavour: "cpu".into(), startup_ok: true, refusal: None });
+        m.node_build = Some(NodeBuild {
+            flavour: "cpu".into(),
+            startup_ok: true,
+            refusal: None,
+        });
         m
     }
 
     fn up() -> Net {
-        Net::Reachable { chain_id: "0x1".into() }
+        Net::Reachable {
+            chain_id: "0x1".into(),
+        }
     }
 
     fn opts(m: &Machine) -> Opts {
@@ -806,14 +929,18 @@ mod tests {
         let p = plan(Path::Validate, &m, &up(), &opts(&m));
         let reg = p.steps.iter().find(|s| s.id == "register").unwrap();
         assert_eq!(reg.gate, Gate::Typed("stake"));
-        assert!(reg.command_line().unwrap().contains("--validator-self-stake 10000000000000000000000"));
+        assert!(
+            reg.command_line()
+                .unwrap()
+                .contains("--validator-self-stake 10000000000000000000000")
+        );
         assert!(reg.skippable);
         let order = ids(&p);
         let adm = order.iter().position(|i| *i == "admission").unwrap();
         let reg_i = order.iter().position(|i| *i == "register").unwrap();
         assert!(adm < reg_i, "approval is explained before staking");
         let admission = &p.steps[adm];
-        assert!(admission.what.contains("tenzro.com/join"));
+        assert!(admission.what.contains("team@tenzro.com"));
         assert!(admission.what.contains("governance"));
     }
 
@@ -823,7 +950,17 @@ mod tests {
         let p = plan(Path::Validate, &m, &up(), &opts(&m));
         assert_eq!(
             ids(&p),
-            ["hardware", "tpm-precheck", "tpm-provision", "setup", "start-node", "wait-node", "admission", "register", "leave"]
+            [
+                "hardware",
+                "tpm-precheck",
+                "tpm-provision",
+                "setup",
+                "start-node",
+                "wait-node",
+                "admission",
+                "register",
+                "leave"
+            ]
         );
     }
 
@@ -845,14 +982,26 @@ mod tests {
         let start = p.steps.iter().find(|s| s.id == "start-node").unwrap();
         let cmd = start.command_line().unwrap();
         assert!(cmd.contains("--tpm-key-holder") && cmd.contains("--tpm-label"));
-        assert!(p.steps.iter().find(|s| s.id == "setup").unwrap().command_line().unwrap().contains("--operator self"));
+        assert!(
+            p.steps
+                .iter()
+                .find(|s| s.id == "setup")
+                .unwrap()
+                .command_line()
+                .unwrap()
+                .contains("--operator self")
+        );
     }
 
     #[test]
     fn a_cpu_build_on_a_gpu_machine_blocks_with_the_fix() {
         let mut m = machine(KeyRoot::TpmReady);
         m.gpus = vec!["NVIDIA GPU".into()];
-        m.node_build = Some(NodeBuild { flavour: "cpu".into(), startup_ok: false, refusal: Some("refused".into()) });
+        m.node_build = Some(NodeBuild {
+            flavour: "cpu".into(),
+            startup_ok: false,
+            refusal: Some("refused".into()),
+        });
         let b = plan(Path::Provide, &m, &up(), &opts(&m)).blocked.unwrap();
         assert!(b.why.contains("CPU build"));
         assert!(b.fix[0].contains("CUDA"));
@@ -868,7 +1017,12 @@ mod tests {
 
     #[test]
     fn machine_names_are_always_legal() {
-        for (host, ok) in [("My Laptop.local", "my-laptop-local"), ("PC", "tenzro-pc"), ("-a-", "tenzro-a"), ("srv_01", "srv-01")] {
+        for (host, ok) in [
+            ("My Laptop.local", "my-laptop-local"),
+            ("PC", "tenzro-pc"),
+            ("-a-", "tenzro-a"),
+            ("srv_01", "srv-01"),
+        ] {
             let n = sanitize_machine_name(host);
             assert_eq!(n, ok, "{host}");
             assert!(n.len() >= 3 && n.len() <= 63 && !n.starts_with('-') && !n.ends_with('-'));

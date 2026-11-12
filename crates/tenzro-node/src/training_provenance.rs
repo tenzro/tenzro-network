@@ -203,7 +203,9 @@ pub fn sign_round_op(
     Ok(TrainingProofOp::Commit {
         receipt: SignedTrainingReceipt {
             receipt,
-            batched: hex::encode(serde_json::to_vec(&signature.batched).map_err(|e| e.to_string())?),
+            batched: hex::encode(
+                serde_json::to_vec(&signature.batched).map_err(|e| e.to_string())?,
+            ),
             tee: None,
         },
     })

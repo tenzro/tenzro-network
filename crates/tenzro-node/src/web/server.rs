@@ -143,6 +143,12 @@ impl WebServer {
             .layer(cors)
             // Concurrency limit: max 100 in-flight requests
             .layer(ConcurrencyLimitLayer::new(100))
+            // Under load a request of a shed class is refused with 503 and
+            // Retry-After before it reaches the limit above.
+            .layer(axum::middleware::from_fn_with_state(
+                crate::load_shed::ShedGate::new(),
+                crate::load_shed::load_shed,
+            ))
             // Request body size limit: 2 MB
             .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
             // Per-IP GCRA gate, outermost so an abusive source is

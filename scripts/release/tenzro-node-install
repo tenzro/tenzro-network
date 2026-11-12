@@ -204,6 +204,14 @@ if [ "$ROLE" = gpu ] && [ $cuda_backend = 1 ]; then
     sudo install -d "$PREFIX/lib"
     for f in "$root"/lib/libonnxruntime*; do sudo cp -a "$f" "$PREFIX/lib/"; done
 fi
+# The network profile the node joins through when started without --boot-nodes:
+# found at <dir of the binary>/../share/network/<chain_id>.toml.
+if ls "$root"/share/network/*.toml >/dev/null 2>&1; then
+    sudo install -d "$PREFIX/share/network"
+    for f in "$root"/share/network/*.toml; do sudo install -m644 "$f" "$PREFIX/share/network/"; done
+else
+    echo "WARNING: this archive ships no network profile; the node will not find the relay by itself" >&2
+fi
 sudo install -m755 "$cli" "$PREFIX/bin/tenzro"
 sudo install -m755 "$node" "$PREFIX/bin/tenzro-node"
 if [ "$ROLE" = gpu ] && [ $cuda_backend = 1 ]; then

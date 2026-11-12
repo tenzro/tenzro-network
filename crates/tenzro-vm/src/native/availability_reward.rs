@@ -29,8 +29,8 @@
 //! (the on-chain energy budget) covers separately against the same
 //! declaration this module writes.
 //!
-//! Not yet implemented, left for a follow-up: indexing the cap to the
-//! on-chain compute price index (queue item 74, a separate commit).
+//! Not yet implemented: indexing the cap to the on-chain compute
+//! price index.
 //!
 //! With hardware binding on, the reward is paid per GPU: once for each GPU
 //! the host proved with its NVIDIA device certificate in the current reward

@@ -66,7 +66,9 @@ pub fn provision_tpm() -> Result<Vec<String>, String> {
     match signer::platform_backend().map(|b| b.as_str()) {
         None => Err(NO_HARDWARE.into()),
         Some("tpm") => provision_report(),
-        Some(_) => Err("this machine's key hardware is the Secure Enclave, which needs no provisioning".into()),
+        Some(_) => Err(
+            "this machine's key hardware is the Secure Enclave, which needs no provisioning".into(),
+        ),
     }
 }
 
@@ -79,12 +81,29 @@ fn provision_report() -> Result<Vec<String>, String> {
     };
     let r = provision().map_err(reason)?;
     let mut lines = vec![
-        format!("storage root      0x{:08x}  {}", r.storage_root.0, word(r.storage_root.1)),
-        format!("attestation key   0x{:08x}  {}", r.attestation.0, word(r.attestation.1)),
-        format!("identity key      0x{:08x}  {}", r.identity.0, word(r.identity.1)),
+        format!(
+            "storage root      0x{:08x}  {}",
+            r.storage_root.0,
+            word(r.storage_root.1)
+        ),
+        format!(
+            "attestation key   0x{:08x}  {}",
+            r.attestation.0,
+            word(r.attestation.1)
+        ),
+        format!(
+            "identity key      0x{:08x}  {}",
+            r.identity.0,
+            word(r.identity.1)
+        ),
     ];
     if let Some(ek) = r.endorsement_key {
-        lines.push(format!("endorsement key   0x{:08x}  {} ({})", ek.handle, word(ek.slot), ek.kind));
+        lines.push(format!(
+            "endorsement key   0x{:08x}  {} ({})",
+            ek.handle,
+            word(ek.slot),
+            ek.kind
+        ));
     } else if r.uncertified_endorsement_key {
         lines.push("endorsement key   present, not certified by the manufacturer".into());
     }

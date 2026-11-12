@@ -1,4 +1,4 @@
-name: lane-e-verify
+name: macos-install-verify
 # Verification only: installs the already built 0.2.1 macOS pkg (artifact of an earlier run)
 # on a clean runner and runs tenzro under a pty. Builds nothing, signs nothing, publishes nothing.
 on:
@@ -6,10 +6,7 @@ on:
     inputs:
       pkg_run:
         description: 'run id holding the tenzro-macos-pkg artifact'
-        default: '42351050433'
-  push:
-    branches: [lane-e-verify]
-    paths: ['.github/workflows/lane-e-verify.yml']
+        required: true
 permissions:
   contents: read
   actions: read
@@ -18,13 +15,13 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          sparse-checkout: .github/lane-e
-      - uses: actions/download-artifact@v4
+          sparse-checkout: .github/install-verify
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: tenzro-macos-pkg
-          run-id: ${{ inputs.pkg_run || '42351050433' }}
+          run-id: ${{ inputs.pkg_run }}
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: pkgdl
@@ -43,7 +40,7 @@ jobs:
           env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/local/bin tenzro </dev/null > o.txt 2> e.txt; echo "rc=$?"; head -5 o.txt; head -3 e.txt
           echo "== pty fresh HOME"
           python3 -m venv v && v/bin/pip -q install pyte
-          P=.github/lane-e/ptyrun.py
+          P=.github/install-verify/ptyrun.py
           export PATH=/usr/local/bin:$PATH
           H1=$(mktemp -d); echo "-- welcome"; HOME=$H1 v/bin/python $P 5 '' -- tenzro
           H2=$(mktemp -d); echo "-- after Enter (machine check)"; HOME=$H2 v/bin/python $P 7 '\r' -- tenzro

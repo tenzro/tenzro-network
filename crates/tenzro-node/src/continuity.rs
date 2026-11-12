@@ -7,8 +7,7 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tenzro_crypto::encryption::{
-    EncryptedEnvelope, SymmetricKey, envelope_decrypt,
-    envelope_encrypt,
+    EncryptedEnvelope, SymmetricKey, envelope_decrypt, envelope_encrypt,
 };
 use thiserror::Error;
 
@@ -282,8 +281,7 @@ pub fn wrap_data_key(
     key: &SymmetricKey,
     recipient: &tenzro_crypto::hybrid_seal::HybridPublicKey,
 ) -> Result<EncryptedEnvelope, ContinuityError> {
-    envelope_encrypt(recipient, key.as_bytes())
-        .map_err(|e| ContinuityError::Seal(e.to_string()))
+    envelope_encrypt(recipient, key.as_bytes()).map_err(|e| ContinuityError::Seal(e.to_string()))
 }
 
 /// Unwrap a checkpoint's data key with the recipient's key.

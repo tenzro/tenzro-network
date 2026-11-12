@@ -84,7 +84,10 @@ mod tests {
     }
 
     async fn call(d: &IrohA2aDispatcher, body: &[u8]) -> serde_json::Value {
-        let out = d.dispatch(Bytes::copy_from_slice(body)).await.expect("a reply frame");
+        let out = d
+            .dispatch(Bytes::copy_from_slice(body))
+            .await
+            .expect("a reply frame");
         serde_json::from_slice(&out).expect("a JSON-RPC reply")
     }
 
@@ -95,7 +98,13 @@ mod tests {
     #[tokio::test]
     async fn bytes_that_are_not_json_rpc_are_answered_with_a_parse_error_not_a_dropped_stream() {
         let (d, _state, _tmp) = dispatcher().await;
-        for body in [&b""[..], b"not json", b"{\"jsonrpc\":", b"[1,2,3]", &[0xff, 0xfe]] {
+        for body in [
+            &b""[..],
+            b"not json",
+            b"{\"jsonrpc\":",
+            b"[1,2,3]",
+            &[0xff, 0xfe],
+        ] {
             let reply = call(&d, body).await;
             assert_eq!(code(&reply), -32700, "{body:?}");
             assert!(reply["id"].is_null());
@@ -105,7 +114,11 @@ mod tests {
     #[tokio::test]
     async fn a_request_that_is_not_json_rpc_2_0_is_refused() {
         let (d, _state, _tmp) = dispatcher().await;
-        let reply = call(&d, br#"{"jsonrpc":"1.0","method":"GetTask","params":{},"id":4}"#).await;
+        let reply = call(
+            &d,
+            br#"{"jsonrpc":"1.0","method":"GetTask","params":{},"id":4}"#,
+        )
+        .await;
         assert_eq!(code(&reply), -32600);
         assert_eq!(reply["id"], 4);
     }
@@ -113,7 +126,11 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_method_is_not_found() {
         let (d, _state, _tmp) = dispatcher().await;
-        let reply = call(&d, br#"{"jsonrpc":"2.0","method":"DeleteEverything","params":{},"id":1}"#).await;
+        let reply = call(
+            &d,
+            br#"{"jsonrpc":"2.0","method":"DeleteEverything","params":{},"id":1}"#,
+        )
+        .await;
         assert_eq!(code(&reply), -32601);
     }
 

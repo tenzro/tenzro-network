@@ -75,7 +75,7 @@ FIXTURE=${FIXTURE:-$ROOT/crates/tenzro-bridge/tests/fixtures/cosmos_local_ibc.js
 TENZRO_CHAIN_ID=${TENZRO_CHAIN_ID:-1337}
 TENZRO_GENESIS_HASH=${TENZRO_GENESIS_HASH:-0x$(printf '11%.0s' $(seq 32))}
 TENZRO_COMMITTEE_ROOT=${TENZRO_COMMITTEE_ROOT:-0x$(printf '22%.0s' $(seq 32))}
-FINALITY_IMAGE_ID=${FINALITY_IMAGE_ID:-0x578bacf21a7a6a60d75ba661def3099b49231a66f52434b55cc987a18cf6ce39}
+FINALITY_IMAGE_ID=${FINALITY_IMAGE_ID:-0x84684b576dcba8ca62548bb2ef545eee3817bc5db36ac5a821847b5bd2b493a3}
 KR=(--keyring-backend test --home "$HOME_DIR")
 TXF=(--chain-id "$COSMOS_CHAIN_ID" --node "$NODE" "${KR[@]}" --gas 3000000 --fees 30000stake -y --output json)
 

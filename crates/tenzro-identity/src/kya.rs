@@ -8,7 +8,7 @@
 //! Tenzro adds the missing pieces:
 //!
 //! - `did:tenzro:machine:*`, a DID for any agent
-//! - ERC-8004 Identity precompile `0x101a`, an on-chain registry mirror,
+//! - the ERC-8004 IdentityRegistry contract, an on-chain registry mirror,
 //!   written through on machine registration via [`OnChainAgentRegistry`].
 //! - RFC 9421 agent signatures in the Web Bot Auth profile, whose key
 //!   directory every node derives from the agent's terms in consensus state.

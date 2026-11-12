@@ -122,6 +122,24 @@ fn enrolment_pq_leg(xy: &[u8], challenge_hex: &str) -> String {
     ))
 }
 
+/// Record the ML-DSA-65 key of the passkey `xy` as enrolled in the node's
+/// chain state, as the identity registration an enrolment submits would once a
+/// block carried it.
+fn record_enrolled_key(n: &TestNode, xy: &[u8]) {
+    let mut state = n
+        .node
+        .webauthn_validator()
+        .expect("webauthn validator")
+        .state();
+    tenzro_vm::account_keys::set_enrolled_pq_key(
+        &mut state,
+        xy,
+        enrolment_pq_key(xy).verifying_key_bytes().to_vec(),
+        &mut Vec::new(),
+    );
+    state.commit().expect("commit enrolled key");
+}
+
 /// The relying party a node verifies passkeys against when none is configured.
 fn rp_id() -> String {
     tenzro_node::config::DEFAULT_WEBAUTHN_RP_ID.to_string()
@@ -261,14 +279,12 @@ async fn authorize_over(
             "user_handle": null,
         },
     });
-    if operation == "enroll_passkey" {
-        authorization["ml_dsa_signature_hex"] = json!(enrolment_pq_leg(
-            &owner.xy(),
-            issued["result"]["challenge_hex"]
-                .as_str()
-                .expect("challenge_hex"),
-        ));
-    }
+    authorization["ml_dsa_signature_hex"] = json!(enrolment_pq_leg(
+        &owner.xy(),
+        issued["result"]["challenge_hex"]
+            .as_str()
+            .expect("challenge_hex"),
+    ));
     (authorization, digest)
 }
 
@@ -284,18 +300,23 @@ async fn enroll_with_registration(n: &TestNode, passkey: &Passkey, registration:
         &passkey.credential_id,
     )
     .await;
-    n.rpc(
-        "tenzro_enrollPasskey",
-        json!({
-            "display_name": "Sender",
-            "passkey_public_key_hex": format!("04{}", hex::encode(&xy)),
-            "credential_id_hex": hex::encode(&passkey.credential_id),
-            "registration_authenticator_data_hex": hex::encode(registration),
-            "ml_dsa_public_key_hex": hex::encode(enrolment_pq_key(&xy).verifying_key_bytes()),
-            "authorization": authorization,
-        }),
-    )
-    .await
+    let resp = n
+        .rpc(
+            "tenzro_enrollPasskey",
+            json!({
+                "display_name": "Sender",
+                "passkey_public_key_hex": format!("04{}", hex::encode(&xy)),
+                "credential_id_hex": hex::encode(&passkey.credential_id),
+                "registration_authenticator_data_hex": hex::encode(registration),
+                "ml_dsa_public_key_hex": hex::encode(enrolment_pq_key(&xy).verifying_key_bytes()),
+                "authorization": authorization,
+            }),
+        )
+        .await;
+    if resp["result"].is_object() {
+        record_enrolled_key(n, &xy);
+    }
+    resp
 }
 
 /// Enrolls `passkey` at `salt` and returns the raw response.
@@ -309,19 +330,24 @@ async fn enroll_at_salt(n: &TestNode, passkey: &Passkey, salt: u64) -> Value {
         &passkey.credential_id,
     )
     .await;
-    n.rpc(
-        "tenzro_enrollPasskey",
-        json!({
-            "display_name": "Sender",
-            "passkey_public_key_hex": format!("04{}", hex::encode(&xy)),
-            "credential_id_hex": hex::encode(&passkey.credential_id),
-            "registration_authenticator_data_hex": hex::encode(passkey.registration()),
-            "ml_dsa_public_key_hex": hex::encode(enrolment_pq_key(&xy).verifying_key_bytes()),
-            "authorization": authorization,
-            "salt": salt,
-        }),
-    )
-    .await
+    let resp = n
+        .rpc(
+            "tenzro_enrollPasskey",
+            json!({
+                "display_name": "Sender",
+                "passkey_public_key_hex": format!("04{}", hex::encode(&xy)),
+                "credential_id_hex": hex::encode(&passkey.credential_id),
+                "registration_authenticator_data_hex": hex::encode(passkey.registration()),
+                "ml_dsa_public_key_hex": hex::encode(enrolment_pq_key(&xy).verifying_key_bytes()),
+                "authorization": authorization,
+                "salt": salt,
+            }),
+        )
+        .await;
+    if resp["result"].is_object() {
+        record_enrolled_key(n, &xy);
+    }
+    resp
 }
 
 /// Enrolls `passkey`, authorized the way a browser does it, and returns the
@@ -369,6 +395,7 @@ fn link(n: &TestNode, account: &str, first: &Passkey, new: &Passkey, counts_from
     tenzro_vm::keystore::write_record(&mut state, previous.as_ref(), &next, &mut Vec::new())
         .expect("link");
     state.commit().expect("commit");
+    record_enrolled_key(n, &new.xy());
 }
 
 /// The account's keystore as any node reports it.
@@ -506,12 +533,20 @@ async fn send_transfer_on(
         let last = assertion.signature.len() - 1;
         assertion.signature[last] ^= 0x01;
     }
-    let signature = tenzro_crypto::composite::CompositeSignature::classical(
+    let pq_leg = enrolment_pq_key(&passkey.xy()).sign(
+        tenzro_crypto::composite::LABEL_MLDSA65_P256,
+        &tenzro_crypto::composite::message_representative(
+            tenzro_crypto::composite::SignatureContext::Transaction,
+            &digest,
+        ),
+    );
+    let signature = tenzro_crypto::composite::CompositeSignature::hybrid(
         tenzro_crypto::composite::ClassicalProof::WebAuthn {
             authenticator_data: assertion.authenticator_data,
             client_data_json: assertion.client_data_json,
             signature: assertion.signature,
         },
+        pq_leg,
     );
     let mut params = fields;
     params["public_key"] = json!(hex::encode(passkey.xy()));

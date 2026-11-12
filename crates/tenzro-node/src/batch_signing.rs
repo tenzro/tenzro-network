@@ -6,9 +6,9 @@
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use std::sync::atomic::Ordering;
 use tenzro_crypto::batch::{BatchParams, BatchService};
 use tenzro_crypto::composite::HybridSigner;
-use std::sync::atomic::Ordering;
 use tracing::{error, info, warn};
 
 /// What bounds batch signing. Governed by node configuration.
@@ -154,7 +154,7 @@ pub fn open_batch_service(
     // branch does not exist in a build without `cfg(test)`.
     #[cfg(test)]
     {
-        return build_batch_service(
+        build_batch_service(
             label,
             params,
             true,
@@ -166,7 +166,7 @@ pub fn open_batch_service(
                     )) as Arc<dyn HybridSigner>,
                 )
             })],
-        );
+        )
     }
     #[cfg(not(test))]
     build_batch_service(
@@ -190,14 +190,66 @@ pub fn signing_refused() -> bool {
     SIGNING_REFUSED.load(Ordering::Relaxed)
 }
 
+/// Paces the batch ticker while the hardware does not sign: each failure
+/// doubles the pause before the next try (up to five seconds), and the
+/// failure is logged on the first miss and then once a minute.
+struct RetryPace {
+    every: Duration,
+    gate: tenzro_device_key::retry::RetryGate,
+    last_log: Option<std::time::Instant>,
+}
+
+impl RetryPace {
+    fn new(every: Duration) -> Self {
+        Self {
+            every,
+            gate: tenzro_device_key::retry::RetryGate::new(every, Duration::from_secs(5)),
+            last_log: None,
+        }
+    }
+
+    fn due(&self) -> bool {
+        self.gate.check(std::time::Instant::now()).is_ok()
+    }
+
+    fn ok(&mut self) {
+        self.gate.succeeded();
+        self.last_log = None;
+    }
+
+    /// Records a failure; the failure count when it is time to log it.
+    fn failed(&mut self) -> Option<u32> {
+        let now = std::time::Instant::now();
+        self.gate.failed(now);
+        let _ = self.every;
+        let log = self
+            .last_log
+            .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(60));
+        log.then(|| {
+            self.last_log = Some(now);
+            self.gate.failures()
+        })
+    }
+}
+
 fn spawn_ticker(service: Weak<BatchService>, params: BatchSigningParams) {
     let every = Duration::from_millis((params.flush_interval_ms / 4).max(50));
     let _ = std::thread::Builder::new()
         .name("batch-tick".into())
         .spawn(move || {
+            // Callers block on the batch signature, so a flush is not
+            // deferred work: it queues behind votes and blocks at the TPM,
+            // but not behind every other command (a deferred command may wait
+            // ten seconds for each TPM command of a flush, and a flush needs
+            // several). Between tries the ticker pauses while the chip does
+            // not sign.
             let mut reported = false;
+            let mut pace = RetryPace::new(every);
             loop {
                 std::thread::sleep(every);
+                if !pace.due() {
+                    continue;
+                }
                 let Some(svc) = service.upgrade() else { return };
                 match svc.tick(tenzro_crypto::session::now_ms()) {
                     Ok(_) => {
@@ -205,6 +257,7 @@ fn spawn_ticker(service: Weak<BatchService>, params: BatchSigningParams) {
                             info!("batch signing: signing again");
                         }
                         reported = false;
+                        pace.ok();
                     }
                     Err(e) if svc.refused() => {
                         // Reported once; retrying would not help, the key
@@ -216,7 +269,13 @@ fn spawn_ticker(service: Weak<BatchService>, params: BatchSigningParams) {
                         }
                     }
                     Err(e) => {
-                        warn!(error = %e, "batch signing: the hardware did not sign; will retry")
+                        if let Some(failures) = pace.failed() {
+                            warn!(
+                                error = %e,
+                                failures,
+                                "batch signing: the hardware did not sign; will retry"
+                            )
+                        }
                     }
                 }
             }
@@ -226,6 +285,8 @@ fn spawn_ticker(service: Weak<BatchService>, params: BatchSigningParams) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenzro_crypto::batch::RecordSigner as _;
+    use tenzro_crypto::composite::CompositePublicKey;
     use tenzro_crypto::composite::testing::TestHybridSigner;
 
     fn ok(seed: u8, hybrid: bool) -> IdentityOpener {
@@ -252,6 +313,80 @@ mod tests {
         pq_required_from_ms: 0,
         ..P
     };
+
+    /// A hardware that takes `delay` per signature.
+    struct SlowHardware(TestHybridSigner, Duration);
+    impl HybridSigner for SlowHardware {
+        fn sign(
+            &self,
+            c: tenzro_crypto::SignatureContext,
+            m: &[u8],
+        ) -> tenzro_crypto::Result<tenzro_crypto::CompositeSignature> {
+            std::thread::sleep(self.1);
+            self.0.sign(c, m)
+        }
+        fn public_key(&self) -> &CompositePublicKey {
+            self.0.public_key()
+        }
+        fn sign_external(&self, d: &[u8]) -> tenzro_crypto::Result<Vec<u8>> {
+            self.0.sign_external(d)
+        }
+    }
+
+    fn slow_service(delay_ms: u64, params: BatchSigningParams) -> Arc<BatchService> {
+        let opener: IdentityOpener = Box::new(move |_| {
+            Ok(Arc::new(SlowHardware(
+                TestHybridSigner::hybrid(63),
+                Duration::from_millis(delay_ms),
+            )) as Arc<dyn HybridSigner>)
+        });
+        build_batch_service("l", params, true, false, vec![opener]).unwrap()
+    }
+
+    #[test]
+    fn records_queued_behind_a_slow_hardware_are_all_signed_within_the_wait() {
+        // 400 ms per signature, eight records requested at once: one batch,
+        // one signature, every record verifies and none waits past the
+        // node's own record wait.
+        let params = BatchSigningParams {
+            max_batch: 32,
+            flush_interval_ms: 300,
+            ..BatchSigningParams::default()
+        };
+        let svc = slow_service(400, params);
+        let signer = Arc::new(tenzro_crypto::batch::BatchRecordSigner::new(
+            svc.clone(),
+            params.receipt_wait(),
+        ));
+        let started = std::time::Instant::now();
+        let workers: Vec<_> = (0..8u8)
+            .map(|i| {
+                let signer = signer.clone();
+                std::thread::spawn(move || {
+                    let msg = vec![i; 8];
+                    let sig = signer.sign_record(&msg).expect("signed in time");
+                    (msg, sig)
+                })
+            })
+            .collect();
+        for w in workers {
+            let (msg, sig) = w.join().unwrap();
+            sig.verify_record_at(svc.identity(), &msg, 0).unwrap();
+        }
+        assert!(started.elapsed() < params.receipt_wait());
+    }
+
+    #[test]
+    fn a_hardware_that_never_signs_fails_the_record_loudly() {
+        let params = BatchSigningParams {
+            flush_interval_ms: 100,
+            ..P
+        };
+        let svc = slow_service(5_000, params);
+        let signer = tenzro_crypto::batch::BatchRecordSigner::new(svc, Duration::from_millis(300));
+        let err = signer.sign_record(b"x").unwrap_err();
+        assert!(err.to_string().contains("not signed in time"), "{err}");
+    }
 
     #[test]
     fn a_local_hardware_key_signs_batches() {

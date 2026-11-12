@@ -85,7 +85,11 @@ fn assert_attack_invariants(seed: u64, events: Vec<Event>) -> chaos::SeedResult 
     r
 }
 
-fn run_with(adv: Adversary, days: u32, rate_reports: bool) -> tenzro_econsim::attack::AttackOutcome {
+fn run_with(
+    adv: Adversary,
+    days: u32,
+    rate_reports: bool,
+) -> tenzro_econsim::attack::AttackOutcome {
     let mut c = RunConfig::scenario(Market::Flat, 11, days);
     c.rate_reports = rate_reports;
     c.assumptions.buyer_price_elasticity = 4.0;
@@ -102,7 +106,10 @@ fn run_with(adv: Adversary, days: u32, rate_reports: bool) -> tenzro_econsim::at
 #[test]
 fn a_bridge_drain_up_to_the_whole_attack_window_keeps_supply_and_value() {
     let r = assert_attack_invariants(21, vec![event(Kind::BridgeLoss, 5, 1, 1.0, 1.0)]);
-    assert!(r.shocks.get("bridge_loss").copied().unwrap_or(0) >= 1, "{r:?}");
+    assert!(
+        r.shocks.get("bridge_loss").copied().unwrap_or(0) >= 1,
+        "{r:?}"
+    );
 }
 
 // (4) governance takeover: an accumulating holder pushes a treasury grant to
@@ -155,7 +162,10 @@ fn a_proposal_flood_across_the_period_boundary_never_passes_the_period_cap() {
         .get("worst_period_paid_over_cap")
         .copied()
         .unwrap_or(0.0);
-    assert!(worst <= 1.0 + 1e-9, "a period paid {worst} times its cap: {o:?}");
+    assert!(
+        worst <= 1.0 + 1e-9,
+        "a period paid {worst} times its cap: {o:?}"
+    );
 }
 
 // (6) price manipulation of fee pricing: a venue quote pushed off for every
@@ -356,7 +366,10 @@ mod standing_permission {
                 h.actions_this_hour += 1;
             }
         }
-        assert!(passed <= DAILY, "{passed} passed against a day cap of {DAILY}");
+        assert!(
+            passed <= DAILY,
+            "{passed} passed against a day cap of {DAILY}"
+        );
         assert!(passed > 0);
     }
 

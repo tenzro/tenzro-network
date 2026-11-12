@@ -155,9 +155,10 @@ impl MoeTensorNaming {
     fn shared_expert_tensor(self, layer: u32, proj: &str) -> Option<String> {
         match self {
             Self::QwenMoe => None,
-            Self::DeepSeekMoe | Self::NemotronH | Self::NemotronHOmni => {
-                Some(format!("{}.shared_experts.{proj}.weight", self.mixer(layer)))
-            }
+            Self::DeepSeekMoe | Self::NemotronH | Self::NemotronHOmni => Some(format!(
+                "{}.shared_experts.{proj}.weight",
+                self.mixer(layer)
+            )),
         }
     }
 }
@@ -439,9 +440,7 @@ impl MoeExtractor {
             MoeTensorNaming::QwenMoe => None,
             MoeTensorNaming::DeepSeekMoe
             | MoeTensorNaming::NemotronH
-            | MoeTensorNaming::NemotronHOmni => {
-                Some(client.deepseek_config().await?)
-            }
+            | MoeTensorNaming::NemotronHOmni => Some(client.deepseek_config().await?),
         };
         Ok(Self {
             client,
@@ -563,8 +562,10 @@ impl MoeExtractor {
         ) {
             let mixer = self.naming.mixer(layer);
             Some((
-                self.fetch_named(&format!("{mixer}.fc1_latent_proj.weight")).await?,
-                self.fetch_named(&format!("{mixer}.fc2_latent_proj.weight")).await?,
+                self.fetch_named(&format!("{mixer}.fc1_latent_proj.weight"))
+                    .await?,
+                self.fetch_named(&format!("{mixer}.fc2_latent_proj.weight"))
+                    .await?,
             ))
         } else {
             None
@@ -572,7 +573,9 @@ impl MoeExtractor {
         if let Some((down, up)) = &latent {
             for (name, t) in [(TENSOR_LATENT_IN, down), (TENSOR_LATENT_OUT, up)] {
                 let v = TensorView::new(t.0, t.1.clone(), &t.2).map_err(|e| {
-                    ModelError::InvalidModel(format!("latent projection L{layer}: tensor view: {e:?}"))
+                    ModelError::InvalidModel(format!(
+                        "latent projection L{layer}: tensor view: {e:?}"
+                    ))
                 })?;
                 tensors.push((name, v));
             }

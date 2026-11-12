@@ -63,11 +63,33 @@ impl StatusCmd {
         let client = RpcClient::new(&self.rpc);
         match self.watch {
             None => {
-                let snap = Snapshot::fetch(&client).await;
+                let mut snap = Snapshot::fetch(&client).await;
+                let serves_role = snap.raw["node"]["roles"].as_array().is_some_and(|r| {
+                    crate::commands::update::notice::serves_role(
+                        r.iter().filter_map(|x| x.as_str()),
+                    )
+                });
+                let data_dir = crate::commands::update::notice::data_dir();
+                let news = crate::commands::update::notice::for_status(
+                    &data_dir,
+                    &self.rpc,
+                    serves_role,
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                )
+                .await;
                 if self.json {
+                    snap.raw["update"] = news.json();
                     println!("{}", serde_json::to_string_pretty(&snap.raw)?);
                 } else {
                     snap.render();
+                    let surface = crate::commands::update::notice::surface(false, false);
+                    for line in news.lines(
+                        &data_dir,
+                        surface,
+                        chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    ) {
+                        println!("{line}");
+                    }
                 }
                 Ok(())
             }
@@ -160,6 +182,8 @@ pub struct NodeFacts {
     /// Whether governance has approved the account as an operator.
     pub approved: Option<bool>,
     pub pending_stake: Option<PendingStake>,
+    /// The node's `disk` object: pressure, level and the last assessment.
+    pub disk: Option<serde_json::Value>,
 }
 
 impl NodeFacts {
@@ -197,7 +221,7 @@ pub fn next_action(f: &NodeFacts) -> String {
                 return match &f.pending_stake {
                     Some(p) => format!(
                         "Waiting for stake: send {} to {}, then restart the node and it registers \
-                         itself. `tenzro sponsor check` shows the sponsored route.",
+                         itself. `tenzro join --role validator` shows where your application stands.",
                         format_tnzo(p.required_wei.parse().unwrap_or(0)),
                         p.account
                     ),
@@ -256,12 +280,13 @@ impl Snapshot {
     /// looking at, and an operator diagnosing a half-up node is precisely who
     /// needs the half that works.
     async fn fetch(client: &RpcClient) -> Self {
-        let (memory, traffic, lifecycle, autotune, node) = tokio::join!(
+        let (memory, traffic, lifecycle, autotune, node, load) = tokio::join!(
             call(client, "tenzro_memoryBudget"),
             call(client, "tenzro_trafficStats"),
             call(client, "tenzro_modelLifecycle"),
             call(client, "tenzro_autotuneDecisions"),
             fetch_node(client),
+            fetch_load(client),
         );
         let next = next_action(&node);
         Self {
@@ -271,6 +296,7 @@ impl Snapshot {
                 "traffic": traffic,
                 "lifecycle": lifecycle,
                 "autotune": autotune,
+                "load": load,
             }),
         }
     }
@@ -278,10 +304,29 @@ impl Snapshot {
     fn render(&self) {
         output::print_header("Node Status");
         self.render_node();
+        self.render_load();
         self.render_memory();
         self.render_traffic();
         self.render_models();
         self.render_autotune();
+    }
+
+    /// The load level and which classes of work the node is shedding.
+    fn render_load(&self) {
+        let l = &self.raw["load"];
+        let Some(level) = l["level"].as_str() else {
+            return;
+        };
+        let line = load_line(
+            level,
+            l["shedding"].as_array(),
+            l["cause"]["signal"].as_str(),
+        );
+        if level == "GREEN" {
+            output::print_field("Load", &line);
+        } else {
+            output::print_warning(&line);
+        }
     }
 
     fn render_node(&self) {
@@ -297,7 +342,11 @@ impl Snapshot {
                     duration(n["uptime_secs"].as_u64().unwrap_or(0) * 1000),
                     n["roles"]
                         .as_array()
-                        .map(|r| r.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
+                        .map(|r| r
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","))
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "none".to_string())
                 ),
@@ -317,6 +366,9 @@ impl Snapshot {
             if let Some(a) = n["sponsorship"].as_str() {
                 output::print_field("Sponsorship", a);
             }
+        }
+        if let Some(line) = disk_line(&n["disk"]) {
+            output::print_field("Disk", &line);
         }
         output::print_field("Next", n["next"].as_str().unwrap_or(""));
         println!();
@@ -499,18 +551,34 @@ async fn fetch_node(client: &RpcClient) -> NodeFacts {
         };
     };
     let roles: Vec<String> = match status.get("roles") {
-        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
         Some(Value::String(s)) => s.split(',').map(|x| x.trim().to_string()).collect(),
         _ => Vec::new(),
     };
-    let account = status.get("payee").and_then(Value::as_str).map(str::to_string);
+    let account = status
+        .get("payee")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let mut facts = NodeFacts {
         reachable: true,
-        state: status.get("state").and_then(Value::as_str).map(str::to_string),
+        state: status
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         roles,
-        uptime_secs: status.get("uptime_secs").and_then(Value::as_u64).unwrap_or(0),
+        uptime_secs: status
+            .get("uptime_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         sample: service::sample(client).await,
-        machine_did: status.get("machine_did").and_then(Value::as_str).map(str::to_string),
+        machine_did: status
+            .get("machine_did")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        disk: status.get("disk").cloned(),
         account: account.clone(),
         pending_stake: crate::config::load_config().pending_stake,
         ..NodeFacts::default()
@@ -519,7 +587,10 @@ async fn fetch_node(client: &RpcClient) -> NodeFacts {
         return facts;
     };
     let wei = |v: &Value, k: &str| -> u128 {
-        v.get(k).and_then(Value::as_str).and_then(|s| s.parse().ok()).unwrap_or(0)
+        v.get(k)
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
     };
     if facts.serves("validator")
         && let Ok(v) = client
@@ -549,7 +620,10 @@ async fn fetch_node(client: &RpcClient) -> NodeFacts {
             .collect();
     }
     if let Ok(p) = client
-        .call::<Value>("tenzro_getTreasuryPayouts", json!({ "address": acct, "limit": 1 }))
+        .call::<Value>(
+            "tenzro_getTreasuryPayouts",
+            json!({ "address": acct, "limit": 1 }),
+        )
         .await
     {
         facts.approved = Some(
@@ -581,7 +655,62 @@ fn node_json(f: &NodeFacts, next: &str) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "sponsorship": f.approved.map(|a| if a { "approved" } else { "not approved" }),
         "next": next,
+        "disk": f.disk,
     })
+}
+
+/// The Disk line of the status: the node's own assessment (level, free
+/// space, runway, growth, class given up next), or the pressure word when an
+/// older node reports no assessment.
+fn disk_line(d: &serde_json::Value) -> Option<String> {
+    if let Some(s) = d["assessment"]["summary"].as_str() {
+        return Some(s.to_string());
+    }
+    let p = d["pressure"].as_str()?;
+    Some(format!(
+        "{p}; {}% of the data volume used",
+        d["used_pct"].as_u64().unwrap_or(0)
+    ))
+}
+
+/// The node's load level, from its `/load` endpoint; `null` when the node
+/// does not answer or predates the endpoint.
+async fn fetch_load(client: &RpcClient) -> serde_json::Value {
+    let url = format!("{}/load", client.url().trim_end_matches('/'));
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return serde_json::Value::Null;
+    };
+    match http.get(url).send().await {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// One line for the load level: `GREEN`, or the level, what raised it and
+/// the classes of work being shed, lowest priority first.
+pub fn load_line(
+    level: &str,
+    shedding: Option<&Vec<serde_json::Value>>,
+    cause: Option<&str>,
+) -> String {
+    if level == "GREEN" {
+        return "GREEN: nothing is shed".to_string();
+    }
+    let shed = shedding
+        .map(|s| {
+            s.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    match cause {
+        Some(c) => format!("{level} ({c}): shedding {shed}"),
+        None => format!("{level}: shedding {shed}"),
+    }
 }
 
 async fn call(client: &RpcClient, method: &str) -> serde_json::Value {
@@ -640,7 +769,12 @@ mod tests {
         NodeFacts {
             reachable: true,
             roles: vec!["validator".into()],
-            sample: Some(Sample { height: 100, highest: 100, peers: 4, syncing: false }),
+            sample: Some(Sample {
+                height: 100,
+                highest: 100,
+                peers: 4,
+                syncing: false,
+            }),
             ..NodeFacts::default()
         }
     }
@@ -648,20 +782,33 @@ mod tests {
     #[test]
     fn an_unreachable_node_points_at_setup_and_the_service() {
         let a = next_action(&NodeFacts::default());
-        assert!(a.contains("tenzro setup --apply") && a.contains("systemctl"), "{a}");
+        assert!(
+            a.contains("tenzro setup --apply") && a.contains("systemctl"),
+            "{a}"
+        );
     }
 
     #[test]
     fn syncing_comes_before_everything_else() {
         let mut f = running();
-        f.sample = Some(Sample { height: 5, highest: 90, peers: 3, syncing: true });
+        f.sample = Some(Sample {
+            height: 5,
+            highest: 90,
+            peers: 3,
+            syncing: true,
+        });
         assert!(next_action(&f).starts_with("Syncing, block 5 of 90"));
     }
 
     #[test]
     fn no_peers_is_named_before_roles() {
         let mut f = running();
-        f.sample = Some(Sample { height: 5, highest: 5, peers: 0, syncing: false });
+        f.sample = Some(Sample {
+            height: 5,
+            highest: 5,
+            peers: 0,
+            syncing: false,
+        });
         assert!(next_action(&f).contains("No peers"));
     }
 
@@ -675,7 +822,10 @@ mod tests {
             account: "0xabc".into(),
         });
         let a = next_action(&f);
-        assert!(a.contains("10000 TNZO") && a.contains("0xabc") && a.contains("sponsor check"), "{a}");
+        assert!(
+            a.contains("10000 TNZO") && a.contains("0xabc") && a.contains("join --role validator"),
+            "{a}"
+        );
     }
 
     #[test]
@@ -694,7 +844,11 @@ mod tests {
         let one = tenzro_types::constants::ONE_TNZO;
         let mut f = running();
         f.roles = vec!["ai".into()];
-        f.bonds = vec![RoleBond { role: "ai".into(), bonded: 400 * one, required: 1000 * one }];
+        f.bonds = vec![RoleBond {
+            role: "ai".into(),
+            bonded: 400 * one,
+            required: 1000 * one,
+        }];
         let a = next_action(&f);
         assert!(a.contains("--role ai --amount 600"), "{a}");
     }
@@ -707,6 +861,19 @@ mod tests {
         assert!(next_action(&f).contains("tenzro sponsor check"));
         f.approved = Some(true);
         assert_eq!(next_action(&f), "Running. Nothing to do.");
+    }
+
+    #[test]
+    fn the_load_line_names_the_level_the_cause_and_what_is_shed() {
+        assert_eq!(load_line("GREEN", None, None), "GREEN: nothing is shed");
+        let shed = vec![
+            serde_json::json!("background"),
+            serde_json::json!("model_serving"),
+        ];
+        assert_eq!(
+            load_line("HIGH", Some(&shed), Some("swap_used_pct")),
+            "HIGH (swap_used_pct): shedding background, model_serving"
+        );
     }
 
     #[test]
@@ -788,5 +955,31 @@ mod tests {
         assert_eq!(gib(1_073_741_824), "1.0 GiB");
         assert_eq!(gib(0), "0.0 GiB");
         assert_eq!(gib(120 * 1_073_741_824), "120.0 GiB");
+    }
+}
+
+#[cfg(test)]
+mod disk_line_tests {
+    use super::disk_line;
+    use serde_json::json;
+
+    #[test]
+    fn the_status_shows_the_nodes_assessment_with_the_runway() {
+        let d = json!({"pressure": "pruning", "used_pct": 80, "assessment": {
+            "summary": "level prune; 11.0 GiB free (11.0%); runway 47000 blocks; growth 230000 B/block; next sacrificed: expendable"}});
+        let line = disk_line(&d).unwrap();
+        assert!(
+            line.contains("runway 47000 blocks") && line.contains("next sacrificed: expendable")
+        );
+    }
+
+    #[test]
+    fn an_older_node_without_an_assessment_still_shows_its_pressure() {
+        let d = json!({"pressure": "normal", "used_pct": 40});
+        assert_eq!(
+            disk_line(&d).unwrap(),
+            "normal; 40% of the data volume used"
+        );
+        assert!(disk_line(&json!(null)).is_none());
     }
 }

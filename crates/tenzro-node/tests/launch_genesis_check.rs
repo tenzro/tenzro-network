@@ -14,7 +14,8 @@
 //! procedure lists the addresses that answered a hardware-signed challenge in
 //! `TENZRO_LAUNCH_LIVE` (comma-separated); when it is unset every entry is
 //! assumed live, which is the right assumption for the structural check CI
-//! runs. `TENZRO_LAUNCH_GENESIS` adds a genesis file to check.
+//! runs. `TENZRO_LAUNCH_GENESIS` adds a genesis file to check; its governed
+//! parameters are held to the registry bounds as well.
 
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,14 @@ fn check_file(path: &Path) {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let g: GenesisConfig =
         toml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    // The node refuses a genesis whose governed parameters are outside the
+    // registry bounds, so the stage refuses it too, before any host starts.
+    if let Err(refusal) = g.network_params() {
+        panic!(
+            "{}: the governed parameters are refused: {refusal}",
+            path.display()
+        );
+    }
     if g.validators.is_empty() {
         // A template. The check runs when the entries are filled in.
         return;

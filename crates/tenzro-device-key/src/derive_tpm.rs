@@ -288,6 +288,9 @@ pub(crate) struct TpmRoot {
     /// Transient only: flushed on drop, and by the kernel resource manager
     /// when the process exits.
     loaded: Mutex<Option<Loaded>>,
+    /// Paces loading the root again after a load failed, so a TPM that is
+    /// not answering is not asked for the same load over and over.
+    reload: Mutex<crate::retry::RetryGate>,
 }
 
 /// A connection with the storage parent and the root loaded in it.
@@ -302,6 +305,17 @@ enum Attempt {
     /// broke), so loading them again may succeed.
     Lost(DeviceKeyError),
     Failed(DeviceKeyError),
+}
+
+/// A command failed outright. A TPM that did not answer has not lost the
+/// root: loading it again would queue behind the stuck command, so that is a
+/// plain failure, not a loss.
+fn lost(e: DeviceKeyError) -> Attempt {
+    if crate::tpm_exec::is_stall(&e) {
+        Attempt::Failed(e)
+    } else {
+        Attempt::Lost(e)
+    }
 }
 
 /// Classify a response-parsing failure.
@@ -369,6 +383,10 @@ impl TpmRoot {
             authorizer,
             open,
             loaded: Mutex::new(None),
+            reload: Mutex::new(crate::retry::RetryGate::new(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(30),
+            )),
         })
     }
 
@@ -396,7 +414,24 @@ impl TpmRoot {
         let mut reloaded = false;
         loop {
             if loaded.is_none() {
-                *loaded = Some(self.load()?);
+                let mut gate = self.reload.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(wait) = gate.check(std::time::Instant::now()) {
+                    return Err(tpm_err(format!(
+                        "the TPM did not load the derivation root ({} failed loads); next try in {:.1}s",
+                        gate.failures(),
+                        wait.as_secs_f64()
+                    )));
+                }
+                match self.load() {
+                    Ok(l) => {
+                        gate.succeeded();
+                        *loaded = Some(l);
+                    }
+                    Err(e) => {
+                        gate.failed(std::time::Instant::now());
+                        return Err(e);
+                    }
+                }
             }
             let l = loaded.as_mut().expect("loaded above");
             match Self::hmac_once(l, self.authorizer, data) {
@@ -444,7 +479,7 @@ impl TpmRoot {
                 &message,
                 tpm_wire::TPM2_RH_ENDORSEMENT,
             ))
-            .map_err(Attempt::Lost)?;
+            .map_err(lost)?;
         let (digest, ticket) = step(
             "hashing the authorisation",
             tpm_wire::parse_hash_response(&resp),
@@ -453,7 +488,7 @@ impl TpmRoot {
             l.s.cmd(&tpm_wire::sign_validated_command(
                 authorizer, &digest, &ticket,
             ))
-            .map_err(Attempt::Lost)?;
+            .map_err(lost)?;
         step(
             "signing the authorisation",
             tpm_wire::parse_sign_response(&resp),
@@ -465,17 +500,17 @@ impl TpmRoot {
         authorizer: u32,
         data: &[u8],
     ) -> std::result::Result<Zeroizing<[u8; 32]>, Attempt> {
-        let (mut session, mut nonce_tpm) = l.s.policy_session().map_err(Attempt::Lost)?;
+        let (mut session, mut nonce_tpm) = l.s.policy_session().map_err(lost)?;
         // A message starting with TPM_GENERATED_VALUE gets no hash ticket, so a
         // nonce that begins with it is replaced.
         while nonce_tpm.starts_with(&tpm_wire::TPM2_GENERATED_VALUE.to_be_bytes()) {
             let _ = l.s.t.submit(&tpm_wire::flush_context_command(session));
-            (session, nonce_tpm) = l.s.policy_session().map_err(Attempt::Lost)?;
+            (session, nonce_tpm) = l.s.policy_session().map_err(lost)?;
         }
         let mut run = || {
             let resp =
                 l.s.cmd(&tpm_wire::policy_pcr_command(session, &[], ROOT_PCR))
-                    .map_err(Attempt::Lost)?;
+                    .map_err(lost)?;
             step("TPM2_PolicyPCR", tpm_wire::response_body(&resp).map(|_| ()))?;
             let expiration = -ROOT_POLICY_EXPIRATION;
             let signature = Self::authorize(l, authorizer, &nonce_tpm, expiration)?;
@@ -488,14 +523,14 @@ impl TpmRoot {
                     expiration,
                     &signature,
                 ))
-                .map_err(Attempt::Lost)?;
+                .map_err(lost)?;
             step(
                 "TPM2_PolicySigned",
                 tpm_wire::response_body(&resp).map(|_| ()),
             )?;
             let resp =
                 l.s.cmd(&tpm_wire::hmac_command(l.key, session, &[], data))
-                    .map_err(Attempt::Lost)?;
+                    .map_err(lost)?;
             step("TPM root HMAC", tpm_wire::parse_hmac_response(&resp))
         };
         let out = run();
@@ -1560,5 +1595,4 @@ mod tests {
             });
         });
     }
-
 }

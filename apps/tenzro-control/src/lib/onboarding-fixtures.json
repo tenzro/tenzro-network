@@ -1,0 +1,2304 @@
+{
+  "cases": [
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: not applied yet (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "Why: the validator role bonds 10000 TNZO as its stake. In the initial phase of Tenzro Network the Tenzro founders and core developers run the network, review each application, decide eligibility, and send the stake to approved applicants. There is nothing to buy first, and applying does not guarantee approval."
+        ],
+        [
+          "text",
+          "How to apply: fill in the form at https://join.example.test/apply and give this wallet address:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Run the same command again at any time. It carries on from wherever your application is."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: [applied] > under review > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has received your application for the validator role. Nothing more is needed from you right now. If approved, the team sends 10000 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > [under review] > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team is reviewing your application for the validator role. Nothing more is needed from you right now. If approved, the team sends 10000 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > [approved] > funded > staked > serving"
+        ],
+        [
+          "text",
+          "Approved. The Tenzro team sends 10000 TNZO to this wallet after approval. Nothing more is needed from you; once it arrives, run the same command again and it carries on to staking:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "If it has not arrived and the expected time has passed (within the fixture window), contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > approved > [funded] > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has recorded this wallet as funded, but the balance does not show it yet. Run the same command again in a few minutes. If it still does not show, contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: not approved (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "The Tenzro team did not approve this application, so no stake will be sent for it."
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: not applied yet (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "Why: the validator role bonds 10000 TNZO as its stake. In the initial phase of Tenzro Network the Tenzro founders and core developers run the network, review each application, decide eligibility, and send the stake to approved applicants. There is nothing to buy first, and applying does not guarantee approval."
+        ],
+        [
+          "text",
+          "How to apply: fill in the form at https://join.example.test/apply and give this wallet address:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Run the same command again at any time. It carries on from wherever your application is."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: [applied] > under review > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has received your application for the validator role. Nothing more is needed from you right now. If approved, the team sends 10000 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: applied > [under review] > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team is reviewing your application for the validator role. Nothing more is needed from you right now. If approved, the team sends 10000 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: applied > under review > [approved] > funded > staked > serving"
+        ],
+        [
+          "text",
+          "Approved. The Tenzro team sends 10000 TNZO to this wallet after approval. Nothing more is needed from you; once it arrives, run the same command again and it carries on to staking:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "If it has not arrived and the expected time has passed (within the fixture window), contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: applied > under review > approved > [funded] > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has recorded this wallet as funded, but the balance does not show it yet. Run the same command again in a few minutes. If it still does not show, contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: not approved (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "The Tenzro team did not approve this application, so no stake will be sent for it."
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: not applied yet (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "Why: the validator role bonds 10000 TNZO as its stake. In the initial phase of Tenzro Network the Tenzro founders and core developers run the network, review each application, decide eligibility, and send the stake to approved applicants. There is nothing to buy first, and applying does not guarantee approval."
+        ],
+        [
+          "text",
+          "How to apply: fill in the form at https://join.example.test/apply and give this wallet address:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Run the same command again at any time. It carries on from wherever your application is."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: [applied] > under review > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has received your application for the validator role. Nothing more is needed from you right now. If approved, the team sends 10000 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > [under review] > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team is reviewing your application for the validator role. Nothing more is needed from you right now. If approved, the team sends 10000 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > [approved] > funded > staked > serving"
+        ],
+        [
+          "text",
+          "Approved. The Tenzro team sends 10000 TNZO to this wallet after approval. Nothing more is needed from you; once it arrives, run the same command again and it carries on to staking:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "If it has not arrived and the expected time has passed (within the fixture window), contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > approved > [funded] > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has recorded this wallet as funded, but the balance does not show it yet. Run the same command again in a few minutes. If it still does not show, contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 10000 TNZO to run the validator role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: not approved (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "The Tenzro team did not approve this application, so no stake will be sent for it."
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: not applied yet (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "Why: the compute provider role bonds 500 TNZO as its stake. In the initial phase of Tenzro Network the Tenzro founders and core developers run the network, review each application, decide eligibility, and send the stake to approved applicants. There is nothing to buy first, and applying does not guarantee approval."
+        ],
+        [
+          "text",
+          "How to apply: fill in the form at https://join.example.test/apply and give this wallet address:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Run the same command again at any time. It carries on from wherever your application is."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: [applied] > under review > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has received your application for the compute provider role. Nothing more is needed from you right now. If approved, the team sends 500 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > [under review] > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team is reviewing your application for the compute provider role. Nothing more is needed from you right now. If approved, the team sends 500 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > [approved] > funded > staked > serving"
+        ],
+        [
+          "text",
+          "Approved. The Tenzro team sends 500 TNZO to this wallet after approval. Nothing more is needed from you; once it arrives, run the same command again and it carries on to staking:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "If it has not arrived and the expected time has passed (within the fixture window), contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > approved > [funded] > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has recorded this wallet as funded, but the balance does not show it yet. Run the same command again in a few minutes. If it still does not show, contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 0 TNZO."
+        ],
+        [
+          "text",
+          "Status: not approved (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "The Tenzro team did not approve this application, so no stake will be sent for it."
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: not applied yet (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "Why: the compute provider role bonds 500 TNZO as its stake. In the initial phase of Tenzro Network the Tenzro founders and core developers run the network, review each application, decide eligibility, and send the stake to approved applicants. There is nothing to buy first, and applying does not guarantee approval."
+        ],
+        [
+          "text",
+          "How to apply: fill in the form at https://join.example.test/apply and give this wallet address:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Run the same command again at any time. It carries on from wherever your application is."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: [applied] > under review > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has received your application for the compute provider role. Nothing more is needed from you right now. If approved, the team sends 500 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: applied > [under review] > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team is reviewing your application for the compute provider role. Nothing more is needed from you right now. If approved, the team sends 500 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: applied > under review > [approved] > funded > staked > serving"
+        ],
+        [
+          "text",
+          "Approved. The Tenzro team sends 500 TNZO to this wallet after approval. Nothing more is needed from you; once it arrives, run the same command again and it carries on to staking:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "If it has not arrived and the expected time has passed (within the fixture window), contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: applied > under review > approved > [funded] > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has recorded this wallet as funded, but the balance does not show it yet. Run the same command again in a few minutes. If it still does not show, contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. The balance could not be checked just now."
+        ],
+        [
+          "text",
+          "Status: not approved (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "The Tenzro team did not approve this application, so no stake will be sent for it."
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: not applied yet (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "Why: the compute provider role bonds 500 TNZO as its stake. In the initial phase of Tenzro Network the Tenzro founders and core developers run the network, review each application, decide eligibility, and send the stake to approved applicants. There is nothing to buy first, and applying does not guarantee approval."
+        ],
+        [
+          "text",
+          "How to apply: fill in the form at https://join.example.test/apply and give this wallet address:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Run the same command again at any time. It carries on from wherever your application is."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: [applied] > under review > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has received your application for the compute provider role. Nothing more is needed from you right now. If approved, the team sends 500 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > [under review] > approved > funded > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team is reviewing your application for the compute provider role. Nothing more is needed from you right now. If approved, the team sends 500 TNZO to this wallet:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "Expected reply: within the fixture window"
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ],
+        [
+          "text",
+          "Run the same command again to check; it continues from here."
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > [approved] > funded > staked > serving"
+        ],
+        [
+          "text",
+          "Approved. The Tenzro team sends 500 TNZO to this wallet after approval. Nothing more is needed from you; once it arrives, run the same command again and it carries on to staking:"
+        ],
+        [
+          "command",
+          "0xabababababababababababababababababababababababababababababababab"
+        ],
+        [
+          "text",
+          "If it has not arrived and the expected time has passed (within the fixture window), contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: applied > under review > approved > [funded] > staked > serving"
+        ],
+        [
+          "text",
+          "The Tenzro team has recorded this wallet as funded, but the balance does not show it yet. Run the same command again in a few minutes. If it still does not show, contact the team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": [
+        [
+          "heading",
+          "You need 500 TNZO to run the compute provider role. This wallet holds 250 TNZO."
+        ],
+        [
+          "text",
+          "Status: not approved (applied > under review > approved > funded > staked > serving)"
+        ],
+        [
+          "text",
+          "The Tenzro team did not approve this application, so no stake will be sent for it."
+        ],
+        [
+          "text",
+          "Questions? Contact the Tenzro team:"
+        ],
+        [
+          "command",
+          "Email: team@example.invalid"
+        ],
+        [
+          "command",
+          "Discord: example-invite"
+        ]
+      ],
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "foundation",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "10000000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "10000000000000000000000",
+      "role_label": "validator",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "0",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": null,
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "250000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "not_applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "applied"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "under_review"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "approved"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "funded"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "staked"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "serving"
+    },
+    {
+      "account": "0xabababababababababababababababababababababababababababababababab",
+      "balance_wei": "500000000000000000000",
+      "lines": null,
+      "phase": "open-stake",
+      "required_wei": "500000000000000000000",
+      "role_label": "compute provider",
+      "state": "declined"
+    }
+  ],
+  "env": {
+    "contacts": [
+      "Email: team@example.invalid",
+      "Discord: example-invite"
+    ],
+    "join_link": "https://join.example.test/apply",
+    "reply_time": "within the fixture window"
+  }
+}
