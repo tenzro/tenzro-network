@@ -4,10 +4,11 @@
 //! address, holds a deposit to it, and accepts the withdrawal this crate
 //! plans and assembles from two of three signatures; it rejects the same
 //! withdrawal with one. Needs Bitcoin Core's `bitcoind` and `bitcoin-cli`,
-//! so it is ignored by default:
+//! so cargo ignores it by default; `scripts/tests/bitcoin-regtest.sh` fetches
+//! the pinned release and runs it:
 //!
 //! ```text
-//! BITCOIN_BIN=/path/to/bitcoin/bin cargo test -p tenzro-bridge --test bitcoin_regtest -- --ignored
+//! scripts/tests/bitcoin-regtest.sh
 //! ```
 
 use std::path::PathBuf;
@@ -89,7 +90,7 @@ fn signer(seed: u8) -> k256::schnorr::SigningKey {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs Bitcoin Core; run scripts/tests/bitcoin-regtest.sh"]
 fn bitcoin_core_accepts_a_withdrawal_signed_by_the_threshold() {
     let node = Node::start();
     let desc = DepositDescriptor {

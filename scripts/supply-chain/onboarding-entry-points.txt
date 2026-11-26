@@ -32,13 +32,13 @@ node-flag --credential-id applied after the start gate; starts, registers, stake
 node-flag --data-dir applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --dest applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --dev developer chain: parsed after the start gate, same refusal on a machine with no hardware key; started by `tenzro dev`, which refuses first
+node-flag --discard a flag of `registry-undo`: removes the unreadable undo records from this machine's own stopped store; see the subcommand for what that can leave behind. It starts no node and signs nothing
 node-flag --external-mcp-addr applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --external-rpc-addr applied after the start gate; starts, registers, stakes or serves nothing before it
-node-flag --force applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --force applied after the start gate where a start command takes it. On `registry-undo`, with --discard --yes, it also removes the readable undo records, so every registry change of an uncommitted block stays in this machine's registry: the more dangerous mode of that command, with the same limit (this machine's view only; see the subcommand)
 node-flag --format applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --fund developer-chain genesis funding; only with --dev, after the start gate
 node-flag --genesis genesis file; applied after the start gate
-node-flag --genesis-committee-root applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --genesis-hash applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --handover-program applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --json applied after the start gate; starts, registers, stakes or serves nothing before it
@@ -50,6 +50,7 @@ node-flag --log-format applied after the start gate; starts, registers, stakes o
 node-flag --log-level applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --max-wait-secs applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --mcp-addr applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --no-state-sync applied after the start gate: the node does not restore a snapshot by default and executes blocks itself, from its own chain tip when it has one and from genesis otherwise; a snapshot peer named with --state-sync-from is still used. It registers and serves nothing before the gate
 node-flag --not-after-ms applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --on-demand-ceiling-gb applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --out applied after the start gate; starts, registers, stakes or serves nothing before it
@@ -93,6 +94,7 @@ node-flag --valid-hours applied after the start gate; starts, registers, stakes 
 node-flag --validator-self-stake self-registration as a validator; applied after the start gate, signs with the hardware keys
 node-flag --web-addr applied after the start gate; starts, registers, stakes or serves nothing before it
 node-flag --worker-threads applied after the start gate; starts, registers, stakes or serves nothing before it
+node-flag --yes a flag of `registry-undo`: confirms the removal that --discard asks for; without --discard it does nothing
 
 # --- tenzro-node subcommands ---
 node-sub access administers who may use a node; the node checks the caller
@@ -108,6 +110,7 @@ node-sub init prints this machine's validator entry from its hardware keys (from
 node-sub key-holder carries a delegated node's signing requests to the provider; signs nothing itself
 node-sub prover-inputs prints inputs for a prover run; read-only
 node-sub provision creates the three persistent TPM keys; the hardware root itself
+node-sub registry-undo runs with the node stopped, before any start gate, and starts no node and holds no key: it lists the validator registry's undo records in this machine's own store and, with --discard --yes, removes the unreadable ones (with --force the readable ones too). The undo records are what put the registry back at the next start when a block's registry change never committed, so removing them can leave such a change, a registration included, in this machine's registry. That is this machine's view only: no other node reads it, blocks are imported only under a certificate the committee on chain signed, and a validator whose registry differs from the chain's signs checkpoints no quorum joins. It is not a way to act without a hardware-rooted identity; the node still passes the start gate before it uses the store
 node-sub remote-check asks the provider to sign through the key holder; read-only proof
 node-sub restore verifies and restores a store snapshot; starts or registers nothing
 node-sub serve a provider serving its own TPM to delegated nodes; needs that TPM
@@ -124,21 +127,29 @@ env TENZRO_BATCH_SPECULATION tuning or path setting; does not touch identity, wa
 env TENZRO_BEARER_JWT a token the CLI/SDK presents; issued by the node after a passkey or hardware proof
 env TENZRO_BOOT_NODES boot identities appended to --boot-nodes; applied after the start gate
 env TENZRO_DATA_DIR data directory; the setup identity step no longer depends on it (SCOPED_IDENTITY_NEEDS_RPC)
+env TENZRO_DEBUG_ONBOARDING prints the CLI's status lookups to stderr; changes no decision
 env TENZRO_DEVICE_KEY_DIR where TPM-wrapped key blobs live; the key still has to open in the TPM or Secure Enclave
 env TENZRO_DPOP_PROOF a proof presented with that token
 env TENZRO_GPU_LAYERS tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_GROUND_MARGIN_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_HOME root of the per-user tree
 env TENZRO_HUGGINGFACE_CREDENTIAL model download credential; not an identity
+env TENZRO_JOIN_LINK the link the CLI's join message shows; wording only
+env TENZRO_JOIN_STATUS_STUB a fixed application status for the CLI's join message in place of the website's answer. The status only words the message; whether a stake command goes through is decided by the balance on chain, and the chain refuses an unfunded stake
+env TENZRO_JOIN_STATUS_URL where the CLI reads the application status from; see TENZRO_JOIN_STATUS_STUB for what the status can and cannot do
 env TENZRO_KV_CACHE_TYPE tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_MAX_CONTEXT tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_MCP_AUTH tiered or full; can only raise the MCP edge to full authentication
 env TENZRO_MODELS_DIR tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_NETWORK_PROFILE path of the network profile: the relay, the boot identities, snapshot peers and the default identity-gate mode of this node toward others (the node config key onboarding.mode sets the same thing). It is read while the config is assembled and starts nothing; the hardware key and identity checks of the start gate run whatever it holds
 env TENZRO_NOTHINK_MODELS tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_NO_BANNER hides the CLI banner
 env TENZRO_ON_DEMAND_CEILING_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_PHASE turns the CLI's join message and its pre-flight balance check on or off; the chain decides every stake and registration either way
 env TENZRO_PREFER_SPECULATION tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_PROGRESS progress output as json or plain text
 env TENZRO_REASONING_EFFORT tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_RELEASE_CHANNEL the name of the release channel whose notices this machine shows; a notice is shown only when a trusted release key signed it
 env TENZRO_RESERVE_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_RESIDENT_CEILING_GB tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_RPC which node the CLI talks to
@@ -149,7 +160,10 @@ env TENZRO_TIER tuning or path setting; does not touch identity, wallet, role, s
 env TENZRO_TOOL_GRAMMAR tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_TPM_KEY_HOLDER --tpm-key-holder; the delegated-TPM root, see the flag
 env TENZRO_TPM_LABEL --tpm-label; see the flag
+env TENZRO_UPDATE_CHANNEL where releases and notices are read from. A release is installed, and a notice shown, only when the release keys this machine trusts signed it, wherever it was read from
+env TENZRO_UPDATE_NOTICES whether the CLI shows the update banner
 env TENZRO_UPSTREAM_API_KEY operator connector credential; not an identity
 env TENZRO_USE_MMAP tuning or path setting; does not touch identity, wallet, role, stake or grant
+env TENZRO_WALLET_URL the page the browser passkey ceremony opens. The CLI relays public keys and signatures only, and the node checks the registration against its own relying-party id before it creates anything, so another page gets nothing a hand-made request would not
 env TENZRO_WARM_WAIT_SECS tuning or path setting; does not touch identity, wallet, role, stake or grant
 env TENZRO_WORKER_THREADS tuning or path setting; does not touch identity, wallet, role, stake or grant

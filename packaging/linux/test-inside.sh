@@ -74,10 +74,11 @@ verify_installed() {
         echo "  ldd: $(ldd /usr/lib/tenzro/bin/tenzro-node 2>&1 | grep 'not found' | tr -s ' \t' ' ' | tr '\n' ';')"
         if [ "${EXPECT_MISSING_CUDA:-}" = 1 ]; then ok "ldd: only the NVIDIA runtime libraries are missing (expected without CUDA)"; else bad "ldd: libraries not found"; fi
     else ok "ldd: every library resolves"; fi
-    if [ -d /usr/lib/tenzro/lib ]; then
-        r=$(ldd /usr/lib/tenzro/bin/tenzro-node 2>&1 | awk '/libonnxruntime\.so/ {print $3}')
-        [ -n "$r" ] && r=$(readlink -f "$r")
-        case "$r" in /usr/lib/tenzro/lib/*) ok "ONNX Runtime resolves through \$ORIGIN/../lib to $r" ;; *) bad "ONNX Runtime resolves to '$r'" ;; esac
+    if ls /usr/lib/tenzro/bin/libonnxruntime_providers_*.so >/dev/null 2>&1; then
+        ! ldd /usr/lib/tenzro/bin/tenzro-node 2>&1 | grep -q 'libonnxruntime\.so' \
+            && [ -e /usr/lib/tenzro/bin/libonnxruntime_providers_shared.so ] \
+            && ok "ONNX Runtime is linked statically and its providers sit beside the node" \
+            || bad "ONNX Runtime providers or the static link"
     fi
     out=$(tenzro-check 2>&1); rc=$?
     echo "$out" | grep -q "Next step" && ok "tenzro-check runs (exit $rc) and names the next step" || bad "tenzro-check"

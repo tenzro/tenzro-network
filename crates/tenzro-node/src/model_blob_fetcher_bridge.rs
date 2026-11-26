@@ -80,4 +80,45 @@ impl BlobFetcher for IrohBlobFetcher {
             .await
             .map_err(|e| e.to_string())
     }
+
+    async fn release(&self, hashes: &[[u8; 32]]) -> Result<(), String> {
+        self.resolver
+            .release_blobs(hashes)
+            .await
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn deleting_a_published_model_removes_its_blob_from_the_store() {
+        let resolver = IrohBackedResolver::bind_in_memory()
+            .await
+            .expect("bind in-memory resolver");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("m.gguf");
+        std::fs::write(&file, b"model weights").unwrap();
+
+        let fetcher = IrohBlobFetcher::arc(resolver.clone());
+        fetcher.publish_file(&file).await.expect("publish the file");
+        let hash = *blake3::hash(b"model weights").as_bytes();
+
+        let downloader = tenzro_model::HfDownloader::new(
+            dir.path().to_path_buf(),
+            tenzro_model::CatalogCell::default(),
+        )
+        .with_blob_fetcher(fetcher);
+        assert_eq!(downloader.delete_model("m").await.unwrap(), 1);
+        assert!(!file.exists());
+        assert_eq!(
+            resolver.release_blobs(&[hash]).await.unwrap(),
+            0,
+            "the blob's tag was removed when the model was deleted"
+        );
+        resolver.shutdown().await.ok();
+    }
 }

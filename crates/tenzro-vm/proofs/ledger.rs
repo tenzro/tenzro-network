@@ -1,4 +1,7 @@
-//! Token ledger: conservation, frozen <= balance, supply <= max, no overflow.
+//! Token ledger: conservation, supply <= max, a freeze only an issuer action
+//! lowers, no overflow; and, until the final ERC-7943 rules are live
+//! (`feature.erc7943_final`), frozen <= balance. Each proof names the side
+//! of that gate it models.
 //!
 //! The ledger operations in `token_ledger` read and write chain state; their
 //! arithmetic is the helpers proved here, composed exactly as `mint`,
@@ -29,12 +32,13 @@ impl Ledger {
         }
     }
 
-    /// Conservation, frozen within balance, supply within the maximum.
-    fn holds(&self) -> bool {
+    /// Conservation and supply within the maximum. Under the final rules a
+    /// frozen amount is absolute and may exceed its balance; before them it
+    /// stays within it.
+    fn holds(&self, final_rules: bool) -> bool {
         self.bal[0].checked_add(self.bal[1]) == Some(self.supply)
-            && self.frozen[0] <= self.bal[0]
-            && self.frozen[1] <= self.bal[1]
             && self.max.is_none_or(|m| self.supply <= m)
+            && (final_rules || (self.frozen[0] <= self.bal[0] && self.frozen[1] <= self.bal[1]))
     }
 
     /// `move_balance`: debit, then credit the recipient as read after the
@@ -71,23 +75,28 @@ impl Ledger {
     }
 
     fn forced_transfer(&mut self, from: usize, to: usize, amount: u128) -> Option<()> {
+        let held = self.bal[from];
         self.move_balance(from, to, amount)?;
-        self.frozen[from] = frozen_after(self.frozen[from], self.bal[from]);
+        self.frozen[from] = frozen_after(self.frozen[from], held, self.bal[from]);
         Some(())
     }
 
-    fn set_frozen(&mut self, who: usize, amount: u128) -> Option<()> {
-        self.frozen[who] = freeze_within(amount, self.bal[who])?;
+    fn set_frozen(&mut self, who: usize, amount: u128, final_rules: bool) -> Option<()> {
+        self.frozen[who] = if final_rules {
+            amount
+        } else {
+            freeze_within(amount, self.bal[who])?
+        };
         Some(())
     }
 }
 
-/// Any one ledger operation, successful or refused, keeps every invariant.
-/// A refused operation leaves the state as it was (the transaction reverts).
-#[kani::proof]
-fn every_ledger_operation_keeps_the_invariants() {
+/// Any one ledger operation, successful or refused, keeps every invariant of
+/// its side of the gate. A refused operation leaves the state as it was (the
+/// transaction reverts).
+fn any_operation_keeps_the_invariants(final_rules: bool) {
     let before = Ledger::any();
-    kani::assume(before.holds());
+    kani::assume(before.holds(final_rules));
     let mut after = before;
     let a: usize = if kani::any() { 1 } else { 0 };
     let b: usize = if kani::any() { 1 } else { 0 };
@@ -98,18 +107,32 @@ fn every_ledger_operation_keeps_the_invariants() {
         1 => after.burn(a, amount),
         2 => after.transfer(a, b, amount),
         3 => after.forced_transfer(a, b, amount),
-        _ => after.set_frozen(a, amount),
+        _ => after.set_frozen(a, amount, final_rules),
     };
     let end = if applied.is_some() { after } else { before };
-    assert!(end.holds());
+    assert!(end.holds(final_rules));
+}
+
+/// Under the final rules.
+#[kani::proof]
+fn every_ledger_operation_keeps_the_invariants() {
+    any_operation_keeps_the_invariants(true);
+}
+
+/// Before the final rules: the same, with frozen <= balance kept by every
+/// operation, the forced transfer included.
+#[kani::proof]
+fn every_ledger_operation_keeps_frozen_within_the_balance_before_the_final_rules() {
+    any_operation_keeps_the_invariants(false);
 }
 
 /// Only an issuer action moves frozen value: a holder burn or transfer that
 /// succeeds leaves the holder's freeze in place and still covered.
 #[kani::proof]
 fn a_holder_never_spends_the_frozen_part() {
+    let final_rules: bool = kani::any();
     let before = Ledger::any();
-    kani::assume(before.holds());
+    kani::assume(before.holds(final_rules));
     let mut after = before;
     let b: usize = if kani::any() { 1 } else { 0 };
     let amount: u128 = kani::any();
@@ -120,7 +143,30 @@ fn a_holder_never_spends_the_frozen_part() {
     };
     if applied.is_some() {
         assert!(after.frozen[0] == before.frozen[0]);
-        assert!(after.bal[0] >= after.frozen[0]);
+        assert!(after.bal[0] >= before.frozen[0].min(before.bal[0]));
+        if !final_rules {
+            assert!(after.bal[0] >= after.frozen[0]);
+        }
+    }
+}
+
+/// A forced transfer lowers the freeze by exactly the part of the move that
+/// reached past the spendable balance, and never raises it; one to the
+/// holder itself changes nothing.
+#[kani::proof]
+fn a_forced_transfer_takes_from_the_freeze_only_what_it_must() {
+    let before = Ledger::any();
+    kani::assume(before.holds(true));
+    let mut after = before;
+    let b: usize = if kani::any() { 1 } else { 0 };
+    let amount: u128 = kani::any();
+    if after.forced_transfer(0, b, amount).is_some() {
+        let free = spendable(before.bal[0], before.frozen[0]);
+        if b == 0 {
+            assert!(after.frozen[0] == before.frozen[0]);
+        } else {
+            assert!(after.frozen[0] == before.frozen[0] - amount.saturating_sub(free));
+        }
     }
 }
 
@@ -171,5 +217,4 @@ fn the_spendable_part_and_the_freeze_add_up_to_the_balance() {
     let free = spendable(held, frozen);
     assert!(free <= held);
     assert!(free + frozen.min(held) == held);
-    assert!(frozen_after(frozen, held) <= held);
 }

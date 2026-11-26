@@ -27,7 +27,6 @@
 //!    on chain) stops inference, egress, payments and policy changes;
 //! 5. every decision is a record signed under the TPM identity, carrying the
 //!    host binding.
-
 #![cfg(feature = "openshell-e2e")]
 
 #[path = "e2e/tenzro_node.rs"]
@@ -41,7 +40,6 @@ use std::time::Duration;
 
 use openshell_e2e::harness::binary::openshell_cmd;
 use openshell_e2e::harness::sandbox::SandboxGuard;
-use tenzro_crypto::batch::ImmediateRecordSigner;
 use tenzro_crypto::composite::HybridSigner;
 use tenzro_openshell::authority::StateAuthority;
 use tenzro_openshell::credential_driver::TenzroCredentialDriver;
@@ -70,8 +68,8 @@ const PAYEE: &str = "0909090909090909090909090909090909090909";
 const PROFILE: &str = "tenzro-e2e";
 const PER_UNIT: u128 = 2;
 const UNITS: u64 = 30;
-const SUPERVISOR_IMAGE: &str = "ghcr.io/nvidia/openshell/supervisor:0.1.5";
-const RUNTIME_IMAGE: &str = "ghcr.io/nvidia/openshell/sandbox:0.1.5";
+const SUPERVISOR_IMAGE: &str = "ghcr.io/nvidia/openshell/supervisor:0.1.7";
+const RUNTIME_IMAGE: &str = "ghcr.io/nvidia/openshell/sandbox:0.1.7";
 const SANDBOX_IMAGE: &str = "nvcr.io/nvidia/base/ubuntu:24.04";
 
 fn env(k: &str) -> String {

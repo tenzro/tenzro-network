@@ -196,6 +196,18 @@ pub fn delete(label: &str) -> Result<()> {
     backend::delete(&namespaced(label))
 }
 
+/// The key directory of one embedding app: `root` itself without an app id, else a subdirectory
+/// named by the hash of the app's bundle id, so two apps that carry the node on one machine do not
+/// share a key unless the user points both at one directory. The id is hashed, never used as a path.
+pub fn app_key_dir(root: &std::path::Path, app_id: Option<&str>) -> std::path::PathBuf {
+    match app_id.filter(|id| !id.is_empty()) {
+        Some(id) => root
+            .join("app")
+            .join(hex::encode(&credential_id_for_label(id)[..16])),
+        None => root.to_path_buf(),
+    }
+}
+
 /// Deterministic credential id for a passkey: the SHA-256 of its device-key
 /// label. Stable across runs so a signer can locate the credential
 /// without persisting an extra identifier.
@@ -213,6 +225,7 @@ pub mod compact;
 pub mod credential;
 pub mod delegation;
 pub mod derive;
+pub mod dir_backup;
 pub use derive::{DerivationRoot, DeriveBackend, Ed25519Key, MlDsa65Key, P256Key, X25519Key};
 /// The TPM derivation root behind [`derive::DerivationRoot`] on Linux and Windows.
 #[cfg(any(target_os = "linux", windows, test))]
@@ -229,8 +242,9 @@ pub mod signer;
 /// on first use.
 pub const IDENTITY_KEY_LABEL: &str = "tenzro/consensus/validator";
 pub mod retry;
-/// The one serializing executor every TPM command runs on.
-#[cfg(any(target_os = "linux", windows, test))]
+/// The one serializing executor every TPM command runs on. Compiled on every
+/// platform: the node reads its load level and priority markers even where no
+/// TPM exists.
 pub mod tpm_exec;
 /// One-time TPM provisioning: the only place a primary key is created.
 #[cfg(any(target_os = "linux", windows, test))]
@@ -268,6 +282,18 @@ pub use signer::{
     HardwareBackend, HardwareHybridSigner, HardwareMlDsaSigner, HardwareP384Signer, HardwareSigner,
 };
 
+/// The directory this machine keeps its wrapped key blobs in:
+/// `TENZRO_DEVICE_KEY_DIR`, else the platform's per-user state directory.
+/// `None` on a platform with no hardware key backend.
+pub fn device_key_dir() -> Option<std::path::PathBuf> {
+    #[cfg(any(target_os = "linux", windows))]
+    return tpm_provision::default_dir().ok();
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    return Some(backend_se::key_root());
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", windows)))]
+    None
+}
+
 // ---- Backend dispatch ------------------------------------------------------
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -294,10 +320,26 @@ mod backend {
     pub use super::backend_tpm::{create, delete, open};
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", windows)))]
+/// The Android Keystore signing and key-agreement key, over JNI.
+#[cfg(any(target_os = "android", test))]
+pub mod backend_android;
+
+#[cfg(target_os = "android")]
+mod backend {
+    pub use super::backend_android::{create, delete, open};
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    windows,
+    target_os = "android"
+)))]
 mod backend {
     use super::{DeviceKey, DeviceKeyError, Result};
-    const STUB: &str = "no TPM or Secure Enclave backend exists for this platform";
+    const STUB: &str =
+        "no TPM, Secure Enclave or Android Keystore backend exists for this platform";
     pub fn open(_label: &str) -> Result<Box<dyn DeviceKey>> {
         Err(DeviceKeyError::Enclave(STUB.into()))
     }
@@ -325,6 +367,28 @@ mod tests {
             namespaced("machine"),
             "machine",
             "a refused namespace set nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod app_key_dir_tests {
+    use super::app_key_dir;
+    use std::path::Path;
+
+    #[test]
+    fn an_app_id_gets_its_own_directory_and_none_keeps_the_root() {
+        let root = Path::new("/r");
+        assert_eq!(app_key_dir(root, None), root);
+        assert_eq!(app_key_dir(root, Some("")), root);
+        let a = app_key_dir(root, Some("com.example.a"));
+        let b = app_key_dir(root, Some("com.example.b"));
+        assert_ne!(a, b);
+        assert!(a.starts_with("/r/app/"));
+        assert_eq!(a, app_key_dir(root, Some("com.example.a")));
+        assert!(
+            !a.to_string_lossy().contains("example"),
+            "the id is hashed, not a path component"
         );
     }
 }

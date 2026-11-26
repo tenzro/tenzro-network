@@ -28,7 +28,8 @@
 //!    session certificates that tie the signatures to hardware keys travel
 //!    once per epoch ([`session::SessionBook`]); every minute a
 //!    [`compact`] certificate replaces the quorum's ML-DSA-65 signatures with
-//!    one STARK, and a [`light_client`] follows these from genesis.
+//!    one STARK, and `tenzro_light`'s light client follows these from
+//!    genesis.
 //!
 //! Stake enters every quorum through seats ([`committee`]).
 
@@ -39,7 +40,6 @@ pub mod channel;
 pub mod checkpoint;
 pub mod committee;
 pub mod compact;
-mod compact_certificate;
 pub mod compact_work;
 pub mod config;
 pub mod core;
@@ -47,11 +47,11 @@ pub mod dag;
 pub mod epoch_manager;
 pub mod error;
 pub mod eu_ai_act;
-pub mod event_proof;
 pub mod evidence_pack;
 mod kem;
 pub mod launch_check;
-pub mod light_client;
+#[cfg(test)]
+mod light_client_tests;
 pub mod mempool;
 mod nversion;
 pub mod ordering;
@@ -87,7 +87,7 @@ pub use core::{
 };
 pub use epoch_manager::{Epoch, EpochManager, EpochStateStore, EpochStats};
 pub use error::{ConsensusError, Result};
-pub use mempool::{Mempool, MempoolStats, SenderRegistry, is_registration_path};
+pub use mempool::{Mempool, MempoolStats, PoolGuard, SenderRegistry, is_registration_path};
 pub use ordering::{OrderingState, Resumed};
 pub use rbc::RbcStats;
 pub use session::{SessionBook, SessionCertificate};

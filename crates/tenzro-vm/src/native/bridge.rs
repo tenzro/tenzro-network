@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use tenzro_bridge::BridgeError;
 use tenzro_bridge::route::state::RouteState;
 use tenzro_bridge::route::{BridgeRoute, MintRateLimit, OutboundTransfer, RouteFramework};
+use tenzro_native_ops::gateway_delivery::GatewayDeliveryOp;
 use tenzro_types::bridge_route::{BridgeRouteAdapter, CarriedAsset, ChainFamily};
 use tenzro_types::bridge_transfer::BridgeOp;
 
@@ -41,6 +42,13 @@ pub const GAS_BRIDGE: u64 = 150_000;
 pub const GAS_BRIDGE_BYTE: u64 = 16;
 /// Topic of the log every bridge operation emits.
 pub const BRIDGE_TOPIC: &[u8] = b"Bridge";
+
+/// The gate of CCIP 2.0 finality policies: once live, a delivery that did not
+/// wait for its sending chain's finality draws on its route's finality policy
+/// or is refused ([`tenzro_bridge::route::finality`]), and governance may set
+/// such a policy ([`crate::governance::ProposalAction::SetBridgeFinalityPolicy`]).
+/// Until then the finality a message carries is not read.
+pub const CCIP_FINALITY_POLICY_KEY: &str = "feature.ccip_finality_policy.activation_epoch";
 
 /// Gas a bridge operation is charged.
 pub fn bridge_gas(op: &BridgeOp) -> u64 {
@@ -156,6 +164,10 @@ impl<'a> VmRouteState<'a> {
 impl RouteState for VmRouteState<'_> {
     fn local_chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    fn finality_policy_live(&self) -> bool {
+        crate::feature_gate::is_live_now(&*self.state, CCIP_FINALITY_POLICY_KEY)
     }
 
     fn now_ms(&self) -> i64 {
@@ -441,6 +453,58 @@ fn exit_now(
     }))
 }
 
+/// Gas a gateway delivery is charged: the bridge operation's own and the
+/// whole of the delivery gas its recipient is given.
+pub(super) fn gateway_delivery_gas(state: &dyn VmState, op: &GatewayDeliveryOp) -> u64 {
+    GAS_BRIDGE
+        .saturating_add(GAS_BRIDGE_BYTE.saturating_mul(op.delivery.len() as u64))
+        .saturating_add(network_param(state, crate::evm::gateway::DELIVERY_GAS_KEY))
+}
+
+/// Admit the gateway message a [`GatewayDeliveryOp`] carries: the route
+/// admits the delivery once, and the body is a gateway message from the
+/// route's chain to an account on this one. The call to the recipient comes
+/// after the operation, from [`crate::evm::gateway::deliver_inbound`].
+pub(super) fn admit_gateway_delivery(
+    state: &mut dyn VmState,
+    tx: &VmTransaction,
+    op: &GatewayDeliveryOp,
+    now: i64,
+) -> Result<(Vec<StateChange>, Vec<Log>)> {
+    if !crate::feature_gate::is_live_now(state, crate::evm::gateway::GATEWAY_KEY) {
+        return Err(refuse(format!(
+            "gateway deliveries are not in force on this chain yet (they wait for {})",
+            crate::evm::gateway::GATEWAY_KEY
+        )));
+    }
+    let chain = op.source_chain.to_ascii_lowercase();
+    let epoch = read_reward_state(state)?.current_epoch;
+    let mut view = VmRouteState::new(state, tx.chain_id, now, epoch);
+    let (route, body) = route_framework()
+        .admit_message(&mut view, op.adapter, &chain, &op.delivery)
+        .map_err(route_refused)?;
+    let changes = view.into_changes();
+    let message =
+        crate::evm::gateway::inbound_message(tx.chain_id, &chain, &body).map_err(refuse)?;
+    let nonce = tenzro_bridge::route::attestation::Delivery::decode(&op.delivery)
+        .map_err(route_refused)?
+        .nonce;
+    let out = serde_json::json!({
+        "route": route.storage_key(),
+        "receive_id": hex::encode(crate::evm::gateway::receive_id(&route.storage_key(), nonce)),
+        "sender": hex::encode(&message.sender),
+        "recipient": hex::encode(message.recipient),
+    });
+    let data = serde_json::to_vec(&out)
+        .map_err(|e| VmError::Internal(format!("encode bridge log: {e}")))?;
+    let logs = vec![Log::new(
+        SYSTEM_ADDRESS.to_vec(),
+        vec![BRIDGE_TOPIC.to_vec(), b"message_delivered".to_vec()],
+        data,
+    )];
+    Ok((changes, logs))
+}
+
 impl NativeExecutor {
     /// Handle `Bridge`.
     pub(super) fn execute_bridge(
@@ -469,7 +533,7 @@ impl NativeExecutor {
             Some(balance.to_le_bytes().to_vec()),
             Some((balance - cost).to_le_bytes().to_vec()),
         )];
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let epoch = read_reward_state(state)?.current_epoch;
         let framework = route_framework();
 
@@ -505,7 +569,7 @@ impl NativeExecutor {
                     admitted.asset.as_ref(),
                     &receiver,
                     amount,
-                    deterministic_now_ms(tx),
+                    deterministic_now_ms(tx)?,
                     &mut changes,
                 )?;
                 (
@@ -766,7 +830,7 @@ impl NativeExecutor {
                         None,
                         &sender,
                         amount,
-                        deterministic_now_ms(tx),
+                        deterministic_now_ms(tx)?,
                         &mut changes,
                     )?;
                 }
@@ -788,6 +852,15 @@ impl NativeExecutor {
                 target_chain,
                 payload,
             } => {
+                // A body that opens with the gateway's tag names the contract
+                // that sent it, so only the gateway may queue one.
+                if crate::feature_gate::is_live(state, crate::evm::gateway::GATEWAY_KEY, epoch)
+                    && payload.starts_with(&crate::evm::gateway::message_tag())
+                {
+                    return Err(refuse(
+                        "a message in the ERC-7786 gateway's format is sent through the gateway",
+                    ));
+                }
                 let chain = target_chain.to_ascii_lowercase();
                 let mut view = VmRouteState::new(state, tx.chain_id, now, epoch);
                 let sent = framework
@@ -815,6 +888,64 @@ impl NativeExecutor {
         )];
         Ok(ExecutionResult::success(gas, data, logs, changes))
     }
+}
+
+/// The installed route a finality policy proposal names, with the policy
+/// checked against it: the route is installed, a named asset is one it
+/// carries, and the policy suits the route
+/// ([`tenzro_bridge::route::finality::CcipFinalityPolicy::validate`]).
+pub(crate) fn check_finality_policy(
+    state: &dyn VmState,
+    adapter: BridgeRouteAdapter,
+    source_chain: &str,
+    asset: Option<&str>,
+    policy: Option<&tenzro_bridge::route::finality::CcipFinalityPolicy>,
+) -> Result<BridgeRoute> {
+    let route = read_bridge_route(state, adapter, source_chain).ok_or_else(|| {
+        refuse(format!(
+            "no bridge route is installed at {}",
+            tenzro_types::bridge_route::bridge_route_storage_key(adapter, source_chain)
+        ))
+    })?;
+    if let Some(asset) = asset
+        && !route.assets.iter().any(|a| a.symbol == asset)
+    {
+        return Err(refuse(format!(
+            "route {} carries no asset {asset}",
+            route.storage_key()
+        )));
+    }
+    if let Some(policy) = policy {
+        policy.validate(&route).map_err(route_refused)?;
+    }
+    Ok(route)
+}
+
+/// Write (or, for `None`, clear) the finality policy a proposal set, where
+/// the route framework reads it.
+pub(crate) fn set_finality_policy(
+    state: &mut dyn VmState,
+    route: &BridgeRoute,
+    asset: Option<&str>,
+    policy: Option<&tenzro_bridge::route::finality::CcipFinalityPolicy>,
+    changes: &mut Vec<StateChange>,
+) -> Result<()> {
+    let key = tenzro_bridge::route::finality::policy_key(route, asset);
+    let value = match policy {
+        Some(policy) => serde_json::to_vec(policy)
+            .map_err(|e| VmError::Internal(format!("finality policy: {e}")))?,
+        // An empty value reads as absent everywhere route state is read.
+        None => Vec::new(),
+    };
+    let previous = state.get_storage(&GOVERNED_STATE_ADDRESS, key.as_bytes());
+    state.set_storage(&GOVERNED_STATE_ADDRESS, key.as_bytes(), value.clone());
+    changes.push(StateChange::new(
+        GOVERNED_STATE_ADDRESS.to_vec(),
+        key.into_bytes(),
+        previous,
+        Some(value),
+    ));
+    Ok(())
 }
 
 #[cfg(test)]

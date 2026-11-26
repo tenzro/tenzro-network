@@ -8,7 +8,7 @@ name = "tenzro-sdk"
 version = "0.9.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Tenzro Network SDK: a typed client for every RPC the node serves, hardware-signed transactions, agents, inference, payments and settlement"
+description = "Tenzro Network SDK: a typed client for every RPC the node serves, hardware-signed transactions, agents, inference, storage, compute claims, payments and settlement"
 license = "Apache-2.0"
 repository = "https://github.com/tenzro/tenzro-network"
 homepage = "https://tenzro.com/docs/sdk"
@@ -43,6 +43,16 @@ bridge = ["dep:bs58", "dep:bech32", "dep:curve25519-dalek", "dep:blake2", "dep:s
 inference = ["dep:futures"]
 # Tokens, staking, validators, governance, contracts, TEE and ZK, storage, events with proofs.
 chain = ["dep:blake3", "dep:bincode", "dep:sha3"]
+# A device's session with a node's app transport over WebTransport (preview).
+# Not in `full`: it brings a QUIC stack.
+app-transport = ["dep:wtransport", "dep:ml-dsa"]
+# Preview, off by default: a light client that checks checkpoint
+# certificates, epoch handovers, state values and identity keys from a
+# trusted committee (`TenzroClient::light_client`). It builds on the
+# published `tenzro-light` crate, without its compact certificate path:
+# that one needs `tenzro-cert-stark`, which cannot be published while it
+# takes Plonky3 from git. Quorum certificates carry every check.
+light = ["dep:tenzro-light"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -71,8 +81,13 @@ bincode = { version = "1.3", optional = true }
 # OpenShell record verification: Ed25519 session keys and ML-DSA-65 legs.
 ed25519-dalek = { version = "2", optional = true }
 ml-dsa = { version = "0.1.1", optional = true }
+wtransport = { version = "=0.7.2", default-features = false, features = ["aws-lc-rs"], optional = true }
+tenzro-light = { version = "0.2", path = "../../crates/tenzro-light", default-features = false, optional = true }
 
 [dev-dependencies]
+tenzro-light = { version = "0.2", path = "../../crates/tenzro-light", default-features = false, features = ["test-support"] }
+tenzro-types = { version = "0.2", path = "../../crates/tenzro-types" }
+bincode = "1.3"
 tower = { version = "0.5", features = ["util"] }
 tracing-subscriber = "0.3"
 hex = "0.4"
@@ -80,7 +95,6 @@ tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 base64 = "0.22"
 serde_json = "1"
-bincode = "1.3"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 
@@ -113,6 +127,10 @@ required-features = ["inference"]
 [[test]]
 name = "event_proof_compat"
 required-features = ["chain"]
+
+[[test]]
+name = "light_client"
+required-features = ["light"]
 
 [[test]]
 name = "governance_receipt"

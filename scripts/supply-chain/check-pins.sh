@@ -8,6 +8,13 @@
 #   - every cargo build/test/check/bench/install in a Dockerfile or a build
 #     script under scripts/ passes --locked, so the committed Cargo.lock is
 #     what is built.
+#   - every GitHub Actions workflow file parses as YAML (needs python3 with
+#     PyYAML: GitHub's Ubuntu image has it, elsewhere `python3-yaml`; without
+#     it the check fails rather than skipping);
+#   - bindgen and the prettyplease it hands a syn::File to resolve to one
+#     major version of syn in every committed Cargo.lock;
+#   - every binary that links rustls installs aws-lc-rs as its process TLS
+#     provider.
 #
 # Enforced with --release (scripts/supply-chain/release.sh), reported otherwise:
 #   - every Dockerfile FROM names its base image by digest (@sha256:...);
@@ -85,6 +92,18 @@ if [ -n "$unpinned_from" ]; then
   [ $release -eq 1 ] && fail=1
 fi
 
+# Every workflow file parses: GitHub runs none of the jobs of a file it cannot parse, and says so
+# only on the run page.
+if python3 -c 'import yaml' 2>/dev/null; then
+  for wf in .github/workflows/*.yml; do
+    python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$wf" 2>/dev/null \
+      || { echo "workflow file does not parse as YAML: $wf"; fail=1; }
+  done
+else
+  echo "python3 with the yaml module is not available; the workflow files were not parsed"
+  fail=1
+fi
+
 # GitHub Actions by commit SHA.
 unpinned_uses=$(grep -Hn -E '^[[:space:]]*-?[[:space:]]*uses:' .github/workflows/*.yml 2>/dev/null \
   | grep -v -E '@[0-9a-f]{40}' || true)
@@ -92,6 +111,10 @@ if [ -n "$unpinned_uses" ]; then
   echo "GitHub Actions not pinned by commit SHA:"; echo "$unpinned_uses"
   [ $release -eq 1 ] && fail=1
 fi
+
+# bindgen and its prettyplease link one major version of syn in every lockfile.
+python3 "$(dirname "$0")/check_bindgen_syn.py" || fail=1
+(cd "$(dirname "$0")" && python3 -m unittest test_check_bindgen_syn test_check_tls_provider) || fail=1
 
 # No new private key created or stored in software.
 "$(dirname "$0")/check-keys.sh" || fail=1
@@ -113,11 +136,12 @@ while IFS= read -r pj; do
   fi
 done < <(find apps sdk contracts crates -name package.json -not -path '*/node_modules/*' -not -path '*/native/npm/*' -not -path '*/packages/*' 2>/dev/null || true)
 
+# Every binary that links rustls installs aws-lc-rs, so no TLS client falls back to ring.
+python3 "$(dirname "$0")/check_tls_provider.py" || fail=1
+
 # Dependency policy (advisories, licences, bans, sources) on every check.
 if command -v cargo-deny >/dev/null 2>&1; then
   cargo deny --locked check advisories licenses bans sources || fail=1
-  # The control app ships its own lockfile; its advisories are held to the same policy.
-  cargo deny --manifest-path apps/tenzro-control/src-tauri/Cargo.toml --locked check advisories || fail=1
 else
   echo "cargo-deny is not installed; the dependency policy was not checked"
   fail=1

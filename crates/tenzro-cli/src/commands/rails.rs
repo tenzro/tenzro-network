@@ -176,14 +176,129 @@ impl RouteCmd {
 pub enum InteractionCommand {
     /// Record a settlement, given as its interaction record, on other chains, in parallel.
     Mirror(MirrorInteractionCmd),
+    /// Recompute an interaction record's digest offline and check it against one you were given.
+    Verify(VerifyInteractionCmd),
 }
 
 impl InteractionCommand {
     pub async fn execute(&self) -> Result<()> {
         match self {
             Self::Mirror(c) => c.execute().await,
+            Self::Verify(c) => c.execute(),
         }
     }
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifyInteractionCmd {
+    /// Path to the interaction record JSON.
+    interaction_json: String,
+    /// The digest the record is claimed to have (64 hex characters), as a
+    /// node reported it or as it was written onto a chain.
+    #[arg(long)]
+    expect: Option<String>,
+}
+
+impl VerifyInteractionCmd {
+    /// Needs no node: the digest is a function of the record alone
+    /// (docs/standards/interaction-receipt.md).
+    pub fn execute(&self) -> Result<()> {
+        let raw = std::fs::read_to_string(&self.interaction_json)?;
+        let digest = interaction_digest(&raw, self.expect.as_deref())?;
+        output::print_header("Interaction record");
+        output::print_field("Digest", &digest);
+        match &self.expect {
+            Some(_) => output::print_success("The record has the expected digest."),
+            None => output::print_info(
+                "Compare this digest with the one the node reported or the one written on chain.",
+            ),
+        }
+        Ok(())
+    }
+}
+
+/// The keys of an interaction record its digest covers, as
+/// docs/standards/interaction-receipt.md lists them; `on_behalf_of` may be
+/// absent.
+const COVERED_KEYS: [&str; 11] = [
+    "interaction_id",
+    "kind",
+    "payer_did",
+    "on_behalf_of",
+    "attester_did",
+    "resource_id",
+    "authority",
+    "charge",
+    "amount_charged",
+    "settled_asset",
+    "occurred_at",
+];
+
+/// A record whose uncovered fields hold placeholders: the digest never reads
+/// them, so a record that carries only its covered fields is laid over this.
+fn uncovered_placeholders() -> tenzro_types::provenance::InteractionProvenance {
+    use tenzro_types::access_tier::{AccessTier, PayerKind};
+    use tenzro_types::provenance::{Authority, ChargeRef, InboundRail, InteractionKind};
+    tenzro_types::provenance::InteractionProvenance {
+        interaction_id: String::new(),
+        payer_did: String::new(),
+        payer_kind: PayerKind::Agent,
+        payer_wallet: tenzro_types::primitives::Address::default(),
+        on_behalf_of: None,
+        kind: InteractionKind::Inference,
+        resource_id: String::new(),
+        units: tenzro_types::model::BillableUnits::tokens(0, 0),
+        occurred_at: tenzro_types::primitives::Timestamp::new(0),
+        attester_did: String::new(),
+        authority: Authority::Open,
+        charge: ChargeRef::Free,
+        tier: AccessTier::User,
+        credential_digest: None,
+        inbound_rail: InboundRail::Tenzro,
+        amount_charged: 0,
+        settled_asset: String::new(),
+        payees: Vec::new(),
+        settlement_tx: None,
+        secondary_settlements: Vec::new(),
+    }
+}
+
+/// The hex digest of the interaction record in `raw`, read from its covered
+/// fields alone, so a record carrying only those is accepted just as the
+/// independent verifier accepts it. Refuses a record that is not attestable,
+/// and one whose digest is not `expect` when that is given.
+fn interaction_digest(raw: &str, expect: Option<&str>) -> Result<String> {
+    let given: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("not an interaction record: {e}"))?;
+    let given = given
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("not an interaction record: not a JSON object"))?;
+    let mut full = serde_json::to_value(uncovered_placeholders())?;
+    for key in COVERED_KEYS {
+        match given.get(key) {
+            Some(value) => full[key] = value.clone(),
+            None if key == "on_behalf_of" => full[key] = serde_json::Value::Null,
+            None => anyhow::bail!("not an interaction record: `{key}` is missing"),
+        }
+    }
+    if let Some(amount) = given["amount_charged"].as_str()
+        && (amount.is_empty() || !amount.bytes().all(|b| b.is_ascii_digit()))
+    {
+        anyhow::bail!("not an interaction record: `amount_charged` is not a decimal string");
+    }
+    let record: tenzro_types::provenance::InteractionProvenance = serde_json::from_value(full)
+        .map_err(|e| anyhow::anyhow!("not an interaction record: {e}"))?;
+    record
+        .validate_attestable()
+        .map_err(|e| anyhow::anyhow!("the record cannot be attested: {e}"))?;
+    let digest = record.attestation_digest_hex();
+    if let Some(expect) = expect {
+        let expect = expect.trim().trim_start_matches("0x").to_ascii_lowercase();
+        if expect != digest {
+            anyhow::bail!("the record's digest is {digest}, not the expected {expect}");
+        }
+    }
+    Ok(digest)
 }
 
 #[derive(Debug, Parser)]
@@ -285,5 +400,152 @@ impl MirrorInteractionCmd {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenzro_types::access_tier::{AccessTier, PayerKind};
+    use tenzro_types::model::BillableUnits;
+    use tenzro_types::primitives::{Address, Timestamp};
+    use tenzro_types::provenance::{
+        Authority, ChargeRef, InboundRail, InteractionKind, InteractionProvenance,
+    };
+
+    /// The digest of the worked example in docs/standards/interaction-receipt.md.
+    const EXAMPLE_DIGEST: &str = "d6d89cd298efecf601be462c2a4e76878fbd021033753663db55af3728ab0bf7";
+
+    /// The worked example of docs/standards/interaction-receipt.md.
+    fn example() -> InteractionProvenance {
+        InteractionProvenance {
+            interaction_id: "int_1".into(),
+            payer_did: "did:tenzro:machine:agent".into(),
+            payer_kind: PayerKind::Agent,
+            payer_wallet: Address::default(),
+            on_behalf_of: Some("did:tenzro:human:alice".into()),
+            kind: InteractionKind::Inference,
+            resource_id: "qwen3-27b".into(),
+            units: BillableUnits::tokens(1_000, 250),
+            occurred_at: Timestamp::new(1_700_000_000_000),
+            attester_did: "did:tenzro:machine:node".into(),
+            authority: Authority::X402Payment {
+                scheme: "exact".into(),
+            },
+            charge: ChargeRef::Settlement {
+                settlement_id: "s-1".into(),
+            },
+            tier: AccessTier::User,
+            credential_digest: None,
+            inbound_rail: InboundRail::Tenzro,
+            amount_charged: 1_000,
+            settled_asset: "tenzro:1337/native:tnzo".into(),
+            payees: Vec::new(),
+            settlement_tx: None,
+            secondary_settlements: Vec::new(),
+        }
+    }
+
+    /// The published vectors (docs/standards/vectors/interaction-receipt.json),
+    /// each a record that carries only its covered fields.
+    fn vectors() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/standards/vectors/interaction-receipt.json"
+        );
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_record_of_covered_fields_alone_is_read_and_a_missing_one_refused() {
+        let worked = vectors()["vectors"][0]["record"].clone();
+        let covered = worked.as_object().unwrap();
+        assert!(
+            covered
+                .keys()
+                .all(|key| COVERED_KEYS.contains(&key.as_str()))
+        );
+        assert_eq!(
+            interaction_digest(&worked.to_string(), None).unwrap(),
+            EXAMPLE_DIGEST
+        );
+        let full = serde_json::to_string(&example()).unwrap();
+        assert_eq!(interaction_digest(&full, None).unwrap(), EXAMPLE_DIGEST);
+        let mut missing = worked.clone();
+        missing.as_object_mut().unwrap().remove("settled_asset");
+        let refused = interaction_digest(&missing.to_string(), None).unwrap_err();
+        assert!(
+            refused.to_string().contains("`settled_asset` is missing"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn an_amount_is_read_as_a_number_or_any_decimal_string() {
+        let worked = vectors()["vectors"][0]["record"].clone();
+        let mut as_text = worked.clone();
+        as_text["amount_charged"] = "1000".into();
+        assert_eq!(
+            interaction_digest(&as_text.to_string(), None).unwrap(),
+            EXAMPLE_DIGEST
+        );
+        for refused in ["+1000", "", "1e3", "-1"] {
+            as_text["amount_charged"] = refused.into();
+            assert!(
+                interaction_digest(&as_text.to_string(), None).is_err(),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_nodes_digest_is_the_published_one_for_every_vector() {
+        let all = vectors();
+        assert_eq!(all["vectors"][0]["digest"], EXAMPLE_DIGEST);
+        for v in all["vectors"].as_array().unwrap() {
+            let digest = interaction_digest(&v["record"].to_string(), None).unwrap();
+            assert_eq!(digest, v["digest"].as_str().unwrap(), "{}", v["label"]);
+        }
+        for v in all["refused"].as_array().unwrap() {
+            assert!(
+                interaction_digest(&v["record"].to_string(), None).is_err(),
+                "{}",
+                v["label"]
+            );
+        }
+    }
+
+    #[test]
+    fn the_offline_digest_of_the_worked_example_is_the_documented_one() {
+        let raw = serde_json::to_string(&example()).unwrap();
+        assert_eq!(interaction_digest(&raw, None).unwrap(), EXAMPLE_DIGEST);
+    }
+
+    #[test]
+    fn an_expected_digest_is_checked_in_either_spelling() {
+        let raw = serde_json::to_string(&example()).unwrap();
+        assert!(interaction_digest(&raw, Some(EXAMPLE_DIGEST)).is_ok());
+        let spelled = format!("0x{}", EXAMPLE_DIGEST.to_uppercase());
+        assert!(interaction_digest(&raw, Some(&spelled)).is_ok());
+        let wrong = "00".repeat(32);
+        let refusal = interaction_digest(&raw, Some(&wrong)).unwrap_err();
+        assert!(refusal.to_string().contains(EXAMPLE_DIGEST), "{refusal}");
+    }
+
+    #[test]
+    fn a_changed_field_changes_the_digest_and_fails_the_check() {
+        let mut changed = example();
+        changed.resource_id = "another-model".into();
+        let raw = serde_json::to_string(&changed).unwrap();
+        assert!(interaction_digest(&raw, Some(EXAMPLE_DIGEST)).is_err());
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_attested_is_refused() {
+        let mut unattributed = example();
+        unattributed.payer_did.clear();
+        let raw = serde_json::to_string(&unattributed).unwrap();
+        assert!(interaction_digest(&raw, None).is_err());
+        assert!(interaction_digest("{}", None).is_err());
     }
 }

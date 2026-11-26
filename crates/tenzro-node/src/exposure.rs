@@ -4,7 +4,10 @@
 //! A node runs confined. Every HTTP listener (RPC, web, MCP, A2A and the chain
 //! MCP servers) binds loopback, for local clients only; peers are reached over
 //! the network's own identity-addressed transport. [`validate`] refuses, at
-//! startup, a listener bound to anything but loopback. It never derives a public URL from a bind
+//! startup, a listener bound to anything but loopback. The one listener off
+//! loopback is the paired-device listener (`paired_device_addr`): the devices
+//! an operator paired are other machines on their own networks, and it
+//! answers peers on private networks only. It never derives a public URL from a bind
 //! address: `0.0.0.0:8545` names every interface of this machine, and a
 //! loopback, private, CGNAT or link-local address names a network the reader
 //! is not on. Publishing either leaks the operator's network layout and
@@ -35,6 +38,16 @@ pub fn validate(config: &NodeConfig) -> Result<(), String> {
                  your own reverse proxy outside the node"
             ));
         }
+    }
+    if config
+        .paired_device_addr
+        .parse::<std::net::SocketAddr>()
+        .is_err()
+    {
+        return Err(format!(
+            "paired_device_addr = {:?}: not an address and a port",
+            config.paired_device_addr
+        ));
     }
     if let Some(relay) = &config.iroh.relay {
         if !relay.bind_addr.ip().is_loopback() {
@@ -154,7 +167,7 @@ fn is_own_loopback_relay(url: &url::Url, bind: std::net::SocketAddr) -> bool {
         && url.query().is_none()
 }
 
-fn check_public_https(url: &str) -> Result<(), &'static str> {
+pub(crate) fn check_public_https(url: &str) -> Result<(), &'static str> {
     let url = url.trim();
     let Some(rest) = url.strip_prefix("https://") else {
         return Err("must be an https:// URL served by the operator's own edge");
@@ -240,6 +253,18 @@ mod tests {
         c.external_rpc_addr = rpc.map(str::to_string);
         c.external_mcp_addr = mcp.map(str::to_string);
         c
+    }
+
+    #[test]
+    fn the_paired_device_listener_may_bind_off_loopback_and_must_be_an_address() {
+        let mut c = config_with(None, None);
+        assert_eq!(c.paired_device_addr, "0.0.0.0:8543");
+        assert!(validate(&c).is_ok());
+        c.paired_device_addr = "192.168.1.20:9000".to_string();
+        assert!(validate(&c).is_ok());
+        c.paired_device_addr = "every interface".to_string();
+        let why = validate(&c).unwrap_err();
+        assert!(why.starts_with("paired_device_addr"), "{why}");
     }
 
     #[test]

@@ -738,6 +738,62 @@ pub fn settle_epoch_with_levels(
     (summary, coupons)
 }
 
+/// Holds what a closed epoch releases to `ceiling` in all, then each address
+/// to `address_share_bps` of that bounded release. Coupons over the ceiling
+/// are cut in proportion, and an address over its share is cut to it across
+/// its coupons; a coupon's base and level bonus are cut with its amount. What
+/// is cut lapses as unmatched rights do and stays in the pool. Each cut
+/// coupon takes at most what is left of its bound, so rounding never carries
+/// a release past it.
+///
+/// The share is per address: an earner who splits its work across addresses
+/// is held to the share once per address, so the cap limits how much of a
+/// release one key can take, not one operator.
+pub fn bound_release(
+    summary: &mut EpochRewardSummary,
+    coupons: &mut Vec<RewardCoupon>,
+    ceiling: u128,
+    address_share_bps: u64,
+) {
+    let total = |c: &[RewardCoupon]| c.iter().fold(0u128, |a, c| a.saturating_add(c.amount));
+    let cut = |c: &mut RewardCoupon, part: u128, of: u128, left: &mut u128| {
+        let amount = pro_rata(c.amount, part, of).min(*left);
+        *left -= amount;
+        c.base = pro_rata(c.base, part, of).min(amount);
+        c.level_bonus = pro_rata(c.level_bonus, part, of).min(amount - c.base);
+        c.amount = amount;
+    };
+    let before = total(coupons);
+    if before > ceiling {
+        let mut left = ceiling;
+        for c in coupons.iter_mut() {
+            cut(c, ceiling, before, &mut left);
+        }
+    }
+    let most = mul_bps(total(coupons), address_share_bps.min(10_000));
+    let mut of_address: BTreeMap<[u8; 32], u128> = BTreeMap::new();
+    for c in coupons.iter() {
+        let held = of_address.entry(c.address.0).or_insert(0);
+        *held = held.saturating_add(c.amount);
+    }
+    let mut room: BTreeMap<[u8; 32], u128> = BTreeMap::new();
+    for c in coupons.iter_mut() {
+        let held = of_address[&c.address.0];
+        if held > most {
+            let left = room.entry(c.address.0).or_insert(most);
+            cut(c, most, held, left);
+        }
+    }
+    coupons.retain(|c| c.amount > 0);
+    let after = total(coupons);
+    summary.matched = after;
+    summary.expired_unmatched = summary.rights_issued.saturating_sub(after);
+    summary.coupon_count = coupons.len() as u64;
+    summary.level_bonus = coupons
+        .iter()
+        .fold(0u128, |a, c| a.saturating_add(c.level_bonus));
+}
+
 /// Whether a coupon issued in `coupon_epoch` has passed its claim window at
 /// `current_epoch`.
 pub fn coupon_expired(coupon_epoch: u64, current_epoch: u64, window_epochs: u64) -> bool {
@@ -1124,6 +1180,125 @@ mod tests {
             DEFAULT_CLAIM_WINDOW_EPOCHS + 1,
             DEFAULT_CLAIM_WINDOW_EPOCHS
         ));
+    }
+
+    fn coupon(address: u8, bucket: RoleBucket, amount: u128, base: u128) -> RewardCoupon {
+        RewardCoupon {
+            epoch: 3,
+            address: addr(address),
+            bucket,
+            work_weight: 1,
+            amount,
+            issued_at: Timestamp::new(0),
+            status: CouponStatus::Issued,
+            claimed_at: None,
+            level_bonus: 0,
+            base,
+        }
+    }
+
+    fn summary_of(coupons: &[RewardCoupon], rights: u128) -> EpochRewardSummary {
+        let matched = coupons.iter().map(|c| c.amount).sum();
+        EpochRewardSummary {
+            epoch: 3,
+            rights_issued: rights,
+            withheld: 0,
+            matched,
+            expired_unmatched: rights - matched,
+            validator_weight: 0,
+            provider_weight: 0,
+            ecosystem_weight: 0,
+            coupon_count: coupons.len() as u64,
+            closed_at: Timestamp::new(0),
+            level_bonus: 0,
+        }
+    }
+
+    #[test]
+    fn a_release_under_its_bounds_is_left_as_it_was() {
+        let mut coupons = vec![
+            coupon(1, RoleBucket::Validator, 300, 100),
+            coupon(2, RoleBucket::Provider, 300, 0),
+            coupon(3, RoleBucket::Ecosystem, 300, 0),
+            coupon(4, RoleBucket::Provider, 100, 0),
+        ];
+        let was = coupons.clone();
+        let mut summary = summary_of(&coupons, 2_000);
+        let before = summary.clone();
+        bound_release(&mut summary, &mut coupons, 1_000, 3_000);
+        assert_eq!(coupons, was);
+        assert_eq!(summary, before);
+    }
+
+    #[test]
+    fn a_release_over_the_ceiling_is_cut_in_proportion_and_the_cut_lapses() {
+        let mut coupons = vec![
+            coupon(1, RoleBucket::Validator, 600, 300),
+            coupon(2, RoleBucket::Provider, 300, 0),
+            coupon(3, RoleBucket::Ecosystem, 100, 0),
+        ];
+        coupons[1].level_bonus = 30;
+        let mut summary = summary_of(&coupons, 1_500);
+        summary.level_bonus = 30;
+        bound_release(&mut summary, &mut coupons, 500, 10_000);
+        let amounts: Vec<u128> = coupons.iter().map(|c| c.amount).collect();
+        assert_eq!(amounts, vec![300, 150, 50]);
+        assert_eq!(coupons[0].base, 150);
+        assert_eq!(coupons[1].level_bonus, 15);
+        assert_eq!(summary.matched, 500);
+        assert_eq!(summary.rights_issued, 1_500);
+        assert_eq!(summary.expired_unmatched, 1_000);
+        assert_eq!(summary.level_bonus, 15);
+    }
+
+    #[test]
+    fn rounding_never_carries_a_release_past_its_ceiling() {
+        // Weights above 64 bits lose low bits in pro_rata; uncapped, these
+        // three coupons would come to 7 over the ceiling.
+        let mut coupons = vec![
+            coupon(1, RoleBucket::Validator, 41_974_567_469_525_165_795, 0),
+            coupon(2, RoleBucket::Provider, 60_121_719_391_676_662_302, 0),
+            coupon(3, RoleBucket::Ecosystem, 48_537_151_152_154_249_945, 0),
+        ];
+        let ceiling = 128_556_109_266_758_602_464;
+        let mut summary = summary_of(&coupons, 150_633_438_013_356_078_042);
+        bound_release(&mut summary, &mut coupons, ceiling, 10_000);
+        let total: u128 = coupons.iter().map(|c| c.amount).sum();
+        assert!(total <= ceiling, "{} over", total - ceiling);
+        assert_eq!(summary.matched, total);
+    }
+
+    #[test]
+    fn a_ceiling_of_nothing_leaves_no_coupon() {
+        let mut coupons = vec![coupon(1, RoleBucket::Provider, 7, 0)];
+        let mut summary = summary_of(&coupons, 10);
+        bound_release(&mut summary, &mut coupons, 0, 10_000);
+        assert!(coupons.is_empty());
+        assert_eq!(summary.coupon_count, 0);
+        assert_eq!(summary.matched, 0);
+        assert_eq!(summary.expired_unmatched, 10);
+    }
+
+    #[test]
+    fn an_address_over_its_share_is_cut_to_it_across_its_coupons() {
+        // Address 1 holds 800 of 1000 in two buckets; a third is 333.
+        let mut coupons = vec![
+            coupon(1, RoleBucket::Validator, 600, 60),
+            coupon(1, RoleBucket::Provider, 200, 0),
+            coupon(2, RoleBucket::Provider, 200, 0),
+        ];
+        let mut summary = summary_of(&coupons, 1_000);
+        bound_release(&mut summary, &mut coupons, u128::MAX, 3_333);
+        let of_one: u128 = coupons
+            .iter()
+            .filter(|c| c.address == addr(1))
+            .map(|c| c.amount)
+            .sum();
+        assert!((332..=333).contains(&of_one), "{of_one}");
+        assert_eq!(coupons[2].amount, 200);
+        assert!(coupons[0].base <= coupons[0].amount);
+        assert_eq!(summary.matched, 200 + of_one);
+        assert_eq!(summary.expired_unmatched, 1_000 - 200 - of_one);
     }
 
     #[test]

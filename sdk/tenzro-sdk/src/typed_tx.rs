@@ -18,8 +18,8 @@ use crate::error::{SdkError, SdkResult};
 use crate::rpc::RpcClient;
 use crate::types::Address;
 use crate::wallet::{
-    HybridSigner, TRANSACTION_SIGNATURE_CONTEXT, account_address, composite_message_representative,
-    composite_signature_json,
+    FEE_PAYER_SIGNATURE_CONTEXT, HybridSigner, TRANSACTION_SIGNATURE_CONTEXT, account_address,
+    composite_message_representative, composite_signature_json,
 };
 
 /// Every consensus transaction type.
@@ -124,11 +124,15 @@ pub enum TxKind {
     SponsoredBond,
     /// An operation on the sender's own opt-in outflow policy.
     AccountOutflow,
+    /// A native operation named by its selector (an identity's key change,
+    /// a root revoked in favour of a successor, a builder's attestation),
+    /// with its payload.
+    NativeCall,
 }
 
 impl TxKind {
     /// Every kind, in the order the network declares them.
-    pub const ALL: [TxKind; 84] = [
+    pub const ALL: &[TxKind] = &[
         TxKind::Transfer,
         TxKind::ContractDeploy,
         TxKind::ContractCall,
@@ -213,6 +217,7 @@ impl TxKind {
         TxKind::AttachMachineAttestation,
         TxKind::SponsoredBond,
         TxKind::AccountOutflow,
+        TxKind::NativeCall,
     ];
 
     /// The name the network encodes the kind under.
@@ -302,6 +307,7 @@ impl TxKind {
             TxKind::AttachMachineAttestation => "AttachMachineAttestation",
             TxKind::SponsoredBond => "SponsoredBond",
             TxKind::AccountOutflow => "AccountOutflow",
+            TxKind::NativeCall => "NativeCall",
         }
     }
 
@@ -324,8 +330,9 @@ pub struct TypedTransaction {
     /// signer's passkey, such as the account every device of a wallet acts
     /// for. The account the signer's P-256 key names when unset.
     pub from: Option<Address>,
-    /// Gas limit.
-    pub gas_limit: u64,
+    /// Gas limit. The node's estimate for the transaction
+    /// (`tenzro_estimateGas`) when unset.
+    pub gas_limit: Option<u64>,
     /// Gas price, smallest TNZO unit. The node's current price
     /// (`eth_gasPrice`) when unset.
     pub gas_price: Option<u64>,
@@ -359,7 +366,7 @@ impl TypedTransaction {
             fields,
             to: None,
             from: None,
-            gas_limit: 500_000,
+            gas_limit: None,
             gas_price: None,
         })
     }
@@ -378,7 +385,7 @@ impl TypedTransaction {
 
     /// Set the gas limit.
     pub fn gas_limit(mut self, gas_limit: u64) -> Self {
-        self.gas_limit = gas_limit;
+        self.gas_limit = Some(gas_limit);
         self
     }
 
@@ -430,6 +437,61 @@ struct Envelope {
     gas_price: u64,
     timestamp: i64,
     valid_until: i64,
+    memo: Option<String>,
+}
+
+impl Envelope {
+    /// The envelope a `tenzro_sendRawTransaction` request describes.
+    fn of_request(request: &Value) -> SdkResult<Self> {
+        let number = |name: &str| {
+            request[name]
+                .as_u64()
+                .ok_or_else(|| SdkError::InvalidParameter(format!("the request carries no {name}")))
+        };
+        let account = |name: &str| -> SdkResult<[u8; 32]> {
+            request[name]
+                .as_str()
+                .and_then(|h| hex::decode(h.trim_start_matches("0x")).ok())
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| SdkError::InvalidParameter(format!("the request carries no {name}")))
+        };
+        Ok(Self {
+            chain_id: number("chain_id")?,
+            from: account("from")?,
+            to: account("to")?,
+            nonce: number("nonce")?,
+            gas_limit: number("gas_limit")?,
+            gas_price: number("gas_price")?,
+            timestamp: number("timestamp")? as i64,
+            valid_until: number("valid_until")? as i64,
+            memo: request["memo"].as_str().map(str::to_string),
+        })
+    }
+}
+
+/// What a memo that carries a fee payer's consent starts with, as
+/// `tenzro_crypto::fee_payer::MEMO_PREFIX`.
+pub const FEE_PAYER_MEMO_PREFIX: &str = "tenzro-fee-payer-1:";
+
+/// What a fee payer signs to pay the fee of the transaction `env` and the
+/// canonical action encoding `tx_type_json` describe, as
+/// `tenzro_crypto::fee_payer::consent_digest`: the whole body and the
+/// payer's account, so the consent pays for that one transaction of that
+/// sender on that chain until it expires.
+fn fee_payer_consent_digest(env: &Envelope, tx_type_json: &str, payer: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"tenzro/fee-payer/consent/1");
+    h.update(env.chain_id.to_le_bytes());
+    h.update(env.from);
+    h.update(env.to);
+    h.update(env.nonce.to_le_bytes());
+    h.update(env.gas_limit.to_le_bytes());
+    h.update(env.gas_price.to_le_bytes());
+    h.update(env.timestamp.to_le_bytes());
+    h.update(env.valid_until.to_le_bytes());
+    h.update(payer);
+    h.update(tx_type_json.as_bytes());
+    h.finalize().into()
 }
 
 /// The node a [`TypedTxClient`] reads nonces and signing payloads from and
@@ -522,15 +584,36 @@ impl TypedTxClient {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| SdkError::InvalidParameter(e.to_string()))?
             .as_millis() as i64;
-        let env = Envelope {
+        let mut env = Envelope {
             chain_id: parse_hex_u64(&chain_hex)?,
             from,
             to,
             nonce: parse_hex_u64(&nonce_hex)?,
-            gas_limit: tx.gas_limit,
+            gas_limit: 0,
             gas_price,
             timestamp,
             valid_until: timestamp + VALIDITY_MS,
+            memo: None,
+        };
+        env.gas_limit = match tx.gas_limit {
+            Some(gas_limit) => gas_limit,
+            None => parse_hex_u64(
+                &self
+                    .call::<String>(
+                        "tenzro_estimateGas",
+                        json!({
+                            "from": from_hex,
+                            "to": format!("0x{}", hex::encode(env.to)),
+                            "nonce": env.nonce,
+                            "chain_id": env.chain_id,
+                            "gas_price": env.gas_price,
+                            "timestamp": env.timestamp,
+                            "valid_until": env.valid_until,
+                            "tx_type": tx.tx_type(),
+                        }),
+                    )
+                    .await?,
+            )?,
         };
         let request = json!({
             "from": from_hex,
@@ -581,6 +664,77 @@ impl TypedTxClient {
         request["signature"] = composite_signature_json(&signature, pq_signature.as_deref());
         self.call(method, request).await
     }
+
+    /// A fee payer's consent to pay the fee of the unsigned `request` (the
+    /// `request` of [`Self::prepare`]), as the memo the sender then signs
+    /// and sends with [`Self::send_with_fee_payer`]. The digest signed is
+    /// rebuilt from the request's own fields and the node's encoding of its
+    /// action, checked against them, so the payer consents to exactly the
+    /// sender, nonce, gas limit and price, expiry and action it reads there,
+    /// on that chain. The fee is the payer's only once the network's fee
+    /// payer rule is live (`feature.fee_payer.activation_epoch`); before, the
+    /// sender pays. A privileged action carries no memo and names no payer.
+    pub async fn fee_payer_consent(
+        &self,
+        payer: &dyn HybridSigner,
+        request: &Value,
+    ) -> SdkResult<String> {
+        let env = Envelope::of_request(request)?;
+        if env.memo.is_some() {
+            return Err(SdkError::InvalidParameter(
+                "the request already carries a memo".to_string(),
+            ));
+        }
+        let payload: Value = self
+            .call("tenzro_getSigningPayload", request.clone())
+            .await?;
+        check_signing_payload(&env, &request["tx_type"], &payload)?;
+        let (Some("plain"), Some(tx_type_json)) =
+            (payload["kind"].as_str(), payload["tx_type_json"].as_str())
+        else {
+            return Err(SdkError::InvalidParameter(
+                "a privileged action names no fee payer".to_string(),
+            ));
+        };
+        let public_key = payer.p256_public_key();
+        let account = account_address(&public_key);
+        let digest = fee_payer_consent_digest(&env, tx_type_json, &account);
+        let m_prime = composite_message_representative(FEE_PAYER_SIGNATURE_CONTEXT, &digest);
+        let (signature, pq_signature) = payer.sign_composite(&m_prime).await?;
+        let mut memo = format!(
+            "{FEE_PAYER_MEMO_PREFIX}{}:{}:{}",
+            hex::encode(account),
+            hex::encode(public_key),
+            hex::encode(signature),
+        );
+        if let Some(pq) = pq_signature {
+            memo.push(':');
+            memo.push_str(&hex::encode(pq));
+        }
+        Ok(memo)
+    }
+
+    /// Sign the unsigned `request` with the sender's `signer`, carrying
+    /// `consent` (from [`Self::fee_payer_consent`]) as its memo, and submit
+    /// it. Returns the node's answer to `tenzro_sendRawTransaction`.
+    pub async fn send_with_fee_payer(
+        &self,
+        signer: &dyn HybridSigner,
+        mut request: Value,
+        consent: String,
+    ) -> SdkResult<Value> {
+        request["memo"] = json!(consent);
+        let env = Envelope::of_request(&request)?;
+        let payload: Value = self
+            .call("tenzro_getSigningPayload", request.clone())
+            .await?;
+        let digest = check_signing_payload(&env, &request["tx_type"], &payload)?;
+        let m_prime = composite_message_representative(TRANSACTION_SIGNATURE_CONTEXT, &digest);
+        let (signature, pq_signature) = signer.sign_composite(&m_prime).await?;
+        request["public_key"] = json!(hex::encode(signer.p256_public_key()));
+        request["signature"] = composite_signature_json(&signature, pq_signature.as_deref());
+        self.call("tenzro_sendRawTransaction", request).await
+    }
 }
 
 fn parse_hex_u64(s: &str) -> SdkResult<u64> {
@@ -630,6 +784,9 @@ fn check_signing_payload(env: &Envelope, tx_type: &Value, payload: &Value) -> Sd
             h.update(env.timestamp.to_le_bytes());
             h.update(env.valid_until.to_le_bytes());
             h.update(encoded.as_bytes());
+            if let Some(memo) = &env.memo {
+                h.update(memo.as_bytes());
+            }
             h.finalize().into()
         }
         Some("typed_action") => {
@@ -678,6 +835,7 @@ mod tests {
             gas_price: 1,
             timestamp: 1_000,
             valid_until: 2_000,
+            memo: None,
         }
     }
 
@@ -697,6 +855,92 @@ mod tests {
                 .unwrap()
                 .tx_type(),
             json!("ExitValidator")
+        );
+    }
+
+    /// A memo is part of what the sender signs: the digest of the same
+    /// transaction without it, or with another, is refused. A request reads
+    /// back as the envelope it describes.
+    #[test]
+    fn a_plain_payload_covers_the_memo() {
+        let tx_type = json!({"Transfer": {"amount": 5}});
+        let encoded = r#"{"Transfer":{"amount":5}}"#;
+        let digest_for = |memo: Option<&str>| -> [u8; 32] {
+            let e = env();
+            let mut h = Sha256::new();
+            h.update(e.chain_id.to_le_bytes());
+            h.update(e.from);
+            h.update(e.to);
+            h.update(e.nonce.to_le_bytes());
+            h.update(e.gas_limit.to_le_bytes());
+            h.update(e.gas_price.to_le_bytes());
+            h.update(e.timestamp.to_le_bytes());
+            h.update(e.valid_until.to_le_bytes());
+            h.update(encoded.as_bytes());
+            if let Some(memo) = memo {
+                h.update(memo.as_bytes());
+            }
+            h.finalize().into()
+        };
+        let payload = |digest: [u8; 32]| json!({"kind": "plain", "tx_type_json": encoded, "digest": hex::encode(digest)});
+        let request = json!({
+            "from": format!("0x{}", hex::encode([1u8; 32])),
+            "to": format!("0x{}", hex::encode([2u8; 32])),
+            "nonce": 7,
+            "chain_id": 1337,
+            "gas_limit": 500_000,
+            "gas_price": 1,
+            "timestamp": 1_000,
+            "valid_until": 2_000,
+            "tx_type": tx_type.clone(),
+            "memo": "tenzro-fee-payer-1:aa",
+        });
+        let with_memo = Envelope::of_request(&request).unwrap();
+        assert_eq!(with_memo.memo.as_deref(), Some("tenzro-fee-payer-1:aa"));
+        let digest = digest_for(Some("tenzro-fee-payer-1:aa"));
+        assert_eq!(
+            check_signing_payload(&with_memo, &tx_type, &payload(digest)).unwrap(),
+            digest
+        );
+        assert!(check_signing_payload(&with_memo, &tx_type, &payload(digest_for(None))).is_err());
+        assert!(
+            check_signing_payload(
+                &with_memo,
+                &tx_type,
+                &payload(digest_for(Some("tenzro-fee-payer-1:ab")))
+            )
+            .is_err()
+        );
+        assert!(check_signing_payload(&env(), &tx_type, &payload(digest)).is_err());
+
+        // The consent digest covers every field of the body and the payer.
+        let base = fee_payer_consent_digest(&env(), encoded, &[9; 32]);
+        assert_ne!(base, fee_payer_consent_digest(&env(), encoded, &[8; 32]));
+        let changed = [
+            Envelope {
+                chain_id: 1,
+                ..env()
+            },
+            Envelope {
+                from: [3; 32],
+                ..env()
+            },
+            Envelope { nonce: 8, ..env() },
+            Envelope {
+                valid_until: 2_001,
+                ..env()
+            },
+            Envelope {
+                gas_price: 2,
+                ..env()
+            },
+        ];
+        for e in &changed {
+            assert_ne!(base, fee_payer_consent_digest(e, encoded, &[9; 32]));
+        }
+        assert_ne!(
+            base,
+            fee_payer_consent_digest(&env(), r#"{"Transfer":{"amount":6}}"#, &[9; 32])
         );
     }
 

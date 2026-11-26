@@ -11,19 +11,21 @@ Every flag and subcommand of the `tenzro-node` binary, from its own argument def
 | `--config` / `-c` | `FILE` |  |  | Path to configuration file |
 | `--data-dir` / `-d` | `DIR` | `TENZRO_DATA_DIR` |  | Data directory. Also settable via `$TENZRO_DATA_DIR` so an operator can pin it once — in the environment, a service unit, a shell profile — rather than repeating the flag on every start; the flag wins when both are given. |
 | `--tpm-key-holder` | `SOCKET` | `TENZRO_TPM_KEY_HOLDER` |  | Hold this machine's identity key in another machine's TPM instead of a local one, through the key holder listening on this socket (`tenzro-node tpm key-holder`). The holder keeps this boot's transport key in memory and the operator passkey's grant for it. |
+| `--tpm-key-holder-wait` | `SECS` | `TENZRO_TPM_KEY_HOLDER_WAIT` | `120 ` | How long a node started before its key holder waits for one to answer at `--tpm-key-holder` before it refuses to start. A holder that answers without a grant is waited on until the grant is installed. |
 | `--tpm-label` | `LABEL` | `TENZRO_TPM_LABEL` |  | The key label the provider enrolled for this machine. |
 | `--reserve-gb` | `GB` | `TENZRO_RESERVE_GB` |  | GiB held back from models for the OS, this process, RocksDB, iroh, and the service surfaces — never lent to a model at any load. Defaults to 16. Also settable via `$TENZRO_RESERVE_GB`; the flag wins when both are given. Lower it on a node that only serves models; raise it on one carrying a deep RocksDB working set or co-hosting other services. |
 | `--resident-ceiling-gb` | `GB` | `TENZRO_RESIDENT_CEILING_GB` |  | GiB ceiling for always-resident models (language models, embeddings, forecasting, ASR, TTS). Omit to use 60% of what remains after the reserve. Also settable via `$TENZRO_RESIDENT_CEILING_GB`; the flag wins when both are given. |
 | `--on-demand-ceiling-gb` | `GB` | `TENZRO_ON_DEMAND_CEILING_GB` |  | GiB ceiling for pipelines loaded per job and evicted afterwards — image and video generation. Omit to use whatever the resident tier does not take. Also settable via `$TENZRO_ON_DEMAND_CEILING_GB`; the flag wins when both are given. Separate from the resident ceiling on purpose: a chat model must not be able to crowd out the diffusion worker, and a video pipeline must not evict the model currently answering requests. On a memory-constrained box, the 60/40 default split can leave this tier too small for a single on-demand pipeline — raise it explicitly when that happens. |
 | `--tier` | `TIER` | `TENZRO_TIER` |  | Resource tier: `auto` (default), `edge`, `validator` or `provider`. Sets the defaults for the store's memory and background work and the runtime's threads; `auto` picks `provider` for roles that run models, `edge` on a machine with at most 8 GiB of memory, `validator` otherwise. Values set under `[storage]` win over the tier. |
 | `--worker-threads` | `N` | `TENZRO_WORKER_THREADS` |  | Async runtime worker threads. Omit for the tier's: the core count, 2 to 8 on a validator or provider, 1 to 2 on an edge device. |
-| `--roles` / `-r` | `ROLES` |  |  | Node roles, comma-separated (e.g. "validator,storage,ai"). A node may serve any combination of roles under a single stake. Aliases accepted: validator, model-provider/ai, tee-provider/tee, storage, edge/ingress, user/light. |
+| `--roles` / `-r` | `ROLES` |  |  | Node roles, comma-separated (e.g. "validator,storage,ai"). A node may serve any combination of roles; each role is bonded separately from the same account. Aliases accepted: validator, model-provider/ai, tee-provider/tee, storage, edge/ingress, user/light. |
 | `--validator-self-stake` | `WEI` |  |  | Self-stake in wei to auto-register this node as a validator on boot (permissionless / first-boot onboarding). Requires the validator role; the node's validator-derived account must hold this stake plus gas. Omit to disable self-registration. |
 | `--consensus-key-scheme` | `SCHEME` |  |  | Signature scheme of this node's consensus key: COMPSIG-MLDSA65-ECDSA-P256 (the default) or COMPSIG-MLDSA87-ECDSA-P384, which needs a TPM implementing ML-DSA and P-384. A validator registered under another scheme rotates to the key of this one. |
-| `--boot-nodes` / `-b` | `IDENTITIES` |  |  | Boot identities (comma-separated): machine identities, each optionally with the relay it is reachable through, `did:tenzro:machine:<id>[@<relay url>]`. Network addresses are refused. Also read, and appended, from `TENZRO_BOOT_NODES`. Omitting this joins the public network through its genesis validators' identities. Pass an explicitly empty value — `--boot-nodes ""` — to stay **isolated**: no dialling out. That is what a local or solo node wants, and it is distinct from omitting the flag. |
+| `--boot-nodes` / `-b` | `IDENTITIES` |  |  | Boot identities (comma-separated): machine identities, each optionally with the relay it is reachable through, `did:tenzro:machine:<id>[@<relay url>]`. Network addresses are refused. Also read, and appended, from `TENZRO_BOOT_NODES`. Omitting this joins the public network through its genesis validators' identities. A genesis validator does not omit it: it names every other genesis validator's machine identity with its relay URL, or a fresh network does not bootstrap. Pass an explicitly empty value — `--boot-nodes ""` — to stay **isolated**: no dialling out. That is what a local or solo node wants, and it is distinct from omitting the flag. A validator in the `enforce` onboarding mode dials only these identities, the validators' machines and the peers named with `--state-sync-from`, and keeps gossip neighbours only among these identities and the validators; inbound connections that pass the identity gate are still admitted, so other nodes can sync from it. Every validator's list names the relay and RPC entry points. |
 | `--relay-listen` | `ADDR` |  |  | Serve the relay role: the address the relay's HTTP listener binds. Requires `--relay-url`. |
 | `--relay-url` | `URL` |  |  | The URL peers reach this node's relay at, announced in its signed endpoint record. Exposing the listener at that URL, with TLS, is the operator's choice outside the node. |
 | `--relay-udp-port` | `PORT` |  |  | UDP port this node's endpoint binds while it serves the relay role (default 443). Only for a host that runs several relays, such as a test cluster; one process per host can hold a port. |
+| `--iroh-bind-port` | `PORT` |  |  | UDP port this node's iroh endpoint binds (default 9001, or the port of `bind_addr` in the config file's iroh section). One process per host can hold a port, so a second node on a machine names its own. |
 | `--log-level` | `LEVEL` |  | `info` | Log level (trace, debug, info, warn, error) |
 | `--log-format` | `FORMAT` |  | `text` | Log format: "text" for human-readable, "json" for structured JSON |
 | `--rpc-addr` | `ADDR` |  |  | RPC listen address. Loopback only (default `127.0.0.1:8545`): the node never exposes its machine. To serve RPC publicly, put your own reverse proxy in front of this address and pass its URL as `--external-rpc-addr`. |
@@ -36,8 +38,9 @@ Every flag and subcommand of the `tenzro-node` binary, from its own argument def
 | `--a2a-addr` | `ADDR` |  |  | A2A protocol server listen address. Loopback only (default `127.0.0.1:3002`). |
 | `--external-rpc-addr` | `URL` |  |  | Public https URL of your own edge (reverse proxy) in front of this node's loopback RPC listener, if you expose it. The only RPC URL the node publishes; without it none is published. Refused at startup when it is not https or names a loopback, private, CGNAT or link-local host. |
 | `--external-mcp-addr` | `URL` |  |  | Public https URL of your own edge in front of this node's loopback MCP listener, if you expose it. Same rules as `--external-rpc-addr`. |
-| `--state-sync-from` | `ENDPOINT_ID[@IP:PORT]` |  |  | State sync: restore the committed state from these peers (their current iroh `EndpointId`s, as their signed announcements give them; repeat the flag for several) before starting consensus, instead of replaying blocks. `<EndpointId>@<ip:port>` dials that address directly, for a network with no discovery (repeat it to give several addresses of one peer); a bare id is found by discovery. Also settable as `state_sync_from` in the config file. The snapshot is fetched as BLAKE3-verified blobs from any peer that has them and checked bucket by bucket against the state root that the `--checkpoint-hash` block commits. The recovery after a corrupt store (`scripts/repair-validator-store.sh`, then restart with this flag) works on a fixed `bind_addr` too: the state-sync endpoint is released before the node's own endpoint binds. Requires `--checkpoint-height` and `--checkpoint-hash`. |
-| `--no-state-sync` |  |  |  | Replay the chain from the local tip even on a role that would join by snapshot. A node without the validator role restores the committed state from a peer's snapshot by default when a weak-subjectivity checkpoint is configured (`--checkpoint-height`/`--checkpoint-hash` or genesis `[weak_subjectivity]`); a validator always replays. Also settable as `state_sync = "off"` in the config file. |
+| `--state-sync-from` | `ENDPOINT_ID[@IP:PORT]` |  |  | State sync: restore the committed state from these peers (their current iroh `EndpointId`s, as their signed announcements give them; repeat the flag for several) before starting consensus, instead of replaying blocks. `<EndpointId>@<ip:port>` dials that address directly, for a network with no discovery (repeat it to give several addresses of one peer); a bare id is found by discovery. Also settable as `state_sync_from` in the config file. The snapshot is fetched as BLAKE3-verified blobs from any peer that has them and checked bucket by bucket against the state root that the `--checkpoint-hash` block commits or, with no checkpoint pinned, the block of the snapshot anchor a peer certifies, verified from the genesis committee. The recovery after a corrupt store (`scripts/repair-validator-store.sh`, then restart with this flag) works on a fixed `bind_addr` too: the state-sync endpoint is released before the node's own endpoint binds. Each peer is asked in turn; if none holds the snapshot the checkpoint commits, the node refuses to start. A node whose store already holds chain state continues from its tip and ignores this flag. Requires `--checkpoint-height` and `--checkpoint-hash`: take them from a snapshot the peer lists (`tenzro node snapshots`, fields `checkpoint_height` and `checkpoint_hash`). |
+| `--replace-store` |  |  |  | Join by snapshot over a store that already holds chain state: the store is moved aside to `db.replaced-<unix seconds>` in the data directory (nothing is deleted; move it back to undo) and the node starts fresh, restoring from the peers named with `--state-sync-from` or the boot peers. Without this flag a node whose store holds chain state continues from its tip and says why it ignores the peers. |
+| `--no-state-sync` |  |  |  | Replay the chain from the local tip even on a role that would join by snapshot. A node without the validator role restores the committed state from a boot peer's snapshot by default, verified against the weak-subjectivity checkpoint when one is pinned (`--checkpoint-height`/`--checkpoint-hash` or genesis `[weak_subjectivity]`) and otherwise against the anchor the peer certifies, checked from the genesis committee; a validator always replays. A planned snapshot join that no peer can serve stops the start, except an unpinned join from boot peers, which replays. Also settable as `state_sync = "off"` in the config file. |
 | `--checkpoint-hash` | `HEX` |  |  | Weak-subjectivity checkpoint: the hash (hex, with or without `0x`) of a finalized block the operator has verified out of band, at `--checkpoint-height`. Every import path refuses any other block at that height, which defeats a long-range fork that passes certificate verification, and state sync restores the state this block commits. |
 | `--checkpoint-height` | `HEIGHT` |  |  | Height of the `--checkpoint-hash` block. |
 | `--recovery-manifest` | `FILE` |  |  | Recovery restart after a halt below quorum: the manifest file (JSON) that the surviving operators and the successor validators agreed on. Applied once at start, before consensus is seated, and only at the manifest's anchor block, so it does nothing on a chain that has moved on. Needs `--recovery-digest` and the anchor as `--checkpoint-height` and `--checkpoint-hash`. See docs/RECOVERY-BELOW-QUORUM.md. |
@@ -68,6 +71,15 @@ Print this machine's validator public keys (Ed25519 + ML-DSA-65) for genesis ass
 | `--stake` | `u64` |  | `1_000_000` | Genesis stake to print in the emitted `[[validators]]` stanza. Does not write anything on-chain — this is purely a convenience for the operator assembling genesis.toml. |
 | `--format` | `FORMAT` |  | `toml` | Output format. `toml` (default) emits a ready-to-paste `[[validators]]` stanza; `json` the same entry as an object. |
 
+### `tenzro-node identity-key`
+
+Print the identity key change that records this machine's identity key at VERSION, committing to the key at the version after it. Each version is its own key, derived on demand from this machine's TPM or Secure Enclave; nothing is written. The machine's root approves the change with `tenzro identity keys --did <machine DID> --change <file>`. Once the chain records it and root signatures are live, the node signs its jurisdiction receipts with this key.
+
+| Flag | Value | Environment | Default | Description |
+|---|---|---|---|---|
+| `--data-dir` | `DIR` | `TENZRO_DATA_DIR` |  | The node's data directory. Also settable via `$TENZRO_DATA_DIR`. |
+| `--version` | `u64` |  | `1` | The key version: 1 for the first, one above the version the chain records for a rotation. |
+
 ### `tenzro-node validator-entry`
 
 Print this machine's `[[validators]]` genesis entry, signed by its hardware consensus key. Refuses on a machine without one.
@@ -80,7 +92,7 @@ Print this machine's `[[validators]]` genesis entry, signed by its hardware cons
 
 ### `tenzro-node graceful-exit`
 
-Ask the running node to step down gracefully. Calls `tenzro_gracefulExit` on the local RPC. The node waits until it leads none of the next consensus rounds its schedule looks ahead over, then triggers its existing shutdown path (the in-process `NodeEvent::Shutdown` plus the 5-second drain in `main()`). Intended for K8s `preStop` hooks and systemd `ExecStop=` units — a 0 exit means the node accepted the request, not that the process has already died. Wait on the process or the pod terminationGracePeriodSeconds for the actual exit.
+Ask the running node to step down gracefully. Calls `tenzro_gracefulExit` on the local RPC. The node waits until it leads none of the next consensus rounds its schedule looks ahead over, then triggers its existing shutdown path (the in-process `NodeEvent::Shutdown` plus the 5-second drain in `main()`). The method is the operator's: the command first signs in as this machine with its hardware identity key, the operator of a node whose config names no other `operator_did`, so it runs on the node's machine as the user whose keys the node uses. When `operator_did` names someone else it refuses: that operator signs in with `tenzro access sign-in` and calls the method, or the service is stopped, which sends SIGTERM. Intended for K8s `preStop` hooks and systemd `ExecStop=` units — a 0 exit means the node accepted the request, not that the process has already died. Wait on the process or the pod terminationGracePeriodSeconds for the actual exit.
 
 | Flag | Value | Environment | Default | Description |
 |---|---|---|---|---|
@@ -100,14 +112,14 @@ Copy the node's newest epoch snapshot to DEST. Only SST files no earlier backup 
 
 ### `tenzro-node registry-undo`
 
-List, or discard, the validator registry's undo records. A node that stops between a registry change and its commit puts the registry back from these records at its next start. If a record cannot be read the start fails and keeps them. This command, with the node stopped, shows the chain tip and the records. `--discard --yes` removes the unreadable ones; the readable ones too only with `--force`. Nothing is put back: the registry stays as the last run left it, which may include the changes of a block that never committed. Prefer restoring from a snapshot.
+List, or discard, the validator registry's undo records. A node that stops between a registry change and its commit puts the registry back from these records at its next start. If a record cannot be read the start fails and keeps them. This command, with the node stopped, shows the chain tip and the records. `--discard` removes the unreadable ones, the readable ones too only with `--force`, after stating what follows and asking for a word to be typed (`--yes` goes on without asking, for scripts). Nothing is put back: the registry stays as the last run left it. When a discarded record covers a block or epoch boundary that never committed, the node then starts only if the registry equals what the chain holds: the rows committed at the epoch's first block, with the validator logs since replayed from the node's event log; where the event log does not reach back that far it must be restored from a snapshot.
 
 | Flag | Value | Environment | Default | Description |
 |---|---|---|---|---|
 | `--data-dir` | `DIR` | `TENZRO_DATA_DIR` |  | The node's data directory. |
 | `--discard` |  |  | `false` | Remove the unreadable records. |
 | `--force` |  |  | `false` | With --discard, remove the readable records as well. |
-| `--yes` |  |  | `false` | Confirm the removal. |
+| `--yes` |  |  | `false` | With --discard, go on without asking for the word to be typed, for scripts; what follows is still printed. |
 
 ### `tenzro-node access`
 
@@ -134,7 +146,7 @@ Rebuild the node's store from an epoch snapshot or backup. The snapshot's checkp
 | `--snapshot` | `DIR` |  |  | The snapshot or backup directory to restore from. |
 | `--chain-id` | `u64` |  |  | Chain id, from the genesis file. |
 | `--genesis-hash` | `HEX` |  |  | Genesis block hash (hex), from the genesis file. |
-| `--genesis-committee-root` | `HEX` |  |  | Root of the genesis committee (hex), from the genesis file. |
+| `--genesis` | `FILE` |  |  | Genesis file of the chain: the first committee is read from its validators. |
 | `--proof-from` | `URL` |  |  | Fetch the checkpoint proof from this peer's RPC endpoint. |
 | `--proof` | `FILE` |  |  | Read the checkpoint proof (bincode) from this file. |
 | `--handover-program` | `HEX` |  |  | Image id (hex) of the handover program, from the chain's governance: needed when the proof builds on a handover chain proof rather than on every handover from genesis. |
@@ -164,9 +176,17 @@ This machine's TPM. The node account key is a P-256 key held in the TPM or Secur
 |---|---|---|---|---|
 | `<ACTION>` | `TpmAction` |  |  |  |
 
+### `tenzro-node volume`
+
+A volume this machine offers for storage.
+
+| Flag | Value | Environment | Default | Description |
+|---|---|---|---|---|
+| `<ACTION>` | `VolumeAction` |  |  |  |
+
 ### `tenzro-node hardware`
 
-Report what this binary was built for and whether it can use this machine's accelerators, then exit: the same check the node runs at startup, without starting a node. Exits non-zero when the node would refuse to start here.
+Report what this binary was built for and whether it can use this machine's accelerators, then exit: the same check the node runs at startup, without starting a node. Exits non-zero when the node would refuse to start here. An ONNX Runtime that cannot use this machine's GPU stops only a node that serves models: with `--roles` (or a config file) it counts as for those roles; without them it counts against a GPU build and not against the CPU build.
 
 ### `tenzro-node doctor`
 
@@ -175,7 +195,7 @@ Report whether peers can reach this node, and how to fix it when they cannot: IP
 | Flag | Value | Environment | Default | Description |
 |---|---|---|---|---|
 | `--json` |  |  |  | Print the report as JSON. |
-| `--allow-inbound` |  |  |  | Also let peers reach this node directly through the host firewall, with a rule scoped to this binary and its UDP port: on Windows an inbound rule for the private and public profiles (and removal of block rules a dismissed prompt left for this binary), on macOS an entry in the application firewall. Optional: the node works without it, through relays and hole punching. Needs an administrator PowerShell on Windows and sudo on macOS. On Linux it prints the command for your firewall. |
+| `--allow-inbound` |  |  |  | Also let peers reach this node directly through the host firewall: on Windows one inbound rule for the UDP port the node binds, keyed to the port so an update needs no new rule, on the private profile only (and removal of block rules a dismissed prompt left for the install's binaries); on macOS an entry in the application firewall for this binary. Optional: the node works without it, through relays and hole punching. Needs an administrator PowerShell on Windows and sudo on macOS. On Linux it prints the command for your firewall. |
 
 
 ## Node tiers
@@ -261,8 +281,9 @@ History retention is a network parameter (governance), not a preset: every
 non-archival node keeps the governed window, prunes to it and compacts when
 the data volume runs low (under 20 GiB and 12 percent free by default), and
 refuses non-essential data when it runs lower still (under 8 GiB and 6
-percent). A level also trips when the measured growth leaves too few blocks
-of room. The levels are set in `[storage.ladder]`. On a small SD card or
+percent). A level also trips when the growth measured over the last hours leaves
+too little time before the volume is full (under 20 days for the first
+level, 20 hours for refusing). The levels are set in `[storage.ladder]`. On a small SD card or
 eMMC they are what keep the node inside its disk.
 
 The background tasks a node starts are already gated by role: audit
@@ -287,12 +308,37 @@ session continuity or the MoE repair loop.
 - **Identity.** A Pi has no TPM. It keeps its identity key in another
   machine's TPM through `tenzro-node tpm serve` on that machine. The provider
   listens on loopback only unless its file names the addresses to serve on,
-  such as `listen = ["100.64.0.7:7400"]` for its private-network (VPN) address. On the Pi,
+  such as `listen = ["100.64.0.7:7400"]` for its private-network (VPN) address. The
+  operator passkeys that may grant each key label are enrolled with
+  `tenzro-node tpm clients add --config <file> --label <label> --rp-id <rp id>
+  --registration <phone.json> --registration <laptop.json>`, from the JSON each
+  passkey's creation returned: two devices for a new label, so losing one does
+  not lock the machine out (`--one-device` accepts one knowingly).
+  `tpm clients list` shows them, `tpm clients remove` takes one out, and a
+  running provider reads the change within seconds. On the Pi,
   `tenzro-node tpm key-holder` runs as its own service: it makes this boot's
   transport key in memory (never on disk) and the operator approves it with
-  a passkey grant (`tpm grant-request`, then `tpm grant-install`); the node
+  a passkey grant: `tenzro-node tpm enrol --socket <socket> --label <label>
+  --rp-id <rp id>` prints a line to run in the browser on the relying party's
+  page, takes the assertion it prints, installs the grant, signs a test
+  message with the machine's key at the provider and prints the node's flags
+  (`tpm grant-request` and `tpm grant-install` are the same steps by hand); the node
   starts with `--tpm-key-holder <socket> --tpm-label <label>`. The node can
-  restart without a new grant; a reboot needs one.
+  restart without a new grant; a reboot needs one. A node started before its
+  key holder waits up to `--tpm-key-holder-wait` seconds (120 by default) for
+  one to answer, then refuses naming the socket; once a holder answers, the
+  node waits for the grant and starts by itself when it is installed.
+
+  **Providers.** A Raspberry Pi 5 serves as a provider on the public testnet
+  this way. `tenzro join --provider` signs with the machine's own TPM or
+  Secure Enclave, so on a Pi it stops at "this machine has no TPM 2.0 or
+  Secure Enclave". The Pi takes the provider path one command at a time,
+  each naming the key holder: `tenzro access sign-in --tpm-key-holder
+  <socket> --tpm-label <label>` signs in as the node's operator (model loads
+  need it), and `tenzro provider bond post --node-account --tpm-key-holder
+  <socket> --tpm-label <label> --did <machine did> --amount <TNZO>` posts the
+  compute bond from the node account. Without `--node-account` the bond is
+  refused: the key holder holds the node's key, not a client account's.
 
   **Validators.** The same delegation can hold a validator's consensus key.
   The P-256 leg is a key in the provider's TPM and the ML-DSA-65 leg is
@@ -307,6 +353,11 @@ session continuity or the MoE repair loop.
   TPM in the validator's own machine that implements ML-DSA and P-384. A
   passkey never holds a consensus key: the operator's passkey grants and
   approves, and the key stays in a TPM or Secure Enclave.
+  A machine whose keys are in another machine's TPM cannot be a genesis
+  validator: `tenzro-node validator-entry` reads only the machine's own TPM
+  or Secure Enclave. Such a validator joins after genesis with
+  `tenzro validator register --tpm-key-holder` (`docs/operations/VALIDATOR-EXIT.md`,
+  "Joining").
 
   **Batch signing.** A TPM command takes seconds, so the identity key does
   not sign every message on its own. It signs, in hardware, one statement per
@@ -329,6 +380,16 @@ session continuity or the MoE repair loop.
   request that finds the line full, or that waits its limit, is refused with
   `tpm busy: ... retry in N ms`, and the key holder waits that long and asks
   again (`--busy-retries`, `--request-timeout-secs`).
+
+  A machine whose keys the provider holds has no TPM of its own to attest
+  with. The provider's TPM is the hardware its identity rests on, and a TPM
+  is admitted on chain under one identity, so the provider file names the
+  one client it answers for: `attests_for = "<that client's label>"`. For
+  that client the provider's TPM attests the machine root at registration
+  and quotes each reward epoch's possession challenge, which is what
+  hardware level 1 needs. A provider whose TPM backs its own machine's
+  identity leaves `attests_for` out; its clients register without a TPM
+  attestation and stay at level 0.
 - **Memory.** The light node's resident memory measured 130 to 210 MiB idle
   and up to about 230 MiB under RPC load (below), within a 2 GB board's
   budget beside the operating system (about 200 to 250 MiB idle on Raspberry
@@ -393,31 +454,131 @@ Check a build against its budget with `scripts/edge-budget.sh <binary>
 [<measurement>]` (the release gate runs it as row L4): 100 MB stripped, and
 256 MiB idle and 320 MiB loaded resident memory for a `--roles light` node.
 
-## Joining a new network by snapshot
+## Joining a network that has already run
 
-A node that is not a validator, joining a network that has already run, can restore the committed
+On this release a new node joins by block replay from genesis. Start it with the genesis file and
+leave out `--state-sync-from`, `--checkpoint-height` and `--checkpoint-hash`:
+
+```
+tenzro-node --genesis genesis.toml
+```
+
+The node replays the chain from block 0, says so in its log, and is in step when it reports the
+network's finalized height. `--no-state-sync` forces the replay even where a checkpoint is
+configured. Joining from a snapshot arrives in an update; the rest of this section describes it
+for that update.
+
+### Joining by snapshot (arrives in an update)
+
+A node that is not a validator, joining a network that has already run, will restore the committed
 state from a peer's snapshot instead of replaying every block. It needs three things, all
 published by the operators at launch and repeated on the release page and the operators'
 channels (docs/operations/GENESIS-PUBLICATION.md):
 
 | What | Value |
 |---|---|
-| Checkpoint height (`--checkpoint-height`) | published at launch |
-| Checkpoint block hash (`--checkpoint-hash`) | published at launch |
+| Checkpoint height (`--checkpoint-height`) | `checkpoint_height` of a snapshot a serving node lists (below) |
+| Checkpoint block hash (`--checkpoint-hash`) | `checkpoint_hash` of the same entry, checked against a second source |
 | Peers to fetch the snapshot from (`--state-sync-from ENDPOINT_ID[@IP:PORT]`, repeatable) | published at launch |
+
+Without a checkpoint the node joins from the certified anchor of a peer's newest snapshot: the
+peer sends the certification of the checkpoint covering the block that commits the snapshot, and
+the node verifies every certificate from its genesis committee and checks that the block's hash is
+among those the certified checkpoint commits before it uses any of the snapshot. Peers the
+operator names must serve such an anchor or the node does not start; boot peers that serve none
+leave the node replaying the chain. A checkpoint, when given, is still the block the node joins
+from and the one every import path holds to.
 
 The checkpoint is a finalized block the operator has verified out of band. Compare the hash with
 at least two independent sources before using it: the node refuses any other block at that height,
-which is what protects a new node from a forged history. Start with:
+which is what protects a new node from a forged history.
+
+The checkpoint must be one a serving node holds a snapshot for. A checkpoint block at height `A`
+commits the state root of height `A - 2`, and the joining node asks its peers for the snapshot at
+that height. Validators snapshot only the first block of an epoch, at most once per
+`[snapshot] interval_blocks`, and keep the newest `retain_count` (the newest is never removed), so
+an arbitrary finalized block almost never has one. Take the checkpoint from the peer's own list
+(the listing works on this release too):
+
+```
+tenzro node snapshots --rpc <peer rpc url>
+```
+
+Each entry gives `checkpoint_height` and `checkpoint_hash` (the block that commits that snapshot)
+and the `endpoint_id` to sync from; use the newest, and compare its hash with another node's
+`eth_getBlockByNumber` at that height. Once the update is installed, start with:
 
 ```
 tenzro-node --genesis genesis.toml \
-  --checkpoint-height <height> --checkpoint-hash <hash> \
+  --checkpoint-height <checkpoint_height> --checkpoint-hash <checkpoint_hash> \
   --state-sync-from <endpoint-id>@<ip:port>
 ```
 
+The node asks every state-sync peer in turn and logs `State sync complete` with the restored root.
+If no peer holds the snapshot for the checkpoint, the node does not start: it exits naming each
+peer's answer, rather than replaying the chain from genesis while the operator believes it joined
+at the checkpoint. Pick a listed checkpoint, or replay instead: drop `--state-sync-from` and
+pass `--no-state-sync`.
+
 Check the genesis file first (`launch-manifest.sh verify`, same page). A validator always replays
 the chain and does not join by snapshot; `--no-state-sync` forces a replay on any role.
+
+A node whose store already holds chain state continues from its tip and ignores
+`--state-sync-from`; it logs a warning saying so. To replace a stalled or far-behind store with a
+snapshot, stop the node and start it once with `--replace-store` and the same snapshot options. The
+old store is moved to `db.replaced-<unix seconds>` in the data directory, not deleted: move it
+back to undo. `--replace-store` without `--state-sync-from` is refused, because nothing would
+restore the store.
+
+## Granting a key holder its key label with the operator passkey
+
+A machine whose keys are in another machine's TPM (a Raspberry Pi, a server with no TPM of its own)
+runs `tenzro-node tpm key-holder`; the machine that holds the TPM runs `tenzro-node tpm serve`. The
+key holder may use its key label only with a grant the operator passkey signs. The passkey is on the
+operator's own device (a laptop or phone), so the signature is made in a browser page, `tools/passkey-grant/`
+in the repository: one static page and a small local server, no dependencies, nothing leaves the page. Three commands on the
+operator's side:
+
+1. On the key holder's machine, ask for a grant, naming the passkey enrolled for the label (its
+   credential id, base64url) and how long it lasts:
+
+   ```
+   tenzro-node tpm grant-request --socket /run/tenzro/holder.sock --label <label> \
+     --valid-hours 720 --json --credential-id <enrolled credential id>
+   ```
+
+   It prints one JSON object: the key holder's endpoint, the label, the end of the grant, the
+   challenge, the credential id with its fingerprint, and the relying party (`--rp-id`, default `localhost`).
+
+2. On the operator's device, serve the page from `localhost` and open it:
+
+   ```
+   python3 tools/passkey-grant/serve.py
+   ```
+
+   Open `http://localhost:8743`, paste the JSON into step 2 and press the button. (Step 1 of the page enrols the passkey once and prints the `[[clients]]` block for the provider file and the credential id.) The browser is asked
+   for the enrolled passkey only, with user verification; a synced passkey the page did not name
+   is not offered. The page shows the label, the key holder, the end of the grant and the passkey's
+   fingerprint, and refuses a request with no credential id, a credential id that does not match its
+   fingerprint, a host other than the relying party, or an end that has passed.
+
+3. Copy the `tenzro-node tpm grant-install ...` line the page prints and run it on the key
+   holder's machine. `tenzro-node tpm remote-check --key-holder <socket> --label <label>` then opens
+   the identity key at the provider and signs a test message.
+
+A key holder that restarts with its machine needs a new grant; a restart of the node alone does not.
+`scripts/tests/grant_roundtrip_test.sh` runs these steps on a software TPM with a software passkey in
+the operator's place.
+
+## Adding a device to a running TPM provider
+
+A machine with no TPM of its own signs through a provider's TPM, and each such machine is
+enrolled with the operator passkey that approves its key grants. Add one with
+`tenzro-node tpm enrol-client --config <provider file> --passkey-public-key <hex x||y> --rp-id <id> --label <label>`
+on the provider's machine. The command checks the whole file before it replaces it, so a refused
+client leaves the file as it was, and then tells the provider running from that file to re-read
+its client list. The provider needs no restart and keeps every client it is serving; the command
+says which process it told, or that none is running and the client is used when one starts.
 
 ## Testnet use and reporting a vulnerability
 

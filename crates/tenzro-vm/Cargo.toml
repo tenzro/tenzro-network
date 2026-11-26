@@ -8,6 +8,7 @@ description = "Multi-VM runtime for Tenzro Network — EVM and SVM execution eng
 
 [dependencies]
 tenzro-types = { workspace = true }
+tenzro-native-ops = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-storage = { workspace = true }
 tenzro-tee = { workspace = true }
@@ -21,6 +22,10 @@ tenzro-consensus = { workspace = true }
 tenzro-bridge = { workspace = true }
 # A catalog fault carries a signed catalog entry, checked as published.
 tenzro-trust = { workspace = true }
+# WebAuthn attestation of a human root's passkey at registration
+# (src/native/registration_attestation.rs).
+tenzro-auth = { workspace = true }
+base64 = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -39,6 +44,7 @@ p256 = { workspace = true }
 parking_lot = { workspace = true }
 chrono = "0.4"
 revm = { workspace = true }
+revm-osaka = { workspace = true }
 rlp = { workspace = true }
 curve25519-dalek = { workspace = true }
 
@@ -90,13 +96,19 @@ svm-full = [
 ]
 
 [dev-dependencies]
+# WebAuthn attestation objects built in tests (native/registration_attestation.rs).
+ciborium = { workspace = true }
 criterion = { workspace = true }
 # PEM-encodes test TPM endorsement and manufacturer roots for the
 # availability-reward and hardware-level tests; no runtime use.
 base64 = { workspace = true }
 proptest = "1.11"
 tenzro-crypto = { workspace = true, features = ["test-keys"] }
+# The light client's state keys are held to the executor's; no runtime use.
+tenzro-light = { workspace = true }
 tenzro-tee = { workspace = true, features = ["test-ca"] }
+# The operator-side assembler of fleet hardware proofs, checked against this crate's verifier.
+tenzro-fleet-proof = { workspace = true }
 # Software consensus keys of every signature scheme for the registration tests.
 tenzro-consensus = { workspace = true, features = ["test-keys"] }
 tokio = { workspace = true }

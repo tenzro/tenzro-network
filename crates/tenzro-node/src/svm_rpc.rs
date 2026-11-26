@@ -175,9 +175,23 @@ pub(crate) async fn handle_simulate_transaction(
     let mut st = state(node)?;
     let base_fee = tenzro_vm::ledger::block_base_fee(&st);
     let nonce = st.get_nonce(&ext.signers[0]);
+    // The transaction runs as one in the next block would, at the tip's
+    // time: nothing executes without a block's time.
+    let height = crate::eth_block_param::block_height(node, None).await?;
+    let tip = crate::eth_block_param::block_at(node, height).await?;
+    let at_ms =
+        tenzro_vm::native::calendar_ms(&st, tip.header.timestamp.as_millis()).map_err(|e| {
+            JsonRpcError {
+                code: -32603,
+                message: format!("calendar: {e}"),
+                data: None,
+            }
+        })?;
     let vm_tx = ext
         .to_vm_transaction(nonce, base_fee, crate::rpc::node_chain_id(node))
-        .map_err(|e| invalid(e.to_string()))?;
+        .map_err(|e| invalid(e.to_string()))?
+        .with_block_timestamp_ms(at_ms)
+        .with_block_height(height);
     let (err, units) = crate::rpc::simulate_vm_transaction(node, &mut st, &vm_tx, base_fee).await?;
     Ok(context(
         node,

@@ -21,10 +21,6 @@ use tenzro_types::{
 };
 use tracing::{debug, info, warn};
 
-pub mod intent;
-
-pub use intent::IntentPolicy;
-
 /// Strategy for routing inference requests
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RoutingStrategy {
@@ -522,8 +518,6 @@ pub struct InferenceRouter {
     /// is the producer side of the marketplace observability data —
     /// without a tracker attached, `UsageTracker` exists but stays empty.
     usage_tracker: Option<Arc<UsageTracker>>,
-    /// Model-selection tier, installed once (see [`IntentPolicy`]).
-    intent: std::sync::OnceLock<IntentPolicy>,
     /// Optional EU AI Act Art. 50(2) provenance signer. When set, every
     /// successful inference response is stamped with a signed
     /// `ContentProvenanceManifest` before it is returned. When unset (e.g. unit
@@ -553,7 +547,21 @@ pub struct InferenceRouter {
     /// manifest must be signed by that key; without a resolver no provider
     /// can satisfy a signed-response request.
     identity_keys: Option<IdentityKeyResolver>,
+    /// The chain's record of identity keys, which a receipt signed with a
+    /// provider's identity key is checked against; without it such a
+    /// receipt is refused.
+    chain_keys: Option<ChainKeys>,
 }
+
+/// The chain's identity key histories as a resolver, and the tolerance in
+/// force for checking against them; `None` while the node has no chain view.
+pub type ChainKeys = Arc<
+    dyn Fn() -> Option<(
+            Arc<dyn tenzro_device_key::delegation::IssuerResolver>,
+            tenzro_device_key::delegation::VerifyParams,
+        )> + Send
+        + Sync,
+>;
 
 /// Resolves a machine DID to the hardware identity key (P-256, plus ML-DSA-65
 /// when enrolled) registered for it in the identity registry.
@@ -571,13 +579,13 @@ impl InferenceRouter {
             transport: None,
             default_config: config,
             usage_tracker: None,
-            intent: std::sync::OnceLock::new(),
             provenance_signer: None,
             provenance_store: None,
             pricing: Arc::new(parking_lot::RwLock::new(PriceContext::default())),
             metrics: RouterMetrics::default(),
             observation_sink: None,
             identity_keys: None,
+            chain_keys: None,
         }
     }
 
@@ -590,13 +598,13 @@ impl InferenceRouter {
             transport: None,
             default_config: config,
             usage_tracker: None,
-            intent: std::sync::OnceLock::new(),
             provenance_signer: None,
             provenance_store: None,
             pricing: Arc::new(parking_lot::RwLock::new(PriceContext::default())),
             metrics: RouterMetrics::default(),
             observation_sink: None,
             identity_keys: None,
+            chain_keys: None,
         }
     }
 
@@ -620,21 +628,6 @@ impl InferenceRouter {
         self
     }
 
-    /// Installs the model-selection tier. Refused once one is installed.
-    pub(crate) fn install_intent_policy(&self, policy: IntentPolicy) -> Result<()> {
-        self.intent
-            .set(policy)
-            .map_err(|_| ModelError::RoutingError("intent policy already installed".into()))
-    }
-
-    /// The installed model-selection tier, or the empty one (no gates, no
-    /// catalog, no difficulty index) when none is installed.
-    fn intent(&self) -> &IntentPolicy {
-        static EMPTY: std::sync::LazyLock<IntentPolicy> =
-            std::sync::LazyLock::new(IntentPolicy::default);
-        self.intent.get().unwrap_or(&EMPTY)
-    }
-
     /// Attaches the transport forwarded requests travel on.
     #[must_use]
     pub fn with_transport(mut self, transport: Arc<dyn ProviderTransport>) -> Self {
@@ -646,6 +639,14 @@ impl InferenceRouter {
     #[must_use]
     pub fn with_identity_keys(mut self, resolver: IdentityKeyResolver) -> Self {
         self.identity_keys = Some(resolver);
+        self
+    }
+
+    /// Attaches the chain's identity key histories, which receipts signed
+    /// with a provider's identity key are checked against.
+    #[must_use]
+    pub fn with_chain_keys(mut self, chain_keys: ChainKeys) -> Self {
+        self.chain_keys = Some(chain_keys);
         self
     }
 
@@ -1196,8 +1197,7 @@ impl InferenceRouter {
     fn speculation_bias(provider: &ProviderWithMetrics) -> f64 {
         const SPECULATION_BIAS_CEILING: f64 = 4.0;
         let cap = &provider.provider.capacity;
-        if cap.mtp_enabled && intent::idle_enough(cap.active_requests, cap.max_concurrent_requests)
-        {
+        if cap.mtp_enabled && idle_enough(cap.active_requests, cap.max_concurrent_requests) {
             SPECULATION_BIAS_CEILING
         } else {
             0.0
@@ -1484,7 +1484,7 @@ impl InferenceRouter {
         // `speculation_pays` excludes them: an absent value is unknown, and
         // unknown must not be the most attractive state to advertise.
         providers.retain(|p| {
-            intent::idle_enough(
+            idle_enough(
                 p.provider.capacity.active_requests,
                 p.provider.capacity.max_concurrent_requests,
             )
@@ -1795,6 +1795,7 @@ impl InferenceRouter {
                                 v.clone(),
                             ) {
                                 Ok(receipt) => {
+                                    let chain = self.chain_keys.as_ref().and_then(|keys| keys());
                                     let verdict = if receipt.provider != provider_address {
                                         Err(crate::jurisdiction::JurisdictionError::VerificationFailed)
                                     } else {
@@ -1804,6 +1805,13 @@ impl InferenceRouter {
                                             output_text.as_bytes(),
                                             &request.model_id,
                                             self.registered_key(&provider).as_ref(),
+                                            chain.as_ref().map(|(resolver, params)| {
+                                                crate::jurisdiction::IdentityKeyCheck {
+                                                    resolver: resolver.as_ref(),
+                                                    now_ms: tenzro_crypto::session::now_ms(),
+                                                    params: *params,
+                                                }
+                                            }),
                                         )
                                         .and_then(|()| match jurisdiction_pin {
                                             Some(pin) => {
@@ -2001,7 +2009,13 @@ impl InferenceRouter {
                             price,
                             elapsed_ms,
                         )
-                        .with_record_id(request.request_id.clone());
+                        .with_record_id(request.request_id.clone())
+                        // The routed call is paid by the account that asked for it.
+                        .with_payer(
+                            (request.requester != Address::zero()).then(|| {
+                                format!("0x{}", hex::encode(request.requester.as_bytes()))
+                            }),
+                        );
                         if let Err(e) = tracker.record_usage(record) {
                             warn!(
                                 "Failed to record usage for request {}: {}",
@@ -2214,10 +2228,44 @@ pub trait ObservationSink: Send + Sync {
     fn observe(&self, draft: ObservationDraft);
 }
 
+/// Whether a provider is idle enough for speculative decoding to pay: below
+/// half its declared admission ceiling.
+///
+/// `max == 0` means the provider declared no ceiling, which is *unknown*, not
+/// idle — see [`Candidate::speculation_pays`].
+///
+/// `div_ceil` rather than `/ 2` so a one-slot provider can qualify while
+/// genuinely idle: plain truncation makes `1 / 2 == 0`, and `active < 0` is
+/// unsatisfiable, which locked every single-slot MTP provider out of the
+/// preference no matter how idle it was.
+///
+/// Written as a comparison against `max` rather than `active * 2 < max`
+/// because both values come off a gossiped announcement — a peer can publish
+/// any `u32`, and the multiplication would overflow and panic in debug builds.
+pub(crate) fn idle_enough(active: u32, max: u32) -> bool {
+    max > 0 && active < max.div_ceil(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tenzro_types::model::ModelInfo;
+
+    /// Declaring no concurrency ceiling must not be better than answering
+    /// honestly — `0` is also the serde default, so a truncated announcement
+    /// would otherwise land in the most-preferred bucket for free.
+    #[test]
+    fn undeclared_ceiling_is_not_treated_as_idle() {
+        assert!(
+            !idle_enough(0, 0),
+            "no declared ceiling is unknown, not idle"
+        );
+        assert!(!idle_enough(u32::MAX, 0));
+        // A genuinely idle single-slot provider still qualifies.
+        assert!(idle_enough(0, 1), "1/2 truncating to 0 locked these out");
+        assert!(idle_enough(3, 8));
+        assert!(!idle_enough(4, 8));
+    }
 
     /// Answers every request with `body`, as a remote provider would.
     struct CannedProvider(serde_json::Value);
@@ -2646,7 +2694,7 @@ mod tests {
     #[test]
     fn check_modality_rejects_mismatch() {
         let pm = Arc::new(ProviderManager::new());
-        let registry = Arc::new(ModelRegistry::new());
+        let registry = Arc::new(ModelRegistry::new(crate::catalog::CatalogCell::default()));
 
         // Register a Text model. `register_model` rejects a zero hash as
         // an integrity check, so seed a deterministic non-zero hash.
@@ -2688,7 +2736,7 @@ mod tests {
     #[test]
     fn check_modality_unknown_model_returns_not_found() {
         let pm = Arc::new(ProviderManager::new());
-        let registry = Arc::new(ModelRegistry::new());
+        let registry = Arc::new(ModelRegistry::new(crate::catalog::CatalogCell::default()));
         let router = InferenceRouter::new(pm).with_registry(registry);
 
         let p = InferencePayload::Chat(InferenceRequest::new(

@@ -1,0 +1,45 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{7F8F506A-9CC5-48BE-829E-F8699D8C7BB3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tenzro.Sdk", "src\Tenzro.Sdk\Tenzro.Sdk.csproj", "{DAF18052-1821-4B79-B8DA-0FCE6321DBF5}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{366485C5-50BE-4EDD-944D-8610F815A5B9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tenzro.Sdk.Tests", "tests\Tenzro.Sdk.Tests\Tenzro.Sdk.Tests.csproj", "{C2AE7089-D4E6-4E02-93DF-886B8188CD29}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "examples", "examples", "{64F8B4FC-7398-4091-8E76-4839CD2FFA6E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Console", "examples\Console\Console.csproj", "{C1A4055D-D681-45BD-AC26-71BB9B5C2EB0}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DAF18052-1821-4B79-B8DA-0FCE6321DBF5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DAF18052-1821-4B79-B8DA-0FCE6321DBF5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DAF18052-1821-4B79-B8DA-0FCE6321DBF5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DAF18052-1821-4B79-B8DA-0FCE6321DBF5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C2AE7089-D4E6-4E02-93DF-886B8188CD29}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C2AE7089-D4E6-4E02-93DF-886B8188CD29}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C2AE7089-D4E6-4E02-93DF-886B8188CD29}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C2AE7089-D4E6-4E02-93DF-886B8188CD29}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C1A4055D-D681-45BD-AC26-71BB9B5C2EB0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C1A4055D-D681-45BD-AC26-71BB9B5C2EB0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C1A4055D-D681-45BD-AC26-71BB9B5C2EB0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C1A4055D-D681-45BD-AC26-71BB9B5C2EB0}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{DAF18052-1821-4B79-B8DA-0FCE6321DBF5} = {7F8F506A-9CC5-48BE-829E-F8699D8C7BB3}
+		{C2AE7089-D4E6-4E02-93DF-886B8188CD29} = {366485C5-50BE-4EDD-944D-8610F815A5B9}
+		{C1A4055D-D681-45BD-AC26-71BB9B5C2EB0} = {64F8B4FC-7398-4091-8E76-4839CD2FFA6E}
+	EndGlobalSection
+EndGlobal

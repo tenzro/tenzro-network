@@ -393,9 +393,17 @@ fn evaluate(
     // a busy host must not stop the node from opening its keys: they raise
     // the level to HIGH at most. Memory, I/O and the node's own signals
     // still reach CRITICAL.
+    // TPM latency describes one device that only signs. The TPM executor
+    // already serves consensus commands first with a longer deadline, and
+    // nothing the node sheds (transaction admission, RPC, relay) uses the
+    // chip, so a slow chip raises the level to ELEVATED at most: a higher
+    // level would shrink the executor's normal queue and refuse the
+    // signatures a waiting transfer needs, without freeing the chip.
     let cpu_ceiling = |signal: &'static str, l: LoadLevel| {
         if matches!(signal, "cpu_psi" | "load_per_core" | "runnable_per_core") {
             l.min(LoadLevel::High)
+        } else if signal == "tpm_ms" {
+            l.min(LoadLevel::Elevated)
         } else {
             l
         }
@@ -1033,8 +1041,29 @@ mod tests {
         drive(&mut l, &s, ENTER_SAMPLES * 2);
         assert_eq!(l.level(), LoadLevel::Critical);
         let mut s = calm();
+        s.loop_lag_ms = Some(2000.0);
+        let mut l = LoadLadder::new(LoadThresholds::default());
+        drive(&mut l, &s, ENTER_SAMPLES * 2);
+        assert_eq!(l.level(), LoadLevel::Critical);
+    }
+
+    #[test]
+    fn a_slow_tpm_alone_keeps_transaction_admission_open() {
+        let mut s = calm();
         s.tpm_ms = Some(9000.0);
         let mut l = LoadLadder::new(LoadThresholds::default());
+        drive(&mut l, &s, ENTER_SAMPLES * 4);
+        assert_eq!(l.level(), LoadLevel::Elevated);
+        assert_eq!(
+            capacity_percent(WorkClass::TransactionAdmission, l.level()),
+            100
+        );
+        assert_eq!(
+            capacity_percent(WorkClass::RelayAndProvider, l.level()),
+            100
+        );
+        // Another signal still raises the level past the TPM's ceiling.
+        s.mem_psi_full = Some(30.0);
         drive(&mut l, &s, ENTER_SAMPLES * 2);
         assert_eq!(l.level(), LoadLevel::Critical);
     }
@@ -1105,7 +1134,7 @@ mod tests {
         let mut s = calm();
         s.tpm_ms = Some(5000.0);
         drive(&mut l, &s, ENTER_SAMPLES);
-        assert_eq!(l.level(), LoadLevel::High);
+        assert_eq!(l.level(), LoadLevel::Elevated);
         let mut l = LoadLadder::new(LoadThresholds::default());
         let mut s = calm();
         s.loop_lag_ms = Some(300.0);

@@ -4,7 +4,11 @@
 //!
 //! 1. The validator generates a VRF proof over `epoch || round || provider_did`
 //!    using its own Ed25519-compatible VRF key. The 64-byte VRF output is
-//!    folded into a deterministic per-provider challenge nonce.
+//!    folded into a deterministic per-provider challenge nonce. A probe
+//!    drawn under the chain's randomness beacon ([`ProbeBeacon`]) also
+//!    covers the beacon value in force: that value does not exist before
+//!    the chain takes it, so neither does the nonce, and an issuer cannot
+//!    work out its challenges ahead of time.
 //! 2. For every active provider, the validator emits an [`SlaProbe`] carrying
 //!    `(challenge_nonce, deadline_ms, vrf_proof, vrf_pubkey)`. The proof lets
 //!    any third party verify the challenge was not retroactively forged after
@@ -41,7 +45,8 @@ use tenzro_crypto::vrf::VrfSecretKey;
 use tenzro_crypto::vrf::{self, OUTPUT_LEN, PROOF_LEN, VrfProof, VrfProver, VrfPublicKey};
 
 /// Domain tag for the VRF probe seed. SHA-256 over
-/// `SLA_PROBE_DOMAIN || epoch_be || round_be || issuer_addr || provider_did`
+/// `SLA_PROBE_DOMAIN || epoch_be || round_be || issuer_addr || provider_did`,
+/// then `beacon_round_be || beacon_mix` for a probe drawn under the beacon,
 /// produces the per-(round, provider) input to the VRF.
 pub const SLA_PROBE_DOMAIN: &[u8] = b"TENZRO_SLA_PROBE:";
 
@@ -53,6 +58,18 @@ pub const SLA_RESPONSE_DOMAIN: &[u8] = b"TENZRO_SLA_RESPONSE:";
 /// avoid; since misses count toward an unavailable verdict, allowing one would
 /// let whoever issues probes fault an honest provider.
 pub const MIN_SLA_RESPONSE_WINDOW_MS: i64 = 10_000;
+
+/// The value of the chain's randomness beacon a probe is drawn under: the
+/// beacon's round and mix as chain state held them when the probe was
+/// issued. Whoever answers the probe checks both against its own chain
+/// state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProbeBeacon {
+    /// The beacon's round: how many contributions it had taken.
+    pub round: u64,
+    /// The beacon's mix at that round.
+    pub mix: [u8; 32],
+}
 
 /// One SLA probe issued by a validator. Carries the verifiable-random
 /// challenge nonce + the VRF proof anyone can use to confirm the nonce was
@@ -66,6 +83,12 @@ pub struct SlaProbe {
     /// Validator-derived round identifier — `(epoch, round)` tuple flattened.
     pub epoch: u64,
     pub round: u64,
+    /// The beacon value the nonce is drawn under, bound into the VRF input;
+    /// `None` for a probe drawn without one. It travels beside the probe
+    /// ([`BeaconProbe`], on [`SLA_BEACON_TOPIC`]), not inside it, so a
+    /// probe's own bytes are the same either way.
+    #[serde(skip)]
+    pub beacon: Option<ProbeBeacon>,
     /// 32-byte challenge nonce derived from the VRF output (first 32 bytes of
     /// `proof_to_hash(vrf_proof)`). Provider signs this in their response.
     pub challenge_nonce: [u8; 32],
@@ -222,6 +245,30 @@ pub enum SlaEnvelope {
     Response(SlaResponse),
 }
 
+/// Gossip topic of probes drawn under the randomness beacon. They do not
+/// travel on `tenzro/sla`: a node that cannot read a message on a topic it
+/// subscribes to holds it against the sender, and nodes that do not draw
+/// probes under the beacon do not subscribe here.
+pub const SLA_BEACON_TOPIC: &str = "tenzro/sla/beacon";
+
+/// A probe and the beacon value it was drawn under, as it travels on
+/// [`SLA_BEACON_TOPIC`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeaconProbe {
+    pub probe: SlaProbe,
+    pub beacon: ProbeBeacon,
+}
+
+impl BeaconProbe {
+    /// The probe with its beacon value in place.
+    pub fn into_probe(self) -> SlaProbe {
+        SlaProbe {
+            beacon: Some(self.beacon),
+            ..self.probe
+        }
+    }
+}
+
 /// A signature on an SLA response that can be checked against the
 /// subject's registered hardware identity key.
 pub trait SlaSignature {
@@ -284,6 +331,33 @@ impl SlaEnvelope {
             Self::Response(r) => Some(r),
         }
     }
+
+    /// The probe drawn without a beacon value this payload carries; `None`
+    /// for a response.
+    pub fn into_probe(self) -> Option<SlaProbe> {
+        match self {
+            Self::Probe(probe) => Some(SlaProbe {
+                beacon: None,
+                ..probe
+            }),
+            Self::Response(_) => None,
+        }
+    }
+}
+
+/// Where a probe travels: the topic and the payload bytes. A probe drawn
+/// under a beacon value goes on [`SLA_BEACON_TOPIC`] as a [`BeaconProbe`];
+/// any other on `tenzro/sla` as [`SlaEnvelope::Probe`].
+pub fn probe_wire(probe: &SlaProbe) -> Result<(&'static str, Vec<u8>)> {
+    let encoded = match probe.beacon {
+        Some(beacon) => bincode::serialize(&BeaconProbe {
+            probe: probe.clone(),
+            beacon,
+        })
+        .map(|b| (SLA_BEACON_TOPIC, b)),
+        None => bincode::serialize(&SlaEnvelope::Probe(probe.clone())).map(|b| ("tenzro/sla", b)),
+    };
+    encoded.map_err(|e| ModelError::Other(format!("encode SlaProbe: {e}")))
 }
 
 /// An SLA response whose batch signature is not made yet.
@@ -373,13 +447,15 @@ impl SlaManager {
         }
     }
 
-    /// Compute the VRF input bytes for one (epoch, round, provider) tuple.
+    /// Compute the VRF input bytes for one (epoch, round, provider) tuple,
+    /// under `beacon` when the probe is drawn under a beacon value.
     /// Exposed so verifiers can reconstruct the input independently.
     pub fn vrf_input_for(
         issuer: &Address,
         epoch: u64,
         round: u64,
         provider_did: &str,
+        beacon: Option<&ProbeBeacon>,
         work: Option<&CapacityWork>,
     ) -> Vec<u8> {
         let mut hasher = Sha256::new();
@@ -388,6 +464,10 @@ impl SlaManager {
         hasher.update(round.to_be_bytes());
         hasher.update(issuer.as_bytes());
         hasher.update(provider_did.as_bytes());
+        if let Some(beacon) = beacon {
+            hasher.update(beacon.round.to_be_bytes());
+            hasher.update(beacon.mix);
+        }
         if let Some(work) = work {
             hasher.update(work.digest());
         }
@@ -413,19 +493,29 @@ impl SlaManager {
         out
     }
 
-    /// Issue one probe for `provider_did` at `(epoch, round)`. Generates the
+    /// Issue one probe for `provider_did` at `(epoch, round)`, drawn under
+    /// `beacon`, the chain's randomness beacon value in force, when one is
+    /// given. Generates the
     /// VRF proof, derives the 32-byte challenge nonce, and stamps the
     /// deadline. Does NOT broadcast — the caller is responsible for routing
     /// the probe over its preferred transport.
     pub fn issue_probe(
         &self,
+        beacon: Option<ProbeBeacon>,
         provider_did: &str,
         epoch: u64,
         round: u64,
         deadline_ms: i64,
         work: Option<CapacityWork>,
     ) -> Result<SlaProbe> {
-        let input = Self::vrf_input_for(&self.issuer, epoch, round, provider_did, work.as_ref());
+        let input = Self::vrf_input_for(
+            &self.issuer,
+            epoch,
+            round,
+            provider_did,
+            beacon.as_ref(),
+            work.as_ref(),
+        );
         let proof = self
             .vrf
             .prove(&input)
@@ -442,6 +532,7 @@ impl SlaManager {
             provider_did: provider_did.to_string(),
             epoch,
             round,
+            beacon,
             challenge_nonce,
             deadline_ms,
             vrf_proof: proof.as_bytes().to_vec(),
@@ -469,6 +560,7 @@ impl SlaManager {
             probe.epoch,
             probe.round,
             &probe.provider_did,
+            probe.beacon.as_ref(),
             probe.work.as_ref(),
         );
         let output = vrf::verify(&pk, &input, &proof)
@@ -617,7 +709,7 @@ mod tests {
         use tenzro_crypto::batch::{BatchParams, BatchService};
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
-        let probe = mgr.issue_probe("p1", 0, 0, 10_000, None).unwrap();
+        let probe = mgr.issue_probe(None, "p1", 0, 0, 10_000, None).unwrap();
 
         // A response travels as variant 1, scores Ok for the registered
         // identity, and not for another identity.
@@ -662,6 +754,75 @@ mod tests {
         assert!(any.into_verified(Some(&other)).is_none());
     }
 
+    const BEACON: ProbeBeacon = ProbeBeacon {
+        round: 4,
+        mix: [0x5a; 32],
+    };
+
+    /// A probe drawn under a beacon value takes its nonce from it: another
+    /// round or another mix gives another nonce, a probe whose beacon value
+    /// was changed or dropped after it was issued no longer verifies, and
+    /// the value travels beside the probe, whose own bytes stay as they are
+    /// for a probe drawn without one.
+    #[test]
+    fn the_nonce_is_drawn_under_the_beacon_value() {
+        let (issuer, vrf) = validator_setup();
+        let mgr = SlaManager::new(issuer, vrf);
+        let plain = mgr.issue_probe(None, "p1", 5, 2, 10_000, None).unwrap();
+        let probe = mgr
+            .issue_probe(Some(BEACON), "p1", 5, 2, 10_000, None)
+            .unwrap();
+        assert_ne!(probe.challenge_nonce, plain.challenge_nonce);
+        SlaManager::verify_probe(&probe).unwrap();
+        let next_round = ProbeBeacon {
+            round: BEACON.round + 1,
+            ..BEACON
+        };
+        let other_mix = ProbeBeacon {
+            mix: [0x5b; 32],
+            ..BEACON
+        };
+        for beacon in [next_round, other_mix] {
+            let other = mgr
+                .issue_probe(Some(beacon), "p1", 5, 2, 10_000, None)
+                .unwrap();
+            assert_ne!(other.challenge_nonce, probe.challenge_nonce);
+            SlaManager::verify_probe(&other).unwrap();
+            let mut moved = probe.clone();
+            moved.beacon = Some(beacon);
+            assert!(SlaManager::verify_probe(&moved).is_err());
+        }
+        let mut dropped = probe.clone();
+        dropped.beacon = None;
+        assert!(SlaManager::verify_probe(&dropped).is_err());
+
+        // On the wire: a plain probe travels on tenzro/sla as variant 0 of
+        // the envelope, as before; a beacon probe travels on its own topic,
+        // so a node reading tenzro/sla never meets one. Each comes back as
+        // it was sent.
+        let (topic, plain_bytes) = probe_wire(&plain).unwrap();
+        assert_eq!(topic, "tenzro/sla");
+        assert_eq!(&plain_bytes[..4], &0u32.to_le_bytes());
+        assert_eq!(
+            plain_bytes,
+            bincode::serialize(&SlaEnvelope::Probe(plain.clone())).unwrap()
+        );
+        let (topic, bytes) = probe_wire(&probe).unwrap();
+        assert_eq!(topic, SLA_BEACON_TOPIC);
+        let back = bincode::deserialize::<BeaconProbe>(&bytes)
+            .unwrap()
+            .into_probe();
+        assert_eq!(back.beacon, Some(BEACON));
+        assert_eq!(back.challenge_nonce, probe.challenge_nonce);
+        SlaManager::verify_probe(&back).unwrap();
+        let back = bincode::deserialize::<SlaEnvelope>(&plain_bytes)
+            .unwrap()
+            .into_probe()
+            .unwrap();
+        assert_eq!(back.beacon, None);
+        SlaManager::verify_probe(&back).unwrap();
+    }
+
     fn validator_setup() -> (Address, VrfSecretKey) {
         // Deterministic seed for reproducible tests.
         (Address::new([1u8; 20]), VrfSecretKey([7u8; 32]))
@@ -689,7 +850,7 @@ mod tests {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
         let (paddr, psigner, ppk) = provider_keypair();
-        let probe = mgr.issue_probe("p1", 0, 0, 10_000, None).unwrap();
+        let probe = mgr.issue_probe(None, "p1", 0, 0, 10_000, None).unwrap();
         let response = SlaManager::build_response(&probe, paddr, &psigner, 5_000, None).unwrap();
         assert_eq!(
             SlaManager::score_response(&probe, Some(&response), 6_000, Some(&ppk)),
@@ -701,7 +862,7 @@ mod tests {
     fn a_missed_response_is_a_failure() {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
-        let probe = mgr.issue_probe("p1", 0, 0, 1_000, None).unwrap();
+        let probe = mgr.issue_probe(None, "p1", 0, 0, 1_000, None).unwrap();
         let result = SlaManager::score_response::<Verified>(&probe, None, 2_000, None);
         assert_eq!(result, SlaResult::Missed);
         assert!(result.is_failure());
@@ -712,7 +873,7 @@ mod tests {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
         let (paddr, psigner, ppk) = provider_keypair();
-        let probe = mgr.issue_probe("p1", 0, 0, 1_000, None).unwrap();
+        let probe = mgr.issue_probe(None, "p1", 0, 0, 1_000, None).unwrap();
         let response = SlaManager::build_response(&probe, paddr, &psigner, 500, None).unwrap();
         assert_eq!(
             SlaManager::score_response(&probe, Some(&response), 2_000, Some(&ppk)),
@@ -725,7 +886,7 @@ mod tests {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
         let (paddr, psigner, ppk) = provider_keypair();
-        let probe = mgr.issue_probe("p1", 0, 0, 10_000, None).unwrap();
+        let probe = mgr.issue_probe(None, "p1", 0, 0, 10_000, None).unwrap();
         let mut response =
             SlaManager::build_response(&probe, paddr, &psigner, 5_000, None).unwrap();
         response.challenge_nonce[0] ^= 0x01;
@@ -740,7 +901,7 @@ mod tests {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
         let (paddr, psigner, ppk) = provider_keypair();
-        let probe = mgr.issue_probe("p1", 0, 0, 10_000, None).unwrap();
+        let probe = mgr.issue_probe(None, "p1", 0, 0, 10_000, None).unwrap();
         let response = SlaManager::build_response(&probe, paddr, &psigner, 5_000, None).unwrap();
         // Signed by an identity other than the one registered.
         let (_a, other_signer, _o) = provider_keypair();
@@ -764,7 +925,7 @@ mod tests {
         // the issuer's secret key — closes the grinding attack class.
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
-        let probe = mgr.issue_probe("p1", 5, 2, 10_000, None).unwrap();
+        let probe = mgr.issue_probe(None, "p1", 5, 2, 10_000, None).unwrap();
         SlaManager::verify_probe(&probe).expect("clean probe must verify");
     }
 
@@ -772,7 +933,7 @@ mod tests {
     fn tampered_probe_rejected_by_observer() {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
-        let mut probe = mgr.issue_probe("p1", 5, 2, 10_000, None).unwrap();
+        let mut probe = mgr.issue_probe(None, "p1", 5, 2, 10_000, None).unwrap();
         probe.challenge_nonce[0] ^= 0x01;
         assert!(SlaManager::verify_probe(&probe).is_err());
     }
@@ -781,9 +942,9 @@ mod tests {
     fn different_rounds_yield_different_nonces() {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
-        let p0 = mgr.issue_probe("p1", 0, 0, 10_000, None).unwrap();
-        let p1 = mgr.issue_probe("p1", 0, 1, 10_000, None).unwrap();
-        let p2 = mgr.issue_probe("p1", 1, 0, 10_000, None).unwrap();
+        let p0 = mgr.issue_probe(None, "p1", 0, 0, 10_000, None).unwrap();
+        let p1 = mgr.issue_probe(None, "p1", 0, 1, 10_000, None).unwrap();
+        let p2 = mgr.issue_probe(None, "p1", 1, 0, 10_000, None).unwrap();
         assert_ne!(p0.challenge_nonce, p1.challenge_nonce);
         assert_ne!(p0.challenge_nonce, p2.challenge_nonce);
         assert_ne!(p1.challenge_nonce, p2.challenge_nonce);
@@ -793,8 +954,8 @@ mod tests {
     fn different_providers_yield_different_nonces() {
         let (issuer, vrf) = validator_setup();
         let mgr = SlaManager::new(issuer, vrf);
-        let p_a = mgr.issue_probe("p_a", 0, 0, 10_000, None).unwrap();
-        let p_b = mgr.issue_probe("p_b", 0, 0, 10_000, None).unwrap();
+        let p_a = mgr.issue_probe(None, "p_a", 0, 0, 10_000, None).unwrap();
+        let p_b = mgr.issue_probe(None, "p_b", 0, 0, 10_000, None).unwrap();
         assert_ne!(p_a.challenge_nonce, p_b.challenge_nonce);
     }
 
@@ -819,7 +980,10 @@ mod tests {
             height: 7,
             count: 8,
         };
-        let mut probe = mgr.issue_probe("p1", 5, 2, 10_000, Some(work)).unwrap();
+        let mut probe = mgr
+            .issue_probe(None, "p1", 5, 2, 10_000, Some(work))
+            .unwrap();
+
         SlaManager::verify_probe(&probe).expect("issuer's work verifies");
         // A peer relaying the probe cannot swap in heavier work.
         probe.work = Some(CapacityWork::StateReads {
@@ -838,6 +1002,7 @@ mod tests {
         let (paddr, psigner, ppk) = provider_keypair();
         let probe = mgr
             .issue_probe(
+                None,
                 "p1",
                 0,
                 0,

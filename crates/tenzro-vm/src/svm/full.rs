@@ -104,11 +104,6 @@ impl ForkGraph for SingleForkGraph {
 /// the post-execution account set itself; the executor layer applies the
 /// resulting deltas back through `VmState`. Here the callback answers "what does
 /// this account look like before execution".
-///
-/// The [`TransactionProcessingCallback::get_account_shared_data`] contract
-/// returns `(account, slot)`; the slot is the slot the account was last
-/// modified. Under linear finality every served account is reported
-/// at [`EXECUTION_SLOT`].
 struct VmStateAccountLoader<'a> {
     state: &'a dyn VmState,
     /// The program under test — its stored ELF is served as executable account
@@ -119,6 +114,10 @@ struct VmStateAccountLoader<'a> {
     /// on-chain programs observe the finalized block's time via
     /// `fill_missing_sysvar_cache_entries`.
     clock_account: AccountSharedData,
+    /// The transaction's synthetic fee payer, served as a rent-exempt system
+    /// account: fees are zero, so nothing is taken from it, and the processor
+    /// refuses a transaction whose payer does not exist.
+    payer: Pubkey,
 }
 
 impl<'a> VmStateAccountLoader<'a> {
@@ -127,12 +126,14 @@ impl<'a> VmStateAccountLoader<'a> {
         program_id: Pubkey,
         program_elf: Vec<u8>,
         clock_account: AccountSharedData,
+        payer: Pubkey,
     ) -> Self {
         Self {
             state,
             program_id,
             program_elf,
             clock_account,
+            payer,
         }
     }
 }
@@ -144,23 +145,33 @@ impl<'a> VmStateAccountLoader<'a> {
 impl InvokeContextCallback for VmStateAccountLoader<'_> {}
 
 impl TransactionProcessingCallback for VmStateAccountLoader<'_> {
-    fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
+    fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
         // Clock sysvar: served from block context.
         if *pubkey == solana_sdk_ids::sysvar::clock::id() {
-            return Some((self.clock_account.clone(), EXECUTION_SLOT));
+            return Some(self.clock_account.clone());
+        }
+
+        if *pubkey == self.payer {
+            return Some(AccountSharedData::new(
+                solana_rent::Rent::default().minimum_balance(0),
+                0,
+                &solana_sdk_ids::system_program::id(),
+            ));
         }
 
         // The program under test: serve its ELF as an executable, BPF-loader
         // owned account so the processor loads and runs it.
         if *pubkey == self.program_id {
+            // A zero-lamport account reads as absent once the processor has
+            // loaded it, so the program holds its rent-exempt balance.
             let mut account = AccountSharedData::new(
-                0,
+                solana_rent::Rent::default().minimum_balance(self.program_elf.len()),
                 self.program_elf.len(),
                 &solana_sdk_ids::bpf_loader::id(),
             );
             account.set_data_from_slice(&self.program_elf);
             account.set_executable(true);
-            return Some((account, EXECUTION_SLOT));
+            return Some(account);
         }
 
         let addr = pubkey.to_bytes().to_vec();
@@ -182,7 +193,7 @@ impl TransactionProcessingCallback for VmStateAccountLoader<'_> {
         if !data.is_empty() {
             account.set_data_from_slice(&data);
         }
-        Some((account, EXECUTION_SLOT))
+        Some(account)
     }
 }
 
@@ -249,9 +260,8 @@ pub(crate) fn process_sbf_transaction(
 
     let cu_limit = compute_unit_limit.min(max_compute_unit_limit).max(1);
 
-    // Feature set + execution budget. The explicit constructors are used
-    // because the `Default` impls are gated behind `dev-context-only-utils`.
-    let feature_set = SVMFeatureSet::all_enabled();
+    // Execution budget. The explicit constructor is used because the
+    // `Default` impl is gated behind `dev-context-only-utils`.
     let mut budget = SVMTransactionExecutionBudget::new_with_defaults(false);
     budget.compute_unit_limit = cu_limit;
 
@@ -282,6 +292,55 @@ pub(crate) fn process_sbf_transaction(
         SanitizedTransaction::try_from_legacy_transaction(transaction, &HashSet::default())
             .map_err(|e| VmError::ExecutionFailed(format!("SVM transaction sanitize: {e}")))?;
 
+    let clock_account = clock_sysvar_account(block_unix_timestamp);
+    let loader = VmStateAccountLoader::new(
+        state,
+        program_pubkey,
+        program_elf.to_vec(),
+        clock_account,
+        payer,
+    );
+
+    match process(&loader, sanitized, budget)? {
+        ProcessedTransaction::Executed(executed) => {
+            let details = &executed.execution_details;
+            if let Err(err) = &details.status {
+                return Err(VmError::ExecutionReverted(format!("{err:?}")));
+            }
+            let return_data = details
+                .return_data
+                .as_ref()
+                .map(|rd| rd.data.clone())
+                .unwrap_or_default();
+            let logs = details.log_messages.clone().unwrap_or_default();
+            let executed_units = details.executed_units;
+            Ok((return_data, executed_units, logs))
+        }
+        ProcessedTransaction::FeesOnly(fees_only) => Err(VmError::ExecutionReverted(format!(
+            "SVM transaction charged fees only: {:?}",
+            fees_only.load_error
+        ))),
+        ProcessedTransaction::NoOp(no_op) => Err(VmError::ExecutionReverted(format!(
+            "SVM transaction changed no state: {:?}",
+            no_op.validation_error
+        ))),
+    }
+}
+
+/// The feature set every SVM transaction runs under: every feature the
+/// pinned `solana-svm` line knows, active.
+fn feature_set() -> SVMFeatureSet {
+    SVMFeatureSet::all_enabled()
+}
+
+/// Load and execute `sanitized` against `accounts` in a processor with the
+/// BPF loader and the system program, under [`feature_set`] and `budget`.
+fn process<CB: TransactionProcessingCallback + InvokeContextCallback>(
+    accounts: &CB,
+    sanitized: SanitizedTransaction,
+    budget: SVMTransactionExecutionBudget,
+) -> Result<ProcessedTransaction> {
+    let feature_set = feature_set();
     let environments = runtime_environments(&feature_set, &budget)?;
 
     // Processor. `new_uninitialized` is the production constructor (the `new`
@@ -307,25 +366,19 @@ pub(crate) fn process_sbf_transaction(
     // transfers).
     processor.add_builtin(
         solana_sdk_ids::bpf_loader::id(),
-        ProgramCacheEntry::new_builtin(0, 0, solana_bpf_loader_program::Entrypoint::register),
+        ProgramCacheEntry::new_builtin(solana_bpf_loader_program::Entrypoint::register),
     );
     processor.add_builtin(
         solana_sdk_ids::system_program::id(),
         ProgramCacheEntry::new_builtin(
-            0,
-            0,
             solana_system_program::system_processor::Entrypoint::register,
         ),
     );
 
-    let clock_account = clock_sysvar_account(block_unix_timestamp);
-    let loader =
-        VmStateAccountLoader::new(state, program_pubkey, program_elf.to_vec(), clock_account);
-
     // Populate the sysvar cache. `fill_missing_sysvar_cache_entries` reads each
     // sysvar account through the callback — the clock is served from block
-    // context by the loader; the rest come from their default accounts.
-    processor.fill_missing_sysvar_cache_entries(&loader);
+    // context by the account loader; the rest come from their default accounts.
+    processor.fill_missing_sysvar_cache_entries(accounts);
 
     // Per-transaction budget/fee limits. The CU limit rides here (there is no
     // `compute_budget` field on `TransactionProcessingConfig`); fees are zero
@@ -355,7 +408,7 @@ pub(crate) fn process_sbf_transaction(
     };
 
     let output = processor.load_and_execute_sanitized_transactions(
-        &loader,
+        accounts,
         &[sanitized],
         check_results,
         &processing_environment,
@@ -368,27 +421,139 @@ pub(crate) fn process_sbf_transaction(
         .next()
         .ok_or_else(|| VmError::ExecutionFailed("SVM produced no processing result".into()))?;
 
-    let processed = processing_result
-        .map_err(|e| VmError::ExecutionFailed(format!("SVM transaction not processed: {e:?}")))?;
+    processing_result
+        .map_err(|e| VmError::ExecutionFailed(format!("SVM transaction not processed: {e:?}")))
+}
 
-    match processed {
-        ProcessedTransaction::Executed(executed) => {
-            let details = &executed.execution_details;
-            if let Err(err) = &details.status {
-                return Err(VmError::ExecutionReverted(format!("{err:?}")));
-            }
-            let return_data = details
-                .return_data
-                .as_ref()
-                .map(|rd| rd.data.clone())
-                .unwrap_or_default();
-            let logs = details.log_messages.clone().unwrap_or_default();
-            let executed_units = details.executed_units;
-            Ok((return_data, executed_units, logs))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_adapter::StateAdapter;
+
+    /// A program in the sBPFv3 format loads and runs to success. The program
+    /// is the loader's own fixture, which returns without an error.
+    #[test]
+    fn an_sbpf_v3_program_loads_and_runs() {
+        let elf = include_bytes!("../../tests/fixtures/sbpf/sbpfv3_return_ok.so");
+        // `e_flags` of the ELF header names the sBPF version.
+        assert_eq!(elf[0x30..0x34], 3u32.to_le_bytes());
+        let state = StateAdapter::new();
+        let (return_data, units, _logs) = process_sbf_transaction(
+            &[7u8; 32],
+            elf,
+            &[],
+            200_000,
+            1_400_000,
+            1_700_000_000,
+            &state,
+        )
+        .expect("the program runs");
+        assert!(return_data.is_empty());
+        assert!(units > 0 && units <= 200_000, "{units} compute units");
+    }
+
+    /// Accounts served from a map, for transactions the VM state cannot form.
+    struct MapAccounts(std::collections::HashMap<Pubkey, AccountSharedData>);
+
+    impl InvokeContextCallback for MapAccounts {}
+
+    impl TransactionProcessingCallback for MapAccounts {
+        fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
+            self.0.get(pubkey).cloned()
         }
-        ProcessedTransaction::FeesOnly(fees_only) => Err(VmError::ExecutionReverted(format!(
-            "SVM transaction charged fees only: {:?}",
-            fees_only.load_error
-        ))),
+    }
+
+    /// The loaded size a transaction is counted at when it names a loader-v3
+    /// program whose ProgramData holds `programdata_len` bytes (`None`: no
+    /// ProgramData account).
+    fn counted_size_with_programdata(programdata_len: Option<usize>) -> u32 {
+        let elf = include_bytes!("../../tests/fixtures/sbpf/sbpfv3_return_ok.so");
+        let rent = solana_rent::Rent::default();
+        let program = Pubkey::new_from_array([7; 32]);
+        let payer = Pubkey::new_from_array([8; 32]);
+        let v3_program = Pubkey::new_from_array([9; 32]);
+        let programdata = Pubkey::new_from_array([10; 32]);
+
+        let mut accounts = std::collections::HashMap::new();
+        let mut account = AccountSharedData::new(
+            rent.minimum_balance(elf.len()),
+            elf.len(),
+            &solana_sdk_ids::bpf_loader::id(),
+        );
+        account.set_data_from_slice(elf);
+        account.set_executable(true);
+        accounts.insert(program, account);
+        accounts.insert(
+            payer,
+            AccountSharedData::new(
+                rent.minimum_balance(0),
+                0,
+                &solana_sdk_ids::system_program::id(),
+            ),
+        );
+        // `UpgradeableLoaderState::Program { programdata_address }` in bincode:
+        // the variant index 2 as a u32, then the address.
+        let mut state = 2u32.to_le_bytes().to_vec();
+        state.extend_from_slice(programdata.as_ref());
+        let mut account = AccountSharedData::new(
+            rent.minimum_balance(state.len()),
+            state.len(),
+            &solana_sdk_ids::bpf_loader_upgradeable::id(),
+        );
+        account.set_data_from_slice(&state);
+        account.set_executable(true);
+        accounts.insert(v3_program, account);
+        if let Some(len) = programdata_len {
+            accounts.insert(
+                programdata,
+                AccountSharedData::new(
+                    rent.minimum_balance(len),
+                    len,
+                    &solana_sdk_ids::bpf_loader_upgradeable::id(),
+                ),
+            );
+        }
+
+        let instruction = Instruction::new_with_bytes(
+            program,
+            &[],
+            vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new_readonly(v3_program, false),
+            ],
+        );
+        let transaction = Transaction::new_unsigned(Message::new(&[instruction], Some(&payer)));
+        let sanitized =
+            SanitizedTransaction::try_from_legacy_transaction(transaction, &HashSet::default())
+                .expect("the transaction sanitizes");
+        let mut budget = SVMTransactionExecutionBudget::new_with_defaults(false);
+        budget.compute_unit_limit = 200_000;
+        match process(&MapAccounts(accounts), sanitized, budget).expect("the transaction loads") {
+            ProcessedTransaction::Executed(executed) => {
+                executed.loaded_transaction.loaded_accounts_data_size
+            }
+            ProcessedTransaction::FeesOnly(fees_only) => {
+                panic!("the transaction did not load: {:?}", fees_only.load_error)
+            }
+            ProcessedTransaction::NoOp(no_op) => {
+                panic!(
+                    "the transaction changed nothing: {:?}",
+                    no_op.validation_error
+                )
+            }
+        }
+    }
+
+    /// A loader-v3 program's ProgramData is counted at least at its metadata
+    /// size (45 bytes: state tag, slot, and an optional upgrade authority),
+    /// whether it is smaller or missing, as from `solana-svm` 4.4.1.
+    #[test]
+    fn a_small_programdata_account_is_counted_at_its_metadata_size() {
+        assert!(feature_set().loaderv3_programdata_size_floor);
+        let missing = counted_size_with_programdata(None);
+        let small = counted_size_with_programdata(Some(4));
+        let large = counted_size_with_programdata(Some(100));
+        assert_eq!(missing, small);
+        assert_eq!(large - small, 100 - 45);
     }
 }

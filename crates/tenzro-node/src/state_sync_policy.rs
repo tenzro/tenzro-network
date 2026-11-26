@@ -45,8 +45,8 @@ pub enum ReplayReason {
     Validator,
     /// The node already holds chain state: a snapshot restores a fresh node.
     HasChain,
-    /// No trusted checkpoint to verify a snapshot against was configured.
-    NoCheckpoint,
+    /// No boot identity to ask for a snapshot.
+    NoBootIdentities,
 }
 
 /// How a node catches up with the chain.
@@ -67,17 +67,22 @@ pub struct JoinFacts {
     pub is_validator: bool,
     /// Whether the operator named state-sync peers.
     pub named_peers: bool,
-    /// Whether a weak-subjectivity checkpoint is configured (flags, genesis
-    /// `[weak_subjectivity]`).
-    pub has_checkpoint: bool,
+    /// Whether the node has boot identities (`--boot-nodes`, the genesis
+    /// validators) to ask for a snapshot.
+    pub has_boot_identities: bool,
     /// Whether the node already holds blocks beyond genesis.
     pub has_chain: bool,
 }
 
-/// Decides how the node catches up. Named peers always mean a snapshot
-/// join: the operator asked for it (the recovery after a corrupt store uses
-/// it on a validator).
+/// Decides how the node catches up. A node that already holds chain state
+/// (a restart, including one after a snapshot join) continues from its tip:
+/// a snapshot restores only a fresh store. On a fresh store, named peers
+/// always mean a snapshot join: the operator asked for it (the recovery
+/// after a corrupt store uses it on a validator).
 pub fn plan(f: JoinFacts) -> JoinPlan {
+    if f.has_chain {
+        return JoinPlan::Replay(ReplayReason::HasChain);
+    }
     if f.named_peers {
         return JoinPlan::Snapshot(PeerSource::Named);
     }
@@ -87,11 +92,8 @@ pub fn plan(f: JoinFacts) -> JoinPlan {
     if f.is_validator {
         return JoinPlan::Replay(ReplayReason::Validator);
     }
-    if f.has_chain {
-        return JoinPlan::Replay(ReplayReason::HasChain);
-    }
-    if !f.has_checkpoint {
-        return JoinPlan::Replay(ReplayReason::NoCheckpoint);
+    if !f.has_boot_identities {
+        return JoinPlan::Replay(ReplayReason::NoBootIdentities);
     }
     JoinPlan::Snapshot(PeerSource::Boot)
 }
@@ -105,13 +107,13 @@ mod tests {
             mode: StateSyncMode::Auto,
             is_validator: false,
             named_peers: false,
-            has_checkpoint: true,
+            has_boot_identities: true,
             has_chain: false,
         }
     }
 
     #[test]
-    fn a_fresh_non_validator_with_a_checkpoint_joins_by_snapshot() {
+    fn a_fresh_non_validator_with_boot_identities_joins_by_snapshot() {
         assert_eq!(plan(facts()), JoinPlan::Snapshot(PeerSource::Boot));
     }
 
@@ -124,13 +126,16 @@ mod tests {
         assert_eq!(plan(f), JoinPlan::Replay(ReplayReason::Validator));
     }
 
+    /// With no boot identity there is nobody to restore from. A missing
+    /// checkpoint no longer decides it: the anchor is then one a boot peer
+    /// certifies, verified from the genesis committee.
     #[test]
-    fn without_a_checkpoint_the_node_replays_rather_than_trusting_a_peer() {
+    fn without_boot_identities_the_node_replays() {
         let f = JoinFacts {
-            has_checkpoint: false,
+            has_boot_identities: false,
             ..facts()
         };
-        assert_eq!(plan(f), JoinPlan::Replay(ReplayReason::NoCheckpoint));
+        assert_eq!(plan(f), JoinPlan::Replay(ReplayReason::NoBootIdentities));
     }
 
     #[test]
@@ -164,6 +169,20 @@ mod tests {
             ..facts()
         };
         assert_eq!(plan(f), JoinPlan::Snapshot(PeerSource::Named));
+    }
+
+    /// A node restarted with its state-sync peers still named (on the
+    /// command line or as `state_sync_from` in its config) continues from
+    /// its own tip instead of asking for a snapshot it cannot restore over
+    /// existing state.
+    #[test]
+    fn a_restart_with_named_peers_continues_from_the_local_tip() {
+        let f = JoinFacts {
+            named_peers: true,
+            has_chain: true,
+            ..facts()
+        };
+        assert_eq!(plan(f), JoinPlan::Replay(ReplayReason::HasChain));
     }
 
     #[test]

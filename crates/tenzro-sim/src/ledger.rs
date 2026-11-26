@@ -441,6 +441,14 @@ impl Ledger {
         ] {
             tenzro_vm::native::set_genesis_param(&mut state, key, 1_000_000_000);
         }
+        // The genesis grace counts one-hour epochs; a run whose epochs span
+        // longer keeps the week it stands for.
+        let epoch_calendar_ms = g.epoch_ms.saturating_mul(g.calendar_scale.max(1)).max(1);
+        tenzro_vm::native::set_genesis_param(
+            &mut state,
+            tenzro_vm::governance::TIGHTENING_GRACE_PARAM,
+            (7 * 86_400_000 / epoch_calendar_ms).max(1),
+        );
         for (key, value) in &g.network_params {
             tenzro_vm::native::set_genesis_param(&mut state, key, *value);
         }

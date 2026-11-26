@@ -36,7 +36,7 @@ mod tests {
     /// with the wall time the emulation took on one core. Run in release
     /// with `--ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn gate_local_genesis_latency() {
         use crate::config::TimeRules;
         let env = |k: &str, d: u64| {

@@ -214,7 +214,7 @@ async fn render_here(
     let seed = media
         .seed
         .ok_or_else(|| invalid("a render is seeded: set params.seed"))?;
-    if tenzro_model::media_gen_model_splits(model_id) {
+    if node.catalog().media_gen_model_splits(model_id) {
         return Err(invalid(format!(
             "{model_id} renders across two experts and is not served as one render"
         )));
@@ -275,7 +275,7 @@ async fn render_here(
             other => return Err(failed(format!("the content store answered {other:?}"))),
         }
     };
-    let (cost_wei, settlement) = crate::rpc::bill_local_units(
+    let (cost_wei, settlement, generation_id) = crate::rpc::bill_local_units(
         node,
         p,
         model_id,
@@ -290,6 +290,7 @@ async fn render_here(
         obj.insert("units".into(), crate::rpc::units_to_json(&units));
         obj.insert("cost_wei".into(), json!(cost_wei.to_string()));
         obj.insert("settlement".into(), settlement.to_json());
+        obj.insert("generation_id".into(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -381,7 +382,6 @@ mod tests {
         );
         let witness = committed("audio/wav", &wav(|_| 3020.0)).unwrap();
         assert!(crate::optimistic::answers_agree(
-            "praecise",
             &answer,
             &Answer::Task {
                 task: "media".into(),

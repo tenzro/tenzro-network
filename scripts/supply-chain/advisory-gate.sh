@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # Release advisory gate: refuses a lockfile that pulls in a RustSec
 # vulnerability, or an advisory that marks a crate unsound, unless
-# .cargo/audit.toml accepts it with a recorded decision. release.sh stops on
-# it; the scheduled sec-supply-chain stage only files what it finds.
+# .cargo/audit.toml accepts it with a recorded decision that names its owner
+# and is not past its recheck day. release.sh stops on it; the scheduled
+# sec-supply-chain stage only files what it finds.
 #
-# Usage: scripts/supply-chain/advisory-gate.sh [--no-fetch] [lockfile]
+# Usage: scripts/supply-chain/advisory-gate.sh [--today YYYY-MM-DD] [--no-fetch] [lockfile]
 #   lockfile   default Cargo.lock; read with this repository's .cargo/audit.toml
 #   --no-fetch use the advisory database already on this host
+#   --today    the day recheck days are measured against (default: today, UTC)
 # Needs cargo-audit (pinned in scripts/testnet/security/tools.env).
 # Exit 0 clean, 1 blocked, 2 the check could not run (also a refusal).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
+today=()
+if [ "${1:-}" = "--today" ]; then today=(--today "${2:?--today needs a day}"); shift 2; fi
 fetch=()
 if [ "${1:-}" = "--no-fetch" ]; then fetch=(--no-fetch); shift; fi
 lock=${1:-$root/Cargo.lock}
 [ -f "$lock" ] || { echo "REFUSING: no lockfile at $lock"; exit 2; }
 lock=$(realpath "$lock")
 cd "$root"
+python3 -I "$root/scripts/supply-chain/acceptance-recheck.py" "${today[@]}" "$root/.cargo/audit.toml" || exit 1
 command -v cargo-audit >/dev/null || { echo "REFUSING: cargo-audit not found"; exit 2; }
 json=$(cargo audit --json "${fetch[@]}" --file "$lock" 2>/dev/null)
 read -r -d '' check <<'PY'

@@ -34,10 +34,7 @@ use crate::{
     error::{Result, VmError},
     gas::{GasOracle, svm_gas_costs},
     traits::{VmExecutor, VmState, VmType},
-    types::{
-        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log,
-        StateChange, VmTransaction,
-    },
+    types::{CallResult, ContractCall, ExecutionResult, Log, StateChange, VmTransaction},
 };
 
 /// SVM executor dispatching SPL / cross-VM native paths and, under the
@@ -389,7 +386,7 @@ impl SvmExecutor {
                     &accounts[0],
                     &accounts[2],
                     amount_base,
-                    crate::native::deterministic_now_ms(tx),
+                    crate::native::deterministic_now_ms(tx)?,
                 )? {
                     Some(changes) => (
                         "spl_transfer_checked",
@@ -932,67 +929,6 @@ impl VmExecutor for SvmExecutor {
         }
     }
 
-    async fn deploy_contract(
-        &self,
-        deployment: &ContractDeployment,
-        state: &mut dyn VmState,
-    ) -> Result<DeployResult> {
-        tracing::info!(
-            "SVM: Deploying program from {}",
-            hex::encode(&deployment.deployer)
-        );
-
-        // Validate program size
-        self.config.validate_contract_size(deployment.code.len())?;
-
-        // Derive program ID
-        let nonce = state.get_nonce(&deployment.deployer);
-        let program_id = Self::derive_pda(&deployment.deployer, &[&nonce.to_le_bytes()]);
-
-        // Calculate compute units
-        let compute_units = svm_gas_costs::CREATE_ACCOUNT
-            + (deployment.code.len() as u64 * svm_gas_costs::DATA_BYTE);
-
-        if compute_units > deployment.gas_limit {
-            return Ok(DeployResult::failed(
-                compute_units,
-                format!(
-                    "Insufficient compute units: need {}, have {}",
-                    compute_units, deployment.gas_limit
-                ),
-            ));
-        }
-
-        // Check balance
-        let deployer_balance = state.get_balance(&deployment.deployer);
-        let total_cost = deployment.value + (compute_units as u128 * deployment.gas_price);
-
-        if deployer_balance < total_cost {
-            return Ok(DeployResult::failed(
-                0,
-                format!(
-                    "Insufficient balance: have {}, need {}",
-                    deployer_balance, total_cost
-                ),
-            ));
-        }
-
-        // Deploy program
-        state.set_code(&program_id, deployment.code.clone());
-        state.set_nonce(&deployment.deployer, nonce + 1);
-
-        // Deduct costs
-        state.set_balance(&deployment.deployer, deployer_balance - total_cost);
-
-        // Credit the program account on top of whatever it already holds.
-        if deployment.value > 0 {
-            let before = state.get_balance(&program_id);
-            state.set_balance(&program_id, before.saturating_add(deployment.value));
-        }
-
-        Ok(DeployResult::success(program_id, compute_units))
-    }
-
     async fn estimate_gas(&self, tx: &VmTransaction, _state: &dyn VmState) -> Result<u64> {
         let compute_units = if tx.to.is_none() {
             // Deployment
@@ -1049,7 +985,8 @@ mod tests {
             0,
             VmType::Svm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
         assert!(!result.success);
@@ -1060,7 +997,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_program_deployment() {
+    async fn a_creation_transaction_deploys_a_program() {
         let executor = create_executor();
         let mut state = StateAdapter::new();
 
@@ -1071,26 +1008,23 @@ mod tests {
 
         state.set_balance(&deployer, 10_000_000_000_000_000_000u128);
 
-        let deployment = ContractDeployment::new(
+        let tx = VmTransaction::new(
             deployer.clone(),
-            code.clone(),
-            Vec::new(),
+            None,
             0,
+            code.clone(),
             500_000,
             1_000_000_000,
             0,
             VmType::Svm,
+            1337,
         );
 
-        let result = executor
-            .deploy_contract(&deployment, &mut state)
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert_eq!(result.address.len(), 32);
-
-        let stored_code = state.get_code(&result.address).unwrap();
-        assert_eq!(stored_code, code);
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert!(result.success, "{:?}", result.revert_reason);
+        let address = result.contract_address.expect("the program's address");
+        assert_eq!(address.len(), 32);
+        assert_eq!(state.get_code(&address).unwrap(), code);
     }
 
     #[tokio::test]
@@ -1117,7 +1051,8 @@ mod tests {
             0,
             VmType::Svm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
         assert!(!result.success);
@@ -1159,7 +1094,8 @@ mod tests {
             0,
             VmType::Svm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
         assert!(!result.success);
@@ -1230,7 +1166,8 @@ mod tests {
             0,
             VmType::Svm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = executor
             .execute_transaction(&vm_tx, &mut state)
@@ -1300,7 +1237,8 @@ mod tests {
             0,
             VmType::Svm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = executor
             .execute_transaction(&vm_tx, &mut state)
@@ -1339,7 +1277,8 @@ mod tests {
             0,
             VmType::Svm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let err = executor
             .execute_transaction(&tx, &mut state)
@@ -1365,6 +1304,7 @@ mod tests {
             VmType::Svm,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     #[test]

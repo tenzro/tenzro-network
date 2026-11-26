@@ -122,6 +122,9 @@ pub struct Connectivity {
     pub relays: Vec<RelayState>,
     /// The peer relays (forwarders) the endpoint offers paths through.
     pub forwarders: Vec<ForwarderState>,
+    /// Latency and jitter of every path the endpoint's connections used in
+    /// the last minute.
+    pub paths: Vec<crate::paths::PathLatencyReport>,
     /// Peers reached on a birthday-punched path.
     pub punched: usize,
     /// Whether the node has an IPv4 path to the internet.
@@ -301,6 +304,7 @@ pub fn connectivity(
     observations: &Observations,
     external: &[SocketAddr],
     forwarders: Vec<ForwarderState>,
+    paths: Vec<crate::paths::PathLatencyReport>,
     punched: usize,
     now_ms: u64,
 ) -> Connectivity {
@@ -361,6 +365,7 @@ pub fn connectivity(
         observed,
         relays,
         forwarders,
+        paths,
         punched,
     }
 }

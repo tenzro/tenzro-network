@@ -89,7 +89,7 @@ pub fn install(os: &str, unit: &Path) -> Result<()> {
 
 /// Runs `steps` in order, with the terminal attached, and stops at the first
 /// that fails. `not_done` ends the error and says what was left undone.
-fn run_steps(steps: &[Vec<String>], not_done: &str) -> Result<()> {
+pub fn run_steps(steps: &[Vec<String>], not_done: &str) -> Result<()> {
     for step in steps {
         let (program, args) = step.split_first().expect("a command has a program");
         output::print_info(&format!("$ {}", step.join(" ")));
@@ -180,6 +180,84 @@ pub fn installed(os: &str) -> NodeService {
     }
 }
 
+/// Starting or stopping the node service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Start,
+    Stop,
+}
+
+/// The commands that start or stop the node through the service `tenzro
+/// setup` installs on `os`, with `home` the user's home. Pure. Stopping the
+/// launchd agent leaves it to start at the next login, as stopping the
+/// systemd unit leaves it enabled.
+pub fn switch_steps(os: &str, home: &Path, switch: Switch) -> Result<Vec<Vec<String>>> {
+    let s = |v: &str| v.to_string();
+    let plist = launchd_plist_path(home).display().to_string();
+    match (os, switch) {
+        ("linux", Switch::Start) => Ok(vec![vec![
+            s("sudo"),
+            s("systemctl"),
+            s("start"),
+            s("tenzro-node"),
+        ]]),
+        ("linux", Switch::Stop) => Ok(vec![vec![
+            s("sudo"),
+            s("systemctl"),
+            s("stop"),
+            s("tenzro-node"),
+        ]]),
+        ("macos", Switch::Start) => Ok(vec![vec![s("launchctl"), s("load"), s("-w"), plist]]),
+        ("macos", Switch::Stop) => Ok(vec![vec![s("launchctl"), s("unload"), plist]]),
+        (other, _) => {
+            bail!("the node service is started and stopped on Linux and macOS, not {other}")
+        }
+    }
+}
+
+/// Whether the service `tenzro setup` installs is on this machine for `os`,
+/// running or not.
+pub fn in_place(os: &str) -> bool {
+    match os {
+        "linux" => systemd_unit_path().is_file(),
+        "macos" => {
+            tenzro_types::paths::home_dir().is_some_and(|home| launchd_plist_path(&home).is_file())
+        }
+        _ => false,
+    }
+}
+
+/// Whether the node service `tenzro setup` installs starts with the machine,
+/// and the command that turns that on or off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtBoot {
+    pub on: bool,
+    pub turn_on: String,
+    pub turn_off: String,
+}
+
+/// The node service's start with the machine, for `os`; `None` where no
+/// such service is installed.
+pub fn at_boot(os: &str) -> Option<AtBoot> {
+    match os {
+        "linux" => systemd_unit_path().is_file().then(|| AtBoot {
+            on: succeeds("systemctl", &["is-enabled", "--quiet", SYSTEMD_UNIT]),
+            turn_on: "sudo systemctl enable tenzro-node".into(),
+            turn_off: "sudo systemctl disable tenzro-node".into(),
+        }),
+        "macos" => {
+            let plist = launchd_plist_path(&tenzro_types::paths::home_dir()?);
+            let path = plist.display().to_string();
+            plist.is_file().then(|| AtBoot {
+                on: succeeds("launchctl", &["list", LAUNCHD_LABEL]),
+                turn_on: format!("launchctl load -w {path}"),
+                turn_off: format!("launchctl unload -w {path}"),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The commands that restart the node through `service`. Pure. The launchd
 /// agent is unloaded and loaded again, the way [`install_steps`] loaded it.
 pub fn restart_steps(service: &NodeService) -> Result<Vec<Vec<String>>> {
@@ -204,6 +282,19 @@ pub fn restart_steps(service: &NodeService) -> Result<Vec<Vec<String>>> {
             bail!("the node does not run under an installed service on this machine")
         }
     }
+}
+
+/// The restart through `service` as one command an operator types, or
+/// `None` when the node runs under no installed service.
+pub fn restart_command(service: &NodeService) -> Option<String> {
+    let steps = restart_steps(service).ok()?;
+    Some(
+        steps
+            .iter()
+            .map(|step| step.join(" "))
+            .collect::<Vec<_>>()
+            .join(" && "),
+    )
 }
 
 /// Restart the node through its service, with the terminal attached, so
@@ -348,21 +439,16 @@ pub struct Sample {
 
 impl Sample {
     /// Build a sample from the three RPC answers: `eth_blockNumber`,
-    /// `net_peerCount` (both hex) and `tenzro_syncing` (`false`, or an object
-    /// with `currentBlock` and `highestBlock`).
+    /// `net_peerCount` (both hex) and `tenzro_syncing` (the node's follow state,
+    /// with the highest height it heard from the network).
     pub fn from_rpc(block: &str, peers: &str, syncing: &Value) -> Self {
         let height = parse_hex_u64(block);
-        let (syncing_now, highest) = match syncing {
-            Value::Object(o) => (
-                true,
-                o.get("highestBlock")
-                    .and_then(Value::as_str)
-                    .map(parse_hex_u64)
-                    .unwrap_or(height)
-                    .max(height),
-            ),
-            _ => (false, height),
-        };
+        let syncing_now = syncing.get("state").and_then(Value::as_str) != Some("following");
+        let highest = syncing
+            .get("network_head")
+            .and_then(Value::as_u64)
+            .unwrap_or(height)
+            .max(height);
         Self {
             height,
             highest,
@@ -403,7 +489,7 @@ pub async fn sample(rpc: &RpcClient) -> Option<Sample> {
     let syncing: Value = rpc
         .call("tenzro_syncing", json!([]))
         .await
-        .unwrap_or(Value::Bool(false));
+        .unwrap_or(Value::Null);
     Some(Sample::from_rpc(&block, &peers, &syncing))
 }
 
@@ -719,7 +805,7 @@ mod tests {
         let s = Sample::from_rpc(
             "0x64",
             "0x3",
-            &json!({"syncing": true, "currentBlock": "0x64", "highestBlock": "0xc8"}),
+            &json!({"state": "catching_up", "local_height": 100, "network_head": 200}),
         );
         assert!(s.syncing && !s.caught_up());
         assert_eq!((s.height, s.highest, s.peers), (100, 200, 3));
@@ -748,17 +834,17 @@ mod tests {
 
     #[test]
     fn a_node_at_the_tip_with_peers_is_caught_up() {
-        let s = Sample::from_rpc("0x2710", "0x5", &Value::Bool(false));
+        let s = Sample::from_rpc("0x2710", "0x5", &json!({"state": "following"}));
         assert!(s.caught_up());
         assert_eq!(s.describe(), "block 10000, 5 peer(s)");
     }
 
     #[test]
     fn a_node_with_no_peers_or_no_blocks_is_not_caught_up() {
-        assert!(!Sample::from_rpc("0x2710", "0x0", &Value::Bool(false)).caught_up());
-        assert!(!Sample::from_rpc("0x0", "0x4", &Value::Bool(false)).caught_up());
+        assert!(!Sample::from_rpc("0x2710", "0x0", &json!({"state": "following"})).caught_up());
+        assert!(!Sample::from_rpc("0x0", "0x4", &json!({"state": "following"})).caught_up());
         assert_eq!(
-            Sample::from_rpc("0x5", "0x0", &Value::Bool(false)).describe(),
+            Sample::from_rpc("0x5", "0x0", &json!({"state": "following"})).describe(),
             "block 5, no peers yet"
         );
     }

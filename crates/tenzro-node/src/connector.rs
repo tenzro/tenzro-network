@@ -286,16 +286,13 @@ impl Connector {
     }
 
     /// Flag every connector model as served, under its visibility. Refuses a
-    /// model the installed catalog lists.
+    /// model `catalog` lists.
     pub fn register(
         &self,
+        catalog: &tenzro_model::Catalog,
         served: &dashmap::DashMap<String, Option<Visibility>>,
     ) -> Result<(), String> {
-        if let Some(listed) = self
-            .models
-            .keys()
-            .find(|id| tenzro_model::catalog::entry(id).is_some())
-        {
+        if let Some(listed) = self.models.keys().find(|id| catalog.entry(id).is_some()) {
             return Err(format!(
                 "{listed} is a catalog model, whose weights the network pins; offer the \
                  endpoint's model under an id of its own"
@@ -672,8 +669,16 @@ fn chat_input(request: &OpenAIChatRequest) -> Result<String, Response> {
     }
     let messages: Vec<tenzro_model::ChatMessage> =
         request.messages.iter().map(|m| m.to_model()).collect();
+    let render = request.render_settings().map_err(|e| {
+        json_error_response(
+            StatusCode::BAD_REQUEST,
+            &e.message,
+            "invalid_request_error",
+            e.code,
+        )
+    })?;
     Ok(crate::inference_receipt::input_commitment(
-        &messages, &media,
+        &messages, &render, &media,
     ))
 }
 
@@ -715,6 +720,7 @@ pub(crate) async fn serve_chat(
         bytes_in: serde_json::to_vec(&request.messages)
             .map(|b| b.len() as u64)
             .unwrap_or(0),
+        paid_by: crate::usage_payer::current(),
     };
     if stream {
         let include_usage = request
@@ -740,6 +746,8 @@ struct ChatCall {
     sampling: SamplingParams,
     level: VerificationLevel,
     bytes_in: u64,
+    /// Who paid at the payment gate, read when the call was admitted.
+    paid_by: Option<crate::usage_payer::Payer>,
 }
 
 impl ChatCall {
@@ -781,6 +789,7 @@ impl ChatCall {
             bytes_out,
             cost_wei,
             started.elapsed().as_millis() as u64,
+            self.paid_by.clone(),
         );
         self.node.metrics().record_inference();
         Ok((receipt, cost_wei))
@@ -1060,13 +1069,13 @@ pub(crate) async fn serve_chat_frame(
         && !crate::rpc::local_claim_satisfies_pin(node, pin)
     {
         return Err(refuse(
-            -32024,
+            crate::rpc::JURISDICTION_UNMET,
             format!("This node does not satisfy jurisdiction pin '{pin}'"),
         ));
     }
     if jurisdiction_receipt_required {
         return Err(refuse(
-            -32024,
+            crate::rpc::JURISDICTION_UNMET,
             "a model served from the operator's own endpoint carries no jurisdiction receipt"
                 .into(),
         ));
@@ -1137,7 +1146,11 @@ pub(crate) async fn serve_chat_frame(
         Served {
             model_id: &model.id,
             nonce: params.get("receipt_nonce").and_then(Value::as_str),
-            input_commitment: crate::inference_receipt::input_commitment(&messages, &[]),
+            input_commitment: crate::inference_receipt::input_commitment(
+                &messages,
+                &crate::inference_receipt::RenderSettings::of(&[], config),
+                &[],
+            ),
             output_hash: crate::inference_receipt::output_hash(
                 &output,
                 thinking.as_deref().unwrap_or(""),
@@ -1152,15 +1165,17 @@ pub(crate) async fn serve_chat_frame(
     .await
     .map_err(crate::verifiable_inference::receipt_refused)?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
+    let generation_id = uuid::Uuid::new_v4().to_string();
     crate::rpc::record_local_generation(
         node,
         &model.id,
-        &uuid::Uuid::new_v4().to_string(),
+        &generation_id,
         units.clone(),
         message.len() as u64,
         output.len() as u64,
         cost_wei,
         elapsed_ms,
+        crate::usage_payer::Payer::from_settlement(&settlement),
     );
     node.metrics().record_inference();
     Ok(json!({
@@ -1173,6 +1188,7 @@ pub(crate) async fn serve_chat_frame(
         "generation_time_ms": elapsed_ms,
         "cost_wei": cost_wei.to_string(),
         "settlement": settlement.to_json(),
+        "generation_id": generation_id,
         "model_id": model.id,
         "location": "upstream",
     }))
@@ -1293,7 +1309,7 @@ pub(crate) async fn serve_text_embed(
     let bytes_in = inputs.iter().map(|s| s.len() as u64).sum();
     let bytes_out =
         (embeddings.iter().map(Vec::len).sum::<usize>() * std::mem::size_of::<f32>()) as u64;
-    let (cost_wei, settlement) = crate::rpc::bill_local_units(
+    let (cost_wei, settlement, generation_id) = crate::rpc::bill_local_units(
         node,
         &p,
         &model.id,
@@ -1323,6 +1339,7 @@ pub(crate) async fn serve_text_embed(
         obj.insert("units".into(), crate::rpc::units_to_json(&units));
         obj.insert("cost_wei".into(), json!(cost_wei.to_string()));
         obj.insert("settlement".into(), settlement.to_json());
+        obj.insert("generation_id".into(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -1449,7 +1466,7 @@ pub(crate) async fn serve_render(
             }
         }
     };
-    let (cost_wei, settlement) = crate::rpc::bill_local_units(
+    let (cost_wei, settlement, generation_id) = crate::rpc::bill_local_units(
         node,
         p,
         &model.id,
@@ -1464,6 +1481,7 @@ pub(crate) async fn serve_render(
         obj.insert("units".into(), crate::rpc::units_to_json(&units));
         obj.insert("cost_wei".into(), json!(cost_wei.to_string()));
         obj.insert("settlement".into(), settlement.to_json());
+        obj.insert("generation_id".into(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -1579,13 +1597,17 @@ mod tests {
 
     #[test]
     fn a_catalog_model_is_not_served_from_an_endpoint() {
-        tenzro_catalog::install_test_seed();
+        let catalog = tenzro_model::Catalog::test_seed();
         let served = dashmap::DashMap::new();
         let c = Connector::new(&section(vec![chat("qwen3-0.6b")]), None);
-        assert!(c.register(&served).unwrap_err().contains("catalog model"));
+        assert!(
+            c.register(&catalog, &served)
+                .unwrap_err()
+                .contains("catalog model")
+        );
         assert!(served.is_empty());
         let c = Connector::new(&section(vec![chat("acme/own-model")]), None);
-        c.register(&served).unwrap();
+        c.register(&catalog, &served).unwrap();
         assert!(served.contains_key("acme/own-model"));
     }
 

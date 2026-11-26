@@ -31,7 +31,7 @@ fn sign(k: &SigningKey, chain_id: U256, nonce: u64) -> Eip7702Authorization {
         nonce,
         signature: vec![],
     };
-    let (sig, rid) = k.sign_prehash_recoverable(&a.signing_hash()).unwrap();
+    let (sig, rid) = k.sign_prehash_recoverable(&a.signing_hash());
     a.signature = sig.to_bytes().to_vec();
     a.signature.push(rid.to_byte());
     a
@@ -74,6 +74,7 @@ impl World {
             VmType::Evm,
             CHAIN,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
         .with_authorization_list(auths);
         match self.rt.execute_transaction(&tx, &mut self.state).await {
             Ok(r) => refusal(r).map(|r| r.success),
@@ -212,6 +213,7 @@ impl World {
             VmType::Evm,
             CHAIN,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
         .with_authorization_list(auths);
         tx.block_timestamp_ms = Some(now_ms);
         match self.rt.execute_transaction(&tx, &mut self.state).await {
@@ -322,7 +324,7 @@ async fn an_unlisted_delegate_is_refused_while_the_list_is_enforced() {
     // Clearing a delegation (the zero address) is always admitted.
     let mut clear = sign(&k, U256::from(CHAIN), 1);
     clear.delegate_address = vec![0; 20];
-    let (sig, rid) = k.sign_prehash_recoverable(&clear.signing_hash()).unwrap();
+    let (sig, rid) = k.sign_prehash_recoverable(&clear.signing_hash());
     clear.signature = sig.to_bytes().to_vec();
     clear.signature.push(rid.to_byte());
     assert!(w.submit_at(vec![clear], T0 + 1000).await.unwrap().success);

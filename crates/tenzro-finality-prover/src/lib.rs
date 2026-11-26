@@ -21,7 +21,8 @@
 use anyhow::{Context, Result};
 use risc0_zkvm::sha::Digestible;
 use risc0_zkvm::{
-    ExecutorEnv, Groth16ReceiptVerifierParameters, InnerReceipt, ProverOpts, Receipt, default_prover,
+    ExecutorEnv, Groth16ReceiptVerifierParameters, InnerReceipt, ProverOpts, Receipt,
+    default_prover,
 };
 use serde_json::json;
 use tenzro_finality::chain::HandoverLink;

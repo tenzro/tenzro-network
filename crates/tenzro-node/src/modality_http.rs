@@ -357,11 +357,11 @@ pub(crate) async fn embeddings(
     }
 
     #[cfg(feature = "inference")]
-    let image_encoder = tenzro_model::get_vision_model_by_id(&r.model).is_some()
+    let image_encoder = node.catalog().get_vision_model_by_id(&r.model).is_some()
         || node.vision_runtime.is_loaded(&r.model);
     // The light build loads no encoder, so only the catalog names one.
     #[cfg(not(feature = "inference"))]
-    let image_encoder = tenzro_model::get_vision_model_by_id(&r.model).is_some();
+    let image_encoder = node.catalog().get_vision_model_by_id(&r.model).is_some();
     let mut answers = Vec::new();
     if image_encoder {
         if r.dimensions.is_some() {

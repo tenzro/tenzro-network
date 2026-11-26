@@ -57,7 +57,7 @@ pub struct LaneBucket {
 }
 
 impl LaneBucket {
-    fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         let mut out = self.tokens.to_be_bytes().to_vec();
         out.extend_from_slice(&self.last_updated.to_be_bytes());
         out
@@ -83,7 +83,11 @@ pub fn lane_bucket(
     route: &BridgeRoute,
     direction: LaneDirection,
 ) -> Option<LaneBucket> {
-    bucket_at(state, &lane_key(route, direction), limit(route, direction)?)
+    Some(bucket_at(
+        state,
+        &lane_key(route, direction),
+        limit(route, direction)?,
+    ))
 }
 
 /// Key of a carried asset's bucket for `direction` on `route`.
@@ -110,11 +114,11 @@ pub fn asset_lane_bucket(
     asset: &CarriedAsset,
     direction: LaneDirection,
 ) -> Option<LaneBucket> {
-    bucket_at(
+    Some(bucket_at(
         state,
         &asset_lane_key(route, asset, direction),
         asset_limit(asset, direction)?,
-    )
+    ))
 }
 
 /// Check `amount` against a carried asset's bucket for `direction` and
@@ -138,7 +142,8 @@ pub fn consume_asset_lane(
     .map(|b| Some((asset_lane_key(route, asset, direction), b.encode())))
 }
 
-fn bucket_at(state: &dyn RouteState, key: &str, limit: LaneRateLimit) -> Option<LaneBucket> {
+/// The bucket under `key`, refilled to now under `limit`.
+pub(super) fn bucket_at(state: &dyn RouteState, key: &str, limit: LaneRateLimit) -> LaneBucket {
     let stored = match state.get(key) {
         Some(b) if b.len() == 24 => {
             let mut t = [0u8; 16];
@@ -149,7 +154,7 @@ fn bucket_at(state: &dyn RouteState, key: &str, limit: LaneRateLimit) -> Option<
         }
         _ => None,
     };
-    Some(LaneBucket::refill(stored, now_secs(state), limit))
+    LaneBucket::refill(stored, now_secs(state), limit)
 }
 
 impl LaneBucket {
@@ -199,7 +204,8 @@ pub fn consume_lane(
         .map(|b| Some((lane_key(route, direction), b.encode())))
 }
 
-fn draw(
+/// `bucket` with `amount` taken out, or why it cannot be.
+pub(super) fn draw(
     bucket: LaneBucket,
     amount: u128,
     direction: LaneDirection,

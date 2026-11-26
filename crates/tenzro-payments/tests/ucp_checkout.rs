@@ -158,6 +158,7 @@ fn sd_jwt(k: &SigningKey, claims: Value) -> String {
     body.insert("_sd_alg".into(), "sha-256".into());
     let mut h = Map::new();
     h.insert("alg".into(), "ES256".into());
+    h.insert("typ".into(), "dc+sd-jwt".into());
     h.insert("jwk".into(), jwk_of(k.verifying_key()));
     let mut out = sign_jws(&h, &Value::Object(body), |m| k.sign(m));
     for d in discs {

@@ -1,3 +1,5 @@
+import { redact, type Shown } from "./redact.js";
+
 const WEI = 10n ** 18n;
 
 /** Whole-token display of a wei amount, up to `places` decimals, grouped by thousands. */
@@ -45,13 +47,13 @@ export function isAddress(s: string): boolean {
   return /^0x([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(s.trim());
 }
 
-/** Turn a transport failure into one plain sentence that says what to do. */
-export function plainError(e: unknown, url: string): string {
+/** Turn a transport failure into one plain sentence that says what to do, with any credential in it masked. */
+export function plainError(e: unknown, url: Shown): Shown {
   const raw = e instanceof Error ? `${e.message} ${(e as { cause?: { code?: string; message?: string } }).cause?.code ?? ""} ${(e as { cause?: { message?: string } }).cause?.message ?? ""}` : String(e);
   if (/ECONNREFUSED|fetch failed|ENOTFOUND|EHOSTUNREACH|ECONNRESET/i.test(raw)) {
-    return `Cannot reach a node at ${url}. Start one, or pass --rpc <url>.`;
+    return redact(`Cannot reach a node at ${url}. Start one, or pass --rpc <url>.`);
   }
-  if (/abort|timeout|timed out/i.test(raw)) return `The node at ${url} did not answer in time.`;
-  if (/401|403|unauthor|forbidden|access/i.test(raw)) return "The node refused this request (access required).";
-  return raw.replace(/\s+/g, " ").trim().slice(0, 160);
+  if (/abort|timeout|timed out/i.test(raw)) return redact(`The node at ${url} did not answer in time.`);
+  if (/401|403|unauthor|forbidden|access/i.test(raw)) return redact("The node refused this request (access required).");
+  return redact(redact(raw).replace(/\s+/g, " ").trim().slice(0, 160));
 }

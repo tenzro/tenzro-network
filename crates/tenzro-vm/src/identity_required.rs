@@ -33,7 +33,7 @@ use crate::VmType;
 use crate::error::{Result, VmError};
 use crate::feature_gate;
 use crate::native::{
-    SELECTOR_IDENTITY_REGISTER, bonded_stake_of, identity_of_wallet, is_identity_revoked,
+    SELECTOR_IDENTITY_REGISTER, bonded_stake_of, identity_of_wallet, identity_revoked_in_force,
     network_param,
 };
 use crate::traits::VmState;
@@ -124,9 +124,9 @@ pub fn check(tx: &VmTransaction, state: &dyn VmState) -> Result<()> {
 
 fn enforce(tx: &VmTransaction, state: &dyn VmState) -> Result<()> {
     match identity_of_wallet(state, &tx.from) {
-        Some(did) if is_identity_revoked(state, &did) => Err(VmError::InvalidTransaction(format!(
-            "{did} was revoked: its account may not transact"
-        ))),
+        Some(did) if identity_revoked_in_force(state, &did) => Err(VmError::InvalidTransaction(
+            format!("{did} was revoked: its account may not transact"),
+        )),
         Some(_) => Ok(()),
         None if bonded_stake_of(state, &tx.from) > 0 => Ok(()),
         None => Err(VmError::InvalidTransaction(format!(
@@ -199,6 +199,43 @@ mod tests {
         assert!(err.to_string().contains("revoked"), "{err}");
     }
 
+    /// A machine registered under a root, with no agent terms, is in no
+    /// index a revocation walks: before the reach rule's epoch its account
+    /// transacts after its root is revoked, and from that epoch it does not.
+    #[test]
+    fn a_revoked_roots_machine_is_refused_from_the_reach_rules_epoch() {
+        use crate::native::{ROOT_REVOCATION_REACH_KEY, begin_block_params};
+        for root in ["did:tenzro:human:aa", "did:tenzro:machine:aa"] {
+            let mut state = StateAdapter::new();
+            set_governed_param_for_test(&mut state, KEY, 0);
+            set_governed_param_for_test(&mut state, ROOT_REVOCATION_REACH_KEY, 5);
+            for (who, did) in [
+                (6, "did:tenzro:machine:aa:m1"),
+                (7, "did:tenzro:machine:bb:m1"),
+            ] {
+                state.set_storage(
+                    &SYSTEM_ADDRESS,
+                    format!("identity_wallet:{}", hex::encode(vec![who; 32])).as_bytes(),
+                    did.as_bytes().to_vec(),
+                );
+            }
+            state.set_storage(
+                &SYSTEM_ADDRESS,
+                format!("identity_revoked:{root}").as_bytes(),
+                vec![1],
+            );
+            begin_block_params(&mut state, 4).unwrap();
+            assert!(check(&tx(6, vec![]), &state).is_ok(), "{root}: dormant");
+            begin_block_params(&mut state, 5).unwrap();
+            let err = check(&tx(6, vec![]), &state).unwrap_err();
+            assert!(err.to_string().contains("revoked"), "{root}: {err}");
+            assert!(
+                check(&tx(7, vec![]), &state).is_ok(),
+                "{root}: a machine under another root is untouched"
+            );
+        }
+    }
+
     #[test]
     fn live_it_still_admits_registration_and_keys() {
         let mut state = StateAdapter::new();
@@ -217,7 +254,7 @@ mod tests {
     fn live_it_lets_a_bonded_validator_through_and_ignores_unsigned_calls() {
         let mut state = StateAdapter::new();
         set_governed_param_for_test(&mut state, KEY, 0);
-        crate::native::staking::add_bond(&mut state, &vec![7u8; 32], 1_000, 0).unwrap();
+        crate::native::staking::add_bond(&mut state, &[7u8; 32], 1_000, 0).unwrap();
         assert!(check(&tx(7, vec![]), &state).is_ok());
         let mut read_only = tx(5, vec![]);
         read_only.signing_digest = None;

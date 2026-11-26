@@ -56,7 +56,13 @@ Signing needs an account with a certificate authority or a cloud signing
 service. That puts one vendor into the trust path of Windows installs, which
 conflicts with the rule of no single-vendor account in the trust root. Until
 that is decided, the MSI ships unsigned and the verifiable chain is the Tenzro
-release signature. If the project decides to sign, the least invasive option is to sign
-only the MSI wrapper (the contained binaries and the archive hashes stay
-untouched) and to state clearly that the cosign signature remains the
-authority.
+release signature. The cosign signature remains the authority either way.
+
+The build is ready for that choice: when TENZRO_WINDOWS_SIGN_CERT and
+TENZRO_WINDOWS_TIMESTAMP_URL name a certificate on the Windows build machine,
+the release build signs the programs before the archive and its digest are made
+(scripts/release/build-windows.ps1), so the archive hashes cover the signed
+programs, and build-msi.sh signs the MSI; each signature is checked against that
+certificate. Unset, nothing is signed, as today. The macOS build has the same
+switches (TENZRO_MACOS_SIGN_IDENTITY, TENZRO_MACOS_INSTALLER_IDENTITY,
+TENZRO_MACOS_NOTARY_PROFILE).

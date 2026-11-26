@@ -14,20 +14,22 @@
 #   N  node infrastructure: p2p networking, mempool and admission, sync and
 #      block storage, RPC and MCP serving, metrics
 #
-# The U (under review) class is gone: the guard rejects it. A few H lines
-# (application layer, three columns, no id) remain only until their removal
-# commit; the guard caps their number and they may only be removed.
-# A new entry must be P, R or N with a decision-log id.
+# Every entry is P, R or N with a decision-log id; the guard rejects any other class.
 
+native affiliated_share P chain-core
 native agent_audit P agent-accounts
+native agent_cap P agent-accounts
 native agent_terms P agent-accounts
 native availability_reward P sla-probes
 native beacon P chain-proofs
+native bond_onramp P settlement
 native bridge P chain-proofs
 native bridge_circuit P chain-proofs
 native bridge_committee P tee-attestation
 native bridge_exit P chain-proofs
 native bridge_watcher P chain-proofs
+native burn_bound_release P chain-core
+native build_attestation P chain-core
 native burn_netting P chain-core
 native compute_claim P settlement
 native da_retention P chain-proofs
@@ -36,15 +38,24 @@ native duty P agent-accounts
 native economy P chain-core
 native evidence P chain-core
 native feature_pause P chain-core
+native first_registration P identity-access
 native funding P chain-core
+native gateway_sets P chain-core
 native hardware_level P chain-core
 native guardian P agent-accounts
+native identity_keys P identity-access
+native identity_caps P identity-access
 native identity_revocation P identity-access
+native identity_succession P identity-access
 native machine_attestation P identity-access
 native inference_fault P model-serving
 native insurance P settlement
 native key_release P tee-attestation
 native meter_bond P agent-accounts
+native native_call P chain-core
+native operator P chain-core
+native operator_cap P chain-core
+native paid_readiness P sla-probes
 native participation P chain-core
 native payment_settlement P settlement
 native payment_settlement/netting P settlement
@@ -52,16 +63,24 @@ native payment_settlement/plan P settlement
 native payment_settlement/recon P settlement
 native payout_gates P chain-core
 native payout_swap P chain-core
+native presence P sla-probes
+native registration_attestation P identity-access
 native registry P chain-core
 native remote_grant P agent-accounts
+native reward_root P chain-core
 native rewards P chain-core
 native role_stake P chain-core
+native role_stake_proptest P chain-core
+native rpc_provider_approval P settlement
+native rpc_provider_leg P settlement
 native security P chain-core
 native settlement_asset P chain-core
 native sla_energy_budget P sla-probes
 native sponsored_bond P chain-core
+native sponsorship_end P chain-core
 native stable_payout P chain-core
 native staking P chain-core
+native storage_class P settlement
 native token P identity-access
 native training_proof R model-serving
 native treasury_remote P agent-accounts
@@ -71,6 +90,7 @@ native validator_cover P settlement
 native validator_machine P chain-core
 native veto_escrow P settlement
 native zk_registry P chain-core
+native zk_verdict P chain-core
 
 selector SELECTOR_ACCOUNT_ID P chain-core
 selector SELECTOR_ACCOUNT_KEYS P chain-core
@@ -133,6 +153,7 @@ selector SELECTOR_LIFT_AGENT_QUARANTINE P agent-accounts
 selector SELECTOR_METER_BOND_POST P agent-accounts
 selector SELECTOR_METER_BOND_WITHDRAW P agent-accounts
 selector SELECTOR_METER_DISPUTE P chain-core
+selector SELECTOR_NATIVE_CALL P chain-core
 selector SELECTOR_ON_INSTALL P chain-core
 selector SELECTOR_ON_UNINSTALL P chain-core
 selector SELECTOR_PAYER_SETTLE P settlement
@@ -224,12 +245,14 @@ rpc sendTransaction P eth-solana-compat
 rpc simulateTransaction P eth-solana-compat
 rpc tenzro_acceptClusterMembership R model-serving
 rpc tenzro_accessChallenge P identity-access
+rpc tenzro_acknowledgeCondition P chain-core
 rpc tenzro_addMachineAccess P identity-access
 rpc tenzro_agentAccounts P agent-accounts
 rpc tenzro_agentAct P agent-accounts
 rpc tenzro_agentNodePqKey P identity-access
 rpc tenzro_agentVoucher P agent-accounts
 rpc tenzro_agentWalletConsent P agent-accounts
+rpc tenzro_approveDeviceCode P identity-access
 rpc tenzro_attestFinalityProof P chain-proofs
 rpc tenzro_auditInferenceChallenge P chain-core
 rpc tenzro_autotuneDecisions R model-serving
@@ -240,7 +263,6 @@ rpc tenzro_buildRemoteAction P agent-accounts
 rpc tenzro_buildReserveAttestationFromPor P tee-attestation
 rpc tenzro_canTransfer P chain-core
 rpc tenzro_chat R model-serving
-rpc tenzro_chatByIntent H
 rpc tenzro_checkDelegateTarget P identity-access
 rpc tenzro_cleanupIdleLocalModelServices R model-serving
 rpc tenzro_closePaymentChannel P settlement
@@ -250,7 +272,7 @@ rpc tenzro_commitTrainingRound R model-serving
 rpc tenzro_computeBondParams P agent-accounts
 rpc tenzro_computeGetClaim P settlement
 rpc tenzro_computeListClaims P settlement
-rpc tenzro_computePriceFeed H
+rpc tenzro_computePriceFeed N node-routing
 rpc tenzro_createCustodyChallenge P chain-core
 rpc tenzro_createPasskeySession P identity-access
 rpc tenzro_createPaymentChallenge P settlement
@@ -271,25 +293,32 @@ rpc tenzro_detect R model-serving
 rpc tenzro_detectTee R tee-attestation
 rpc tenzro_discoverModels R model-serving
 rpc tenzro_enrollPasskey P identity-access
+rpc tenzro_estimateGas P chain-core
 rpc tenzro_eventStatus P chain-core
 rpc tenzro_exchangeToken P identity-access
 rpc tenzro_exportConfig R model-serving
 rpc tenzro_exportEvidencePack P chain-core
 rpc tenzro_fabricProfile R model-serving
+rpc tenzro_fileChallengeFault P chain-core
 rpc tenzro_fileInferenceChallenge P chain-core
 rpc tenzro_finalizeChallenge P chain-core
 rpc tenzro_flagAgentAudit P agent-accounts
+rpc tenzro_fleetHostEvidence R tee-attestation
 rpc tenzro_forecast R model-serving
 rpc tenzro_forgetIdentity P identity-access
 rpc tenzro_get7702Delegation P identity-access
 rpc tenzro_getAccessPolicy P identity-access
 rpc tenzro_getAccountContention P chain-core
 rpc tenzro_getAccountOutflow P identity-access
+rpc tenzro_getAccountSigningKey P chain-core
 rpc tenzro_getAgentAuditCommit P agent-accounts
 rpc tenzro_getAgentBond P agent-accounts
 rpc tenzro_getAgentGrantProof P agent-accounts
 rpc tenzro_getAgentQuarantine P agent-accounts
 rpc tenzro_getAgentTerms P agent-accounts
+rpc tenzro_getAgentTermsCredential P agent-accounts
+rpc tenzro_getAppTransportInfo N app-transport
+rpc tenzro_getAppTransportUsage N app-transport
 rpc tenzro_getAttestationLog P tee-attestation
 rpc tenzro_getBalance P chain-core
 rpc tenzro_getBeacon P chain-proofs
@@ -301,8 +330,8 @@ rpc tenzro_getBridgeOutbound P chain-proofs
 rpc tenzro_getBridgeOutflow P chain-proofs
 rpc tenzro_getBridgeRoute P chain-proofs
 rpc tenzro_getBurnRateConfig P chain-core
-rpc tenzro_getBurnRateRecommendation H
 rpc tenzro_getCatalogEntry P chain-core
+rpc tenzro_getChallengeInputs P chain-core
 rpc tenzro_getCheckpointCertificate P chain-proofs
 rpc tenzro_getCommittee R tee-attestation
 rpc tenzro_getCompactCertificate P chain-proofs
@@ -361,7 +390,7 @@ rpc tenzro_getPlanDecision P settlement
 rpc tenzro_getPolicy P identity-access
 rpc tenzro_getPriceCard R model-serving
 rpc tenzro_getProposal P chain-core
-rpc tenzro_getProviderPricing H
+rpc tenzro_getProviderPricing R model-serving
 rpc tenzro_getProviderScorecard P chain-core
 rpc tenzro_getProviderStats P chain-core
 rpc tenzro_getReconciliation P settlement
@@ -372,7 +401,8 @@ rpc tenzro_getRewardEpoch P chain-core
 rpc tenzro_getRewardSchedule P chain-core
 rpc tenzro_getRole P chain-core
 rpc tenzro_getRoleStakes P chain-core
-rpc tenzro_getRouterMetrics H
+rpc tenzro_getRouterMetrics N node-routing
+rpc tenzro_getRpcProviderLeg P settlement
 rpc tenzro_getSealedModel R tee-attestation
 rpc tenzro_getSettlementPreference P settlement
 rpc tenzro_getSigningPayload P chain-core
@@ -381,6 +411,7 @@ rpc tenzro_getSponsoredBond P chain-core
 rpc tenzro_getStateProof P chain-proofs
 rpc tenzro_getStateRoot P chain-proofs
 rpc tenzro_getStatusList P trust-records
+rpc tenzro_getStorageHoldingReceipt R model-serving
 rpc tenzro_getSupplyMetrics P chain-core
 rpc tenzro_getTeeAttestation R tee-attestation
 rpc tenzro_getTerritoryPolicy R model-serving
@@ -406,6 +437,7 @@ rpc tenzro_imageEmbed R model-serving
 rpc tenzro_imageTextSimilarity R model-serving
 rpc tenzro_inferenceRequest R model-serving
 rpc tenzro_installSealedModel R tee-attestation
+rpc tenzro_installUpdate N release-signalling
 rpc tenzro_introspectToken P identity-access
 rpc tenzro_iroh_fetchBlob R blob-transport
 rpc tenzro_iroh_getEndpointId R blob-transport
@@ -427,6 +459,7 @@ rpc tenzro_listBridgeRoutes P chain-proofs
 rpc tenzro_listCatalog R model-serving
 rpc tenzro_listCircuits P chain-core
 rpc tenzro_listComputeBonds P agent-accounts
+rpc tenzro_listConditions P chain-core
 rpc tenzro_listDecisionCatalog R model-serving
 rpc tenzro_listDetectionCatalog R model-serving
 rpc tenzro_listDuties P chain-core
@@ -446,6 +479,7 @@ rpc tenzro_listMismatches P chain-core
 rpc tenzro_listModelEndpoints R model-serving
 rpc tenzro_listModels R model-serving
 rpc tenzro_listNetworkLegs P settlement
+rpc tenzro_listPairedDevices P identity-access
 rpc tenzro_listPayments P settlement
 rpc tenzro_listPeers P chain-core
 rpc tenzro_listPlans P settlement
@@ -458,9 +492,11 @@ rpc tenzro_listRewardCoupons P chain-core
 rpc tenzro_listRoleEndpoints P chain-core
 rpc tenzro_listRpcMethods P chain-core
 rpc tenzro_listSealedModels R tee-attestation
+rpc tenzro_listSeatDuties P chain-core
 rpc tenzro_listSegmentationCatalog R model-serving
 rpc tenzro_listSettlements P settlement
 rpc tenzro_listSnapshots P chain-proofs
+rpc tenzro_listStorageProviders R model-serving
 rpc tenzro_listTeeProviders R tee-attestation
 rpc tenzro_listTextEmbeddingCatalog R model-serving
 rpc tenzro_listTextSegmentationCatalog R model-serving
@@ -515,10 +551,12 @@ rpc tenzro_onboardAutonomousAgent P agent-accounts
 rpc tenzro_onboardDelegatedAgent P agent-accounts
 rpc tenzro_onboardHuman P identity-access
 rpc tenzro_openPaymentChannel P settlement
+rpc tenzro_pairDevice P identity-access
 rpc tenzro_peerCount R model-serving
 rpc tenzro_permit2NonceUsed P settlement
 rpc tenzro_permit2VerifyAndConsume P settlement
 rpc tenzro_pinModel R model-serving
+rpc tenzro_pollDeviceCode P identity-access
 rpc tenzro_prefixProbe R model-serving
 rpc tenzro_previewAccess P identity-access
 rpc tenzro_previewServe P chain-core
@@ -529,17 +567,19 @@ rpc tenzro_pruneModelRegistry R model-serving
 rpc tenzro_publishTeeMeasurement R tee-attestation
 rpc tenzro_queryEvents P chain-core
 rpc tenzro_quoteBridgeFeeInTnzo P settlement
-rpc tenzro_quoteInference H
+rpc tenzro_quoteInference N node-routing
 rpc tenzro_quotePayment P settlement
 rpc tenzro_readPorReserve P chain-core
 rpc tenzro_recordAgentAuditSession P agent-accounts
-rpc tenzro_recordRouteOutcome H
+rpc tenzro_recordExecutionReceipt P settlement
 rpc tenzro_redeemSealedDelivery P tee-attestation
+rpc tenzro_reexecuteChallenge P chain-core
 rpc tenzro_refreshToken P identity-access
 rpc tenzro_registerIdentity P identity-access
 rpc tenzro_registerKeyRelease P tee-attestation
 rpc tenzro_registerMachineIdentity P identity-access
 rpc tenzro_registerModelEndpoint R model-serving
+rpc tenzro_requestDeviceCode P identity-access
 rpc tenzro_requestKeyRelease P tee-attestation
 rpc tenzro_requestRemoteGrant P agent-accounts
 rpc tenzro_rerank R model-serving
@@ -547,6 +587,8 @@ rpc tenzro_resolveAgentKey P agent-accounts
 rpc tenzro_resolveCredential P identity-access
 rpc tenzro_resolveDidDocument P identity-access
 rpc tenzro_resolveIdentity P identity-access
+rpc tenzro_resolvePaymentIntent P settlement
+rpc tenzro_restartNode P chain-core
 rpc tenzro_retryNetworkLeg P settlement
 rpc tenzro_revealChallengeVote P chain-core
 rpc tenzro_revokeAccessToken P identity-access
@@ -556,18 +598,17 @@ rpc tenzro_revokeJwt P identity-access
 rpc tenzro_revokeKeyRelease P tee-attestation
 rpc tenzro_revokeMachineAccess P identity-access
 rpc tenzro_rotateIdentityToPq P identity-access
-rpc tenzro_routeDifficultyStats H
-rpc tenzro_routeIntent H
 rpc tenzro_scanModelFiles R model-serving
 rpc tenzro_sealModel R model-serving
 rpc tenzro_segment R model-serving
 rpc tenzro_sendRawTransaction P chain-core
+rpc tenzro_sendZkProof P chain-proofs
 rpc tenzro_serveModel R model-serving
 rpc tenzro_setAccessPolicy P identity-access
 rpc tenzro_setClusterMembership R model-serving
 rpc tenzro_setDraining R model-serving
 rpc tenzro_setNodeVisibility R model-serving
-rpc tenzro_setProviderPricing H
+rpc tenzro_setProviderPricing R model-serving
 rpc tenzro_setRole P chain-core
 rpc tenzro_setSettlementPreference P settlement
 rpc tenzro_settle P settlement
@@ -578,6 +619,7 @@ rpc tenzro_signChallengeVote P identity-access
 rpc tenzro_signRemoteAction P agent-accounts
 rpc tenzro_signRemoteChannelVoucher P settlement
 rpc tenzro_signalUpgradeReady P identity-access
+rpc tenzro_slaGetEnergy P sla-probes
 rpc tenzro_slaGetParams P sla-probes
 rpc tenzro_slaIssueProbe P sla-probes
 rpc tenzro_slaListOutstandingProbes P sla-probes
@@ -587,9 +629,10 @@ rpc tenzro_sponsoredInference R model-serving
 rpc tenzro_standbyQuote R model-serving
 rpc tenzro_stopModel R model-serving
 rpc tenzro_storageRetrieveObject R model-serving
-rpc tenzro_storageSetPricing H
+rpc tenzro_storageSetPricing R model-serving
 rpc tenzro_storageStatus R model-serving
 rpc tenzro_storageStoreObject R model-serving
+rpc tenzro_submitApproval P identity-access
 rpc tenzro_submitReconciliation P settlement
 rpc tenzro_submitReserveAttestation P tee-attestation
 rpc tenzro_submitTrustRecord P trust-records
@@ -619,6 +662,7 @@ rpc tenzro_unloadTextSegmentationModel R model-serving
 rpc tenzro_unloadTrainingModel R model-serving
 rpc tenzro_unloadVideoModel R model-serving
 rpc tenzro_unloadVisionModel R model-serving
+rpc tenzro_unpairDevice P identity-access
 rpc tenzro_unpinModel R model-serving
 rpc tenzro_unregisterModelEndpoint R model-serving
 rpc tenzro_updateAgentTerms P agent-accounts
@@ -636,6 +680,7 @@ rpc tenzro_verifyEventProof P chain-proofs
 rpc tenzro_verifyEvidence P chain-core
 rpc tenzro_verifyInferenceCommitment P chain-core
 rpc tenzro_verifyInferenceReceipt P chain-core
+rpc tenzro_verifyJurisdictionReceipt P chain-core
 rpc tenzro_verifyKyaCredential P kya-credential
 rpc tenzro_verifyModelFiles R model-serving
 rpc tenzro_verifyNodeDidDocument P chain-core

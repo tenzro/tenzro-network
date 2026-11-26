@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+The version follows the Tenzro release; no change in behaviour.
+
 ## 0.1.1
 
 First release.

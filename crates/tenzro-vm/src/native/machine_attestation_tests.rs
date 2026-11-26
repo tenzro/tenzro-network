@@ -291,7 +291,8 @@ async fn the_attach_transaction_executes_under_its_selector() {
         0,
         VmType::Tenzro,
         1337,
-    );
+    )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
     let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
     assert!(result.success, "{result:?}");
     assert!(

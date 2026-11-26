@@ -57,12 +57,23 @@ pub struct ConsensusConfig {
     /// unexecutable-for-now spam.
     pub mempool_max_per_sender: usize,
 
+    /// Maximum number of pending transactions one fee payer may pay for in
+    /// the mempool at once (default: 64). Its balance must also cover the
+    /// gas of all of them together. A configuration written before this
+    /// limit existed reads as the default.
+    #[serde(default = "default_mempool_max_per_fee_payer")]
+    pub mempool_max_per_fee_payer: usize,
+
     /// Transaction TTL in seconds (default: 600)
     pub transaction_ttl_seconds: u64,
     /// The scheme of this validator's session keys: its hardware key's
     /// scheme, which the node sets from its consensus key scheme.
     #[serde(default)]
     pub session_key_scheme: crate::validator_key::SignatureScheme,
+}
+
+fn default_mempool_max_per_fee_payer() -> usize {
+    64
 }
 
 impl Default for ConsensusConfig {
@@ -78,6 +89,7 @@ impl Default for ConsensusConfig {
             mempool_size_limit: 100 * 1024 * 1024,
             mempool_max_transactions: 10_000,
             mempool_max_per_sender: 64,
+            mempool_max_per_fee_payer: default_mempool_max_per_fee_payer(),
             transaction_ttl_seconds: 600,
             session_key_scheme: Default::default(),
         }
@@ -107,6 +119,7 @@ impl ConsensusConfig {
             handover_confirmations: time.handover_confirmations,
             fetch_retry_ms: 250,
             idle_round_interval_ms: time.idle_round_interval_ms.max(self.min_round_interval_ms),
+            whole_member_fault_bound_from: u64::MAX,
         }
     }
 }

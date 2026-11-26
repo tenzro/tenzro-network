@@ -179,6 +179,7 @@ pub struct NodeConfig {
     web_addr: String,                    // [default: 127.0.0.1:8080]
     mcp_addr: String,                    // [default: 127.0.0.1:3001]
     a2a_addr: String,                    // [default: 127.0.0.1:3002]
+    paired_device_addr: String,          // [default: 0.0.0.0:8543] paired devices, private networks only
     external_rpc_addr: Option<String>,   // public https URL of the operator's edge
     external_mcp_addr: Option<String>,
     external_a2a_addr: Option<String>,

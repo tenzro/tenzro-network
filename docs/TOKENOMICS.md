@@ -1,10 +1,8 @@
 # TNZO Token Economics
 
-## Version 1.2
-
 TNZO is the economic unit that keeps Tenzro Network running. It prices and settles work on chain, it is the stake operators bond and are slashed in, it pays gas, and it funds the network's upkeep through fees and the treasury. The supply is fixed at one billion TNZO, all allocated at genesis. Nothing mints TNZO after genesis and there is no inflation: rewards are paid from a pool genesis already funded, and burns only reduce the supply.
 
-Tenzro is an open network for the machine economy: machines from small edge devices to the largest GPU servers sell AI work, and agents and apps buy it. The token model serves that economy rather than the other way round. Providers, validators and creators are paid for paid, verified work and for nothing else; nothing is paid for holding, volume, sign-ups or engagement. End users do not need to hold TNZO: protocol fees are set in USD terms, and the apps and platforms that serve users pay on their behalf, in what those users already use.
+Tenzro is the demand and settlement layer for AI work: it settles compute of every kind, with AI inference, compute, storage and data served as node roles, for the operators who already run the machines and the agents and apps that buy from them. It is not itself a GPU provider. The token model serves that economy rather than the other way round. Providers, validators and creators are paid for paid, verified work and for nothing else; nothing is paid for holding, volume, sign-ups or engagement. Operators set their own rate cards; the network sets no provider price. End users do not need to hold TNZO: protocol fees are priced in USD, and the apps and platforms that serve users pay on their behalf, in TNZO or in a settlement asset governance has listed (section 4).
 
 This document specifies the economic model, the rationale behind each parameter, and how the pieces compose, from the bootstrap through progressive decentralization. It states rules and governed parameters; it makes no forecast of any return.
 
@@ -25,15 +23,14 @@ This document specifies the economic model, the rationale behind each parameter,
 11. [Bridge fee model](#11-bridge-fee-model)
 12. [Treasury](#12-treasury)
 13. [Bootstrap activity](#13-bootstrap-activity)
-13c. [Grants and funding proposals](#13c-grants-and-funding-proposals)
-13d. [Vesting](#13d-vesting)
+    13c. [Grants and funding proposals](#13c-grants-and-funding-proposals)
+    13d. [Vesting](#13d-vesting)
 14. [Agent-economy specific surfaces](#14-agent-economy-specific-surfaces)
 15. [Network duties](#15-network-duties)
-15b. [Economic security](#15b-economic-security)
+    15b. [Economic security](#15b-economic-security)
 16. [Governance economics](#16-governance-economics)
 17. [Sustainability](#17-sustainability)
 18. [Simulations](#18-simulations)
-19. [Where the agentic decade is going](#19-where-the-agentic-decade-is-going)
 
 ---
 
@@ -42,13 +39,13 @@ This document specifies the economic model, the rationale behind each parameter,
 TNZO is the primary utility token of Tenzro Network. It is the single asset every participant — humans, agents, machines — uses to pay transaction fees, access network resources, and vote in governance. The point of the design is simple: a participant on Tenzro does not have to juggle a dozen tokens to get things done. One token covers every protocol-layer action.
 
 - **Gas.** Every transaction pays gas in TNZO. No separate fee token.
-- **Resource access.** Resources on Tenzro are everything participants can offer or consume — agents, skills, data, workflows, models, compute, apps, tools, TEE attestation, storage, generative image and video rendering, micropayment channels, cross-chain messages, marketplace templates. Every paid resource settles its protocol-layer commission in TNZO. Counterparties can still settle the underlying payment in any asset they agree on (stablecoins, native chain assets, off-chain rails); TNZO is the protocol's denominator.
+- **Resource access.** Resources on Tenzro are everything participants can offer or consume: models, compute, storage, data, TEE attestation, agents, apps, tools, payment channels and cross-chain messages. Every paid resource pays the protocol's settlement fee. A payment in TNZO pays it in TNZO; a payment in a settlement asset governance has listed pays it in that asset (fee in kind, below).
 - **Governance.** Voting weight is TNZO-stake-weighted. A single asset is the basis for proposal bonds, voting, delegation, and constitutional decisions.
-- **Bonds and security.** Validators, providers (model, TEE, storage, compute, data), bridge nodes, marketplace agents, and template creators bond TNZO. The bond aligns the participant with honest behavior; misbehavior is slashed.
+- **Bonds and security.** Validators, providers (model, TEE, storage, compute), RPC operators, rail attestors (who also sit on bridge route committees), wallet providers, catalog publishers and edge operators bond TNZO, and delegated agents post agent bonds. The bond aligns the participant with honest behavior; misbehavior is slashed.
 
-Users and apps are not asked to carry the token. Fees can be covered at the application layer: a platform or app that buys AI for its users pays the network's charges itself and prices the service to them on its own terms, so a user does not need TNZO just to use it; protocol fees are set in micro-USD and charged in TNZO at the rate in force (see [ECONOMICS.md](ECONOMICS.md)), so the network's charges do not drift with the token.
+Users and apps are not asked to carry the token. Protocol fees are priced in USD, the governed unit of account (`UnitOfAccount`, the dollar at launch), and paid in TNZO at the in-network TNZO/USD rate: during the preview the governance-set rate `fees.tnzo_usd_nano` (`fees.usd_rate_mode` 0); in validator mode (1) the stake-weighted median of validator reports, banded and change-capped. Prices outside the chain are evidence for governance, never an input to the rate (see [ECONOMICS.md](ECONOMICS.md)), so the network's charges do not drift with the token. A platform or app can also pay in a listed stablecoin and never hold or price TNZO: the settlement fee is collected in that asset, and its burn share is netted against the epoch's reward issuance, which burns the TNZO equivalent from the rewards pool (section 5).
 
-TNZO does not replace user-facing stablecoins. AP2 cart settlements, x402 USDC flows, Tempo stablecoin transfers, and Stripe Payment Intents all flow in their own assets. TNZO is the protocol-layer denominator that makes the rails work: gas, the network's share of a settled payment, bond, and governance vote.
+TNZO does not replace user-facing stablecoins. x402 and MPP payments, AP2 mandates and stablecoin settlement flow in their own assets. TNZO stays underneath for gas, stake, security and governance votes.
 
 ---
 
@@ -56,15 +53,15 @@ TNZO does not replace user-facing stablecoins. AP2 cart settlements, x402 USDC f
 
 ### Parameters
 
-| Parameter | Value | Notes |
-|---|---|---|
-| Token name | TNZO | |
-| Symbol | TNZO | |
-| Decimals | 18 | u128 arithmetic throughout |
-| Maximum supply | 1,000,000,000 TNZO | Fixed cap |
-| Smallest unit | 10⁻¹⁸ TNZO | One wei-equivalent |
-| Chain ID | set by each network's genesis | 13380 on the preview network; `eth_chainId` returns it |
-| Network-rewards pool | 400,000,000 TNZO | Genesis-funded account; rewards are transfers out of it |
+| Parameter            | Value                         | Notes                                                   |
+| -------------------- | ----------------------------- | ------------------------------------------------------- |
+| Token name           | TNZO                          |                                                         |
+| Symbol               | TNZO                          |                                                         |
+| Decimals             | 18                            | u128 arithmetic throughout                              |
+| Maximum supply       | 1,000,000,000 TNZO            | Fixed cap                                               |
+| Smallest unit        | 10⁻¹⁸ TNZO                    | One wei-equivalent                                      |
+| Chain ID             | set by each network's genesis | 13380 on the preview network; `eth_chainId` returns it  |
+| Network-rewards pool | 400,000,000 TNZO              | Genesis-funded account; rewards are transfers out of it |
 
 Supply is fixed. Total supply never exceeds the maximum of 1,000,000,000 TNZO. Genesis allocates to the accounts it names, including the network-rewards pool account (`tenzro_token::rewards_pool_address()`, 400M TNZO); genesis refuses a configuration whose allocations total more than 1,000,000,000 TNZO (`tnzo::check_genesis_supply`); it does not require the allocations to total exactly that amount. There is no protocol-level mint authority beyond the genesis distribution: reward claims and vesting releases are transfers out of the pool and the vesting escrow account (see section 7), not mints. The only thing that changes total supply after genesis is burning (section 5), plus bridge mint and burn of tokens that crossed chains.
 
@@ -78,25 +75,25 @@ Every block is held to a value rule: the balances each transaction touches chang
 
 **The way to earn TNZO is to contribute value to the network.** This is open-ended by design. The protocol does not enumerate every legitimate path to earnings, and the list below is examples rather than a closed set — anyone finding a new way to create value for the network can earn from that activity. Representative paths include:
 
-| Path | How value flows back as TNZO |
-|---|---|
-| Running a validator | Bond 10,000 TNZO and run a node that meets the resource profile (hardware, bandwidth, uptime, optional TEE attestation) to order blocks and sign checkpoints with a hardware-held consensus key. Voting power is stake-weighted; earn reward coupons for the consensus work performed, and governance weight. Optional TEE attestation is a reputation signal and does not change leader selection. Only validators carry consensus weight; the service roles in the next row bond for their own rung without voting (section 7) |
-| Serving compute or hardware | Bond for a service rung — model provider, TEE provider, compute provider, storage provider, rail attestor, wallet provider or catalog publisher — and earn per-call / per-token / per-service / per-attestation / per-byte fees, plus the provider class reward multiplier on staking rewards. Compute and storage bonds scale with the capacity pledged (section 7) |
-| Operating an RPC provider | Run a public or gated RPC endpoint that brokers access to network resources (external chains, regulated bridge routes, KYC-tier-gated services, admin-gated cross-chain mint/burn). Admit tenants by DID in the node's access policy, broker their upstream credentials keyed by DID, expose per-tenant analytics; earn from tenant access fees, per-call fees, and commission on the underlying flow routed through your endpoint |
-| Building and running apps on Tenzro | Run an application that drives transactions through the network — settlements, payments, inference billing, marketplace flows; earn from the underlying activity (provider fees, marketplace commissions, agent template invocations, AP2 / MPP / x402 settlement flow your app routes) |
-| Running agents that do useful work | Deploy autonomous or delegated agents that fulfill inference requests, payment routing, cross-chain settlement, capital intent, or any other paid service; earn per fulfilled task plus reputation-driven routing share |
-| Building tools, skills, and integrations | Publish MCP tools, A2A skills, agent templates, libraries, SDKs, bridges, oracle integrations, payment-rail adapters, and other ecosystem components; earn template invocation commissions and tool / skill usage fees; ecosystem grants are a separate, governance-approved program (below) |
-| Data and content contributions | Contribute to skills, tools, model catalogs, training datasets, knowledge bases, reference data, or any other public resource the network consumes; earn through usage fees, or through governance-approved contribution grants (below) |
-| Protocol and infrastructure work | Build the protocol itself, audit code, write core integrations, write documentation, run security research, operate public infrastructure; receive grants from the public treasury through the Tenzro Foundation's governance-approved allocation process |
-| Community participation | Participate in governance votes, contribute to community channels and learning resources, file useful bug reports; work of this kind is paid only through governance-approved grants, milestone-based or retroactive, for verified work. There are no airdrops, points, referral, engagement or volume rewards |
+| Path                                     | How value flows back as TNZO                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Running a validator                      | Bond 10,000 TNZO and run a node with a hardware-held consensus key (TPM 2.0 or Secure Enclave) to order blocks and sign checkpoints. While `validator.admission_approval` is 1, as at launch, an account joins the set only once an enacted `ApproveValidators` proposal names it; governance opens admission by changing that parameter. Voting power is stake-weighted; earn reward coupons for the consensus work performed, and governance weight. Optional TEE attestation is a reputation signal and does not change leader selection. Only validators carry consensus weight; the service roles in the next row bond for their own rung without voting (section 7) |
+| Serving compute or hardware              | Bond for a service rung — model provider, TEE provider, compute provider, storage provider, rail attestor, wallet provider or catalog publisher — and earn per-call / per-token / per-service / per-attestation / per-byte fees at the rates on the operator's own rate card, plus provider reward coupons weighted by the outside cost of the settlements it was paid for. Nothing is paid on stake. Compute and storage bonds scale with the capacity pledged (section 7)                                                                                                                                                                                               |
+| Operating an RPC provider                | Run a public or gated RPC endpoint for the network and for the external chains you broker. Admit tenants by DID in the node's access policy and broker their upstream credentials keyed by DID; earn for the traffic served: tenant access and per-call fees on your own terms, and provider reward coupons for RPC traffic paid to your bonded account (section 7)                                                                                                                                                                                                                                 |
+| Building and running apps on Tenzro      | Run an application that drives paid work through the network; earn from your own users on your own terms, and, when payers attribute their settlements to your app's DID (`CallAttribution`), the ecosystem reward weight of those settlements and any governed creator royalty (section 7)                                                                                                                                                                                                                                                                                                                                                                               |
+| Running agents that do useful work       | Deploy delegated agents, each owned by a person's passkey or a machine's hardware key, that do paid work; earn what the buyer pays per task, and the ecosystem reward weight of settlements payers attribute to the agent's DID                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Building tools, skills, and integrations | Publish MCP tools, A2A skills, libraries, SDKs, oracle integrations, payment-rail adapters, and other ecosystem components; earn usage fees on your own terms and, when payers attribute settlements to a tool's DID, their ecosystem reward weight and any governed creator royalty; ecosystem grants are a separate, governance-approved program (below)                                                                                                                                                                                                                                                                                                                |
+| Data and content contributions           | Contribute to skills, tools, model catalogs, training datasets, knowledge bases, reference data, or any other public resource the network consumes; earn through usage fees, or through governance-approved contribution grants (below)                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Protocol and infrastructure work         | Build the protocol itself, audit code, write core integrations, write documentation, run security research, operate public infrastructure; receive grants from the public treasury through enacted governance proposals                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Community participation                  | Participate in governance votes, contribute to community channels and learning resources, file useful bug reports; work of this kind is paid only through governance-approved grants, milestone-based or retroactive, for verified work. There are no airdrops, points, referral, engagement or volume rewards                                                                                                                                                                                                                                                                                                                                                            |
 
-Beyond the above, the Tenzro Foundation runs a public, governance-controlled grant program. Grants are separate from network rewards. Network rewards pay only for verified work on the network, out of the genesis-funded rewards pool (section 7). Grants come from the public treasury, never from the rewards pool, and fund work governance approves — research, ecosystem development, public-good infrastructure, regional onboarding, education, security audits, integrations, and anything else governance approves as serving the network. The grant pool sits in the public treasury (section 12); allocation is on-chain and auditable.
+Beyond the above, the public treasury funds a governance-controlled grant program. Grants are separate from network rewards. Network rewards pay only for verified work on the network, out of the genesis-funded rewards pool (section 7). Grants come from the public treasury, never from the rewards pool, and fund work governance approves — research, ecosystem development, public-good infrastructure, regional onboarding, education, security audits, integrations, and anything else governance approves as serving the network. The grant pool sits in the public treasury (section 12); allocation is on-chain and auditable.
 
 There are no privileged token-holder classes and no lock-ups for special parties, because there are no special parties.
 
 ### Circulating supply
 
-Circulating supply at any point is the genesis distribution outside the rewards pool and the treasury, plus rewards paid out of the pool, minus the cumulative burn (section 5). The full supply does not enter circulation at genesis; participation-class allocations unlock as participants earn them (run a validator → earn validator rewards; serve inference → earn provider settlement; build a template → earn invocation commissions).
+Circulating supply at any point is the genesis distribution outside the rewards pool and the treasury, plus rewards paid out of the pool, minus the cumulative burn (section 5). The full supply does not enter circulation at genesis; participation-class allocations unlock as participants earn them (run a validator → earn validator rewards; serve inference → earn provider settlement; build an app or tool that payers attribute their settlements to → earn ecosystem rewards).
 
 The treasury (the treasury part of each settlement fee, and the governed treasury leg of provider payments where governance sets one) accumulates a public, on-chain balance that governance disburses through grants and ecosystem incentives. Treasury holdings are not circulating; they enter circulation only when governance approves a specific disbursement.
 
@@ -120,9 +117,9 @@ TNZO is needed for five things, each of which grows with use of the network:
 
 **On-chain settlement fee.** Every settlement the chain carries out pays `fees.settlement_fee_bps` of the value it pays out (10 bps at genesis, never below the governed USD minimum), half of it burned at genesis (`fees.settlement_fee_burn_bps`) and the rest to the treasury. A payment to a bonded provider may also carry the governed treasury leg of its class of work (section 7), 0 at genesis.
 
-**Node revenue split.** Every payment routed through Tenzro's settlement layer (inference billing, TEE service payment, agent-to-agent settlement, AP2 cart, MPP receipt, x402 verification, micropayment channel close) is divided once, by the node's economic mode: a private node keeps it, a public validating node shares 10% with the treasury, and a public node that does not validate pays 10% to the treasury and 10% to the RPC provider validating on its behalf. See [ECONOMICS.md](ECONOMICS.md).
+**Settled payments.** Every payment routed through Tenzro's settlement layer (inference billing, TEE service payment, agent-to-agent settlement, AP2 cart, MPP receipt, x402 verification, micropayment channel close) settles once and is not divided by node mode: the payee receives it, less the chain's settlement fee and any governed treasury leg. See [ECONOMICS.md](ECONOMICS.md).
 
-**Bonds.** Every provider class bonds TNZO. Validators, model providers, TEE providers, storage providers, bridge nodes, marketplace agents — all bond. The bond aligns the provider with honest behavior. Misbehavior is slashed against the bond.
+**Bonds.** Every provider class bonds TNZO. Validators, RPC operators, rail attestors, model, TEE, compute and storage providers, wallet providers, catalog publishers and edge operators all bond, and delegated agents post agent bonds. The bond aligns the provider with honest behavior. Misbehavior is slashed against the bond.
 
 **Governance.** Voting weight is stake-weighted (see section 16). Proposers post a proposal bond; voters lock TNZO for the voting window.
 
@@ -136,17 +133,17 @@ Tenzro implements two tiers of fees: gas (infrastructure layer) and the network'
 
 ### Tier 1 — Gas fees (EIP-1559)
 
-| Parameter | Value |
-|---|---|
-| Max gas per block | 30,000,000 |
-| Target gas per block | 15,000,000 (50% of max) |
-| Initial base fee | 1 Gwei (10⁹ wei-equivalent) |
-| Min base fee | 0.1 Gwei |
-| Max base fee | 1,000 Gwei |
-| Elasticity multiplier | 2× |
-| Base fee change rate | ±12.5% per block (denominator 8) |
-| Max contract code size | 24,576 bytes |
-| Max call depth | 1,024 |
+| Parameter              | Value                            |
+| ---------------------- | -------------------------------- |
+| Max gas per block      | 30,000,000                       |
+| Target gas per block   | 15,000,000 (50% of max)          |
+| Initial base fee       | 1 Gwei (10⁹ wei-equivalent)      |
+| Min base fee           | 0.1 Gwei                         |
+| Max base fee           | 1,000 Gwei                       |
+| Elasticity multiplier  | 2×                               |
+| Base fee change rate   | ±12.5% per block (denominator 8) |
+| Max contract code size | 24,576 bytes                     |
+| Max call depth         | 1,024                            |
 
 Base fee adjustment formula:
 
@@ -171,48 +168,32 @@ Fee split, per block, from the fees actually paid:
 
 Priority fee suggestions by urgency:
 
-| Urgency | Priority fee |
-|---|---|
-| Low | 10% of base fee |
-| Medium | 20% of base fee |
-| High | 50% of base fee |
-| Urgent | 100% of base fee |
+| Urgency | Priority fee     |
+| ------- | ---------------- |
+| Low     | 10% of base fee  |
+| Medium  | 20% of base fee  |
+| High    | 50% of base fee  |
+| Urgent  | 100% of base fee |
 
-### Tier 2 — Network commission
+### A fee payer
 
-The network's share of a service payment is **not a separate fee taken on top of
-the split** — it *is* the non-operator part of the split. There is one division,
-made once, described in full in [ECONOMICS.md](ECONOMICS.md).
+Once `feature.fee_payer.activation_epoch` is live, a native transaction may name another account that pays its fee. Until then nothing below applies: the memo is a plain memo and the sender pays.
 
-| Mode | Operator | RPC provider | Treasury |
-|---|---:|---:|---:|
-| Private (not advertised) | 100% | — | — |
-| Public, validating | 90% | — | 10% |
-| Public, not validating | 80% | 10% | 10% |
+- **How it is named.** The payer's consent travels in the transaction's memo: the prefix `tenzro-fee-payer-1:`, then the payer's account, its P-256 public key, its P-256 signature and its ML-DSA-65 signature, each in hex and separated by `:`. The transaction's own encoding does not change. The memo is part of the transaction hash, so the sender's signature covers the payer and its consent.
+- **What the payer signs.** A digest of the whole body (chain id, sender, recipient, nonce, gas limit, gas price, timestamp, expiry and action) and its own account, under its own signature context (`tenzro/tx/fee-payer`). The payer signs first and the sender second. A consent therefore pays for that one transaction of that sender on that chain, up to `gas_limit × gas_price`, until it expires, and for nothing else.
+- **Who may name one.** Any native transaction whose sender signs its memo. A privileged action (governance, agent Terms and kill switch, issuer powers over a token) is signed over a typed preimage with no memo, an external EVM or Solana wallet's transaction over its raw bytes, and a validator's fee-free record owes no fee: the memo of these is not read. A contract deployment runs in the EVM and names none.
+- **Execution.** Before the transaction runs, `gas_limit × gas_price` moves from the payer to the sender; what the gas did not use moves back when it has run. The sender's own balance is never touched for gas, and a sender that sends any of the advance on is reverted. A reverted transaction spends the sender's nonce and its fee is still taken from the payer. A payer that cannot cover the advance pays what it holds and nothing runs. Resource fees beyond gas are also the payer's.
+- **Admission.** A node admits the transaction on signature, balance and cap checks alone; no code of the payer runs. A memo that starts with the prefix and is not a well-formed consent is refused, never read as a plain memo. The payer's balance must cover the gas of every pooled transaction that names it, and one payer pays for at most `mempool_max_per_fee_payer` pooled transactions (64 by default).
+- **Both signature legs.** A consent spends the payer's balance, so it is held to the rule a transaction signature of the payer's account is held to: the ML-DSA-65 leg is required and verifies against the key the account enrolled. An account that has enrolled none pays for nobody.
+- **Size.** A consent is about 7 KB of memo (the ML-DSA-65 signature is 3.3 KB, in hex). The ledger sets no memo limit: a memo is bounded only by what the pool and the network accept for a whole transaction. The wallet library keeps its 1 KB limit for ordinary memos and accepts a well-formed consent up to 8,000 bytes.
+- **Submitting.** `tenzro_getSigningPayload` and `tenzro_sendRawTransaction` take `memo`. The Rust SDK makes the consent with `TypedTxClient::fee_payer_consent` and sends with `TypedTxClient::send_with_fee_payer`.
 
-```
-// The complete division. Nothing downstream takes a further cut — the
-// settlement engine's own network fee is zero on this path.
-treasury_amount     = (amount × treasury_bps) / 10,000
-rpc_provider_amount = (amount × rpc_provider_bps) / 10,000   // delegated mode only
-operator_amount     = amount − treasury_amount − rpc_provider_amount
-```
+### Tier 2 — Settlement fee and treasury legs
 
-The operator's share is computed by subtraction, so the shares sum to exactly
-the payment and the rounding dust reaches the majority party rather than
-vanishing.
-
-Every rate is governance-settable as one `EconomicPolicy` block, and the
-operator must always hold a strict majority — enforced at construction, and
-enforced against governance too. Comparable take rates: traditional cloud
-(5–30%), centralized payment processors (2–4%), traditional brokerages (basis
-points to percent).
-
-**Historical note.** Earlier revisions of this document described a flat 0.5%
-commission re-split 40% treasury / 30% burn / 30% stakers. That re-split was
-never wired to any live path, and the rate actually charged on inference was
-5%. Both are gone: there is now one division, and it is the one in the table
-above.
+The chain's share of a service payment is the governed settlement fee and any
+governed treasury leg of its class of work, charged by the consensus executors
+on the on-chain settlement. A payment is not divided by node mode: the payee
+receives it. Described in full in [ECONOMICS.md](ECONOMICS.md).
 
 ### Why two tiers
 
@@ -237,9 +218,14 @@ Net supply change per epoch =
     − settlement-fee burn               (fees.settlement_fee_burn_bps of each on-chain settlement fee)
     − local-fee burn                    (gas paid in a local asset; not wired in execution yet)
     − paymaster burn                    (100% of paymaster fees; not wired in execution yet)
+    − netted burn                       (burn share of settlement fees paid in a listed settlement asset, burned from the rewards pool at epoch close)
 ```
 
 Rewards are not a term: they are transfers out of the genesis-funded rewards pool, so they move supply between accounts without changing it. Supply can only fall after genesis.
+
+### Netted burn for fees paid in kind
+
+A settlement paid in a settlement asset governance has listed pays its fee in that asset. The burn share goes to the treasury's stable holdings, and its TNZO equivalent at the chain rate is booked for the epoch. When the epoch closes, that amount and any burn debt carried from earlier epochs are withheld from the epoch's reward rights and burned from the rewards pool, so supply falls as if the fee had been burned in TNZO (`tenzro_vm::native::burn_netting`). What issuance cannot cover is carried as burn debt, at most `fees.burn_debt_cap_epochs` epochs of issuance; past that the treasury burns at most `fees.treasury_burn_max_tnzo_epoch` TNZO an epoch, and anything past both caps is written off and recorded in the epoch's netting record.
 
 The on-chain settlement fee burns its governed share: every settlement the chain
 carries out pays `fees.settlement_fee_bps` of the value it pays out (10 bps at
@@ -247,11 +233,8 @@ genesis) and burns `fees.settlement_fee_burn_bps` of that fee (half at
 genesis); the rest goes to the treasury. Each settling transaction declares
 what it burns, and the block value rule checks it.
 
-The node revenue split is not a burn channel. A service payment a node collects
-is divided once between the operator, the treasury and, where the node does not
-validate, the RPC provider validating on its behalf; nothing in that division is
-destroyed. Nor are the per-class treasury legs: they accumulate in the treasury
-as a balance governance can disburse.
+The per-class treasury legs are not a burn channel: they accumulate in the
+treasury as a balance governance can disburse.
 
 ### Base-fee burn
 
@@ -263,7 +246,7 @@ The movement happens inside block execution, in consensus state (`tenzro_vm::led
 2. At the end of the block the pool is emptied: the burn share is removed from the pool and from total supply, the rest is credited to the treasury, and the next block's base fee is written to state.
 3. The block is then checked: the net change across every balance it wrote must equal the supply change it recorded. A block that fails is refused.
 
-Because the figures come from the fees actually paid, and are applied by every node while executing the same block, the treasury balance and total supply cannot drift from what payers were charged or between nodes. Earlier revisions derived the split from a node-local fee-market counter that re-anchored on every restart; that path is gone.
+Because the figures come from the fees actually paid, and are applied by every node while executing the same block, the treasury balance and total supply cannot drift from what payers were charged or between nodes.
 
 ### Local-fee burn
 
@@ -295,10 +278,10 @@ Tenzro carries a governance-controlled adaptive burn dial that lets the protocol
 
 The `BurnRateConfig` carries three independently-adjustable burn fractions:
 
-| Parameter | Default | Adjustable |
-|---|---|---|
-| `base_fee_burn_bps` | 10,000 (100% of base fee burned) | Yes, by governance |
-| `local_fee_burn_bps` | 10,000 (100% of local fee burned) | Yes, by governance |
+| Parameter            | Default                               | Adjustable         |
+| -------------------- | ------------------------------------- | ------------------ |
+| `base_fee_burn_bps`  | 10,000 (100% of base fee burned)      | Yes, by governance |
+| `local_fee_burn_bps` | 10,000 (100% of local fee burned)     | Yes, by governance |
 | `paymaster_burn_bps` | 10,000 (100% of paymaster fee burned) | No, locked at 100% |
 
 ### Supply targets
@@ -333,39 +316,38 @@ A fixed burn fraction works well at one usage band. As the network grows, the bu
 
 ## 7. Consensus, staking, and service roles
 
-Tenzro decouples **consensus weight** from **service capacity**. Block finality is produced by a staked validator set running DAG consensus with stake-weighted checkpoint certificates. Serving intelligence, security, compute, storage, and hosted services is a separate set of roles that earn through proof-of-service. Every role bonds TNZO, but only validators carry finality weight and governance weight. A single operator can do both: bond to validate *and* bond to serve capacity, earning on both tracks at once.
+Tenzro decouples **consensus weight** from **service capacity**. Block finality is produced by a staked validator set running DAG consensus with stake-weighted checkpoint certificates. Serving intelligence, security, compute, storage, and hosted services is a separate set of roles that earn through proof-of-service. Every role bonds TNZO, but only validators carry finality weight and governance weight. A single operator can do both: bond to validate _and_ bond to serve capacity, earning on both tracks at once.
 
 Bonding is what puts a participant at risk for the work it claims to do, so it is universal across the ladder — ten rungs, each with its own bond sized to the trust surface it opens. Bonding is never free: a role that pledges no capacity still posts the floor for its rung. What differs between rungs is the size of the bond and what misbehavior costs, not whether a bond exists. Nothing about bonding requires a TEE, and nothing about a TEE substitutes for a bond.
 
 ### The stake ladder
 
-| Role | Bond | Scales with |
-|---|---|---|
-| RPC operator | 100,000 TNZO | — |
-| Rail attestor | 100,000 TNZO | — |
-| Validator | 10,000 TNZO | — |
-| TEE provider | 10,000 TNZO | — |
-| Edge operator | 10,000 TNZO | — |
-| Model provider | 1,000 TNZO | — |
-| Wallet provider | 1,000 TNZO | — (declares its passkey domain) |
-| Catalog publisher | 1,000 TNZO | — |
-| Compute provider | 500 TNZO floor | Accelerators pledged |
-| Storage provider | 100 TNZO floor | Terabytes pledged |
+| Role              | Bond           | Scales with                     |
+| ----------------- | -------------- | ------------------------------- |
+| RPC operator      | 100,000 TNZO   | —                               |
+| Rail attestor     | 100,000 TNZO   | —                               |
+| Validator         | 10,000 TNZO    | —                               |
+| TEE provider      | 10,000 TNZO    | —                               |
+| Edge operator     | 10,000 TNZO    | —                               |
+| Model provider    | 1,000 TNZO     | —                               |
+| Wallet provider   | 1,000 TNZO     | — (declares its passkey domain) |
+| Catalog publisher | 1,000 TNZO     | —                               |
+| Compute provider  | 500 TNZO floor | Accelerators pledged            |
+| Storage provider  | 100 TNZO floor | Terabytes pledged               |
 
 A **wallet provider** bonds for the relying-party domain its passkeys are bound to. Validators fetch `https://<domain>/.well-known/tenzro-provider` each probe round and attest whether it names the bonding account; a frozen verdict that it does marks the domain as served by a staked provider, and an unavailable verdict takes the SLA penalty from the bond. Wallets from unbonded domains still work; they are only not shown as staked.
 
 The RPC operator carries the largest bond on the ladder, level with the rail attestor's, because it holds the largest trust surface: it admits tenants to its node by DID, brokers upstream chain access under its own credentials, and fronts gated resources for parties that never touch the protocol directly. The RPC bond subsumes the validator bond: an RPC operator is a validator that additionally serves public RPC.
 
-Below the ladder sits unbonded participation. A node can join, sync, gossip, relay, and run consensus without posting anything, because it claims no work and takes no counterparty risk. Its quorum weight is its own bond, so bonding nothing contributes nothing to a quorum; it gets no governance vote and has no slashing exposure, since there is no bond to slash. That is what keeps admission open without making influence free.
+Below the ladder sit nodes that follow the chain without a bond. Such a node syncs, gossips and relays; it claims no work and takes no counterparty risk, so it posts nothing. It has no quorum weight, since quorum weight is bonded stake, no governance vote, and no slashing exposure, since there is no bond to slash. Registering its machine identity on chain pays the registration fee like any other transaction. That is what keeps following the chain open without making influence free.
 
 **Compute providers** bond per card, at 1,000 TNZO scaled by the accelerator class: integrated 500, consumer 1,000, workstation 2,000, datacentre 5,000. A provider pledging one datacentre card and one consumer card bonds 6,000 TNZO. The floor is 500 TNZO.
 
 **Storage providers** bond 100 TNZO per whole terabyte pledged, floored at 100 TNZO.
 
-
 The ladder is defined in `tenzro-types/src/constants.rs` and applied by `NetworkRole::required_stake`; the bond itself is a `Stake` transaction per account per role, held in consensus. Every bond figure is governance-adjustable.
 
-**A new bond keeps its USD value.** A new or raised bond, and a validator joining the set, must meet each amount above raised in proportion when TNZO trades below `stake.bond_floor_rate_nano_usd` (0.10 USD at genesis), valued at the safety rate (the lower of the fee rate and the lowest median of the last day). After a 95% fall, entering costs twenty times the TNZO, so a crash does not make Sybil entry cheap; a rise never lowers the amounts. Bonds already in place keep serving at the TNZO amounts. `tenzro_getRoleStakes` reports both as `required` and `entry_required`.
+**A new bond keeps its USD value.** A new or raised bond, and a validator joining the set, must meet each amount above raised in proportion when TNZO is valued below `stake.bond_floor_rate_nano_usd` (0.10 USD at genesis), valued at the safety rate (the lower of the fee rate and the lowest median of the last day). After a 95% fall, entering costs twenty times the TNZO, so a crash does not make Sybil entry cheap; a rise never lowers the amounts. Bonds already in place keep serving at the TNZO amounts. `tenzro_getRoleStakes` reports both as `required` and `entry_required`.
 
 ### Consensus is stake-weighted
 
@@ -376,10 +358,9 @@ A consequence of stake-weighting: a node with zero stake carries zero finality w
 Validators sign checkpoints with a hardware-held composite ML-DSA-65 + P-256 key, propose a vertex every round, and are exposed to slashing:
 
 - **Stake requirement.** Bonded TNZO above the governance-set minimum.
-- **Slashing exposure.** Checkpoint equivocation costs three times the share of bonded stake held by every validator that equivocated within 16 checkpoints of it, at least 5% (15% for a validator that has offended before) and at most the whole stake, paid into the insurance pool; additional slashing on invalid TEE attestations, or persistent SLA failures.
-- **Leader election** across every block class, including the highest-trust classes (large-value institutional settlement).
+- **Slashing exposure.** Checkpoint equivocation costs three times the share of bonded stake held by every validator that equivocated within 16 checkpoints of it, at least 5% (15% for a validator that has offended before) and at most the whole stake, paid into the insurance pool; an unavailable SLA verdict, and a sealed fee-rate report left unopened, also cost bond.
+- **Leader election.** Every validator proposes a vertex each round; the leader schedule is seats times observed behavior.
 - **Governance weight**, stake-weighted (section 16).
-- **High-trust role eligibility:** high-value bridge duties (Hyperlane Tenzro-set ISM, Wormhole Guardian-quorum when configured, a seat on a bridge route committee drawn from bonded attestors); AP2 high-value mandate validation.
 
 **TEE is an optional capability, not a gate.** Hardware attestation through any supported vendor (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU CC, Intel Tiber) is a reputation signal. It never changes the leader-selection draw, which is seats times observed behavior only.
 
@@ -388,39 +369,41 @@ Validators sign checkpoints with a hardware-held composite ML-DSA-65 + P-256 key
 Service providers bond for their rung and earn through proof-of-service. They do not vote in consensus and do not finalize blocks:
 
 - **Admission is permissionless but bonded.** Registration requires an active bond at or above the rung's requirement. There is no allowlist and no operator approval step — post the bond, meet the resource profile, and serve.
-- **Admission profile.** Hardware thresholds (CPU, memory, disk, bandwidth, storage IOPS) checked at registration, continuous monitoring during operation, and a stability/uptime probation window. The protocol favors operators that add geographic, ISP, or jurisdictional diversity.
-- **Earnings.** Pay-per-use inference fees, time-based rental revenue, and storage/bandwidth fees, settled per the mechanisms in section 9. A reputation-weighted reward share scales with uptime, successful service, and the provider-class and TEE-capability multipliers.
-- **Bond at risk.** A misbehaving provider loses reputation, is ejected from the serving set, and is exposed to slashing against its bond (every serving role's `Stake` bond is probed under `did:tenzro:role:<role>:<account hex>`, and an unavailable SLA verdict takes the governed penalty from it into the insurance pool) — invalid TEE attestations, upheld inference-verification challenges, and persistent SLA failure all cut into it. Payers are additionally protected by escrow and streaming settlement (section 9), so the bond backs correctness while escrow backs delivery.
+- **Monitoring.** Validators probe every bonded provider each epoch and freeze an SLA verdict once two thirds of bonded stake agree; the verdicts feed routing standing and the unavailability penalty.
+- **Earnings.** Pay-per-use inference fees, time-based rental revenue, and storage/bandwidth fees, settled per the mechanisms in section 9. Provider reward coupons follow the outside cost of the settlements the provider was paid for (below), plus a small governed bonus for a proven hardware security level ([ECONOMICS.md](ECONOMICS.md)). Prices come from the operator's own rate card; the network sets no provider price.
+- **Bond at risk.** A misbehaving provider loses reputation, is ejected from the serving set, and is exposed to slashing against its bond (every serving role's `Stake` bond is probed under `did:tenzro:role:<role>:<account hex>`, and an unavailable SLA verdict takes the governed penalty from it into the insurance pool) — upheld inference faults and training challenges, proven policy violations and unavailable SLA verdicts all cut into it. Payers are additionally protected by escrow and streaming settlement (section 9), so the bond backs correctness while escrow backs delivery.
 - **Capacity and bond move together.** A compute or storage provider that grows its pledged capacity raises its bond to match. Serving beyond what the bond covers is not admissible.
 
 The clean line: **finality weight lives with validators; service capacity lives with bonded providers; escrow bridges the trust gap for paid service.**
 
 ### Parameters
 
-| Parameter | Value | Source |
-|---|---|---|
-| RPC operator bond | 100,000 TNZO | `tenzro-types/constants.rs` |
-| Validator bond | 10,000 TNZO | `tenzro-types/constants.rs` |
-| TEE provider bond | 10,000 TNZO | `tenzro-types/constants.rs` |
-| Model provider / wallet provider bond | 1,000 TNZO | `tenzro-types/constants.rs` |
-| Compute provider bond | 1,000 TNZO per accelerator × class multiplier (0.5× integrated, 1× consumer, 2× workstation, 5× datacentre), 500 TNZO floor | `tenzro-types/constants.rs` |
-| Storage provider bond | 100 TNZO per terabyte, 100 TNZO floor | `tenzro-types/constants.rs` |
-| Compute bond minimum | 100 TNZO at genesis, `compute_bond.min_tnzo` | `tenzro-vm/native/mod.rs` |
-| Validator unbonding period | 7 days: `ExitValidator` moves the bond to unbonding (no longer stake, still slashable); a second `ExitValidator` after 7 days pays it out | `tenzro-vm/native/staking.rs` |
-| Reward model | Work-gated coupons on a declining annual schedule, paid from the genesis rewards pool; provider and ecosystem buckets capped at `revenue_peg_bps` (default and most 10,000) of the work weight they recorded, each settlement's weight at most a share of the fee it paid outside the trade | `tenzro-token/rewards.rs` |
-| Epoch duration | 7,200 checkpoints at 500 ms (1 hour) in the launch genesis | `config/genesis-launch.toml` `[time]` |
-| Epochs per year | 8,766 (a schedule year is 31,557,600 s) | `tenzro-token/rewards.rs` |
-| Reward claim liquid fraction | `liquid_bps` (remainder opens 12-month reward vesting) | `tenzro-token/rewards.rs` |
-| Equivocation slash | `min(100%, max(5%, 3 × correlated bonded share))` of bonded and unbonding stake, 15% floor for a repeat offender, correlation window 16 checkpoints, earlier offenders topped up; applied in-block by the evidence transaction, into the insurance pool | `tenzro-types/constants.rs`, `tenzro-vm/native/staking.rs` |
-| Consensus quorum threshold | `n - f` of `n` seats, `f = (n - 1) / 3` | `tenzro-consensus/committee.rs` |
-| Per-validator weight cap | 10% of active set, excess redistributed proportionally | `tenzro-consensus` |
-| Service-provider reward share | Reputation-weighted, proof-of-service | Governance-set |
+| Parameter                             | Value                                                                                                                                                                                                                                                                                       | Source                                                          |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| RPC operator bond                     | 100,000 TNZO                                                                                                                                                                                                                                                                                | `tenzro-types/constants.rs`                                     |
+| Validator bond                        | 10,000 TNZO                                                                                                                                                                                                                                                                                 | `tenzro-types/constants.rs`                                     |
+| TEE provider bond                     | 10,000 TNZO                                                                                                                                                                                                                                                                                 | `tenzro-types/constants.rs`                                     |
+| Model provider / wallet provider bond | 1,000 TNZO                                                                                                                                                                                                                                                                                  | `tenzro-types/constants.rs`                                     |
+| Compute provider bond                 | 1,000 TNZO per accelerator × class multiplier (0.5× integrated, 1× consumer, 2× workstation, 5× datacentre), 500 TNZO floor                                                                                                                                                                 | `tenzro-types/constants.rs`                                     |
+| Storage provider bond                 | 100 TNZO per terabyte, 100 TNZO floor                                                                                                                                                                                                                                                       | `tenzro-types/constants.rs`                                     |
+| Compute bond minimum                  | 100 TNZO at genesis, `compute_bond.min_tnzo`                                                                                                                                                                                                                                                | `tenzro-vm/native/mod.rs`                                       |
+| Validator unbonding period            | 7 days: `ExitValidator` moves the bond to unbonding (no longer stake, still slashable); a second `ExitValidator` after 7 days pays it out                                                                                                                                                   | `tenzro-vm/native/staking.rs`                                   |
+| Reward model                          | Work-gated coupons on a declining annual schedule, paid from the genesis rewards pool; provider and ecosystem buckets capped at `revenue_peg_bps` (default and most 10,000) of the work weight they recorded, each settlement's weight at most a share of the fee it paid outside the trade | `tenzro-token/rewards.rs`                                       |
+| Epoch duration                        | 7,200 checkpoints at 500 ms (1 hour) in the launch genesis                                                                                                                                                                                                                                  | `config/genesis-launch.toml` `[time]`                           |
+| Epochs per year                       | 8,766 (a schedule year is 31,557,600 s)                                                                                                                                                                                                                                                     | `tenzro-token/rewards.rs`                                       |
+| Reward claim liquid fraction          | `liquid_bps` (remainder opens 12-month reward vesting)                                                                                                                                                                                                                                      | `tenzro-token/rewards.rs`                                       |
+| Equivocation slash                    | `min(100%, max(5%, 3 × correlated bonded share))` of bonded and unbonding stake, 15% floor for a repeat offender, correlation window 16 checkpoints, earlier offenders topped up; applied in-block by the evidence transaction, into the insurance pool                                     | `tenzro-types/constants.rs`, `tenzro-vm/native/staking.rs`      |
+| Consensus quorum threshold            | `n - f` of `n` seats, `f = (n - 1) / 3`                                                                                                                                                                                                                                                     | `tenzro-consensus/committee.rs`                                 |
+| Per-validator weight cap              | 10% of active set, excess redistributed proportionally                                                                                                                                                                                                                                      | `tenzro-consensus`                                              |
+| Service-provider reward share         | Provider coupons pro rata to the outside cost of paid settlements, plus a hardware-level bonus capped at `hardware.level_bonus_cap_bps` (3% of the base share at genesis)                                                                                                                   | `tenzro-token/rewards.rs`, `tenzro-vm/native/hardware_level.rs` |
 
-Every bond on the ladder, the unbonding period, resource profile thresholds, quorum/cap parameters, and reward shares are governance-adjustable.
+Every bond on the ladder, the unbonding period and the reward shares are governance-adjustable.
 
 ### Reward calculation
 
 Rewards are **work-gated**: an epoch's payout rights are earned by verified work done in that epoch, not by holding stake. Every payout is a transfer out of the genesis-funded rewards pool; nothing is minted. There is no stake-proportional payout. Nothing a participant self-reports can create reward-eligible work — every unit of work weight is measured by the protocol (finalized blocks and quorum-certificate participation for validators, metered proof-of-service for providers, on-chain-recorded contribution acceptance for the ecosystem bucket).
+
+Once `feature.reward_root.activation_epoch` is live (dormant until a vote sets it), work earns a coupon only when the root behind the earning account is a passkey-held human or an autonomous machine whose TPM endorsement certificate chains to a root governance recognises. Work by an account with no identity, under a revoked identity or root, or under a machine root without an endorsed TPM is left unmatched, and its share stays in the pool. Validators' work is held to the same rule, so the vote that switches it on waits until `tenzro_getRewardEpoch` reports `reward_root.all_matched`: every active validator's account under a root that would still earn, each one that would not named with the reason.
 
 The engine (`tenzro-token/rewards.rs`) closes each epoch by issuing **reward coupons** rather than paying balances directly:
 
@@ -445,25 +428,25 @@ Provider and ecosystem work weight is each settlement's own reward ceiling, so t
 
 What a settlement may earn is bounded by what it paid **outside the trade**: the TNZO protocol fee (burned, and paid to the treasury and the insurance pool) plus the treasury leg of its provider class, where governance sets one (`fees.treasury_leg_{inference,tee,rpc,compute,storage}_bps`, 0 at genesis, taken from the provider's credit so the buyer's price is unchanged). Out of that outside cost:
 
-| Share | Parameter (genesis) | Paid to |
-|---|---|---|
-| Provider weight | `mint.provider_reward_cost_bps` (4,000), and never above what the provider was paid | The payee, when its bond or stake makes the payment provider work |
-| Activity weight | `fees.activity_reward_fee_bps` (5,000), split evenly | The apps, agents and tools the payer attributed the settlement to, never the payee |
-| Creator royalty | `fees.creator_royalty_fee_bps` (0), paid in TNZO out of the treasury part of the fee and leg | The same attributed creators |
+| Share           | Parameter (genesis)                                                                          | Paid to                                                                            |
+| --------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Provider weight | `mint.provider_reward_cost_bps` (4,000), and never above what the provider was paid          | The payee, when its bond or stake makes the payment provider work                  |
+| Activity weight | `fees.activity_reward_fee_bps` (5,000), split evenly                                         | The apps, agents and tools the payer attributed the settlement to, never the payee |
+| Creator royalty | `fees.creator_royalty_fee_bps` (0), paid in TNZO out of the treasury part of the fee and leg | The same attributed creators                                                       |
 
 Governance keeps the three together at or below 9,000 bps (`MAX_SETTLEMENT_REWARD_BPS`), so every settlement leaves at least a tenth of its outside cost with parties outside it. Nothing is earned by a party that shares an identity root with the payer or the payee (roots are followed through agent controllers), or when the payer or payee is unregistered. Issuance out of the pool is tied to metered, paid service; burn is tied to paid block space (section 5).
 
-**Why self-dealing loses.** Let one settlement move value `V`, pay fee `F` and treasury leg `L`, so the outside cost is `C = F + L`. A coupon never exceeds the weight it was matched to, and the buckets pay at most their recorded weight, so the most the parties can receive back is `(p + a + r)·C` with `p + a + r ≤ 0.9`. A payer, provider and creator acting together (one root, or any number of colluding roots) therefore end at least `0.1·C` poorer per settlement, before gas and before the 75% of each claim that vests over twelve months. At the genesis rate (10 bps fee, no leg) that is at least 1 bp of the value moved. Both sides of the inequality are TNZO amounts recorded by the same settlement, so it holds whatever TNZO trades at and whatever rate the fee oracle holds; the oracle only sets the least fee, which is charged in TNZO before any weight is computed.
+**Why self-dealing loses.** Let one settlement move value `V`, pay fee `F` and treasury leg `L`, so the outside cost is `C = F + L`. A coupon never exceeds the weight it was matched to, and the buckets pay at most their recorded weight, so the most the parties can receive back is `(p + a + r)·C` with `p + a + r ≤ 0.9`. A payer, provider and creator acting together (one root, or any number of colluding roots) therefore end at least `0.1·C` poorer per settlement, before gas and before the 75% of each claim that vests over twelve months. At the genesis rate (10 bps fee, no leg) that is at least 1 bp of the value moved. Both sides of the inequality are TNZO amounts recorded by the same settlement, so it holds whatever the TNZO rate and whatever rate the fee oracle holds; the oracle only sets the least fee, which is charged in TNZO before any weight is computed.
 
 **Provider classes.** Provider work is recorded per class, all in the provider bucket and paid pro rata to weight, so a unit of outside cost earns the same whatever the class:
 
-| Class | Recorded when | Backed by |
-|---|---|---|
-| `InferenceServed` | A plan's payee reports it (`ReportSettledWork`); a voucher, x402 payment or escrow release paid to the account that posted a compute bond | The settlement plan or the escrow; the compute bond |
-| `TeeSession` | The same payments (or a reported plan) to an account with a bonded TEE provider stake | The TEE provider stake |
-| `RpcTraffic` | The same payments (or a reported plan) to an account with a bonded RPC operator stake | The RPC operator stake |
-| `ComputeLease` | A stream claim paid to the account that posted the compute bond; an hour of a compute claim judged available | The compute bond and its frozen SLA verdict |
-| `StorageServed` | An hour of a storage claim judged available, which needs a possession proof of the stored object | The bond or storage stake and its frozen SLA verdict |
+| Class             | Recorded when                                                                                                                             | Backed by                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `InferenceServed` | A plan's payee reports it (`ReportSettledWork`); a voucher, x402 payment or escrow release paid to the account that posted a compute bond | The settlement plan or the escrow; the compute bond  |
+| `TeeSession`      | The same payments (or a reported plan) to an account with a bonded TEE provider stake                                                     | The TEE provider stake                               |
+| `RpcTraffic`      | The same payments (or a reported plan) to an account with a bonded RPC operator stake                                                     | The RPC operator stake                               |
+| `ComputeLease`    | A stream claim paid to the account that posted the compute bond; an hour of a compute claim judged available                              | The compute bond and its frozen SLA verdict          |
+| `StorageServed`   | An hour of a storage claim judged available, which needs a possession proof of the stored object                                          | The bond or storage stake and its frozen SLA verdict |
 
 Compute and storage claim hours pay the settlement fee like every other on-chain settlement. A payment to an account that holds none of these bonds earns no provider weight.
 
@@ -477,17 +460,17 @@ Annual payout rights decline year over year on a fixed schedule over the fixed p
 
 ### Role buckets and what counts as work
 
-| Bucket | Work weight is | Measured by |
-|---|---|---|
-| Validator | Finalized-block participation and quorum-certificate signing | Consensus records — no self-report |
-| Provider | Settled provider work: inference, TEE sessions, RPC traffic, compute leases, storage served | Settlements paid to a bonded provider, each weighted by the outside cost it paid |
-| Ecosystem | Settled usage attributed to registered apps, agents and tools | The payer-signed attribution on a plan or voucher, weighted by the outside cost it paid |
+| Bucket    | Work weight is                                                                              | Measured by                                                                             |
+| --------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Validator | Finalized-block participation and quorum-certificate signing                                | Consensus records — no self-report                                                      |
+| Provider  | Settled provider work: inference, TEE sessions, RPC traffic, compute leases, storage served | Settlements paid to a bonded provider, each weighted by the outside cost it paid        |
+| Ecosystem | Settled usage attributed to registered apps, agents and tools                               | The payer-signed attribution on a plan or voucher, weighted by the outside cost it paid |
 
 The ecosystem bucket is how TNZO rewards flow to apps, agents and tools: the settlements their users pay for and attribute to them record ecosystem work weight for the attributed creators, which then earns coupons in that epoch's ecosystem bucket. Contributions the network funds outside settled usage go through treasury grants (section 12), not this bucket. This keeps "earn TNZO by building" on the same work-gated rail as validation and service, with no path for self-reported work to mint.
 
 ### Claiming, vesting, and quality of service
 
-Reward accounting is consensus state: every finalized block credits its proposer and closes the epochs before its own, so every node derives the same coupons from the same chain. Providers record settled fees with a `report_settled_work` funding transaction citing the leg receipts of committed settlement plans that credited them and that another party paid, each plan counted once at its provider weight. Claiming a coupon (a `claim_rewards` funding transaction, signed by the earner) splits the payout: a liquid fraction (`liquid_bps`) is transferred from the rewards pool immediately, and the remainder moves from the pool into the vesting escrow account under a **12-month linear reward-vesting schedule** (no cliff); a `release_vesting` funding transaction pays vested amounts out of that escrow. This aligns rewarded participants with the network over a year rather than paying fully liquid up front. Provider and validator work weight is itself quality-scaled — uptime and reputation reduce the measured work weight before coupons are issued, so a low-availability operator earns proportionally fewer rights.
+Reward accounting is consensus state: every finalized block credits its proposer and closes the epochs before its own, so every node derives the same coupons from the same chain. Providers record settled fees with a `report_settled_work` funding transaction citing the leg receipts of committed settlement plans that credited them and that another party paid, each plan counted once at its provider weight. Claiming a coupon (a `claim_rewards` funding transaction, signed by the earner) splits the payout: a liquid fraction (`liquid_bps`) is transferred from the rewards pool immediately, and the remainder moves from the pool into the vesting escrow account under a **12-month linear reward-vesting schedule** (no cliff); a `release_vesting` funding transaction pays vested amounts out of that escrow. This aligns rewarded participants with the network over a year rather than paying fully liquid up front. Work weight is what was recorded: a validator that signs fewer certified rounds records fewer vote units, and a provider that is paid for less work records less provider weight.
 
 ### Slashing
 
@@ -498,7 +481,7 @@ Equivocation is signing two different checkpoints with one index; every validato
 Other slashable conditions, each through its own consensus evidence:
 
 - **Unavailability** — validators probe providers and attest each epoch's outcome (`SlaAttest`); once two thirds of bonded stake have attested, a verdict that the provider was unavailable takes the governed `sla.unavailable.penalty_gwei` from its compute bond. A renter whose stream paid that provider for the epoch claims the epoch's accrual from the pool with the verdict as evidence.
-- **Inference faults** — an upheld `InferenceFault` refunds the requester from the provider's compute bond and takes a penalty of `inference.optimistic.penalty_payment_bps` of what the requester paid (default 20x), at least `inference.optimistic.penalty_floor_micro_usd` (default 10 cents) in TNZO at the rate in force. Governance holds the multiple at or above the inverse of the least sampling share, so a substituted answer loses more in expectation than it saves, whatever the TNZO price.
+- **Inference faults** — an upheld `InferenceFault` refunds the requester from the provider's compute bond and takes a penalty of `inference.optimistic.penalty_payment_bps` of what the requester paid (default 20x), at least `inference.optimistic.penalty_floor_micro_usd` (default 10 cents) in TNZO at the rate in force. Governance holds the multiple at or above the inverse of the least sampling share, so a substituted answer loses more in expectation than it saves, whatever the TNZO rate.
 - **Training faults** — a trainer commits a signed receipt for each round (`TrainingProof`: starting checkpoint, shard commitment, hyperparameters, step count, resulting checkpoint and step log, bound to the round's milestone escrow). Anyone may challenge it within `training.challenge_window_ms` (the shorter `training.tee_challenge_window_ms` when the receipt carries an accepted TEE attestation) by posting `training.challenge_bond_gwei`. Validators replay `training.sample_steps` steps drawn from the randomness beacon, the first and last always among them, and compare within `training.tolerance_ppm`. Upheld by two thirds of bonded stake, the trainer's compute bond pays `training.challenger_reward_gwei` to the challenger and `training.penalty_gwei` to the insurance pool, the milestone returns to its payer, and the challenger's bond comes back less `training.challenge_fee_bps`. A dismissed challenge's bond, less the fee, goes to the trainer. The milestone is released only after the window closes with no challenge pending and none upheld.
 - **Policy violations** — a receipt contradicting the operator's own published policy, once validators holding two thirds of bonded stake have proved it (`AgentAuditFlag` with a `PolicyViolation` finding), takes the governed penalty from the operator's compute bond.
 - **Agent faults** — validator-verified quarantines and the controller's own `TerminateAgent` slash the agent bond. A paused or quarantined agent's bond is frozen: it cannot be withdrawn until the pause ends or the quarantine is lifted.
@@ -522,8 +505,8 @@ Tenzro has multiple provider classes, each with its own micro-economy.
 A model provider:
 
 - Stakes TNZO (min stake configurable; see section 7).
-- Registers in the model registry with one or more model identifiers, modalities, and pricing.
-- Serves inference requests routed by the inference router (price, latency, reputation, or weighted strategy).
+- Registers in the model registry with one or more model identifiers and modalities, and publishes its own rate card per model and unit of work; the network sets no provider price.
+- Serves inference requests a node routes on its API by price, latency and standing read from chain, failing over within seconds; selection policies beyond that belong to harnesses.
 - Earns in either of two billing modes (see "Capacity rental and reservation" below): **pay-per-use** (per call or per token, the unit depends on modality) for on-demand consumption, or **time-based rental** (a stream escrow to the provider, paid per epoch) when a consumer reserves dedicated capacity.
 - Is ranked for routing by its standing, read from consensus state: 0 without a live serving bond, otherwise a bonded part (`routing.standing_bonded`, 3,000 at genesis) plus an availability part (`routing.standing_availability`, 7,000) scaled by the share of the last `routing.standing_window_hours` (24) closed hours that validators' SLA verdicts found it available, on a scale of 0 to 10,000.
 
@@ -548,36 +531,15 @@ A validator:
 - Participates in consensus: proposes vertices and signs checkpoints with its hardware key.
 - Earns reward coupons for the consensus work actually performed, and a base reward while it records consensus work (section 18.2). Priority fees go to the treasury, not to the proposer (section 4).
 
-### How a settled service payment divides
+### A settled service payment is not divided by node mode
 
-One payment funds the party that did the work and the network that made it
-findable and settleable. How it divides follows from what the node actually
-does — there is no setting an operator can change to be paid more.
-
-| Mode | Condition | Operator | RPC provider | Treasury |
-|---|---|---:|---:|---:|
-| Private | The node's visibility is `private` | 100% | — | — |
-| Public, validating | Advertised, and the node validates | 90% | — | 10% |
-| Public, delegated | Advertised, and the node does not validate | 80% | 10% | 10% |
-
-**A private node keeps the payment.** It is connected to the network but not
-advertising itself; its resources are reached as the operator's access policy
-admits. Nobody discovered it and no validator was engaged on the
-caller's behalf, so there is no network share to take. Ledger gas is still owed
-on any transaction it settles — a separate stream, not a commission.
-
-**The RPC provider's leg pays for validation, not for brokerage.** A node that
-advertises but does not validate still needs its users' transactions validated,
-and whoever does that work is owed for it. The difference between the two public
-schedules is exactly that leg. A node in this mode that cannot name its RPC
-provider is refused at settlement rather than having that share quietly
-redirected.
+The payee receives the payment. Whether a node is private, public or validating
+changes neither who is paid nor how much; ledger gas is owed on any transaction
+it settles, a separate stream and not a commission.
 
 Separately, an RPC provider selling access to **external networks they broker**
 (chains beyond Tenzro) bills their own tenants on their own
-terms, the way every other chain's RPC operators do. That revenue never touches
-this split — charging in both places would be charging twice for two different
-things.
+terms, the way every other chain's RPC operators do.
 
 The operator's majority is enforced at construction, not merely documented, and
 the shares sum to exactly the payment with rounding dust going to the operator
@@ -590,20 +552,16 @@ The treasury account is derived (`SHA-256("tenzro/treasury")`), keyless, and spe
 A storage provider:
 
 - Stakes TNZO.
-- Serves snapshot / DA / blob requests.
-- Earns through DA pricing and snapshot-bootstrap fees.
+- Holds content-addressed objects under storage claims, at its own rate per byte-epoch ([STORAGE.md](STORAGE.md)).
+- Is paid per claim hour that validators judge available, which needs a possession proof of the stored object (`StorageServed`, section 7).
 
 ### Media providers
 
-A provider serving media models earns like any other AI provider: each render is metered in pixel-steps (`width × height × steps × frames`, with duration, voxel and world-model equivalents) against its rate card, and pays the same network share on earnings, per the node's economic mode. A node loads only catalog models whose licence terms the operator accepted.
+A provider serving media models earns like any other AI provider: each render is metered in pixel-steps (`width × height × steps × frames`, with duration, voxel and world-model equivalents) against its rate card, and pays the same settlement fee and treasury legs as any other payment. A node loads only catalog models whose licence terms the operator accepted.
 
-### Marketplace template creators
+### App, agent and tool creators
 
-A creator who publishes an agent template is paid by whoever invokes it, at the price the creator sets. When the payer attributes the payment to the template's agent or tool DID, the creator also earns that settlement's activity weight and any creator royalty (section 7). There is no marketplace commission on top, and no on-chain path that settles a creator share to a template's `creator_wallet` by itself: a creator share is a line of the payment's split rule, set by the payer and payee.
-
-### Skill and tool creators
-
-Skill and tool authors register entries in the skill / tool registries. Discovery is permissionless; usage is settled through the same micropayment substrate.
+The protocol pays no one for publishing. Agent templates belong to applications, and markets and catalogs of agents, skills and tools run in harnesses over the public surface. A creator is paid by whoever uses its work, at the price the creator sets. When a payer attributes a settlement to an app, agent or tool DID (`CallAttribution`), that creator also earns the settlement's activity weight and any governed creator royalty (section 7). There is no marketplace commission: a creator share beyond that is a line of the payment's split rule, set by the payer and payee.
 
 ### Capacity rental and reservation
 
@@ -612,7 +570,7 @@ A consumer can reach a provider's capacity two ways. **Pay-per-use** meters cons
 - **Matching.** Renter and provider agree a price for the term wherever they meet: directly, or in any market built on the network's public interfaces.
 - **Settlement streams.** The renter opens a stream escrow with `CreateEscrow` to the provider's bonded address, locking the price as a stream accruing `ceil(price / epochs)` per one-hour market epoch until the deadline. The provider draws what has accrued with `ClaimEscrowStream`; either side stops it with `RefundEscrow`, which pays the accrued part and returns the rest. Neither side is ever exposed for more than one epoch. A stream escrow opens only as a rental award.
 - **SLA, not self-report.** Validators probe every bonded provider and freeze a verdict per epoch once two thirds of bonded stake agree. An unavailable verdict slashes the provider's compute bond (`sla.unavailable.penalty_gwei`) into the insurance pool, and the renter's stream never pays for that epoch: it stays with the renter, so there is no loss to claim, and one party on both sides of a stream gains nothing. The provider's compute bond is the rental's collateral; there is no per-rental bond.
-- **Settlement fee.** Each stream draw divides by the node's economic mode like any settled payment (§4).
+- **Settlement fee.** Each stream draw settles like any other payment (§4).
 
 ---
 
@@ -620,13 +578,13 @@ A consumer can reach a provider's capacity two ways. **Pay-per-use** meters cons
 
 Every provider class carries a bond. The bond size is proportional to the economic damage the provider could cause if they misbehave.
 
-| Class | Bond size guideline | Slashing event |
-|---|---|---|
-| Validator stake | Min 10,000 TNZO (governance-set, `stake.validator_tnzo`) | Equivocation: correlation-scaled, 5% to 100%, into the insurance pool |
-| Model provider | Stake + AgentBond (per agent) | Persistent inference failure: reputation collapse + bond withholding; unavailable SLA epoch: compute-bond slash into the insurance pool, which pays the renter that epoch (§9, *Capacity rental and reservation*) |
-| TEE provider | Stake | Forged attestation: bond slash |
-| Bridge node | Per-bridge configurable | Quorum dishonesty: bond slash |
-| Agent (marketplace) | AgentBond | Kill-switch termination, validator finding: slash into the insurance pool |
+| Class                         | Bond size guideline                                      | Slashing event                                                                                                                                                                                                                 |
+| ----------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Validator stake               | Min 10,000 TNZO (governance-set, `stake.validator_tnzo`) | Equivocation: correlation-scaled, 5% to 100%, into the insurance pool                                                                                                                                                          |
+| Model provider                | Role stake; compute bond for rented or metered serving   | Upheld inference fault: refund and penalty from the compute bond; unavailable SLA epoch: compute-bond slash into the insurance pool, and the renter's stream does not pay for that epoch (§9, Capacity rental and reservation) |
+| TEE provider                  | Role stake                                               | Unavailable SLA verdict: governed penalty from the stake into the insurance pool                                                                                                                                               |
+| Bridge route committee member | Rail attestor stake                                      | Committee equivocation (`bridge.equivocation_slash_bps`) or a reconciliation mismatch (`settlement.attestor_slash_bps`): attestor stake slash into the insurance pool                                                          |
+| Delegated agent               | Agent bond                                               | Controller termination, validator finding: slash into the insurance pool                                                                                                                                                       |
 
 ### AgentBond and the insurance pool
 
@@ -645,50 +603,28 @@ A claim pays the proven loss, capped at `insurance.max_claim_bps` of the pool an
 
 ## 11. Bridge fee model
 
-Cross-chain settlement has direct costs (gas on the source chain, fees on the destination chain, oracle/relayer compensation) and protocol-layer costs (the bridge router, fee oracle, monitor).
-
-### Fee structure per route
-
-For each bridge adapter, the fee is the sum of:
-
-- **Source-chain gas** — paid in the source chain's native asset.
-- **Destination-chain gas** — paid by the relayer/keeper.
-- **Adapter-specific fee** — LayerZero DVN fee, CCIP fee, deBridge order fee, Wormhole relayer fee, etc.
-- **Tenzro protocol fee** — a configurable basis-point fee on the routed amount.
-
-The protocol fee routes to the treasury leg of the standard revenue split (see [ECONOMICS.md](ECONOMICS.md)).
+Cross-chain settlement runs over governed bridge routes ([BRIDGE.md](BRIDGE.md)). Its costs are gas on the source chain, gas and transport fees on the destination chain, and Tenzro gas for the bridge transaction. The protocol adds no bridge fee of its own.
 
 ### Fee quoting
 
-All adapters expose live fee quoting via the unified `BridgeRouter`. Callers request quotes for a desired route and receive a fresh quote per adapter, with the protocol fee already factored in. Quotes have a TTL; stale quotes are rejected.
+`tenzro_quoteBridgeFeeInTnzo` quotes a destination-native fee in TNZO at the USD rates validators commit on chain, so every node quotes the same amount for the same state (`tenzro_bridge::BridgeFeeQuote`). A quote is honoured for 60 seconds.
 
-### Fee sponsorship pools
+### Outflow limits
 
-Operators can contribute to bridge-fee sponsorship pools that subsidize cross-chain settlements for end users and agents on configured routes. Sponsorship pools are funded by:
-
-- Operator contributions in TNZO.
-- A configurable cut of the treasury leg accrued on subsidized routes (capped to prevent runaway sponsorship).
-- Treasury grants approved by governance.
-
-Eligible flows draw automatically from the sponsorship pool when invoked through the standard bridge router. Sponsorship is logged on-chain and exposed via analytics.
-
-### Fee oracle
-
-A per-adapter fee oracle tracks recent fee observations and feeds the router with reasonable defaults when live quoting is unavailable (network partition, adapter outage). The oracle is also used by the adaptive burn dial input layer when estimating bridge-related supply impacts.
+What leaves over the bridges is bounded by the network-wide outflow caps and the security ratio (section 15b), not by fees.
 
 ---
 
 ## 12. Treasury
 
-The Tenzro Network Treasury accumulates the treasury leg of every settlement split, plus governance-approved transfers, plus genesis-allocated treasury holdings. The treasury is on-chain and every outflow is approved through governance.
+The Tenzro Network Treasury accumulates the treasury legs of settlements, plus governance-approved transfers, plus genesis-allocated treasury holdings. The treasury is on-chain, and every outflow is approved through governance except two verified-work releases governed parameters set: the availability reward and the reconciliation duty (section 15).
 
 ### Inflows
 
 - **Settlement fee share** — the part of each on-chain settlement fee that is not burned (half at genesis).
 - **Treasury legs** — the governed per-class treasury leg of provider payments (`fees.treasury_leg_{inference,tee,rpc,compute,storage}_bps`, 0 at genesis, at most 5,000 bps each), less any creator royalty paid out of it.
-- **Node revenue split share** — the treasury part of a service payment a public node divides (section 9).
 - **Block fees** — the block fees that are not burned.
-- **Bridge protocol fees** — share of cross-chain settlement protocol fees.
+- **Fees paid in kind** — the treasury and burn shares of a settlement fee paid in a listed settlement asset, held in that asset; the burn share's TNZO equivalent is burned from the rewards pool (section 5).
 - Each inflow above goes to the treasury less the insurance pool's governed share (`fees.insurance_pool_bps`). There is no marketplace commission.
 - **Slashing recovery** — none: slashed bond goes to the insurance pool, not the treasury. The treasury does not benefit from slashing events.
 - **Governance-directed transfers** — explicit grants or reallocations.
@@ -701,7 +637,6 @@ Approved through governance. Categories include:
 - Ecosystem incentives (developer grants, bug bounties)
 - Infrastructure (test environments, monitoring, on-call)
 - Insurance fund seed and replenishment
-- Bridge fee sponsorship pool contributions
 - Operational costs (legal, compliance)
 - Network duties, such as settlement reconciliation each epoch (see section 15)
 
@@ -715,9 +650,9 @@ All treasury inflows and outflows are on-chain and queryable. The treasury is ke
 
 The network is bootstrapped: its first operators run it until it is stable, and decentralization opens at measured milestones (security of the bonded stake, independence of operators, uptime), never on a date. The network opens as a preview, then a testnet, then the stages governance decides on the way to mainnet; each step and each lift of a launch limit is an enacted governance proposal. During the preview a new validator registers only from an account an enacted `ApproveValidators` proposal named (`validator.admission_approval` = 1).
 
-Bootstrap demand is held to the same rules as any other. Usage brought by the operators' own projects or related parties pays the normal tariff and fees, earns no extra rewards (payer and payee on one root earn nothing; other groups are held to the outside-cost bound of section 7), and is reported apart from unrelated demand, never as organic growth.
+Bootstrap demand is held to the same rules as any other. Usage brought by the operators' own projects or related parties pays the normal tariff and fees, earns no extra rewards (payer and payee on one root earn nothing; other groups are held to the outside-cost bound of section 7), and is labelled and reported apart from unrelated demand, never as organic growth.
 
-The protocol keeps no bootstrap allocation, earmark or protocol-owned agent registry. Agent templates that exercise inference, settlement, bridges and the other surfaces live in a harness over the public surface. The agents they run are ordinary identities: they are funded by governed treasury grants (section 13c), act under delegation terms, and their activity is counted by the same rules as any other identity's. What bootstrap activity costs is therefore visible in the treasury's grant records and stops when governance stops granting.
+The protocol keeps no bootstrap allocation, earmark or protocol-owned agent registry. The bootstrap agents that exercise inference, settlement, bridges and the other surfaces run from tooling outside the protocol, over the public surface. They are ordinary identities: they are funded by governed treasury grants (section 13c), act under delegation terms, and their activity is counted by the same rules as any other identity's. What bootstrap activity costs is therefore visible in the treasury's grant records and stops when governance stops granting.
 
 ---
 
@@ -735,10 +670,10 @@ The read surface is open: `tenzro_getProposal` and `tenzro_getGrant` (`tenzro fu
 
 The protocol has a single vesting primitive (`tenzro-token/vesting.rs`) used wherever TNZO is committed to a future release curve rather than paid liquid. All schedules are linear after any cliff, overflow-safe over 18-decimal u128 amounts, and expose an `outstanding()` view; `release` pays out the vested-but-unreleased portion at a given time.
 
-| Kind | Cliff | Duration | Used for |
-|---|---|---|---|
-| Reward | None | 12 months linear | The non-liquid fraction of a claimed reward coupon |
-| Grant | None | 6 months linear | Treasury grants enacted with `vesting: grant` |
+| Kind        | Cliff     | Duration                     | Used for                                                                     |
+| ----------- | --------- | ---------------------------- | ---------------------------------------------------------------------------- |
+| Reward      | None      | 12 months linear             | The non-liquid fraction of a claimed reward coupon                           |
+| Grant       | None      | 6 months linear              | Treasury grants enacted with `vesting: grant`                                |
 | Contributor | 12 months | 36 months linear after cliff | Treasury grants enacted with `vesting: contributor` (long-term contributors) |
 
 Reward vesting is opened automatically at claim time (section 7) and needs no operator action. Grant and contributor schedules are opened only by an enacted `TreasuryGrant` proposal: its `vesting` field is `liquid` (paid to the recipient's balance), `grant` or `contributor`, and each tranche vests on its own schedule from when it is paid. No operator or foundation key can open one. Vesting keeps rewarded participants, funded projects, and long-term contributors aligned with the network over the release window instead of taking a fully-liquid position up front.
@@ -751,30 +686,21 @@ The agentic economy has a few specific economic surfaces that do not exist in hu
 
 ### Nested-ceiling enforcement on agent payments
 
-An agent payment passes through up to four checks, outermost first:
+An agent payment passes every check that applies to it, outermost first:
 
-1. **AP2 checkout mandate** — the mandate itself (signed by the principal) declares an item set, a max amount, and optional merchant / category / chain allow-lists; the payment cannot exceed or fall outside any of them.
-2. **The agent's consensus Terms** — the per-transaction cap, per-period caps, allowed operations, chains, payment protocols and counterparties, and expiry its root approved; spend is counted in consensus state.
-3. **On-chain escrow** — when the mandate pair carries an `escrow_id`, the pre-locked escrow balance bounds the payment. An `escrow_id` that fails to resolve is a hard refusal, never a skip.
-4. **Stripe SPT usage limits** — when the mandate pair carries a `spt_grant_id`, the granted token's `usage_limits.max_amount` and currency bound the payment. An unresolvable `spt_grant_id` is likewise a hard refusal.
+1. **AP2 mandates** (when presented): a closed Checkout Mandate the merchant signed and a Payment Mandate the agent's controller signed, or an open Payment Mandate whose constraints (amount range, allowed payees and instruments, reference, execution date) the payment must meet. A mandate only narrows the Terms; constraints that would need a mandate store (`payment.budget`, `payment.agent_recurrence`) are refused, and nothing is stored.
+2. **The agent's consensus Terms**: the per-transaction cap, per-period caps, allowed operations, chains, payment protocols and counterparties, and expiry its root approved; spend is counted in consensus state.
+3. **On-chain escrow**: a payment drawn on an escrow (a voucher or stream claim) is bounded by what the escrow holds.
 
-Ceilings 1–3 apply to every agent payment; 4 and 5 apply when the mandate pair commits to an escrow or an SPT. Every applicable ceiling must pass — the payment is refused if any single one fails. The principal retains the right to override by signing a new mandate or through the controller's revocation surface.
+Every applicable check must pass; the payment is refused if any one fails. The principal can narrow or end the authority at any time by replacing the Terms or revoking the agent.
 
 ### ERC-7579 on-chain custody enforcement
 
-The on-chain twin of the delegation scope is the spending limit validator module. Smart accounts use both — the on-chain validator enforces the limit at `validateUserOp`, the off-chain runtime spending policy reinforces it before the user operation is even dispatched. Custody is enforced at signing time, not as a defensive afterthought.
+The on-chain twin of the delegation scope is the spending limit validator module: a smart account that installs it has the limit enforced at `validateUserOp`.
 
 ### Mandate-receipt binding
 
-Every settlement receipt can be bound to the off-chain mandate that authorized it. The `MandateRef` carries the mandate protocol (`ap2-checkout`, `ap2-payment`, `x402`, `mpp`, `stripe-spt`, `capital-intent`, `workflow-step`), the mandate hash, the issuer DID, the optional mandate URI, and the expiration. The audit loop authorization → settlement is closed: every settlement reveals which mandate authorized it.
-
-### Capital intent fee model
-
-Capital intent lifecycle operations (open / quote / assign / execute / verify / compensate / settle) pay gas per operation plus the network's share of the underlying settlement. There is no per-intent protocol surcharge; the system is priced on the actual flows it executes.
-
-### Workflow fee model
-
-Workflows pay gas per step plus a commission on the underlying value movement. Per-step compensate handlers do not pay commission on the rollback; commission is on net value transferred, not gross.
+Every settlement receipt can be bound to the off-chain mandate that authorized it. The `MandateRef` carries the mandate protocol (for example `x402` or `mpp`), the mandate hash, the issuer DID, the optional mandate URI, and the expiration. The audit loop authorization → settlement is closed: every settlement reveals which mandate authorized it.
 
 ---
 
@@ -783,9 +709,23 @@ Workflows pay gas per step plus a commission on the underlying value movement. P
 A network duty is chain work that anyone may carry out. The chain holds the reward in a keyless vault, pays it to the first sender whose proof it verifies, and then closes the duty; an unpaid remainder returns to the funder when the duty expires. Duties are read with `tenzro_getDuty` and `tenzro_listDuties`.
 
 - **Settlement reconciliation.** Each epoch the chain opens one duty for every bridge route with a settlement lock, funded by the treasury at the governed `settlement.reconciliation_reward` (1 TNZO at genesis). The duty pays whoever submits the entries the lock recorded since the last reconciliation with a proof of the lock's checkpoint. An entry that disagrees with Tenzro's plan is stored as a mismatch and disables the route.
-- **Voided-grant relay.** Funded from the relay deposit of the grant, not the treasury.
+- **Voided-grant relay.** Funded from the relay deposit of the grant, not the treasury. It pays whoever reports the void installed on the other chain (`RemoteGrantSettle`), checked against that chain's report route.
+- **Handover proof.** Funded by whoever opens it. It pays the first sender of a Groth16 proof of one chain's epoch handover chain up to the duty's epoch, verified in the `HandoverDuty` transaction against the governed finality program.
 
 The reward, like every other economic value in this document, is a governed parameter: it changes only through an enacted proposal.
+
+### Other work the chain pays for
+
+Besides duties, these are the kinds of work a participant, human or agent, is paid for by the chain itself rather than by a counterparty, each against evidence the chain checks:
+
+| Work | Who may do it | What pays | What the chain checks | Governed by |
+|---|---|---|---|---|
+| Consensus work | an active validator | the base reward (a share of the burn) and the stable cover reserve, per reward epoch | finalized-block and certificate participation in the epoch | `fees.validator_burn_share_bps`, `validator.base_cost_usd_month`, `validator.base_cap_tnzo_month`, `validator.stable_cover_*` |
+| Staying available | a bonded provider | the availability reward from the treasury, once per subject and epoch, split liquid and vesting | an available SLA verdict that bonded validators holding two thirds of stake attested | `reward.availability_*`, `sla.*` |
+| Challenging a training round | anyone, posting the challenge bond | the challenger reward out of the trainer's slashed compute bond, and the bond back less the fee | validators' replay of the sampled steps; a verdict two thirds of bonded stake attested | `training.challenge_*`, `training.challenger_reward_gwei` |
+| Settled provider work | a provider paid by another party | reward coupons from the rewards pool, capped by the revenue settled | leg receipts of committed plans that another root paid (section 7) | `rewards.*`, `fees.activity_reward_fee_bps` |
+
+Two related paths pay no reward. An upheld inference fault refunds the requester out of the provider's compute bond and pays the insurance pool; it compensates a loss rather than paying for work. A bridge watcher's pause is bonded: when no validator finding, reconciliation check, governance stop or freeze followed it, the watcher is slashed into the insurance pool, and a confirmed pause earns nothing, so pausing a route is never a source of income.
 
 ---
 
@@ -805,10 +745,10 @@ Governance is on-chain: proposals, votes, enactment and vetoes are transactions 
 
 ### Tracks
 
-| Track | Voting window | Timelock | Quorum (of bonded stake) | Threshold (of participating stake) | Used for |
-|---|---|---|---|---|---|
-| Standard | 3 days | 2 days | 1/3 | 2/3 | Everything |
-| Expedited | 6 hours | 4 hours | 1/3 | 4/5 | A burn-dial change answering a supply alarm, stopping a bridge route, or a parameter change that only pauses a feature |
+| Track     | Voting window | Timelock | Quorum (of bonded stake) | Threshold (of participating stake) | Used for                                                                                                               |
+| --------- | ------------- | -------- | ------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Standard  | 3 days        | 2 days   | 1/3                      | 2/3                                | Everything                                                                                                             |
+| Expedited | 6 hours       | 4 hours  | 1/3                      | 4/5                                | A burn-dial change answering a supply alarm, stopping a bridge route, or a parameter change that only pauses a feature |
 
 Guardians hold negative powers only. Governance guardians veto a passed proposal during its timelock; protocol guardians pause enactment (voting and proposing continue). Either power takes `governance.guardian_threshold` distinct seated guardians of the role (default 2), a pause lifts by itself after `governance.max_pause_ms` (default 72 hours), and a new pause waits `governance.pause_cooloff_ms` (default 7 days) after the last one ended. A guardian is a human identity seated by an enacted `SetGuardian` proposal (or at genesis) for a term of at most `governance.guardian_max_term_ms` (default one year), and unseated by `RemoveGuardian` or when the term ends. Every seat names an independent key root (a passkey sync provider or a device-bound credential); two live seats of one role never share one. Foundation steward seats (role `steward`) may veto a queued treasury or expedited proposal, or hold treasury and expedited enactment for at most `governance.max_pause_ms`; they hold no power after `governance.steward_sunset_ms`, at most `governance.steward_max_seats` are live, and governance may only lower either value. No guardian action moves funds, sets a parameter or enacts a proposal. Actions fall into three domains: `Network` (parameters, economic policy, burn dial, supply targets, protocol upgrades; another vote can reverse them), `Treasury` (grants, tranches, recoveries; value moves and cannot be voted back) and `Sanction` (revoking an identity, seating or unseating a guardian). An agent may originate only the domains the governed agent phase permits.
 
@@ -830,7 +770,7 @@ The network is sustainable when the fees real users pay cover what it costs to r
 
 - **Fees, not new tokens.** Network revenue comes from the on-chain settlement fee, the per-class treasury legs, and block fees. Rewards come out of a finite, genesis-funded pool on a declining schedule; nothing is minted, and unmatched or unclaimed rights stay in the pool.
 - **Rewards bounded by outside cost.** A settlement's rewards are at most 9,000 bps of what it paid outside the trade (section 7). The reward pool can help a working loop start; it cannot pay anyone to trade with themselves.
-- **Prices in USD terms.** Fees are set in micro-USD and charged in TNZO at the rate in force, so the network's charges follow the cost of the work rather than the token. AI prices fall quickly year on year; fees that are a share of value, plus governed USD minimums, keep pace where fixed per-token charges would not.
+- **Prices in USD terms.** Fees are set in micro-USD and charged in TNZO at the rate in force, so the network's charges follow the cost of the work rather than the token; fees that are a share of value, plus governed USD minimums, follow the value of the work where fixed per-token charges would not. A payer in a listed settlement asset pays the fee in that asset (section 5).
 - **A visible take.** Every charge is a governed parameter with hard bounds (section 16 and [GOVERNANCE_PARAMS.md](GOVERNANCE_PARAMS.md)), and every payment it applies to settles on chain.
 
 ### How it is judged
@@ -843,7 +783,7 @@ Total supply only falls after genesis: burns (the governed share of base fees, o
 
 ### Treasury runway
 
-The treasury receives the part of each on-chain settlement fee that is not burned, the governed treasury legs, the treasury part of a public node's revenue split, and the block fees that are not burned, each less the insurance pool's governed share (`fees.insurance_pool_bps`, default 10%), plus other inflows (section 12). Outflows are capped per proposal and per period. The treasury does not depend on token sales.
+The treasury receives the part of each on-chain settlement fee that is not burned, the governed treasury legs, and the block fees that are not burned, each less the insurance pool's governed share (`fees.insurance_pool_bps`, default 10%), plus other inflows (section 12). Outflows are capped per proposal and per period. The treasury does not depend on token sales.
 
 ---
 
@@ -904,13 +844,11 @@ What a validator is paid therefore depends on the work it does, the number of va
 
 **Stress check — falling validator stake.** If validators leave, the bonded stake that secures consensus falls. At what point does the network become Byzantine-vulnerable?
 
-Consensus requires more than two-thirds of seats honest, and in Tenzro consensus weight comes only from the validator bond — service bonds carry zero finality weight (section 7). Because consensus weight is decoupled from service capacity, the security budget is exactly the validator-bonded supply; bonding for any number of service rungs cannot move a quorum. With `n` seats, fault bound `f = (n - 1) / 3` and quorum `n - f` (section 7), an attacker holding more than one third of validator-bonded stake can halt finality, and can also sign conflicting checkpoints that each reach a quorum. More than one third of bonded stake is therefore enough to break either liveness or safety. The attacker must acquire and bond that share at market price, and it is all slashable.
-
-High-trust block classes (institutional settlement, high-value bridge messages, cross-chain delivery-versus-payment) further restrict *leader election* to validators above a higher stake and reputation bar, raising the bonded position an attacker needs to target them, but the underlying one-third fault bound is the same.
+Consensus requires more than two-thirds of seats honest, and in Tenzro consensus weight comes only from the validator bond — service bonds carry zero finality weight (section 7). Because consensus weight is decoupled from service capacity, the security budget is exactly the validator-bonded supply; bonding for any number of service rungs cannot move a quorum. With `n` seats, fault bound `f = (n - 1) / 3` and quorum `n - f` (section 7), an attacker holding more than one third of validator-bonded stake can halt finality, and can also sign conflicting checkpoints that each reach a quorum. More than one third of bonded stake is therefore enough to break either liveness or safety. The attacker must acquire and bond that share, and it is all slashable.
 
 The rule: the stake an attacker must bond to break liveness or safety is more than one third of all validator-bonded stake. With `B` TNZO bonded to validators, that is more than `B / 3`. The protocol measures the same quantity: `security.attack_stake_bps` (default 3,334, one third) is the share of bonded stake a safety fault puts at risk, used in the security ratio (section 15b).
 
-The attacker also faces (a) the slashing risk on every validator they operate (an equivocation costs at least 5% of the bond, and a coordinated one by a third of bonded stake costs all of it), (b) market impact on accumulating the position, and (c) the cost of running the additional infrastructure. Real attacker cost is meaningfully above the headline TNZO figure.
+The attacker also faces (a) the slashing risk on every validator they operate (an equivocation costs at least 5% of the bond, and a coordinated one by a third of bonded stake costs all of it), and (b) the cost of running the additional infrastructure. Real attacker cost is meaningfully above the headline TNZO figure.
 
 The protocol responds through the security ratio (slashable stake over what one attack can take out over the bridges). While the ratio is below `security.min_ratio_bps` (default 1.5x), the issuance controller raises its multiplier toward `mint.max_mult_bps`, and a raise of any bridge outflow cap is refused. Governance can also lower bridge outflow caps or change the validator base reward. The adaptive burn dial alone is insufficient at this end.
 
@@ -944,7 +882,7 @@ where:
          + (1 − fees.settlement_fee_burn_bps) × on-chain settlement fees
          + unburned block fees) × (1 − fees.insurance_pool_bps)
          + other inflows (section 12)
-  O_t = grants + ecosystem incentives + infrastructure + insurance fund + sponsorship contributions + operational
+  O_t = grants + ecosystem incentives + infrastructure + insurance fund + operational
 ```
 
 For the network to fund itself indefinitely from real demand:
@@ -955,73 +893,35 @@ I_steady_state ≥ O_steady_state
 
 **Treasury rates at genesis:**
 
-- Treasury part of a public node's revenue split: 10% of the payment at genesis (`EconomicPolicy`), less the insurance share.
 - Per-class treasury legs of provider payments: 0 at genesis (`fees.treasury_leg_*_bps`), set by governance within 0 to 5,000 bps.
 - On-chain settlement fee: 0.1% of the value settled (`fees.settlement_fee_bps` = 10), of which half is burned and half goes to the treasury, less the insurance share: 0.045% of the value settled.
 - Block fees: the base fee is burned by default; priority fees go to the treasury, less the insurance share.
 
 How much settlement volume is service payments and how much is other on-chain settlement is not fixed by the protocol, so this document gives the rates and not a yearly figure. At steady-state activity, inflows grow with settled volume and are what funds grants, audits, insurance, infrastructure, and other outflows without depleting the genesis allocation. Below steady-state activity, the treasury must rely on its genesis-allocated initial balance to extend runway; governance can throttle outflows during the bootstrap phase to preserve runway until commission throughput ramps up.
 
-**Stress check — bootstrap runway.** Treasury inflows during the first 12 months will be modest. Grants that fund bootstrap activity draw on the treasury like any other grant and are bounded by the same per-proposal and per-period outflow caps, so governance can scale them to the runway.
+**Stress check — bootstrap runway.** Treasury inflows early in the network's life are small. Grants that fund bootstrap activity draw on the treasury like any other grant and are bounded by the same per-proposal and per-period outflow caps, so governance can scale them to the runway.
 
 ### 18.5 Bootstrap funding
 
 There is no bootstrap earmark to draw down or burn at a sunset. Bootstrap activity is paid for by governed treasury grants, each enacted by its own vote, released in tranches where the grant says so, and bounded by the treasury outflow caps. If organic activity ramps slower than projected, governance grants more from what the treasury holds; if it ramps faster, governance stops granting. Nothing is pre-allocated, so nothing is left over.
 
-### 18.6 Bridge sponsorship sustainability
+### 18.6 Failure mode coverage
 
-Bridge fee sponsorship draws from a configurable pool. Sustainability requires:
+The simulations above cover the failure modes that have broken comparable systems:
 
-```
-S_pool_inflow ≥ S_pool_outflow_to_sponsored_routes
-```
-
-Where pool inflow comes from operator contributions, a configurable cut of the treasury leg on subsidized routes, and treasury grants. The cap on commission share is governance-set; the default cap prevents runaway sponsorship.
-
-**Stress check — sponsorship drain.** If sponsored routes are gamed (users routing through them solely to extract subsidies), the cap on commission share auto-throttles. Persistent gaming triggers governance to lower the cap, raise the eligibility threshold, or shut down sponsorship for a specific route.
-
-### 18.7 Failure mode coverage
-
-The simulations above cover the failure modes that have broken comparable systems in 2022–2025:
-
-| Failure mode | Tenzro mitigation | Tested in |
-|---|---|---|
-| Runaway issuance | Fixed supply, nothing minted after genesis; rewards from the finite genesis pool | 18.1 |
-| Insufficient burn | Two demand-driven channels + adaptive dial | 18.1, 18.3 |
-| Falling validator stake → security degradation | Pool release controller on the security ratio + governance lever | 18.2 |
-| Slashing cascade | Correlation-scaled penalty touches only the offenders; slashed stake funds the insurance pool, never surviving validators; no positive feedback | 18.2 |
-| Fee market lock-up at high base fee | Symmetric ±12.5% adjustment + ceiling | 18.3 |
-| Adversarial gas spamming | Self-paid via the same base-fee burn | 18.3 |
-| Treasury depletion | Diversified inflows; governance throttles outflows | 18.4 |
-| Bootstrap funding cliff | Governed treasury grants under outflow caps | 18.4, 18.5 |
-| Sponsorship pool drain | Governance-set commission share cap | 18.6 |
-| Investor / team unlock cliffs | No team or investor allocation; no cliffs exist | 2 |
+| Failure mode                                   | Tenzro mitigation                                                                                                                               | Tested in  |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| Runaway issuance                               | Fixed supply, nothing minted after genesis; rewards from the finite genesis pool                                                                | 18.1       |
+| Insufficient burn                              | Demand-driven burn channels (base fee, settlement fee, netted burn) + adaptive dial                                                             | 18.1, 18.3 |
+| Falling validator stake → security degradation | Pool release controller on the security ratio + governance lever                                                                                | 18.2       |
+| Slashing cascade                               | Correlation-scaled penalty touches only the offenders; slashed stake funds the insurance pool, never surviving validators; no positive feedback | 18.2       |
+| Fee market lock-up at high base fee            | Symmetric ±12.5% adjustment + ceiling                                                                                                           | 18.3       |
+| Adversarial gas spamming                       | Self-paid via the same base-fee burn                                                                                                            | 18.3       |
+| Treasury depletion                             | Diversified inflows; governance throttles outflows                                                                                              | 18.4       |
+| Bootstrap funding cliff                        | Governed treasury grants under outflow caps                                                                                                     | 18.4, 18.5 |
+| Investor / team unlock cliffs                  | No team or investor allocation; no cliffs exist                                                                                                 | 2          |
 
 The model is conservatively parameterized — every assumption used to verify it errs on the side of pessimism (low activity, no organic ramp, adversarial staking participation, sustained congestion). The default parameters survive every simulation; the governance dials are available to retune any of them if real-world activity diverges from these projections.
-
----
-
-## 19. Where the agentic decade is going
-
-The model above is designed for where the AI and agentic economy is going, not where it has been.
-
-**Agents do most discrete economic actions.** By the late 2020s, autonomous agents — LLM-driven, tool-using, identity-bound — will conduct the majority of routine economic transactions: quote requests, payment routing, on-chain settlement, identity verification, micro-credentialing. The protocol that wins this period is the one that gives agents a complete substrate. Tenzro's TDIP, hardware-bound wallets, AP2 mandates, ERC-7579 custody, MCP/A2A surfaces, and protocol-level settlement are designed for that world.
-
-**Settlement converges on identity-bound payment.** Stablecoins, payment processors, card networks, agent-pay standards, and on-chain micropayments are all converging on the same model: a counterparty identity (KYC where required), a signed mandate (authorization scope), a settled receipt (audit). MPP, x402, Tempo, Visa Tap, Mastercard Agent Pay, Stripe SPT, and AP2 all express this pattern. Tenzro implements every major variant natively so an agent can serve any payment surface its counterparty needs.
-
-**Open-source AI is the default.** By late 2026, open-weight models from Qwen, Gemma, Mistral, DeepSeek, Granite, and others match or exceed closed models on most benchmarks. Inference moves from a small number of hyperscaler APIs to a long tail of operators serving their own GPUs. Tenzro's permissionless model marketplace, multi-modality runtimes, and provider economy are built for this distribution.
-
-**Distributed training is production.** Data-parallel training with decoupled outer synchronization has demonstrated that large models can be trained across regions and across operators. Coordinating such runs across operators needs sponsor escrow, round milestones and checkable evidence. On Tenzro these are built on the network's public interfaces (escrows carrying a reference, quorum release, evidence verification), so anyone can run, fork or replace the training tooling.
-
-**Cross-chain becomes intent-driven.** ERC-7683 cross-chain intents, deBridge DLN, LayerZero V2, and CCIP CCT are coalescing on an intent-driven model: the user signs what they want; the network finds the cheapest, fastest, or most-reliable path. Tenzro's unified `BridgeRouter` is built for this.
-
-**Regulation requires legibility.** EU AI Act Article 50 binds AI disclosure. MiCA binds stablecoin and crypto-asset service providers. Travel rule enforcement extends to virtual asset service providers. Protocols that move into 2027 without auditable identity, mandate-bound authorization, KYC-tier-bound delegation, on-chain receipts, and operator-grade analytics will not be usable by institutional counterparties. Tenzro's TDIP credential system, AP2 validation, ERC-7579 enforcement, settlement receipts with mandate binding, and per-tenant analytics are built for this regulatory shape.
-
-**Post-quantum becomes table stakes.** NIST standardized ML-DSA in 2024; CNSA 2.0 mandates PQ-hybrid signatures across federal infrastructure by the late 2020s; major TLS deployments enabled X25519MLKEM768 in 2024–2025. Protocols that store value or sign attestations for the long term need PQ-hybrid throughout. Tenzro's Ed25519 + ML-DSA-65 hybrid signatures on every safety-critical message, X25519 + ML-KEM-768 key exchange, and PQ-hybrid wallet primitives are built for this.
-
-The TNZO economic model is built around these forward trajectories. Demand sources scale with the agentic economy. Burn channels scale with real usage. Bonds align providers with the value they secure. Governance dials let the protocol respond to where the world is going.
-
-That is what TNZO is for.
 
 ---
 

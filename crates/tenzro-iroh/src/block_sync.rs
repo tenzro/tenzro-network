@@ -130,12 +130,10 @@ pub async fn block_sync_request(
 ) -> IrohResult<Vec<u8>> {
     let peer: EndpointAddr = peer.into();
     let id = peer.id;
-    let conn = endpoint
-        .connect(peer, ALPN_BLOCK_SYNC)
+    let conn = crate::bounded::connect(endpoint, peer, ALPN_BLOCK_SYNC, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("block-sync connect to {id}: {e}")))?;
-    let (mut send, mut recv) = conn
-        .open_bi()
+    let (mut send, mut recv) = crate::bounded::open_bi(&conn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("block-sync open stream: {e}")))?;
     write_frame(&mut send, request).await?;
@@ -144,6 +142,10 @@ pub async fn block_sync_request(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
 
@@ -161,10 +163,12 @@ mod tests {
     #[tokio::test]
     async fn a_request_gets_the_servers_response() {
         let deferred = DeferredBlockSyncServer::new();
-        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let server = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let _router = iroh::protocol::Router::builder(server.clone())
             .accept(
                 ALPN_BLOCK_SYNC,
@@ -172,10 +176,12 @@ mod tests {
             )
             .spawn();
         deferred.set(Arc::new(Reverse));
-        let client = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let client = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let response = block_sync_request(&client, server.addr(), b"abc")
             .await
             .unwrap();
@@ -193,10 +199,12 @@ mod tests {
     async fn a_stalled_request_is_cut_off() {
         let deferred = DeferredBlockSyncServer::new();
         deferred.set(Arc::new(Reverse));
-        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let server = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let limits = AdmissionLimits {
             read_timeout: std::time::Duration::from_secs(2),
             ..AdmissionLimits::default()
@@ -207,10 +215,12 @@ mod tests {
                 BlockSyncProtocol::new(deferred.clone(), limits),
             )
             .spawn();
-        let client = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let client = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let conn = client
             .connect(server.addr(), ALPN_BLOCK_SYNC)
             .await

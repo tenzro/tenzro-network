@@ -8,6 +8,9 @@
 //! has its own `main`. A kernel that refuses the confinement skips the run
 //! with the reason.
 
+#[path = "support/listing.rs"]
+mod listing;
+
 #[cfg(unix)]
 mod confined {
     use std::path::Path;
@@ -44,7 +47,11 @@ for line in sys.stdin:
 
     pub fn main() {
         praecise_host::sandbox::enter_if_requested();
-        if !cfg!(target_os = "linux") || !Path::new("/usr/bin/python3").exists() {
+        let runnable = cfg!(target_os = "linux") && Path::new("/usr/bin/python3").exists();
+        if super::listing::answered_list("hosted_engines", runnable) {
+            return;
+        }
+        if !runnable {
             println!("hosted_engines: skipped (needs Linux and /usr/bin/python3)");
             return;
         }
@@ -95,7 +102,9 @@ for line in sys.stdin:
             models: [(MODEL.to_string(), "transformers".to_string())].into(),
         };
         let host = Arc::new(ModelHost::with_engines(TrafficManager::default(), &config).unwrap());
-        let runtime = ModelRuntime::with_host(Arc::clone(&host)).expect("runtime");
+        let runtime =
+            ModelRuntime::with_host(Arc::clone(&host), tenzro_model::CatalogCell::default())
+                .expect("runtime");
         assert_eq!(
             runtime.hosted_backend(MODEL).map(|b| b.as_str()),
             Some("transformers")
@@ -204,5 +213,8 @@ fn main() {
 /// runs on another platform, and this line says so rather than passing.
 #[cfg(not(unix))]
 fn main() {
+    if listing::answered_list("hosted_engines", false) {
+        return;
+    }
     println!("hosted_engines: NOT RUN, the runtime-host confinement needs Linux");
 }

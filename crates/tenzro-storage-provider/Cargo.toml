@@ -4,13 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Decentralized storage provider for Tenzro Network — provider daemon, proof-of-retrievability challenges, erasure-coded redundancy, and per-byte settlement over the iroh content-addressed transport"
+description = "Decentralized storage provider for Tenzro Network — provider daemon, proof-of-retrievability challenges, erasure-coded redundancy, and hourly retrievability settlement over the iroh content-addressed transport"
 
 [dependencies]
 tenzro-types = { workspace = true }
 tenzro-iroh = { workspace = true }
 tenzro-cluster = { workspace = true }
-tenzro-settlement = { workspace = true }
 tenzro-storage = { workspace = true }
 
 thiserror = { workspace = true }
@@ -24,6 +23,10 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 reed-solomon-erasure = { workspace = true }
+fs4 = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

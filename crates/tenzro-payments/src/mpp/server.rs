@@ -38,10 +38,14 @@ pub struct MppPaymentServer {
     default_chain: String,
     /// Intent this server issues challenges under.
     intent: &'static str,
+    /// Issue `session` challenges instead while this holds.
+    session_while: Option<crate::LiveSwitch>,
     /// Challenge store for looking up challenges during settlement
     challenge_store: ChallengeStore,
     /// The keys payers' accounts enrolled, which their signatures verify against.
     keys: std::sync::Arc<dyn EnrolledKeys>,
+    /// Resolves who stands behind a payer, for its receipt.
+    chains: std::sync::Arc<dyn crate::principal_chains::PrincipalChains>,
 }
 
 impl MppPaymentServer {
@@ -50,9 +54,21 @@ impl MppPaymentServer {
         Self {
             default_chain: "tenzro".to_string(),
             intent: MPP_INTENT_CHARGE,
+            session_while: None,
             challenge_store: ChallengeStore::new(),
             keys,
+            chains: std::sync::Arc::new(crate::principal_chains::Unresolved),
         }
+    }
+
+    /// Record on each receipt the payer's delegation path as `chains`
+    /// resolves it.
+    pub fn with_principal_chains(
+        mut self,
+        chains: std::sync::Arc<dyn crate::principal_chains::PrincipalChains>,
+    ) -> Self {
+        self.chains = chains;
+        self
     }
 
     /// Issue `session` challenges: each request is paid by a voucher
@@ -60,6 +76,22 @@ impl MppPaymentServer {
     pub fn with_session_intent(mut self) -> Self {
         self.intent = MPP_INTENT_SESSION;
         self
+    }
+
+    /// Issue `session` challenges while `live` holds, and the configured
+    /// intent otherwise, so a node that takes up or puts down a metered
+    /// service while it runs changes its challenges without a rebuild.
+    pub fn with_session_intent_while(mut self, live: crate::LiveSwitch) -> Self {
+        self.session_while = Some(live);
+        self
+    }
+
+    /// The intent of a challenge issued now.
+    fn intent_now(&self) -> &'static str {
+        match &self.session_while {
+            Some(live) if live() => MPP_INTENT_SESSION,
+            _ => self.intent,
+        }
     }
 
     /// Sets the default chain
@@ -104,13 +136,14 @@ impl PaymentProtocol for MppPaymentServer {
         let mpp_challenge =
             MppChallenge::new(resource, amount, asset, recipient).with_chain(&self.default_chain);
 
+        let intent = self.intent_now();
         info!(
             "Created MPP {} challenge {} for resource {} amount={}",
-            self.intent, mpp_challenge.challenge_id, resource, amount
+            intent, mpp_challenge.challenge_id, resource, amount
         );
 
         let mut extra = HashMap::new();
-        extra.insert(MPP_INTENT_KEY.to_string(), serde_json::json!(self.intent));
+        extra.insert(MPP_INTENT_KEY.to_string(), serde_json::json!(intent));
         let challenge = PaymentChallenge {
             challenge_id: mpp_challenge.challenge_id,
             protocol: "mpp".to_string(),
@@ -211,10 +244,7 @@ impl PaymentProtocol for MppPaymentServer {
             settlement_tx: None,
             chain: challenge.chain.clone(),
             settled_at: Utc::now(),
-            principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
-                verification.payer_did.clone(),
-                tenzro_types::primitives::BlockHeight::new(0),
-            ),
+            principal_chain: self.chains.chain_of(&verification.payer_did),
             extra,
         })
     }
@@ -276,6 +306,41 @@ mod tests {
         assert_eq!(v.amount, 5000);
     }
 
+    /// The receipt of a payment by a delegated agent names the controller
+    /// behind it; without a registry the payer stands alone, marked
+    /// unresolved.
+    #[tokio::test]
+    async fn a_receipt_carries_the_payers_resolved_principal_chain() {
+        use crate::principal_chains::tests::{agent_did, chains, human_did};
+        let keys = std::sync::Arc::new(crate::test_support::SeedKeys);
+        let server = MppPaymentServer::new(keys.clone()).with_principal_chains(chains());
+        let ch = stamped(&server).await;
+        let cred = server
+            .create_credential(&ch, &agent_did(), &signer())
+            .await
+            .unwrap();
+        let v = server.verify_credential(&ch, &cred).await.unwrap();
+        let receipt = server.settle(&ch, &cred, &v).await.unwrap();
+        assert_eq!(receipt.principal_chain.actor, agent_did());
+        assert_eq!(receipt.principal_chain.controller_did(), human_did());
+        assert!(!receipt.principal_chain.has_tombstone());
+        assert_eq!(
+            receipt.principal_chain.frozen_at_block,
+            tenzro_types::primitives::BlockHeight::new(4242)
+        );
+
+        let plain = MppPaymentServer::new(keys);
+        let ch = stamped(&plain).await;
+        let cred = plain
+            .create_credential(&ch, &agent_did(), &signer())
+            .await
+            .unwrap();
+        let v = plain.verify_credential(&ch, &cred).await.unwrap();
+        let receipt = plain.settle(&ch, &cred, &v).await.unwrap();
+        assert!(receipt.principal_chain.has_tombstone());
+        assert_eq!(receipt.principal_chain.controller_did(), agent_did());
+    }
+
     #[tokio::test]
     async fn a_charge_signed_with_one_key_cannot_debit_another_account() {
         let server = MppPaymentServer::new(std::sync::Arc::new(crate::test_support::SeedKeys));
@@ -283,6 +348,26 @@ mod tests {
         let mut cred = server.create_credential(&ch, "", &signer()).await.unwrap();
         cred.payer_address = hex::encode([0x77u8; 20]);
         assert!(server.verify_credential(&ch, &cred).await.is_err());
+    }
+
+    /// The session intent follows its live condition.
+    #[tokio::test]
+    async fn the_session_intent_follows_its_live_condition() {
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = live.clone();
+        let server = MppPaymentServer::new(std::sync::Arc::new(crate::test_support::SeedKeys))
+            .with_session_intent_while(std::sync::Arc::new(move || {
+                flag.load(std::sync::atomic::Ordering::Acquire)
+            }));
+        assert_eq!(
+            stamped(&server).await.extra[MPP_INTENT_KEY],
+            MPP_INTENT_CHARGE
+        );
+        live.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            stamped(&server).await.extra[MPP_INTENT_KEY],
+            MPP_INTENT_SESSION
+        );
     }
 
     #[tokio::test]

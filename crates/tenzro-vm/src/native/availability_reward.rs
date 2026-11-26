@@ -29,8 +29,18 @@
 //! (the on-chain energy budget) covers separately against the same
 //! declaration this module writes.
 //!
-//! Not yet implemented: indexing the cap to the on-chain compute
-//! price index.
+//! Indexed cap (dormant): from [`AVAILABILITY_INDEX_CAP_KEY`]'s epoch a unit
+//! paid per proven GPU is capped at [`AVAILABILITY_INDEX_CAP_BPS_PARAM`] of
+//! the datacenter-GPU compute price index in force (the validators' rate
+//! symbol from `economy::compute_index_symbol`), converted to wei at the TNZO
+//! rate in force, when that is below the absolute cap. A unit with no proven
+//! GPU keeps the absolute cap: the chain knows no other hardware class for a
+//! bond, and the provider's own announcement would let it pick the dearest
+//! index. With no index in force the absolute cap holds.
+//!
+//! Dormant behind [`UNIT_BUDGET_KEY`]: the reward per verified unit as an
+//! equal share of an hourly budget pinned to verified paid demand
+//! ([`unit_budget_reward`]) in place of the schedule's demand offset.
 //!
 //! With hardware binding on, the reward is paid per GPU: once for each GPU
 //! the host proved with its NVIDIA device certificate in the current reward
@@ -104,6 +114,46 @@ pub const DEFAULT_AVAILABILITY_REWARD_REQUIRE_HARDWARE: u64 = 0;
 /// A toggle, not a magnitude: 0 or 1.
 pub const MAX_AVAILABILITY_REWARD_REQUIRE_HARDWARE: u64 = 1;
 
+/// Gate of the paid-activity requirement: the first epoch from which the
+/// availability reward pays only a subject whose owner has recent paid work.
+/// Its tunables are the three parameters below.
+pub const AVAILABILITY_PAID_ACTIVITY_GATE: &str =
+    "feature.availability_paid_activity.activation_epoch";
+
+/// Governed: how many reward epochs back, counting the current one, the
+/// subject's owner must have earned provider work for the availability
+/// reward to pay it. Provider work is recorded only for settled payments
+/// from another registered party, so an operator nobody pays is not paid for
+/// being reachable. Zero asks for no paid activity.
+pub const AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS_PARAM: &str =
+    "feature.availability_paid_activity.window_epochs";
+/// Genesis: paid work within the last 30 reward epochs.
+pub const DEFAULT_AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS: u64 = 30;
+/// Longest window governance may set.
+pub const MAX_AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS: u64 = 365;
+
+/// Governed: least provider work, wei of reward weight, the subject's owner
+/// must have earned over the paid-activity window. Provider work weight is
+/// the governed share of the protocol fee a settlement paid, so this is a
+/// floor on fees paid by other parties, not on a count of payments.
+pub const AVAILABILITY_REWARD_MIN_PAID_WORK_PARAM: &str =
+    "feature.availability_paid_activity.min_work_wei";
+/// Genesis: 0.04 TNZO of weight, what 100 TNZO of settled payments earn at
+/// the genesis settlement fee (10 bps) and provider share of it (40%).
+pub const DEFAULT_AVAILABILITY_REWARD_MIN_PAID_WORK: u64 = 40_000_000_000_000_000;
+/// Highest floor governance may set: 4 TNZO of weight.
+pub const MAX_AVAILABILITY_REWARD_MIN_PAID_WORK: u64 = 4_000_000_000_000_000_000;
+
+/// Governed: the reward epoch before which the paid-activity requirement is
+/// waived, so a network with no paid demand yet can pay its first hardware-
+/// bound operators. Zero (genesis) waives nothing.
+pub const AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH_PARAM: &str =
+    "feature.availability_paid_activity.bootstrap_until_epoch";
+/// Genesis: no bootstrap period.
+pub const DEFAULT_AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH: u64 = 0;
+/// Latest epoch governance may set.
+pub const MAX_AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH: u64 = u32::MAX as u64;
+
 /// Governed: the verified-paid-demand target, in atto-USD per day (1e-18
 /// USD), at which the demand offset has phased the availability reward all
 /// the way to zero (ENERGY-VERIFY section 9's $60k/day). Converted to wei
@@ -116,9 +166,24 @@ pub const AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY_PARAM: &str =
     "reward.availability_demand_target_atto_usd_per_day";
 /// Genesis: disabled.
 pub const DEFAULT_AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY: u64 = 0;
-/// Highest target governance may set: 10M USD/day, well past any horizon
-/// this network will reach without a parameter table change.
+/// Highest target the key holds: `u64::MAX` atto-USD, about 18.4 USD/day,
+/// far below the design's 60,000 USD/day; from
+/// [`AVAILABILITY_DEMAND_TARGET_USD_KEY`]'s epoch the target is read from
+/// [`AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM`] instead.
 pub const MAX_AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY: u64 = u64::MAX;
+
+/// Gate of the whole-USD demand target. Never at genesis.
+pub const AVAILABILITY_DEMAND_TARGET_USD_KEY: &str =
+    "feature.availability_demand_target_usd.activation_epoch";
+/// Governed: the verified-paid-demand target in whole USD per day at which
+/// the demand offset has phased the reward to zero, read from
+/// [`AVAILABILITY_DEMAND_TARGET_USD_KEY`]'s epoch. Zero disables the offset.
+pub const AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM: &str =
+    "feature.availability_demand_target_usd.usd_per_day";
+/// Genesis: disabled.
+pub const DEFAULT_AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY: u64 = 0;
+/// Highest target governance may set: 10M USD/day.
+pub const MAX_AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY: u64 = 10_000_000;
 
 /// Governed: how many one-hour epochs the verified-paid-demand window
 /// trails behind `epoch` when computing the demand offset. Section 9 anchors
@@ -131,9 +196,114 @@ pub const DEFAULT_AVAILABILITY_REWARD_DEMAND_WINDOW_EPOCHS: u64 = 24;
 /// never has to read an unbounded number of epoch records.
 pub const MAX_AVAILABILITY_REWARD_DEMAND_WINDOW_EPOCHS: u64 = 90 * 24;
 
+/// Gate of the indexed cap (see the module text). Never at genesis.
+pub const AVAILABILITY_INDEX_CAP_KEY: &str = "feature.availability_index_cap.activation_epoch";
+/// Basis points of the datacenter-GPU compute price index one proven GPU's
+/// unit-hour may earn once the indexed cap is live.
+pub const AVAILABILITY_INDEX_CAP_BPS_PARAM: &str = "feature.availability_index_cap.bps";
+/// Genesis: 7.5% of the index, read only once the gate is live.
+pub const DEFAULT_AVAILABILITY_INDEX_CAP_BPS: u64 = 750;
+/// Highest share governance may set: 10% of the index.
+pub const MAX_AVAILABILITY_INDEX_CAP_BPS: u64 = 1_000;
+
+/// The indexed cap in wei per unit-hour: [`AVAILABILITY_INDEX_CAP_BPS_PARAM`]
+/// of the datacenter-GPU compute price index in force at the TNZO rate in
+/// force. `None` while validators have frozen no index.
+fn index_cap_wei(state: &dyn VmState) -> Option<u128> {
+    let symbol =
+        super::economy::compute_index_symbol(tenzro_types::hardware::HardwareClass::DatacenterGpu)?;
+    let (index_nano_usd, _) = super::economy::read_symbol_rate(state, symbol)?;
+    let bps =
+        network_param(state, AVAILABILITY_INDEX_CAP_BPS_PARAM).min(MAX_AVAILABILITY_INDEX_CAP_BPS);
+    let cap_nano_usd = index_nano_usd.checked_mul(u128::from(bps))? / 10_000;
+    let tnzo_nano_usd = super::economy::read_fee_rate(state).rate_nano_usd.max(1);
+    const WEI_PER_TNZO: u128 = 1_000_000_000_000_000_000;
+    Some(cap_nano_usd.checked_mul(WEI_PER_TNZO)? / tnzo_nano_usd)
+}
+
+/// One unit-hour's availability reward at `epoch` before the readiness
+/// tier and the per-GPU count: the decayed, demand-offset cap, under the
+/// indexed cap when its gate is live and `proven_gpu`.
+pub fn unit_hour_reward(state: &dyn VmState, epoch: u64, proven_gpu: bool) -> u128 {
+    under_index_cap(state, availability_reward_amount(state, epoch), proven_gpu)
+}
+
+/// `amount`, one unit-hour's reward before the readiness tier, under the
+/// indexed cap when its gate is live and the unit is a proven GPU.
+fn under_index_cap(state: &dyn VmState, amount: u128, proven_gpu: bool) -> u128 {
+    if !proven_gpu || !crate::feature_gate::is_live_now(state, AVAILABILITY_INDEX_CAP_KEY) {
+        return amount;
+    }
+    index_cap_wei(state).map_or(amount, |cap| amount.min(cap))
+}
+
 /// Log topic of an availability reward payout; data is
 /// `subject_len_le(4) || subject_did || epoch_be(8) || amount_le(16)`.
 pub const AVAILABILITY_REWARD_TOPIC: &[u8] = b"AvailabilityReward";
+
+/// Gate: the first epoch from which the reward per verified unit is a share
+/// of a budget pinned to verified paid demand instead of the governed
+/// schedule. From it, each hour's budget is [`UNIT_BUDGET_DEMAND_BPS_PARAM`]
+/// of the verified paid demand per hour over the demand window, split
+/// equally over the units the last closed hour verified, and never more per
+/// unit than the decayed cap. Every unit is paid alike, so splitting one
+/// operator into several earns nothing more, and the total follows demand.
+pub const UNIT_BUDGET_KEY: &str = "feature.unit_budget.activation_epoch";
+
+/// Governed: share of verified paid demand per hour that budgets the
+/// availability reward once [`UNIT_BUDGET_KEY`] is live, bps. Zero at
+/// genesis: the vote that activates the budget sets it.
+pub const UNIT_BUDGET_DEMAND_BPS_PARAM: &str = "feature.unit_budget.demand_bps";
+/// Upper bound of [`UNIT_BUDGET_DEMAND_BPS_PARAM`].
+pub const MAX_UNIT_BUDGET_DEMAND_BPS: u64 = 10_000;
+
+fn verified_units_key(epoch: u64) -> String {
+    format!("availability_units:{epoch:016x}")
+}
+
+/// Units verified available in `epoch` so far.
+pub fn verified_units(state: &dyn VmState, epoch: u64) -> u64 {
+    super::funding::read_json(state, &verified_units_key(epoch)).unwrap_or(0)
+}
+
+/// Adds `units` to `epoch`'s verified units and drops the count two hours
+/// back, which nothing reads again.
+fn add_verified_units(
+    state: &mut dyn VmState,
+    epoch: u64,
+    units: u64,
+    changes: &mut Vec<StateChange>,
+) -> Result<()> {
+    let total = verified_units(state, epoch).saturating_add(units);
+    super::funding::write_json(state, &verified_units_key(epoch), &total, changes)?;
+    if let Some(old) = epoch.checked_sub(2) {
+        let key = verified_units_key(old);
+        if let Some(prior) = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes()) {
+            state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), Vec::new());
+            changes.push(StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                key.into_bytes(),
+                Some(prior),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The reward per verified unit in `epoch` under the demand-pinned budget:
+/// the hour's budget over the units the hour before verified (at least one),
+/// at most the decayed cap.
+pub fn unit_budget_reward(state: &dyn VmState, epoch: u64) -> u128 {
+    let bps = network_param(state, UNIT_BUDGET_DEMAND_BPS_PARAM).min(MAX_UNIT_BUDGET_DEMAND_BPS);
+    let window = network_param(state, AVAILABILITY_REWARD_DEMAND_WINDOW_EPOCHS_PARAM)
+        .clamp(1, MAX_AVAILABILITY_REWARD_DEMAND_WINDOW_EPOCHS);
+    let budget = verified_paid_demand_wei(state, epoch, window).saturating_mul(u128::from(bps))
+        / 10_000
+        / u128::from(window);
+    let units = verified_units(state, epoch.saturating_sub(1)).max(1);
+    decayed_cap(state, epoch).min(budget / u128::from(units))
+}
 
 /// Gas charged for one `DeclareReadinessTier` transaction: a single small
 /// state write, the same order of magnitude as `SlaAttest`/`FeeRateSubmit`.
@@ -188,6 +358,69 @@ pub const AVAILABILITY_READINESS_WARM_BPS_PARAM: &str = "reward.availability_rea
 /// undecayed, un-offset reward.
 pub const DEFAULT_AVAILABILITY_READINESS_BPS: u64 = 10_000;
 pub const MAX_AVAILABILITY_READINESS_BPS: u64 = 10_000;
+
+/// First epoch from which a validator judges each readiness tier's
+/// verdict against its own governed SLA. Before it every subject is
+/// available when it answered more than half of a validator's probes.
+pub const SLA_TIERS_GATE: &str = "feature.sla_tiers.activation_epoch";
+/// Governed: share of a validator's probes a Warm subject must answer, more
+/// than this many bps, for its verdict to be available.
+pub const SLA_WARM_AVAILABLE_BPS_PARAM: &str = "feature.sla_tiers.warm_available_bps";
+/// Governed: the same for a Cool subject.
+pub const SLA_COOL_AVAILABLE_BPS_PARAM: &str = "feature.sla_tiers.cool_available_bps";
+/// Governed: the same for a Cold subject.
+pub const SLA_COLD_AVAILABLE_BPS_PARAM: &str = "feature.sla_tiers.cold_available_bps";
+/// Genesis SLA of every tier: more than half of the probes answered.
+pub const DEFAULT_SLA_AVAILABLE_BPS: u64 = 5_000;
+
+impl ReadinessTier {
+    /// The share of probes, bps, this tier must answer more than to be
+    /// available; more than half until [`SLA_TIERS_GATE`] is live.
+    pub fn available_bps(self, state: &dyn VmState) -> u64 {
+        if !crate::feature_gate::is_live_now(state, SLA_TIERS_GATE) {
+            return DEFAULT_SLA_AVAILABLE_BPS;
+        }
+        network_param(
+            state,
+            match self {
+                Self::Warm => SLA_WARM_AVAILABLE_BPS_PARAM,
+                Self::Cool => SLA_COOL_AVAILABLE_BPS_PARAM,
+                Self::Cold => SLA_COLD_AVAILABLE_BPS_PARAM,
+            },
+        )
+        .min(9_999)
+    }
+}
+
+/// Whether `subject` met its tier's SLA with `answered` of `answered +
+/// failed` probes answered.
+pub fn meets_sla(state: &dyn VmState, subject: &str, answered: u32, failed: u32) -> bool {
+    let bps = declared_readiness_tier(state, subject).available_bps(state);
+    let total = u64::from(answered) + u64::from(failed);
+    total > 0 && u64::from(answered) * 10_000 > bps * total
+}
+
+/// First epoch from which a machine whose TPM its manufacturer certifies as
+/// firmware on the host processor earns the firmware tier's share of the
+/// availability reward, a tier below a discrete chip.
+pub const FIRMWARE_TPM_TIER_GATE: &str = "feature.firmware_tpm_tier.activation_epoch";
+/// Governed: the share of the availability reward, bps, a machine on a
+/// firmware TPM earns once [`FIRMWARE_TPM_TIER_GATE`] is live.
+pub const AVAILABILITY_FIRMWARE_TPM_BPS_PARAM: &str = "feature.firmware_tpm_tier.reward_bps";
+/// Genesis firmware tier: half of a discrete chip's reward.
+pub const DEFAULT_AVAILABILITY_FIRMWARE_TPM_BPS: u64 = 5_000;
+
+/// `reward` at the firmware tier's share when `subject` runs on a firmware
+/// TPM and the tier is live, whole otherwise.
+fn apply_firmware_tier(state: &dyn VmState, subject: &str, reward: u128) -> u128 {
+    if !crate::feature_gate::is_live_now(state, FIRMWARE_TPM_TIER_GATE)
+        || !super::funding::machine_firmware_tpm(state, subject)
+    {
+        return reward;
+    }
+    let bps = network_param(state, AVAILABILITY_FIRMWARE_TPM_BPS_PARAM).min(10_000);
+    reward.saturating_mul(u128::from(bps)) / 10_000
+}
 
 fn readiness_tier_key(subject: &str) -> String {
     format!("readiness_tier:{subject}")
@@ -333,15 +566,12 @@ fn halving_decay(value: u128, elapsed_epochs: u64, half_life_epochs: u64) -> u12
 
 /// TNZO wei settled across the governed demand window of one-hour epochs
 /// ending at and including `epoch`: the sum of
-/// [`super::economy::EpochActivity::settled_value`] over that window --
-/// value every chat/inference, TEE, RPC-traffic, compute-lease and storage
-/// settlement already records on its one canonical settlement path
-/// (`economy::settle_payout` -> `record_fee`). Multi-leg x402/MPP plan
-/// settlements and sponsored/proven payments settle through a separate,
-/// raw `move_balance` path that does not write an `EpochActivity` entry, so
-/// their value is not counted here -- a real, named gap (counting them
-/// would need its own change to those two settlement paths, not a guess
-/// bolted on here) rather than a silent omission.
+/// [`super::economy::EpochActivity::settled_value`] over that window. Every
+/// settlement on the ledger records it (escrow claims and releases, plan
+/// commits, netted plans, payer settlements); a payment made off the ledger
+/// and recorded on it (proven or attested) records it once
+/// [`super::economy::EXTERNAL_PAYMENT_ACTIVITY_GATE`] is live. Treasury
+/// sponsorships and grants are not demand and record none.
 fn verified_paid_demand_wei(state: &dyn VmState, epoch: u64, window_epochs: u64) -> u128 {
     let start = epoch.saturating_sub(window_epochs.saturating_sub(1));
     let mut total = 0u128;
@@ -351,6 +581,41 @@ fn verified_paid_demand_wei(state: &dyn VmState, epoch: u64, window_epochs: u64)
     total
 }
 
+/// Whether `subject_owner` meets the paid-activity requirement, in force
+/// once [`AVAILABILITY_PAID_ACTIVITY_GATE`] is live: within the
+/// governed window of reward epochs it earned at least the governed minimum
+/// of provider work, the window is zero, or the bootstrap period has not
+/// ended. Provider work is recorded only for a settlement whose payer and
+/// payee are registered identities of different roots, so paying oneself
+/// earns none; the minimum is a weight, so a token payment does not reach
+/// it. A 20-byte owner is the account its address names.
+pub(super) fn paid_activity_met(state: &dyn VmState, subject_owner: &[u8]) -> Result<bool> {
+    if !crate::feature_gate::is_live_now(state, AVAILABILITY_PAID_ACTIVITY_GATE) {
+        return Ok(true);
+    }
+    let window = network_param(state, AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS_PARAM)
+        .min(MAX_AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS);
+    if window == 0 {
+        return Ok(true);
+    }
+    let current = super::rewards::read_reward_state(state)?.current_epoch;
+    if current < network_param(state, AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH_PARAM) {
+        return Ok(true);
+    }
+    let Ok(owner) = super::pad_address_32(subject_owner) else {
+        return Ok(false);
+    };
+    let earned = super::rewards::provider_work_since(
+        state,
+        &Address::new(owner),
+        current.saturating_sub(window - 1),
+    )?;
+    let least = network_param(state, AVAILABILITY_REWARD_MIN_PAID_WORK_PARAM)
+        .clamp(1, MAX_AVAILABILITY_REWARD_MIN_PAID_WORK);
+
+    Ok(earned >= u128::from(least))
+}
+
 /// The availability reward's demand-offset multiplier, in bps of the
 /// decayed cap: `10_000` (no offset) when the governed target is zero
 /// (disabled) or the rate feed [`super::economy::usd_to_wei`] converts
@@ -358,15 +623,27 @@ fn verified_paid_demand_wei(state: &dyn VmState, epoch: u64, window_epochs: u64)
 /// never phase out the reward just because the rate feed is quiet); linear
 /// in between, down to `0` once verified paid demand over the governed
 /// window reaches the governed target.
+/// The demand target in force, atto-USD per day: the whole-USD key once
+/// its gate is live, the atto-USD key before.
+fn demand_target_atto_usd(state: &dyn VmState) -> u128 {
+    if crate::feature_gate::is_live_now(state, AVAILABILITY_DEMAND_TARGET_USD_KEY) {
+        let usd = network_param(state, AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM)
+            .min(MAX_AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY);
+        u128::from(usd) * 1_000_000_000_000_000_000
+    } else {
+        u128::from(network_param(
+            state,
+            AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY_PARAM,
+        ))
+    }
+}
+
 fn demand_offset_bps(state: &dyn VmState, epoch: u64) -> u64 {
-    let target_usd = network_param(
-        state,
-        AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY_PARAM,
-    );
-    if target_usd == 0 {
+    let target_atto_usd = demand_target_atto_usd(state);
+    if target_atto_usd == 0 {
         return 10_000;
     }
-    let target_wei = super::economy::usd_to_wei(state, u128::from(target_usd));
+    let target_wei = super::economy::usd_to_wei(state, target_atto_usd);
     if target_wei == 0 {
         return 10_000;
     }
@@ -410,8 +687,9 @@ fn demand_offset_bps(state: &dyn VmState, epoch: u64) -> u64 {
 /// once per GPU counted in the current reward epoch or the one before, and
 /// once for a host with none. Returns the amount paid (liquid plus
 /// newly-vesting), or `None` if nothing was (the reward is zero, the
-/// treasury cannot cover it, hardware binding is off, or the subject does
-/// not pass it).
+/// treasury cannot cover it, hardware binding is off, the subject does not
+/// pass it, or its owner has no recent paid activity:
+/// [`AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS_PARAM`]).
 pub(super) fn pay_if_available(
     state: &mut dyn VmState,
     subject_did: &str,
@@ -421,19 +699,31 @@ pub(super) fn pay_if_available(
     changes: &mut Vec<StateChange>,
     logs: &mut Vec<Log>,
 ) -> Result<Option<u128>> {
-    let reward = apply_readiness_tier(state, subject_did, availability_reward_amount(state, epoch));
-    if reward == 0 {
-        return Ok(None);
-    }
     let require_hardware = network_param(state, AVAILABILITY_REWARD_REQUIRE_HARDWARE_PARAM)
         .min(MAX_AVAILABILITY_REWARD_REQUIRE_HARDWARE)
         != 0;
     if !require_hardware || super::funding::machine_endorsed(state, subject_did, now_ms).is_err() {
         return Ok(None);
     }
+    if !paid_activity_met(state, subject_owner)? {
+        return Ok(None);
+    }
     let gpus = super::hardware_level::current_gpus(state, subject_did)
         .len()
         .max(1);
+    let per_unit = if crate::feature_gate::is_live_now(state, UNIT_BUDGET_KEY) {
+        add_verified_units(state, epoch, gpus as u64, changes)?;
+        unit_budget_reward(state, epoch)
+    } else {
+        let proven_gpu = crate::feature_gate::is_live_now(state, AVAILABILITY_INDEX_CAP_KEY)
+            && !super::hardware_level::current_gpus(state, subject_did).is_empty();
+        unit_hour_reward(state, epoch, proven_gpu)
+    };
+    let reward = apply_readiness_tier(state, subject_did, per_unit);
+    let reward = apply_firmware_tier(state, subject_did, reward);
+    if reward == 0 {
+        return Ok(None);
+    }
     let reward = reward.saturating_mul(gpus as u128);
     let treasury: [u8; 32] = super::derive_treasury_address()
         .as_bytes()
@@ -491,7 +781,7 @@ pub(super) fn pay_if_available(
 pub(super) mod tests {
     use super::*;
     use crate::state_adapter::StateAdapter;
-    use tenzro_tee::tpm_attest::tests::{SoftTpm, evidence};
+    use tenzro_tee::tpm_attest::tests::{SoftTpm, evidence, evidence_from};
     use tenzro_tee::tpm_attest::{
         MachineAttestation, admission_challenge, attestation_key_sec1,
         machine_did_for_attestation_key,
@@ -521,13 +811,27 @@ pub(super) mod tests {
         state: &mut StateAdapter,
         seed: u8,
     ) -> String {
+        register_endorsed_machine_from(state, seed, None)
+    }
+
+    /// [`register_endorsed_machine`] on a TPM whose EK certificate names
+    /// `manufacturer` when given.
+    fn register_endorsed_machine_from(
+        state: &mut StateAdapter,
+        seed: u8,
+        manufacturer: Option<&str>,
+    ) -> String {
         let tpm = SoftTpm::new(seed);
         let (probe, _) = evidence(&tpm, &[0; 32]);
         let ak = attestation_key_sec1(&probe).unwrap();
         let did = machine_did_for_attestation_key(&ak);
         let controller = vec![seed; 33];
         let nonce = [seed; 32];
-        let (ev, root) = evidence(&tpm, &admission_challenge(&did, &controller, &nonce));
+        let (ev, root) = evidence_from(
+            &tpm,
+            &admission_challenge(&did, &controller, &nonce),
+            manufacturer,
+        );
         let att = MachineAttestation {
             evidence: ev,
             nonce: nonce.to_vec(),
@@ -575,9 +879,28 @@ pub(super) mod tests {
     pub(in crate::native) const BOUND_NOW_MS: i64 = 1_800_000_000_000;
 
     /// Turns hardware binding on and registers a TPM-endorsed machine for
+    /// Puts the paid-activity requirement in force and gives `owner` the
+    /// least provider work it asks for at its genesis values, earned in the
+    /// current reward epoch.
+    pub(in crate::native) fn earn_paid_work(state: &mut StateAdapter, owner: &[u8]) {
+        crate::native::set_genesis_param(state, AVAILABILITY_PAID_ACTIVITY_GATE, 0);
+        crate::native::rewards::record_settled_work(
+            state,
+            Address::new(crate::native::pad_address_32(owner).unwrap()),
+            tenzro_token::rewards::WorkClass::InferenceServed,
+            u128::from(DEFAULT_AVAILABILITY_REWARD_MIN_PAID_WORK),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+
     /// `seed`: the only kind of subject the reward pays. Returns its DID.
+    /// Its owner, the account `[seed; 20]` or `[seed; 32]`, has earned the
+    /// least provider work the reward asks for in the current reward epoch.
     fn bound_subject(state: &mut StateAdapter, seed: u8) -> String {
         set(state, AVAILABILITY_REWARD_REQUIRE_HARDWARE_PARAM, 1);
+        earn_paid_work(state, &[seed; 20]);
+        earn_paid_work(state, &[seed; 32]);
         register_endorsed_machine(state, seed)
     }
 
@@ -612,6 +935,135 @@ pub(super) mod tests {
             super::super::compute_bond_storage_key(did).as_bytes(),
             serde_json::to_vec(&marker).unwrap(),
         );
+    }
+
+    /// A datacenter-GPU index of 2.00 USD per compute-hour frozen at epoch 3,
+    /// with TNZO at 0.10 USD: 7.5% is 0.15 USD, 1.5 TNZO.
+    fn with_index(state: &mut StateAdapter) {
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            b"fxr_live:IDXDCGPU",
+            serde_json::to_vec(&serde_json::json!({ "rate_nano_usd": "2000000000", "epoch": 3 }))
+                .unwrap(),
+        );
+        set_genesis_param(
+            state,
+            super::super::economy::GOVERNANCE_RATE_PARAM,
+            100_000_000,
+        );
+    }
+
+    const TNZO: u128 = 1_000_000_000_000_000_000;
+
+    /// Before the gate the absolute cap holds for every unit, index or not.
+    #[test]
+    fn before_the_gate_the_absolute_cap_holds() {
+        let mut state = StateAdapter::new();
+        with_index(&mut state);
+        assert_eq!(under_index_cap(&state, 5 * TNZO, true), 5 * TNZO);
+    }
+
+    /// From the gate a proven GPU earns at most its share of the index; a
+    /// unit with no proven GPU, or a chain with no index, keeps the absolute
+    /// cap, and a cap already below the index share is untouched.
+    #[test]
+    fn from_the_gate_a_proven_gpu_is_capped_at_its_share_of_the_index() {
+        let mut state = StateAdapter::new();
+        set_genesis_param(&mut state, AVAILABILITY_INDEX_CAP_KEY, 0);
+        assert_eq!(
+            under_index_cap(&state, 5 * TNZO, true),
+            5 * TNZO,
+            "no index yet"
+        );
+        with_index(&mut state);
+        assert_eq!(index_cap_wei(&state), Some(3 * TNZO / 2));
+        assert_eq!(under_index_cap(&state, 5 * TNZO, true), 3 * TNZO / 2);
+        assert_eq!(under_index_cap(&state, 5 * TNZO, false), 5 * TNZO);
+        assert_eq!(under_index_cap(&state, TNZO, true), TNZO);
+        set_genesis_param(&mut state, AVAILABILITY_INDEX_CAP_BPS_PARAM, 5_000);
+        assert_eq!(
+            index_cap_wei(&state),
+            Some(2 * TNZO),
+            "bounded at 10% of the index"
+        );
+    }
+
+    /// Before its gate the target is the atto-USD key, which cannot reach
+    /// 60,000 USD a day; from it the whole-USD key sets 60,000 USD a day and
+    /// the atto-USD key is no longer read.
+    #[test]
+    fn the_whole_usd_demand_target_holds_the_design_figure_only_from_its_gate() {
+        let mut state = StateAdapter::new();
+        set_genesis_param(
+            &mut state,
+            AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY_PARAM,
+            u64::MAX,
+        );
+        set_genesis_param(
+            &mut state,
+            AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM,
+            60_000,
+        );
+        assert_eq!(demand_target_atto_usd(&state), u128::from(u64::MAX));
+        assert!(demand_target_atto_usd(&state) < 19 * 1_000_000_000_000_000_000);
+
+        set_genesis_param(&mut state, AVAILABILITY_DEMAND_TARGET_USD_KEY, 0);
+        assert_eq!(
+            demand_target_atto_usd(&state),
+            60_000 * 1_000_000_000_000_000_000
+        );
+        let gate = crate::governance::governed_param(AVAILABILITY_DEMAND_TARGET_USD_KEY).unwrap();
+        assert!(crate::feature_gate::follows_convention(gate));
+        assert_eq!(gate.genesis, crate::feature_gate::NEVER);
+    }
+
+    /// From the gate, settled demand of half the whole-USD target halves the
+    /// reward.
+    #[test]
+    fn half_the_whole_usd_target_halves_the_reward() {
+        let mut state = StateAdapter::new();
+        set_genesis_param(&mut state, AVAILABILITY_DEMAND_TARGET_USD_KEY, 0);
+        set_genesis_param(
+            &mut state,
+            AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM,
+            60_000,
+        );
+        set_genesis_param(
+            &mut state,
+            super::super::economy::GOVERNANCE_RATE_PARAM,
+            100_000_000,
+        );
+        set_genesis_param(
+            &mut state,
+            AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM,
+            1_000_000,
+        );
+        // 30,000 USD at 0.10 USD per TNZO is 300,000 TNZO, settled in epoch 5.
+        let activity = super::super::economy::EpochActivity {
+            settled_value: 300_000 * 1_000_000_000_000_000_000,
+            ..Default::default()
+        };
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            super::super::economy::activity_key(5).as_bytes(),
+            serde_json::to_vec(&activity).unwrap(),
+        );
+        assert_eq!(demand_offset_bps(&state, 5), 5_000);
+        assert_eq!(availability_reward_amount(&state, 5), 500_000);
+    }
+
+    /// The gate is dormant at genesis and both keys follow the convention.
+    #[test]
+    fn the_index_cap_gate_is_dormant_at_genesis() {
+        let gate = crate::governance::governed_param(AVAILABILITY_INDEX_CAP_KEY).unwrap();
+        assert!(crate::feature_gate::follows_convention(gate));
+        assert_eq!(gate.genesis, crate::feature_gate::NEVER);
+        let bps = crate::governance::governed_param(AVAILABILITY_INDEX_CAP_BPS_PARAM).unwrap();
+        assert!(crate::feature_gate::follows_convention(bps));
+        assert!(!crate::feature_gate::is_live_now(
+            &StateAdapter::new(),
+            AVAILABILITY_INDEX_CAP_KEY
+        ));
     }
 
     #[test]
@@ -880,6 +1332,25 @@ pub(super) mod tests {
             0,
             "a u64 cap cannot survive 100 halvings"
         );
+    }
+
+    /// The sizing rule docs/ECONOMICS.md gives for a flat market, where only
+    /// calendar decay binds: everything one unit can ever be paid is about
+    /// 1.5 half-lives of the cap (each halving interval pays three quarters
+    /// of the cap it starts at), so 36 x half-life in days x the hourly cap.
+    #[test]
+    fn calendar_decay_alone_pays_one_unit_at_most_one_and_a_half_half_lives_of_the_cap() {
+        let cap: u128 = 1_000_000;
+        for half_life_days in [1u64, 10, 90] {
+            let h = half_life_days * 24;
+            let total: u128 = (0..h * 60).map(|e| halving_decay(cap, e, h)).sum();
+            let rule = 36 * u128::from(half_life_days) * cap;
+            assert!(total <= rule + cap, "{half_life_days}d: {total} > {rule}");
+            assert!(
+                total * 1_000 >= rule * 995,
+                "{half_life_days}d: {total} << {rule}"
+            );
+        }
     }
 
     #[test]
@@ -1245,6 +1716,7 @@ pub(super) mod tests {
         let did = register_endorsed_machine(&mut state, 11);
         set(&mut state, AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM, 1_000);
         set(&mut state, AVAILABILITY_REWARD_REQUIRE_HARDWARE_PARAM, 1);
+        earn_paid_work(&mut state, &[11u8; 32]);
         let treasury: [u8; 32] = super::super::derive_treasury_address()
             .as_bytes()
             .try_into()
@@ -1268,6 +1740,197 @@ pub(super) mod tests {
         .unwrap();
         assert_eq!(paid, Some(1_000));
         assert_eq!(logs.len(), 1);
+    }
+
+    /// A hardware-bound operator is paid for being available only while its
+    /// owner has earned the governed minimum of provider work within the
+    /// governed window of reward epochs, or while the bootstrap period runs.
+    /// Once the gate is live both are in force: an operator nobody pays earns
+    /// nothing, and neither does one paid a token amount.
+    #[test]
+    fn an_operator_without_enough_recent_paid_work_earns_no_availability_reward() {
+        use crate::native::rewards;
+        use tenzro_token::rewards::WorkClass;
+        let now_ms = BOUND_NOW_MS;
+        let subject = [11u8; 32];
+        let least = u128::from(DEFAULT_AVAILABILITY_REWARD_MIN_PAID_WORK);
+        let treasury: [u8; 32] = super::super::derive_treasury_address()
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        let fresh = || {
+            let mut state = state_adapter();
+            let did = register_endorsed_machine(&mut state, 11);
+            set(&mut state, AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM, 1_000);
+            set(&mut state, AVAILABILITY_REWARD_REQUIRE_HARDWARE_PARAM, 1);
+            set(&mut state, AVAILABILITY_PAID_ACTIVITY_GATE, 0);
+            state.set_balance(&treasury, 10_000);
+            (state, did)
+        };
+        let pay = |state: &mut StateAdapter, did: &str, owner: &[u8]| {
+            pay_if_available(
+                state,
+                did,
+                owner,
+                1,
+                now_ms,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .unwrap()
+        };
+        let earn = |state: &mut StateAdapter, who: [u8; 32], class, weight: u128| {
+            rewards::record_settled_work(state, Address::new(who), class, weight, &mut Vec::new())
+                .unwrap()
+        };
+        let genesis = state_adapter();
+        assert_eq!(
+            network_param(&genesis, AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS_PARAM),
+            DEFAULT_AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS
+        );
+        assert_eq!(
+            network_param(&genesis, AVAILABILITY_REWARD_MIN_PAID_WORK_PARAM),
+            DEFAULT_AVAILABILITY_REWARD_MIN_PAID_WORK
+        );
+
+        // No paid work: nothing, and nothing leaves the treasury.
+        let (mut state, did) = fresh();
+        assert_eq!(pay(&mut state, &did, &subject), None);
+        assert_eq!(state.get_balance(&treasury), 10_000);
+
+        // Before the gate is live the requirement is not in force.
+        let (mut state, did) = fresh();
+        set(
+            &mut state,
+            AVAILABILITY_PAID_ACTIVITY_GATE,
+            crate::feature_gate::NEVER,
+        );
+        assert_eq!(pay(&mut state, &did, &subject), Some(1_000));
+        assert_eq!(
+            crate::feature_gate::activation_epoch(&genesis, AVAILABILITY_PAID_ACTIVITY_GATE),
+            crate::feature_gate::NEVER
+        );
+
+        // A token payment's worth of work is below the minimum; the rest of
+        // the minimum, earned in two payments, reaches it.
+        let (mut state, did) = fresh();
+        earn(&mut state, subject, WorkClass::InferenceServed, 1);
+        assert_eq!(pay(&mut state, &did, &subject), None);
+        earn(&mut state, subject, WorkClass::InferenceServed, least - 2);
+        assert_eq!(pay(&mut state, &did, &subject), None);
+        earn(&mut state, subject, WorkClass::InferenceServed, 1);
+        assert_eq!(pay(&mut state, &did, &subject), Some(1_000));
+
+        // Work that is not provider work, and another account's provider
+        // work, do not count.
+        let (mut state, did) = fresh();
+        earn(&mut state, subject, WorkClass::AppUsage, least);
+        earn(&mut state, [12u8; 32], WorkClass::InferenceServed, least);
+        assert_eq!(pay(&mut state, &did, &subject), None);
+
+        // A 20-byte owner is the account its address names.
+        let (mut state, did) = fresh();
+        let short = [11u8; 20];
+        earn(
+            &mut state,
+            crate::native::pad_address_32(&short).unwrap(),
+            WorkClass::InferenceServed,
+            least,
+        );
+        assert_eq!(pay(&mut state, &did, &short), Some(1_000));
+
+        // The bootstrap period waives the requirement until its epoch.
+        let (mut state, did) = fresh();
+        set(
+            &mut state,
+            AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH_PARAM,
+            1,
+        );
+        assert_eq!(pay(&mut state, &did, &subject), Some(1_000));
+
+        // A zero window asks for no paid activity.
+        let (mut state, did) = fresh();
+        set(
+            &mut state,
+            AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS_PARAM,
+            0,
+        );
+        assert_eq!(pay(&mut state, &did, &subject), Some(1_000));
+    }
+
+    fn pay(state: &mut StateAdapter, did: &str, seed: u8, epoch: u64) -> Option<u128> {
+        let mut changes = Vec::new();
+        pay_if_available(
+            state,
+            did,
+            &[seed; 32],
+            epoch,
+            1_800_000_000_000,
+            &mut changes,
+            &mut Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn funded(state: &mut StateAdapter) {
+        let treasury: [u8; 32] = super::super::derive_treasury_address()
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        state.set_balance(&treasury, 1_000_000_000);
+    }
+
+    #[test]
+    fn the_unit_budget_is_dormant_at_genesis_and_counts_no_units() {
+        let mut state = state_adapter();
+        funded(&mut state);
+        let did = bound_subject(&mut state, 21);
+        set(&mut state, AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM, 1_000);
+        set(&mut state, UNIT_BUDGET_DEMAND_BPS_PARAM, 10_000);
+        assert_eq!(
+            pay(&mut state, &did, 21, 5),
+            Some(1_000),
+            "the schedule pays"
+        );
+        assert_eq!(verified_units(&state, 5), 0);
+    }
+
+    #[test]
+    fn a_live_unit_budget_splits_demand_equally_over_last_hours_units() {
+        let mut state = state_adapter();
+        funded(&mut state);
+        let a = bound_subject(&mut state, 22);
+        let b = bound_subject(&mut state, 23);
+        set(&mut state, UNIT_BUDGET_KEY, 0);
+        set(
+            &mut state,
+            AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM,
+            1_000_000,
+        );
+        set(
+            &mut state,
+            AVAILABILITY_REWARD_DEMAND_WINDOW_EPOCHS_PARAM,
+            1,
+        );
+        set(&mut state, UNIT_BUDGET_DEMAND_BPS_PARAM, 1_000);
+        // Hour 4: one unit verified, no demand yet, so nothing is paid.
+        seed_epoch_activity(&mut state, 4, 0);
+        assert_eq!(pay(&mut state, &a, 22, 4), None);
+        assert_eq!(verified_units(&state, 4), 1);
+        // Hour 5: 80,000 settled, a 10% budget of 8,000 over the one unit
+        // hour 4 verified.
+        seed_epoch_activity(&mut state, 5, 80_000);
+        assert_eq!(pay(&mut state, &a, 22, 5), Some(8_000));
+        assert_eq!(pay(&mut state, &b, 23, 5), Some(8_000));
+        assert_eq!(verified_units(&state, 5), 2);
+        // Hour 6: the same budget over hour 5's two units.
+        seed_epoch_activity(&mut state, 6, 80_000);
+        assert_eq!(pay(&mut state, &a, 22, 6), Some(4_000));
+        // Hour 4's count is gone once hour 6 is counted.
+        assert_eq!(verified_units(&state, 4), 0);
+        // Never above the decayed cap.
+        set(&mut state, AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM, 3_000);
+        assert_eq!(pay(&mut state, &b, 23, 6), Some(3_000));
     }
 
     #[test]
@@ -1305,6 +1968,73 @@ pub(super) mod tests {
             super::super::rewards::read_vesting(&state, &Address::new(subject))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// Every readiness tier is available above half its probes until the
+    /// gate is live; then each tier is judged against its own SLA.
+    #[test]
+    fn each_readiness_tier_has_its_own_sla_once_live() {
+        let mut state = state_adapter();
+        let (cold, warm) = ("did:tenzro:machine:cold", "did:tenzro:machine:warm");
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            readiness_tier_key(cold).as_bytes(),
+            vec![ReadinessTier::Cold as u8],
+        );
+        set_genesis_param(&mut state, SLA_COLD_AVAILABLE_BPS_PARAM, 9_000);
+
+        // Dormant: more than half.
+        assert!(meets_sla(&state, cold, 6, 4));
+
+        set_genesis_param(&mut state, SLA_TIERS_GATE, 0);
+        assert!(
+            !meets_sla(&state, cold, 9, 1),
+            "exactly the SLA is not above it"
+        );
+        assert!(meets_sla(&state, cold, 10, 0));
+        assert!(meets_sla(&state, warm, 6, 4));
+        assert!(!meets_sla(&state, warm, 0, 0), "no probe proves nothing");
+    }
+
+    /// A machine on a firmware TPM earns the firmware tier's share of the
+    /// availability reward once the tier is live, and the whole reward
+    /// before; a discrete chip earns the whole reward either way.
+    #[test]
+    fn a_firmware_tpm_earns_the_lower_tier_once_live() {
+        let paid = |manufacturer: &str, live: bool| {
+            let mut state = state_adapter();
+            set(&mut state, AVAILABILITY_REWARD_REQUIRE_HARDWARE_PARAM, 1);
+            set(&mut state, AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM, 1_000);
+            if live {
+                set_genesis_param(&mut state, FIRMWARE_TPM_TIER_GATE, 0);
+            }
+            let did = register_endorsed_machine_from(&mut state, 21, Some(manufacturer));
+            let treasury: [u8; 32] = super::super::derive_treasury_address()
+                .as_bytes()
+                .try_into()
+                .unwrap();
+            state.set_balance(&treasury, 1_000_000);
+            pay_if_available(
+                &mut state,
+                &did,
+                &[7u8; 32],
+                1,
+                BOUND_NOW_MS,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let (intel, infineon) = ("id:494E5443", "id:49465800");
+        let whole = paid(infineon, false);
+        assert!(whole > 0);
+        assert_eq!(paid(intel, false), whole);
+        assert_eq!(paid(infineon, true), whole);
+        assert_eq!(
+            paid(intel, true),
+            whole * u128::from(DEFAULT_AVAILABILITY_FIRMWARE_TPM_BPS) / 10_000
         );
     }
 }

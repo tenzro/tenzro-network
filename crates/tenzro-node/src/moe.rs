@@ -767,7 +767,7 @@ pub(crate) async fn handle_moe_route(
         message: format!("hidden_states: {e}"),
         data: None,
     })?;
-    let top_k = resolve_top_k(&p, model_id)?;
+    let top_k = resolve_top_k(&node.catalog(), &p, model_id)?;
 
     let routed = node
         .moe_runtime
@@ -896,21 +896,27 @@ pub(crate) async fn handle_moe_prepare_experts(
         .unwrap_or(true);
     let quant_plan = parse_quant_plan(&p)?;
 
-    let entry = tenzro_model::catalog::get_model_by_id(&model_id).ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: format!("unknown catalog model_id: {model_id}"),
-        data: None,
-    })?;
+    let entry = node
+        .catalog()
+        .get_model_by_id(&model_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("unknown catalog model_id: {model_id}"),
+            data: None,
+        })?;
     let shape = entry.moe.ok_or_else(|| JsonRpcError {
         code: -32602,
         message: format!("{model_id} is not a MoE catalog entry"),
         data: None,
     })?;
-    let source = tenzro_model::catalog::moe_source(&model_id).ok_or_else(|| JsonRpcError {
-        code: -32004,
-        message: format!("no safetensors checkpoint source mapped for {model_id}"),
-        data: None,
-    })?;
+    let source = node
+        .catalog()
+        .moe_source(&model_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("no safetensors checkpoint source mapped for {model_id}"),
+            data: None,
+        })?;
     let naming =
         MoeTensorNaming::for_architecture(entry.architecture).ok_or_else(|| JsonRpcError {
             code: -32004,
@@ -1108,7 +1114,11 @@ pub(crate) async fn handle_moe_prepare_status(
 // Router-peer distributed forward
 // ---------------------------------------------------------------------------
 
-fn resolve_top_k(p: &Value, model_id: &str) -> Result<usize, JsonRpcError> {
+fn resolve_top_k(
+    catalog: &tenzro_model::Catalog,
+    p: &Value,
+    model_id: &str,
+) -> Result<usize, JsonRpcError> {
     if let Some(k) = p.get("top_k").and_then(|v| v.as_u64()) {
         if k == 0 {
             return Err(JsonRpcError {
@@ -1120,7 +1130,8 @@ fn resolve_top_k(p: &Value, model_id: &str) -> Result<usize, JsonRpcError> {
         return Ok(k as usize);
     }
     // Default from the catalog MoE shape (experts_per_token).
-    tenzro_model::catalog::get_model_by_id(model_id)
+    catalog
+        .get_model_by_id(model_id)
         .and_then(|e| e.moe)
         .map(|s| s.experts_per_token as usize)
         .ok_or_else(|| JsonRpcError {
@@ -1163,7 +1174,7 @@ pub(crate) async fn handle_moe_forward(
         message: format!("hidden_states: {e}"),
         data: None,
     })?;
-    let top_k = resolve_top_k(&p, &model_id)?;
+    let top_k = resolve_top_k(&node.catalog(), &p, &model_id)?;
     let allow_cold = p
         .get("allow_cold")
         .and_then(|v| v.as_bool())

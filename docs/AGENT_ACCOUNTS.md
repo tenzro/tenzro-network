@@ -165,6 +165,20 @@ bounds does not renew. A machine root renews its agents with its own hardware
 approval. A renewal that changes nothing but a later expiry keeps the agent's
 grants on other chains.
 
+## How many agents a root may have
+
+Every agent answers to one root, and an agent cannot delegate an agent of its
+own: only a human or an autonomous machine roots one. Once the agent cap is
+live (`feature.agent_cap.activation_epoch`, dormant until a vote sets it), a
+root that already has `feature.agent_cap.max_agents_per_root` live agents
+(governed; 64 at genesis) is refused a further one. An agent stops counting
+once it is revoked, by its root, by governance or by its controller's
+revocation, which frees its place. A quarantined agent still counts, since its
+quarantine can be lifted, and so does a terminated one until its root revokes
+it. Changing an existing agent's terms is never refused. The count is kept per
+root once the rule is live; a root's first new agent after activation pays for
+one scan of the agents it delegated before, so those are counted too.
+
 ## Reports back to Tenzro
 
 On chains with a report route, an account's reports (a grant closed with what

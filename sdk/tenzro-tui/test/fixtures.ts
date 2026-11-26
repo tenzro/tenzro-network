@@ -1,4 +1,5 @@
 import type { Snapshot, Source } from "../src/data.js";
+import { redact } from "../src/redact.js";
 
 const now = Date.now();
 const ok = <T,>(value: T) => ({ state: "ok" as const, value, at: now });
@@ -56,6 +57,7 @@ export function healthy(): Snapshot {
         activated_at_epoch: 0,
         exited_at_epoch: null,
         jailed_until_epoch: null,
+        jailed_remedy: null,
         tee_attestation_hash: null,
         metadata_uri: "",
         updated_at: 0,
@@ -79,14 +81,19 @@ export function healthy(): Snapshot {
       ] as never,
     }),
     balance: ok({ address: PAYEE, wei: 1234567890123456789012n, nonce: 7 }),
+    peers: ok([
+      { peer_id: "3d480675a69f1f52f11deb3acc2adfb5ab94c37e6f8bffd0b19dfab64c56583e", self: true, account: PAYEE, machine_did: "did:tenzro:machine:265ad18ed76da11b", roles: ["Validator", "Provider"], hardware_tier: "server", identity_anchor: "tpm", region: "eu", version: "0.2.0" },
+      { peer_id: "9a11c0de77f1f52f11deb3acc2adfb5ab94c37e6f8bffd0b19dfab64c5650001", self: false, account: null, machine_did: "did:tenzro:machine:77aa18ed76da11b0", roles: ["Provider"], hardware_tier: "edge", identity_anchor: "tpm", region: null, version: null, age_ms: 42000 },
+    ]),
+    conditions: ok(null),
   };
 }
 
 export function down(url: string): Snapshot {
-  const e = { state: "error" as const, error: `Cannot reach a node at ${url}. Start one, or pass --rpc <url>.`, at: now };
-  return { at: now, status: e, health: e, syncing: e, chainId: e, finalized: e, models: e, validators: e, proposals: e, balance: { state: "pending" } };
+  const e = { state: "error" as const, error: redact(`Cannot reach a node at ${url}. Start one, or pass --rpc <url>.`), at: now };
+  return { at: now, status: e, health: e, syncing: e, chainId: e, finalized: e, models: e, validators: e, proposals: e, balance: { state: "pending" }, peers: e, conditions: e };
 }
 
 export function sourceOf(snap: () => Snapshot, url = "http://127.0.0.1:8545"): Source {
-  return { url, collect: async () => snap() };
+  return { url: redact(url), collect: async () => snap() };
 }

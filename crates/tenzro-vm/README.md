@@ -144,10 +144,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### EVM (Ethereum Virtual Machine)
 
 - **Address Format**: 20 bytes (e.g., `0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb`)
-- **Implementation**: revm
-- **Gas Costs**: Ethereum-compatible gas costs
+- **Implementation**: revm, two engines linked side by side: the one the network started with (revm 19) executes until `feature.evm_osaka.activation_epoch` is live; from that epoch revm 43 executes every EVM transaction and `eth_call` under the Osaka rule set (`src/evm/osaka.rs`)
+- **Gas Costs**: Ethereum-compatible gas costs; under Osaka a transaction's gas limit is capped at 16,777,216 (EIP-7825), and the node's pool refuses a higher one
 - **Bytecode**: EVM opcodes
-- **Precompiles**: Standard Ethereum precompiles (0x01-0x09), BLS12-381 (0x0b-0x11, EIP-2537), EIP-7951 P256VERIFY (0x100), Tenzro precompiles (0x1001-0x1011)
+- **Precompiles**: Standard Ethereum precompiles (0x01-0x09), EIP-7951 P256VERIFY (0x100), Tenzro precompiles (0x1001-0x1011); under Osaka also KZG point evaluation (0x0a) and BLS12-381 (0x0b-0x11, EIP-2537), verified by the engine's `blst` backend
+- **Conformance**: the Ethereum state tests run against both engines (`scripts/tests/evm-state-tests.sh`); `tests/state_tests_expected/` records every case that does not pass, per rule set
 
 ### SVM (Solana Virtual Machine)
 

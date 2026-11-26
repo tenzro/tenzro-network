@@ -2,14 +2,15 @@
 //!
 //! The commands that create, serve and delegate a machine's keys belong to
 //! `tenzro-node` (`tpm provision`, `tpm serve`, `tpm key-holder`,
-//! `tpm grant-request`, `tpm grant-install`, `tpm remote-check`). This hands
+//! `tpm grant-request`, `tpm grant-install`, `tpm remote-check`,
+//! `tpm keys-backup`, `tpm keys-verify`, `tpm keys-restore`). This hands
 //! the arguments to it unchanged, so the runbooks and the setup screens use
 //! one spelling and one set of options.
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
 
-/// TPM commands of the node: provision, serve, key-holder, grant-request, grant-install, remote-check
+/// TPM commands of the node: provision, serve, key-holder, grant-request, grant-install, remote-check, keys-backup, keys-verify, keys-restore
 #[derive(Debug, Parser)]
 pub struct TpmCmd {
     /// The arguments of `tenzro-node tpm`, for example: provision

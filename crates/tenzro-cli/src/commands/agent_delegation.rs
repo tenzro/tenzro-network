@@ -68,6 +68,31 @@ fn read_json(path: &PathBuf) -> Result<serde_json::Value> {
     serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
+/// The agent's terms in `path`, refused here when they state no daily
+/// ceiling or no end time: the node prepares no approval for such terms, and
+/// this says which of the two the file leaves out.
+fn read_terms(path: &PathBuf) -> Result<serde_json::Value> {
+    let terms = read_json(path)?;
+    let mut missing = Vec::new();
+    if terms["delegation_scope"]["max_daily_spend"].is_null() {
+        missing.push(
+            "delegation_scope.max_daily_spend (the daily ceiling; \"0\" for an agent that moves \
+             no value)",
+        );
+    }
+    if terms["expires_at_ms"].is_null() {
+        missing.push("expires_at_ms (when the approval ends, unix ms)");
+    }
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "{} states no {}: an agent is approved up to a daily ceiling and until a stated time",
+            path.display(),
+            missing.join(" and no ")
+        );
+    }
+    Ok(terms)
+}
+
 #[derive(Debug, Parser)]
 pub struct ChallengeCmd {
     /// The change to authorize
@@ -102,13 +127,13 @@ impl ChallengeCmd {
             DelegationOp::Delegate => serde_json::json!({
                 "account_address": self.account,
                 "operation": "delegate_agent",
-                "delegation": read_json(self.terms.as_ref().context("--terms is required")?)?,
+                "delegation": read_terms(self.terms.as_ref().context("--terms is required")?)?,
             }),
             DelegationOp::Update => serde_json::json!({
                 "account_address": self.account,
                 "operation": "update_agent_terms",
                 "agent_did": self.agent_did.as_ref().context("--agent-did is required")?,
-                "delegation": read_json(self.terms.as_ref().context("--terms is required")?)?,
+                "delegation": read_terms(self.terms.as_ref().context("--terms is required")?)?,
                 "rotate_tokens": self.rotate_tokens,
             }),
             DelegationOp::Revoke => serde_json::json!({
@@ -518,5 +543,46 @@ impl ActCmd {
         let result: serde_json::Value = rpc.call("tenzro_agentAct", params).await?;
         output::print_success("Action submitted");
         output::print_json(&result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn terms_file(terms: serde_json::Value) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terms.json");
+        std::fs::write(&path, terms.to_string()).unwrap();
+        (dir, path)
+    }
+
+    /// Terms with a daily ceiling and an end time are read; terms without
+    /// one are refused before the node is asked, naming what is missing.
+    #[test]
+    fn terms_without_a_ceiling_or_an_end_time_are_refused_by_name() {
+        let bounded = serde_json::json!({
+            "agent_name": "buyer",
+            "delegation_scope": { "max_daily_spend": "0" },
+            "expires_at_ms": 1_900_000_000_000u64,
+        });
+        let (_dir, path) = terms_file(bounded.clone());
+        assert_eq!(read_terms(&path).unwrap(), bounded);
+
+        let mut endless = bounded.clone();
+        endless.as_object_mut().unwrap().remove("expires_at_ms");
+        let (_dir, path) = terms_file(endless);
+        let err = read_terms(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("expires_at_ms") && !err.contains("max_daily_spend"),
+            "{err}"
+        );
+
+        let (_dir, path) = terms_file(serde_json::json!({ "agent_name": "buyer" }));
+        let err = read_terms(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("max_daily_spend") && err.contains("expires_at_ms"),
+            "{err}"
+        );
     }
 }

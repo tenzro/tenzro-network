@@ -54,6 +54,8 @@ impl ProviderClient {
     ///   this model; `None` lets the node size it.
     /// - `load_drafter`: `Some(false)` skips loading the catalog drafter for
     ///   multi-token prediction; the node loads it otherwise.
+    /// - `context_length`: tokens of context per request; `None` serves the
+    ///   catalog's context.
     /// - `visibility`: an override for this model. `Public` announces it and
     ///   any caller may invoke it by paying the operator's price; `Gated`
     ///   announces it as key-required; `Private` does not announce it and only
@@ -73,6 +75,9 @@ impl ProviderClient {
         }
         if let Some(visibility) = opts.visibility {
             params.insert("visibility".into(), json!(visibility.as_str()));
+        }
+        if let Some(n) = opts.context_length {
+            params.insert("context_length".into(), json!(n));
         }
         self.rpc
             .call::<serde_json::Value>("tenzro_serveModel", Value::Object(params))
@@ -219,7 +224,7 @@ impl ProviderClient {
             .map_err(|e| SdkError::RpcError(format!("Failed to parse hardware profile: {}", e)))
     }
 
-    /// Set this node's active roles. One stake backs every role.
+    /// Set this node's active roles. Each role is bonded separately from the same account.
     ///
     /// `roles` is a comma-separated set of role tokens: `validator`, `ai`,
     /// `storage`, `tee`, `user`. The empty string resolves to a client node.
@@ -489,59 +494,6 @@ impl ProviderClient {
             .map_err(|e| SdkError::RpcError(format!("Failed to parse provider stats: {}", e)))
     }
 
-    /// Read the compute-bond floor and withdrawal cooldown this node enforces.
-    ///
-    /// Call this before registering — a registration whose
-    /// backing bond is below the floor is refused at admission.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use tenzro_sdk::{TenzroClient, config::SdkConfig};
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = tenzro_sdk::network::connect_to_network(&tenzro_sdk::network::NetworkOptions::default()).await?;
-    /// let params = client.provider().compute_bond_params().await?;
-    /// println!("Minimum bond: {} wei", params.min_bond_wei);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn compute_bond_params(&self) -> SdkResult<ComputeBondParams> {
-        let result = self.rpc.call("tenzro_computeBondParams", json!([])).await?;
-        serde_json::from_value(result)
-            .map_err(|e| SdkError::RpcError(format!("Failed to parse compute bond params: {}", e)))
-    }
-
-    /// Fetch the compute bond posted against `provider_did`, or `None` when
-    /// that provider has never posted one.
-    ///
-    /// # Arguments
-    ///
-    /// * `provider_did` - Provider DID (e.g. `did:tenzro:machine:...`)
-    pub async fn get_compute_bond(&self, provider_did: &str) -> SdkResult<Option<ComputeBond>> {
-        let result: serde_json::Value = self
-            .rpc
-            .call(
-                "tenzro_getComputeBond",
-                json!([{ "provider_did": provider_did }]),
-            )
-            .await?;
-        if result.is_null() {
-            return Ok(None);
-        }
-        serde_json::from_value(result)
-            .map(Some)
-            .map_err(|e| SdkError::RpcError(format!("Failed to parse compute bond: {}", e)))
-    }
-
-    /// List every compute bond this node knows about.
-    pub async fn list_compute_bonds(&self) -> SdkResult<Vec<ComputeBond>> {
-        let result: serde_json::Value = self.rpc.call("tenzro_listComputeBonds", json!([])).await?;
-        let bonds = result.get("bonds").cloned().unwrap_or(json!([]));
-        serde_json::from_value(bonds)
-            .map_err(|e| SdkError::RpcError(format!("Failed to parse compute bonds: {}", e)))
-    }
-
     /// List all providers discovered on the Tenzro Network via gossipsub announcements.
     ///
     /// Returns both the local node (if it is actively serving models) and all remote providers
@@ -556,18 +508,19 @@ impl ProviderClient {
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = tenzro_sdk::network::connect_to_network(&tenzro_sdk::network::NetworkOptions::default()).await?;
     /// let provider = client.provider();
-    /// let providers = provider.list_providers().await?;
-    /// for p in &providers {
+    /// let listing = provider.list_providers().await?;
+    /// for p in &listing.providers {
     ///     println!("{}: {} ({}) — models: {:?}",
     ///         p.endpoint_id, p.provider_type, p.status, p.served_models);
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn list_providers(&self) -> SdkResult<Vec<NetworkProvider>> {
+    pub async fn list_providers(&self) -> SdkResult<ProviderListing> {
         #[derive(Deserialize)]
         struct Page {
             providers: Vec<serde_json::Value>,
+            operators: crate::validator::OperatorCounts,
             next_cursor: Option<String>,
         }
         let mut out = Vec::new();
@@ -597,21 +550,29 @@ impl ProviderClient {
             );
             match page.next_cursor {
                 Some(c) => cursor = Some(c),
-                None => return Ok(out),
+                None => {
+                    return Ok(ProviderListing {
+                        providers: out,
+                        operators: page.operators,
+                    });
+                }
             }
         }
     }
 
-    /// Price one request for `model` at every provider serving it, cheapest
-    /// first. `units` are the request's billable units (e.g.
-    /// `{"input_tokens": 800, "output_tokens": 200}`; omitted units are
-    /// zero); `verification` is `none`, `receipt`, `optimistic` or `tee`.
+    /// Price one request for `model` at every provider serving it, with
+    /// each provider's grid carbon intensity. `units` are the request's
+    /// billable units (e.g. `{"input_tokens": 800, "output_tokens": 200}`;
+    /// omitted units are zero); `verification` is `none`, `receipt`,
+    /// `optimistic` or `tee`; `order` is `price` (cheapest first, the
+    /// default) or `carbon` (cleanest grid first, for spot work).
     pub async fn quote_inference(
         &self,
         model: &str,
         units: serde_json::Value,
         verification: Option<&str>,
         provider: Option<&str>,
+        order: Option<&str>,
     ) -> SdkResult<serde_json::Value> {
         self.rpc
             .call(
@@ -621,6 +582,7 @@ impl ProviderClient {
                     "units": units,
                     "verification": verification,
                     "provider": provider,
+                    "order": order,
                 }),
             )
             .await
@@ -709,40 +671,11 @@ pub struct ServeOptions {
     /// `Some(false)` skips loading the catalog drafter for multi-token
     /// prediction; the node loads it otherwise.
     pub load_drafter: Option<bool>,
-}
-
-/// A provider's compute bond — the admission collateral `register` checks
-/// before it will accept a provider onto a rung.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComputeBond {
-    /// DID of the provider the bond is posted against
-    pub provider_did: String,
-    /// Address that posted the bond and receives the refund
-    pub provider_address: String,
-    /// Bonded amount in wei (10^-18 TNZO)
-    pub amount: String,
-    /// `Active`, `Cooldown`, `Returned`, or `Slashed`
-    pub status: String,
-    /// Unix milliseconds at which a withdrawal may be finalized; `None`
-    /// unless the bond is in `Cooldown`
-    pub cooldown_until: Option<i64>,
-    /// The bond vault address, hex
-    pub vault: String,
-    /// Whether this bond can currently back a provider registration
-    pub is_eligible: bool,
-    /// Amount that counts toward admission in wei — zero once the bond
-    /// leaves `Active`
-    pub effective_amount: String,
-}
-
-/// The admission dials a provider needs before it posts a compute bond.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComputeBondParams {
-    /// Minimum bond in wei the node will accept for admission. The operative
-    /// requirement is the higher of this floor and the target rung's own bond
-    pub min_bond_wei: String,
-    /// Milliseconds a withdrawal sits in `Cooldown` before it can be finalized
-    pub cooldown_ms: i64,
+    /// Context per request, in tokens; the node keeps it within the
+    /// catalog's context and no shorter than 2048. `None` serves the
+    /// catalog's context. Every concurrent request holds a whole context of
+    /// KV cache, so this sets most of the memory a serve takes.
+    pub context_length: Option<u32>,
 }
 
 /// `tenzro_getProviderStats`: one provider's measured performance, advertised
@@ -1083,6 +1016,9 @@ pub struct NetworkProvider {
     pub endpoint_id: String,
     /// Wallet/account address of the provider
     pub provider_address: String,
+    /// Root id of the operator behind that account as the chain derives
+    /// it; `None` when the account has no identity on chain
+    pub operator: Option<String>,
     /// Provider type (e.g. "ai", "tee", "general")
     #[serde(default)]
     pub provider_type: String,
@@ -1111,6 +1047,15 @@ pub struct NetworkProvider {
     /// When the load was read, ms since the Unix epoch
     #[serde(default)]
     pub load_as_of_ms: Option<i64>,
+}
+
+/// The providers serving models, with the operators behind every provider
+/// the listing names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderListing {
+    pub providers: Vec<NetworkProvider>,
+    /// Counted over the whole listing, delegated-agent hosts included.
+    pub operators: crate::validator::OperatorCounts,
 }
 
 /// The live load of one model at a provider, as `tenzro_listProviders`
@@ -1322,45 +1267,6 @@ pub struct InstallSealedModelRequest {
 }
 
 impl ProviderClient {
-    /// Calls `tenzro_computeGetClaim`: compute get claim.
-    pub async fn compute_get_claim(
-        &self,
-        claim_id: &str,
-    ) -> crate::error::SdkResult<serde_json::Value> {
-        self.rpc
-            .call(
-                "tenzro_computeGetClaim",
-                serde_json::json!({ "claim_id": claim_id }),
-            )
-            .await
-    }
-
-    /// Calls `tenzro_computeListClaims`: the compute claims `party` (an
-    /// address) is a side of, `{ total, claims }`; `limit` defaults to 100.
-    pub async fn compute_list_claims(
-        &self,
-        party: &str,
-        limit: Option<u64>,
-    ) -> crate::error::SdkResult<serde_json::Value> {
-        self.rpc
-            .call(
-                "tenzro_computeListClaims",
-                serde_json::json!({ "party": party, "limit": limit }),
-            )
-            .await
-    }
-
-    /// Calls `tenzro_computePriceFeed`: compute price feed.
-    pub async fn compute_price_feed(
-        &self,
-        model_id: Option<&str>,
-        region: Option<&str>,
-        attested_only: Option<bool>,
-        limit: Option<u64>,
-    ) -> crate::error::SdkResult<serde_json::Value> {
-        self.rpc.call("tenzro_computePriceFeed", serde_json::json!({ "model_id": model_id, "region": region, "attested_only": attested_only, "limit": limit })).await
-    }
-
     /// Calls `tenzro_buildModelManifest`: build model manifest.
     pub async fn build_model_manifest(
         &self,

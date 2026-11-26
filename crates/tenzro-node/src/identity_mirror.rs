@@ -7,14 +7,19 @@
 //! to the local [`IdentityRegistry`] the resolve path reads, and for a
 //! revocation drops the access tokens this node issued to or through the
 //! revoked identity, so every node stops honouring them once consensus has
-//! decided. Nothing here verifies or gossips: there is no author to distrust
-//! and no peer to tell.
+//! decided. A `KeystoreUpdated` log names the passkeys a keystore change
+//! retired: the devices bound under those credentials are unbound here and
+//! their sessions end, and a completed recovery also drops the tokens the
+//! identity bears, so nothing a retired passkey opened stays open. Nothing
+//! here verifies or gossips: there is no author to distrust and no peer to
+//! tell.
 //!
 //! Errors are logged and never abort the block: a divergent read model is
 //! recoverable on restart via `load_from_storage`.
 
 use tenzro_auth::AuthEngine;
 use tenzro_identity::IdentityRegistry;
+use tenzro_storage::KvStore;
 use tracing::{debug, info, warn};
 
 /// What mirroring one transaction's identity logs changed on this node.
@@ -22,16 +27,24 @@ use tracing::{debug, info, warn};
 pub struct MirrorOutcome {
     /// The DIDs consensus revoked, in log order.
     pub revoked: Vec<String>,
-    /// Access tokens this node revoked because of them.
+    /// Access tokens this node revoked because of them, and because of
+    /// completed recoveries.
     pub tokens_revoked: usize,
+    /// Bound devices this node unbound because their passkey was retired.
+    pub devices_unbound: usize,
+    /// Device sessions this node ended because their passkey was retired.
+    pub sessions_ended: usize,
 }
 
 /// Apply the identity logs of one executed transaction to `registry`, and
 /// for each revoked identity revoke the tokens `auth` issued: every token
-/// whose act-chain names the DID, and every token it holds as bearer.
+/// whose act-chain names the DID, and every token it holds as bearer. For
+/// each passkey a keystore change retired, unbind its device in `store` and
+/// end that device's sessions.
 pub fn mirror_identity_logs(
     registry: &IdentityRegistry,
     auth: Option<&AuthEngine>,
+    store: Option<&dyn KvStore>,
     logs: &[tenzro_vm::Log],
 ) -> MirrorOutcome {
     let mut outcome = MirrorOutcome::default();
@@ -132,6 +145,67 @@ pub fn mirror_identity_logs(
                     ),
                 }
             }
+            t if t == tenzro_vm::keystore::KEYSTORE_UPDATED_TOPIC => {
+                /// What a keystore log says once recovery rotation is in
+                /// force; a log from before it names no owner and retires
+                /// nothing.
+                #[derive(serde::Deserialize)]
+                struct Updated {
+                    owner_did: Option<String>,
+                    #[serde(default)]
+                    retired: Vec<String>,
+                    #[serde(default)]
+                    recovered: bool,
+                }
+                struct Rotation {
+                    owner_did: String,
+                    retired: Vec<String>,
+                    recovered: bool,
+                }
+                let rotation = serde_json::from_slice::<Updated>(&log.data).map(|u| {
+                    u.owner_did.map(|owner_did| Rotation {
+                        owner_did,
+                        retired: u.retired,
+                        recovered: u.recovered,
+                    })
+                });
+                match rotation {
+                    Ok(None) => {}
+                    Ok(Some(u)) => {
+                        for credential_id in &u.retired {
+                            let Some(store) = store else { break };
+                            match crate::device_rpc::unbind_device(
+                                store,
+                                &u.owner_did,
+                                credential_id,
+                            ) {
+                                Ok((existed, ended)) => {
+                                    outcome.devices_unbound += usize::from(existed);
+                                    outcome.sessions_ended += ended;
+                                }
+                                Err(e) => warn!(
+                                    did = %u.owner_did,
+                                    "Unbinding the device of a retired passkey failed: {e}"
+                                ),
+                            }
+                        }
+                        if u.recovered {
+                            outcome.tokens_revoked += auth.map_or(0, |engine| {
+                                revoke_borne_tokens(engine, &u.owner_did, "account recovered")
+                            });
+                            info!(
+                                did = %u.owner_did,
+                                retired = u.retired.len(),
+                                "Account recovered: its earlier passkeys are retired"
+                            );
+                        }
+                    }
+                    Err(e) => warn!(
+                        data_len = log.data.len(),
+                        "Malformed KeystoreUpdated log payload, skipping: {e}"
+                    ),
+                }
+            }
             _ => continue,
         }
     }
@@ -149,8 +223,14 @@ fn revoke_tokens(auth: Option<&AuthEngine>, did: &str, reason: &str) -> usize {
         warn!(%did, "Revoking the act-chain tokens of a revoked identity failed: {e}");
         0
     });
+    rooted + revoke_borne_tokens(engine, did, reason)
+}
+
+/// Revoke the live tokens `did` holds as bearer. The identity itself stays
+/// in good standing and is issued new ones.
+fn revoke_borne_tokens(engine: &AuthEngine, did: &str, reason: &str) -> usize {
     let now = chrono::Utc::now().timestamp() as u64;
-    let borne = engine
+    engine
         .live_tokens(now)
         .map(|live| {
             live.into_iter()
@@ -158,6 +238,5 @@ fn revoke_tokens(auth: Option<&AuthEngine>, did: &str, reason: &str) -> usize {
                 .filter(|t| engine.revoke_token(&t.jti, reason).is_ok())
                 .count()
         })
-        .unwrap_or(0);
-    rooted + borne
+        .unwrap_or(0)
 }

@@ -531,14 +531,11 @@ pub const PUBLIC_NETWORK_CHAIN_ID: u64 = 13380;
 
 /// The canonical public-network genesis, compiled into the binary.
 ///
-/// A self-serve operator running `tenzro-node --roles validator` with default
-/// bootstrap has no way to obtain the fleet's `genesis-prod.toml` (it ships
-/// out-of-band). Embedding it here means "join the public
-/// network" works with zero manual genesis distribution, and the node
-/// verifies against the real validator set instead of fabricating its own.
-/// This file contains only public key material + genesis parameters — the
-/// same information every validator already gossips — so compiling it in
-/// leaks nothing.
+/// `genesis/public-testnet.toml` is the genesis of the live public network:
+/// a node started without `--genesis` joins chain 13380 and verifies against
+/// its validator set, with no genesis file to fetch or hand around. The file
+/// holds only public keys and genesis parameters, the same information every
+/// validator gossips, so compiling it in discloses nothing.
 const PUBLIC_NETWORK_GENESIS_TOML: &str = include_str!("../genesis/public-testnet.toml");
 
 /// Parse the built-in public-network genesis. Fails loudly if the bundled
@@ -580,6 +577,21 @@ pub struct WeakSubjectivityAnchor {
 }
 
 impl GenesisConfig {
+    /// Root of the committee of epoch 0: the validators this genesis names
+    /// under its seat budget. A light client that trusts only the genesis
+    /// starts from it.
+    pub fn committee_root(&self) -> Result<[u8; 32]> {
+        let validators = self
+            .validators
+            .iter()
+            .map(GenesisValidator::decode)
+            .collect::<Result<Vec<_>>>()?;
+        let (_, seat_budget) = self.consensus.rules().map_err(NodeError::Config)?;
+        tenzro_consensus::committee::genesis_committee(validators, seat_budget)
+            .map(|committee| committee.root())
+            .map_err(|e| NodeError::Config(format!("genesis validators: {e}")))
+    }
+
     /// Every governed parameter with its starting value: the registry's
     /// genesis value unless `[network_params]` names another. Keys in the
     /// `feature.` namespace are left out unless the file names them (see
@@ -1004,6 +1016,56 @@ impl PlatformFeeConfig {
     }
 }
 
+/// The app transport (`[app_transport]`): a WebTransport listener through
+/// which the devices of applications sign in to this node and open streams
+/// to each other. Absent, nothing listens. Needs a node built with the
+/// `app-transport` feature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppTransportConfig {
+    /// The UDP address the listener binds.
+    pub listen: String,
+    /// The `https` URL devices reach the listener under. Its host is the
+    /// name on the certificate the node mints; its path is the only one
+    /// sessions are taken on.
+    pub url: String,
+    /// The operator's own certificate chain, PEM. With `key`, it is served
+    /// in place of a certificate the node mints and devices pin by hash.
+    pub cert: Option<PathBuf>,
+    /// The private key of `cert`, PEM.
+    pub key: Option<PathBuf>,
+    /// Most devices signed in at once.
+    pub max_sessions: usize,
+    /// Most connections one IP address may hold before they sign in.
+    pub pending_per_ip: u32,
+    /// Bytes a second carried for one identity, both directions together.
+    pub bytes_per_second: u64,
+    /// Bytes one identity may move at once after a pause.
+    pub burst_bytes: u64,
+    /// Most streams one identity may open in a minute.
+    pub opens_per_minute: u32,
+    /// Most streams that may wait for one device's answer at once.
+    pub pending_per_device: u32,
+    /// Most devices of one identity signed in at once.
+    pub sessions_per_identity: usize,
+    /// Most streams one identity may have open at once.
+    pub streams_per_identity: u32,
+    /// Seconds a carried stream may move nothing either way before it ends.
+    pub idle_secs: u64,
+    /// Most streams one other node may carry to devices signed in here at
+    /// once. Unset, this node carries no streams between nodes: it serves no
+    /// `tenzro/app-stream/1` and refuses an open naming another node.
+    pub peer_streams: Option<u32>,
+    /// Mebibytes one paid session pays for up front, when the access policy
+    /// asks payment for carriage (a `paid` rule for the `iroh` surface's
+    /// `read` class, at its price per mebibyte). Unset, this node takes no
+    /// payment for carriage and refuses a device the policy asks to pay.
+    pub paid_mebibytes: Option<u64>,
+    /// Most connections one signed-in identity's devices may hold at once to
+    /// the relay this node serves. Unset, devices are not let in to the
+    /// relay on their access tokens.
+    pub relay_connections_per_identity: Option<u32>,
+}
+
 /// The operator's terms for sponsored inference (`tenzro_sponsoredInference`):
 /// calls a public page offers without a key, paid by a delegated agent this
 /// machine serves. Absent, the method is off.
@@ -1089,6 +1151,14 @@ pub struct PaymentsConfig {
     #[serde(default)]
     pub ledger_assets: Vec<String>,
 
+    /// The key sets (JWK or JWK set, Ed25519) of the payment networks whose
+    /// trusted agent request signatures the HTTP payment gate checks. Empty:
+    /// none are checked. A request carrying one is served only when it
+    /// verifies, and the verified agent is a signal to the handlers behind
+    /// the gate, never a payment.
+    #[serde(default)]
+    pub trusted_agent_keys: Vec<serde_json::Value>,
+
     /// Operator-supplied canonical Tempo L1 TIP-20 stablecoin addresses,
     /// keyed by symbol (e.g. `"USDC" -> "0xabc..."`). When present, these
     /// override the placeholder addresses seeded by `init_token()` so the
@@ -1156,6 +1226,7 @@ impl Default for PaymentsConfig {
             recipient: String::new(),
             metered_settlement: default_metered_settlement(),
             ledger_assets: Vec::new(),
+            trusted_agent_keys: Vec::new(),
             tempo_stablecoins: std::collections::HashMap::new(),
             x402_facilitator: None,
             facilitator_url: None,
@@ -1300,6 +1371,11 @@ pub struct MemoryConfig {
     /// other services; a node that only serves models can lower it.
     pub reserve_gb: u32,
 
+    /// Least memory held back on a node that validates, whatever
+    /// `reserve_gb` says: consensus, storage and the network must keep
+    /// running while a model loads beside them. Capped at half the machine.
+    pub validator_reserve_gb: u32,
+
     /// Ceiling for always-resident models: language models, embeddings,
     /// forecasting, ASR, TTS. `None` gives them 60% of what remains after the
     /// reserve.
@@ -1313,7 +1389,22 @@ pub struct MemoryConfig {
     /// be able to crowd out the diffusion worker, and a video pipeline must
     /// not evict the model currently answering requests.
     pub on_demand_ceiling_gb: Option<u32>,
+
+    /// The shortest idle limit `tenzro model serve --idle-unload` may set, in
+    /// seconds. A model served with a limit is unloaded after that long
+    /// without a request and loads again on its next one.
+    pub idle_unload_min_secs: u64,
+
+    /// The longest idle limit a serve may set, in seconds.
+    pub idle_unload_max_secs: u64,
 }
+
+/// No idle limit may be shorter than this: a model unloaded within a minute
+/// of its last request would spend its life loading.
+pub const IDLE_UNLOAD_FLOOR_SECS: u64 = 60;
+
+/// Default for [`MemoryConfig::validator_reserve_gb`].
+pub const DEFAULT_VALIDATOR_RESERVE_GB: u32 = 24;
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -1321,19 +1412,40 @@ impl Default for MemoryConfig {
             total_gb: None,
             reserve_gb: (tenzro_model::memory_budget::DEFAULT_RESERVE_BYTES / (1024 * 1024 * 1024))
                 as u32,
+            validator_reserve_gb: DEFAULT_VALIDATOR_RESERVE_GB,
             resident_ceiling_gb: None,
             on_demand_ceiling_gb: None,
+            idle_unload_min_secs: 300,
+            idle_unload_max_secs: 86_400,
         }
     }
 }
 
 impl MemoryConfig {
+    /// Whether the idle-limit bounds are usable: the floor at most the
+    /// shortest, the shortest at most the longest.
+    pub fn check_idle_unload(&self) -> std::result::Result<(), String> {
+        if self.idle_unload_min_secs < IDLE_UNLOAD_FLOOR_SECS
+            || self.idle_unload_min_secs > self.idle_unload_max_secs
+        {
+            return Err(format!(
+                "memory: idle_unload_min_secs ({}) must be at least {IDLE_UNLOAD_FLOOR_SECS} and at \
+                 most idle_unload_max_secs ({})",
+                self.idle_unload_min_secs, self.idle_unload_max_secs
+            ));
+        }
+        Ok(())
+    }
+
     /// Project into the model layer's budget configuration.
     ///
     /// Detects physical memory when `total_gb` is unset. GiB are widened to
     /// bytes here so the operator-facing units and the accounting units stay
     /// separate.
-    pub fn to_budget_config(&self) -> tenzro_model::memory_budget::BudgetConfig {
+    ///
+    /// A node that `validates` holds back at least `validator_reserve_gb`
+    /// (at most half the machine) however low `reserve_gb` is set.
+    pub fn to_budget_config(&self, validates: bool) -> tenzro_model::memory_budget::BudgetConfig {
         const GIB: u64 = 1024 * 1024 * 1024;
         let total_bytes = match self.total_gb {
             Some(gb) => u64::from(gb) * GIB,
@@ -1350,6 +1462,10 @@ impl MemoryConfig {
         // stays as set and is checked as given.
         if self.reserve_gb == Self::default().reserve_gb && total_bytes <= reserve_bytes * 2 {
             reserve_bytes = total_bytes / 4;
+        }
+        if validates {
+            let floor = (u64::from(self.validator_reserve_gb) * GIB).min(total_bytes / 2);
+            reserve_bytes = reserve_bytes.max(floor);
         }
         tenzro_model::memory_budget::BudgetConfig {
             total_bytes,
@@ -1419,7 +1535,8 @@ pub struct BlockSyncConfig {
     /// gap from any peer not hard-banned, in milliseconds.
     pub behind_hint_ms: u64,
     /// Score change for a peer that failed a request or served something
-    /// unusable.
+    /// unusable. A peer that only stayed silent sinks no further than one
+    /// penalty below `score_drop_threshold`.
     pub score_penalty: i32,
     /// Score change for a peer whose range imported.
     pub score_success: i32,
@@ -1453,28 +1570,6 @@ impl Default for BlockSyncConfig {
             score_recovery_per_round: 2,
         }
     }
-}
-
-/// Economic settings an operator declares for this node.
-///
-/// The *rates* are not here — those are governance's, held in
-/// [`tenzro_types::economics::EconomicPolicy`] and applied network-wide. What
-/// an operator declares locally is only who they are paying alongside
-/// themselves, which is a fact about their own arrangement rather than a price.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EconomicsConfig {
-    /// The RPC provider validating on this node's behalf, as a hex address.
-    ///
-    /// Required only when this node advertises a capability *and does not run
-    /// the validator role* — someone is validating for its users, and that
-    /// party is owed a share. A node that validates for itself leaves this
-    /// unset.
-    ///
-    /// Settlement refuses rather than defaulting when it is missing, because
-    /// the alternative — quietly paying that share to the treasury — pays the
-    /// wrong party and reports nothing wrong.
-    #[serde(default)]
-    pub rpc_provider_payee: Option<String>,
 }
 
 /// The WebAuthn relying-party ID the network's passkeys are scoped to. Every
@@ -1673,6 +1768,9 @@ pub struct NodeConfig {
     /// the GPU, and the fee charged while holding a session as its successor.
     pub standby: crate::standby::StandbyConfig,
 
+    /// Spot serving policy: whether spot requests may take any free slot.
+    pub spot: SpotConfig,
+
     /// Whether and how the node tunes its own serving configuration.
     ///
     /// Off by default: a node that rewrites its own dials is one an operator
@@ -1688,6 +1786,11 @@ pub struct NodeConfig {
     /// are derived from the detected core count.
     #[serde(default)]
     pub onnx: tenzro_model::OnnxConfig,
+
+    /// The power serving may draw at once, and what a request on each
+    /// admission queue draws. Unset, nothing is refused for power.
+    #[serde(default)]
+    pub energy: tenzro_model::EnergyConfig,
 
     /// Engines the node runs out of process, each in a confined runtime host
     /// it supervises: the pinned environment of each hosted backend (vLLM,
@@ -1708,14 +1811,15 @@ pub struct NodeConfig {
     /// databases, sites, receipts) is attributed to it, so getting it wrong
     /// misattributes all of them.
     ///
-    /// Set it. Left unset the node *infers* one from its registry, and
-    /// inference is only ever a guess: a registry holds the operator's own
-    /// human identity, every agent the node has spawned, and every machine it
-    /// has enrolled, with nothing in the data marking which one is the node
-    /// itself. The inference is documented at `resolve_operator_identity` and
-    /// deliberately prefers machines over humans, but a node that has enrolled
-    /// several machines can still be handed the wrong one — naming it here is
-    /// how that stops being a guess.
+    /// Set, the node's operator identity is that DID or none: a named
+    /// identity the registry does not hold is never replaced by another.
+    /// Left unset the node takes an identity only when exactly one can be
+    /// meant: its own machine DID, else the one identity registered with its
+    /// hardware wallet account, else (with no hardware key) the only identity
+    /// in its registry. Where several qualify it takes none, and naming one
+    /// here is how the operator chooses.
+    ///
+    /// Unset, the machine's own DID administers the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_did: Option<String>,
 
@@ -1731,6 +1835,13 @@ pub struct NodeConfig {
     /// A2A protocol server listen address
     pub a2a_addr: String,
 
+    /// Listen address of the listener paired devices reach the node on. It is
+    /// the one listener off loopback, because the devices are other machines
+    /// on the operator's own networks: it answers peers on private networks
+    /// only, serves a short list of methods, and opens when a pairing starts
+    /// or a device is paired.
+    pub paired_device_addr: String,
+
     /// Enable metrics collection
     pub metrics_enabled: bool,
 
@@ -1740,23 +1851,6 @@ pub struct NodeConfig {
     /// Genesis configuration
     pub genesis: Option<GenesisConfig>,
 
-    /// Economic settings for this node. Rates are governance's; this is only
-    /// who the operator pays alongside themselves.
-    #[serde(default)]
-    pub economics: EconomicsConfig,
-
-    /// Vendor attestation roots this node pins, as base64 DER certificates.
-    ///
-    /// A device binding is graded hardware-bound only when its attestation
-    /// chain reaches one of these — the FIDO Metadata Service entry for the
-    /// credential's AAGUID, or the platform vendor's root. **Empty is a safe
-    /// default, not a permissive one**: with no roots configured, devices still
-    /// bind and still authenticate, but none grades as hardware-bound, so the
-    /// wallet gate refuses and says why rather than silently accepting a
-    /// software key.
-    #[serde(default)]
-    pub webauthn_trusted_roots: Vec<String>,
-
     /// HTTP 402 payment gate configuration for the Web API
     #[serde(default)]
     pub payments: PaymentsConfig,
@@ -1764,6 +1858,10 @@ pub struct NodeConfig {
     /// Sponsored inference, off unless set.
     #[serde(default)]
     pub sponsored_inference: Option<SponsoredInferenceConfig>,
+
+    /// The app transport, off unless set.
+    #[serde(default)]
+    pub app_transport: Option<AppTransportConfig>,
 
     /// Operators this node hosts, each with the models it serves through the
     /// node. A call to one of those models settles to that operator's wallet,
@@ -1781,16 +1879,6 @@ pub struct NodeConfig {
     /// Bridge configuration: fee oracle and price feeds.
     #[serde(default)]
     pub bridge: BridgeConfig,
-
-    /// Operator overrides mapping a task's use case (`code`, `reasoning`,
-    /// `research`, `chat`, `summarize`, `extract`, `embed`) to a preferred
-    /// model id. When a request's use case is listed here and that model is an
-    /// available candidate for the request, the router selects it outright;
-    /// otherwise it uses its benchmark prior and measured difficulty. This lets
-    /// an operator pin, e.g., `code = "qwen3.8-27b"` without disabling
-    /// automatic routing for the use cases they leave out.
-    #[serde(default)]
-    pub task_models: std::collections::HashMap<String, String>,
 
     /// Browser origins allowed to call the RPC/Web/A2A servers cross-origin,
     /// e.g. `["https://app.tenzro.com"]`. Empty means none: pages on other
@@ -1817,6 +1905,12 @@ pub struct NodeConfig {
     /// Without it the Agent Card addresses the node by machine identity.
     #[serde(default)]
     pub external_a2a_addr: Option<String>,
+
+    /// How many A2A tasks the node keeps and for how long (`[a2a_tasks]`):
+    /// `retention_secs` for a finished task, `input_deadline_secs` for one
+    /// waiting on its sender, `max_per_principal` and `max_total`.
+    #[serde(default)]
+    pub a2a_tasks: crate::a2a::task_manager::TaskLimits,
 
     /// Coarse region of this node: a country code (`DE`) or a wide region
     /// (`europe`), never anything finer (see
@@ -1864,18 +1958,30 @@ pub struct NodeConfig {
     #[serde(default)]
     pub onboarding: crate::identity_gate::OnboardingConfig,
 
+    /// When this node serves models: the hours and days it serves, and the
+    /// model stacks each window keeps resident within its memory ceiling.
+    /// Unset: it serves at all hours with no stacks. A schedule whose window
+    /// names models that cannot fit its ceiling stops the start, naming the
+    /// window. The `[provider_schedule]` table.
+    #[serde(default)]
+    pub provider_schedule: Option<crate::node::ProviderSchedule>,
+
     /// Peers to restore state from at start, as `<EndpointId>` or
     /// `<EndpointId>@<ip:port>`; the `--state-sync-from` flag adds to these.
     /// A bare id is found by discovery, an id with an address is dialled there
-    /// (for a network with no discovery). Needs a weak-subjectivity
-    /// checkpoint.
+    /// (for a network with no discovery). The state is verified against the
+    /// weak-subjectivity checkpoint when one is pinned, and otherwise against
+    /// a snapshot anchor the peer certifies, checked from the genesis
+    /// committee.
     #[serde(default)]
     pub state_sync_from: Vec<String>,
 
     /// How a node catches up with the chain. `auto` (default): a node
     /// without the validator role restores the committed state from a boot
-    /// peer's snapshot when a weak-subjectivity checkpoint is configured,
-    /// and a validator replays the blocks. `off`: replay on every role.
+    /// peer's snapshot, verified against the weak-subjectivity checkpoint
+    /// when one is pinned and otherwise against the snapshot anchor the peer
+    /// certifies, checked from the genesis committee (it replays when no
+    /// boot peer serves one); a validator replays the blocks. `off`: replay on every role.
     /// `state_sync_from` peers restore either way.
     #[serde(default)]
     pub state_sync: crate::state_sync_policy::StateSyncMode,
@@ -2031,6 +2137,17 @@ pub struct NodeConfig {
     #[serde(default)]
     pub gpu_revocation: GpuRevocationConfig,
 
+    /// Whether this node sends a GPU possession proof each reward epoch (the
+    /// `[gpu_proof]` table). Off by default: the proof puts the GPU's
+    /// per-device identifiers on chain for good.
+    #[serde(default)]
+    pub gpu_proof: GpuProofConfig,
+
+    /// How this node keeps transactions that end in an EVM engine error out
+    /// of its pool (the `[evm_pool_guard]` table).
+    #[serde(default)]
+    pub evm_pool_guard: EvmPoolGuardConfig,
+
     /// One model served across several of the operator's own machines (the
     /// `[layer_pipeline]` table). Every machine of the pipeline carries the
     /// same table and finds its place by its machine DID.
@@ -2121,6 +2238,70 @@ pub struct TpmConfig {
     pub root_authorization_handle: u32,
 }
 
+/// What this node does once executed blocks show transactions ending in an
+/// EVM engine error (see `crate::evm_pool_guard`). These are this node's own
+/// operating values: an operator under attack tightens them here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvmPoolGuardConfig {
+    /// Whether the guard runs. Turning it off is said here and nowhere
+    /// else: a value below that would switch it off is refused.
+    pub enabled: bool,
+    /// Seconds a sender is held after its transaction ended in an engine
+    /// error.
+    pub hold_secs: u64,
+    /// Seconds engine errors are counted over.
+    pub watch_secs: u64,
+    /// Engine errors within the window that start the gas limit ceiling.
+    pub watch_faults: usize,
+    /// The gas limit ceiling for EVM transactions while the window runs.
+    pub watch_gas_limit: u64,
+    /// Most senders held at once; past it the hold that ends soonest gives
+    /// way.
+    pub held_senders_max: usize,
+}
+
+impl EvmPoolGuardConfig {
+    /// Refuses values that would switch the guard off or make its ceiling
+    /// permanent without saying so with `enabled = false`.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let positive = [
+            ("hold_secs", self.hold_secs),
+            ("watch_secs", self.watch_secs),
+            ("watch_faults", self.watch_faults as u64),
+            ("held_senders_max", self.held_senders_max as u64),
+        ];
+        if let Some((name, _)) = positive.iter().find(|(_, value)| *value == 0) {
+            return Err(format!(
+                "{name} must be at least 1; set enabled = false to turn the guard off"
+            ));
+        }
+        if self.watch_gas_limit < tenzro_vm::gas::evm_gas_costs::TRANSACTION {
+            return Err(format!(
+                "watch_gas_limit must be at least {}, the gas of a plain transfer",
+                tenzro_vm::gas::evm_gas_costs::TRANSACTION
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for EvmPoolGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            held_senders_max: 10_000,
+            hold_secs: 60 * 60,
+            watch_secs: 10 * 60,
+            watch_faults: 3,
+            watch_gas_limit: 1_000_000,
+        }
+    }
+}
+
 /// Revocation of the certificates behind a GPU proof, asked online before
 /// the proof enters this node's pool (see `crate::gpu_revocation`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2132,6 +2313,21 @@ pub struct GpuRevocationConfig {
     pub ocsp_url: String,
     /// Seconds one answer may take.
     pub timeout_secs: u64,
+}
+
+/// The GPU possession proof this node sends each reward epoch (see
+/// `crate::hardware_possession`). The proof carries the GPU's NVIDIA SPDM
+/// evidence, whose signed certificates name the device: the device
+/// certificate's serial number, the alias certificate's serial and the
+/// NVIDIA device identifier in its subject alternative name. The signatures
+/// the chain checks cover them, so they cannot be removed or hashed, and they
+/// stay on chain for good. Off by default; an operator who wants the GPU's
+/// hardware level turns it on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpuProofConfig {
+    /// Send the proof each reward epoch.
+    pub enabled: bool,
 }
 
 impl Default for GpuRevocationConfig {
@@ -2325,8 +2521,10 @@ impl NodeConfig {
             surge: crate::surge::SurgeConfig::default(),
             session_checkpoint_interval_secs: DEFAULT_SESSION_CHECKPOINT_INTERVAL_SECS,
             standby: crate::standby::StandbyConfig::default(),
+            spot: SpotConfig::default(),
             autotune: crate::autotune_sampler::AutotuneConfig::default(),
             onnx: tenzro_model::OnnxConfig::default(),
+            energy: tenzro_model::EnergyConfig::default(),
             engines: tenzro_model::EnginesConfig::default(),
             log_level: "info".to_string(),
             // Every listener binds loopback: a node speaks to peers over the
@@ -2337,27 +2535,28 @@ impl NodeConfig {
             web_addr: "127.0.0.1:8080".to_string(),
             mcp_addr: "127.0.0.1:3001".to_string(),
             a2a_addr: "127.0.0.1:3002".to_string(),
+            paired_device_addr: "0.0.0.0:8543".to_string(),
             metrics_enabled: true,
             health_enabled: true,
             genesis: Some(GenesisConfig::default_testnet()),
-            economics: EconomicsConfig::default(),
-            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             sponsored_inference: None,
+            app_transport: None,
             hosted_operators: Vec::new(),
             platform_fee: None,
             bridge: BridgeConfig::default(),
-            task_models: std::collections::HashMap::new(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
             external_a2a_addr: None,
+            a2a_tasks: crate::a2a::task_manager::TaskLimits::default(),
             region: None,
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            provider_schedule: None,
             state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
@@ -2379,6 +2578,8 @@ impl NodeConfig {
             hardware_key_namespace: None,
             tpm: TpmConfig::default(),
             gpu_revocation: GpuRevocationConfig::default(),
+            gpu_proof: GpuProofConfig::default(),
+            evm_pool_guard: EvmPoolGuardConfig::default(),
             layer_pipeline: None,
         }
     }
@@ -2402,8 +2603,10 @@ impl NodeConfig {
             surge: crate::surge::SurgeConfig::default(),
             session_checkpoint_interval_secs: DEFAULT_SESSION_CHECKPOINT_INTERVAL_SECS,
             standby: crate::standby::StandbyConfig::default(),
+            spot: SpotConfig::default(),
             autotune: crate::autotune_sampler::AutotuneConfig::default(),
             onnx: tenzro_model::OnnxConfig::default(),
+            energy: tenzro_model::EnergyConfig::default(),
             engines: tenzro_model::EnginesConfig::default(),
             log_level: "info".to_string(),
             operator_did: None,
@@ -2411,27 +2614,28 @@ impl NodeConfig {
             web_addr: "127.0.0.1:8080".to_string(),
             mcp_addr: "127.0.0.1:3001".to_string(),
             a2a_addr: "127.0.0.1:3002".to_string(),
+            paired_device_addr: "0.0.0.0:8543".to_string(),
             metrics_enabled: true,
             health_enabled: true,
             genesis: None,
-            economics: EconomicsConfig::default(),
-            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             sponsored_inference: None,
+            app_transport: None,
             hosted_operators: Vec::new(),
             platform_fee: None,
             bridge: BridgeConfig::default(),
-            task_models: std::collections::HashMap::new(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
             external_a2a_addr: None,
+            a2a_tasks: crate::a2a::task_manager::TaskLimits::default(),
             region: None,
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            provider_schedule: None,
             state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
@@ -2453,6 +2657,8 @@ impl NodeConfig {
             hardware_key_namespace: None,
             tpm: TpmConfig::default(),
             gpu_revocation: GpuRevocationConfig::default(),
+            gpu_proof: GpuProofConfig::default(),
+            evm_pool_guard: EvmPoolGuardConfig::default(),
             layer_pipeline: None,
         }
     }
@@ -2476,8 +2682,10 @@ impl NodeConfig {
             surge: crate::surge::SurgeConfig::default(),
             session_checkpoint_interval_secs: DEFAULT_SESSION_CHECKPOINT_INTERVAL_SECS,
             standby: crate::standby::StandbyConfig::default(),
+            spot: SpotConfig::default(),
             autotune: crate::autotune_sampler::AutotuneConfig::default(),
             onnx: tenzro_model::OnnxConfig::default(),
+            energy: tenzro_model::EnergyConfig::default(),
             engines: tenzro_model::EnginesConfig::default(),
             log_level: "info".to_string(),
             operator_did: None,
@@ -2485,27 +2693,28 @@ impl NodeConfig {
             web_addr: "127.0.0.1:8080".to_string(),
             mcp_addr: "127.0.0.1:3001".to_string(),
             a2a_addr: "127.0.0.1:3002".to_string(),
+            paired_device_addr: "0.0.0.0:8543".to_string(),
             metrics_enabled: true,
             health_enabled: true,
             genesis: None,
-            economics: EconomicsConfig::default(),
-            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             sponsored_inference: None,
+            app_transport: None,
             hosted_operators: Vec::new(),
             platform_fee: None,
             bridge: BridgeConfig::default(),
-            task_models: std::collections::HashMap::new(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
             external_a2a_addr: None,
+            a2a_tasks: crate::a2a::task_manager::TaskLimits::default(),
             region: None,
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            provider_schedule: None,
             state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
@@ -2527,6 +2736,8 @@ impl NodeConfig {
             hardware_key_namespace: None,
             tpm: TpmConfig::default(),
             gpu_revocation: GpuRevocationConfig::default(),
+            gpu_proof: GpuProofConfig::default(),
+            evm_pool_guard: EvmPoolGuardConfig::default(),
             layer_pipeline: None,
         }
     }
@@ -2550,8 +2761,10 @@ impl NodeConfig {
             surge: crate::surge::SurgeConfig::default(),
             session_checkpoint_interval_secs: DEFAULT_SESSION_CHECKPOINT_INTERVAL_SECS,
             standby: crate::standby::StandbyConfig::default(),
+            spot: SpotConfig::default(),
             autotune: crate::autotune_sampler::AutotuneConfig::default(),
             onnx: tenzro_model::OnnxConfig::default(),
+            energy: tenzro_model::EnergyConfig::default(),
             engines: tenzro_model::EnginesConfig::default(),
             log_level: "info".to_string(),
             operator_did: None,
@@ -2559,27 +2772,28 @@ impl NodeConfig {
             web_addr: "127.0.0.1:8080".to_string(),
             mcp_addr: "127.0.0.1:3001".to_string(),
             a2a_addr: "127.0.0.1:3002".to_string(),
+            paired_device_addr: "0.0.0.0:8543".to_string(),
             metrics_enabled: false,
             health_enabled: true,
             genesis: None,
-            economics: EconomicsConfig::default(),
-            webauthn_trusted_roots: Vec::new(),
             payments: PaymentsConfig::default(),
             sponsored_inference: None,
+            app_transport: None,
             hosted_operators: Vec::new(),
             platform_fee: None,
             bridge: BridgeConfig::default(),
-            task_models: std::collections::HashMap::new(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
             external_a2a_addr: None,
+            a2a_tasks: crate::a2a::task_manager::TaskLimits::default(),
             region: None,
             jurisdiction_country: None,
             jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             onboarding: Default::default(),
             state_sync_from: Vec::new(),
+            provider_schedule: None,
             state_sync: crate::state_sync_policy::StateSyncMode::default(),
             da_backend: DaBackendSelector::default(),
             snapshot: crate::snapshot::SnapshotConfig::default(),
@@ -2601,6 +2815,8 @@ impl NodeConfig {
             hardware_key_namespace: None,
             tpm: TpmConfig::default(),
             gpu_revocation: GpuRevocationConfig::default(),
+            gpu_proof: GpuProofConfig::default(),
+            evm_pool_guard: EvmPoolGuardConfig::default(),
             layer_pipeline: None,
         }
     }
@@ -2642,8 +2858,20 @@ impl NodeConfig {
                 .map_err(|e| NodeError::Config(format!("connector: {e}")))?;
         }
 
+        self.evm_pool_guard
+            .validate()
+            .map_err(|e| NodeError::Config(format!("evm_pool_guard: {e}")))?;
+
+        self.a2a_tasks
+            .validate()
+            .map_err(|e| NodeError::Config(format!("a2a_tasks: {e}")))?;
+
         crate::hosted_operators::validate(&self.hosted_operators)
             .map_err(|e| NodeError::Config(format!("hosted_operators: {e}")))?;
+        self.storage
+            .validate()
+            .map_err(|e| NodeError::Config(format!("storage: {e}")))?;
+        self.memory.check_idle_unload().map_err(NodeError::Config)?;
         if let Some(fee) = &self.platform_fee {
             fee.leg().map_err(NodeError::Config)?;
         }
@@ -2672,6 +2900,13 @@ impl NodeConfig {
                     "payments.ledger_assets: {asset} is not a 0x-prefixed 32-byte token id"
                 )));
             }
+        }
+
+        if !self.payments.trusted_agent_keys.is_empty() {
+            tenzro_payments::rfc9421::tap::TapVerifier::from_jwks(
+                &self.payments.trusted_agent_keys,
+            )
+            .map_err(|e| NodeError::Config(format!("payments.trusted_agent_keys: {e}")))?;
         }
 
         // A region is coarse: a country or a wide region, never a site.
@@ -2743,7 +2978,7 @@ impl NodeConfig {
 
     /// Create data directory if it doesn't exist
     pub fn ensure_data_dir(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.data_dir)
+        crate::single_instance::create_data_dir(&self.data_dir)
             .map_err(|e| NodeError::Config(format!("Failed to create data directory: {}", e)))?;
         Ok(())
     }
@@ -2785,6 +3020,43 @@ impl NodeConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn idle_unload_bounds_must_be_usable() {
+        let mut memory = super::MemoryConfig::default();
+        assert!(memory.check_idle_unload().is_ok());
+        memory.idle_unload_min_secs = super::IDLE_UNLOAD_FLOOR_SECS - 1;
+        assert!(memory.check_idle_unload().is_err());
+        memory.idle_unload_min_secs = 600;
+        memory.idle_unload_max_secs = 599;
+        assert!(memory.check_idle_unload().is_err());
+        memory.idle_unload_max_secs = 600;
+        assert!(memory.check_idle_unload().is_ok());
+    }
+
+    #[test]
+    fn a_validator_holds_its_reserve_whatever_reserve_gb_says() {
+        const GIB: u64 = 1 << 30;
+        let low = MemoryConfig {
+            total_gb: Some(121),
+            reserve_gb: 8,
+            ..MemoryConfig::default()
+        };
+        assert_eq!(low.to_budget_config(false).reserve_bytes, 8 * GIB);
+        assert_eq!(low.to_budget_config(true).reserve_bytes, 24 * GIB);
+        let high = MemoryConfig {
+            total_gb: Some(121),
+            reserve_gb: 32,
+            ..MemoryConfig::default()
+        };
+        assert_eq!(high.to_budget_config(true).reserve_bytes, 32 * GIB);
+        // On a small machine the floor is half of it.
+        let small = MemoryConfig {
+            total_gb: Some(8),
+            ..MemoryConfig::default()
+        };
+        assert_eq!(small.to_budget_config(false).reserve_bytes, 2 * GIB);
+        assert_eq!(small.to_budget_config(true).reserve_bytes, 4 * GIB);
+    }
 
     #[test]
     fn a_developer_genesis_funds_each_account_once_on_fast_valid_time_rules() {
@@ -3052,6 +3324,17 @@ recipient = "treasury-addr"
         assert_eq!(cfg.payments.recipient, "treasury-addr");
     }
 
+    /// A node sends no GPU proof, which publishes the device's identifiers,
+    /// unless its operator turns `[gpu_proof]` on.
+    #[test]
+    fn the_gpu_proof_is_sent_only_when_the_operator_turns_it_on() {
+        assert!(!NodeConfig::default().gpu_proof.enabled);
+        let unset: NodeConfig = toml::from_str("").unwrap();
+        assert!(!unset.gpu_proof.enabled);
+        let on: NodeConfig = toml::from_str("[gpu_proof]\nenabled = true\n").unwrap();
+        assert!(on.gpu_proof.enabled);
+    }
+
     /// The one `[onnx]` setting reaches the limits every ONNX runtime and
     /// session builder uses; unset values stay derived from the cores.
     #[test]
@@ -3101,17 +3384,23 @@ recipient = "treasury-addr"
     }
 
     /// A node started without a genesis file runs on the built-in public
-    /// network genesis. The bundled file must parse; until the operator-owned
-    /// validator set is in it, the only refusal is the one that names the
-    /// missing validators, never a malformed file.
+    /// network genesis, which names the network's validators.
     #[test]
-    fn the_built_in_public_network_genesis_parses() {
-        match super::public_network_genesis() {
-            Ok(genesis) => assert!(!genesis.validators.is_empty()),
-            Err(e) => assert!(
-                e.to_string().contains("has no validators"),
-                "the bundled genesis does not parse: {e}"
-            ),
-        }
+    fn the_built_in_public_network_genesis_names_its_validators() {
+        let genesis = super::public_network_genesis().unwrap();
+        assert_eq!(genesis.chain_id, super::PUBLIC_NETWORK_CHAIN_ID);
+        assert!(!genesis.validators.is_empty());
     }
+}
+
+/// Operator spot policy (`[spot]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpotConfig {
+    /// Whether spot requests may take any free slot rather than only the
+    /// batch share. An interactive request that finds the node full makes a
+    /// running spot request yield its slot, so idle capacity can be sold at
+    /// the spot price without keeping interactive callers waiting. Off
+    /// unless the operator turns it on.
+    pub fill_idle: bool,
 }

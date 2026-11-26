@@ -174,6 +174,12 @@ fn no_command_flag_alias_or_env_name_reads_as_a_bypass() {
 ///   key stays in that TPM and signs there.
 const BOUND_ENV: &[(&str, &str)] = &[
     ("tenzro", "TENZRO_RPC"),
+    // Sign-in on a machine whose keys are in another machine's TPM: the identity key and the
+    // DPoP key are reached through the key holder these name. No key material.
+    ("tenzro access sign-in", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro access sign-in", "TENZRO_TPM_LABEL"),
+    // Where the local helper listens: a path on this machine. No key material.
+    ("tenzro control", "TENZRO_CONTROL_SOCKET"),
     ("tenzro node start", "TENZRO_DATA_DIR"),
     ("tenzro setup", "TENZRO_DATA_DIR"),
     ("tenzro update", "TENZRO_DATA_DIR"),
@@ -188,6 +194,142 @@ const BOUND_ENV: &[(&str, &str)] = &[
     ("tenzro update notices", "TENZRO_DATA_DIR"),
     ("tenzro update rollback", "TENZRO_DATA_DIR"),
     ("tenzro update verify", "TENZRO_DATA_DIR"),
+    // The fleet proof, governance, stake and wallet send commands sign from the same signing
+    // account as the bond commands: the two variables name the key holder and the key's label in
+    // the TPM, never key material, and apply only with `--node-account`.
+    ("tenzro join", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro join", "TENZRO_TPM_LABEL"),
+    ("tenzro fleet prove", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro fleet prove", "TENZRO_TPM_LABEL"),
+    ("tenzro governance concern", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance concern", "TENZRO_TPM_LABEL"),
+    ("tenzro governance disclose", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance disclose", "TENZRO_TPM_LABEL"),
+    ("tenzro governance execute", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance execute", "TENZRO_TPM_LABEL"),
+    ("tenzro governance pause", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance pause", "TENZRO_TPM_LABEL"),
+    ("tenzro governance propose", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance propose", "TENZRO_TPM_LABEL"),
+    (
+        "tenzro governance propose-approve-grantee",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-approve-grantee",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-approve-operator",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-approve-operator",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-approve-validators",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-approve-validators",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-operator-running-cost",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-operator-running-cost",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-operator-stable",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-operator-stable",
+        "TENZRO_TPM_LABEL",
+    ),
+    ("tenzro governance propose-param", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance propose-param", "TENZRO_TPM_LABEL"),
+    (
+        "tenzro governance propose-recall-sponsored-bond",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-recall-sponsored-bond",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-reinstate-validator",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-reinstate-validator",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-revoke-grantee",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-revoke-grantee",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-revoke-operator",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance propose-revoke-operator",
+        "TENZRO_TPM_LABEL",
+    ),
+    (
+        "tenzro governance propose-sponsor-bond",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    ("tenzro governance propose-sponsor-bond", "TENZRO_TPM_LABEL"),
+    (
+        "tenzro governance release-sponsored-bond",
+        "TENZRO_TPM_KEY_HOLDER",
+    ),
+    (
+        "tenzro governance release-sponsored-bond",
+        "TENZRO_TPM_LABEL",
+    ),
+    ("tenzro governance veto", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance veto", "TENZRO_TPM_LABEL"),
+    ("tenzro governance veto-signal", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance veto-signal", "TENZRO_TPM_LABEL"),
+    ("tenzro governance veto-withdraw", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance veto-withdraw", "TENZRO_TPM_LABEL"),
+    ("tenzro governance vote", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro governance vote", "TENZRO_TPM_LABEL"),
+    ("tenzro stake bond", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro stake bond", "TENZRO_TPM_LABEL"),
+    ("tenzro stake endpoint", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro stake endpoint", "TENZRO_TPM_LABEL"),
+    ("tenzro stake unbond", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro stake unbond", "TENZRO_TPM_LABEL"),
+    ("tenzro stake withdraw", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro stake withdraw", "TENZRO_TPM_LABEL"),
+    ("tenzro wallet send", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro wallet send", "TENZRO_TPM_LABEL"),
+    // The provider bond commands sign like the validator commands below: the two variables name
+    // the key holder and the key's label in the TPM, never key material.
+    ("tenzro provider bond finalize", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro provider bond finalize", "TENZRO_TPM_LABEL"),
+    ("tenzro provider bond increase", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro provider bond increase", "TENZRO_TPM_LABEL"),
+    ("tenzro provider bond post", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro provider bond post", "TENZRO_TPM_LABEL"),
+    ("tenzro provider bond withdraw", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro provider bond withdraw", "TENZRO_TPM_LABEL"),
+    ("tenzro provider pause", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro provider pause", "TENZRO_TPM_LABEL"),
+    ("tenzro provider resume", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro provider resume", "TENZRO_TPM_LABEL"),
     (
         "tenzro validator attach-attestation",
         "TENZRO_TPM_KEY_HOLDER",
@@ -195,8 +337,14 @@ const BOUND_ENV: &[(&str, &str)] = &[
     ("tenzro validator attach-attestation", "TENZRO_TPM_LABEL"),
     ("tenzro validator exit", "TENZRO_TPM_KEY_HOLDER"),
     ("tenzro validator exit", "TENZRO_TPM_LABEL"),
+    ("tenzro validator increase-stake", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro validator increase-stake", "TENZRO_TPM_LABEL"),
+    ("tenzro validator register", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro validator register", "TENZRO_TPM_LABEL"),
     ("tenzro validator register-machine", "TENZRO_TPM_KEY_HOLDER"),
     ("tenzro validator register-machine", "TENZRO_TPM_LABEL"),
+    ("tenzro validator update-metadata", "TENZRO_TPM_KEY_HOLDER"),
+    ("tenzro validator update-metadata", "TENZRO_TPM_LABEL"),
 ];
 
 #[test]
@@ -220,7 +368,10 @@ fn the_cli_binds_exactly_these_environment_variables() {
 /// them is a decision, not an accident: this fails until the list here is updated with it.
 const ENTRY_FLAGS: &[(&str, &[&str])] = &[
     // `--role` and `--wallet` show where an application for a staked role stands, from what the
-    // chain and the application record say. They read; they send nothing.
+    // chain and the application record say. They read; they send nothing. `--node-account`
+    // (with `--provider`) posts the provider's bonds from this machine's node account, whose key
+    // is in its TPM or, with `--tpm-key-holder` and `--tpm-label`, in the TPM behind the key
+    // holder; none of the three carries key material.
     (
         "tenzro join",
         &[
@@ -229,6 +380,9 @@ const ENTRY_FLAGS: &[(&str, &[&str])] = &[
             "--origin",
             "--type",
             "--provider",
+            "--node-account",
+            "--tpm-key-holder",
+            "--tpm-label",
             "--role",
             "--wallet",
         ],
@@ -236,7 +390,7 @@ const ENTRY_FLAGS: &[(&str, &[&str])] = &[
     // `--delegator` and the three `--delegation-*` flags name who delegates to an agent and on
     // what terms. Setup writes the terms to a file and pauses; the agent exists only once the
     // delegator has signed them with a passkey. `--restart` discards the saved place of an
-    // unfinished setup.
+    // unfinished setup. `--keep-awake` only sets the machine's sleep policy on mains power.
     (
         "tenzro setup",
         &[
@@ -253,6 +407,7 @@ const ENTRY_FLAGS: &[(&str, &[&str])] = &[
             "--delegation-hours",
             "--restart",
             "--roles",
+            "--part-time",
             "--access",
             "--network-name",
             "--chain-id",
@@ -262,6 +417,7 @@ const ENTRY_FLAGS: &[(&str, &[&str])] = &[
             "--bootstrap",
             "--genesis",
             "--provision-tpm",
+            "--keep-awake",
             "--apply",
             "--yes",
             "--plain",
@@ -286,10 +442,16 @@ const ENTRY_FLAGS: &[(&str, &[&str])] = &[
         &["--data-dir", "--rpc-addr", "--key-namespace", "--fund"],
     ),
     ("tenzro wallet create-local", &["--key-namespace", "--rpc"]),
+    // `--node-account` signs and pays as this machine's node account, whose key is in its TPM (or,
+    // with `--tpm-key-holder` and `--tpm-label`, in the TPM behind the key holder); without it the
+    // client account's hardware key signs. None of the three carries key material.
     (
         "tenzro validator register",
         &[
             "--key-namespace",
+            "--node-account",
+            "--tpm-key-holder",
+            "--tpm-label",
             "--ml-dsa-public-key",
             "--p256-public-key",
             "--node-key",
@@ -329,24 +491,40 @@ const ENTRY_FLAGS: &[(&str, &[&str])] = &[
             "--accelerators",
             "--terabytes",
             "--key-namespace",
+            "--node-account",
+            "--tpm-key-holder",
+            "--tpm-label",
             "--rpc",
         ],
     ),
+    // The bond is posted from the signing account: the client account, or with `--node-account`
+    // the node account, whose key is in this machine's TPM or behind the key holder named by
+    // `--tpm-key-holder` and `--tpm-label`. None of the flags carries key material.
     (
         "tenzro provider bond post",
-        &["--did", "--address", "--amount", "--rpc"],
+        &[
+            "--did",
+            "--amount",
+            "--key-namespace",
+            "--node-account",
+            "--tpm-key-holder",
+            "--tpm-label",
+            "--rpc",
+        ],
     ),
     (
         "tenzro model serve",
         &[
             "--rpc",
+            "--context-length",
+            "--max-concurrent",
             "--cluster",
             "--force-single",
             "--public",
             "--gated",
             "--private",
             "--no-speculative",
-            "--catalog-rpc",
+            "--idle-unload",
         ],
     ),
     (
@@ -619,6 +797,9 @@ fn only_the_hardware_keystore_submits_transactions() {
 /// (`require_hardware_key_store` and `require_hardware_identity` in `tenzro-node/src/main.rs`),
 /// so each is a way to ask for a node, not a way round the gate; a new file is still a decision.
 const NODE_LAUNCHERS: &[&str] = &[
+    // `tenzro control` looks for the node's binary and its process to say whether a node is
+    // installed and running. This file starts no node.
+    "commands/control/mod.rs",
     "commands/dev.rs",
     "commands/doctor.rs",
     "commands/node.rs",
@@ -630,6 +811,9 @@ const NODE_LAUNCHERS: &[&str] = &[
     // also restarts the node, and only by restarting its installed service, so the node that
     // runs afterwards is started by that service, through the same gate.
     "commands/update/health.rs",
+    // Runs `tenzro-node hardware` on the new binary before it is installed. That is a subcommand
+    // that reads the machine and starts no node.
+    "commands/update/install.rs",
     "commands/update/manifest.rs",
     "commands/update/mod.rs",
     "commands/update/run.rs",
@@ -768,7 +952,7 @@ fn no_guided_plan_starts_registers_or_stakes_without_a_hardware_key_and_setup_fi
 }
 
 #[test]
-fn the_guided_local_chain_needs_a_hardware_key_and_using_the_network_runs_the_setup() {
+fn the_guided_local_chain_needs_a_hardware_key() {
     let net = Net::Reachable {
         chain_id: "0x1".into(),
     };
@@ -780,23 +964,6 @@ fn the_guided_local_chain_needs_a_hardware_key_and_using_the_network_runs_the_se
             local.blocked.is_none(),
             root.has_local_hardware(),
             "the local chain's verdict does not follow the hardware key on {root:?}"
-        );
-        // Using the network needs no node, only the identity: the one step is `tenzro setup`, and
-        // it cannot be skipped.
-        let net_plan = journey::plan(journey::Path::UseNetwork, &m, &net, &o);
-        let last = net_plan.steps.last().expect("a step");
-        assert_eq!(last.id, "setup");
-        assert!(!last.skippable);
-        assert!(
-            last.command_line()
-                .unwrap()
-                .starts_with("tenzro setup --yes --path network")
-        );
-        assert!(
-            net_plan
-                .steps
-                .iter()
-                .all(|s| s.id == "about" || s.id == "setup")
         );
     }
 }

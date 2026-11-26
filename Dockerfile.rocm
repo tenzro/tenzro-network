@@ -12,6 +12,7 @@ FROM rocm/dev-ubuntu-24.04:7.2.4-complete@sha256:92f309c51b52cef8762867848f1529d
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
     pkg-config \
     libssl-dev \
     libclang-dev \
@@ -45,12 +46,27 @@ ENV AMDGPU_TARGETS="gfx90a;gfx942;gfx1100;gfx1201"
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY tools/ tools/
+COPY sdk/tenzro-ts-sdk/native/ sdk/tenzro-ts-sdk/native/
+COPY sdk/tenzro-py/native/ sdk/tenzro-py/native/
+COPY sdk/tenzro-ffi/ sdk/tenzro-ffi/
+COPY sdk/tenzro-light-wasm/ sdk/tenzro-light-wasm/
+COPY sdk/tenzro-android-node/native/ sdk/tenzro-android-node/native/
+# The CLI's built-in assistant embeds the guides in docs/ at compile time.
+COPY docs/ docs/
 COPY vendor/ vendor/
 
 # Build tenzro-node (llama.cpp HIP backend), then tenzro-cli on its own so the
 # GPU feature does not unify into the CLI, which serves no model.
+# ONNX Runtime from the pinned library (packaging/onnxruntime.tsv), checked by hash; the build downloads nothing.
+COPY packaging/onnxruntime.tsv packaging/onnxruntime.tsv
+COPY scripts/release/fetch-onnxruntime.py scripts/release/fetch-onnxruntime.py
+RUN python3 scripts/release/fetch-onnxruntime.py --target "$(uname -m)-unknown-linux-gnu" --feature migraphx \
+      --prefix /opt/onnxruntime --link-at /opt/onnxruntime/pinned
+ENV ORT_LIB_LOCATION=/opt/onnxruntime/pinned
+
 RUN cargo build --release --locked -p tenzro-node --features tenzro-node/rocm && \
-    cargo build --release --locked -p tenzro-cli
+    cargo build --release --locked -p tenzro-cli && \
+    cp /opt/onnxruntime/pinned/libonnxruntime_providers_*.so target/release/
 
 
 # Stage 2: Runtime
@@ -71,6 +87,8 @@ RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro \
 
 # Copy binaries from builder
 COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
+# ONNX Runtime loads its MIGraphX provider from the binary's folder at run time.
+COPY --from=builder /build/target/release/libonnxruntime_providers_shared.so /build/target/release/libonnxruntime_providers_migraphx.so /usr/local/bin/
 COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
 
 # Create data directories

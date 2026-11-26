@@ -2,7 +2,8 @@
 //!
 //! A charge is a `PayerSettle` transaction carrying the payer's own signed
 //! [`PaymentAuthorization`]: the payer names the payee and a ceiling, the node
-//! settles the metered amount up to that ceiling, and every validator
+//! settles the metered amount, or for a call admitted on its payment the price
+//! it was quoted ([`AdmittedPayments`]), up to that ceiling, and every validator
 //! re-verifies the signature when the block executes. The node's key only
 //! pays the gas; it has no authority over the payer's funds, and nothing moves
 //! outside block execution.
@@ -12,6 +13,7 @@
 //! a request the chain would refuse fails at once rather than in a block.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tenzro_payments::gateway::RailOutcome;
@@ -163,6 +165,42 @@ pub(crate) fn check_declared(
     Ok(())
 }
 
+/// How long a payment admitted to pay for a call stays held: past the time
+/// its settlement takes to execute, after which the chain refuses the payment
+/// id itself.
+const ADMITTED_RETENTION: Duration = Duration::from_secs(600);
+
+/// The ledger payments admitted to pay for a call, by payment id, with the
+/// charge admission checked. A payment id is admitted once, so two calls
+/// carrying it are never both served, and the call it pays for settles the
+/// charge it was admitted for.
+#[derive(Default)]
+pub struct AdmittedPayments(dashmap::DashMap<String, (u128, Instant)>);
+
+impl AdmittedPayments {
+    /// Holds `payment_id` for a call charged `charge`, or refuses it while
+    /// another call holds it.
+    pub(crate) fn admit(&self, payment_id: &str, charge: u128) -> Result<(), String> {
+        let now = Instant::now();
+        self.0
+            .retain(|_, (_, at)| now.duration_since(*at) < ADMITTED_RETENTION);
+        match self.0.entry(payment_id.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(format!(
+                "payment {payment_id} already pays for another call"
+            )),
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert((charge, now));
+                Ok(())
+            }
+        }
+    }
+
+    /// The charge `payment_id` was admitted for, if it was.
+    pub(crate) fn charge(&self, payment_id: &str) -> Option<u128> {
+        self.0.get(payment_id).map(|held| held.0)
+    }
+}
+
 /// Settle `cost` from `payment`'s payer to `payee` in one `PayerSettle`,
 /// with the leg this node `declared` on top of it (see [`check_declared`]):
 /// the payee's price is `cost`, the leg is paid to its own wallet out of the
@@ -179,38 +217,11 @@ pub(crate) async fn settle(
     cost: u128,
     declared: Option<tenzro_types::payment_authorization::AppMargin>,
 ) -> Result<LedgerCharge, JsonRpcError> {
-    if payment.payer == payee {
-        return Err(err(-32602, "the payer cannot pay itself"));
-    }
-    check_declared(payment, declared)?;
-    let amount = match declared {
-        Some(d) => tenzro_vm::native::amount_with_leg(cost, d.margin_bps)
-            .ok_or_else(|| err(-32602, "the declared leg overflows"))?,
-        None => cost,
-    };
+    let amount = check_payable(node, payment, payee, cost, declared)?;
     let submitter = node
         .ledger_submitter()
         .ok_or_else(|| err(-32000, "this node does not submit ledger transactions"))?;
     let state = tenzro_vm::StateAdapter::with_storage(node_storage(node)?);
-    tenzro_vm::native::verify_payment_authorization(
-        &state,
-        submitter.chain_id(),
-        &payment.payment_id,
-        &payment.payer,
-        &payee,
-        amount,
-        &payment.authorization,
-        crate::calendar::now_ms(),
-    )
-    .map_err(|e| err(-32001, format!("payment authorization refused: {e}")))?;
-    let balance = tenzro_vm::traits::VmState::get_balance(&state, payment.payer.as_bytes());
-    if balance < amount {
-        return Err(JsonRpcError {
-            code: -32023,
-            message: format!("the payer holds {balance}, the charge is {amount}"),
-            data: Some(serde_json::json!({ "amount": amount.to_string() })),
-        });
-    }
     let tx = TransactionType::PayerSettle {
         payer: payment.payer,
         payee,
@@ -260,6 +271,57 @@ pub(crate) async fn settle(
             Err(err(-32023, format!("settlement reverted: {reason}")))
         }
     }
+}
+
+/// Whether `payment` would settle a charge of `cost` to `payee` now, as
+/// [`settle`] submits it: the payer is not the payee, the authorization
+/// carries the leg this node declares, its key is the payer's and signed this
+/// payment to this payee with a ceiling covering the charge, its payment id
+/// has not settled before, and the payer holds the charge. Returns the amount
+/// the payer is debited (the charge plus any declared leg).
+pub(crate) fn check_payable(
+    node: &Arc<TenzroNode>,
+    payment: &PayerPayment,
+    payee: Address,
+    cost: u128,
+    declared: Option<tenzro_types::payment_authorization::AppMargin>,
+) -> Result<u128, JsonRpcError> {
+    if payment.payer == payee {
+        return Err(err(-32602, "the payer cannot pay itself"));
+    }
+    check_declared(payment, declared)?;
+    let amount = match declared {
+        Some(d) => tenzro_vm::native::amount_with_leg(cost, d.margin_bps)
+            .ok_or_else(|| err(-32602, "the declared leg overflows"))?,
+        None => cost,
+    };
+    let state = tenzro_vm::StateAdapter::with_storage(node_storage(node)?);
+    tenzro_vm::native::verify_payment_authorization(
+        &state,
+        node.chain_id(),
+        &payment.payment_id,
+        &payment.payer,
+        &payee,
+        amount,
+        &payment.authorization,
+        crate::calendar::now_ms(),
+    )
+    .map_err(|e| err(-32001, format!("payment authorization refused: {e}")))?;
+    if tenzro_vm::native::read_payment_by_id(&state, &payment.payment_id).is_some() {
+        return Err(err(
+            -32001,
+            format!("payment {} has already settled", payment.payment_id),
+        ));
+    }
+    let balance = tenzro_vm::traits::VmState::get_balance(&state, payment.payer.as_bytes());
+    if balance < amount {
+        return Err(JsonRpcError {
+            code: -32023,
+            message: format!("the payer holds {balance}, the charge is {amount}"),
+            data: Some(serde_json::json!({ "amount": amount.to_string() })),
+        });
+    }
+    Ok(amount)
 }
 
 fn node_storage(node: &Arc<TenzroNode>) -> Result<Arc<dyn tenzro_storage::KvStore>, JsonRpcError> {

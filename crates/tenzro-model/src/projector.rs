@@ -146,8 +146,9 @@ mod tests {
     #[cfg(feature = "mtmd")]
     #[test]
     fn an_input_is_laid_out_as_the_checkpoint_pipeline_lays_it_out() {
-        crate::seeded_catalog();
-        let spec = crate::catalog::get_rerank_model_by_id("qwen3-vl-reranker-2b")
+        let catalog = crate::Catalog::test_seed();
+        let spec = catalog
+            .get_rerank_model_by_id("qwen3-vl-reranker-2b")
             .unwrap()
             .vision_input
             .unwrap();
@@ -166,8 +167,9 @@ mod tests {
     #[cfg(feature = "mtmd")]
     #[test]
     fn a_wrapped_video_sits_between_the_vision_markers() {
-        crate::seeded_catalog();
-        let spec = crate::catalog::get_embed_model_by_id("qwen3-vl-embedding-2b")
+        let catalog = crate::Catalog::test_seed();
+        let spec = catalog
+            .get_embed_model_by_id("qwen3-vl-embedding-2b")
             .unwrap()
             .vision_input
             .unwrap();

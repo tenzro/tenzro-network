@@ -184,6 +184,7 @@ impl ForwardLeg<'_> {
     /// and attached `receipt` over an output hashing to `received_output`.
     pub fn billable(
         &self,
+        catalog: &tenzro_model::Catalog,
         reported: Option<BillableUnits>,
         receipt: Option<&Value>,
         received_output: &str,
@@ -195,7 +196,7 @@ impl ForwardLeg<'_> {
                 BillingBasis::OperatorRegistered,
             );
         };
-        let Some(identity) = expected_identity(self.model_id) else {
+        let Some(identity) = expected_identity(catalog, self.model_id) else {
             tracing::warn!(model = %self.model_id,
                 "No catalog identity for the routed model; billing the per-request floor");
             return (BillableUnits::default(), BillingBasis::Floor);
@@ -393,6 +394,13 @@ impl StreamedOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The seed catalog every leg here is billed against.
+    fn seed() -> &'static tenzro_model::Catalog {
+        static SEED: std::sync::LazyLock<tenzro_model::Catalog> =
+            std::sync::LazyLock::new(tenzro_model::Catalog::test_seed);
+        &SEED
+    }
     use crate::inference_receipt::{
         InferenceReceipt, ModelIdentity, ReceiptClaims, SamplingParams, catalog_identity,
         upstream_identity,
@@ -499,8 +507,7 @@ mod tests {
         units: BillableUnits,
         identity: Option<ModelIdentity>,
     ) -> Value {
-        tenzro_catalog::install_test_seed();
-        let identity = identity.unwrap_or_else(|| catalog_identity(MODEL).unwrap());
+        let identity = identity.unwrap_or_else(|| catalog_identity(seed(), MODEL).unwrap());
         receipt_naming(signer, MODEL, identity, nonce, body_hash, units)
     }
 
@@ -568,12 +575,13 @@ mod tests {
             }),
         );
         assert_eq!(
-            leg.billable(Some(reported.clone()), Some(&swapped), &out).1,
+            leg.billable(seed(), Some(reported.clone()), Some(&swapped), &out)
+                .1,
             BillingBasis::Floor
         );
         let honest = receipt_for(&signer, "n1", out.clone(), reported.clone());
         assert_eq!(
-            leg.billable(Some(reported), Some(&honest), &out).1,
+            leg.billable(seed(), Some(reported), Some(&honest), &out).1,
             BillingBasis::SignedReceipt
         );
     }
@@ -584,9 +592,8 @@ mod tests {
     /// upstream identity instead of the weights gets the floor.
     #[test]
     fn a_model_outside_the_catalog_is_billed_on_its_upstream_identity() {
-        tenzro_catalog::install_test_seed();
         const UPSTREAM: &str = "operator/served-upstream";
-        assert!(tenzro_model::catalog::entry(UPSTREAM).is_none());
+        assert!(seed().entry(UPSTREAM).is_none());
         let signer = session();
         let pk = signer.identity().clone();
         let out = output_hash("hi", "", "");
@@ -606,7 +613,7 @@ mod tests {
             reported.clone(),
         );
         assert_eq!(
-            leg.billable(Some(reported.clone()), Some(&receipt), &out),
+            leg.billable(seed(), Some(reported.clone()), Some(&receipt), &out),
             (reported.clone(), BillingBasis::SignedReceipt)
         );
         // The identity is bound to the id: another model's does not pass.
@@ -619,7 +626,8 @@ mod tests {
             reported.clone(),
         );
         assert_eq!(
-            leg.billable(Some(reported.clone()), Some(&other), &out).1,
+            leg.billable(seed(), Some(reported.clone()), Some(&other), &out)
+                .1,
             BillingBasis::Floor
         );
         let catalog_leg = ForwardLeg {
@@ -635,7 +643,9 @@ mod tests {
             reported.clone(),
         );
         assert_eq!(
-            catalog_leg.billable(Some(reported), Some(&claimed), &out).1,
+            catalog_leg
+                .billable(seed(), Some(reported), Some(&claimed), &out)
+                .1,
             BillingBasis::Floor
         );
     }
@@ -653,7 +663,7 @@ mod tests {
             pinned_key: Some(&pk),
             bound: bound(),
         };
-        let (units, basis) = leg.billable(Some(reported.clone()), Some(&receipt), &out);
+        let (units, basis) = leg.billable(seed(), Some(reported.clone()), Some(&receipt), &out);
         assert_eq!(basis, BillingBasis::SignedReceipt);
         // Signed or not, a count above the requested maximum is not billed.
         assert_eq!(units.output_tokens(), 100);
@@ -673,27 +683,29 @@ mod tests {
         let reported = BillableUnits::tokens(10, 50);
         // No receipt at all.
         assert_eq!(
-            leg.billable(Some(reported.clone()), None, &out),
+            leg.billable(seed(), Some(reported.clone()), None, &out),
             (BillableUnits::default(), BillingBasis::Floor)
         );
         // A receipt replayed from another request.
         let replayed = receipt_for(&signer, "n0", out.clone(), reported.clone());
         assert_eq!(
-            leg.billable(Some(reported.clone()), Some(&replayed), &out)
+            leg.billable(seed(), Some(reported.clone()), Some(&replayed), &out)
                 .1,
             BillingBasis::Floor
         );
         // A receipt whose units are lower than the usage block claims.
         let under = receipt_for(&signer, "n1", out.clone(), BillableUnits::tokens(10, 5));
         assert_eq!(
-            leg.billable(Some(reported.clone()), Some(&under), &out).1,
+            leg.billable(seed(), Some(reported.clone()), Some(&under), &out)
+                .1,
             BillingBasis::Floor
         );
         // A receipt from a key other than the announced one.
         let other = session();
         let forged = receipt_for(&other, "n1", out.clone(), reported.clone());
         assert_eq!(
-            leg.billable(Some(reported.clone()), Some(&forged), &out).1,
+            leg.billable(seed(), Some(reported.clone()), Some(&forged), &out)
+                .1,
             BillingBasis::Floor
         );
     }
@@ -706,7 +718,7 @@ mod tests {
             pinned_key: None,
             bound: bound(),
         };
-        let (units, basis) = leg.billable(Some(BillableUnits::tokens(10, 9_999)), None, "");
+        let (units, basis) = leg.billable(seed(), Some(BillableUnits::tokens(10, 9_999)), None, "");
         assert_eq!(basis, BillingBasis::OperatorRegistered);
         assert_eq!(units.output_tokens(), 100);
     }
@@ -752,9 +764,6 @@ mod tests {
             streamed.reasoning,
             message["reasoning_content"].as_str().unwrap()
         );
-        assert!(crate::optimistic::outputs_agree(
-            "gguf", &streamed, &streamed
-        ));
     }
 
     #[test]

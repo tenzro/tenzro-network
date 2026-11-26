@@ -29,7 +29,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```text
 //! use tenzro_zk::{Circuit, ProofSystem, prove, verify_proof_envelope};
 //!
 //! let proof = prove(ProofSystem::KoalaBearSha256Fri, Circuit::Settlement, &witness, &binding)?;

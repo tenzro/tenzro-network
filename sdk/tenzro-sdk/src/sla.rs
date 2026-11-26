@@ -91,6 +91,14 @@ impl SlaClient {
             .await
     }
 
+    /// What SLA challenges cost the bonded compute fleet in energy at the
+    /// probe cadence in force (`tenzro_slaGetEnergy`).
+    pub async fn energy_report(&self) -> SdkResult<SlaEnergyReport> {
+        self.rpc
+            .call("tenzro_slaGetEnergy", serde_json::json!([]))
+            .await
+    }
+
     /// Read the fault-detector parameters this validator is using.
     /// Returns the slash threshold (missed probes before slashing
     /// fires), the per-crossing slash amount in wei, and this
@@ -155,6 +163,52 @@ pub struct SlaOutstandingProbes {
     pub count: usize,
     #[serde(default)]
     pub probes: Vec<SlaOutstandingProbe>,
+}
+
+/// Result of `tenzro_slaGetEnergy`. Joule figures are decimal strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlaEnergyReport {
+    /// The governed probe interval in force, ms.
+    pub probe_interval_ms: u64,
+    /// Probes one bonded unit answers per day at that interval.
+    pub probes_per_unit_per_day: u64,
+    /// Whether the wake-cost rule prices these figures (a scheduled probe a
+    /// liveness reply, a burst the tier's wake); before it every probe is
+    /// charged a cool-tier wake.
+    pub wake_rule_live: bool,
+    /// Challenge energy as a share of the fleet's own energy, basis points.
+    pub challenge_share_bps: u64,
+    /// The governed challenge energy budget, basis points; zero is disabled.
+    pub budget_bps: u64,
+    /// Whether the cadence in force holds within that budget.
+    pub within_budget: bool,
+    /// Eligible compute bonds.
+    pub units: u64,
+    /// The whole fleet's own energy over a day, joules.
+    pub fleet_joules_per_day: String,
+    /// The whole fleet's challenge energy over a day, joules.
+    pub challenge_joules_per_day: String,
+    /// The fleet by declared readiness tier, cold first.
+    pub tiers: Vec<SlaTierEnergy>,
+}
+
+/// One readiness tier's row of an [`SlaEnergyReport`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlaTierEnergy {
+    /// `Cold`, `Cool` or `Warm`.
+    pub tier: String,
+    /// Eligible compute bonds whose provider declared this tier.
+    pub units: u64,
+    /// Probe rounds between this tier's burst challenges.
+    pub burst_rounds_between: u64,
+    /// Challenge energy one unit of this tier spends per day, joules.
+    pub challenge_joules_per_unit_per_day: String,
+    /// One unit of this tier's own energy per day, joules.
+    pub idle_joules_per_unit_per_day: String,
+    /// These units' own energy over a day, joules.
+    pub fleet_joules_per_day: String,
+    /// Challenge energy these units spend over a day, joules.
+    pub challenge_joules_per_day: String,
 }
 
 /// Result of `tenzro_slaGetParams`.

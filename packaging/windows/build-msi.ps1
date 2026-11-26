@@ -9,6 +9,7 @@
   compiler. The binaries are packaged byte for byte; nothing is rebuilt.
 
   Requires: wix 4.x (dotnet tool) with the UI and Util extensions.
+
 #>
 param(
     [Parameter(Mandatory)][string]$ZipPath,
@@ -72,15 +73,32 @@ if ($top.Count -ne 1) { throw 'unexpected archive layout (expected one top-level
 $payload = $top[0].FullName
 $files = Get-ChildItem -LiteralPath $payload -Recurse -File | ForEach-Object { $_.FullName.Substring($payload.Length + 1).ToLower() } | Sort-Object
 # The archive holds the two programs, the libraries they load from their own
-# folder, and the network profile. Anything else is not repackaged blindly.
+# folder, the network profile, the web console `tenzro control --web` serves
+# (share\console, with its scripts in share\console\src) and Tenzro Control, the
+# desktop app, with everything its self-contained build keeps beside it
+# (control\, at any depth). Anything else is not repackaged blindly.
 $libFiles = @($files | Where-Object { $_ -match '^bin\\(onnxruntime[a-z0-9_]*|directml)\.dll$' })
 $netFiles = @($files | Where-Object { $_ -match '^share\\network\\[0-9]+\.toml$' })
-$known = @('bin\tenzro.exe', 'bin\tenzro-node.exe') + $libFiles + $netFiles
+$consoleFiles = @($files | Where-Object { $_ -match '^share\\console\\[a-z0-9_][a-z0-9_.-]*$' })
+$consoleSrcFiles = @($files | Where-Object { $_ -match '^share\\console\\src\\[a-z0-9_][a-z0-9_.-]*\.js$' })
+$controlFiles = @($files | Where-Object { $_ -match '^control\\([a-z0-9_][a-z0-9_.-]*\\)*[a-z0-9_][a-z0-9_.-]*$' })
+$known = @('bin\tenzro.exe', 'bin\tenzro-node.exe') + $libFiles + $netFiles + $consoleFiles + $consoleSrcFiles + $controlFiles
 $unknown = @($files | Where-Object { $known -notcontains $_ })
 if (($files -notcontains 'bin\tenzro.exe') -or ($files -notcontains 'bin\tenzro-node.exe') -or $unknown) {
     throw "unexpected archive contents: $($files -join ', ')"
 }
 if (-not $netFiles) { throw 'the archive ships no network profile (share\network\<chain_id>.toml)' }
+foreach ($need in 'control\tenzrocontrol.exe', 'control\tenzro_control.dll') {
+    if ($controlFiles -notcontains $need) { throw "the archive has no Tenzro Control ($need)" }
+}
+# console check begin
+# Every archive ships the web console; an MSI without it would also carry empty component groups.
+function Assert-Console([string[]]$Console, [string[]]$ConsoleSrc) {
+    if ($Console -notcontains 'share\console\index.html') { throw 'the archive ships no web console (share\console\index.html)' }
+    if (-not $ConsoleSrc) { throw 'the archive ships no web console scripts (share\console\src\*.js)' }
+}
+# console check end
+Assert-Console $consoleFiles $consoleSrcFiles
 foreach ($need in 'bin\onnxruntime_providers_shared.dll', 'bin\onnxruntime_providers_cuda.dll') {
     if ($libFiles -notcontains $need) { throw "the CUDA archive has no $need" }
 }
@@ -150,10 +168,40 @@ function New-FileComponents([string]$GroupId, [string]$DirectoryId, [string]$Pre
     }
     return $x + "    </ComponentGroup>`r`n"
 }
+# Tenzro Control is a tree, so its folders are written here too, under
+# CONTROLDIR. Ids come from a digest of the path: stable from release to
+# release, unique, and short enough for WiX.
+function Get-PathId([string]$Prefix, [string]$Rel) {
+    $digest = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Rel.ToLower()))
+    return $Prefix + (-join ($digest[0..11] | ForEach-Object { $_.ToString('x2') }))
+}
+function New-TreeComponents([string]$GroupId, [string]$DirectoryId, [string]$Root) {
+    $base = Join-Path $payload $Root
+    $dirOf = { param($rel) $up = Split-Path -Parent $rel; if ($up) { Get-PathId 'CtlDir_' $up } else { $DirectoryId } }
+    $x = ''
+    foreach ($d in (Get-ChildItem -LiteralPath $base -Recurse -Directory | Sort-Object { $_.FullName.Length })) {
+        $rel = $d.FullName.Substring($base.Length + 1)
+        $name = [Security.SecurityElement]::Escape($d.Name)
+        $x += "    <DirectoryRef Id=`"$(& $dirOf $rel)`"><Directory Id=`"$(Get-PathId 'CtlDir_' $rel)`" Name=`"$name`" /></DirectoryRef>`r`n"
+    }
+    $x += "    <ComponentGroup Id=`"$GroupId`">`r`n"
+    foreach ($f in (Get-ChildItem -LiteralPath $base -Recurse -File | Sort-Object FullName)) {
+        $rel = $f.FullName.Substring($base.Length + 1)
+        $id = Get-PathId 'Ctl_' $rel
+        $source = [Security.SecurityElement]::Escape($f.FullName)
+        $x += "      <Component Id=`"Cmp$id`" Directory=`"$(& $dirOf $rel)`" Bitness=`"always64`">`r`n"
+        $x += "        <File Id=`"$id`" Source=`"$source`" KeyPath=`"yes`" />`r`n"
+        $x += "      </Component>`r`n"
+    }
+    return $x + "    </ComponentGroup>`r`n"
+}
 $payloadWxs = Join-Path $WorkDir 'Payload.wxs'
 $fragment = "<Wix xmlns=`"http://wixtoolset.org/schemas/v4/wxs`">`r`n  <Fragment>`r`n" +
     (New-FileComponents 'PayloadLibs' 'BINDIR' 'Lib_' $libFiles) +
     (New-FileComponents 'NetworkProfiles' 'NETWORKDIR' 'Net_' $netFiles) +
+    (New-FileComponents 'ConsoleFiles' 'CONSOLEDIR' 'Con_' $consoleFiles) +
+    (New-FileComponents 'ConsoleSrcFiles' 'CONSOLESRCDIR' 'ConSrc_' $consoleSrcFiles) +
+    (New-TreeComponents 'ControlFiles' 'CONTROLDIR' 'control') +
     "  </Fragment>`r`n</Wix>`r`n"
 [IO.File]::WriteAllText($payloadWxs, $fragment, [Text.Encoding]::ASCII)
 
@@ -169,16 +217,45 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
 #   ICE34      ADDTOPATH is deliberately unset until the first action after AppSearch
 #              (so a previous choice can be kept on upgrade); the dialog only runs after that.
 #   ICE38/43/57  the Start menu shortcuts are all-users (per-machine) and use an HKLM key path.
+# A failed build leaves no MSI behind, not even one from an earlier run.
+Remove-Item -LiteralPath $OutMsi -ErrorAction SilentlyContinue
 & wix build -arch x64 -o $OutMsi `
     -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
     -d "Version=$Version" -d "ProductCode=$productCode" -d "Compression=$Compression" `
     -d "PayloadDir=$payload" -d "StageDir=$stage" -d "ScriptDir=$here" `
     -d "SourceCommit=$SourceCommit" -d "PublicCommit=$PublicCommit" -d "ArchiveSha256=$zipSha" `
     (Join-Path $here 'Tenzro.wxs') $payloadWxs
-if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $OutMsi -ErrorAction SilentlyContinue; throw "wix build failed ($LASTEXITCODE)" }
 
 & wix msi validate -sice ICE34 -sice ICE38 -sice ICE43 -sice ICE57 $OutMsi
-if ($LASTEXITCODE -ne 0) { throw "MSI validation failed ($LASTEXITCODE)" }
+# An MSI that fails validation is not left where a later step could install it.
+if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $OutMsi -ErrorAction SilentlyContinue; throw "MSI validation failed ($LASTEXITCODE)" }
+# Authenticode, when this machine holds the release code-signing certificate:
+# TENZRO_WINDOWS_SIGN_CERT names it by thumbprint (CurrentUser or LocalMachine
+# store) and TENZRO_WINDOWS_TIMESTAMP_URL the RFC 3161 timestamp service that
+# keeps each signature valid after the certificate expires. Each file must come
+# out validly signed by that certificate. Without them nothing is signed.
+function Invoke-CodeSign([string[]]$Paths) {
+    if (-not $env:TENZRO_WINDOWS_SIGN_CERT) { Write-Output "unsigned: TENZRO_WINDOWS_SIGN_CERT is not set"; return }
+    if (-not $env:TENZRO_WINDOWS_TIMESTAMP_URL) { throw "TENZRO_WINDOWS_SIGN_CERT is set without TENZRO_WINDOWS_TIMESTAMP_URL" }
+    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+    if (-not $signtool) {
+        $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $signtool) { throw "signtool.exe not found: install the Windows SDK" }
+    & $signtool sign /sha1 $env:TENZRO_WINDOWS_SIGN_CERT /fd SHA256 /tr $env:TENZRO_WINDOWS_TIMESTAMP_URL /td SHA256 $Paths
+    if ($LASTEXITCODE -ne 0) { throw "signtool sign failed ($LASTEXITCODE)" }
+    foreach ($p in $Paths) {
+        $sig = Get-AuthenticodeSignature -LiteralPath $p
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Thumbprint -ne $env:TENZRO_WINDOWS_SIGN_CERT.ToUpper()) {
+            throw "the signature of $p does not check out: $($sig.Status) $($sig.StatusMessage)"
+        }
+        Write-Output "signed by $($sig.SignerCertificate.Subject): $p"
+    }
+}
+Invoke-CodeSign @($OutMsi)
+
 
 Remove-Item -LiteralPath $WorkDir -Recurse -Force
 $len = (Get-Item -LiteralPath $OutMsi).Length

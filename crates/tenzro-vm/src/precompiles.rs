@@ -54,6 +54,8 @@ pub const PRECOMPILE_RANDOMNESS_BEACON: PrecompileAddress = short_address(0x10, 
 pub const PRECOMPILE_TEE_VERIFY: PrecompileAddress = short_address(0x10, 0x10);
 /// ZK proof commitment lookup against the attestations recorded in state.
 pub const PRECOMPILE_ZK_VERIFY: PrecompileAddress = short_address(0x10, 0x11);
+/// ERC-7786 source gateway over the governed bridge routes.
+pub const PRECOMPILE_ERC7786_GATEWAY: PrecompileAddress = short_address(0x10, 0x12);
 
 /// Precompile execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +171,7 @@ pub fn zk_commitment_attested(
 pub struct PrecompileRegistry {
     precompiles: DashMap<PrecompileAddress, PrecompileFn>,
     stateless: dashmap::DashSet<PrecompileAddress>,
+    gates: DashMap<PrecompileAddress, &'static str>,
 }
 
 impl PrecompileRegistry {
@@ -177,6 +180,7 @@ impl PrecompileRegistry {
         let registry = Self {
             precompiles: DashMap::new(),
             stateless: dashmap::DashSet::new(),
+            gates: DashMap::new(),
         };
         registry.register_stateless(PRECOMPILE_P256VERIFY, precompile_p256verify);
         registry.register_stateless(PRECOMPILE_VRF_VERIFY, precompile_vrf_verify);
@@ -186,6 +190,13 @@ impl PrecompileRegistry {
         );
         registry.register(PRECOMPILE_TEE_VERIFY, Arc::new(precompile_tee_verify));
         registry.register(PRECOMPILE_ZK_VERIFY, Arc::new(precompile_zk_verify));
+        registry.register(
+            PRECOMPILE_ERC7786_GATEWAY,
+            Arc::new(crate::evm::gateway::erc7786_gateway_precompile),
+        );
+        registry
+            .gates
+            .insert(PRECOMPILE_ERC7786_GATEWAY, crate::evm::gateway::GATEWAY_KEY);
         registry.register(
             PRECOMPILE_NFT_FACTORY,
             Arc::new(crate::evm::nft_factory::nft_factory_precompile),
@@ -221,6 +232,12 @@ impl PrecompileRegistry {
     }
 
     /// The precompile at `address`, if any.
+    /// The feature gate the precompile at `address` waits for, if any. Until
+    /// the gate is live the address is an ordinary account.
+    pub fn gate(&self, address: &PrecompileAddress) -> Option<&'static str> {
+        self.gates.get(address).map(|g| *g.value())
+    }
+
     pub fn get(&self, address: &PrecompileAddress) -> Option<PrecompileFn> {
         if let Some(p) = self.precompiles.get(address) {
             return Some(p.value().clone());
@@ -320,26 +337,62 @@ fn precompile_tee_verify(call: &mut PrecompileCall<'_>) -> Result<PrecompileResu
         Ok(p) => p,
         Err(_) => return Ok(PrecompileResult::success(bool_word(false), 0)),
     };
+    // From the gate's epoch the key set on chain is the only one a block
+    // checks a GPU report against: with none on chain every GPU report is
+    // refused, and no key set of the node's own is read.
+    let jwks = if call
+        .state
+        .feature_live(crate::native::gateway_sets::NRAS_JWKS_GATE)
+    {
+        Some(
+            call.state
+                .system_storage(crate::native::gateway_sets::NRAS_JWKS_KEY.as_bytes())?
+                .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+                .filter(|set| !set.is_empty()),
+        )
+    } else {
+        None
+    };
     Ok(PrecompileResult::success(
         bool_word(tee_report_acceptable(
             &parsed.report,
             &parsed.expected_binding,
             call.env.block_timestamp,
+            jwks,
         )),
         0,
     ))
 }
 
+/// The policy a block verifies a report under: the block's own time and, from
+/// the gate's epoch, the chain's key set alone (`Some(None)` refuses every GPU
+/// report). Before the gate (`None`) the process's own set applies, as before.
+pub(crate) fn block_policy(
+    expected_user_data: Vec<u8>,
+    block_secs: u64,
+    nras_jwks: Option<Option<String>>,
+) -> tenzro_tee::VerifyPolicy {
+    let mut policy = tenzro_tee::VerifyPolicy::now(expected_user_data);
+    policy.now = block_secs;
+    if let Some(set) = nras_jwks {
+        policy.nvidia_jwks = set;
+    }
+    policy
+}
+
 /// Whether TEE_VERIFY accepts `report` bound to `expected_binding` in a block
-/// with timestamp `block_secs`.
+/// with timestamp `block_secs`. `nras_jwks` is `Some` from the epoch of
+/// `feature.nras_jwks.activation_epoch`: the chain's key set, or none, in
+/// which case every GPU report is refused. `None` before it: the process's own
+/// set applies, as it did before the gate.
 pub(crate) fn tee_report_acceptable(
     report: &tenzro_types::AttestationReport,
     expected_binding: &[u8],
     block_secs: u64,
+    nras_jwks: Option<Option<String>>,
 ) -> bool {
     let expected = tenzro_types::tee::pack_user_data_for_vendor(report.vendor, expected_binding);
-    let mut policy = tenzro_tee::VerifyPolicy::now(expected);
-    policy.now = block_secs;
+    let policy = block_policy(expected, block_secs, nras_jwks);
     tenzro_tee::verify_report(report, &policy).is_ok()
 }
 
@@ -588,6 +641,52 @@ fn precompile_vrf_verify(input: &[u8], gas_limit: u64) -> Result<PrecompileResul
 
 #[cfg(test)]
 mod tests {
+    /// Two nodes with different key files of their own agree on a GPU report
+    /// from the gate's epoch on: the block reads the chain's set alone, and an
+    /// emptied chain set refuses everything instead of falling back.
+    #[test]
+    fn from_the_gate_a_block_reads_the_chain_set_alone() {
+        use crate::native::set_governed_param_for_test;
+        let mut chain = crate::StateAdapter::new();
+        assert_eq!(
+            crate::native::gateway_sets::nras_jwks_for_block(&chain),
+            None,
+            "dormant before the gate"
+        );
+        set_governed_param_for_test(&mut chain, crate::native::gateway_sets::NRAS_JWKS_GATE, 0);
+        assert_eq!(
+            crate::native::gateway_sets::nras_jwks_for_block(&chain),
+            Some(None)
+        );
+        let mut changes = Vec::new();
+        crate::native::gateway_sets::set_nras_jwks(&mut chain, r#"{"keys":[]}"#, &mut changes)
+            .unwrap();
+        assert_eq!(
+            crate::native::gateway_sets::nras_jwks_for_block(&chain),
+            Some(Some(r#"{"keys":[]}"#.into()))
+        );
+        crate::native::gateway_sets::set_nras_jwks(&mut chain, "", &mut changes).unwrap();
+        assert_eq!(
+            crate::native::gateway_sets::nras_jwks_for_block(&chain),
+            Some(None)
+        );
+
+        // The node-local sets of two nodes do not enter the policy a block
+        // verifies under.
+        let policy = |local: &str| {
+            tenzro_tee::replace_nvidia_jwks(Some(local.to_string()));
+            block_policy(
+                vec![],
+                0,
+                crate::native::gateway_sets::nras_jwks_for_block(&chain),
+            )
+            .nvidia_jwks
+        };
+        let (a, b) = (policy("file-a"), policy("file-b"));
+        tenzro_tee::replace_nvidia_jwks(None);
+        assert_eq!(a, None);
+        assert_eq!(a, b);
+    }
     use super::*;
 
     // ---- P256VERIFY (EIP-7951, 0x100) ----

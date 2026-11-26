@@ -1,7 +1,7 @@
-//! Join command for one-click participation in Tenzro Network.
+//! Join command: provisions this machine's identity and wallet on Tenzro Network.
 //!
-//! Calls the node's `tenzro_joinAsMicroNode` RPC to provision a TDIP identity,
-//! permissionless wallet, and full network capabilities as a zero-install MicroNode.
+//! Calls the node's `tenzro_joinAsMicroNode` RPC to provision a TDIP identity
+//! and a wallet bound to a key this machine holds. It runs no node.
 //!
 //! With `--provider`, continues past identity provisioning into the full
 //! provider path against the local node: hardware detection, testnet funding,
@@ -9,15 +9,78 @@
 //! selection + download + serving, and TEE detection where hardware exists.
 
 use crate::config;
+use crate::onboarding::ceremony::{self, CeremonyResult};
 use crate::output;
 use crate::rpc::RpcClient;
 use anyhow::Result;
 use clap::Parser;
 
-/// Join the Tenzro Network as a MicroNode participant.
+/// The display name a join uses when none is given.
+pub(crate) const DEFAULT_NAME: &str = "Tenzro User";
+
+/// The identity and wallet a join made, as this machine keeps them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Joined {
+    pub did: String,
+    pub display_name: String,
+    pub wallet_id: String,
+    pub wallet_address: String,
+}
+
+impl Joined {
+    /// Read them from the node's answer. `name` stands in for a display name
+    /// the node did not return.
+    pub(crate) fn read(result: &serde_json::Value, name: &str) -> Self {
+        let text = |part: &str, field: &str, or: &str| {
+            result
+                .get(part)
+                .and_then(|p| p.get(field))
+                .and_then(|v| v.as_str())
+                .unwrap_or(or)
+                .to_string()
+        };
+        Self {
+            did: text("identity", "did", "unknown"),
+            display_name: text("identity", "display_name", name),
+            wallet_id: text("wallet", "wallet_id", "unknown"),
+            wallet_address: text("wallet", "address", "unknown"),
+        }
+    }
+
+    /// Write them into the CLI's configuration, with the node they were made
+    /// on.
+    pub(crate) fn keep(self, cfg: &mut config::PersistedConfig, rpc_url: &str) {
+        cfg.endpoint = Some(rpc_url.to_string());
+        cfg.wallet_id = Some(self.wallet_id);
+        cfg.wallet_address = Some(self.wallet_address);
+        cfg.did = Some(self.did);
+        cfg.display_name = Some(self.display_name);
+    }
+}
+
+/// Register the passkey a ceremony made as a person's identity on the node.
+pub(crate) async fn enrol(
+    rpc: &RpcClient,
+    made: &CeremonyResult,
+    name: &str,
+) -> Result<serde_json::Value> {
+    rpc.call(
+        "tenzro_onboardHuman",
+        ceremony::build_onboard_params(made, name),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "The node refused the passkey enrolment: {e}\n\
+                 The passkey was created but no identity exists yet."
+        )
+    })
+}
+
+/// Provision this machine's identity and wallet on the Tenzro Network.
 ///
-/// Zero-install — no P2P binary required.
-/// Auto-provisions a TDIP DID, permissionless wallet, and full network capabilities.
+/// No node is installed or run: the command provisions a TDIP DID and a
+/// wallet that can pay for and call the network's services.
 /// Pass `--provider` on a machine running `tenzro-node` to also become
 /// an inference provider in the same command.
 #[derive(Debug, Parser)]
@@ -28,7 +91,7 @@ pub struct JoinCmd {
     pub rpc: Option<String>,
 
     /// Display name
-    #[arg(long, default_value = "Tenzro User")]
+    #[arg(long, default_value = DEFAULT_NAME)]
     pub name: String,
 
     /// Origin hint (e.g. "cli", "sdk", "app", "mcp", "a2a")
@@ -46,6 +109,17 @@ pub struct JoinCmd {
     #[arg(long)]
     pub provider: bool,
 
+    /// With --provider, become a provider as this machine's node: its node
+    /// account posts the bonds and its operator DID is the provider, with no
+    /// new identity provisioned. On a machine with no TPM of its own the
+    /// node account signs through the key holder (--tpm-key-holder and
+    /// --tpm-label, or the one `tenzro setup` recorded).
+    #[arg(long, requires = "provider")]
+    pub node_account: bool,
+
+    #[command(flatten)]
+    pub delegated: crate::keystore::DelegatedKey,
+
     /// Show where your application for a staked role stands and the next
     /// step: validator, edge, tee, rpc, attestor, wallet, catalog, ai,
     /// compute or storage. Run it again at any time; it continues from
@@ -59,6 +133,30 @@ pub struct JoinCmd {
 }
 
 impl JoinCmd {
+    /// The node account the provider steps sign as with `--node-account`,
+    /// or `None` for the client account that joins. A key holder serves a
+    /// node's keys, so naming one without `--node-account` is refused.
+    fn node_signing(&self) -> Result<Option<crate::keystore::SigningAccount>> {
+        let account = crate::keystore::SigningAccount {
+            key_namespace: None,
+            node_account: self.node_account,
+            delegated: self.delegated.clone(),
+        };
+        Ok(match account.signer()? {
+            crate::keystore::AccountSigner::Node(_) => Some(account),
+            crate::keystore::AccountSigner::Client(_) => None,
+        })
+    }
+
+    /// This machine's preflight checklist: the hardware key store its node's
+    /// keys live in, and what fixes each missing piece.
+    async fn checklist() -> Vec<crate::commands::preflight::Check> {
+        let hw = crate::commands::hardware::detect_hardware_profile().await;
+        crate::commands::preflight::evaluate(&crate::commands::preflight::Facts::probe(
+            crate::commands::setup::has_secure_enclave(&hw),
+        ))
+    }
+
     /// The error for an endpoint that did not answer. For provider mode
     /// against the local node it carries the machine's preflight checklist, so
     /// a node that cannot start says why and what fixes it.
@@ -69,12 +167,7 @@ impl JoinCmd {
             }
             return anyhow::anyhow!("Cannot connect to {}: {}", rpc_url, e);
         }
-        let hw = crate::commands::hardware::detect_hardware_profile().await;
-        let facts = crate::commands::preflight::Facts::probe(
-            crate::commands::setup::has_secure_enclave(&hw),
-        );
-        let checklist =
-            crate::commands::preflight::report_text(&crate::commands::preflight::evaluate(&facts));
+        let checklist = crate::commands::preflight::report_text(&Self::checklist().await);
         anyhow::anyhow!(
             "Cannot connect to your local node at {}: {}\n\
              Provider mode registers on your own node. This machine's readiness to run one:\n\
@@ -110,6 +203,29 @@ impl JoinCmd {
             }
         });
 
+        // A provider runs its node on this machine, and the node's keys live
+        // only in its TPM 2.0 or Secure Enclave: say so before anything else
+        // rather than after a node that cannot start.
+        if self.provider && self.rpc.is_none() {
+            let checks = Self::checklist().await;
+            // Only the key store decides here; a node binary run elsewhere,
+            // in a container for one, still answers on the local port.
+            let no_key_store = checks.iter().any(|c| {
+                c.level == crate::commands::preflight::Level::Fail
+                    && matches!(c.label, "TPM 2.0" | "TPM access" | "Secure Enclave")
+            });
+            if no_key_store {
+                anyhow::bail!(
+                    "Provider mode runs a node on this machine, and a node keeps its keys only \
+                     in a TPM 2.0 or a Secure Enclave. This machine is not ready:\n{}\
+                     Fix the items marked FAIL and run this command again, or join without \
+                     --provider (a human identity needs only a passkey) or against a node you \
+                     operate with --rpc <url>.",
+                    crate::commands::preflight::report_text(&checks)
+                );
+            }
+        }
+
         output::print_header("Join Tenzro Network");
 
         println!();
@@ -137,6 +253,12 @@ impl JoinCmd {
 
         let clean_name = self.name.trim_start_matches('@').to_string();
 
+        if self.provider
+            && let Some(account) = self.node_signing()?
+        {
+            return join_node_as_provider(&rpc, &rpc_url, &account, &clean_name, chain_id).await;
+        }
+
         // Step 2: provision the MicroNode identity + wallet.
         let spinner = output::create_spinner("Provisioning identity and wallet...");
 
@@ -145,22 +267,13 @@ impl JoinCmd {
             // the wallet page runs the ceremony and this process relays the
             // public key material to `tenzro_onboardHuman`.
             spinner.finish_and_clear();
-            let ceremony = crate::onboarding::ceremony::run(
-                &rpc_url,
-                &clean_name,
-                crate::onboarding::ceremony::DEFAULT_TIMEOUT,
-            )
-            .await?;
+            let made = ceremony::run(&rpc_url, &clean_name, ceremony::DEFAULT_TIMEOUT).await?;
             let spinner = output::create_spinner("Registering your identity...");
-            let params = crate::onboarding::ceremony::build_onboard_params(&ceremony, &clean_name);
-            let onboarded: serde_json::Value =
-                rpc.call("tenzro_onboardHuman", params).await.map_err(|e| {
-                    anyhow::anyhow!(
-                        "The node refused the passkey enrolment: {e}\n\
-                         The passkey was created but no identity exists yet. \
-                         Run `tenzro join` again; the challenge expires after a few minutes."
-                    )
-                })?;
+            let onboarded = enrol(&rpc, &made, &clean_name).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "{e} Run `tenzro join` again; the challenge expires after a few minutes."
+                )
+            })?;
             spinner.finish_and_clear();
             onboarded
         } else {
@@ -186,17 +299,14 @@ impl JoinCmd {
         let is_micro_node = true;
 
         // Extract identity from RPC response
+        let joined = Joined::read(&result, &clean_name);
+        let Joined {
+            did,
+            display_name,
+            wallet_id,
+            wallet_address,
+        } = joined.clone();
         let identity = result.get("identity").cloned().unwrap_or_default();
-        let did = identity
-            .get("did")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let display_name = identity
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&clean_name)
-            .to_string();
         let identity_type = identity
             .get("identity_type")
             .and_then(|v| v.as_str())
@@ -205,16 +315,6 @@ impl JoinCmd {
 
         // Extract wallet from RPC response
         let wallet = result.get("wallet").cloned().unwrap_or_default();
-        let wallet_id = wallet
-            .get("wallet_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let wallet_address = wallet
-            .get("address")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
 
         // Display identity
         println!();
@@ -266,7 +366,6 @@ impl JoinCmd {
                     ("payments", "TNZO Payments"),
                     ("agent_collaboration", "Agent Collaboration (A2A)"),
                     ("mcp_tools", "MCP Tools (24 tools)"),
-                    ("task_execution", "Task Marketplace"),
                     ("chain_query", "Chain State Queries"),
                     ("smart_contracts", "Smart Contracts (EVM/SVM)"),
                     ("tee_services", "TEE Confidential Compute"),
@@ -370,7 +469,18 @@ impl JoinCmd {
         // Provider path: hardware detection → funding → compute bond →
         // registration → default pricing → model pull + serve → TEE check.
         let provider_result = if self.provider {
-            Some(run_provider_flow(&rpc, &did, &wallet_address, &clean_name).await?)
+            Some(
+                run_provider_flow(
+                    &rpc,
+                    crate::keystore::AccountSigner::Client(
+                        crate::keystore::DEFAULT_CLIENT_KEY_NAMESPACE,
+                    ),
+                    &did,
+                    &wallet_address,
+                    &clean_name,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -378,18 +488,9 @@ impl JoinCmd {
         let spinner = output::create_spinner("Saving configuration...");
 
         let mut cfg = config::load_config();
-        cfg.endpoint = Some(rpc_url.clone());
-        cfg.wallet_id = Some(wallet_id);
-        cfg.wallet_address = Some(wallet_address);
-        cfg.did = Some(did);
-        cfg.display_name = Some(display_name.clone());
-        if let Some((pricing, served_model)) = provider_result {
+        joined.keep(&mut cfg, &rpc_url);
+        if let Some(pricing) = provider_result {
             cfg.pricing = Some(pricing);
-            if let Some(model_id) = served_model
-                && !cfg.served_models.contains(&model_id)
-            {
-                cfg.served_models.push(model_id);
-            }
         }
 
         config::save_config(&cfg)?;
@@ -414,6 +515,75 @@ impl JoinCmd {
 
         Ok(())
     }
+}
+
+/// `join --provider --node-account`: this machine's node becomes a provider
+/// as itself. Its node account (through the key holder on a machine with no
+/// TPM) posts the bonds, and the DID the node operates as is the provider;
+/// the node registers that identity itself, so none is provisioned here.
+async fn join_node_as_provider(
+    rpc: &RpcClient,
+    rpc_url: &str,
+    account: &crate::keystore::SigningAccount,
+    name: &str,
+    chain_id: u64,
+) -> Result<()> {
+    if !names_this_machine(rpc_url) {
+        anyhow::bail!(
+            "--node-account signs the provider bond for the DID the node at {rpc_url} names, and \
+             nothing here checks that DID against this machine's key: run it against this \
+             machine's own node (--rpc http://127.0.0.1:8545)"
+        );
+    }
+    let (signer, address) = account.open()?;
+    let status: serde_json::Value = rpc
+        .call("tenzro_getNodeStatus", serde_json::json!([]))
+        .await
+        .map_err(|e| anyhow::anyhow!("Reading the node's status failed: {e}"))?;
+    let did = status
+        .get("operator_did")
+        .and_then(|v| v.as_str())
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the node at {rpc_url} names no operator DID yet; it names its machine DID once it \
+                 has a hardware identity key. Run this again when `tenzro node status` shows one."
+            )
+        })?
+        .to_string();
+    let wallet = format!("0x{}", hex::encode(address));
+    output::print_field("Provider DID", &did);
+    output::print_field("Node account", &wallet);
+
+    let pricing = run_provider_flow(rpc, signer, &did, &wallet, name).await?;
+
+    let mut cfg = config::load_config();
+    cfg.endpoint = Some(rpc_url.to_string());
+    cfg.pricing = Some(pricing);
+    config::save_config(&cfg)?;
+    output::print_success(&format!(
+        "Configuration saved to: {}",
+        config::config_path().display()
+    ));
+    println!();
+    output::print_success("This node is now a Tenzro Network provider!");
+    output::print_info(&format!("Chain ID: {chain_id}"));
+    Ok(())
+}
+
+/// Whether `rpc_url` names this machine (`localhost` or a loopback address).
+fn names_this_machine(rpc_url: &str) -> bool {
+    let rest = rpc_url.split_once("://").map_or(rpc_url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The compute bond minimum in force, a governed parameter, read from the
@@ -463,24 +633,26 @@ pub(crate) async fn provider_setup(rpc_url: &str, name: &str) -> Result<()> {
         );
     };
     let rpc = RpcClient::new(rpc_url);
-    let (pricing, served_model) = run_provider_flow(&rpc, &did, &wallet, name).await?;
+    let pricing = run_provider_flow(
+        &rpc,
+        crate::keystore::AccountSigner::Client(crate::keystore::DEFAULT_CLIENT_KEY_NAMESPACE),
+        &did,
+        &wallet,
+        name,
+    )
+    .await?;
     cfg.pricing = Some(pricing);
-    if let Some(model_id) = served_model
-        && !cfg.served_models.contains(&model_id)
-    {
-        cfg.served_models.push(model_id);
-    }
     config::save_config(&cfg)
 }
 
-/// Returns the pricing that was set on the node plus the model id that
-/// ended up being served (None when no catalog model fits the hardware).
+/// Returns the pricing that was set on the node.
 async fn run_provider_flow(
     rpc: &RpcClient,
+    signer: crate::keystore::AccountSigner<'_>,
     did: &str,
     wallet_address: &str,
     name: &str,
-) -> Result<(config::ProviderPricing, Option<String>)> {
+) -> Result<config::ProviderPricing> {
     println!();
     output::print_header("Provider Setup");
     println!();
@@ -585,9 +757,9 @@ async fn run_provider_flow(
             "Posting compute bond ({})...",
             crate::rpc::format_tnzo(bond_wei)
         ));
-        crate::keystore::send_as_client(
+        crate::keystore::SigningAccount::send(
             rpc,
-            "client",
+            signer,
             [0u8; 32],
             serde_json::json!({
                 "PostComputeBond": {
@@ -620,9 +792,9 @@ async fn run_provider_flow(
         amount: ai_stake_wei,
         capacity: tenzro_types::token::StakeCapacity::None,
     };
-    crate::keystore::send_as_client(
+    crate::keystore::SigningAccount::send(
         rpc,
-        "client",
+        signer,
         [0u8; 32],
         serde_json::to_value(tenzro_types::TransactionType::Stake { op })?,
         COMPUTE_BOND_POST_GAS,
@@ -683,7 +855,7 @@ async fn run_provider_flow(
             budget_gb,
             rpc.url()
         ));
-        return Ok((pricing, None));
+        return Ok(pricing);
     };
     let model_id = model
         .get("id")
@@ -757,7 +929,7 @@ async fn run_provider_flow(
         }
     }
 
-    Ok((pricing, Some(model_id)))
+    Ok(pricing)
 }
 
 async fn get_balance_wei(rpc: &RpcClient, address: &str) -> u128 {
@@ -770,5 +942,76 @@ async fn get_balance_wei(rpc: &RpcClient, address: &str) -> u128 {
             u128::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or(0)
         }
         Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn only_a_loopback_endpoint_names_this_machine() {
+        for url in [
+            "http://127.0.0.1:8545",
+            "http://localhost:8545/",
+            "https://LOCALHOST",
+            "http://[::1]:8545",
+            "http://user@127.0.0.1:8545/rpc",
+        ] {
+            assert!(names_this_machine(url), "{url}");
+        }
+        for url in [
+            "https://rpc.tenzro.com",
+            "http://10.0.0.5:8545",
+            "http://localhost.example.com:8545",
+            "http://127.0.0.1.example.com",
+            "http://example.com/127.0.0.1",
+            "http://127.0.0.1@evil.example:8545",
+        ] {
+            assert!(!names_this_machine(url), "{url}");
+        }
+    }
+    use super::*;
+    use crate::keystore::AccountSigner;
+
+    fn join(args: &[&str]) -> JoinCmd {
+        let mut all = vec!["join"];
+        all.extend(args);
+        let mut cmd = JoinCmd::try_parse_from(all).expect("the join arguments parse");
+        if !args.contains(&"--tpm-key-holder") {
+            cmd.delegated = crate::keystore::DelegatedKey::default();
+        }
+        cmd
+    }
+
+    #[test]
+    fn a_provider_joins_from_the_client_account_unless_the_node_account_is_asked_for() {
+        assert!(join(&["--provider"]).node_signing().unwrap().is_none());
+        let node = join(&["--provider", "--node-account"])
+            .node_signing()
+            .unwrap()
+            .expect("the node account signs");
+        assert_eq!(node.signer().unwrap(), AccountSigner::Node(None));
+        assert!(
+            JoinCmd::try_parse_from(["join", "--node-account"]).is_err(),
+            "--node-account applies to --provider"
+        );
+    }
+
+    #[test]
+    fn a_machine_without_a_tpm_joins_as_a_provider_through_the_key_holder() {
+        let holder = ["--tpm-key-holder", "/run/holder.sock", "--tpm-label", "m1"];
+        let mut args = vec!["--provider", "--node-account"];
+        args.extend(holder);
+        let node = join(&args)
+            .node_signing()
+            .unwrap()
+            .expect("the node account signs");
+        assert_eq!(node.signer().unwrap(), AccountSigner::Node(None));
+        assert_eq!(node.delegated.tpm_label.as_deref(), Some("m1"));
+
+        let mut args = vec!["--provider"];
+        args.extend(holder);
+        let refused = join(&args).node_signing().unwrap_err().to_string();
+        assert!(refused.contains("--node-account"), "{refused}");
     }
 }

@@ -1,0 +1,51 @@
+[package]
+name = "tenzro-light"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Tenzro light client: checks checkpoint certificates, compact certificates, epoch handovers and state proofs from a trusted committee, with no storage and no network I/O"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-native-ops = { workspace = true }
+tenzro-finality = { workspace = true }
+tenzro-state-proof = { workspace = true }
+# The compact certificate path (feature `compact`).
+tenzro-cert-stark = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+parking_lot = { workspace = true }
+blake3 = { workspace = true }
+# A committee with software keys and a small committed state, for the tests
+# of crates built on this one. Never enabled by a release build.
+ml-dsa = { workspace = true, optional = true }
+p256 = { workspace = true, optional = true }
+
+# The elliptic-curve crates (through getrandom) and the core types (through
+# uuid) reach the system's random source, which on wasm32 must be the
+# browser's.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+uuid = { workspace = true, features = ["js"] }
+
+[features]
+default = ["compact"]
+# Compact certificates: one STARK over a quorum's ML-DSA-65 signatures.
+compact = ["dep:tenzro-cert-stark"]
+test-support = ["dep:ml-dsa", "dep:p256"]
+
+[dev-dependencies]
+ml-dsa = { workspace = true }
+p256 = { workspace = true }
+# The `follow` example reaches a node over HTTP.
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,10 +1,12 @@
 #[cfg(feature = "qlog")]
+use alloc::borrow::ToOwned;
+#[cfg(feature = "qlog")]
 use std::path::Path;
-use std::{
+use alloc::sync::Arc;
+use core::{
     fmt,
     net::SocketAddr,
     num::{NonZeroU8, NonZeroU32},
-    sync::Arc,
 };
 
 use crate::{
@@ -54,6 +56,8 @@ pub struct TransportConfig {
     pub(crate) datagram_send_buffer_size: usize,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
+    #[cfg(test)]
+    pub(crate) initial_key_phase_size: Option<u64>,
 
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
@@ -306,6 +310,8 @@ impl TransportConfig {
     /// The peer is forbidden to send single datagrams larger than this size. If the aggregate size
     /// of all datagrams that have been received from the peer but not consumed by the application
     /// exceeds this value, old datagrams are dropped until it is no longer exceeded.
+    ///
+    /// The amount of payload data buffered may be smaller than `value` due to overhead.
     pub fn datagram_receive_buffer_size(&mut self, value: Option<usize>) -> &mut Self {
         self.datagram_receive_buffer_size = value;
         self
@@ -317,6 +323,8 @@ impl TransportConfig {
     /// than the link, or even the underlying hardware, can transmit them. This limits the amount of
     /// memory that may be consumed in that case. When the send buffer is full and a new datagram is
     /// sent, older datagrams are dropped until sufficient space is available.
+    ///
+    /// The amount of payload data buffered may be smaller than `value` due to overhead.
     pub fn datagram_send_buffer_size(&mut self, value: usize) -> &mut Self {
         self.datagram_send_buffer_size = value;
         self
@@ -329,6 +337,23 @@ impl TransportConfig {
     #[cfg(test)]
     pub(crate) fn deterministic_packet_numbers(&mut self, enabled: bool) -> &mut Self {
         self.deterministic_packet_numbers = enabled;
+        self
+    }
+
+    /// Override the size of the first 1-RTT key phase
+    ///
+    /// A fresh connection picks a short key phase at random (10..1000 packets) so that peers
+    /// which mishandle key updates fail early. That makes the first autonomous key update land
+    /// wherever the seed likes, which is a liability in tests that merely happen to run long
+    /// enough: it arms a `KeyDiscard` timer ahead of the deadline they are waiting for. Set this
+    /// to a size the test will never reach to keep the connection on its initial keys; peer
+    /// initiated and forced updates are unaffected, and the AEAD confidentiality limit still
+    /// applies.
+    ///
+    /// Defaults to `None`, i.e. the random production behavior.
+    #[cfg(test)]
+    pub(crate) fn initial_key_phase_size(&mut self, packets: Option<u64>) -> &mut Self {
+        self.initial_key_phase_size = packets;
         self
     }
 
@@ -582,6 +607,8 @@ impl Default for TransportConfig {
             datagram_send_buffer_size: 1024 * 1024,
             #[cfg(test)]
             deterministic_packet_numbers: false,
+            #[cfg(test)]
+            initial_key_phase_size: None,
 
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
@@ -631,6 +658,8 @@ impl fmt::Debug for TransportConfig {
             datagram_send_buffer_size,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
+            #[cfg(test)]
+                initial_key_phase_size: _,
             congestion_controller_factory: _,
             enable_segmentation_offload,
             address_discovery_role,

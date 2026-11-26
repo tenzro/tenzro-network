@@ -71,26 +71,7 @@ pub fn authorize(state: &dyn VmState, op: &IdentityRevocationOp, now_ms: i64) ->
     if is_identity_revoked(state, did) {
         return Err(refuse(format!("identity {did} is already revoked")));
     }
-    let registered = state
-        .get_storage(&SYSTEM_ADDRESS, &identity_storage_key(did))
-        .is_some_and(|b| !b.is_empty());
-    let terms = read_agent_terms(state, did);
-    // A machine a root registered has no terms on chain; its DID is derived
-    // under that root, which is the one root that may revoke it.
-    let under_approver = terms.is_none() && is_delegated_under(did, &op.approver_did);
-    if !registered && terms.is_none() && !under_approver {
-        return Err(refuse(format!(
-            "identity {did} is neither registered nor delegated on this chain"
-        )));
-    }
-    let authorized = if op.approver_did == did {
-        RootKind::of(did).is_some()
-    } else if let Some(t) = terms.as_ref() {
-        t.terms.controller_did == op.approver_did
-    } else {
-        under_approver
-    };
-    if !authorized {
+    if !is_root_of(state, did, &op.approver_did)? {
         return Err(refuse(format!(
             "{} may not revoke {did}: a root revokes itself, a delegated agent is revoked by \
              the controller its terms name, and a delegated machine by the root its DID is \
@@ -107,6 +88,32 @@ pub fn authorize(state: &dyn VmState, op: &IdentityRevocationOp, now_ms: i64) ->
         now_ms.max(0) as u64,
     )
     .map_err(refuse)
+}
+
+/// Whether `approver_did` is the root of `did`: the identity itself when it
+/// is a root, the controller a delegated agent's terms name, or the root a
+/// delegated machine's DID is derived under. Refuses an identity the chain
+/// neither registered nor delegated.
+pub(super) fn is_root_of(state: &dyn VmState, did: &str, approver_did: &str) -> Result<bool> {
+    let registered = state
+        .get_storage(&SYSTEM_ADDRESS, &identity_storage_key(did))
+        .is_some_and(|b| !b.is_empty());
+    let terms = read_agent_terms(state, did);
+    // A machine a root registered has no terms on chain; its DID is derived
+    // under that root, which is the one root that may act for it.
+    let under_approver = terms.is_none() && is_delegated_under(did, approver_did);
+    if !registered && terms.is_none() && !under_approver {
+        return Err(refuse(format!(
+            "identity {did} is neither registered nor delegated on this chain"
+        )));
+    }
+    Ok(if approver_did == did {
+        RootKind::of(did).is_some()
+    } else if let Some(t) = terms.as_ref() {
+        t.terms.controller_did == approver_did
+    } else {
+        under_approver
+    })
 }
 
 /// Apply one revocation approved by the identity's root.
@@ -148,7 +155,7 @@ pub fn apply(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn revoke_one(
+pub(super) fn revoke_one(
     state: &mut dyn VmState,
     did: &str,
     reason: &str,
@@ -166,6 +173,7 @@ fn revoke_one(
     };
     let blob = serde_json::to_vec(&record)
         .map_err(|e| VmError::Internal(format!("cannot serialise the revocation record: {e}")))?;
+    super::agent_cap::note_retiring(state, did, changes)?;
     let key = identity_revocation_key(did);
     let previous = state.get_storage(&SYSTEM_ADDRESS, &key);
     state.set_storage(&SYSTEM_ADDRESS, &key, blob.clone());
@@ -175,6 +183,7 @@ fn revoke_one(
         previous,
         Some(blob.clone()),
     ));
+    super::identity_keys::record_event(state, did, b"IdentityRevoked", &blob, changes)?;
     logs.push(Log::new(
         SYSTEM_ADDRESS.to_vec(),
         vec![b"IdentityRevoked".to_vec()],
@@ -323,6 +332,30 @@ mod tests {
         );
         assert!(logs.iter().any(|l| l.topics.first().map(|t| t.as_slice())
             == Some(super::super::agent_audit::AGENT_REVOKED_TOPIC)));
+    }
+
+    /// A passkey root's revocation stops its agent at once: the agent acts
+    /// before it and is refused in the next block.
+    #[test]
+    fn a_passkey_roots_revocation_halts_its_agent_at_once() {
+        let mut a = Agent::new(TermsScope {
+            allowed_operations: vec!["transfer".into()],
+            max_daily_spend: Some("1000".into()),
+            ..Default::default()
+        });
+        a.act(&a.action(10), 0).unwrap();
+        let controller = read_agent_terms(&a.state, &a.did)
+            .unwrap()
+            .terms
+            .controller_did;
+        apply(
+            &mut a.state,
+            &approved_by(&a.did, &controller, &passkey()),
+            1,
+        )
+        .unwrap();
+        let halted = a.act(&a.action(10), 2).unwrap_err();
+        assert!(halted.contains("revoked"), "{halted}");
     }
 
     #[test]

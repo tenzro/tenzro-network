@@ -16,7 +16,8 @@ A Tenzro validator is a single `tenzro-node` binary running with
 disk, and exposing one network port to peers.
 
 A **fleet** is N validators (typically 4 or more, often 10+) running this
-binary, sharing a genesis file, and bootstrapping off one well-known peer.
+binary, sharing a genesis file, and each naming the other validators as its
+boot identities.
 
 ## Sizing & topology
 
@@ -124,8 +125,7 @@ set -euo pipefail
 
 IMAGE="<your-registry>/tenzro-node@sha256:<pinned-digest>"
 NODE_INDEX="<0..N-1>"
-BOOT_PEER_ID="<peer id of validator-0>"
-BOOT_PEER_IP="<public IP or DNS of validator-0>"
+BOOT_IDENTITIES="<every other validator: did:tenzro:machine:<id>@<relay url>, comma separated>"
 
 docker pull "$IMAGE"
 
@@ -144,7 +144,7 @@ exec docker run --rm \
     --external-rpc-addr "$SEED_URL" \
     --data-dir /var/lib/tenzro/data \
     --config /var/lib/tenzro/config.toml \
-    --boot-nodes "$BOOT_IDENTITY"
+    --boot-nodes "$BOOT_IDENTITIES"
 ```
 
 A founding validator is also an SDK seed: it bonds `rpc` in the genesis
@@ -153,10 +153,25 @@ reverse proxy in front of the loopback RPC listener (`--external-rpc-addr`
 refuses anything that is not public https). A validator that is not a seed
 runs `--roles validator` without `--external-rpc-addr`.
 
-`$BOOT_IDENTITY` is the bootstrap validator's machine identity with its relay,
-`did:tenzro:machine:<id>@<relay url>`. Validator-0 (the bootstrap) runs the
-same script with `--relay-listen <addr> --relay-url <url>` in place of
-`--boot-nodes`.
+`$BOOT_IDENTITIES` names every other validator of the fleet by its machine
+identity with its relay, `did:tenzro:machine:<id>@<relay url>`. On a new chain
+no identity is registered yet, so a validator started without the others on
+its list stays at round 0 with no peers; the genesis validator entries alone
+do not bring the fleet up.
+
+With the `[onboarding]` mode `enforce` (the shipped default) a validator is
+isolated: the connections it makes (its dials) go only to the machines on its
+boot list, the validators' machines and any peer named with
+`--state-sync-from`, and other nodes it learns of through
+discovery are never dialled. Inbound connections from other peers are still
+admitted when they pass the identity gate, so nodes can sync blocks and state
+from the validator. Gossip is the exception: the validator keeps gossip
+neighbours only among its boot list and the validators, whichever side dialled.
+
+Every validator's `--boot-nodes` list therefore names the other validators and
+the network's relay and RPC entry points, plus any other machine it must reach outside the validator
+set (a sentry, an RPC node of the same operator). A machine missing from the
+list is neither dialled nor kept as a gossip neighbour.
 
 ### systemd units
 
@@ -184,14 +199,42 @@ WantedBy=multi-user.target
 `graceful_exit()` handler — it needs ~30s to flush state and unstake leader
 roles before being killed.
 
+### A validator-only machine forbids builds
+
+A release build or a test run takes the processors and memory the node needs
+to keep up with consensus. On a machine that only validates, create the marker
+file:
+
+```bash
+sudo install -D /dev/null /etc/tenzro/no-builds
+```
+
+`scripts/supply-chain/check-build-host.sh` then refuses the release build and
+every test binary while the node service is active. Without the marker the
+same check prints one warning line and lets the build run.
+
 ## Keys and genesis
 
 A validator's consensus key is a composite ML-DSA-65 + P-256 key. The P-256
 leg is a key in the machine's TPM 2.0 or Secure Enclave; the ML-DSA-65 leg is
 derived from that hardware on demand, for each use, and wiped afterwards.
 Neither is ever generated in software, written to disk, placed in a secret
-store, or passed through an environment variable, and a machine without such
-hardware runs as a follower.
+store, or passed through an environment variable. A Linux or macOS machine
+without such hardware can hold the consensus key in another machine's TPM
+through a key holder (`tenzro-node tpm key-holder`, `--tpm-key-holder`), with
+the limits in
+[docs/NODE.md](../docs/NODE.md#raspberry-pi-and-other-edge-devices) (every
+signature is a round trip to the provider, a grant lasts at most the
+provider's `max_grant_hours`, and the ML-DSA-87 / P-384 scheme is not available
+this way); otherwise it runs as a follower.
+Such a machine cannot be a founding validator: `validator-entry` reads only
+the machine's own TPM or Secure Enclave. It joins after genesis with
+`tenzro validator register --tpm-key-holder`.
+
+A node that joins after genesis, validator or not, replays the chain from block
+0 with the same `genesis.toml` before it takes part
+([docs/operations/node-joining.md](../docs/operations/node-joining.md)); a
+validator never joins by snapshot.
 
 Each founding validator prints its genesis entry on its own machine:
 
@@ -228,6 +271,36 @@ Every validator must load the **same** `genesis.toml`. Mount it at the path
 your config or CLI expects, typically `/var/lib/tenzro/genesis.toml`. A node
 refuses to start on a genesis whose entries' proofs do not verify, or that
 names no validators.
+
+## After genesis
+
+A new chain has no model catalog, no identity for any account genesis funds,
+and no operator on a node that does not name one. Do these before the network
+is called launched:
+
+1. **Operators.** Each validator's node configuration names its operator,
+   `operator_did = "did:tenzro:..."` at the top level. Unset, the machine's
+   own DID administers the node and the node reports no operator.
+2. **Identities for funded accounts.** An account with no registered identity
+   cannot send: its first transaction is refused with "Sender ... is not
+   admitted: no registered identity". On the machine that holds each funded
+   account's key (the founders operations account, the catalog publisher and
+   every other allocation account), run
+   `tenzro identity register-account --key-namespace <namespace>`.
+3. **Catalog publisher.** From the publisher's machine, bond the catalog role
+   (`stake.catalog_tnzo`, 1,000 TNZO at genesis) and publish the seed
+   entries:
+
+   ```bash
+   tenzro stake bond --role catalog --amount 1000 --key-namespace <publisher>
+   tenzro catalog publish crates/tenzro-catalog/seed --key-label client/<publisher>
+   ```
+
+   Until a bonded publisher's entries arrive, every node's catalog is empty.
+4. **Check.** `scripts/launch/after_start.py --hosts <hosts file>
+   --funded-account <address> ...`, one `--funded-account` per account
+   genesis funds. It fails on an empty catalog, a node that names no
+   operator, and a funded account with no registered identity.
 
 ## Rolling out a new image
 
@@ -287,22 +360,48 @@ local ports:
 A Caddyfile for this is ~10 lines per subdomain (reverse_proxy + automatic
 Let's Encrypt). The Caddy container runs alongside the validator container.
 
-## Optional: admin gate on the RPC node
+## Access to the RPC node
 
 Who may use the node at all is its access
 policy (`access.toml`, see [`docs/ACCESS.md`](../docs/ACCESS.md)); set it with
-`tenzro-node access`. It does not gate the marketplace registry: publishing an agent, skill, workflow, or MCP server is
-permissionless, priced by the provider in TNZO or offered free, and needs no
-operator approval.
+`tenzro-node access`. Admin-class methods admit only the operator DID and the
+policy's `admins`, who sign in with a passkey or hardware key for a DPoP-bound
+access token. There is no admin token, API key or shared secret to provision
+on any node.
 
-**Validators 1..N-1 must NOT carry an admin token** — they should
-return `-32001` on admin RPCs (admin-token unset), which is the intended
-fail-closed posture for non-RPC nodes.
+## Engine-error pool guard
 
-The recommended secret-fetch pattern is a boot-time oneshot systemd unit
-that writes a root-only `EnvironmentFile` consumed by `tenzro-node.service`.
-Operators provision this through their own infrastructure tooling; the unit
-only needs read access to wherever the operator stores its secrets.
+A transaction that makes the EVM engine fail after it has run is charged as
+one that never ran. Until the chain rule that prices it is live
+(`feature.evm_conformance.activation_epoch`), each node keeps such
+transactions out of its own pool from what executed blocks show it. This is
+the node's own admission, for transactions from peers and from its RPC
+alike; it changes nothing about which blocks are valid. The values are in
+the node's configuration file and are read at start:
+
+```toml
+[evm_pool_guard]
+enabled = true            # false turns the guard off
+hold_secs = 3600          # a sender is held this long after its transaction ended in an engine error
+watch_secs = 600          # engine errors are counted over this window
+watch_faults = 3          # this many in the window start the gas limit ceiling
+watch_gas_limit = 1000000 # no EVM transaction above this gas limit is admitted while the window runs
+held_senders_max = 10000  # most senders held at once
+```
+
+A value of zero for any of the counts or durations, or a ceiling below the
+gas of a plain transfer, is refused at start: the guard is turned off only
+with `enabled = false`. Each hold and each start of the ceiling is logged
+at `warn` with the transaction.
+
+Under attack, tighten `watch_faults` and `watch_gas_limit`. Know the two
+ways the guard can be used against honest users before you do: `watch_faults`
+cheap engine-error transactions every `watch_secs` keep every EVM
+transaction above `watch_gas_limit`, large deployments among them, out of
+your node; and a contract that calls the failing address gets each of its
+callers held for `hold_secs`. Holds are kept in memory only and run from the
+time of the block that showed the error, so a restart forgets them and
+blocks imported from the past set none that is still in force.
 
 ## Next steps
 

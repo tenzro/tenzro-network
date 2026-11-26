@@ -138,6 +138,14 @@ export class ZkClient {
     });
   }
 
+  /**
+   * Hand a proof envelope (bincode `tenzro_zk::Proof`, hex) to every validator
+   * of the current committee (`tenzro_sendZkProof`).
+   */
+  async sendProof(proof: string): Promise<unknown> {
+    return this.rpc.call("tenzro_sendZkProof", { proof });
+  }
+
   /** The circuits the node proves and verifies, with their proof systems. */
   async listCircuits(): Promise<CircuitInfo[]> {
     const out = await this.rpc.call<{ circuits: CircuitInfo[]; total: number }>("tenzro_listCircuits", {});

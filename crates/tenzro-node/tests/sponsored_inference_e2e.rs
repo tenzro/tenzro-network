@@ -170,6 +170,12 @@ const NAME: &str = "a_caller_with_no_tnzo_completes_a_paid_inference_through_a_s
 
 fn main() {
     tenzro_model::parse_jail::enter_if_requested();
+    // libtest's `--list`, so cargo nextest can list this binary: the test is
+    // reported as ignored, in both the full and the `--ignored` listing.
+    if std::env::args().any(|a| a == "--list") {
+        println!("{NAME}: test");
+        return;
+    }
     if !std::env::args().any(|a| a == "--ignored" || a == "--include-ignored") {
         println!(
             "test {NAME} ... ignored, needs this machine's hardware consensus key (TPM 2.0 or \
@@ -188,9 +194,12 @@ fn main() {
 async fn a_caller_with_no_tnzo_completes_a_paid_inference_through_a_sponsoring_app() {
     use tenzro_vm::traits::VmState as _;
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    tenzro_catalog::install_test_seed();
+    let catalog = tenzro_model::CatalogCell::new(tenzro_model::Catalog::test_seed());
     let model_id = std::env::var("TENZRO_LIVE_MODEL").unwrap_or_else(|_| "qwen3-0.6b".into());
-    let entry = tenzro_model::catalog::get_model_by_id(&model_id).expect("catalog entry");
+    let entry = catalog
+        .current()
+        .get_model_by_id(&model_id)
+        .expect("catalog entry");
     let dir = models_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let (tx, _rx) = tokio::sync::watch::channel(DownloadProgress {
@@ -200,7 +209,7 @@ async fn a_caller_with_no_tnzo_completes_a_paid_inference_through_a_sponsoring_a
         downloaded_bytes: 0,
         total_bytes: 0,
     });
-    let downloader = HfDownloader::new(dir.clone());
+    let downloader = HfDownloader::new(dir.clone(), catalog);
     let path = if downloader.is_downloaded(&model_id) {
         downloader.model_path(&model_id)
     } else {

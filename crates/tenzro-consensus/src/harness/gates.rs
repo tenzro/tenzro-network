@@ -89,7 +89,7 @@ fn byzantine(n: usize, behaviour: Behaviour) -> Vec<Behaviour> {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_fault_free() {
     let sc = scenario();
     let r = run(&sc, nodes(sc.n, &params()));
@@ -97,7 +97,7 @@ fn gate_tdc_fault_free() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_sailfish_baseline() {
     let sc = scenario();
     let r = run(
@@ -108,7 +108,7 @@ fn gate_sailfish_baseline() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_mysticeti_baseline() {
     let sc = scenario();
     let r = run(
@@ -123,7 +123,7 @@ fn gate_mysticeti_baseline() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_crashed_third() {
     let mut sc = scenario();
     let f = (sc.n - 1) / 3;
@@ -133,7 +133,7 @@ fn gate_tdc_crashed_third() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_partition() {
     let mut sc = scenario();
     let secs = sc.duration_ms / 1_000;
@@ -162,7 +162,7 @@ fn gate_tdc_partition() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_equivocation() {
     let sc = scenario();
     let mut p = params();
@@ -172,7 +172,7 @@ fn gate_tdc_equivocation() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_withholding() {
     let sc = scenario();
     let mut p = params();
@@ -182,7 +182,7 @@ fn gate_tdc_withholding() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_byzantine_leaders() {
     let sc = scenario();
     let mut p = params();
@@ -192,7 +192,7 @@ fn gate_tdc_byzantine_leaders() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_whole_committee_restart() {
     let sc = scenario();
     let at_s = sc.duration_ms / 2_000;
@@ -216,7 +216,7 @@ fn gate_tdc_whole_committee_restart() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
 fn gate_tdc_double_signers() {
     let sc = scenario();
     let mut p = params();

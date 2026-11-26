@@ -21,7 +21,7 @@ use serde_json::Value;
 use tenzro_tee::key_release::{
     ContentKeyHolder, ContentKeyRoot, HardwareContentKeys, ReleaseContext, verify_release,
 };
-use tenzro_types::key_release::{KeyReleaseOp, ReleaseRequest};
+use tenzro_types::key_release::{KeyReleaseOp, ReleaseEvent, ReleaseRequest};
 use tenzro_vm::native::key_release::{
     GAS_KEY_RELEASE, authorize, gpu_governance, read_event_by_binding, read_model,
 };
@@ -185,36 +185,120 @@ pub(crate) async fn handle_get_key_release(
         return Ok(out);
     };
     let binding = hex::encode(request.binding());
-    let Some(event) = read_event_by_binding(&state, &model_id, &binding) else {
-        out["recorded"] = Value::Bool(false);
-        return Ok(out);
-    };
-    if event.release_key != hex::encode(request.release_key.fingerprint()) {
-        return Err(refused("the recorded release names another release key"));
-    }
-    out["recorded"] = Value::Bool(true);
-    out["event"] = serde_json::to_value(&event).unwrap_or(Value::Null);
     // Sealing is this provider's alone: only the policy's owner holds the
     // wrapped key, and only its hardware opens it.
     let owns = node
         .ledger_submitter()
         .is_some_and(|s| hex::encode(s.address().as_bytes()) == model.owner);
-    if owns {
-        let holder = machine_content_keys(node)?;
-        let key = holder
-            .content_key(&model_id)
-            .map_err(|e| refused(format!("opening the content key: {e}")))?;
-        let sealed =
-            tenzro_crypto::hybrid_seal::seal(&request.release_key, &request.binding(), &key[..])
-                .map_err(|e| refused(format!("sealing the content key: {e}")))?;
-        out["sealed"] = serde_json::to_value(&sealed).unwrap_or(Value::Null);
-    }
+    answer_request(
+        &mut out,
+        read_event_by_binding(&state, &model_id, &binding),
+        &hex::encode(request.release_key.fingerprint()),
+        owns,
+        || {
+            let holder = machine_content_keys(node)?;
+            let key = holder
+                .content_key(&model_id)
+                .map_err(|e| refused(format!("opening the content key: {e}")))?;
+            let sealed = tenzro_crypto::hybrid_seal::seal(
+                &request.release_key,
+                &request.binding(),
+                &key[..],
+            )
+            .map_err(|e| refused(format!("sealing the content key: {e}")))?;
+            Ok(serde_json::to_value(&sealed).unwrap_or(Value::Null))
+        },
+    )?;
     Ok(out)
+}
+
+/// Answers an environment's request in `out`: whether the chain recorded
+/// its release (`recorded`, the release the chain holds under the request's
+/// binding), and the content key `seal` seals to it. The key is sealed only
+/// once the release is recorded for the request's own `release_key` and
+/// this node owns the policy; the chain records a release only for an
+/// environment whose attestation satisfied the policy.
+fn answer_request(
+    out: &mut Value,
+    recorded: Option<ReleaseEvent>,
+    release_key: &str,
+    owns: bool,
+    seal: impl FnOnce() -> Result<Value, JsonRpcError>,
+) -> Result<(), JsonRpcError> {
+    let Some(event) = recorded else {
+        out["recorded"] = Value::Bool(false);
+        return Ok(());
+    };
+    if event.release_key != release_key {
+        return Err(refused("the recorded release names another release key"));
+    }
+    out["recorded"] = Value::Bool(true);
+    out["event"] = serde_json::to_value(&event).unwrap_or(Value::Null);
+    if owns {
+        out["sealed"] = seal()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(release_key: &str) -> ReleaseEvent {
+        ReleaseEvent {
+            model_id: "m".into(),
+            index: 0,
+            operator_did: "did:tenzro:machine:op".into(),
+            terms_digest: "00".repeat(32),
+            release_key: release_key.into(),
+            binding: "11".repeat(32),
+            evidence: "22".repeat(32),
+            pcr_digest: "33".repeat(32),
+            cvm_measurement: None,
+            gpu_device: None,
+            at_ms: 1,
+        }
+    }
+
+    fn sealed() -> Result<Value, JsonRpcError> {
+        Ok(serde_json::json!("sealed key"))
+    }
+
+    #[test]
+    fn no_key_is_sealed_before_the_chain_records_the_release() {
+        let mut out = serde_json::json!({});
+        answer_request(&mut out, None, "aa", true, || {
+            panic!("sealed before the release was recorded")
+        })
+        .unwrap();
+        assert_eq!(out["recorded"], false);
+        assert!(out.get("sealed").is_none());
+    }
+
+    #[test]
+    fn a_release_recorded_for_another_key_is_refused() {
+        let mut out = serde_json::json!({});
+        assert!(
+            answer_request(&mut out, Some(event("bb")), "aa", true, || {
+                panic!("sealed for another release key")
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_the_policy_owner_seals_a_recorded_release() {
+        let mut out = serde_json::json!({});
+        answer_request(&mut out, Some(event("aa")), "aa", false, || {
+            panic!("sealed by a node that does not own the policy")
+        })
+        .unwrap();
+        assert_eq!(out["recorded"], true);
+        assert!(out.get("sealed").is_none());
+        let mut out = serde_json::json!({});
+        answer_request(&mut out, Some(event("aa")), "aa", true, sealed).unwrap();
+        assert_eq!(out["sealed"], "sealed key");
+    }
 
     #[test]
     fn a_request_is_read_from_its_params() {

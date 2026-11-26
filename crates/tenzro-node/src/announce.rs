@@ -71,6 +71,44 @@ const MIN_TTL_SECS: u64 = 180;
 /// past the point they are useful.
 const MAX_TTL_SECS: u64 = 86_400;
 
+/// Lets one event per key through per interval, so a source that sends many
+/// bad messages is logged once a minute rather than once per message.
+#[derive(Debug)]
+pub struct KeyedLogGate {
+    interval: Duration,
+    last: std::collections::HashMap<String, std::time::Instant>,
+}
+
+/// Most keys the gate remembers; past it, the keys whose interval has passed
+/// are forgotten first.
+const LOG_GATE_KEYS: usize = 4096;
+
+impl KeyedLogGate {
+    /// A gate passing one event per key every `interval`.
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Whether the event for `key` at `now` is the one to log.
+    pub fn admit(&mut self, key: &str, now: std::time::Instant) -> bool {
+        if let Some(at) = self.last.get(key)
+            && now.saturating_duration_since(*at) < self.interval
+        {
+            return false;
+        }
+        if self.last.len() >= LOG_GATE_KEYS {
+            let interval = self.interval;
+            self.last
+                .retain(|_, at| now.saturating_duration_since(*at) < interval);
+        }
+        self.last.insert(key.to_string(), now);
+        true
+    }
+}
+
 /// What to announce this tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -357,6 +395,27 @@ impl Default for SigningLanes {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_source_is_logged_once_per_interval() {
+        let mut gate = KeyedLogGate::new(Duration::from_secs(60));
+        let start = std::time::Instant::now();
+        assert!(gate.admit("a", start));
+        assert!(!gate.admit("a", start + Duration::from_secs(59)));
+        assert!(gate.admit("b", start + Duration::from_secs(1)));
+        assert!(gate.admit("a", start + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn a_full_gate_forgets_the_keys_whose_interval_has_passed() {
+        let mut gate = KeyedLogGate::new(Duration::from_secs(60));
+        let start = std::time::Instant::now();
+        for i in 0..LOG_GATE_KEYS {
+            assert!(gate.admit(&i.to_string(), start));
+        }
+        assert!(gate.admit("fresh", start + Duration::from_secs(61)));
+        assert_eq!(gate.last.len(), 1);
+    }
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lane_job_signs_through_the_runtime_signer_on_the_lane_thread() {
         use tenzro_crypto::batch::RecordSigner;

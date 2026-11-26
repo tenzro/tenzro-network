@@ -185,7 +185,7 @@ the SHA-256 of the executed proposal record followed by the enacting height
   upgrade its readiness signals and scheduled activation), each with a state
   proof under the latest certified checkpoint, and that checkpoint's proof
   from genesis. `tenzro governance receipt <id> --verify --chain-id ...
-  --genesis-hash ... --genesis-committee-root ...` checks it offline with the
+  --genesis-hash ... --genesis ...` checks it offline with the
   evidence pack's verifier: every record proves under the certified root,
   and the decision is of exactly the proven proposal record. MCP
   `governance_get` kind `receipt`; SDK `get_governance_receipt` /
@@ -294,7 +294,8 @@ token (native, EVM, SVM) applies the same check.
 ## EVM: ERC-7943 and the ERC-20 facade
 
 The token factory precompile (`0x1002`) carries the ERC-7943 (uRWA)
-interface keyed by token id: `canTransact(bytes32,address)`,
+interface keyed by token id: `canSend(bytes32,address)`,
+`canReceive(bytes32,address)`,
 `canTransfer(bytes32,address,address,uint256)`,
 `getFrozenTokens(bytes32,address)`, `setFrozenTokens(bytes32,address,uint256)`,
 `forcedTransfer(bytes32,address,address,uint256)`, plus

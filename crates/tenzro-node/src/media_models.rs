@@ -24,10 +24,14 @@ pub struct MediaModels {
 }
 
 impl MediaModels {
-    /// No models loaded yet, loading through the node's `host`.
-    pub fn with_host(host: Arc<tenzro_model::ModelHost>) -> Self {
+    /// No models loaded yet, loading through the node's `host` and reading
+    /// its `catalog`.
+    pub fn with_host(
+        host: Arc<tenzro_model::ModelHost>,
+        catalog: tenzro_model::CatalogCell,
+    ) -> Self {
         Self {
-            runtime: Arc::new(MediaRuntime::with_host(host)),
+            runtime: Arc::new(MediaRuntime::with_host(host, catalog)),
         }
     }
 
@@ -102,8 +106,12 @@ pub(crate) struct CheckpointSource {
 /// entry it requires follow, one source per repository of that entry,
 /// fetched into the required entry's own directory so both models read one
 /// copy.
-pub(crate) fn checkpoint_sources(model_id: &str, primary: &str) -> Vec<CheckpointSource> {
-    let Some(e) = tenzro_model::catalog::entry(model_id) else {
+pub(crate) fn checkpoint_sources(
+    catalog: &tenzro_model::Catalog,
+    model_id: &str,
+    primary: &str,
+) -> Vec<CheckpointSource> {
+    let Some(e) = catalog.entry(model_id) else {
         return vec![CheckpointSource {
             repo: primary.to_string(),
             files: Vec::new(),
@@ -126,7 +134,7 @@ pub(crate) fn checkpoint_sources(model_id: &str, primary: &str) -> Vec<Checkpoin
         // An entry made only of another entry's parts pins nothing of its own.
         .filter(|s| !s.files.is_empty())
         .collect();
-    for dep in required_entries(&e) {
+    for dep in required_entries(catalog, e) {
         let files = e.required_components(&dep);
         let mut repos: Vec<&str> = files.iter().map(|c| c.repo.as_str()).collect();
         repos.dedup();
@@ -145,11 +153,12 @@ pub(crate) fn checkpoint_sources(model_id: &str, primary: &str) -> Vec<Checkpoin
 
 /// The catalog entries `e` requires, in the order it lists them.
 fn required_entries(
+    catalog: &tenzro_model::Catalog,
     e: &tenzro_model::catalog::CatalogEntry,
 ) -> Vec<tenzro_model::catalog::CatalogEntry> {
     e.requires
         .iter()
-        .filter_map(|d| tenzro_model::catalog::entry(&d.entry))
+        .filter_map(|d| catalog.entry(&d.entry).cloned())
         .collect()
 }
 
@@ -157,9 +166,10 @@ fn required_entries(
 /// than its fetched sources: its pipeline reads one directory, and the
 /// entry's files come from entries it requires or are placed apart from
 /// their repository paths.
-fn needs_view(model_id: &str, pipeline_class: &str) -> bool {
+fn needs_view(catalog: &tenzro_model::Catalog, model_id: &str, pipeline_class: &str) -> bool {
     tenzro_model::media_runtime::source_directories(pipeline_class) == 1
-        && tenzro_model::catalog::entry(model_id)
+        && catalog
+            .entry(model_id)
             .is_some_and(|e| !e.requires.is_empty() || e.components.iter().any(|c| c.at.is_some()))
 }
 
@@ -276,11 +286,16 @@ fn source_dir(model_id: &str, repo: &str) -> String {
 /// Bytes of weights the catalog entry for `model_id` pins, across every
 /// repository it fetches: what its load reserves in the node's memory ledger.
 /// Falls back to the entry's declared size.
-pub(crate) fn checkpoint_bytes(model_id: &str, declared: u64) -> u64 {
-    let pinned: u64 = tenzro_model::catalog::entry(model_id)
+pub(crate) fn checkpoint_bytes(
+    catalog: &tenzro_model::Catalog,
+    model_id: &str,
+    declared: u64,
+) -> u64 {
+    let pinned: u64 = catalog
+        .entry(model_id)
         .map(|e| {
             let own: u64 = e.components.iter().map(|c| c.size).sum();
-            let required: u64 = required_entries(&e)
+            let required: u64 = required_entries(catalog, e)
                 .iter()
                 .flat_map(|d| e.required_components(d))
                 .map(|c| c.size)
@@ -297,13 +312,16 @@ pub(crate) async fn load(
     model_id: &str,
     precision: MediaPrecision,
 ) -> Result<MediaModelInfo, JsonRpcError> {
-    let entry = tenzro_model::catalog::runnable_media_gen_model(model_id)
+    let catalog = node.catalog();
+    let entry = catalog
+        .runnable_media_gen_model(model_id)
         .map_err(|m| rpc_err(-32010, m))?;
     node.check_model_license(model_id)
         .map_err(|m| rpc_err(-32010, m))?;
     // The weights of every entry it requires are loaded too, under their own licences.
-    for dep in tenzro_model::catalog::entry(model_id)
-        .map(|e| e.requires)
+    for dep in catalog
+        .entry(model_id)
+        .map(|e| e.requires.clone())
         .unwrap_or_default()
     {
         node.check_model_license(&dep.entry)
@@ -311,7 +329,7 @@ pub(crate) async fn load(
     }
     let mut dirs = Vec::new();
     let mut fetched = HashMap::new();
-    for source in checkpoint_sources(model_id, &entry.hf_repo) {
+    for source in checkpoint_sources(&catalog, model_id, &entry.hf_repo) {
         let total = if source.bytes > 0 {
             source.bytes
         } else {
@@ -331,22 +349,24 @@ pub(crate) async fn load(
     }
     // A pipeline that reads one directory gets the entry's files assembled
     // into one, hash-checked.
-    if needs_view(model_id, &entry.pipeline_class) {
+    if needs_view(&catalog, model_id, &entry.pipeline_class) {
         let models_dir = node.config().effective_models_dir();
-        let e = tenzro_model::catalog::entry(model_id)
+        let e = catalog
+            .entry(model_id)
+            .cloned()
             .ok_or_else(|| rpc_err(-32010, format!("{model_id} is not in the catalog")))?;
-        let view = tokio::task::spawn_blocking(move || {
-            assemble_view(&models_dir, &e, &required_entries(&e), &fetched)
-        })
-        .await
-        .map_err(|e| rpc_err(-32603, format!("assemble task: {e}")))?
-        .map_err(|m| rpc_err(-32010, m))?;
+        let deps = required_entries(&catalog, &e);
+        let view =
+            tokio::task::spawn_blocking(move || assemble_view(&models_dir, &e, &deps, &fetched))
+                .await
+                .map_err(|e| rpc_err(-32603, format!("assemble task: {e}")))?
+                .map_err(|m| rpc_err(-32010, m))?;
         dirs = vec![view];
     }
 
     let runtime = node.media_models.runtime().clone();
     let id = model_id.to_string();
-    let bytes = checkpoint_bytes(model_id, entry.size_bytes);
+    let bytes = checkpoint_bytes(&catalog, model_id, entry.size_bytes);
     let pipeline_class = entry.pipeline_class.clone();
     let precision = if entry.load_int8 {
         MediaPrecision::Q8_0
@@ -406,8 +426,8 @@ mod tests {
 
     #[test]
     fn a_checkpoint_from_several_repositories_fetches_each_into_its_own_directory() {
-        tenzro_catalog::install_test_seed();
-        let one = checkpoint_sources("z-image-turbo", "Tongyi-MAI/Z-Image-Turbo");
+        let catalog = tenzro_model::Catalog::test_seed();
+        let one = checkpoint_sources(&catalog, "z-image-turbo", "Tongyi-MAI/Z-Image-Turbo");
         assert_eq!(one.len(), 1);
         assert_eq!(
             one[0].dir_name,
@@ -415,7 +435,7 @@ mod tests {
         );
         assert!(one[0].files.contains(&"model_index.json".to_string()));
 
-        let ltx = checkpoint_sources("ltx-2.3-22b-dev", "Lightricks/LTX-2.3");
+        let ltx = checkpoint_sources(&catalog, "ltx-2.3-22b-dev", "Lightricks/LTX-2.3");
         let repos: Vec<_> = ltx.iter().map(|s| s.repo.as_str()).collect();
         assert_eq!(repos, ["Lightricks/LTX-2.3", "Lightricks/LTX-2"]);
         assert_eq!(ltx[0].files, ["ltx-2.3-22b-dev.safetensors"]);
@@ -433,11 +453,11 @@ mod tests {
         assert_ne!(ltx[0].dir_name, ltx[1].dir_name);
         assert!(ltx.iter().all(|s| s.bytes > 0));
         let pinned: u64 = ltx.iter().map(|s| s.bytes).sum();
-        assert_eq!(pinned, checkpoint_bytes("ltx-2.3-22b-dev", 0));
+        assert_eq!(pinned, checkpoint_bytes(&catalog, "ltx-2.3-22b-dev", 0));
 
         // The quantised distilled build: split checkpoint, upsampler and
         // prompt encoder each come from their own repository.
-        let q5 = checkpoint_sources("ltx-2.3-22b-distilled-gguf", "Lightricks/LTX-2.3");
+        let q5 = checkpoint_sources(&catalog, "ltx-2.3-22b-distilled-gguf", "Lightricks/LTX-2.3");
         let repos: Vec<_> = q5.iter().map(|s| s.repo.as_str()).collect();
         assert_eq!(
             repos,
@@ -456,23 +476,27 @@ mod tests {
         assert_eq!(q5[1].files.len(), 4);
         assert_eq!(
             q5.iter().map(|s| s.bytes).sum::<u64>(),
-            checkpoint_bytes("ltx-2.3-22b-distilled-gguf", 0)
+            checkpoint_bytes(&catalog, "ltx-2.3-22b-distilled-gguf", 0)
         );
     }
 
     #[test]
     fn a_single_directory_pipeline_loads_a_hash_checked_view_of_its_sources() {
         use sha2::{Digest, Sha256};
-        tenzro_catalog::install_test_seed();
-        let mut e = tenzro_model::catalog::entry("minimax-h3-fl2va-gguf").expect("catalogued");
-        let mut deps = required_entries(&e);
+        let catalog = tenzro_model::Catalog::test_seed();
+        let mut e = catalog
+            .entry("minimax-h3-fl2va-gguf")
+            .cloned()
+            .expect("catalogued");
+        let mut deps = required_entries(&catalog, &e);
         assert!(needs_view(
+            &catalog,
             "minimax-h3-fl2va-gguf",
             "MiniMaxH3ModularPipeline"
         ));
-        assert!(!needs_view("z-image-turbo", "ZImagePipeline"));
+        assert!(!needs_view(&catalog, "z-image-turbo", "ZImagePipeline"));
         assert!(
-            !needs_view("ltx-2.3-22b-distilled-gguf", "LTX2Pipeline"),
+            !needs_view(&catalog, "ltx-2.3-22b-distilled-gguf", "LTX2Pipeline"),
             "a two-directory pipeline reads its sources"
         );
 

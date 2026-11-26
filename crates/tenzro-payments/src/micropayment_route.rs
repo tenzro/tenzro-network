@@ -158,7 +158,7 @@ pub fn route(
 /// Convert TNZO wei to micro-USD at `tnzo_micro_usd` per whole TNZO.
 ///
 /// Uses quotient/remainder decomposition so a large balance cannot overflow
-/// the intermediate multiply — the same discipline the revenue split uses.
+/// the intermediate multiply — the same discipline the settlement code uses.
 pub fn tnzo_wei_to_micro_usd(amount_wei: u128, tnzo_micro_usd: u64) -> u64 {
     const WEI_PER_TNZO: u128 = 1_000_000_000_000_000_000;
     let price = tnzo_micro_usd as u128;

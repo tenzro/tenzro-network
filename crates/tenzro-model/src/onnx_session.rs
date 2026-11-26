@@ -103,10 +103,14 @@ pub(crate) fn declare() -> Result<()> {
                     threads: s.threads,
                     concurrency: s.concurrency,
                     queue_depth: s.queue_depth,
+                    npu: s.npu,
                 },
+                // Only the GPU vendors this node detects; every other
+                // accelerator the engine can plan for is left undetected.
                 praecise_onnx::session::Gpus {
                     nvidia: gpus.contains(&tenzro_types::GpuVendor::Nvidia),
                     amd: gpus.contains(&tenzro_types::GpuVendor::Amd),
+                    ..Default::default()
                 },
             );
             praecise_onnx::session::set_admission(admit);
@@ -265,24 +269,14 @@ mod tests {
             ..cpu_build
         };
         let cause = plan_providers(&no_provider).unwrap_err();
-        assert!(
-            cause.contains("neither the MIGraphX nor the ROCm"),
-            "{cause}"
-        );
+        assert!(cause.contains("no MIGraphX execution provider"), "{cause}");
+        assert!(cause.contains("removed its ROCm provider"), "{cause}");
 
-        let rocm = ProviderFacts {
-            rocm_provider: true,
+        let migraphx = ProviderFacts {
+            migraphx_provider: true,
             ..no_provider
         };
-        assert_eq!(plan_providers(&rocm), Ok(vec![Accelerator::Rocm]));
-        let both = ProviderFacts {
-            migraphx_provider: true,
-            ..rocm
-        };
-        assert_eq!(
-            plan_providers(&both),
-            Ok(vec![Accelerator::MiGraphX, Accelerator::Rocm])
-        );
+        assert_eq!(plan_providers(&migraphx), Ok(vec![Accelerator::MiGraphX]));
     }
 
     #[test]
@@ -326,6 +320,7 @@ mod tests {
             threads: Some(3),
             concurrency: Some(2),
             queue_depth: Some(5),
+            npu: Some(true),
         };
         let s = OnnxSettings::resolve(&config, 56);
         assert_eq!(
@@ -333,9 +328,11 @@ mod tests {
             OnnxSettings {
                 threads: 3,
                 concurrency: 2,
-                queue_depth: 5
+                queue_depth: 5,
+                npu: true,
             }
         );
+        assert!(!OnnxSettings::resolve(&OnnxConfig::default(), 56).npu);
     }
 
     #[test]

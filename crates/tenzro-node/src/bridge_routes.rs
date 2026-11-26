@@ -114,6 +114,13 @@ impl RouteState for NodeRouteState {
         tenzro_vm::native::security::outflow_limits_in_force(&self.state)
     }
 
+    fn finality_policy_live(&self) -> bool {
+        tenzro_vm::feature_gate::is_live_now(
+            &self.state,
+            tenzro_vm::native::bridge::CCIP_FINALITY_POLICY_KEY,
+        )
+    }
+
     fn get(&self, key: &str) -> Option<Vec<u8>> {
         self.state
             .get_storage(&GOVERNED_STATE_ADDRESS, key.as_bytes())

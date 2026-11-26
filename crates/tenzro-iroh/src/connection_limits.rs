@@ -18,6 +18,10 @@
 //!   [`REFUSED_CONNECTIONS`]. A connection already established is never
 //!   closed to make room.
 //!
+//! The router is also the one place every accepted connection passes, so it
+//! is where the time a connection takes to reach a direct path is measured
+//! ([`crate::path_metrics::PathTimings`]).
+//!
 //! The per-peer bound keys on the peer's endpoint id. The overall bounds are
 //! what hold when a flood arrives under many ids.
 
@@ -27,7 +31,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use iroh::EndpointId;
-use iroh::endpoint::{Connection, IdleTimeout, Incoming, QuicTransportConfig, VarInt};
+use iroh::endpoint::{
+    Connection, IdleTimeout, Incoming, QuicTransportConfig, QuicTransportConfigBuilder, VarInt,
+};
 use iroh::protocol::{
     AcceptError, DynProtocolHandler, IncomingFilterOutcome, ProtocolHandler, Router, RouterBuilder,
 };
@@ -36,6 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::consensus::ALPN_CONSENSUS;
 use crate::identity_gate::{Admit, IdentityGate};
+use crate::path_metrics::PathTimings;
 
 /// Application close code for a connection closed because its pool or its
 /// peer is at its bound.
@@ -63,6 +70,16 @@ pub struct ConnectionLimits {
     /// Bytes a peer may have in flight to this endpoint on one connection,
     /// across all its streams.
     pub receive_window_bytes: u32,
+    /// Bytes of datagrams a peer-relay connection holds until they are
+    /// forwarded, held to 64 KiB..16 MiB. No other connection accepts
+    /// datagrams, so no other connection holds any.
+    pub peer_relay_datagram_buffer_bytes: usize,
+    /// Bytes of datagrams all the endpoint's connections may hold between
+    /// them: each connection's buffer is at most this divided by the number of
+    /// connections the endpoint admits (both pools), so that a forwarder with
+    /// every place taken stays within it. The floor of 64 KiB a connection
+    /// keeps can lift the total above a very small budget.
+    pub peer_relay_datagram_budget_bytes: usize,
 }
 
 impl Default for ConnectionLimits {
@@ -76,9 +93,19 @@ impl Default for ConnectionLimits {
             max_concurrent_bidi_streams: 100,
             max_concurrent_uni_streams: 100,
             receive_window_bytes: 32 * 1024 * 1024,
+            peer_relay_datagram_buffer_bytes: 1_250_000,
+            peer_relay_datagram_budget_bytes: 192 * 1024 * 1024,
         }
     }
 }
+
+/// Bounds of [`ConnectionLimits::peer_relay_datagram_buffer_bytes`].
+const PEER_RELAY_DATAGRAM_BUFFER: std::ops::RangeInclusive<usize> = 64 * 1024..=16 * 1024 * 1024;
+
+/// Room every forwarder connection starts with: a QUIC packet of the inner
+/// connection (at least 1,200 bytes) plus the forwarding header must fit in
+/// one datagram from the start, before path MTU discovery has run.
+const FORWARDER_INITIAL_MTU: u16 = 1_400;
 
 impl ConnectionLimits {
     /// The QUIC transport config every connection of the endpoint runs
@@ -88,7 +115,46 @@ impl ConnectionLimits {
     /// round-trip time instead, so it holds throughput under the kind of
     /// uncorrelated loss a lossy link produces. The stream, window and idle
     /// limits are this table's.
-    pub fn transport_config(&self) -> QuicTransportConfig {
+    ///
+    /// Only an endpoint that forwards for the peer relay accepts datagrams
+    /// on the connections it accepts: the transport sets that per endpoint,
+    /// before a connection's protocol is known. Every other endpoint offers
+    /// peers no datagram buffer at all.
+    pub fn transport_config(&self, serves_peer_relay: bool) -> QuicTransportConfig {
+        self.builder()
+            .datagram_receive_buffer_size(
+                serves_peer_relay.then(|| self.peer_relay_datagram_buffer()),
+            )
+            .build()
+    }
+
+    /// The transport config of a connection this endpoint opens on the peer
+    /// relay protocol: the endpoint's own, with a datagram buffer and an
+    /// initial MTU that fits a forwarded packet.
+    pub fn peer_relay_transport_config(&self) -> QuicTransportConfig {
+        self.builder()
+            .initial_mtu(FORWARDER_INITIAL_MTU)
+            .datagram_receive_buffer_size(Some(self.peer_relay_datagram_buffer()))
+            .build()
+    }
+
+    /// The datagram buffer of one connection: what the table asks for, within its share of the
+    /// endpoint's budget and the bounds. It only has to hold the datagrams that arrive while the
+    /// forwarder has not yet read them, not what is in flight on the path.
+    fn peer_relay_datagram_buffer(&self) -> usize {
+        let places = self
+            .max_connections
+            .saturating_add(self.max_consensus_connections)
+            .max(1);
+        self.peer_relay_datagram_buffer_bytes
+            .min(self.peer_relay_datagram_budget_bytes / places)
+            .clamp(
+                *PEER_RELAY_DATAGRAM_BUFFER.start(),
+                *PEER_RELAY_DATAGRAM_BUFFER.end(),
+            )
+    }
+
+    fn builder(&self) -> QuicTransportConfigBuilder {
         let idle = IdleTimeout::try_from(Duration::from_secs(self.idle_timeout_secs.max(1)))
             .unwrap_or(IdleTimeout::from(VarInt::from_u32(30_000)));
         QuicTransportConfig::builder()
@@ -101,7 +167,6 @@ impl ConnectionLimits {
             .max_concurrent_bidi_streams(VarInt::from_u32(self.max_concurrent_bidi_streams))
             .max_concurrent_uni_streams(VarInt::from_u32(self.max_concurrent_uni_streams))
             .receive_window(VarInt::from_u32(self.receive_window_bytes))
-            .build()
     }
 }
 
@@ -135,6 +200,7 @@ struct GateInner {
     general: Mutex<Pool>,
     /// Connections held in both pools, read without a lock by the filter.
     live: AtomicUsize,
+    path_timings: Arc<PathTimings>,
 }
 
 /// The connections the endpoint holds, counted against
@@ -179,8 +245,15 @@ impl ConnectionGate {
                 consensus: Mutex::new(Pool::default()),
                 general: Mutex::new(Pool::default()),
                 live: AtomicUsize::new(0),
+                path_timings: Arc::default(),
             }),
         }
+    }
+
+    /// How long the connections this gate admitted took to reach a direct
+    /// path.
+    pub fn path_timings(&self) -> Arc<PathTimings> {
+        self.inner.path_timings.clone()
     }
 
     /// Connections held now, in both pools.
@@ -277,9 +350,11 @@ impl<P: ProtocolHandler> ProtocolHandler for Gated<P> {
             return Ok(());
         };
         // The place is held until the connection closes, whether or not the
-        // handler returns first.
+        // handler returns first. The same task times its first direct path.
         let held = conn.clone();
+        let timings = self.gate.path_timings();
         tokio::spawn(async move {
+            timings.observe(&held).await;
             held.closed().await;
             drop(permit);
         });
@@ -339,6 +414,10 @@ impl GatedRouter {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
     use iroh::Endpoint;
@@ -377,10 +456,12 @@ mod tests {
     }
 
     async fn serve(limits: ConnectionLimits) -> (Endpoint, Router, ConnectionGate) {
-        let endpoint = crate::identity_transport::base_builder_with(&limits)
-            .bind()
-            .await
-            .unwrap();
+        let endpoint = crate::identity_transport::on_loopback(
+            crate::identity_transport::base_builder_with(&limits, false),
+        )
+        .bind()
+        .await
+        .unwrap();
         let gate = ConnectionGate::new(limits);
         let router = GatedRouter::new(Router::builder(endpoint.clone()), gate.clone())
             .accept(ALPN_CONSENSUS, Hold)
@@ -390,7 +471,7 @@ mod tests {
     }
 
     async fn client() -> Endpoint {
-        crate::identity_transport::base_builder()
+        crate::identity_transport::on_loopback(crate::identity_transport::base_builder())
             .bind()
             .await
             .unwrap()
@@ -430,6 +511,37 @@ mod tests {
         assert_eq!(l.max_concurrent_bidi_streams, 100);
         assert_eq!(l.max_concurrent_uni_streams, 100);
         assert_eq!(l.receive_window_bytes, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn every_place_of_a_forwarder_taken_stays_within_the_datagram_budget() {
+        let l = ConnectionLimits::default();
+        let places = l.max_connections + l.max_consensus_connections;
+        assert!(
+            l.peer_relay_datagram_buffer() * places <= l.peer_relay_datagram_budget_bytes,
+            "{} bytes a connection, {places} places, budget {}",
+            l.peer_relay_datagram_buffer(),
+            l.peer_relay_datagram_budget_bytes
+        );
+        // A larger request or a larger pool does not lift the total above the budget either,
+        // while a connection's share stays above the least buffer a connection gets.
+        let wide = ConnectionLimits {
+            peer_relay_datagram_buffer_bytes: 16 * 1024 * 1024,
+            max_connections: 2048,
+            ..l
+        };
+        let places = wide.max_connections + wide.max_consensus_connections;
+        assert!(
+            wide.peer_relay_datagram_buffer() * places <= wide.peer_relay_datagram_budget_bytes
+        );
+        // A pool so large that its share is below that least buffer gives each connection the
+        // least buffer, which is the one case above the budget: the budget is 192 MiB and the
+        // least buffer 64 KiB, so it takes more than 3,072 places.
+        let huge = ConnectionLimits {
+            max_connections: 4096,
+            ..ConnectionLimits::default()
+        };
+        assert_eq!(huge.peer_relay_datagram_buffer(), 64 * 1024);
     }
 
     #[test]
@@ -562,6 +674,160 @@ mod tests {
         let (_first_send, _first_recv) = conn.open_bi().await.unwrap();
         let second = tokio::time::timeout(Duration::from_millis(500), conn.open_bi()).await;
         assert!(second.is_err(), "a second stream waits behind the bound");
+        router.shutdown().await.unwrap();
+    }
+
+    /// A connection the router admits is timed to its first direct path; one
+    /// it refuses is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_admitted_connection_is_timed_to_its_first_direct_path() {
+        let (server, router, gate) = serve(limits(16, 1, 4)).await;
+        let peer = client().await;
+        let conn = peer.connect(server.addr(), GENERAL_ALPN).await.unwrap();
+        assert!(echoes(&conn).await);
+        let timings = gate.path_timings();
+        let counted = async {
+            while timings.snapshot().count() < 1 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), counted)
+                .await
+                .is_ok(),
+            "two endpoints on one machine have a direct path"
+        );
+        let over = peer.connect(server.addr(), GENERAL_ALPN).await.unwrap();
+        assert!(refused(&over).await);
+        assert_eq!(timings.snapshot().count(), 1);
+        router.shutdown().await.unwrap();
+    }
+
+    const DATAGRAM_ALPN: &[u8] = b"tenzro/test/datagram";
+
+    /// Answers each datagram with a datagram holding its length, and accepts
+    /// streams without ever reading them.
+    #[derive(Debug, Clone)]
+    struct DatagramLengths;
+
+    impl ProtocolHandler for DatagramLengths {
+        async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+            let mut held = Vec::new();
+            loop {
+                tokio::select! {
+                    datagram = conn.read_datagram() => match datagram {
+                        Ok(d) => {
+                            let len = u32::try_from(d.len()).unwrap_or(u32::MAX);
+                            let _ = conn.send_datagram(len.to_be_bytes().to_vec().into());
+                        }
+                        Err(_) => break,
+                    },
+                    stream = conn.accept_bi() => match stream {
+                        Ok(stream) => held.push(stream),
+                        Err(_) => break,
+                    },
+                }
+            }
+            Ok(())
+        }
+    }
+
+    async fn serve_datagrams(serves_peer_relay: bool) -> (Endpoint, Router) {
+        let limits = ConnectionLimits::default();
+        let endpoint = crate::identity_transport::on_loopback(
+            crate::identity_transport::base_builder_with(&limits, serves_peer_relay),
+        )
+        .bind()
+        .await
+        .unwrap();
+        let router = GatedRouter::new(
+            Router::builder(endpoint.clone()),
+            ConnectionGate::new(limits),
+        )
+        .accept(DATAGRAM_ALPN, DatagramLengths)
+        .spawn();
+        (endpoint, router)
+    }
+
+    /// A connection opened as the peer relay opens one: it accepts datagrams.
+    async fn dial_with_datagrams(peer: &Endpoint, server: &Endpoint) -> Connection {
+        let options = iroh::endpoint::ConnectOptions::new()
+            .with_transport_config(ConnectionLimits::default().peer_relay_transport_config());
+        peer.connect_with_opts(server.addr(), DATAGRAM_ALPN, options)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+    }
+
+    async fn length_answer(conn: &Connection) -> Option<u32> {
+        let answer = tokio::time::timeout(Duration::from_secs(2), conn.read_datagram())
+            .await
+            .ok()?
+            .ok()?;
+        Some(u32::from_be_bytes(answer[..].try_into().ok()?))
+    }
+
+    /// An endpoint that does not forward for the peer relay offers no
+    /// datagram buffer: a peer cannot queue a single datagram on it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_endpoint_that_reads_no_datagrams_lets_none_be_queued() {
+        let (server, router) = serve_datagrams(false).await;
+        let peer = client().await;
+        let conn = dial_with_datagrams(&peer, &server).await;
+        assert_eq!(conn.max_datagram_size(), None);
+        assert!(matches!(
+            conn.send_datagram(bytes::Bytes::from_static(b"queued?")),
+            Err(iroh::endpoint::SendDatagramError::UnsupportedByPeer)
+        ));
+        router.shutdown().await.unwrap();
+    }
+
+    /// A datagram does not wait behind a stream that is stalled on flow
+    /// control on the same connection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_datagram_does_not_wait_behind_a_stalled_stream() {
+        let (server, router) = serve_datagrams(true).await;
+        let peer = client().await;
+        let conn = dial_with_datagrams(&peer, &server).await;
+        let (mut send, _recv) = conn.open_bi().await.unwrap();
+        // The server never reads the stream, so writes stop once its windows
+        // and this side's send buffer are full.
+        let filler = vec![0u8; 64 * 1024];
+        let fill = async {
+            loop {
+                send.write_all(&filler).await.unwrap();
+            }
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), fill)
+                .await
+                .is_err(),
+            "the stream stalls"
+        );
+        conn.send_datagram(bytes::Bytes::from_static(b"real time"))
+            .unwrap();
+        assert_eq!(length_answer(&conn).await, Some(9));
+        router.shutdown().await.unwrap();
+    }
+
+    /// A datagram up to the size the connection states arrives; one byte
+    /// more is refused before it is sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_datagram_up_to_the_stated_size_arrives_and_a_larger_one_is_refused() {
+        let (server, router) = serve_datagrams(true).await;
+        let peer = client().await;
+        let conn = dial_with_datagrams(&peer, &server).await;
+        let max = conn
+            .max_datagram_size()
+            .expect("the forwarder accepts datagrams");
+        assert!(max >= 1_000, "{max} bytes");
+        assert!(matches!(
+            conn.send_datagram(vec![1u8; max + 1].into()),
+            Err(iroh::endpoint::SendDatagramError::TooLarge)
+        ));
+        conn.send_datagram(vec![2u8; max].into()).unwrap();
+        assert_eq!(length_answer(&conn).await, Some(max as u32));
         router.shutdown().await.unwrap();
     }
 }

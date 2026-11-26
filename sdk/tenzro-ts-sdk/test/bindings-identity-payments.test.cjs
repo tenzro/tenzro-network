@@ -65,6 +65,8 @@ function answer(method, params) {
       return "0x3444";
     case "eth_gasPrice":
       return "0x1";
+    case "tenzro_estimateGas":
+      return "0x7a120";
     case "tenzro_getSigningPayload":
       return plainPayload(params);
     case "tenzro_createCustodyChallenge":
@@ -268,6 +270,7 @@ const CASES = [
   ["tenzro_settlementNetworks", (c) => c.device.routePayment("100", "usdc", 5), { amount_wei: "100", asset: "usdc", tnzo_micro_usd: 5 }],
   // Keystore and machine access
   ["tenzro_getKeystore", (c) => c.keystore.getKeystore("0x" + "01".repeat(20)), { account: "0x" + "01".repeat(20) }],
+  ["tenzro_getAccountSigningKey", (c) => c.keystore.accountSigningKey("ab", "0x01"), { public_key: "ab", account: "0x01" }],
   ["tenzro_resolveCredential", (c) => c.keystore.resolveCredential("cd", "tenzro.com"), { credential_id: "cd", rp_id: "tenzro.com" }],
   [
     "tenzro_addMachineAccess",

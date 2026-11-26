@@ -610,12 +610,8 @@ fn protocol_crates_carry_no_compatibility_paths() {
     );
 }
 
-/// Held-over harness lines still waiting for their removal commit. The ceiling
-/// only goes down: removing a line lowers it, nothing may raise it.
-const PENDING_REMOVAL_H_CEILING: usize = 11;
-
-/// The approved surface: kind -> name -> class. Every P, R and N line names a
-/// decision-log entry in docs/LAYERS.md.
+/// The approved surface: kind -> name -> class. Every line is P, R or N and
+/// names a decision-log entry in docs/LAYERS.md.
 fn approved() -> BTreeMap<String, BTreeMap<String, String>> {
     let text = std::fs::read_to_string(
         gate::repo_root().join("crates/tenzro-types/tests/support/protocol_surface.txt"),
@@ -624,7 +620,6 @@ fn approved() -> BTreeMap<String, BTreeMap<String, String>> {
     let log =
         std::fs::read_to_string(gate::repo_root().join("docs/LAYERS.md")).expect("docs/LAYERS.md");
     let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let mut held_over = 0;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -632,32 +627,23 @@ fn approved() -> BTreeMap<String, BTreeMap<String, String>> {
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
         assert!(
-            matches!(parts[2], "P" | "R" | "N" | "H"),
-            "class must be P, R or N (U is not allowed, H only as a held-over removal): {line}"
+            matches!(parts[2], "P" | "R" | "N"),
+            "class must be P, R or N: {line}"
         );
-        if parts[2] == "H" {
-            assert_eq!(parts.len(), 3, "malformed surface line: {line}");
-            held_over += 1;
-        } else {
-            assert_eq!(
-                parts.len(),
-                4,
-                "P, R and N lines name a decision-log id: {line}"
-            );
-            assert!(
-                log.contains(&format!("### {}\n", parts[3])),
-                "decision-log id {} has no entry in docs/LAYERS.md: {line}",
-                parts[3]
-            );
-        }
+        assert_eq!(
+            parts.len(),
+            4,
+            "a surface line names a decision-log id: {line}"
+        );
+        assert!(
+            log.contains(&format!("### {}\n", parts[3])),
+            "decision-log id {} has no entry in docs/LAYERS.md: {line}",
+            parts[3]
+        );
         out.entry(parts[0].to_string())
             .or_default()
             .insert(parts[1].to_string(), parts[2].to_string());
     }
-    assert!(
-        held_over <= PENDING_REMOVAL_H_CEILING,
-        "{held_over} H lines exceed the ceiling {PENDING_REMOVAL_H_CEILING}: H lines may only be removed"
-    );
     out
 }
 

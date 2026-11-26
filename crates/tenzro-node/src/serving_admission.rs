@@ -84,6 +84,17 @@ impl ServingPermit {
     pub fn record(&mut self, generated_tokens: u64, first_token_ms: Option<u64>) {
         self.traffic.record(generated_tokens, first_token_ms);
     }
+
+    /// A spot request's yield flag, raised when an interactive request needs
+    /// its slot; `None` for every other class.
+    pub fn yield_flag(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.traffic.yield_flag()
+    }
+
+    /// Whether this request was asked to give its slot up.
+    pub fn yielded(&self) -> bool {
+        self.traffic.yielded()
+    }
 }
 
 /// What a handler should do with this request.
@@ -200,7 +211,7 @@ pub async fn admit_inference_as(
                 // every acquire below failed and a healthy engine served nothing.
                 // Register it here from the same rule the serve paths use.
                 if node.load_tracker.snapshot(model_id).is_none()
-                    && let Some(entry) = tenzro_model::get_model_by_id(model_id)
+                    && let Some(entry) = node.catalog().get_model_by_id(model_id)
                 {
                     node.register_load_tracker(model_id, &entry).await;
                 }
@@ -454,7 +465,10 @@ async fn warm_model(node: &Arc<TenzroNode>, model_id: &str) -> Result<(), String
 
     make_room_for(node, &runtime, model_id, needed).await?;
 
-    let context_length = tenzro_model::get_model_by_id(model_id).map(|e| e.context_length);
+    let context_length = node
+        .catalog()
+        .get_model_by_id(model_id)
+        .map(|e| e.context_length);
     runtime
         .load_model_with_context(model_id, &gguf_path, context_length)
         .await
@@ -498,23 +512,12 @@ async fn make_room_for(
             continue;
         }
 
-        match runtime.unload_model(&victim).await {
-            Ok(()) => {
-                node.lifecycle().finish_evict(&victim);
-                info!(
-                    evicted = %victim,
-                    for_model = %model_id,
-                    "Evicted least-recently-used model to make room"
-                );
-            }
-            Err(e) => {
-                // The model is still resident, so it must go back to warm
-                // rather than be recorded as evicted — otherwise the budget
-                // and reality diverge permanently.
-                node.lifecycle().finish_warm(&victim, Duration::ZERO);
-                return Err(format!("failed to evict {victim}: {e}"));
-            }
-        }
+        crate::memory_guard::unload_marked(runtime, node.lifecycle(), &victim).await?;
+        info!(
+            evicted = %victim,
+            for_model = %model_id,
+            "Evicted least-recently-used model to make room"
+        );
     }
 }
 

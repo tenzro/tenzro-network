@@ -45,7 +45,7 @@ use tenzro_identity::document::{DidDocument, DidService, VerificationMethod, Ver
 use crate::data_integrity;
 
 /// Fragment of the verification method naming that key.
-const HARDWARE_KEY_FRAGMENT: &str = "#hardware-key";
+pub(crate) const HARDWARE_KEY_FRAGMENT: &str = "#hardware-key";
 
 /// Service type for the JSON-RPC surface.
 pub const SERVICE_TYPE_RPC: &str = "TenzroJsonRpc";
@@ -55,6 +55,16 @@ pub const SERVICE_TYPE_MCP: &str = "TenzroMcp";
 pub const SERVICE_TYPE_IROH: &str = "TenzroIrohEndpoint";
 /// Service type for a relay this node is reachable through.
 pub const SERVICE_TYPE_RELAY: &str = "TenzroRelay";
+pub const SERVICE_TYPE_APP_TRANSPORT: &str = "TenzroAppTransport";
+pub const SERVICE_TYPE_PINNED_CERT: &str = "TenzroPinnedCertSha256";
+
+/// Where application devices reach the node over WebTransport, and the
+/// hashes of the certificates they may pin when the node mints its own.
+#[derive(Debug, Clone, Default)]
+pub struct AppTransportAddress {
+    pub url: String,
+    pub pinned_sha256: Vec<String>,
+}
 
 /// Everything a node knows about how to reach itself.
 ///
@@ -79,6 +89,7 @@ pub struct NodeAddressing {
     pub rpc_url: Option<String>,
     /// MCP URL the operator published for their own edge, if any.
     pub mcp_url: Option<String>,
+    pub app_transport: Option<AppTransportAddress>,
 }
 
 /// Build the node's DID Document.
@@ -161,6 +172,21 @@ pub fn build_node_did_document(addressing: &NodeAddressing) -> Option<DidDocumen
                 id: format!("{did}#{suffix}"),
                 service_type: kind.to_string(),
                 service_endpoint: url.clone(),
+            });
+        }
+    }
+
+    if let Some(app) = addressing.app_transport.as_ref() {
+        doc.add_service(DidService {
+            id: format!("{did}#app-transport"),
+            service_type: SERVICE_TYPE_APP_TRANSPORT.to_string(),
+            service_endpoint: app.url.clone(),
+        });
+        for (i, sha256) in app.pinned_sha256.iter().enumerate() {
+            doc.add_service(DidService {
+                id: format!("{did}#app-transport-cert-{i}"),
+                service_type: SERVICE_TYPE_PINNED_CERT.to_string(),
+                service_endpoint: sha256.clone(),
             });
         }
     }
@@ -279,6 +305,10 @@ mod tests {
             relays: vec!["https://relay.example.com/".to_string()],
             rpc_url: Some("https://rpc.example.com".to_string()),
             mcp_url: Some("https://mcp.example.com/mcp".to_string()),
+            app_transport: Some(AppTransportAddress {
+                url: "https://node.example.com:4433/app".to_string(),
+                pinned_sha256: vec!["11".repeat(32), "22".repeat(32)],
+            }),
         }
     }
 
@@ -296,6 +326,8 @@ mod tests {
             SERVICE_TYPE_RELAY,
             SERVICE_TYPE_RPC,
             SERVICE_TYPE_MCP,
+            SERVICE_TYPE_APP_TRANSPORT,
+            SERVICE_TYPE_PINNED_CERT,
         ] {
             assert!(service(&doc, kind).is_some(), "{kind} missing");
         }
@@ -377,6 +409,24 @@ mod tests {
 
     /// A node that runs no iroh endpoint and no mesh still publishes whatever
     /// it does have, rather than an empty document or none at all.
+    #[test]
+    fn the_app_transport_lists_each_certificate_a_device_may_pin_in_order() {
+        let doc = build_node_did_document(&full()).unwrap();
+        let pinned: Vec<&str> = doc
+            .service
+            .iter()
+            .filter(|s| s.service_type == SERVICE_TYPE_PINNED_CERT)
+            .map(|s| s.service_endpoint.as_str())
+            .collect();
+        assert_eq!(pinned, ["11".repeat(32), "22".repeat(32)]);
+        assert_eq!(
+            service(&doc, SERVICE_TYPE_APP_TRANSPORT)
+                .unwrap()
+                .service_endpoint,
+            "https://node.example.com:4433/app"
+        );
+    }
+
     #[test]
     fn a_partial_node_publishes_what_it_has() {
         let addressing = NodeAddressing {

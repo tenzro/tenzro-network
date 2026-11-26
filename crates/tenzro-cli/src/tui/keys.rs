@@ -15,6 +15,7 @@ pub enum Act {
     Refresh,
     Edit,
     More,
+    Assistant,
     // Setup
     Go,
     Back,
@@ -107,6 +108,12 @@ pub const CONSOLE: &[Binding] = &[
         &["m"],
         "More commands: the full command menu",
         "m more",
+    ),
+    b(
+        Act::Assistant,
+        &["a", "/"],
+        "Assistant: ask a question or run a tool",
+        "a ask",
     ),
     b(Act::Help, &["?"], "Show or hide this help", "? help"),
     b(Act::Close, &["Esc"], "Close help or cancel an edit", ""),

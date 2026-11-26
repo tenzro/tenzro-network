@@ -185,11 +185,14 @@ pub fn verify_gpu_leg(
         if c.get("jti").and_then(Value::as_str) != Some(bundle_id) {
             return Err(fail("a GPU token belongs to a different NRAS bundle"));
         }
-        if c.get("eat_nonce")
-            .and_then(Value::as_str)
-            .map(str::to_ascii_lowercase)
-            != Some(nonce_hex.to_ascii_lowercase())
-        {
+        // Only the standard claims this leg acts on: NRAS's other claims
+        // need not follow RFC 9711's shapes.
+        let standard: serde_json::Map<String, Value> = ["eat_nonce", "dbgstat", "ueid"]
+            .iter()
+            .filter_map(|k| c.get(*k).map(|v| (k.to_string(), v.clone())))
+            .collect();
+        let eat = crate::eat::EatClaims::from_json(&Value::Object(standard))?;
+        if eat.nonces.len() != 1 || !eat.answers(nonce_hex) {
             return Err(fail(
                 "GPU evidence answers a different challenge than the CPU leg",
             ));
@@ -210,15 +213,13 @@ pub fn verify_gpu_leg(
         cert_chain_good(&c, "x-nvidia-gpu-attestation-report-cert-chain")?;
         cert_chain_good(&c, "x-nvidia-gpu-driver-rim-cert-chain")?;
         cert_chain_good(&c, "x-nvidia-gpu-vbios-rim-cert-chain")?;
-        if c.get("dbgstat").and_then(Value::as_str) != Some("disabled") {
+        if !eat.debug_disabled() {
             return Err(fail("GPU debug is not disabled"));
         }
-        ueids.push(
-            c.get("ueid")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        );
+        match eat.ueid {
+            Some(ueid) if !ueid.is_empty() => ueids.push(ueid),
+            _ => return Err(fail("a GPU token names no device (ueid)")),
+        }
     }
     if ueids.is_empty() {
         return Err(fail("NRAS bundle carries no device tokens"));
@@ -408,11 +409,38 @@ mod tests {
     }
 
     #[test]
+    fn a_gpu_token_naming_several_nonces_is_refused() {
+        let jwks: Value = serde_json::from_str(&jwks()).unwrap();
+        let mut c = gpu_claims("ab");
+        c["eat_nonce"] = serde_json::json!(["ab", "cd"]);
+        assert!(verify_gpu_leg(&bundle(c, &service_key()), &jwks, "ab", NOW).is_err());
+    }
+
+    #[test]
+    fn a_gpu_token_naming_no_device_is_refused() {
+        let jwks: Value = serde_json::from_str(&jwks()).unwrap();
+        let mut c = gpu_claims("ab");
+        c["ueid"] = "".into();
+        assert!(verify_gpu_leg(&bundle(c, &service_key()), &jwks, "ab", NOW).is_err());
+        let mut c = gpu_claims("ab");
+        c.as_object_mut().unwrap().remove("ueid");
+        assert!(verify_gpu_leg(&bundle(c, &service_key()), &jwks, "ab", NOW).is_err());
+    }
+
+    #[test]
     fn a_debuggable_gpu_or_a_revoked_manifest_is_refused() {
         let jwks: Value = serde_json::from_str(&jwks()).unwrap();
         let mut c = gpu_claims("ab");
         c["dbgstat"] = "enabled".into();
         assert!(verify_gpu_leg(&bundle(c, &service_key()), &jwks, "ab", NOW).is_err());
+        // Only exactly "disabled" counts as debug off.
+        let mut c = gpu_claims("ab");
+        c["dbgstat"] = "disabled-since-boot".into();
+        assert!(verify_gpu_leg(&bundle(c, &service_key()), &jwks, "ab", NOW).is_err());
+        // A claim outside the standard ones NRAS need not shape as RFC 9711.
+        let mut c = gpu_claims("ab");
+        c["measurements"] = "not the RFC shape".into();
+        assert!(verify_gpu_leg(&bundle(c, &service_key()), &jwks, "ab", NOW).is_ok());
         let mut c = gpu_claims("ab");
         c["x-nvidia-gpu-driver-rim-cert-chain"]["x-nvidia-cert-ocsp-status"] = "revoked".into();
         assert!(verify_gpu_leg(&bundle(c, &service_key()), &jwks, "ab", NOW).is_err());

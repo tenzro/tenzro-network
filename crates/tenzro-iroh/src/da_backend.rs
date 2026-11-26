@@ -238,7 +238,6 @@ mod tests {
             payee: Some("did:tenzro:machine:bob".into()),
             amount_wei: Some(42),
             timestamp: Timestamp::new(1_700_000_000_000),
-            principal_chain_summary: None,
         }
     }
 

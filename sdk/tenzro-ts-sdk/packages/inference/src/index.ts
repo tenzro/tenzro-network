@@ -3,10 +3,6 @@
  */
 export { InferenceClient } from "./inference";
 export type {
-  UseCase,
-  IntentParams,
-  RouteDecision,
-  RouteOutcome,
   GenerationStats,
   BillableUnits,
   UsageRecord,
@@ -34,6 +30,21 @@ export {
   RESERVED_REGISTRY_KINDS,
 } from "./pricing";
 export type { Rate, RateCard, PriceCard, RegistryEntry } from "./pricing";
+export {
+  REGISTRY_KIND_RUN_MANIFEST,
+  RUN_MANIFEST_DOMAIN,
+  RUN_MANIFEST_MAX_BYTES,
+  RUN_MANIFEST_MAX_CLAIMS,
+  RUN_MANIFEST_MAX_INPUTS,
+  RUN_MANIFEST_MAX_INTERACTIONS,
+  RUN_MANIFEST_MAX_OUTPUTS,
+  RUN_MANIFEST_MAX_TEXT,
+  RunManifestError,
+  runManifestDigest,
+  runManifestPreimage,
+  runManifestPutTx,
+  runsRegistryId,
+} from "./run-manifest";
 export { ProviderClient } from "./provider";
 export { CatalogClient } from "./catalog";
 export type {
@@ -88,8 +99,6 @@ export type {
   ProviderStats,
   PreviewServeParams,
   MicroNodeIdentity,
-  ComputeBond,
-  ComputeBondParams,
   ChatMessage,
   ChatOptions,
   ChatResponse,
@@ -99,6 +108,7 @@ export type {
   ServeOptions,
   ServeVisibility,
   NetworkProvider,
+  ProviderListing,
   ProviderModelLoad,
 } from "./provider";
 export type {

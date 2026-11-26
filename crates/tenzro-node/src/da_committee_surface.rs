@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use tenzro_consensus::EpochManager;
 use tenzro_crypto::batch::{RecordSignature, RecordSigner};
+use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_iroh::{
     ALPN_DA_COMMITTEE, Endpoint, EndpointId, MAX_STORE_REQUEST, Reply, RequestHandler,
 };
@@ -230,25 +231,26 @@ pub struct IrohDaCommitteeSurface {
     endpoint: Endpoint,
     committee: Arc<dyn CommitteeView>,
     endpoints: MemberEndpoints,
-    local_address: Address,
+    local_key: CompositePublicKey,
 }
 
 impl IrohDaCommitteeSurface {
-    /// Construct the surface. `local_address` is the running node's own
-    /// validator address; requests targeting it are short-circuited by the
-    /// backend before reaching the surface, so this is only used to reject a
-    /// self-directed wire request defensively.
+    /// Construct the surface. `local_key` is the running node's hardware
+    /// identity key, which names its own committee member; requests targeting
+    /// that member are short-circuited by the backend before reaching the
+    /// surface, so this is only used to reject a self-directed wire request
+    /// defensively.
     pub fn new(
         endpoint: Endpoint,
         committee: Arc<dyn CommitteeView>,
         endpoints: MemberEndpoints,
-        local_address: Address,
+        local_key: CompositePublicKey,
     ) -> Self {
         Self {
             endpoint,
             committee,
             endpoints,
-            local_address,
+            local_key,
         }
     }
 
@@ -262,7 +264,7 @@ impl IrohDaCommitteeSurface {
             .ok_or_else(|| {
                 DaCommitteeError::Transport(format!("no committee member at index {to_index}"))
             })?;
-        if member.address == self.local_address {
+        if member.is_key(&self.local_key) {
             return Err(DaCommitteeError::Transport(
                 "refusing to dial self over the wire".into(),
             ));
@@ -305,7 +307,7 @@ impl IrohDaCommitteeSurface {
             .await
             .map_err(|_| DaCommitteeError::Transport(format!("member {to_index} timed out")))?
             .map_err(DaCommitteeError::Transport)?;
-        bincode::deserialize(&body)
+        tenzro_network::wire::decode_bounded(&body, MAX_STORE_REQUEST)
             .map_err(|e| DaCommitteeError::Transport(format!("undecodable member answer: {e}")))
     }
 }
@@ -384,14 +386,15 @@ impl crate::history_archive::SegmentLocator for IrohDaCommitteeSurface {
     async fn locate(&self, first_index: u64) -> Vec<crate::history_archive::ArchivedSegment> {
         let mut found: Vec<crate::history_archive::ArchivedSegment> = Vec::new();
         for member in self.committee.members() {
-            if member.address == self.local_address {
+            if member.is_key(&self.local_key) {
                 continue;
             }
             let request = DaCommitteeRequest::HistorySegment { first_index };
             if let Ok(DaCommitteeResponse::HistorySegment(Some(bytes))) =
                 self.call(member.index, &request).await
-                && let Ok(seg) =
-                    bincode::deserialize::<crate::history_archive::ArchivedSegment>(&bytes)
+                && let Ok(seg) = tenzro_network::wire::decode_bounded::<
+                    crate::history_archive::ArchivedSegment,
+                >(&bytes, MAX_STORE_REQUEST)
                 && seg.first_index == first_index
                 && !found.contains(&seg)
             {
@@ -419,12 +422,11 @@ pub fn follower_reader(
         consensus.epoch_manager().clone(),
         registry,
     ));
-    let local_address = crate::da_committee::committee_address(signer.identity());
     let surface = Arc::new(IrohDaCommitteeSurface::new(
         endpoint,
         committee.clone(),
         announced_member_endpoints(consensus),
-        local_address,
+        signer.identity().clone(),
     ));
     let backend = crate::da_committee::DaCommitteeBackend::new(
         signer,
@@ -440,41 +442,19 @@ pub fn follower_reader(
 /// the local validator key.
 ///
 /// Owns the pieces needed to serve without touching the backend: the local
-/// session signer + address (to attest) and the shared [`DaCommitteeStore`]
-/// (to persist / look up slivers).
+/// session signer (to attest), the committee (to find this node's seat) and
+/// the shared [`DaCommitteeStore`] (to persist / look up slivers).
 pub struct DaCommitteeServer {
     store: Arc<DaCommitteeStore>,
     signer: Arc<dyn RecordSigner>,
-    local_index: LocalIndexResolver,
-    local_address: Address,
+    committee: Arc<dyn CommitteeView>,
     /// The node store holding this member's history segment records.
     history: Option<Arc<dyn KvStore>>,
 }
 
 impl std::fmt::Debug for DaCommitteeServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DaCommitteeServer")
-            .field("local_address", &self.local_address)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Resolves the local node's committee index at serve time. The index a member
-/// signs into its attestation must match the writer's view, and the validator
-/// set can change across epochs, so we re-read the committee on each request
-/// rather than caching a stale index.
-struct LocalIndexResolver {
-    committee: Arc<dyn CommitteeView>,
-    local_address: Address,
-}
-
-impl LocalIndexResolver {
-    fn index(&self) -> Option<usize> {
-        self.committee
-            .members()
-            .into_iter()
-            .find(|m| m.address == self.local_address)
-            .map(|m| m.index)
+        f.debug_struct("DaCommitteeServer").finish_non_exhaustive()
     }
 }
 
@@ -488,17 +468,19 @@ impl DaCommitteeServer {
         store: Arc<DaCommitteeStore>,
         signer: Arc<dyn RecordSigner>,
     ) -> Self {
-        let local_address = crate::da_committee::committee_address(signer.identity());
         Self {
             store,
             signer,
-            local_index: LocalIndexResolver {
-                committee,
-                local_address,
-            },
-            local_address,
+            committee,
             history: None,
         }
+    }
+
+    /// This node's seat in the current committee, re-read on each request:
+    /// the index and address a member signs into its attestation must match
+    /// the writer's view, and the validator set changes across epochs.
+    fn seat(&self) -> Option<CommitteeMember> {
+        crate::da_committee::local_member(&self.committee.members(), self.signer.identity())
     }
 
     /// Answer `HistorySegment` requests from the segment records in `storage`.
@@ -580,20 +562,20 @@ impl DaCommitteeServer {
         }) {
             return DaCommitteeResponse::Error(e.to_string());
         }
-        let Some(index) = self.local_index.index() else {
+        let Some(member) = self.seat() else {
             // We are not in the current committee — we stored the sliver as a
             // courtesy but cannot produce a positioned attestation the writer
             // will accept.
             return DaCommitteeResponse::Error("local node is not in the current committee".into());
         };
-        let msg = attestation_message(&commitment, &self.local_address);
+        let msg = attestation_message(&commitment, &member.address);
         let signature = match self.signer.sign_record(&msg) {
             Ok(sig) => sig,
             Err(e) => return DaCommitteeResponse::Error(e.to_string()),
         };
         DaCommitteeResponse::Attestation(WireMemberAttestation {
-            index: index as u64,
-            address: self.local_address,
+            index: member.index as u64,
+            address: member.address,
             signature,
         })
     }
@@ -619,21 +601,21 @@ impl DaCommitteeServer {
         let Some(stored) = self.store.get_sliver(&commitment) else {
             return DaCommitteeResponse::PossessionProof(None);
         };
-        let Some(index) = self.local_index.index() else {
+        let Some(member) = self.seat() else {
             return DaCommitteeResponse::Error("local node is not in the current committee".into());
         };
         let sliver_bytes = match encode_sliver(&stored.sliver) {
             Ok(bytes) => bytes,
             Err(e) => return DaCommitteeResponse::Error(e.to_string()),
         };
-        let msg = challenge_message(&commitment, &nonce, &self.local_address);
+        let msg = challenge_message(&commitment, &nonce, &member.address);
         let signature = match self.signer.sign_record(&msg) {
             Ok(sig) => sig,
             Err(e) => return DaCommitteeResponse::Error(e.to_string()),
         };
         DaCommitteeResponse::PossessionProof(Some(WirePossessionProof {
-            index: index as u64,
-            address: self.local_address,
+            index: member.index as u64,
+            address: member.address,
             signature,
             sliver: sliver_bytes,
         }))
@@ -643,7 +625,10 @@ impl DaCommitteeServer {
 #[async_trait::async_trait]
 impl RequestHandler for DaCommitteeServer {
     async fn handle(&self, _remote: EndpointId, request: Bytes) -> Reply {
-        let response = match bincode::deserialize::<DaCommitteeRequest>(&request) {
+        let response = match tenzro_network::wire::decode_bounded::<DaCommitteeRequest>(
+            &request,
+            MAX_STORE_REQUEST,
+        ) {
             Ok(request) => self.answer(request),
             Err(e) => DaCommitteeResponse::Error(format!("undecodable request: {e}")),
         };
@@ -659,7 +644,8 @@ fn encode_sliver(sliver: &SliverPair) -> Result<Vec<u8>> {
 }
 
 fn decode_sliver(bytes: &[u8]) -> Result<SliverPair> {
-    bincode::deserialize(bytes).map_err(|e| DaCommitteeError::Core(e.to_string()))
+    tenzro_network::wire::decode_bounded(bytes, MAX_STORE_REQUEST)
+        .map_err(|e| DaCommitteeError::Core(e.to_string()))
 }
 
 fn encode_shape(shape: &CommitteeShape) -> Result<Vec<u8>> {
@@ -667,7 +653,8 @@ fn encode_shape(shape: &CommitteeShape) -> Result<Vec<u8>> {
 }
 
 fn decode_shape(bytes: &[u8]) -> Result<CommitteeShape> {
-    bincode::deserialize(bytes).map_err(|e| DaCommitteeError::Core(e.to_string()))
+    tenzro_network::wire::decode_bounded(bytes, MAX_STORE_REQUEST)
+        .map_err(|e| DaCommitteeError::Core(e.to_string()))
 }
 
 fn wire_to_attestation(wire: WireMemberAttestation) -> MemberAttestation {
@@ -707,6 +694,42 @@ fn member_error(e: String) -> DaCommitteeError {
 mod tests {
     use super::*;
     use crate::batch_signing::test_support::Immediate;
+
+    /// Every member's store request for the largest blob the smallest
+    /// committee takes (the shape whose slivers are the largest share of the
+    /// blob), and every reply carrying one of those slivers, fit the store
+    /// request bound; one byte more would not be taken.
+    #[test]
+    fn every_sliver_of_the_largest_blob_fits_one_store_request() {
+        let shape = CommitteeShape::from_fault_bound(1).unwrap();
+        let max = crate::da_committee::max_blob_len(shape);
+        let blob: Vec<u8> = (0..max).map(|i| (i % 251) as u8).collect();
+        let encoded = tenzro_storage::redstuff::encode(&blob, shape).unwrap();
+        for sliver in &encoded.slivers {
+            let request = DaCommitteeRequest::StoreSliver {
+                commitment: encoded.commitment.0,
+                shape_blob: bincode::serialize(&shape).unwrap(),
+                blob_len: encoded.blob_len,
+                symbol_len: encoded.symbol_len as u64,
+                sliver: encode_sliver(sliver).unwrap(),
+            };
+            assert!(bincode::serialize(&request).unwrap().len() <= MAX_STORE_REQUEST);
+            let reply = DaCommitteeResponse::Sliver(Some(encode_sliver(sliver).unwrap()));
+            assert!(bincode::serialize(&reply).unwrap().len() <= MAX_STORE_REQUEST);
+        }
+        // Larger committees cut a blob into smaller shares, so the bound
+        // holds for them with the same margin.
+        for f in 1..=100 {
+            let shape = CommitteeShape::from_fault_bound(f).unwrap();
+            let symbol_len =
+                crate::da_committee::max_blob_len(shape).div_ceil(shape.rows() * shape.cols());
+            let proofs = 2 * 32 * (usize::BITS - shape.n().leading_zeros()) as usize;
+            assert!(
+                symbol_len * (shape.rows() + shape.cols()) + proofs + 1024 <= MAX_STORE_REQUEST,
+                "f = {f}"
+            );
+        }
+    }
 
     fn index(r: &DaCommitteeResponse) -> u32 {
         let bytes = bincode::serialize(r).unwrap();

@@ -378,7 +378,15 @@ pub struct ComputeBackend;
 impl ComputeBackend {
     /// Resolve the backend for this machine's GPU, or why there is none.
     pub fn select() -> std::result::Result<(BackendKind, Box<dyn ExpertCompute>), String> {
-        Self::select_for(crate::runtime::detected_gpu_vendors())
+        // The unit tests run the CPU path whatever GPU the test machine has; a GPU
+        // host without a GPU build refuses to run experts, which is the rule they do
+        // not exercise.
+        let gpus: &[tenzro_types::GpuVendor] = if cfg!(test) {
+            &[]
+        } else {
+            crate::runtime::detected_gpu_vendors()
+        };
+        Self::select_for(gpus)
     }
 
     /// Resolve the backend for a machine with the `gpus` vendors.

@@ -46,9 +46,6 @@ pub const PROBE_MATRIX_DIMENSION: u32 = 512;
 /// Product rows a compute capacity probe opens.
 pub const PROBE_OPENED_ROWS: u32 = 32;
 
-/// Chunks proven per object in a possession probe.
-pub const PROBE_POSSESSION_SAMPLES: u32 = 8;
-
 /// State entries a state-read capacity probe asks the provider to prove.
 pub const PROBE_STATE_READS: u32 = 16;
 
@@ -62,7 +59,10 @@ pub fn probe_work(chain: &dyn VmState, did: &str) -> Option<CapacityWork> {
     let now = chrono::Utc::now().timestamp_millis();
     if !tenzro_vm::native::compute_claim::storage_claims_due(chain, did, now).is_empty() {
         return Some(CapacityWork::Possession {
-            samples: PROBE_POSSESSION_SAMPLES,
+            samples: tenzro_vm::native::network_param(
+                chain,
+                tenzro_vm::native::compute_claim::POSSESSION_PROBE_SAMPLES_PARAM,
+            ) as u32,
         });
     }
     None
@@ -186,24 +186,43 @@ pub fn measure(
     }
 }
 
+/// Whether a proof that arrived `answered_in_ms` after its probe went out
+/// is in time for `claim`: within the deadline of the storage class the
+/// claim sold. A claim with no class deadline in force, and an answer this
+/// validator kept no issue time for, are held to the probe window alone:
+/// a record this validator lost is not the holder's lateness.
+fn in_class_time(
+    chain: &dyn VmState,
+    claim: &tenzro_vm::native::compute_claim::ClaimRecord,
+    answered_in_ms: Option<i64>,
+) -> bool {
+    tenzro_vm::native::storage_class::response_deadline_ms(chain, claim)
+        .is_none_or(|deadline| answered_in_ms.is_none_or(|ms| ms <= deadline as i64))
+}
+
 /// The storage claims due from `probe`'s bond at `at_ms` that `deals`
-/// proves: the descriptor matches the one the claim committed and the proof
-/// answers this probe's nonce for that claim.
+/// proves: the descriptor matches the one the claim committed, the proof
+/// answers this probe's nonce for that claim, and it arrived within the
+/// claim's class deadline.
 fn proven_claims(
     chain: &dyn VmState,
     probe: &SlaProbe,
     deals: &[tenzro_model::PossessionDeal],
     samples: u32,
     at_ms: i64,
+    answered_in_ms: Option<i64>,
 ) -> Vec<(
     tenzro_vm::native::compute_claim::ClaimRecord,
-    tenzro_storage_provider::ObjectDescriptor,
+    tenzro_storage_provider::DescriptorShards,
 )> {
     use sha2::Digest;
     let due =
         tenzro_vm::native::compute_claim::storage_claims_due(chain, &probe.provider_did, at_ms);
     let mut out = Vec::new();
     for claim in due {
+        if !in_class_time(chain, &claim, answered_in_ms) {
+            continue;
+        }
         let Some(deal) = deals
             .iter()
             .take(tenzro_model::MAX_POSSESSION_DEALS)
@@ -217,7 +236,7 @@ fn proven_claims(
             continue;
         }
         let (Ok(descriptor), Ok(pdp)) = (
-            bincode::deserialize::<tenzro_storage_provider::ObjectDescriptor>(&deal.descriptor),
+            bincode::deserialize::<tenzro_storage_provider::DescriptorShards>(&deal.descriptor),
             bincode::deserialize::<tenzro_storage_provider::PdpProof>(&deal.proof),
         ) else {
             continue;
@@ -227,7 +246,14 @@ fn proven_claims(
             nonce: tenzro_model::possession_nonce(&probe.challenge_nonce, &claim.claim_id),
             samples: samples as usize,
         };
-        if tenzro_storage_provider::verify(&descriptor, &challenge, &pdp).is_ok() {
+        if tenzro_storage_provider::verify(
+            &descriptor.object_id,
+            &descriptor.shards,
+            &challenge,
+            &pdp,
+        )
+        .is_ok()
+        {
             out.push((claim, descriptor));
         }
     }
@@ -235,13 +261,15 @@ fn proven_claims(
 }
 
 /// Whether a response keeps every storage claim `probe`'s bond delivers this
-/// hour: each due object is proven. A bond that delivers storage is found
-/// available only while it does.
+/// hour: each due object is proven, within the deadline of the class it was
+/// sold in when the response took `answered_in_ms` from the probe going out.
+/// A bond that delivers storage is found available only while it does.
 pub fn possession_kept(
     chain: &dyn VmState,
     probe: &SlaProbe,
     response: &SlaResponse<impl tenzro_model::SlaSignature>,
     at_ms: i64,
+    answered_in_ms: Option<i64>,
 ) -> bool {
     let due =
         tenzro_vm::native::compute_claim::storage_claims_due(chain, &probe.provider_did, at_ms);
@@ -253,8 +281,46 @@ pub fn possession_kept(
     else {
         return false;
     };
-    proven_claims(chain, probe, deals, *samples, at_ms).len()
+    proven_claims(chain, probe, deals, *samples, at_ms, answered_in_ms).len()
         == due.len().min(tenzro_model::MAX_POSSESSION_DEALS)
+}
+
+/// The retrieval rate a possession response shows once the storage class
+/// rule is live: chunks proven in time per second, on the validator's clock
+/// from the probe going out. The chain freezes the stake-weighted median
+/// with the hour's verdict, which is the holder's measured record. `None`
+/// while the rule is dormant or when nothing was proven.
+pub fn possession_rate(
+    chain: &dyn VmState,
+    probe: &SlaProbe,
+    response: &SlaResponse<impl tenzro_model::SlaSignature>,
+    issued_at_ms: i64,
+    received_at_ms: i64,
+) -> Option<u64> {
+    if !tenzro_vm::feature_gate::is_live_now(chain, tenzro_vm::native::storage_class::KEY) {
+        return None;
+    }
+    let (CapacityWork::Possession { samples }, CapacityResult::Possession { deals }) =
+        (probe.work.as_ref()?, response.result.as_ref()?)
+    else {
+        return None;
+    };
+    let proven = proven_claims(
+        chain,
+        probe,
+        deals,
+        *samples,
+        received_at_ms,
+        Some(received_at_ms - issued_at_ms),
+    )
+    .len() as u64;
+    (proven > 0).then(|| {
+        per_second(
+            proven.saturating_mul(u64::from(*samples)),
+            issued_at_ms,
+            received_at_ms,
+        )
+    })
 }
 
 /// Work a burst challenge asks a claimed compute unit for: a matrix
@@ -283,11 +349,14 @@ pub fn capacity_kept(
     probe: &SlaProbe,
     response: &SlaResponse<impl tenzro_model::SlaSignature>,
     at_ms: i64,
+    answered_in_ms: Option<i64>,
     measured: Option<u64>,
 ) -> bool {
     match probe.work.as_ref() {
         None => true,
-        Some(CapacityWork::Possession { .. }) => possession_kept(chain, probe, response, at_ms),
+        Some(CapacityWork::Possession { .. }) => {
+            possession_kept(chain, probe, response, at_ms, answered_in_ms)
+        }
         Some(_) => measured.is_some(),
     }
 }
@@ -347,6 +416,8 @@ pub async fn perform(
             Some(CapacityResult::Matmul(proof))
         }
         CapacityWork::Possession { samples } => {
+            // Possession of data already held is answered whether or not the
+            // storage role is served now: its deals and claims still stand.
             let runtime = storage_runtime?;
             let chain = tenzro_vm::StateAdapter::with_storage(storage?.clone());
             let now = chrono::Utc::now().timestamp_millis();
@@ -406,12 +477,358 @@ pub async fn perform(
 mod tests {
     use super::*;
 
+    /// The sample count a possession probe carries at genesis.
+    const POSSESSION_SAMPLES: u32 =
+        tenzro_vm::native::compute_claim::DEFAULT_POSSESSION_PROBE_SAMPLES as u32;
+
+    #[test]
+    fn the_largest_possession_answer_fits_one_gossip_message() {
+        // Worst case: every sample's shard is 2^32 chunks deep, every deal
+        // carries a descriptor of 8 KiB, and the answer carries the most
+        // deals a probe may; 64 KiB stays for the rest of the envelope.
+        let samples = tenzro_vm::native::compute_claim::MAX_POSSESSION_PROBE_SAMPLES as usize;
+        let proof = tenzro_storage_provider::PdpProof {
+            object_id: "o".repeat(64),
+            items: (0..samples)
+                .map(|i| tenzro_storage_provider::PdpItem {
+                    shard: i,
+                    chunk: i as u64,
+                    bytes: vec![0; tenzro_storage_provider::pdp::CHUNK_SIZE],
+                    path: vec![[0; 32]; 32],
+                })
+                .collect(),
+        };
+        let deals: Vec<tenzro_model::PossessionDeal> = (0..tenzro_model::MAX_POSSESSION_DEALS)
+            .map(|i| tenzro_model::PossessionDeal {
+                claim_id: format!("{i:064}"),
+                descriptor: vec![0; 8 * 1024],
+                proof: bincode::serialize(&proof).unwrap(),
+            })
+            .collect();
+        let size = bincode::serialize(&deals).unwrap().len();
+        assert!(
+            size + 64 * 1024 <= tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE,
+            "{size} bytes"
+        );
+    }
+
     #[test]
     fn throughput_is_measured_on_the_validators_clock() {
         assert_eq!(per_second(64, 1_000, 2_000), 64);
         assert_eq!(per_second(16, 0, 500), 32);
         // A response stamped before the probe went out cannot divide by zero.
         assert_eq!(per_second(10, 5_000, 4_000), 10_000);
+    }
+
+    const HOUR: i64 = tenzro_vm::native::MARKET_EPOCH_MS;
+
+    async fn claim_tx(
+        executor: &tenzro_vm::NativeExecutor,
+        chain: &mut tenzro_vm::StateAdapter,
+        from: &[u8],
+        op: tenzro_types::transaction::ComputeClaimOp,
+    ) {
+        use tenzro_vm::VmExecutor as _;
+        let mut data = tenzro_vm::native::SELECTOR_COMPUTE_CLAIM.to_vec();
+        data.extend(serde_json::to_vec(&op).unwrap());
+        let mut tx = tenzro_vm::types::VmTransaction::new(
+            from.to_vec(),
+            None,
+            0,
+            data,
+            1_000_000,
+            0,
+            0,
+            tenzro_vm::VmType::Tenzro,
+            1337,
+        );
+        tx.block_timestamp_ms = Some(5 * HOUR);
+        let result = executor.execute_transaction(&tx, chain).await.unwrap();
+        assert!(result.success, "{op:?}");
+    }
+
+    /// A plaintext object of four shards and its descriptor.
+    fn stored_object() -> (Vec<Vec<u8>>, tenzro_storage_provider::ObjectDescriptor) {
+        let shards: Vec<Vec<u8>> = (0..4u8)
+            .map(|i| (0..5000u32).map(|b| (b as u8).wrapping_add(i)).collect())
+            .collect();
+        let descriptor = tenzro_storage_provider::ObjectDescriptor {
+            object_id: "obj".into(),
+            owner_hex: "00".into(),
+            size_bytes: 20_000,
+            scheme: tenzro_storage_provider::RedundancyScheme::erasure(2, 2).unwrap(),
+            shards: shards
+                .iter()
+                .enumerate()
+                .map(|(index, bytes)| {
+                    let (chunk_root, chunk_count) =
+                        tenzro_storage_provider::pdp::chunk_commitment(bytes);
+                    tenzro_storage_provider::ShardRef {
+                        index,
+                        uri: format!("tenzro://blob/{index}"),
+                        commitment: String::new(),
+                        chunk_root,
+                        chunk_count,
+                    }
+                })
+                .collect(),
+            access_policy: tenzro_types::access_policy::AccessPolicy::OwnerOnly {
+                owner_did: "did:tenzro:human:owner".into(),
+            },
+            confidential: None,
+        };
+        (shards, descriptor)
+    }
+
+    /// A storage claim for `descriptor` in `unit` (a gibibyte of it when
+    /// given), written by the bond `did:store` and bought, delivering from
+    /// hour 10, and its claim id.
+    async fn held_storage_claim(
+        descriptor: &tenzro_storage_provider::ObjectDescriptor,
+        unit: Option<&str>,
+    ) -> (tenzro_vm::StateAdapter, String) {
+        use sha2::Digest;
+        use tenzro_vm::VmState as _;
+        let digest = hex::encode(sha2::Sha256::digest(
+            bincode::serialize(descriptor).unwrap(),
+        ));
+        let executor = tenzro_vm::NativeExecutor::new(tenzro_vm::VmConfig::default()).unwrap();
+        let mut chain = tenzro_vm::StateAdapter::new();
+        let (writer, buyer) = ([1u8; 32], [2u8; 32]);
+        chain.set_balance(&writer, 1_000_000);
+        chain.set_balance(&buyer, 1_000_000);
+        chain.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            b"compute_bond:did:store",
+            serde_json::to_vec(&serde_json::json!({ "provider_address": hex::encode(writer) }))
+                .unwrap(),
+        );
+        let offer = tenzro_types::transaction::ComputeClaimOp::Offer {
+            hardware_class: 3,
+            region: String::new(),
+            delivery_start_ms: 10 * HOUR,
+            epochs: 3,
+            strike_per_epoch: 100,
+            collateral: 150,
+            provider_did: "did:store".into(),
+            storage_descriptor: Some(digest),
+            unit: unit.map(str::to_string),
+            units_per_epoch: if unit.is_some() { 1 << 30 } else { 0 },
+        };
+        claim_tx(&executor, &mut chain, &writer, offer).await;
+        let claim_id = tenzro_vm::native::compute_claim::claim_id_for(&writer, 0);
+        let accept = tenzro_types::transaction::ComputeClaimOp::Accept {
+            claim_id: claim_id.clone(),
+            max_total: 300,
+            placement: None,
+        };
+        claim_tx(&executor, &mut chain, &buyer, accept).await;
+        (chain, claim_id)
+    }
+
+    /// A possession probe of `did:store` and the holder's signed answer, as
+    /// [`perform`] builds it: the descriptor's bincode bytes and a proof of
+    /// the object at the probe's positions.
+    fn possession_answer(
+        claim_id: &str,
+        shards: &[Vec<u8>],
+        descriptor: &tenzro_storage_provider::ObjectDescriptor,
+        at_ms: i64,
+    ) -> (SlaProbe, SlaResponse) {
+        let mgr = tenzro_model::SlaManager::new(
+            tenzro_crypto::keys::Address::new([1u8; 20]),
+            tenzro_crypto::vrf::VrfSecretKey([9u8; 32]),
+        );
+        let probe = mgr
+            .issue_probe(
+                None,
+                "did:store",
+                0,
+                0,
+                at_ms + 60_000,
+                Some(CapacityWork::Possession {
+                    samples: POSSESSION_SAMPLES,
+                }),
+            )
+            .unwrap();
+        let challenge = tenzro_storage_provider::PdpChallenge {
+            object_id: descriptor.object_id.clone(),
+            nonce: tenzro_model::possession_nonce(&probe.challenge_nonce, claim_id),
+            samples: POSSESSION_SAMPLES as usize,
+        };
+        let proof = tenzro_storage_provider::prove(&challenge, &descriptor.shards, |i| {
+            Ok(shards[i].clone())
+        })
+        .unwrap();
+        let deals = vec![tenzro_model::PossessionDeal {
+            claim_id: claim_id.into(),
+            descriptor: bincode::serialize(descriptor).unwrap(),
+            proof: bincode::serialize(&proof).unwrap(),
+        }];
+        let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
+            tenzro_crypto::testing::TestHybridSigner::random(),
+        ));
+        let response = tenzro_model::SlaManager::build_response(
+            &probe,
+            tenzro_types::primitives::Address::new([2u8; 32]),
+            &signer,
+            at_ms,
+            Some(CapacityResult::Possession { deals }),
+        )
+        .unwrap();
+        (probe, response)
+    }
+
+    /// A holder that proves the object its storage claim commits to keeps
+    /// the hour, and one that answers with another object's proof does not.
+    /// The validator reads the proof against the descriptor's shards; it
+    /// cannot read the whole descriptor back from its bincode bytes.
+    #[tokio::test]
+    async fn a_proven_object_keeps_its_storage_claim() {
+        let (shards, descriptor) = stored_object();
+        let encoded = bincode::serialize(&descriptor).unwrap();
+        assert!(
+            bincode::deserialize::<tenzro_storage_provider::ObjectDescriptor>(&encoded).is_err(),
+            "the whole descriptor does not read back from bincode"
+        );
+        let (chain, claim_id) = held_storage_claim(&descriptor, None).await;
+        let at = 10 * HOUR + 1_000;
+        let (probe, response) = possession_answer(&claim_id, &shards, &descriptor, at);
+        assert!(possession_kept(&chain, &probe, &response, at, None));
+        assert!(capacity_kept(&chain, &probe, &response, at, None, None));
+
+        let mut other = descriptor.clone();
+        other.shards[0].chunk_root = "00".repeat(32);
+        let (probe, response) = possession_answer(&claim_id, &shards, &other, at);
+        assert!(
+            !possession_kept(&chain, &probe, &response, at, None),
+            "a descriptor the claim did not commit to proves nothing"
+        );
+    }
+
+    fn storage_claim(unit: Option<&str>) -> tenzro_vm::native::compute_claim::ClaimRecord {
+        tenzro_vm::native::compute_claim::ClaimRecord {
+            claim_id: "claim".into(),
+            writer: String::new(),
+            holder: None,
+            hardware_class: 1,
+            region: String::new(),
+            delivery_start_ms: 0,
+            epochs: 1,
+            strike_per_epoch: 1,
+            provider_did: "did:store".into(),
+            storage_descriptor: Some("ab".repeat(32)),
+            unit: unit.map(str::to_string),
+            units_per_epoch: 1 << 30,
+            epochs_settled: 0,
+            collateral: 0,
+            payment: 0,
+            placement: None,
+            state: tenzro_vm::native::compute_claim::ClaimState::Held,
+        }
+    }
+
+    fn set_param(chain: &mut tenzro_vm::StateAdapter, key: &str, value: u64) {
+        chain.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::governed_param_key(key).as_bytes(),
+            value.to_le_bytes().to_vec(),
+        );
+    }
+
+    /// A proof for a hot claim that arrives after the hot deadline counts
+    /// while the class rule is dormant and stops counting once it is live;
+    /// the same delay still meets the cold deadline, and a claim with no
+    /// class is held to the probe window alone on both sides.
+    #[test]
+    fn a_late_proof_misses_its_class_only_once_the_rule_is_live() {
+        use tenzro_vm::native::storage_class::{KEY, StorageClass};
+        let (hot, cold, classless) = (
+            storage_claim(Some("stored_bytes@hot")),
+            storage_claim(Some("stored_bytes@cold")),
+            storage_claim(None),
+        );
+        let mut chain = tenzro_vm::StateAdapter::new();
+        set_param(&mut chain, StorageClass::Hot.deadline_param(), 2_000);
+        set_param(&mut chain, StorageClass::Cold.deadline_param(), 20_000);
+        let late = Some(5_000);
+
+        for claim in [&hot, &cold, &classless] {
+            assert!(in_class_time(&chain, claim, late), "dormant");
+            assert!(in_class_time(&chain, claim, None), "dormant, untimed");
+        }
+
+        set_param(&mut chain, KEY, 0);
+        assert!(in_class_time(&chain, &hot, Some(2_000)), "on the deadline");
+        assert!(!in_class_time(&chain, &hot, late), "past the hot deadline");
+        assert!(
+            in_class_time(&chain, &hot, None),
+            "an answer this validator kept no issue time for is held to the window alone"
+        );
+        assert!(in_class_time(&chain, &cold, late));
+        assert!(in_class_time(&chain, &classless, late));
+        assert!(in_class_time(&chain, &classless, None));
+    }
+
+    /// An object of a hot claim proven in time keeps the hour; the same
+    /// proof past the hot deadline loses it once the rule is live, and keeps
+    /// it while the rule is dormant; the rate is reported only once live,
+    /// and only for what was proven in time.
+    #[tokio::test]
+    async fn a_hot_claim_is_kept_only_by_a_proof_inside_its_deadline() {
+        use tenzro_vm::native::storage_class::{KEY, StorageClass};
+        let (shards, descriptor) = stored_object();
+        let (mut chain, claim_id) = held_storage_claim(&descriptor, Some("stored_bytes@hot")).await;
+        let at = 10 * HOUR + 1_000;
+        let (probe, response) = possession_answer(&claim_id, &shards, &descriptor, at);
+        set_param(&mut chain, StorageClass::Hot.deadline_param(), 5_000);
+
+        assert!(
+            possession_kept(&chain, &probe, &response, at, Some(6_000)),
+            "dormant"
+        );
+        assert_eq!(
+            possession_rate(&chain, &probe, &response, at - 2_000, at),
+            None
+        );
+
+        set_param(&mut chain, KEY, 0);
+        assert!(possession_kept(&chain, &probe, &response, at, Some(2_000)));
+        assert!(possession_kept(&chain, &probe, &response, at, Some(5_000)));
+        assert!(!possession_kept(&chain, &probe, &response, at, Some(6_000)));
+        assert!(
+            possession_kept(&chain, &probe, &response, at, None),
+            "untimed"
+        );
+        assert_eq!(
+            possession_rate(&chain, &probe, &response, at - 2_000, at),
+            Some(per_second(POSSESSION_SAMPLES.into(), at - 2_000, at))
+        );
+        assert_eq!(
+            possession_rate(&chain, &probe, &response, at - 6_000, at),
+            None
+        );
+    }
+
+    /// The same delay meets the cold deadline.
+    #[tokio::test]
+    async fn a_cold_claim_is_kept_by_a_proof_a_hot_one_would_lose() {
+        use tenzro_vm::native::storage_class::{KEY, StorageClass};
+        let (shards, descriptor) = stored_object();
+        let (mut chain, claim_id) =
+            held_storage_claim(&descriptor, Some("stored_bytes@cold")).await;
+        let at = 10 * HOUR + 1_000;
+        let (probe, response) = possession_answer(&claim_id, &shards, &descriptor, at);
+        set_param(&mut chain, StorageClass::Cold.deadline_param(), 20_000);
+        set_param(&mut chain, KEY, 0);
+        assert!(possession_kept(&chain, &probe, &response, at, Some(6_000)));
+        assert!(!possession_kept(
+            &chain,
+            &probe,
+            &response,
+            at,
+            Some(21_000)
+        ));
     }
 
     fn matmul_probe_and_signer() -> (
@@ -428,7 +845,7 @@ mod tests {
             VrfSecretKey([9u8; 32]),
         );
         let probe = mgr
-            .issue_probe("unit-0", 0, 0, 10_000, Some(burst_work()))
+            .issue_probe(None, "unit-0", 0, 0, 10_000, Some(burst_work()))
             .unwrap();
         let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
             TestHybridSigner::random(),
@@ -460,11 +877,11 @@ mod tests {
 
         let chain = tenzro_vm::StateAdapter::new();
         assert!(
-            possession_kept(&chain, &probe, &response, 2_000),
+            possession_kept(&chain, &probe, &response, 2_000, None),
             "the old storage-only gate has nothing due and waves this through"
         );
         assert!(
-            !capacity_kept(&chain, &probe, &response, 2_000, measured),
+            !capacity_kept(&chain, &probe, &response, 2_000, None, measured),
             "the new gate requires the work itself to verify"
         );
     }
@@ -486,8 +903,10 @@ mod tests {
         assert_eq!(measured, None, "a bogus proof must not verify");
 
         let chain = tenzro_vm::StateAdapter::new();
-        assert!(possession_kept(&chain, &probe, &response, 2_000));
-        assert!(!capacity_kept(&chain, &probe, &response, 2_000, measured));
+        assert!(possession_kept(&chain, &probe, &response, 2_000, None));
+        assert!(!capacity_kept(
+            &chain, &probe, &response, 2_000, None, measured
+        ));
     }
 
     /// A genuine matrix proof keeps the provider available, exactly as
@@ -513,7 +932,9 @@ mod tests {
         assert!(measured.is_some(), "a genuine proof verifies");
 
         let chain = tenzro_vm::StateAdapter::new();
-        assert!(capacity_kept(&chain, &probe, &response, 2_000, measured));
+        assert!(capacity_kept(
+            &chain, &probe, &response, 2_000, None, measured
+        ));
     }
 
     /// The scenario a burst challenge exists for: one operator claims `n +
@@ -543,7 +964,7 @@ mod tests {
         for i in 0..(real_units + over_claimed) {
             let did = format!("unit-{i}");
             let probe = mgr
-                .issue_probe(&did, epoch, 0, deadline, Some(burst_work()))
+                .issue_probe(None, &did, epoch, 0, deadline, Some(burst_work()))
                 .unwrap();
             let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
                 TestHybridSigner::random(),
@@ -575,14 +996,14 @@ mod tests {
             );
             let measured = measure(&probe, &response, 0, 2_000, &trie, None);
             assert!(
-                possession_kept(&chain, &probe, &response, 2_000),
+                possession_kept(&chain, &probe, &response, 2_000, None),
                 "the old gate is blind to compute content and keeps every unit"
             );
-            let kept = capacity_kept(&chain, &probe, &response, 2_000, measured);
+            let kept = capacity_kept(&chain, &probe, &response, 2_000, None, measured);
             tally.record(&did, epoch, !score.is_failure() && kept);
         }
 
-        let outcomes = tally.take_epoch(epoch, &|_| None);
+        let outcomes = tally.take_epoch(epoch, &|_| None, &crate::sla_attest::majority);
         for i in 0..real_units {
             let did = format!("unit-{i}");
             assert!(

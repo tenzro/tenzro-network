@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 pub enum EventsCommand {
     /// Follow the chain's events from a cursor
     Subscribe(EventSubscribeCmd),
-    /// Query a range of the chain's events, with proofs
+    /// Query the chain's events with proofs: the newest first, or a range read forward
     History(EventHistoryCmd),
     /// Verify an event from genesis, as a light client
     Verify(EventVerifyCmd),
@@ -147,18 +147,22 @@ impl EventSubscribeCmd {
     }
 }
 
-/// Query a range of the chain's events, each with its proof
+/// Query the chain's events, each with its proof: the newest first, or a
+/// range read forward from a start
 #[derive(Debug, Parser)]
 pub struct EventHistoryCmd {
-    /// Start at this height
-    #[arg(long, conflicts_with = "from_cursor")]
+    /// Read forward from this height (0 for the oldest)
+    #[arg(long, conflicts_with_all = ["from_cursor", "before_cursor"])]
     from_height: Option<u64>,
-    /// Resume after this cursor (height:tx_index:event_index)
-    #[arg(long)]
+    /// Read forward after this cursor (height:tx_index:event_index)
+    #[arg(long, conflicts_with = "before_cursor")]
     from_cursor: Option<String>,
-    /// Stop at this cursor, inclusive
-    #[arg(long)]
+    /// Stop at this cursor, inclusive, reading forward
+    #[arg(long, conflicts_with = "before_cursor")]
     to_cursor: Option<String>,
+    /// The newest events before this cursor, newest first
+    #[arg(long)]
+    before_cursor: Option<String>,
     /// Event types (comma-separated): log, transaction_included
     #[arg(long)]
     types: Option<String>,
@@ -196,6 +200,9 @@ impl EventHistoryCmd {
         if let Some(c) = &self.to_cursor {
             params["to_cursor"] = serde_json::json!(c);
         }
+        if let Some(c) = &self.before_cursor {
+            params["before_cursor"] = serde_json::json!(c);
+        }
         let result: serde_json::Value = rpc.call("tenzro_queryEvents", params).await?;
         spinner.finish_and_clear();
 
@@ -208,6 +215,9 @@ impl EventHistoryCmd {
         }
         if let Some(c) = result["cursor"].as_str() {
             output::print_info(&format!("Next page: --from-cursor {c}"));
+        }
+        if let Some(c) = result["before_cursor"].as_str() {
+            output::print_info(&format!("Older page: --before-cursor {c}"));
         }
         Ok(())
     }
@@ -239,7 +249,7 @@ impl EventVerifyCmd {
                 serde_json::json!({ "cursor": self.cursor, "anchor_index": anchor }),
             )
             .await?;
-        let proof: tenzro_consensus::event_proof::EventProof =
+        let proof: tenzro_light::event_proof::EventProof =
             serde_json::from_value(result["proof"].clone())
                 .map_err(|e| anyhow::anyhow!("the node's proof does not decode: {e}"))?;
         if proof.event.cursor.to_string() != self.cursor {
@@ -249,8 +259,11 @@ impl EventVerifyCmd {
                 self.cursor
             );
         }
-        client
-            .verify_event(&proof)
+        let latest = client
+            .latest()
+            .ok_or_else(|| anyhow::anyhow!("the light client has accepted no checkpoint"))?;
+        proof
+            .verify(latest)
             .map_err(|e| anyhow::anyhow!("the proof does not verify: {e}"))?;
         output::print_success("Event verified against a certified checkpoint");
         output::print_field("Cursor", &self.cursor);
@@ -265,7 +278,7 @@ impl EventVerifyCmd {
 /// selects
 #[derive(Debug, Parser)]
 pub struct EventCompleteCmd {
-    /// Start at this height
+    /// Start at this height (default: the oldest held)
     #[arg(long, conflicts_with = "from_cursor")]
     from_height: Option<u64>,
     /// Resume after this cursor (height:tx_index:event_index)
@@ -296,7 +309,7 @@ pub struct EventCompleteCmd {
 impl EventCompleteCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        use tenzro_consensus::event_proof::{CompletenessProof, EventProof};
+        use tenzro_light::event_proof::{CompletenessProof, EventProof};
 
         output::print_header("Complete Event Range");
         let rpc = RpcClient::new(&self.rpc);
@@ -314,22 +327,23 @@ impl EventCompleteCmd {
             "completeness": true,
             "anchor_index": compact.checkpoint.index,
         });
-        if let Some(h) = self.from_height {
-            params["from_height"] = serde_json::json!(h);
-        }
-        if let Some(c) = &self.from_cursor {
-            params["from_cursor"] = serde_json::json!(c);
+        match &self.from_cursor {
+            Some(c) => params["from_cursor"] = serde_json::json!(c),
+            None => params["from_height"] = serde_json::json!(self.from_height.unwrap_or(0)),
         }
         if let Some(c) = &self.to_cursor {
             params["to_cursor"] = serde_json::json!(c);
         }
         let result: serde_json::Value = rpc.call("tenzro_queryEvents", params).await?;
+        let latest = client
+            .latest()
+            .ok_or_else(|| anyhow::anyhow!("the light client has accepted no checkpoint"))?;
         let mut answer = Vec::new();
         for entry in result["events"].as_array().cloned().unwrap_or_default() {
             let proof: EventProof = serde_json::from_value(entry["proof"].clone())
                 .map_err(|e| anyhow::anyhow!("an event proof does not decode: {e}"))?;
-            client
-                .verify_event(&proof)
+            proof
+                .verify(latest)
                 .map_err(|e| anyhow::anyhow!("event {}: {e}", proof.event.cursor))?;
             answer.push(proof.event);
         }

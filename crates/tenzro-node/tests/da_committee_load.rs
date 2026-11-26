@@ -44,7 +44,7 @@ fn session_of(seed: u8) -> ImmediateRecordSigner {
 use tenzro_node::da_committee::{
     CommitteeMember, CommitteeView, DaCommitteeBackend, DaCommitteeError, DaCommitteeStore,
     DaCommitteeSurface, MemberAttestation, PossessionProof, StoredSliver, attestation_message,
-    challenge_message, committee_address,
+    challenge_message,
 };
 use tenzro_storage::RocksDbStore;
 use tenzro_storage::da::DaBackend;
@@ -58,6 +58,15 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// A validator's ledger account. It is not derived from the member's identity
+/// key: a node finds its own seat by key, never by address.
+fn validator_account(seed: u8) -> Address {
+    let mut account = [0u8; 32];
+    account[0] = 0xa0;
+    account[1] = seed;
+    Address::new(account)
 }
 
 /// Static committee of validators with test identity keys.
@@ -75,7 +84,7 @@ impl StaticCommittee {
             let key = TestHybridSigner::p256_only(kp).public_key().clone();
             members.push(CommitteeMember {
                 index,
-                address: committee_address(&key),
+                address: validator_account(kp),
                 public_key: Some(key),
             });
             keypairs.push(kp);
@@ -112,9 +121,7 @@ impl WireMeshSurface {
             let db = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
             stores.push(Arc::new(DaCommitteeStore::with_storage(db).unwrap()));
             signers.push(session_of(*kp));
-            addresses.push(committee_address(
-                TestHybridSigner::p256_only(*kp).public_key(),
-            ));
+            addresses.push(validator_account(*kp));
             dirs.push(dir);
         }
         Self {

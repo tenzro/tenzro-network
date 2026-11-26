@@ -414,6 +414,7 @@ impl RouteAdapter for BitcoinAdapter {
             token_pool: route.peer,
             token: route.local_endpoint,
             amount: u128::from(deposit.value),
+            finality: super::finality::WAIT_FOR_FINALITY,
         })
     }
 

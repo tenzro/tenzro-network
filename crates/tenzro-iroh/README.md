@@ -20,7 +20,7 @@ endpoint records and relays.
 | `EndpointRecord`       | The machine's hardware key certifying a transport endpoint key (the per-boot `EndpointId` for iroh), its relays, scope and sequence. `verify` refuses a record signed by another identity, expired, stale, or naming another endpoint. |
 | `DiscoveryStore`       | Tenzro's discovery network: verified records, answered on the `tenzro/discovery` ALPN and used as the endpoint's address lookup. |
 | `RelayServer`          | The relay role: the iroh relay protocol and the operator's own record (`/identity`) on one HTTP listener. |
-| `IdentityTransport`    | Admits relays by their operators' records, keeps this machine's record published to known peers and pulls theirs. |
+| `IdentityTransport`    | Admits relays by their operators' records, keeps this machine's record published to known peers and pulls theirs. Once `hold_dials_to` gives it an isolated `IdentityGate` (a validator in enforce mode), it dials only the boot list and the validators' machines; inbound connections still pass the identity gate as before. |
 
 `publish_path` is the path every large-artifact publish takes. It imports the
 file with `ImportMode::TryReference`, so a multi-gigabyte model artifact is

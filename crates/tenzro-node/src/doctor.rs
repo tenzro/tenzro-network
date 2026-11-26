@@ -69,6 +69,40 @@ async fn node_load(rpc_addr: &str) -> Option<LoadStatus> {
     serde_json::from_str(&resp.text().await.ok()?).ok()
 }
 
+/// The grant of the key holder that holds the node's key in another
+/// machine's TPM, as the holder answers at its socket. It is read there and
+/// not from the node, so it shows while a node waits for its grant before it
+/// serves anything.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyGrant {
+    /// The key holder's socket.
+    pub socket: PathBuf,
+    /// Why the node cannot sign through the holder yet, when it cannot.
+    pub wanted: Option<String>,
+    /// The minutes the grant still stands, when one stands.
+    pub minutes_left: Option<u64>,
+}
+
+/// Asks the key holder at `socket` for its grant.
+#[cfg(unix)]
+fn key_grant(socket: &Path) -> KeyGrant {
+    use crate::tpm_key_holder::{grant_wanted, holder_id};
+    let now = crate::remote_tpm::now_ms();
+    let wanted = grant_wanted(socket, now).map(|w| w.reason().to_string());
+    let minutes_left = match wanted {
+        None => holder_id(socket)
+            .ok()
+            .and_then(|(_, end)| end)
+            .map(|end| end.saturating_sub(now) / 60_000),
+        Some(_) => None,
+    };
+    KeyGrant {
+        socket: socket.to_path_buf(),
+        wanted,
+        minutes_left,
+    }
+}
+
 /// The whole report.
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -93,6 +127,9 @@ pub struct DoctorReport {
     /// How the node's TPM is answering: its summary line, when the node
     /// reported it.
     pub tpm: Option<String>,
+    /// The key holder's grant, for a node whose key is held in another
+    /// machine's TPM.
+    pub key_grant: Option<KeyGrant>,
     /// The running node's load level and what it is shedding, when it
     /// answered.
     pub load: Option<LoadStatus>,
@@ -129,6 +166,13 @@ async fn probe_port_mapping() -> Option<PortMapping> {
 /// The admin-page ticket to read the node's report with: the current one
 /// while it is fresh, else a new one.
 fn ticket(data_dir: &Path) -> Result<String, String> {
+    if !data_dir.is_dir() {
+        return Err(format!(
+            "no node data directory at {}; run doctor as the user the node runs as, with the \
+             node's --config or --data-dir",
+            data_dir.display()
+        ));
+    }
     let path = data_dir.join(crate::access::PAGE_TICKET_FILE);
     let fresh = std::fs::metadata(&path)
         .and_then(|m| m.modified())
@@ -138,7 +182,13 @@ fn ticket(data_dir: &Path) -> Result<String, String> {
     if fresh && let Ok(t) = std::fs::read_to_string(&path) {
         return Ok(t.trim().to_string());
     }
-    crate::access::issue_page_ticket(data_dir)
+    crate::access::issue_page_ticket(data_dir).map_err(|e| {
+        format!(
+            "{e}; run doctor as the user the node runs as, so it can write the admin-page ticket \
+             in {}",
+            data_dir.display()
+        )
+    })
 }
 
 /// The running node's connectivity report, read from its loopback admin page
@@ -157,6 +207,14 @@ async fn node_connectivity(rpc_addr: &str, data_dir: &Path) -> Result<Connectivi
         })?;
     let status = resp.status();
     let body = resp.text().await.map_err(|e| e.to_string())?;
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!(
+            "the node at {rpc_addr} refused the admin-page ticket from {} ({status}); the node \
+             answering there uses another data directory: run doctor with that node's --config or \
+             --data-dir",
+            data_dir.display()
+        ));
+    }
     if !status.is_success() {
         return Err(format!("{status}: {body}"));
     }
@@ -167,29 +225,15 @@ async fn node_connectivity(rpc_addr: &str, data_dir: &Path) -> Result<Connectivi
 pub fn fixes(report: &DoctorReport) -> Vec<String> {
     let mut out = Vec::new();
     let port = report.port;
-    if let Some(l) = &report.load
-        && (l.level == "HIGH" || l.level == "CRITICAL")
-    {
-        out.push(format!(
-            "The node is at load {} and is shedding {}. Consensus and signing are protected; \
-             stop other services on this machine or move them to tenzro-aux.slice \
-             (docs/LOAD-PROTECTION.md), and check swap with `free -h`.",
-            l.level,
-            l.shedding.join(", ")
-        ));
-    }
+    out.extend(report.load.as_ref().and_then(load_fix));
     let inbound_hint = report.firewall.allows_node == Some(false);
-    if report
-        .tpm
-        .as_deref()
-        .is_some_and(|t| t.starts_with("stalled"))
-    {
-        out.push(
-            "The TPM stopped answering. The node holds normal commands back and probes it; \
-             votes keep waiting for the chip. Check the machine's load and memory (swap), and the \
-             kernel log for `tpm` messages; no restart is needed once it answers."
-                .to_string(),
-        );
+    out.extend(tpm_fix(report.tpm.as_deref()));
+    if let Some(wanted) = report.key_grant.as_ref().and_then(|g| g.wanted.as_ref()) {
+        out.push(format!(
+            "The node is waiting for the operator's approval: {wanted}. A node waiting at start \
+             answers nothing until then, and a running one signs nothing; either goes on by \
+             itself once the grant is installed, with no restart."
+        ));
     }
     if report.ipv4_route.is_none() && report.ipv6_route.is_none() {
         out.push(
@@ -203,33 +247,19 @@ pub fn fixes(report: &DoctorReport) -> Vec<String> {
         );
     }
     let Some(node) = &report.node else {
+        if let Some(err) = &report.node_error {
+            out.push(format!(
+                "The running node could not be read, so its NAT, relay, TPM and load results are \
+                 missing: {err}"
+            ));
+        }
         if inbound_hint {
             out.push(optional_inbound(report));
         }
         return out;
     };
-    if !node.relays.iter().any(|r| r.connected) && !report.relay_only {
-        out.push(
-            "No relay is connected. The node reaches relays over HTTPS (TCP 443): check that outbound HTTPS is \
-             allowed, or name a reachable relay with --boot-nodes did:tenzro:machine:<id>@https://<relay>."
-                .to_string(),
-        );
-    }
-    match (node.reachability, node.nat) {
-        (Reachability::Unreachable, _) => out.push(
-            "Peers cannot reach this node yet. If it persists, check the relay and firewall lines above.".to_string(),
-        ),
-        (Reachability::Relay, NatKind::EndpointDependent) => out.push(format!(
-            "The NAT in front of this machine gives each peer a different port (often called symmetric NAT), so \
-             most peers reach the node through a relay. For direct paths, turn on UPnP, NAT-PMP or PCP on the \
-             router, or forward UDP {port} to this machine."
-        )),
-        (Reachability::Relay, NatKind::Unknown) if node.observed.is_empty() => out.push(format!(
-            "No peer has reached this node over UDP yet. Peers reach it through relays, over HTTPS. If this \
-             stays so, this network may block UDP: allow outbound UDP, or forward UDP {port} to this machine."
-        )),
-        _ => {}
-    }
+    out.extend(relay_fix(node, report.relay_only));
+    out.extend(reach_fix(node, port).map(|(_, fix)| fix));
     if inbound_hint
         && !matches!(
             node.reachability,
@@ -238,19 +268,134 @@ pub fn fixes(report: &DoctorReport) -> Vec<String> {
     {
         out.push(optional_inbound(report));
     }
-    if report.validator
+    out.extend(validator_fix(report.validator, node, port));
+    out
+}
+
+/// A finding the running node can make about itself, with nothing from
+/// outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finding {
+    /// It sheds work; `critical` at the CRITICAL load level.
+    Load {
+        critical: bool,
+    },
+    TpmStalled,
+    NoRelay,
+    Unreachable,
+    SymmetricNat,
+    NoUdp,
+    ValidatorNotDirect,
+}
+
+/// What `report` would find from the running node alone, each with its fix,
+/// in the order `fixes` gives them: its load, its TPM, and, once its endpoint
+/// is up (`node`), its relays and how peers reach it on UDP `port`.
+pub fn findings(
+    load: Option<&LoadStatus>,
+    tpm: Option<&str>,
+    node: Option<&Connectivity>,
+    relay_only: bool,
+    validator: bool,
+    port: u16,
+) -> Vec<(Finding, String)> {
+    let mut out = Vec::new();
+    if let Some(load) = load {
+        out.extend(load_fix(load).map(|fix| {
+            (
+                Finding::Load {
+                    critical: load.level == "CRITICAL",
+                },
+                fix,
+            )
+        }));
+    }
+    out.extend(tpm_fix(tpm).map(|fix| (Finding::TpmStalled, fix)));
+    if let Some(node) = node {
+        out.extend(relay_fix(node, relay_only).map(|fix| (Finding::NoRelay, fix)));
+        out.extend(reach_fix(node, port));
+        out.extend(
+            validator_fix(validator, node, port).map(|fix| (Finding::ValidatorNotDirect, fix)),
+        );
+    }
+    out
+}
+
+/// The fix for a node at a load where it sheds work.
+fn load_fix(load: &LoadStatus) -> Option<String> {
+    (load.level == "HIGH" || load.level == "CRITICAL").then(|| {
+        format!(
+            "The node is at load {} and is shedding {}. Consensus and signing are protected; \
+             stop other services on this machine or move them to tenzro-aux.slice \
+             (docs/LOAD-PROTECTION.md), and check swap with `free -h`.",
+            load.level,
+            load.shedding.join(", ")
+        )
+    })
+}
+
+/// The fix for a TPM whose health summary is `tpm`, when it stopped answering.
+fn tpm_fix(tpm: Option<&str>) -> Option<String> {
+    tpm.is_some_and(|t| t.starts_with("stalled")).then(|| {
+        "The TPM stopped answering. The node holds normal commands back and probes it; \
+         votes keep waiting for the chip. Check the machine's load and memory (swap), and the \
+         kernel log for `tpm` messages; no restart is needed once it answers."
+            .to_string()
+    })
+}
+
+/// The fix for a node that is connected to no relay, unless it runs
+/// relay-only.
+fn relay_fix(node: &Connectivity, relay_only: bool) -> Option<String> {
+    (!node.relays.iter().any(|r| r.connected) && !relay_only).then(|| {
+        "No relay is connected. The node reaches relays over HTTPS (TCP 443): check that outbound HTTPS is \
+         allowed, or name a reachable relay with --boot-nodes did:tenzro:machine:<id>@https://<relay>."
+            .to_string()
+    })
+}
+
+/// What keeps peers from reaching the node on UDP `port` directly, with its
+/// fix.
+fn reach_fix(node: &Connectivity, port: u16) -> Option<(Finding, String)> {
+    match (node.reachability, node.nat) {
+        (Reachability::Unreachable, _) => Some((
+            Finding::Unreachable,
+            "Peers cannot reach this node yet. If it persists, check that a relay is connected and that the host \
+             firewall lets the node out.".to_string(),
+        )),
+        (Reachability::Relay, NatKind::EndpointDependent) => Some((
+            Finding::SymmetricNat,
+            format!(
+                "The NAT in front of this machine gives each peer a different port (often called symmetric NAT), so \
+                 most peers reach the node through a relay. For direct paths, turn on UPnP, NAT-PMP or PCP on the \
+                 router, or forward UDP {port} to this machine."
+            ),
+        )),
+        (Reachability::Relay, NatKind::Unknown) if node.observed.is_empty() => Some((
+            Finding::NoUdp,
+            format!(
+                "No peer has reached this node over UDP yet. Peers reach it through relays, over HTTPS. If this \
+                 stays so, this network may block UDP: allow outbound UDP, or forward UDP {port} to this machine."
+            ),
+        )),
+        _ => None,
+    }
+}
+
+/// The fix for a validator that has no direct address on UDP `port`.
+fn validator_fix(validator: bool, node: &Connectivity, port: u16) -> Option<String> {
+    (validator
         && !matches!(
             node.reachability,
             Reachability::Public | Reachability::PortMapped
-        )
-    {
-        out.push(format!(
+        ))
+    .then(|| {
+        format!(
             "This node is a validator. Validators exchange consensus messages with every other validator, so \
              give it a direct address: a host with a public IP, a port forward of UDP {port}, or a router with \
              UPnP, NAT-PMP or PCP turned on."
-        ));
-    }
-    out
+        )
+    })
 }
 
 /// The optional step for a host firewall that refuses unsolicited inbound
@@ -286,20 +431,36 @@ async fn node_tpm(rpc_addr: &str, data_dir: &Path) -> Option<String> {
     v.get("summary")?.as_str().map(str::to_string)
 }
 
-/// Builds the report for a node with `config`.
-pub async fn report(config: &crate::config::NodeConfig, binary: &Path) -> DoctorReport {
-    let port = config.iroh.bind_addr.port();
-    let firewall = {
-        let binary = binary.to_path_buf();
-        tokio::task::spawn_blocking(move || host_firewall::state(&binary, port))
-            .await
-            .unwrap_or(FirewallState {
-                system: "host firewall".to_string(),
-                enabled: None,
-                allows_node: None,
-                detail: "could not be read".to_string(),
-                fix: None,
-            })
+/// Builds the report for a node with `config` whose key is held through the
+/// key holder at `key_holder`, when it is.
+pub async fn report(
+    config: &crate::config::NodeConfig,
+    binary: &Path,
+    key_holder: Option<&Path>,
+) -> DoctorReport {
+    let bound = host_firewall::node_udp_port(&config.iroh);
+    let port = bound.unwrap_or(config.iroh.bind_addr.port());
+    let firewall = match bound {
+        Some(port) => {
+            let binary = binary.to_path_buf();
+            tokio::task::spawn_blocking(move || host_firewall::state(&binary, port))
+                .await
+                .unwrap_or(FirewallState {
+                    system: "host firewall".to_string(),
+                    enabled: None,
+                    allows_node: None,
+                    detail: "could not be read".to_string(),
+                    fix: None,
+                })
+        }
+        None => FirewallState {
+            system: "host firewall".to_string(),
+            enabled: None,
+            allows_node: None,
+            detail: "the node binds no fixed UDP port (a private node, or a port the system picks); no inbound rule applies"
+                .to_string(),
+            fix: None,
+        },
     };
     let (port_mapping, node, tpm, load) = tokio::join!(
         probe_port_mapping(),
@@ -311,6 +472,23 @@ pub async fn report(config: &crate::config::NodeConfig, binary: &Path) -> Doctor
         Ok(c) => (Some(c), None),
         Err(e) => (None, Some(e)),
     };
+    // The holder answers over a blocking socket: off the runtime's threads.
+    #[cfg(unix)]
+    let key_grant = match key_holder {
+        Some(socket) => {
+            let socket = socket.to_path_buf();
+            tokio::task::spawn_blocking(move || key_grant(&socket))
+                .await
+                .ok()
+        }
+        None => None,
+    };
+    #[cfg(not(unix))]
+    let key_grant = key_holder.map(|socket| KeyGrant {
+        socket: socket.to_path_buf(),
+        wanted: Some("a key holder is reached only on Unix".into()),
+        minutes_left: None,
+    });
     let mut report = DoctorReport {
         port,
         relay_only: config.iroh.relay_only,
@@ -322,6 +500,7 @@ pub async fn report(config: &crate::config::NodeConfig, binary: &Path) -> Doctor
         node,
         node_error,
         tpm,
+        key_grant,
         load,
         fixes: Vec::new(),
     };
@@ -386,6 +565,16 @@ pub fn render(r: &DoctorReport) -> String {
     );
     if let Some(t) = &r.tpm {
         line("TPM", t.clone());
+    }
+    if let Some(g) = &r.key_grant {
+        line(
+            "key grant",
+            match (&g.wanted, g.minutes_left) {
+                (Some(wanted), _) => format!("waiting for the operator's approval: {wanted}"),
+                (None, Some(m)) => format!("stands for another {m} min"),
+                (None, None) => "stands".to_string(),
+            },
+        );
     }
     match &r.node {
         Some(n) => {
@@ -513,9 +702,41 @@ mod tests {
             node,
             node_error: None,
             tpm: None,
+            key_grant: None,
             load: None,
             fixes: Vec::new(),
         }
+    }
+
+    /// A node waiting for its key grant is told so first, with the steps
+    /// that install one, and the report's line names the wait.
+    #[test]
+    fn a_node_waiting_for_its_key_grant_is_told_how_to_approve_it() {
+        let mut r = base(None);
+        r.node_error = Some("no node answered at 127.0.0.1:8545".into());
+        r.key_grant = Some(KeyGrant {
+            socket: "/run/tenzro/holder.sock".into(),
+            wanted: Some(
+                "the key holder has no grant: run `tenzro-node tpm grant-request` and approve it \
+                 with the operator passkey on your own device"
+                    .into(),
+            ),
+            minutes_left: None,
+        });
+        let f = fixes(&r);
+        assert!(
+            f[0].contains("waiting for the operator's approval") && f[0].contains("grant-request"),
+            "{f:?}"
+        );
+        assert!(render(&r).contains("key grant"), "{}", render(&r));
+
+        r.key_grant = Some(KeyGrant {
+            socket: "/run/tenzro/holder.sock".into(),
+            wanted: None,
+            minutes_left: Some(42),
+        });
+        assert!(!fixes(&r).iter().any(|x| x.contains("approval")));
+        assert!(render(&r).contains("stands for another 42 min"));
     }
 
     fn conn(
@@ -544,6 +765,7 @@ mod tests {
                 error: None,
             }],
             forwarders: vec![],
+            paths: vec![],
             punched: 0,
             ipv4: true,
             ipv6: false,
@@ -564,6 +786,43 @@ mod tests {
             f.iter()
                 .any(|x| x.contains("symmetric NAT") && x.contains("forward UDP 9001"))
         );
+    }
+
+    #[test]
+    fn the_node_alone_finds_what_the_report_finds_from_it_in_the_same_words() {
+        let load = LoadStatus {
+            level: "CRITICAL".into(),
+            shedding: vec!["inference".into()],
+        };
+        let node = conn(Reachability::Relay, NatKind::Unknown, false, 0);
+        let found = findings(
+            Some(&load),
+            Some("stalled for 30s"),
+            Some(&node),
+            false,
+            true,
+            9001,
+        );
+        assert_eq!(
+            found.iter().map(|(f, _)| *f).collect::<Vec<_>>(),
+            [
+                Finding::Load { critical: true },
+                Finding::TpmStalled,
+                Finding::NoRelay,
+                Finding::NoUdp,
+                Finding::ValidatorNotDirect,
+            ]
+        );
+        let mut r = base(Some(node));
+        r.load = Some(load);
+        r.tpm = Some("stalled for 30s".into());
+        r.validator = true;
+        let fixes = fixes(&r);
+        assert!(
+            found.iter().all(|(_, fix)| fixes.contains(fix)),
+            "{found:?} {fixes:?}"
+        );
+        assert!(findings(None, Some("healthy"), None, false, true, 9001).is_empty());
     }
 
     #[test]
@@ -614,6 +873,29 @@ mod tests {
         // A node peers already reach directly needs no rule at all.
         r.node = Some(conn(Reachability::Public, NatKind::None, true, 2));
         assert!(fixes(&r).is_empty());
+    }
+
+    #[test]
+    fn a_node_that_could_not_be_read_is_never_nothing_to_fix() {
+        let mut r = base(None);
+        r.node_error = Some("no node answered at 127.0.0.1:8545".into());
+        r.fixes = fixes(&r);
+        assert_eq!(r.fixes.len(), 1, "{:?}", r.fixes);
+        assert!(r.fixes[0].contains("could not be read") && r.fixes[0].contains("127.0.0.1:8545"));
+        let text = render(&r);
+        assert!(!text.contains("Nothing to fix"), "{text}");
+        assert!(text.contains("To fix:"), "{text}");
+    }
+
+    #[test]
+    fn a_missing_data_directory_names_the_directory_instead_of_an_os_error() {
+        let dir = std::env::temp_dir().join(format!("doctor-missing-{}", std::process::id()));
+        let e = ticket(&dir).unwrap_err();
+        assert!(
+            e.contains("no node data directory") && e.contains("--data-dir"),
+            "{e}"
+        );
+        assert!(!dir.exists(), "doctor must not create the data directory");
     }
 
     #[test]

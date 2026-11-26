@@ -33,7 +33,7 @@ hold them; the controller's approval is a passkey assertion.
 
 These are the steps the live end-to-end test
 (`crates/tenzro-openshell/tests/openshell_e2e.rs`) runs against a Tenzro node,
-with OpenShell 0.1.5 (`openshell` and `openshell-gateway`, the release
+with OpenShell 0.1.7 (`openshell` and `openshell-gateway`, the release
 `crates/tenzro-openshell` pins).
 
 1. Admit the serving node. On the machine that runs the node and the
@@ -259,6 +259,14 @@ payment request, the middleware checks the rail, the payee and the amount
 against the Terms and pays from the agent's wallet. Each attempt is a `spend`
 entry whose action is `<rail> <url>`: allowed with the transaction it
 produced, or refused with the reason (for example `max_transaction_value`).
+
+A tool's result is content from outside the agent's Terms. When the middleware
+allows an MCP `tools/call`, it labels the agent, and for one hour after the
+last such call every payment the agent proposes counts as derived from
+untrusted input: it is refused above the Terms' `tainted_value_limit` (absent:
+any value) and to a payee this host has not paid for the agent before. The
+label is held by the supervisor middleware in memory; it covers tool calls
+only, not other responses the sandbox reads.
 
 `openShellPayments(session)` lists both kinds from a verified session, in
 order: `{ seq, at_ms, rail, target, outcome, linked_tx }`, with `rail`

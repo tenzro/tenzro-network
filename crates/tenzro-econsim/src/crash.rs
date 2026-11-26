@@ -13,8 +13,8 @@
 //! - **Z**: no crash and no outside buyers (report).
 //! - **A**: depth and speed of the crash. Pass: with buyers staying, the
 //!   protocol's flows never deepen the fall (amplification at least 0.99).
-//! - **B**: validators sell every reward; issuance controller on and off;
-//!   correlated loss of demand. Pass: the same rule with buyers staying.
+//! - **B**: validators sell every reward, or none; correlated loss of
+//!   demand. Pass: the same rule with buyers staying.
 //! - **C**: a provider floor in USD paid at the chain rate. Pass: a floor
 //!   capped in TNZO never drains the pool (the uncapped rows are a report).
 //! - **D**: a 95% fall in a day with a 1% or 5% hourly fall cap, and the
@@ -119,7 +119,7 @@ fn run(d: &Design, w: &World, s: &Stress, x: &Ext, days: u32) -> Vec<Day> {
     let mut rate = w.price0;
     let mut anchor = w.price0;
     let mut cong = 1.0;
-    let mut mint_mult = 1.0;
+    let mut pool = w.rewards_pool;
     let mut demand_factor = 1.0;
     let mut unbonding: Vec<(u32, f64)> = Vec::new();
     let mut outside = 1.0;
@@ -206,16 +206,16 @@ fn run(d: &Design, w: &World, s: &Stress, x: &Ext, days: u32) -> Vec<Day> {
         usd += buy_usd;
         tnzo -= bought;
         net += buy_usd;
-        if s.controller {
-            let ratio = stake / supply;
-            mint_mult = (mint_mult + d.mint_adj_rate / 365.25 * (1.0 - ratio / d.stake_goal))
-                .clamp(d.mint_min, d.mint_max);
-        }
-        let minted = d.mint_base * (1.0 - d.mint_decay).powf(years) / 365.25 * mint_mult;
-        // Provider floor in USD, paid in TNZO at the chain rate, sold at once.
-        let retainer = (x.retainer_usd_day / rate).min(x.retainer_cap_tnzo_day);
-        supply += minted - burned + retainer;
-        let to_stakers = minted * (1.0 - d.app_reward_share);
+        let paid = (bme::schedule_per_year(d, years) / 365.25).min(pool);
+        pool -= paid;
+        // Provider floor in USD, paid from the rewards pool in TNZO at the
+        // chain rate, sold at once.
+        let retainer = (x.retainer_usd_day / rate)
+            .min(x.retainer_cap_tnzo_day)
+            .min(pool);
+        pool -= retainer;
+        supply -= burned;
+        let to_stakers = paid * (1.0 - d.app_reward_share);
         let price = usd / tnzo;
         let cover = (w.validator_cost_usd_year / 365.25 / price).min(to_stakers);
         let sell = cover.max(x.sell_share * to_stakers).min(to_stakers) + retainer;
@@ -288,23 +288,20 @@ fn parity() -> f64 {
     let d = Design::default();
     let w = World::default();
     let mut worst: f64 = 0.0;
-    for controller in [true, false] {
-        let s = Stress {
-            price_shock: Some((30, 0.2)),
-            controller,
-            ..Default::default()
-        };
-        let a = bme::run(&d, &w, &s, 730);
-        let b = run(&d, &w, &s, &Ext::off(), 730);
-        for (p, q) in a.iter().zip(&b) {
-            for (u, v) in [
-                (p.price, q.price),
-                (p.rate, q.rate),
-                (p.stake, q.stake),
-                (p.supply, q.supply),
-            ] {
-                worst = worst.max(((u - v) / u).abs());
-            }
+    let s = Stress {
+        price_shock: Some((30, 0.2)),
+        ..Default::default()
+    };
+    let a = bme::run(&d, &w, &s, 730);
+    let b = run(&d, &w, &s, &Ext::off(), 730);
+    for (p, q) in a.iter().zip(&b) {
+        for (u, v) in [
+            (p.price, q.price),
+            (p.rate, q.rate),
+            (p.stake, q.stake),
+            (p.supply, q.supply),
+        ] {
+            worst = worst.max(((u - v) / u).abs());
         }
     }
     worst
@@ -315,7 +312,6 @@ struct Case {
     name: String,
     w: World,
     x: Ext,
-    controller: bool,
 }
 
 /// What one case measured after its crash day.
@@ -340,10 +336,7 @@ pub struct Measured {
 
 fn measure(c: &Case, days: u32) -> Measured {
     let d = Design::default();
-    let s = Stress {
-        controller: c.controller,
-        ..Default::default()
-    };
+    let s = Stress::default();
     let v = run(&d, &c.w, &s, &c.x, days);
     let mut base_x = c.x.clone();
     base_x.crash_day = u32::MAX;
@@ -448,7 +441,6 @@ fn cases() -> Vec<Case> {
             name: format!("Z depth ${:.0}k, no crash, no outside buyers", depth / 1e3),
             w,
             x,
-            controller: true,
         });
     }
     // A. Depth and speed of the crash, protocol as on main.
@@ -467,18 +459,12 @@ fn cases() -> Vec<Case> {
                     ),
                     w: thin(depth),
                     x,
-                    controller: true,
                 });
             }
         }
     }
-    // B. Validators sell all rewards; controller on/off; correlated demand loss.
-    for (sell, ctl, dem) in [
-        (1.0, true, 1.0),
-        (1.0, false, 1.0),
-        (1.0, true, 0.3),
-        (0.0, true, 0.3),
-    ] {
+    // B. Validators sell all rewards or none; correlated demand loss.
+    for (sell, dem) in [(1.0, 1.0), (1.0, 0.3), (0.0, 0.3)] {
         let mut x = base(100_000.0, 0.05, 3);
         x.sell_share = sell;
         x.demand_after = dem;
@@ -489,14 +475,9 @@ fn cases() -> Vec<Case> {
             w.human_buy_usd_day = sell_all_buy;
         }
         cases.push(Case {
-            name: format!(
-                "B -95%/3d, sell {:.0}%, controller {}, demand x{dem}",
-                sell * 100.0,
-                if ctl { "on" } else { "off" }
-            ),
+            name: format!("B -95%/3d, sell {:.0}%, demand x{dem}", sell * 100.0),
             w,
             x,
-            controller: ctl,
         });
     }
     // C. A provider floor in USD paid at the chain rate: uncapped vs TNZO-capped.
@@ -520,7 +501,6 @@ fn cases() -> Vec<Case> {
             ),
             w: thin(100_000.0),
             x,
-            controller: true,
         });
     }
     // D. Rate lag and the bridge: symmetric 1%/h vs fast fall 5%/h; de-risk off/on.
@@ -540,7 +520,6 @@ fn cases() -> Vec<Case> {
             ),
             w: thin(1_000_000.0),
             x,
-            controller: true,
         });
     }
     // E. Exit churn: no cap vs 4%/day, validators selling all, demand x0.3.
@@ -560,7 +539,6 @@ fn cases() -> Vec<Case> {
             ),
             w,
             x,
-            controller: true,
         });
     }
     cases
@@ -572,6 +550,59 @@ pub const DAYS: u32 = 730;
 /// Every case, measured.
 pub fn measured() -> Vec<Measured> {
     cases().iter().map(|c| measure(c, DAYS)).collect()
+}
+
+/// Which flow of the protocol deepens the worst crash of rule 302: the
+/// worst case among A and B with buyers staying, run again with each flow
+/// switched off in turn and with all of them off. A row's amplification is
+/// the same figure as the table's.
+pub fn ablation() -> String {
+    let staying = |c: &Case| {
+        !c.name.contains("x0.3") && (c.name.starts_with("A ") || c.name.starts_with("B "))
+    };
+    let all = cases();
+    let worst = all
+        .iter()
+        .filter(|c| staying(c))
+        .map(|c| (measure(c, DAYS).amplification, c))
+        .fold(None, |a: Option<(f64, &Case)>, b| match a {
+            Some(a) if a.0 <= b.0 => Some(a),
+            _ => Some(b),
+        });
+    let Some((amp, case)) = worst else {
+        return String::new();
+    };
+    let variants: [(&str, fn(&mut Ext)); 7] = [
+        ("as measured", |_| {}),
+        ("agents buy fee USD, not TNZO at the chain rate", |x| {
+            x.buy_at_rate = false
+        }),
+        ("released stake is not sold", |x| x.unbond_sell = 0.0),
+        ("validators sell no reward beyond cost", |x| {
+            x.sell_share = 0.0
+        }),
+        ("no unbonding delay", |x| x.unbond_days = 0),
+        ("no provider floor", |x| x.retainer_usd_day = 0.0),
+        ("every flow above off", |x| {
+            x.buy_at_rate = false;
+            x.unbond_sell = 0.0;
+            x.sell_share = 0.0;
+            x.retainer_usd_day = 0.0;
+        }),
+    ];
+    let mut out = format!(
+        "Ablation of the worst case ({}), amplification {amp:.2}:\n\n| flow switched off | amplification |\n|---|---|\n",
+        case.name
+    );
+    for (name, off) in variants {
+        let mut c = case.clone();
+        off(&mut c.x);
+        out.push_str(&format!(
+            "| {name} | {:.2} |\n",
+            measure(&c, DAYS).amplification
+        ));
+    }
+    out
 }
 
 /// The table of every case.

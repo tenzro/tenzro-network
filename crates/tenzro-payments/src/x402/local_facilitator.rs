@@ -667,7 +667,7 @@ mod tests {
         let req = requirement(pay_to, asset, "1000000", "eip155:84532");
         let digest = LocalFacilitatorVerifier::transfer_digest(&auth, &req, 84532).unwrap();
 
-        let (sig, recid) = sk.sign_prehash_recoverable(&digest).unwrap();
+        let (sig, recid) = sk.sign_prehash_recoverable(&digest);
         let mut sig65 = sig.to_bytes().to_vec();
         sig65.push(recid.to_byte());
         let recovered = crate::x402::erc7710::recover_signer(&digest, &sig65).unwrap();

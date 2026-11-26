@@ -20,6 +20,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tenzro_storage_provider::{ObjectDescriptor, RedundancyScheme, StorageProvider};
 use tenzro_types::primitives::Address;
+use tenzro_vm::native::storage_class::StorageClass;
 use tracing::{debug, info};
 
 use crate::pricing::PricingPolicy;
@@ -50,9 +51,56 @@ pub struct StorageProviderRuntime {
     /// The byte-epoch pricing policy for this provider, read at deal-open
     /// time.
     pricing: Arc<RwLock<PricingPolicy>>,
+    /// Whether the node serves the storage role now, so takes new objects. A
+    /// node configured with it but holding no bond for it keeps the runtime,
+    /// and answers for what it already holds, before the bond lands and after
+    /// it goes.
+    serving: std::sync::atomic::AtomicBool,
+    /// What this provider charges to read each class, wei per gibibyte, in
+    /// [`StorageClass::ALL`] order; 0 reads free.
+    read_rates: Arc<RwLock<[u128; 3]>>,
+    /// The class each object was stored under, when its owner named one.
+    read_classes: dashmap::DashMap<String, StorageClass>,
+    /// Durable store the read classes are written through to.
+    storage: Option<Arc<dyn tenzro_storage::KvStore>>,
+}
+
+/// Key prefix (in `CF_SETTLEMENTS`) of an object's read class.
+const READ_CLASS_PREFIX: &str = "storage_read_class:";
+
+/// What reading `bytes` costs at `rate_per_gib` wei per gibibyte, rounded up.
+pub fn read_charge_wei(bytes: u64, rate_per_gib: u128) -> u128 {
+    u128::from(bytes)
+        .saturating_mul(rate_per_gib)
+        .div_ceil(1 << 30)
 }
 
 impl StorageProviderRuntime {
+    /// Whether the node serves the storage role now, so takes new objects.
+    pub fn serving(&self) -> bool {
+        self.serving.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether a new object may be stored: only while the storage role is
+    /// served. What the runtime already holds is answered for either way.
+    pub fn admit_new_object(&self) -> Result<(), String> {
+        if self.serving() {
+            Ok(())
+        } else {
+            Err(
+                "this node takes no new objects: its storage role is not served now (the bond \
+                 for it is not in chain state); objects it holds are still answered for"
+                    .to_string(),
+            )
+        }
+    }
+
+    /// Starts or stops serving the storage role from this runtime.
+    pub fn set_serving(&self, serving: bool) {
+        self.serving
+            .store(serving, std::sync::atomic::Ordering::Release);
+    }
+
     /// The provider address, resolved now rather than at construction.
     ///
     /// `None` when the node has no resolvable payee yet. Callers must treat
@@ -112,12 +160,70 @@ impl StorageProviderRuntime {
             Some(s) => StorageProvider::with_storage(resolver.clone(), s),
             None => StorageProvider::new(resolver.clone()),
         });
+        let read_classes = dashmap::DashMap::new();
+        if let Some(kv) = &storage
+            && let Ok(rows) =
+                kv.scan_prefix(tenzro_storage::CF_SETTLEMENTS, READ_CLASS_PREFIX.as_bytes())
+        {
+            for (key, value) in rows {
+                let id = String::from_utf8_lossy(&key[READ_CLASS_PREFIX.len()..]).into_owned();
+                if let Some(class) = std::str::from_utf8(&value)
+                    .ok()
+                    .and_then(StorageClass::from_tier)
+                {
+                    read_classes.insert(id, class);
+                }
+            }
+        }
         Self {
             provider,
             store,
             resolver,
             pricing: Arc::new(RwLock::new(policy)),
+            serving: std::sync::atomic::AtomicBool::new(true),
+            read_rates: Arc::new(RwLock::new([0; 3])),
+            read_classes,
+            storage,
         }
+    }
+
+    /// Sets what reading each class costs, wei per gibibyte.
+    pub fn set_read_rates(&self, rates: [u128; 3]) {
+        *self.read_rates.write() = rates;
+        info!(?rates, "Storage read rates set");
+    }
+
+    /// What reading each class costs, wei per gibibyte, fastest class first.
+    pub fn read_rates(&self) -> [u128; 3] {
+        *self.read_rates.read()
+    }
+
+    /// Records the class `object_id` was stored under.
+    pub fn set_read_class(&self, object_id: &str, class: StorageClass) {
+        self.read_classes.insert(object_id.to_string(), class);
+        if let Some(kv) = &self.storage {
+            let key = format!("{READ_CLASS_PREFIX}{object_id}");
+            if let Err(e) = kv.put(
+                tenzro_storage::CF_SETTLEMENTS,
+                key.as_bytes(),
+                class.tier().as_bytes(),
+            ) {
+                tracing::warn!(object_id, error = %e, "Could not persist a storage read class");
+            }
+        }
+    }
+
+    /// What reading `bytes` of `object_id` costs: its class's read rate,
+    /// or nothing when it was stored under no class.
+    pub fn read_charge(&self, object_id: &str, bytes: u64) -> u128 {
+        let Some(class) = self.read_classes.get(object_id).map(|c| *c) else {
+            return 0;
+        };
+        let index = StorageClass::ALL
+            .iter()
+            .position(|c| *c == class)
+            .expect("every class is in ALL");
+        read_charge_wei(bytes, self.read_rates()[index])
     }
 
     /// Convenience constructor for a flat byte-epoch rate.
@@ -247,4 +353,99 @@ pub fn descriptor_digest(descriptor: &ObjectDescriptor) -> Option<String> {
 fn descriptor_digest_of(encoded: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(encoded))
+}
+
+#[cfg(test)]
+mod serving_tests {
+    use super::*;
+
+    /// A runtime whose storage role is put down refuses new objects and
+    /// keeps the ones it holds; taken up again, it takes new ones.
+    #[tokio::test]
+    async fn a_runtime_put_down_keeps_what_it_holds_and_takes_nothing_new() {
+        let resolver = tenzro_iroh::IrohBackedResolver::bind_in_memory()
+            .await
+            .expect("bind in-memory resolver");
+        let runtime = StorageProviderRuntime::with_fixed_rate(Arc::new(|| None), resolver, 1);
+        assert!(runtime.admit_new_object().is_ok());
+        let held = runtime.store().descriptors().len();
+        runtime.set_serving(false);
+        let refused = runtime.admit_new_object().unwrap_err();
+        assert!(refused.contains("still answered for"), "{refused}");
+        assert_eq!(runtime.store().descriptors().len(), held);
+        runtime.set_serving(true);
+        assert!(runtime.admit_new_object().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenzro_iroh::IrohResolver;
+
+    /// A resolver nothing here calls.
+    struct Unused;
+
+    #[async_trait::async_trait]
+    impl IrohResolver for Unused {
+        async fn fetch_bytes(
+            &self,
+            _uri: &tenzro_iroh::TenzroUri,
+        ) -> tenzro_iroh::IrohResult<bytes::Bytes> {
+            unreachable!()
+        }
+        async fn publish_bytes(
+            &self,
+            _bytes: bytes::Bytes,
+        ) -> tenzro_iroh::IrohResult<tenzro_iroh::TenzroUri> {
+            unreachable!()
+        }
+        async fn publish_path(
+            &self,
+            _path: &std::path::Path,
+        ) -> tenzro_iroh::IrohResult<tenzro_iroh::TenzroUri> {
+            unreachable!()
+        }
+    }
+
+    fn runtime(kv: Arc<dyn tenzro_storage::KvStore>) -> StorageProviderRuntime {
+        StorageProviderRuntime::with_storage(
+            Arc::new(|| None),
+            Arc::new(Unused),
+            PricingPolicy::Fixed { rate: 1 },
+            kv,
+        )
+    }
+
+    #[test]
+    fn a_read_is_charged_per_gibibyte_rounded_up() {
+        assert_eq!(read_charge_wei(1 << 30, 7), 7);
+        assert_eq!(read_charge_wei(1, 1), 1);
+        assert_eq!(read_charge_wei(3 << 29, 4), 6);
+        assert_eq!(read_charge_wei(1 << 40, 0), 0);
+        assert_eq!(
+            read_charge_wei(u64::MAX, u128::MAX),
+            u128::MAX.div_ceil(1 << 30)
+        );
+    }
+
+    #[test]
+    fn an_object_reads_at_its_class_rate_and_free_without_one() {
+        let kv: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let rt = runtime(kv.clone());
+        rt.set_read_rates([300, 20, 1]);
+        rt.set_read_class("hot-object", StorageClass::Hot);
+        rt.set_read_class("cold-object", StorageClass::Cold);
+        assert_eq!(rt.read_charge("hot-object", 1 << 30), 300);
+        assert_eq!(rt.read_charge("cold-object", 1 << 30), 1);
+        assert_eq!(
+            rt.read_charge("plain-object", 1 << 30),
+            0,
+            "no class, no read charge"
+        );
+        // The classes outlive a restart; the rates are set again by the operator.
+        let restarted = runtime(kv);
+        restarted.set_read_rates([300, 20, 1]);
+        assert_eq!(restarted.read_charge("hot-object", 1 << 30), 300);
+    }
 }

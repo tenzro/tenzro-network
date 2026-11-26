@@ -47,13 +47,7 @@ pub struct KeyEpoch {
 
 /// The digest an epoch commits to for its successor.
 pub fn commitment_of(ed25519: &[u8; 32], ml_dsa: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"tenzro/identity/next-key/v1");
-    h.update(ed25519);
-    h.update((ml_dsa.len() as u32).to_be_bytes());
-    h.update(ml_dsa);
-    h.finalize().into()
+    tenzro_crypto::identity_key::next_key_commitment(ed25519, ml_dsa)
 }
 
 /// The keys an identity has had, oldest first, versions rising by one.
@@ -92,8 +86,9 @@ impl IdentityHistory {
 /// What the chain exposes. Implemented over the node's chain state.
 pub trait LedgerView: Send + Sync {
     fn history(&self, identity: &str) -> DelegationResult<IdentityHistory>;
-    /// When the delegation was revoked, if it was.
-    fn revoked_at_ms(&self, delegation_id: &[u8; 32]) -> Option<u64>;
+    /// When `identity` revoked the delegation, if it did. A revocation
+    /// counts only when the identity that issued the delegation made it.
+    fn revoked_at_ms(&self, identity: &str, delegation_id: &[u8; 32]) -> Option<u64>;
     /// The timestamp of the newest block this view has applied.
     fn head_time_ms(&self) -> u64;
 }
@@ -204,7 +199,7 @@ impl ChainIssuerResolver {
                 "its key was declared compromised before this was made".into(),
             ));
         }
-        if let Some(r) = self.ledger.revoked_at_ms(&sig.id())
+        if let Some(r) = self.ledger.revoked_at_ms(&sig.identity, &sig.id())
             && made_at_ms >= r
         {
             return Err(DelegationError::Revoked);
@@ -226,8 +221,8 @@ impl IssuerResolver for ChainIssuerResolver {
         Ok(Self::record(latest))
     }
 
-    fn is_revoked(&self, delegation_id: &[u8; 32]) -> bool {
-        self.ledger.revoked_at_ms(delegation_id).is_some()
+    fn is_revoked(&self, identity: &str, delegation_id: &[u8; 32]) -> bool {
+        self.ledger.revoked_at_ms(identity, delegation_id).is_some()
     }
 
     fn resolve_issuing(
@@ -322,7 +317,7 @@ mod tests {
                     .collect(),
             })
         }
-        fn revoked_at_ms(&self, id: &[u8; 32]) -> Option<u64> {
+        fn revoked_at_ms(&self, _identity: &str, id: &[u8; 32]) -> Option<u64> {
             self.revoked.lock().unwrap().get(id).copied()
         }
         fn head_time_ms(&self) -> u64 {
@@ -483,7 +478,7 @@ mod tests {
         let made_at = r.now();
         r.advance(2_000);
         r.ledger.revoked.lock().unwrap().insert(id, r.now());
-        assert!(r.resolver.is_revoked(&id));
+        assert!(r.resolver.is_revoked(IDENTITY, &id));
         assert_eq!(
             sig.verify(r.resolver.as_ref(), r.now(), VERIFY),
             Err(DelegationError::Revoked)
@@ -510,7 +505,7 @@ mod tests {
             fn history(&self, _: &str) -> DelegationResult<IdentityHistory> {
                 Ok(IdentityHistory::default())
             }
-            fn revoked_at_ms(&self, _: &[u8; 32]) -> Option<u64> {
+            fn revoked_at_ms(&self, _: &str, _: &[u8; 32]) -> Option<u64> {
                 None
             }
             fn head_time_ms(&self) -> u64 {

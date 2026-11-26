@@ -335,6 +335,26 @@ fn der_uint(body: &[u8]) -> Option<u64> {
     Some(body.iter().fold(0u64, |a, b| (a << 8) | u64::from(*b)))
 }
 
+/// TCG vendor ids of TPMs implemented in the host processor's firmware
+/// rather than in a separate chip: Intel PTT, AMD fTPM, Qualcomm.
+pub const FIRMWARE_TPM_VENDORS: [&str; 3] = ["INTC", "AMD", "QCOM"];
+
+/// Whether `manufacturer`, the TCG `tpmManufacturer` an endorsement
+/// certificate names (`id:` and the vendor id in hex), is a firmware TPM's
+/// vendor. The manufacturer signed the certificate, so a certificate
+/// [`verify_endorsement`] accepted cannot claim a discrete chip for a
+/// firmware TPM.
+pub fn is_firmware_tpm(manufacturer: &str) -> bool {
+    let Some(id) = manufacturer
+        .strip_prefix("id:")
+        .and_then(|h| hex::decode(h).ok())
+    else {
+        return false;
+    };
+    let id = String::from_utf8_lossy(&id);
+    FIRMWARE_TPM_VENDORS.contains(&id.trim_end_matches(['\0', ' ']))
+}
+
 /// The TPM manufacturer and specification an endorsement certificate names:
 /// the TCG `tpmManufacturer` from its subject alternative name (for example
 /// `id:494E5443`) and `family/level/revision` from its `tpmSpecification`
@@ -397,6 +417,10 @@ pub struct MachineAttestation {
 pub enum EndorsementGrade {
     /// The EK certificate carries the EK and chains to a manufacturer root.
     ManufacturerCertified,
+    /// As [`Self::ManufacturerCertified`], for a TPM its manufacturer
+    /// certifies as implemented in the host processor's firmware
+    /// ([`is_firmware_tpm`]): a separate, lower tier than a discrete chip.
+    FirmwareCertified,
     /// No certificate, or one that does not verify; the reason says which.
     Uncertified(String),
 }
@@ -406,6 +430,7 @@ impl EndorsementGrade {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ManufacturerCertified => "manufacturer_certified",
+            Self::FirmwareCertified => "firmware_certified",
             Self::Uncertified(_) => "uncertified",
         }
     }
@@ -421,6 +446,11 @@ pub fn endorsement_grade(
         return EndorsementGrade::Uncertified("the TPM holds no EK certificate".into());
     }
     match verify_endorsement(&attestation.evidence, roots, now) {
+        Ok(_)
+            if is_firmware_tpm(&ek_certificate_profile(&attestation.evidence.ek_certificate).0) =>
+        {
+            EndorsementGrade::FirmwareCertified
+        }
         Ok(_) => EndorsementGrade::ManufacturerCertified,
         Err(e) => EndorsementGrade::Uncertified(e.to_string()),
     }
@@ -852,8 +882,10 @@ pub mod tests {
         }
     }
 
-    /// A manufacturer root and an EK certificate it issued for `tpm`'s EK.
-    pub(crate) fn endorsed(tpm: &SoftTpm) -> (Cert, Vec<u8>) {
+    /// A manufacturer root and an EK certificate it issued for `tpm`'s EK,
+    /// naming `manufacturer` (for example `id:494E5443`) as its TCG
+    /// `tpmManufacturer` when given.
+    pub(crate) fn endorsed_as(tpm: &SoftTpm, manufacturer: Option<&str>) -> (Cert, Vec<u8>) {
         use spki::EncodePublicKey;
         let root_k = testca::key(40);
         let root = x509::parse(&testca::issue(
@@ -869,7 +901,14 @@ pub mod tests {
             false,
             2,
             (1_000_000_000, 4_000_000_000),
-            &[],
+            &manufacturer
+                .map(|m| {
+                    let mut san = super::TCG_TPM_MANUFACTURER.to_vec();
+                    san.extend_from_slice(&[0x0C, m.len() as u8]);
+                    san.extend_from_slice(m.as_bytes());
+                    vec![("2.5.29.17", san)]
+                })
+                .unwrap_or_default(),
         );
         (root, ek_cert)
     }
@@ -884,7 +923,16 @@ pub mod tests {
     }
 
     pub fn evidence(tpm: &SoftTpm, extra: &[u8]) -> (TpmEvidence, Cert) {
-        let (root, ek_cert) = endorsed(tpm);
+        evidence_from(tpm, extra, None)
+    }
+
+    /// [`evidence`] from a TPM whose EK certificate names `manufacturer`.
+    pub fn evidence_from(
+        tpm: &SoftTpm,
+        extra: &[u8],
+        manufacturer: Option<&str>,
+    ) -> (TpmEvidence, Cert) {
+        let (root, ek_cert) = endorsed_as(tpm, manufacturer);
         let (quote, sig) = tpm.quote(extra);
         (
             TpmEvidence {
@@ -938,6 +986,32 @@ pub mod tests {
             endorsement_grade(&bare, &[root], NOW),
             EndorsementGrade::Uncertified(_)
         ));
+    }
+
+    /// A TPM its manufacturer certifies as firmware on the host processor
+    /// (here Intel PTT) is graded apart from, and below, a discrete chip
+    /// (here Infineon).
+    #[test]
+    fn a_firmware_tpm_is_graded_apart_from_a_discrete_chip() {
+        let tpm = SoftTpm::new(3);
+        let c = admission_challenge("did:a", b"w", &[1; 32]);
+        let grade = |manufacturer: &str| {
+            let (ev, root) = evidence_from(&tpm, &c, Some(manufacturer));
+            let att = MachineAttestation {
+                evidence: ev,
+                nonce: vec![1; 32],
+                activated: true,
+            };
+            endorsement_grade(&att, &[root], NOW)
+        };
+        assert_eq!(grade("id:494E5443"), EndorsementGrade::FirmwareCertified);
+        assert_eq!(
+            grade("id:49465800"),
+            EndorsementGrade::ManufacturerCertified
+        );
+        assert!(is_firmware_tpm("id:414D4400"), "AMD fTPM");
+        assert!(!is_firmware_tpm("id:53544D20"), "STMicroelectronics");
+        assert!(!is_firmware_tpm(""));
     }
 
     #[test]
@@ -1008,7 +1082,7 @@ pub mod tests {
         let other = SoftTpm::new(20);
         let c = admission_challenge("did:a", b"w", &[1; 32]);
         let (mut ev, root) = evidence(&tpm, &c);
-        let (_, other_cert) = endorsed(&other);
+        let (_, other_cert) = endorsed_as(&other, None);
         ev.ek_certificate = other_cert;
         assert!(verify_endorsement(&ev, &[root], NOW).is_err());
     }
@@ -1395,7 +1469,7 @@ mod endorsement_key_types {
     /// TEST ONLY): the EK certificate swtpm's test CA issued chains to that
     /// CA's root and carries the EK provisioning kept.
     #[test]
-    #[ignore]
+    #[ignore = "needs swtpm; run by hardware-key-gate.sh"]
     fn swtpm_ek_certificate_chains_to_its_test_ca() {
         let dir = std::path::PathBuf::from(std::env::var("TENZRO_TEST_SWTPM_OUT").unwrap());
         let read = |f: &str| std::fs::read(dir.join(f)).unwrap();

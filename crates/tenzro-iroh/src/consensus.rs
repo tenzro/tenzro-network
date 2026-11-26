@@ -140,12 +140,10 @@ pub async fn open_consensus_connection(
 ) -> IrohResult<(Connection, SendStream, RecvStream)> {
     let peer: EndpointAddr = peer.into();
     let id = peer.id;
-    let conn = endpoint
-        .connect(peer, ALPN_CONSENSUS)
+    let conn = crate::bounded::connect(endpoint, peer, ALPN_CONSENSUS, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("consensus connect to {id}: {e} ({e:?})")))?;
-    let (send, recv) = conn
-        .open_bi()
+    let (send, recv) = crate::bounded::open_bi(&conn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("consensus open stream: {e} ({e:?})")))?;
     Ok((conn, send, recv))
@@ -161,8 +159,13 @@ pub async fn open_consensus_stream(
     Ok((send, recv))
 }
 
-/// Writes one length-prefixed frame.
-pub async fn write_frame(send: &mut SendStream, bytes: &[u8]) -> IrohResult<()> {
+/// Writes one length-prefixed frame, to an iroh stream or any other byte
+/// stream a channel runs over (an in-memory pair in tests).
+pub async fn write_frame<W>(send: &mut W, bytes: &[u8]) -> IrohResult<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    use tokio::io::AsyncWriteExt;
     let len =
         u32::try_from(bytes.len()).map_err(|_| IrohError::Backend("frame too large".into()))?;
     send.write_all(&len.to_be_bytes())
@@ -279,6 +282,28 @@ mod tests {
     /// mid-transfer). [`read_frame_idle`] must keep reading as long as each
     /// gap between pieces stays under its idle bound, even though the
     /// pieces together take much longer than that bound to finish arriving.
+    /// Frames written to an in-memory stream read back whole and in order,
+    /// and a frame above the reader's limit is refused before its body is
+    /// read: the frame layer does not depend on iroh's streams.
+    #[tokio::test(start_paused = true)]
+    async fn frames_cross_any_byte_stream_and_an_oversized_one_is_refused() {
+        let (mut a, mut b) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            for body in [&b"one"[..], &[7u8; 300], b""] {
+                write_frame(&mut a, body).await.unwrap();
+            }
+            // Refused by the reader, which then goes away mid-frame.
+            let _ = write_frame(&mut a, &[1u8; 1_000]).await;
+        });
+        assert_eq!(read_frame(&mut b, 512).await.unwrap(), b"one");
+        assert_eq!(read_frame(&mut b, 512).await.unwrap(), vec![7u8; 300]);
+        assert_eq!(read_frame(&mut b, 512).await.unwrap(), b"");
+        let err = read_frame(&mut b, 512).await.unwrap_err().to_string();
+        assert!(err.contains("exceeds 512"), "{err}");
+        drop(b);
+        writer.await.unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_frame_arriving_in_slow_pieces_is_not_mistaken_for_silence() {
         let (mut client, mut server) = tokio::io::duplex(4096);
@@ -361,10 +386,12 @@ mod tests {
     async fn frames_cross_the_alpn_and_oversized_ones_are_refused() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let deferred = DeferredConsensusHandler::new();
-        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let server = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let _router = iroh::protocol::Router::builder(server.clone())
             .accept(
                 ALPN_CONSENSUS,
@@ -372,10 +399,12 @@ mod tests {
             )
             .spawn();
         deferred.set(Arc::new(Echo(tx, None)));
-        let client = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let client = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let (mut send, mut recv) = open_consensus_stream(&client, server.addr()).await.unwrap();
         write_frame(&mut send, b"hello").await.unwrap();
         assert_eq!(read_frame(&mut recv, 64).await.unwrap(), b"hello");
@@ -390,18 +419,24 @@ mod tests {
     #[tokio::test]
     async fn a_connection_the_handler_does_not_admit_is_closed_before_any_stream() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
-        let member = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
-        let outsider = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let server = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
+        let member = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
+        let outsider = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let _router = iroh::protocol::Router::builder(server.clone())
             .accept(
                 ALPN_CONSENSUS,

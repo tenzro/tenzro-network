@@ -42,16 +42,64 @@ use tenzro_types::block::Block;
 use tenzro_types::primitives::{BlockHeight, Hash};
 
 use crate::config::BlockSyncConfig;
-use crate::consensus_driver::ConsensusHandle;
+use crate::consensus_driver::{BodyGap, ConsensusHandle};
 use crate::error::{NodeError, Result};
 
 /// Largest number of blocks one range request asks for.
 pub const MAX_BLOCKS_PER_RANGE: u32 = 128;
 
+/// Checkpoint bodies one request may ask for.
+pub const MAX_CHECKPOINTS_PER_REQUEST: u64 = 512;
+
+/// Runs of missing checkpoint bodies fetched per wake.
+const MAX_BODY_GAPS_PER_WAKE: u32 = 8;
+
+/// How long runs no peer could serve are passed over before they are asked
+/// for again.
+const BODY_GAP_RETRY: Duration = Duration::from_secs(3600);
+
 /// Largest block payload a server puts in one range response. A server
 /// returning fewer blocks than asked for is normal: the requester asks again
-/// from its new height.
+/// from its new height, or from past the blocks it holds when they complete
+/// no checkpoint yet.
 pub const MAX_BLOCK_RANGE_BYTES: usize = 6 * 1024 * 1024;
+
+/// How far past its tip a node holds blocks that wait for a certificate.
+pub(crate) const MAX_HELD_AHEAD: u64 = 20_000;
+
+/// The first height of the next range: past the local `tip`, and past
+/// `fetched`, the last block already served and held in this catch-up.
+fn next_range_start(tip: u64, fetched: u64) -> u64 {
+    tip.max(fetched) + 1
+}
+
+/// Whether a range that imported nothing still moved the catch-up on: it
+/// served blocks past `fetched` (the last held one, at least the tip) and
+/// below the peer's `target`, within what the node holds ahead of `tip`.
+/// One checkpoint can commit more blocks than one range carries; its blocks
+/// import only once all of them are held, so the next range asks from past
+/// the held ones instead of from the unchanged tip.
+/// Why a range imported nothing the node could keep: it carried no blocks,
+/// or it carried blocks the node holds back until a certificate covers them
+/// and none did, or a certificate it already has. Operator-facing, not a
+/// fault signal.
+fn fruitless_reason(received: usize, served: Option<u64>, checkpoint: Option<u64>) -> &'static str {
+    match (received, served) {
+        (0, _) => "the range carried no blocks",
+        (_, None) => {
+            "the blocks are held until a certificate covers them; none came with the range"
+        }
+        (_, Some(s)) if checkpoint.is_some_and(|c| s <= c) => {
+            "the range's certificate is not newer than the one the node already holds"
+        }
+        _ => "the blocks are held until their checkpoint is certified",
+    }
+}
+
+fn range_extended_held(tip: u64, fetched: u64, last_served: Option<u64>, target: u64) -> bool {
+    let fetched = tip.max(fetched);
+    last_served.is_some_and(|l| l > fetched && fetched < target && l - tip <= MAX_HELD_AHEAD)
+}
 
 /// A block-sync request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +120,14 @@ pub enum BlockSyncRequest {
         /// when there are no blocks past its tip (checkpoints that ordered
         /// none), the evidence carries it on from there.
         known_checkpoint: Option<u64>,
+    },
+    /// The checkpoint bodies `first..=last`, for a node that holds the body
+    /// after `last` and lacks these.
+    GetCheckpoints {
+        /// First index.
+        first: u64,
+        /// Last index, at most `MAX_CHECKPOINTS_PER_REQUEST - 1` past `first`.
+        last: u64,
     },
 }
 
@@ -100,8 +156,21 @@ pub enum BlockSyncResponse {
         /// certificate it names.
         certificate: Option<PublishedCertificate>,
     },
+    /// Answer to `GetCheckpoints`: the bodies held from the last one asked
+    /// for downwards without a break, ascending.
+    Checkpoints(Vec<Checkpoint>),
     /// The request could not be answered.
     Error(String),
+}
+
+/// The served bodies from `first` up to the one below `above` that `above`,
+/// a body this node holds, authenticates through the chain of predecessor
+/// digests.
+fn authenticated_gap(above: &Checkpoint, served: &[Checkpoint], first: u64) -> Vec<Checkpoint> {
+    crate::certified_import::authenticate_chain(above, served)
+        .into_iter()
+        .filter(|cp| cp.index >= first && cp.index < above.index)
+        .collect()
 }
 
 fn wire() -> impl bincode::Options {
@@ -118,8 +187,8 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, String> {
-    use bincode::Options;
-    wire().deserialize(bytes).map_err(|e| e.to_string())
+    tenzro_network::wire::decode_bounded(bytes, tenzro_iroh::block_sync::MAX_RESPONSE_BYTES)
+        .map_err(|e| e.to_string())
 }
 
 /// Checks that a range response is exactly what was requested: it starts at
@@ -204,11 +273,112 @@ fn sync_candidates(
     out
 }
 
+/// Why a request brought nothing usable.
+#[derive(Debug)]
+enum RequestError {
+    /// The peer did not answer in time, or the connection to it failed:
+    /// the path may be at fault as much as the peer.
+    Silent(String),
+    /// The peer answered with bytes that are not a response.
+    Unusable(String),
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Silent(e) | Self::Unusable(e) => f.write_str(e),
+        }
+    }
+}
+
+/// The score of a peer that stayed silent. Silence lowers a peer by the
+/// penalty of a failure but no further than one penalty below `drop`, the
+/// line under which it is not asked: a peer cut off for a while sits out a
+/// few rounds and is asked again, where a peer that served something
+/// unusable keeps sinking towards the hard ban.
+fn after_silence(score: i32, penalty: i32, drop: i32) -> i32 {
+    let floor = drop.saturating_add(penalty.min(0));
+    if score <= floor {
+        score
+    } else {
+        score.saturating_add(penalty.min(0)).max(floor)
+    }
+}
+
 fn recovered(score: i32, step: i32) -> i32 {
     if score < 0 {
         score.saturating_add(step.max(0)).min(0)
     } else {
         score
+    }
+}
+
+/// The middle of `values`, the lower one of two; `None` of none.
+fn middle(mut values: Vec<u64>) -> Option<u64> {
+    values.sort_unstable();
+    values.get(values.len().saturating_sub(1) / 2).copied()
+}
+
+/// The endpoints the members of epoch `current`'s committee (by
+/// `members_of`) disclosed, by `endpoint`: the only answers that count as
+/// the committee's. A member of an earlier committee that has left answers
+/// for nobody, so no other epoch's committee is asked.
+fn committee_endpoints<K>(
+    current: u64,
+    members_of: impl Fn(u64) -> Vec<K>,
+    endpoint: impl Fn(&K) -> Option<[u8; 32]>,
+) -> std::collections::HashSet<[u8; 32]> {
+    members_of(current).iter().filter_map(endpoint).collect()
+}
+
+/// The checkpoint the network stands at by every answering peer, when too
+/// few members answered: the middle of their answers, so one peer naming a
+/// far checkpoint, or an old one, is outvoted once three answer.
+fn peer_checkpoint(answers: &[([u8; 32], u64)]) -> Option<u64> {
+    middle(answers.iter().map(|(_, c)| *c).collect())
+}
+
+/// Fewest answers whose middle one of them cannot set.
+const MIDDLE_NEEDS: usize = 3;
+
+/// The checkpoint the network stands at, from the certified checkpoints
+/// the probed peers answered: the middle of what the endpoints in `members`
+/// answered, one answer each, when at least [`MIDDLE_NEEDS`] of them did.
+///
+/// Only the endpoints the committee's members disclosed count. Any node can
+/// connect and answer a probe, so answers counted by the head would let a
+/// crowd of free endpoints name the checkpoint. With fewer member answers
+/// than [`MIDDLE_NEEDS`] there is no estimate: a handover is passed over
+/// only on one, so too few answers never keep a validator from joining.
+fn network_checkpoint(
+    answers: &[([u8; 32], u64)],
+    members: &std::collections::HashSet<[u8; 32]>,
+) -> Option<u64> {
+    let mut seen = std::collections::HashSet::new();
+    let counted: Vec<u64> = answers
+        .iter()
+        .filter(|(peer, _)| members.contains(peer) && seen.insert(*peer))
+        .map(|(_, checkpoint)| *checkpoint)
+        .collect();
+    if counted.len() < MIDDLE_NEEDS {
+        return None;
+    }
+    middle(counted)
+}
+
+/// Where the network stands by one round of answers: by the committee's
+/// members when enough of them answered, otherwise by every answering peer.
+/// A round nobody answered leaves no peers' estimate (`Peers(0)`), so a
+/// peer that answered falsely and then went quiet misleads the node for the
+/// round it answered in only.
+fn network_standing(
+    answers: &[([u8; 32], u64)],
+    members: &std::collections::HashSet<[u8; 32]>,
+) -> crate::consensus_driver::NetworkStanding {
+    use crate::consensus_driver::NetworkStanding;
+    match network_checkpoint(answers, members) {
+        Some(c) => NetworkStanding::Members(c),
+        None => NetworkStanding::Peers(peer_checkpoint(answers).unwrap_or(0)),
     }
 }
 
@@ -318,6 +488,14 @@ impl BlockSyncService {
                     certificate,
                 }
             }
+            BlockSyncRequest::GetCheckpoints { first, last } => {
+                if last < first || last - first >= MAX_CHECKPOINTS_PER_REQUEST {
+                    return BlockSyncResponse::Error(format!(
+                        "checkpoints {first} to {last}; 1 to {MAX_CHECKPOINTS_PER_REQUEST} allowed"
+                    ));
+                }
+                BlockSyncResponse::Checkpoints(self.consensus.bodies_down_from(*first, *last))
+            }
         }
     }
 }
@@ -336,6 +514,11 @@ impl tenzro_iroh::BlockSyncServer for BlockSyncService {
 /// The endpoints of the peers a node is connected to, best scored first.
 pub type ConnectedPeers = Arc<dyn Fn() -> Vec<[u8; 32]> + Send + Sync>;
 
+/// The address a peer was named with (`<EndpointId>@<ip:port>`, or a boot
+/// identity's record), when the node knows one: block sync dials it instead of
+/// the endpoint id alone, which needs discovery to resolve.
+pub type AddrBook = Arc<dyn Fn(&[u8; 32]) -> Option<tenzro_iroh::EndpointAddr> + Send + Sync>;
+
 /// The client side: finds a peer ahead of the local tip and imports ranges
 /// from it.
 pub struct BlockSyncEngine {
@@ -350,7 +533,18 @@ pub struct BlockSyncEngine {
     /// While in the future, any positive gap is closed.
     hinted_until: Option<std::time::Instant>,
     /// When the node was first seen behind, for the staleness deadline.
+    /// Addresses the node knows for the peers it asks.
+    addr_book: Option<AddrBook>,
     behind_since: Option<std::time::Instant>,
+    /// When a round last said what it asked and what the peers answered.
+    summary_at: Option<std::time::Instant>,
+    /// When the adoption state was last logged.
+    adoption_logged: Option<std::time::Instant>,
+    /// Where the look for missing checkpoint bodies starts: past the runs
+    /// no peer could serve, until the next retry.
+    body_gap_from: u64,
+    /// When a run was first passed over, for the retry.
+    body_gap_since: Option<std::time::Instant>,
 }
 
 impl BlockSyncEngine {
@@ -374,12 +568,23 @@ impl BlockSyncEngine {
             connected,
             scores: HashMap::new(),
             hinted_until: None,
+            addr_book: None,
             behind_since: None,
+            summary_at: None,
+            adoption_logged: None,
+            body_gap_from: 0,
+            body_gap_since: None,
         }
     }
 
     fn hinted(&self) -> bool {
         matches!(self.hinted_until, Some(t) if std::time::Instant::now() < t)
+    }
+
+    /// Dials the peers it knows an address for at that address.
+    pub fn with_addr_book(mut self, book: AddrBook) -> Self {
+        self.addr_book = Some(book);
+        self
     }
 
     fn tolerance(&self) -> u64 {
@@ -407,6 +612,22 @@ impl BlockSyncEngine {
         *s = s.saturating_add(delta).clamp(floor, ceiling);
     }
 
+    /// Scores a failed request: silence by [`after_silence`], an unusable
+    /// answer by the full penalty.
+    fn score_failure(&mut self, peer: [u8; 32], failure: &RequestError) {
+        match failure {
+            RequestError::Silent(_) => {
+                let s = self.scores.entry(peer).or_default();
+                *s = after_silence(
+                    *s,
+                    self.config.score_penalty,
+                    self.config.score_drop_threshold,
+                );
+            }
+            RequestError::Unusable(_) => self.score(peer, self.config.score_penalty),
+        }
+    }
+
     /// Every peer below zero regains `score_recovery_per_round`, up to zero.
     fn recover_scores(&mut self) {
         let step = self.config.score_recovery_per_round;
@@ -415,8 +636,29 @@ impl BlockSyncEngine {
         }
     }
 
+    /// The endpoints whose answers say where the network stands: those the
+    /// current epoch's committee members disclosed to this node (see
+    /// [`committee_endpoints`]).
+    fn member_endpoints(&self) -> std::collections::HashSet<[u8; 32]> {
+        committee_endpoints(
+            self.consensus.epoch_manager().current_epoch().number,
+            |epoch| {
+                self.consensus
+                    .committee(epoch)
+                    .map(|c| c.members().iter().map(|m| m.public_key.clone()).collect())
+                    .unwrap_or_default()
+            },
+            |key| self.consensus.announced_endpoint(key),
+        )
+    }
+
     /// The endpoints the current and previous epoch's committee members
-    /// disclosed to this node, and the connected peers, but this node's own.
+    /// disclosed to this node, and the connected peers, but this node's own:
+    /// the peers asked for blocks. The previous committee is asked too,
+    /// unlike for [`Self::member_endpoints`]: a member that left still holds
+    /// the blocks it certified, and what it serves is checked against the
+    /// certificates whoever sends it, while a vote on where the network
+    /// stands is only as good as the voter.
     fn candidates(&self) -> Vec<[u8; 32]> {
         let current = self.consensus.epoch_manager().current_epoch().number;
         let disclosed: Vec<[u8; 32]> = (current.saturating_sub(1)..=current)
@@ -459,7 +701,239 @@ impl BlockSyncEngine {
                 }
                 _ = tick.tick() => {}
             }
-            run_rounds(&mut self, MAX_ROUNDS_PER_WAKE).await;
+            self.adopt_closing_committee().await;
+            let ran = run_rounds(&mut self, MAX_ROUNDS_PER_WAKE).await;
+            info!(
+                rounds = ran,
+                "Block-sync: engine wake: rounds ran, body gaps next"
+            );
+            self.fill_body_gaps().await;
+        }
+    }
+
+    /// Looks for missing bodies from `index` up until the next retry.
+    fn pass_over_bodies(&mut self, index: u64) {
+        self.body_gap_from = index;
+        self.body_gap_since
+            .get_or_insert_with(std::time::Instant::now);
+    }
+
+    /// What decides whether this follower adopts the next epoch's committee,
+    /// logged once a minute, and the closing checkpoint's body asked for when
+    /// that is what it lacks. Runs before a sync round, which can take minutes.
+    async fn adopt_closing_committee(&mut self) {
+        // A validator whose own core ordered the epoch adopts the next committee
+        // itself; only a follower, or a validator that took the handover or
+        // fast-forwarded past blocks it did not execute, needs this.
+        if self.consensus.is_validator()
+            && !self.consensus.awaiting_handover()
+            && self.consensus.fast_forward_target().is_none()
+        {
+            return;
+        }
+        let threshold = self.exclusion_threshold();
+        let peers: Vec<[u8; 32]> = self
+            .candidates()
+            .into_iter()
+            .filter(|p| self.scores.get(p).copied().unwrap_or(0) >= threshold)
+            .collect();
+        let timeout = Duration::from_millis(self.config.range_request_timeout_ms);
+        if self
+            .adoption_logged
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(60))
+        {
+            self.adoption_logged = Some(std::time::Instant::now());
+            info!(
+                state = %self.consensus.adoption_state(),
+                "Block-sync: what decides adopting the next committee"
+            );
+        }
+        // A follower that holds the handover certificate of its epoch but not the
+        // closing checkpoint's body cannot adopt the next committee: it asks for
+        // that body, and adopts once it has it.
+        if let Some((first, last)) = self.consensus.closing_body_wanted()
+            && let Some(above) = self.consensus.checkpoint(last + 1).or_else(|| {
+                // The certificate itself carries its checkpoint, which the
+                // bodies chain to when the body was never stored.
+                self.consensus
+                    .latest_certificate()
+                    .map(|c| c.checkpoint)
+                    .filter(|c| c.index == last + 1)
+            })
+        {
+            self.consensus.record_body(&above);
+            let request = BlockSyncRequest::GetCheckpoints { first, last };
+            let mut fetched = false;
+            for peer in &peers {
+                let id = hex::encode(&peer[..8]);
+                let served = match self.request(*peer, &request, timeout).await {
+                    Ok(BlockSyncResponse::Checkpoints(served)) => served,
+                    Ok(_) => {
+                        info!(peer = %id, first, last, "Block-sync: closing bodies: the peer answered something else");
+                        continue;
+                    }
+                    Err(e) => {
+                        info!(peer = %id, first, last, error = %e, "Block-sync: closing bodies: the request failed");
+                        continue;
+                    }
+                };
+                let bodies = authenticated_gap(&above, &served, first);
+                info!(
+                    peer = %id,
+                    first,
+                    last,
+                    served = served.len(),
+                    authenticated = bodies.len(),
+                    "Block-sync: closing bodies: the peer answered"
+                );
+                for cp in &bodies {
+                    self.consensus.record_body(cp);
+                }
+                if !bodies.is_empty() {
+                    fetched = true;
+                    break;
+                }
+            }
+            if !fetched {
+                self.fetch_epoch_end(&peers, first, timeout).await;
+            }
+            self.consensus.adopt_pending_committee();
+        }
+    }
+
+    /// The bodies between the closing checkpoint and the handover are pruned
+    /// on the peers, so nothing chains the handover certificate back to the
+    /// closing one: ask instead as a node that stopped before the closing
+    /// checkpoint would, which is served the closing checkpoint's own kept
+    /// certificate, and import that through the usual path: it is verified
+    /// against the committee this node knows, and carries the checkpoint the
+    /// next committee's root is read from.
+    async fn fetch_epoch_end(&mut self, peers: &[[u8; 32]], first: u64, timeout: Duration) {
+        let Ok(tip) = self.local_tip().await else {
+            return;
+        };
+        let request = BlockSyncRequest::GetBlockRange {
+            start: BlockHeight(tip.0 + 1),
+            count: 1,
+            known_epoch: self.consensus.known_epoch(),
+            known_checkpoint: Some(first.saturating_sub(1)),
+        };
+        for peer in peers {
+            let id = hex::encode(&peer[..8]);
+            let (blocks, checkpoints, certificate) = match self
+                .request(*peer, &request, timeout)
+                .await
+            {
+                Ok(BlockSyncResponse::BlockRange {
+                    blocks,
+                    checkpoints,
+                    certificate,
+                }) => (blocks, checkpoints, certificate),
+                Ok(_) => {
+                    info!(peer = %id, "Block-sync: the epoch end: the peer answered something else");
+                    continue;
+                }
+                Err(e) => {
+                    info!(peer = %id, error = %e, "Block-sync: the epoch end: the request failed");
+                    continue;
+                }
+            };
+            let served = certificate.as_ref().map(|c| c.certificate.checkpoint.index);
+            info!(
+                peer = %id,
+                blocks = blocks.len(),
+                bodies = checkpoints.len(),
+                certificate = ?served,
+                "Block-sync: the epoch end: the peer answered"
+            );
+            if certificate.is_none() {
+                continue;
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if self
+                .block_importer
+                .send(BlockImport {
+                    blocks,
+                    checkpoints,
+                    certificate,
+                    result: tx,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            match rx.await {
+                Ok(Ok(())) => {
+                    info!(peer = %id, "Block-sync: the epoch end was imported");
+                    return;
+                }
+                Ok(Err(e)) => {
+                    info!(peer = %id, error = %e, "Block-sync: the epoch end was refused")
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Fetches the checkpoint bodies this node lacks below ones it holds, a
+    /// run at a time, each from the first peer that serves any of it.
+    async fn fill_body_gaps(&mut self) {
+        let threshold = self.exclusion_threshold();
+        let peers: Vec<[u8; 32]> = self
+            .candidates()
+            .into_iter()
+            .filter(|p| self.scores.get(p).copied().unwrap_or(0) >= threshold)
+            .collect();
+        let timeout = Duration::from_millis(self.config.range_request_timeout_ms);
+        if self
+            .body_gap_since
+            .is_some_and(|at| at.elapsed() >= BODY_GAP_RETRY)
+        {
+            (self.body_gap_from, self.body_gap_since) = (0, None);
+        }
+        for _ in 0..MAX_BODY_GAPS_PER_WAKE {
+            let (first, last) = match self
+                .consensus
+                .body_gap(MAX_CHECKPOINTS_PER_REQUEST, self.body_gap_from)
+            {
+                BodyGap::Complete => return,
+                BodyGap::Unanchored { resume } => {
+                    self.pass_over_bodies(resume);
+                    return;
+                }
+                BodyGap::Missing { first, last } => (first, last),
+            };
+            let Some(above) = self.consensus.checkpoint(last + 1) else {
+                return;
+            };
+            let request = BlockSyncRequest::GetCheckpoints { first, last };
+            let mut filled = 0;
+            for peer in &peers {
+                let Ok(BlockSyncResponse::Checkpoints(served)) =
+                    self.request(*peer, &request, timeout).await
+                else {
+                    continue;
+                };
+                let bodies = authenticated_gap(&above, &served, first);
+                for cp in &bodies {
+                    self.consensus.record_body(cp);
+                }
+                filled = bodies.len();
+                if filled > 0 {
+                    break;
+                }
+            }
+            if filled == 0 {
+                // No peer holds them now: look above this run until the
+                // next retry instead of asking again on every wake.
+                self.pass_over_bodies(last + 1);
+                return;
+            }
+            debug!(
+                first,
+                last, filled, "Block-sync: missing checkpoint bodies fetched"
+            );
         }
     }
 
@@ -468,17 +942,22 @@ impl BlockSyncEngine {
         peer: [u8; 32],
         request: &BlockSyncRequest,
         timeout: Duration,
-    ) -> std::result::Result<BlockSyncResponse, String> {
+    ) -> std::result::Result<BlockSyncResponse, RequestError> {
         let id = tenzro_iroh::EndpointId::from_bytes(&peer)
-            .map_err(|e| format!("peer endpoint key: {e}"))?;
+            .map_err(|e| RequestError::Unusable(format!("peer endpoint key: {e}")))?;
+        let target = self
+            .addr_book
+            .as_ref()
+            .and_then(|book| book(&peer))
+            .unwrap_or_else(|| tenzro_iroh::EndpointAddr::new(id));
         let bytes = tokio::time::timeout(
             timeout,
-            tenzro_iroh::block_sync_request(&self.endpoint, id, &encode(request)),
+            tenzro_iroh::block_sync_request(&self.endpoint, target, &encode(request)),
         )
         .await
-        .map_err(|_| "timed out".to_string())?
-        .map_err(|e| e.to_string())?;
-        decode(&bytes)
+        .map_err(|_| RequestError::Silent("timed out".to_string()))?
+        .map_err(|e| RequestError::Silent(e.to_string()))?;
+        decode(&bytes).map_err(RequestError::Unusable)
     }
 
     /// One round: probe tips, and if a peer is ahead, import from it until
@@ -486,12 +965,23 @@ impl BlockSyncEngine {
     async fn sync_once(&mut self) -> Result<()> {
         self.recover_scores();
         let our = self.local_tip().await?;
+        self.consensus.follow().local(our.0);
         let threshold = self.exclusion_threshold();
-        let candidates: Vec<[u8; 32]> = self
-            .candidates()
-            .into_iter()
+        let known = self.candidates();
+        let candidates: Vec<[u8; 32]> = known
+            .iter()
+            .copied()
             .filter(|p| self.scores.get(p).copied().unwrap_or(0) >= threshold)
             .collect();
+        if candidates.is_empty() && self.hinted() {
+            warn!(
+                known = known.len(),
+                excluded = known.len() - candidates.len(),
+                connected = (self.connected)().len(),
+                "Block-sync: a certificate is past the local tip and there is no peer to ask"
+            );
+        }
+        let asked = candidates.len();
         let probe_timeout = Duration::from_millis(self.config.tip_request_timeout_ms);
         let probes = futures::future::join_all(
             candidates
@@ -513,12 +1003,21 @@ impl BlockSyncEngine {
                 }
                 Err(e) => {
                     debug!(peer = %hex::encode(&peer[..8]), error = %e, "Block-sync: tip probe failed");
-                    self.score(peer, self.config.score_penalty);
+                    self.score_failure(peer, &e);
                 }
             }
         }
-        if let Some(c) = tips.iter().map(|(_, _, _, c)| *c).max() {
-            self.consensus.note_network_checkpoint(c);
+        // Where the network stands, for the decision to start consensus at
+        // a handover, is what the committee's own machines answer, or, with
+        // too few of them, the middle of what every peer answered, which the
+        // decision reads together with the clock.
+        let answers: Vec<([u8; 32], u64)> = tips.iter().map(|(p, _, _, c)| (*p, *c)).collect();
+        self.consensus
+            .note_network_checkpoint(network_standing(&answers, &self.member_endpoints()));
+        // The middle of the heights every peer answered: a single peer
+        // naming a far height does not move it.
+        if let Some(head) = middle(tips.iter().map(|(_, h, _, _)| h.0).collect()) {
+            self.consensus.follow().heard(head);
         }
         let our_checkpoint = self.local_checkpoint();
         let behind = tips
@@ -563,6 +1062,23 @@ impl BlockSyncEngine {
                 std::cmp::Reverse(*c),
             )
         });
+        // Once a minute, while behind, what this round asked and heard: a
+        // node that stays behind without a catch-up line says why.
+        if behind
+            && self
+                .summary_at
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(60))
+        {
+            self.summary_at = Some(std::time::Instant::now());
+            info!(
+                asked = asked,
+                answered = tips.len(),
+                eligible = eligible.len(),
+                our_tip = %our,
+                best_tip = tips.iter().map(|(_, h, _, _)| h.0).max().unwrap_or(0),
+                "Block-sync: behind the peers"
+            );
+        }
         for (peer, target, checkpoint) in eligible {
             if self.sync_from(peer, target, checkpoint).await? {
                 self.hinted_until = None;
@@ -582,6 +1098,9 @@ impl BlockSyncEngine {
         checkpoint: u64,
     ) -> Result<bool> {
         info!(peer = %hex::encode(&peer[..8]), target = %target, checkpoint, "Block-sync: catching up");
+        // The last block served and held in this catch-up that no imported
+        // checkpoint committed yet.
+        let mut fetched = 0u64;
         loop {
             let our = self.local_tip().await?;
             let our_checkpoint = self.local_checkpoint();
@@ -589,10 +1108,10 @@ impl BlockSyncEngine {
                 info!(height = %our, checkpoint = ?our_checkpoint, "Block-sync: caught up");
                 return Ok(true);
             }
-            let start = our.0 + 1;
+            let start = next_range_start(our.0, fetched);
             let count = target
                 .0
-                .saturating_sub(our.0)
+                .saturating_sub(start - 1)
                 .clamp(1, MAX_BLOCKS_PER_RANGE as u64) as u32;
             let known_epoch = self.consensus.known_epoch();
             let request = BlockSyncRequest::GetBlockRange {
@@ -621,7 +1140,7 @@ impl BlockSyncEngine {
                 }
                 Err(e) => {
                     warn!(peer = %hex::encode(&peer[..8]), error = %e, "Block-sync: range request failed");
-                    self.score(peer, self.config.score_penalty);
+                    self.score_failure(peer, &e);
                     return Ok(false);
                 }
             };
@@ -635,6 +1154,8 @@ impl BlockSyncEngine {
                 return Ok(false);
             }
             let served = certificate.as_ref().map(|c| c.certificate.checkpoint.index);
+            let received = blocks.len();
+            let last_served = blocks.last().map(|b| b.height().0);
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.block_importer
                 .send(BlockImport {
@@ -678,13 +1199,23 @@ impl BlockSyncEngine {
             )
             .await?;
             if !progressed {
+                let tip_now = self.local_tip().await?;
+                if tip_now == our && range_extended_held(our.0, fetched, last_served, target.0) {
+                    // The served blocks are held but complete no checkpoint
+                    // yet: ask for the ones after them.
+                    fetched = last_served.unwrap_or(fetched);
+                    debug!(peer = %hex::encode(&peer[..8]), height = %our, fetched, "Block-sync: blocks held, asking for the rest of their checkpoint");
+                    continue;
+                }
                 // The peer holds blocks past its latest certificate; not a
                 // fault, and nothing more to gain from it now. An import
                 // that only ended an epoch made progress: its next committee
                 // verifies the next range.
-                let tip_now = self.local_tip().await?;
+                let reason = fruitless_reason(received, served, self.local_checkpoint());
+                self.consensus.follow().fruitless(reason);
                 info!(
                     peer = %hex::encode(&peer[..8]), height = %tip_now, started_at = %our, known_epoch, target = %target,
+                    reason,
                     "Block-sync: the range imported nothing new"
                 );
                 return Ok(false);
@@ -814,6 +1345,19 @@ where
 #[cfg(test)]
 mod round_tests {
     use super::*;
+
+    #[test]
+    fn a_fruitless_range_says_why() {
+        assert_eq!(
+            fruitless_reason(0, None, None),
+            "the range carried no blocks"
+        );
+        assert!(fruitless_reason(5, None, Some(3)).contains("none came with the range"));
+        assert!(fruitless_reason(5, Some(3), Some(3)).contains("not newer"));
+        assert!(fruitless_reason(5, Some(3), Some(4)).contains("not newer"));
+        assert!(fruitless_reason(5, Some(4), Some(3)).contains("certified"));
+        assert!(fruitless_reason(5, Some(1), None).contains("certified"));
+    }
 
     /// A restarted validator asked for the three blocks up to a tip a peer
     /// had probed, inside a checkpoint not yet certified there: the range
@@ -970,8 +1514,150 @@ mod settle_tests {
 mod tests {
     use super::*;
 
+    fn linked_bodies(len: u64) -> Vec<Checkpoint> {
+        let mut out: Vec<Checkpoint> = Vec::new();
+        for index in 0..len {
+            out.push(Checkpoint {
+                chain_id: 7,
+                genesis_hash: [1; 32],
+                epoch: 0,
+                index,
+                prev: out.last().map_or([0; 32], |p| p.digest()),
+                first_height: index + 1,
+                last_height: index,
+                blocks_root: [0; 32],
+                state_height: index,
+                state_root: [0; 32],
+                statement_root: [0; 32],
+                next_committee_root: None,
+                anchor_round: index,
+                timestamp_ms: 0,
+                ordering_root: [0; 32],
+            });
+        }
+        out
+    }
+
+    /// Bodies served for a run this node lacks count only as far as the
+    /// held body above them authenticates each through its predecessor
+    /// digest: a body that is not the one the chain names ends the run.
+    #[test]
+    fn bodies_served_for_a_gap_count_only_when_they_chain_to_the_held_body_above() {
+        let chain = linked_bodies(8);
+        let above = &chain[6];
+        let filled = authenticated_gap(above, &chain[2..6], 3);
+        assert_eq!(
+            filled.iter().map(|b| b.index).collect::<Vec<_>>(),
+            [3, 4, 5]
+        );
+
+        let mut forged = chain[2..6].to_vec();
+        forged[2].state_root = [5; 32];
+        let filled = authenticated_gap(above, &forged, 3);
+        assert_eq!(filled.iter().map(|b| b.index).collect::<Vec<_>>(), [5]);
+
+        assert!(authenticated_gap(above, &chain[2..5], 3).is_empty());
+    }
+
     fn cfg() -> BlockSyncConfig {
         BlockSyncConfig::default()
+    }
+
+    /// One peer naming a far checkpoint or height does not move where the
+    /// network is taken to stand.
+    #[test]
+    fn the_middle_of_the_answers_ignores_a_far_one() {
+        assert_eq!(middle(vec![]), None);
+        assert_eq!(middle(vec![7]), Some(7));
+        assert_eq!(middle(vec![9, 7]), Some(7));
+        assert_eq!(middle(vec![7, u64::MAX, 8]), Some(8));
+        assert_eq!(middle(vec![7, u64::MAX, 8, 6]), Some(7));
+    }
+
+    /// By every answering peer, one peer naming a far checkpoint among three
+    /// is outvoted, and so is one naming an old one.
+    #[test]
+    fn one_peer_naming_a_far_or_an_old_checkpoint_is_outvoted() {
+        let peer = |i: u8, c: u64| ([i; 32], c);
+        assert_eq!(peer_checkpoint(&[]), None);
+        assert_eq!(
+            peer_checkpoint(&[peer(1, 9_000), peer(2, 9_001), peer(3, u64::MAX)]),
+            Some(9_001)
+        );
+        assert_eq!(
+            peer_checkpoint(&[peer(1, 9_000), peer(2, 9_001), peer(3, 0)]),
+            Some(9_000)
+        );
+    }
+
+    /// A round nobody answered clears the peers' estimate, so a far answer
+    /// from a peer that then went quiet is not read again.
+    #[test]
+    fn a_round_nobody_answered_leaves_no_peers_estimate() {
+        use crate::consensus_driver::NetworkStanding;
+        let members = std::collections::HashSet::new();
+        assert_eq!(
+            network_standing(&[([1; 32], u64::MAX)], &members),
+            NetworkStanding::Peers(u64::MAX)
+        );
+        assert_eq!(network_standing(&[], &members), NetworkStanding::Peers(0));
+    }
+
+    /// Only the members passed in count; the caller passes the current
+    /// committee, so a member of an earlier one that left does not.
+    #[test]
+    fn only_the_current_committees_endpoints_count() {
+        let left = 9u8;
+        let members_of = |epoch: u64| match epoch {
+            4 => vec![1u8, left],
+            5 => vec![1u8, 2, 3],
+            _ => Vec::new(),
+        };
+        let endpoint = |k: &u8| (*k != 3).then_some([*k; 32]);
+        let counted = committee_endpoints(5, members_of, endpoint);
+        assert_eq!(
+            counted.len(),
+            2,
+            "a member with no disclosed endpoint counted"
+        );
+        assert!(counted.contains(&[1; 32]) && counted.contains(&[2; 32]));
+        assert!(!counted.contains(&[left; 32]));
+    }
+
+    /// Only the committee's own machines say where the network stands, one
+    /// answer each, and only three or more of them: a crowd of other peers
+    /// naming a far checkpoint changes nothing, one member cannot set the
+    /// middle, and too few member answers give no estimate at all.
+    #[test]
+    fn only_committee_members_say_where_the_network_stands() {
+        let member = |i: u8| [i; 32];
+        let members: std::collections::HashSet<[u8; 32]> = (1..=4).map(member).collect();
+        let honest = vec![(member(1), 9_000), (member(2), 9_001), (member(3), 9_002)];
+        assert_eq!(network_checkpoint(&honest, &members), Some(9_001));
+
+        // A hundred free endpoints name a far checkpoint, or an old one.
+        for claim in [u64::MAX, 0] {
+            let mut crowded = honest.clone();
+            crowded.extend((100..200).map(|i| ([i; 32], claim)));
+            assert_eq!(network_checkpoint(&crowded, &members), Some(9_001));
+            let crowd_only: Vec<_> = (100..200).map(|i| ([i; 32], claim)).collect();
+            assert_eq!(network_checkpoint(&crowd_only, &members), None);
+        }
+
+        // One member lying either way does not move the middle past the
+        // honest answers; a member answering twice counts once.
+        let mut low = honest.clone();
+        low[0].1 = 3;
+        assert_eq!(network_checkpoint(&low, &members), Some(9_001));
+        let mut high = honest.clone();
+        high[2].1 = u64::MAX;
+        assert_eq!(network_checkpoint(&high, &members), Some(9_001));
+        let repeated = vec![(member(1), 3), (member(1), 3), (member(2), 9_001)];
+        assert_eq!(network_checkpoint(&repeated, &members), None);
+
+        // Fewer than three member answers: no estimate, whatever they say.
+        assert_eq!(network_checkpoint(&honest[..2], &members), None);
+        assert_eq!(network_checkpoint(&[], &members), None);
     }
 
     /// A node outside the committee has no disclosed endpoints; it asks the
@@ -1019,6 +1705,102 @@ mod tests {
             recovered(c.score_ceiling, c.score_recovery_per_round),
             c.score_ceiling
         );
+    }
+
+    /// A peer that stays silent round after round is set aside and asked
+    /// again within a few rounds of recovery; one that keeps serving
+    /// something unusable sinks to the hard ban.
+    #[test]
+    fn silence_sets_a_peer_aside_without_banning_it() {
+        let c = cfg();
+        let (mut silent, mut unusable) = (0, 0);
+        for _ in 0..1_000 {
+            silent = after_silence(silent, c.score_penalty, c.score_drop_threshold);
+            unusable = (unusable + c.score_penalty).max(c.score_hard_ban_threshold);
+        }
+        assert_eq!(unusable, c.score_hard_ban_threshold);
+        assert!(
+            silent < c.score_drop_threshold,
+            "a silent peer is not asked every round"
+        );
+        assert_eq!(silent, c.score_drop_threshold + c.score_penalty);
+        let mut rounds = 0;
+        while silent < c.score_drop_threshold {
+            silent = recovered(silent, c.score_recovery_per_round);
+            rounds += 1;
+        }
+        assert!(
+            rounds <= (-c.score_penalty / c.score_recovery_per_round) as usize,
+            "asked again after {rounds} rounds"
+        );
+        // Silence never lifts a peer an unusable answer sank.
+        assert_eq!(
+            after_silence(
+                c.score_hard_ban_threshold,
+                c.score_penalty,
+                c.score_drop_threshold
+            ),
+            c.score_hard_ban_threshold
+        );
+    }
+
+    /// A checkpoint that commits more blocks than one range carries (blocks
+    /// 1..=156 ordered before the first checkpoint) imports on a follower at
+    /// genesis: each range asks from past the blocks already held, and the
+    /// checkpoint imports once all of its blocks are held.
+    #[test]
+    fn a_checkpoint_longer_than_a_range_imports_from_genesis() {
+        let (cp_last, target) = (156u64, 170u64);
+        let (mut tip, mut fetched) = (0u64, 0u64);
+        let mut held = std::collections::BTreeSet::new();
+        let mut requests = Vec::new();
+        for _ in 0..10 {
+            if tip >= target {
+                break;
+            }
+            let start = next_range_start(tip, fetched);
+            let count = target
+                .saturating_sub(start - 1)
+                .clamp(1, MAX_BLOCKS_PER_RANGE as u64);
+            requests.push(start);
+            let last = start + count - 1;
+            held.extend(start..=last);
+            // The certificate covers blocks 1..=156, then one per block.
+            let mut moved = false;
+            if tip < cp_last && (tip + 1..=cp_last).all(|h| held.contains(&h)) {
+                tip = cp_last;
+                moved = true;
+            }
+            while tip >= cp_last && held.contains(&(tip + 1)) {
+                tip += 1;
+                moved = true;
+            }
+            if !moved {
+                assert!(range_extended_held(tip, fetched, Some(last), target));
+                fetched = last;
+            }
+        }
+        assert_eq!(tip, target);
+        assert_eq!(requests, vec![1, 129]);
+    }
+
+    /// Held blocks extend a catch-up only below the peer's tip and within
+    /// what the node holds ahead; a range with no blocks never does.
+    #[test]
+    fn held_blocks_extend_a_catch_up_only_within_bounds() {
+        assert!(range_extended_held(0, 0, Some(128), 156));
+        assert!(!range_extended_held(0, 0, None, 156));
+        assert!(!range_extended_held(0, 128, Some(128), 156));
+        assert!(!range_extended_held(0, 156, Some(160), 156));
+        assert!(!range_extended_held(10, 0, Some(10), 156));
+        assert!(!range_extended_held(
+            0,
+            0,
+            Some(MAX_HELD_AHEAD + 1),
+            MAX_HELD_AHEAD + 10
+        ));
+        assert_eq!(next_range_start(0, 128), 129);
+        assert_eq!(next_range_start(156, 128), 157);
     }
 
     fn tip(h: u64) -> Option<(BlockHeight, Hash)> {

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App transport echo</title>
+<style>
+  :root { --bg: #fff; --fg: #1b1b1f; --muted: #5d5d66; --line: #d6d6dc; --ok: #1f7a3a; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16161a; --fg: #ececf1; --muted: #a0a0ab; --line: #34343c; --ok: #6fcf8e; --bad: #f2867f; }
+  }
+  body { background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 46rem; padding: 1.5rem 16px; }
+  h1 { font-size: 1.3rem; } p, li { color: var(--muted); }
+  label { display: block; margin-top: .8rem; font-weight: 600; }
+  input, textarea { width: 100%; box-sizing: border-box; font: 13px ui-monospace, monospace; padding: .4rem; border: 1px solid var(--line); background: transparent; color: var(--fg); }
+  code { font: 13px ui-monospace, monospace; word-break: break-all; }
+  button { margin-top: 1rem; padding: .5rem 1rem; font: inherit; }
+  #log { white-space: pre-wrap; font: 13px ui-monospace, monospace; border-top: 1px solid var(--line); margin-top: 1rem; padding-top: .5rem; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<h1>App transport echo</h1>
+<p>A manual check of a node's app transport (preview) from a real browser: two devices in this page sign in to
+one node, the second echoes what the first sends, and the page reports the round trip. Nothing leaves the page
+except the WebTransport sessions to the node.</p>
+<ol>
+  <li>On the node, configure <code>[app_transport]</code> and read <code>tenzro_getAppTransportInfo</code>: it gives the
+    session URL and the SHA-256 hashes of the certificates the node serves. Check the publication's signing time and
+    each hash's validity before you trust a hash (the SDK's <code>verifyPublication</code> does this).</li>
+  <li>This page made two device keys. Issue each an access token of that node bound to its thumbprint
+    (<code>dpop_jkt</code>), for two different identities.</li>
+  <li>Paste the URL, one current hash and both tokens, then run.</li>
+</ol>
+<p>Device 1 key thumbprint: <code id="jkt1">…</code><br>Device 2 key thumbprint: <code id="jkt2">…</code></p>
+<label for="url">Session URL</label><input id="url" placeholder="https://node.example:4433/app">
+<label for="hash">Certificate SHA-256 (hex)</label><input id="hash" placeholder="64 hex characters">
+<label for="tok1">Access token, device 1</label><textarea id="tok1" rows="3"></textarea>
+<label for="tok2">Access token, device 2</label><textarea id="tok2" rows="3"></textarea>
+<label for="size">Bytes to echo</label><input id="size" value="1048576">
+<button id="run">Run</button>
+<div id="log"></div>
+<script type="module">
+const enc = new TextEncoder(), dec = new TextDecoder();
+const $ = (id) => document.getElementById(id);
+const log = (text, cls) => { const line = document.createElement("div"); line.textContent = text; if (cls) line.className = cls; $("log").append(line); };
+const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const hex = (text) => Uint8Array.from(text.trim().match(/../g) ?? [], (h) => parseInt(h, 16));
+
+async function deviceKey() {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const { crv, kty, x, y } = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const jwk = { crv, kty, x, y };
+  const jkt = b64url(await crypto.subtle.digest("SHA-256", enc.encode(JSON.stringify(jwk))));
+  return { pair, jwk, jkt };
+}
+
+async function proof(key, htu, token) {
+  const header = { typ: "dpop+jwt", alg: "ES256", jwk: key.jwk };
+  const payload = { jti: crypto.randomUUID(), htm: "POST", htu, iat: Math.floor(Date.now() / 1000),
+    ath: b64url(await crypto.subtle.digest("SHA-256", enc.encode(token))) };
+  const input = `${b64url(enc.encode(JSON.stringify(header)))}.${b64url(enc.encode(JSON.stringify(payload)))}`;
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key.pair.privateKey, enc.encode(input));
+  return `${input}.${b64url(sig)}`;
+}
+
+function frame(value) {
+  const body = enc.encode(JSON.stringify(value));
+  const out = new Uint8Array(4 + body.length);
+  new DataView(out.buffer).setUint32(0, body.length, true);
+  out.set(body, 4);
+  return out;
+}
+
+// Reads frames, then hands over the bytes after them.
+class Frames {
+  constructor(readable) { this.reader = readable.getReader(); this.buf = new Uint8Array(0); }
+  async fill(n) {
+    while (this.buf.length < n) {
+      const { value, done } = await this.reader.read();
+      if (done) return false;
+      const next = new Uint8Array(this.buf.length + value.length); next.set(this.buf); next.set(value, this.buf.length); this.buf = next;
+    }
+    return true;
+  }
+  async next() {
+    if (!(await this.fill(4))) return null;
+    const n = new DataView(this.buf.buffer, this.buf.byteOffset, 4).getUint32(0, true);
+    if (!(await this.fill(4 + n))) return null;
+    const value = JSON.parse(dec.decode(this.buf.subarray(4, 4 + n)));
+    this.buf = this.buf.slice(4 + n);
+    return value;
+  }
+  async *rest() {
+    if (this.buf.length) { yield this.buf; this.buf = new Uint8Array(0); }
+    for (;;) { const { value, done } = await this.reader.read(); if (done) return; yield value; }
+  }
+}
+
+async function signIn(name, url, hash, key, token) {
+  // allowPooling must be false: a pinned certificate is refused on a pooled session.
+  const wt = new WebTransport(url, { serverCertificateHashes: [{ algorithm: "sha-256", value: hash }], allowPooling: false });
+  await wt.ready;
+  const incoming = wt.incomingBidirectionalStreams.getReader();
+  const control = (await incoming.read()).value;
+  const frames = new Frames(control.readable);
+  const writer = control.writable.getWriter();
+  const challenge = await frames.next();
+  if (challenge?.type !== "challenge") throw new Error(`${name}: no challenge`);
+  await writer.write(frame({ type: "hello", access_token: token, dpop: await proof(key, `tenzro-app://${challenge.nonce}`, token) }));
+  const welcome = await frames.next();
+  if (welcome?.type !== "welcome") throw new Error(`${name}: ${welcome?.reason ?? "refused"}`);
+  log(`${name} signed in as ${welcome.did}`, "ok");
+  return { wt, incoming, frames, writer, did: welcome.did };
+}
+
+const keys = await Promise.all([deviceKey(), deviceKey()]);
+$("jkt1").textContent = keys[0].jkt;
+$("jkt2").textContent = keys[1].jkt;
+
+$("run").onclick = async () => {
+  $("log").textContent = "";
+  try {
+    if (typeof WebTransport === "undefined") throw new Error("this browser has no WebTransport");
+    const url = $("url").value.trim(), hash = hex($("hash").value), size = Number($("size").value);
+    if (hash.length !== 32) throw new Error("the certificate hash is 64 hex characters");
+    const one = await signIn("device 1", url, hash, keys[0], $("tok1").value.trim());
+    const two = await signIn("device 2", url, hash, keys[1], $("tok2").value.trim());
+
+    await two.writer.write(frame({ type: "listen", from: [one.did], apps: [] }));
+    if ((await two.frames.next())?.type !== "listening") throw new Error("device 2: listen not taken");
+
+    // Device 2 echoes the first stream offered to it.
+    const echoed = (async () => {
+      const stream = (await two.incoming.read()).value;
+      const head = new Frames(stream.readable);
+      const incoming = await head.next();
+      log(`device 2 was offered a stream from ${incoming.from} (${incoming.app})`);
+      const w = stream.writable.getWriter();
+      await w.write(frame({ type: "accept" }));
+      for await (const chunk of head.rest()) await w.write(chunk);
+      await w.close();
+    })();
+
+    const stream = await one.wt.createBidirectionalStream();
+    const w = stream.writable.getWriter();
+    const started = performance.now();
+    await w.write(frame({ type: "open", to: two.did, device: null, via: null, app: "echo" }));
+    const head = new Frames(stream.readable);
+    const opened = await head.next();
+    if (opened?.type !== "opened") throw new Error(`open: ${opened?.reason ?? "refused"}`);
+    const firstByte = performance.now();
+    const payload = crypto.getRandomValues(new Uint8Array(Math.min(size, 65536)));
+    const sending = (async () => {
+      for (let sent = 0; sent < size; sent += payload.length) await w.write(payload.subarray(0, Math.min(payload.length, size - sent)));
+      await w.close();
+    })();
+    let received = 0;
+    for await (const chunk of head.rest()) received += chunk.length;
+    await sending; await echoed;
+    const ms = performance.now() - started;
+    log(`stream opened in ${(firstByte - started).toFixed(1)} ms`);
+    log(`${received} of ${size} bytes echoed in ${ms.toFixed(1)} ms (${((2 * received * 8) / (ms * 1000)).toFixed(1)} Mbit/s both ways)`, received === size ? "ok" : "bad");
+    one.wt.close(); two.wt.close();
+  } catch (e) {
+    log(String(e.message ?? e), "bad");
+  }
+};
+</script>
+</body>
+</html>

@@ -11,6 +11,10 @@ readme = "README.md"
 keywords = ["tenzro", "identity", "did", "credentials", "delegation"]
 categories = ["cryptography", "authentication"]
 
+[features]
+# Test helpers that write identity records directly, for other crates' tests.
+test-support = []
+
 [dependencies]
 tenzro-types = { workspace = true }
 tenzro-crypto = { workspace = true }

@@ -5,6 +5,7 @@ use crate::validator::{ValidatorInfo, ValidatorSet};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use tenzro_types::primitives::{Address, BlockHeight, Timestamp};
 
 /// Persistence backend for epoch state.
@@ -147,6 +148,10 @@ pub struct EpochManager {
     /// subsequent transitions.
     pending_removals: Arc<RwLock<Vec<tenzro_types::primitives::Address>>>,
 
+    /// Most validators the next epoch's set may hold, or 0 for no limit.
+    /// Set by the node, from chain state, before each transition.
+    member_cap: Arc<AtomicUsize>,
+
     /// History of past epochs (protected by RwLock)
     epoch_history: Arc<RwLock<Vec<Epoch>>>,
 
@@ -192,6 +197,7 @@ impl EpochManager {
             epoch_duration,
             pending_validators: Arc::new(RwLock::new(Vec::new())),
             pending_removals: Arc::new(RwLock::new(Vec::new())),
+            member_cap: Arc::new(AtomicUsize::new(0)),
             epoch_history: Arc::new(RwLock::new(Vec::new())),
             max_history: 10,
             store: None,
@@ -278,6 +284,7 @@ impl EpochManager {
                     epoch_duration,
                     pending_validators: Arc::new(RwLock::new(Vec::new())),
                     pending_removals: Arc::new(RwLock::new(Vec::new())),
+                    member_cap: Arc::new(AtomicUsize::new(0)),
                     epoch_history: Arc::new(RwLock::new(Vec::new())),
                     max_history: 10,
                     store: Some(store),
@@ -321,6 +328,7 @@ impl EpochManager {
             epoch_duration,
             pending_validators: Arc::new(RwLock::new(Vec::new())),
             pending_removals: Arc::new(RwLock::new(Vec::new())),
+            member_cap: Arc::new(AtomicUsize::new(0)),
             epoch_history: Arc::new(RwLock::new(history)),
             max_history: 10,
             store: Some(store),
@@ -423,6 +431,14 @@ impl EpochManager {
         time_up: Option<u64>,
     ) -> Result<Option<ValidatorSet>> {
         self.transition_epoch_checked(height, time_up, None)
+    }
+
+    /// The most validators the next epoch's set may hold, or `None` for no
+    /// limit. The node sets it from chain state before it derives a set, so
+    /// every node derives the same one.
+    pub fn set_member_cap(&self, cap: Option<usize>) {
+        self.member_cap
+            .store(cap.unwrap_or(0), AtomicOrdering::Release);
     }
 
     /// As [`Self::transition_epoch_timed`], but the new validator set is
@@ -595,6 +611,24 @@ impl EpochManager {
             {
                 Some(existing) => *existing = candidate,
                 None => next_validators.push(candidate),
+            }
+        }
+
+        // Step 4 — the member cap: a full certificate costs one signature
+        // bundle per signer and must fit one gossip message, so the set holds
+        // at most the governed number of validators, the highest stakes.
+        // A validator cut here is not lost: the node rebuilds the queue from
+        // its registry at every boundary, so it is offered again each epoch
+        // and holds a seat in the first set where its stake outranks one.
+        let cap = self.member_cap.load(AtomicOrdering::Acquire);
+        if cap > 0 {
+            for dropped in cap_members(&mut next_validators, cap) {
+                tracing::warn!(
+                    address = %dropped.address,
+                    stake = dropped.stake,
+                    cap,
+                    "The next validator set is full: this validator holds no seat in it"
+                );
             }
         }
 
@@ -1009,6 +1043,22 @@ pub struct EpochStats {
     pub epoch_duration: u64,
 }
 
+/// Keeps the `cap` validators of `set` with the highest stakes, a tie going
+/// to the lower address, and returns those it dropped. The choice depends
+/// on the validators alone, never on their order, so every node that
+/// derives the set keeps the same ones.
+fn cap_members(set: &mut Vec<ValidatorInfo>, cap: usize) -> Vec<ValidatorInfo> {
+    if set.len() <= cap {
+        return Vec::new();
+    }
+    set.sort_by(|a, b| {
+        b.stake
+            .cmp(&a.stake)
+            .then_with(|| a.address.as_bytes().cmp(b.address.as_bytes()))
+    });
+    set.split_off(cap)
+}
+
 /// Why `update` cannot join `set`: a malformed key, or a key another
 /// validator in the set already holds.
 fn unseatable(set: &[ValidatorInfo], update: &ValidatorInfo) -> Option<&'static str> {
@@ -1040,6 +1090,111 @@ mod tests {
             addr_bytes,
             stake,
         )
+    }
+
+    /// Before the cap is set the next set holds every validator; with it,
+    /// the validators of the highest stakes, a tie to the lower address, and
+    /// the same ones whatever the order they were given in.
+    #[test]
+    fn the_member_cap_keeps_the_highest_stakes_and_only_once_set() {
+        let stakes = [500u128, 400, 300, 300, 100];
+        let make =
+            || -> Vec<ValidatorInfo> { stakes.iter().map(|s| create_test_validator(*s)).collect() };
+        let validators = make();
+        let two_300s: Vec<_> = validators
+            .iter()
+            .filter(|v| v.stake == 300)
+            .map(|v| v.address)
+            .collect();
+        let lower_300 = *two_300s
+            .iter()
+            .min_by(|a, b| a.as_bytes().cmp(b.as_bytes()))
+            .unwrap();
+
+        let uncapped = EpochManager::new(validators.clone(), 100).unwrap();
+        uncapped.transition_epoch(BlockHeight::from(100)).unwrap();
+        assert_eq!(uncapped.current_epoch().validator_set.len(), 5);
+
+        let mut reversed = validators.clone();
+        reversed.reverse();
+        for given in [validators.clone(), reversed] {
+            let capped = EpochManager::new(given, 100).unwrap();
+            capped.set_member_cap(Some(3));
+            capped.transition_epoch(BlockHeight::from(100)).unwrap();
+            let kept: Vec<u128> = {
+                let mut k: Vec<u128> = capped
+                    .current_epoch()
+                    .validator_set
+                    .iter()
+                    .map(|v| v.stake)
+                    .collect();
+                k.sort_unstable();
+                k
+            };
+            assert_eq!(kept, vec![300, 400, 500]);
+            assert!(
+                capped
+                    .current_epoch()
+                    .validator_set
+                    .get_by_address(&lower_300)
+                    .is_some(),
+                "a tie keeps the lower address"
+            );
+        }
+
+        let mut set = make();
+        assert!(cap_members(&mut set, 9).is_empty() && set.len() == 5);
+    }
+
+    /// A validator the cap left out is offered again at the next boundary, as
+    /// the node's registry does for every active validator without a seat:
+    /// with the stake it had it stays out, and once its stake outranks a
+    /// member's it takes that member's seat.
+    #[test]
+    fn a_validator_cut_by_the_cap_takes_a_seat_once_it_outranks_a_member() {
+        let (a, b, c) = (
+            create_test_validator(500),
+            create_test_validator(400),
+            create_test_validator(300),
+        );
+        let d = create_test_validator(100);
+        let manager = EpochManager::new(vec![a.clone(), b.clone(), c.clone()], 100).unwrap();
+        manager.set_member_cap(Some(3));
+        let seated = |m: &EpochManager| {
+            let mut v: Vec<_> = m
+                .current_epoch()
+                .validator_set
+                .iter()
+                .map(|v| v.address)
+                .collect();
+            v.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
+            v
+        };
+        let mut abc = vec![a.address, b.address, c.address];
+        abc.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
+
+        manager.clear_pending();
+        manager.add_pending_validator(d.clone());
+        manager.transition_epoch(BlockHeight::from(100)).unwrap();
+        assert_eq!(seated(&manager), abc, "d is cut");
+
+        manager.clear_pending();
+        manager.add_pending_validator(d.clone());
+        manager.transition_epoch(BlockHeight::from(200)).unwrap();
+        assert_eq!(
+            seated(&manager),
+            abc,
+            "offered again, with its stake, it stays out"
+        );
+
+        let mut grown = d.clone();
+        grown.stake = 350;
+        manager.clear_pending();
+        manager.add_pending_validator(grown);
+        manager.transition_epoch(BlockHeight::from(300)).unwrap();
+        let mut abd = vec![a.address, b.address, d.address];
+        abd.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
+        assert_eq!(seated(&manager), abd, "outranking c, d takes its seat");
     }
 
     #[test]
@@ -1898,7 +2053,7 @@ mod tests {
             for i in perm {
                 manager.add_pending_validator(adds[*i].clone());
             }
-            let removals: Vec<Address> = if perm[0] % 2 == 0 {
+            let removals: Vec<Address> = if perm[0].is_multiple_of(2) {
                 drops.to_vec()
             } else {
                 drops.iter().rev().copied().collect()

@@ -19,7 +19,7 @@ use tenzro_consensus::{
     ValidatorIndex, ValidatorInfo, ValidatorPublicKey, ValidatorSet, ValidatorSigner,
 };
 
-use crate::config::{Behaviour, SimConfig};
+use crate::config::{Behaviour, SimConfig, ThresholdHalts};
 use crate::ledger::{self, Envelope, Genesis, Ledger, SimTx, TNZO, USER_BASE};
 use crate::node::{NodeBlocks, SegmentBlock, batching_index};
 use crate::report::{Report, Violation};
@@ -117,6 +117,8 @@ struct Node {
     behaviour: Behaviour,
     status: Status,
     skew_ms: i64,
+    /// Votes and certificates received, counted by a divergent verifier.
+    signed_seen: u64,
     core: Option<Core>,
     epoch: u64,
     committee: Committee,
@@ -137,6 +139,9 @@ struct Node {
     // Progress and accounting.
     last_height: u64,
     batch_count: u64,
+    /// Messages a mutating validator has handled, and the latest of them.
+    mutate_count: u64,
+    sent_before: VecDeque<(Target, Message)>,
     cpu_free_us: u64,
     egress_free_us: u64,
     bytes_out: u64,
@@ -233,6 +238,9 @@ struct Proposal {
     retry_at_cal: i64,
 }
 
+/// Calendar time after which an execute with no result is sent again.
+const GOV_RESEND_MS: i64 = 6 * 3_600_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GovStage {
     Proposing,
@@ -289,6 +297,9 @@ pub struct World {
     deliveries: HashMap<u64, Delivery>,
     nodes: Vec<Node>,
     ledger: Ledger,
+    /// The ledger that replays every block from genesis, when the run asks
+    /// for one.
+    replay: Option<Ledger>,
     core_cfg: CoreConfig,
     seat_budget: u64,
     /// Committee and start of every epoch the network entered.
@@ -341,12 +352,23 @@ const CUT: u64 = 1;
 const SECOND: u64 = 2;
 const GOSSIP: u64 = 3;
 
+/// How many times the usual latency a frame between `a` and `b` takes: the
+/// larger factor of the two ends, 1 when neither sits behind a slow link.
+fn link_slowdown(slow_links: &[(u32, u64)], a: u32, b: u32) -> u64 {
+    slow_links
+        .iter()
+        .filter(|(v, _)| *v == a || *v == b)
+        .map(|(_, factor)| (*factor).max(1))
+        .max()
+        .unwrap_or(1)
+}
+
 impl World {
     /// Builds the network at genesis.
     pub fn new(cfg: SimConfig) -> Self {
         let mut rng = StdRng::seed_from_u64(cfg.seed);
         let validators = cfg.validators + cfg.standby;
-        let ledger = Ledger::genesis(&Genesis {
+        let genesis = Genesis {
             active: cfg.validators,
             standby: cfg.standby,
             users: cfg.workload.users,
@@ -357,7 +379,9 @@ impl World {
             strict_supply: false,
             calendar_scale: cfg.calendar_scale(),
             epoch_ms: cfg.epoch_ms(),
-        });
+        };
+        let ledger = Ledger::genesis(&genesis);
+        let replay = cfg.replay_from_genesis.then(|| Ledger::genesis(&genesis));
         let time = TimeRules {
             checkpoint_interval_ms: cfg.checkpoint_interval_ms,
             epoch_checkpoints: cfg.epoch_checkpoints,
@@ -414,6 +438,7 @@ impl World {
                     Status::Retired
                 },
                 skew_ms: skew,
+                signed_seen: 0,
                 core,
                 epoch: 0,
                 committee: committee.clone(),
@@ -431,6 +456,8 @@ impl World {
                 clients: Vec::new(),
                 last_height: 0,
                 batch_count: 0,
+                mutate_count: 0,
+                sent_before: VecDeque::new(),
                 cpu_free_us: 0,
                 egress_free_us: 0,
                 bytes_out: 0,
@@ -465,6 +492,7 @@ impl World {
             deliveries: HashMap::new(),
             nodes,
             ledger,
+            replay,
             core_cfg,
             seat_budget,
             epochs,
@@ -765,9 +793,9 @@ impl World {
     }
 
     /// A leader slot skipped while the network was calm, with the leader
-    /// honest, up, connected to every member up and not slow or stalled, is
-    /// a liveness violation: every honest validator holds its vertex well
-    /// within the leader timeout.
+    /// honest, up, connected to every member up and not slow, stalled or
+    /// behind slow links, is a liveness violation: every honest validator
+    /// holds its vertex well within the leader timeout.
     fn judge_skips(&mut self, i: usize) {
         let skipped = match self.nodes[i].core.as_mut() {
             Some(c) => c.take_skipped(),
@@ -795,6 +823,7 @@ impl World {
                 || l.status != Status::Up
                 || l.epoch != epoch
                 || l.slow > 1
+                || link_slowdown(&self.cfg.faults.slow_links, id, id) > 1
                 || self.now_us < l.up_since_us + calm
                 || self.now_us < l.stall_until_us + calm
             {
@@ -975,6 +1004,22 @@ impl World {
                             .get(seg.anchor.source as usize)
                             .copied()
                             .unwrap_or(0);
+                        let replayed = self.replay.as_mut().map(|r| {
+                            let e = r.execute(
+                                height,
+                                content,
+                                seg.anchor.digest,
+                                batches_digest,
+                                self.nodes[i].id,
+                                seg.epoch,
+                                seg.timestamp_ms,
+                                proposer,
+                                txs.clone(),
+                            );
+                            r.results.clear();
+                            r.conservation_failures.clear();
+                            e.root
+                        });
                         let e = self.ledger.execute(
                             height,
                             content,
@@ -986,6 +1031,19 @@ impl World {
                             proposer,
                             txs,
                         );
+                        if let Some(root) = replayed
+                            && root != e.root
+                        {
+                            self.violation(
+                                "replay",
+                                None,
+                                format!(
+                                    "height {height}: the ledger replayed from genesis has root {} and the network {}",
+                                    hex::encode(root),
+                                    hex::encode(e.root)
+                                ),
+                            );
+                        }
                         self.after_block(height);
                         e
                     }
@@ -1275,6 +1333,8 @@ impl World {
 
     fn drain(&mut self, i: usize) {
         let now_us = self.now_us;
+        let seed = self.cfg.seed;
+        let (mut mutated, mut replayed) = (0, 0);
         let n = &mut self.nodes[i];
         let Some(core) = n.core.as_mut() else { return };
         let records = core.take_journal();
@@ -1331,6 +1391,27 @@ impl World {
                         sends.push((t, m));
                     }
                 }
+                (_, Behaviour::Mutate) => {
+                    n.mutate_count += 1;
+                    let draw = crate::mutate::draw(seed, n.id, n.mutate_count);
+                    match draw % 8 {
+                        0 | 1 => {
+                            sends.push((t, crate::mutate::mutate(&m, draw >> 3, size)));
+                            mutated += 1;
+                        }
+                        2 if !n.sent_before.is_empty() => {
+                            let k = (draw >> 3) as usize % n.sent_before.len();
+                            sends.push(n.sent_before[k].clone());
+                            sends.push((t, m.clone()));
+                            replayed += 1;
+                        }
+                        _ => sends.push((t, m.clone())),
+                    }
+                    n.sent_before.push_back((t, m));
+                    if n.sent_before.len() > 64 {
+                        n.sent_before.pop_front();
+                    }
+                }
                 _ => sends.push((t, m)),
             }
         }
@@ -1342,6 +1423,8 @@ impl World {
         let id = n.id;
         let epoch = n.epoch;
         let members = n.members.clone();
+        self.report.faults.mutated_messages += mutated;
+        self.report.faults.replayed_messages += replayed;
         if let Some(r) = twice {
             self.violation(
                 "safety",
@@ -1408,7 +1491,7 @@ impl World {
         // A fixed base per link plus jitter.
         let base = lo + (((a as u64 * 7_919) ^ (b as u64 * 104_729)) % (hi - lo + 1).max(1));
         let jitter = self.rng.gen_range(0..=base / 5 + 1);
-        let mut l = (base + jitter) * 1_000;
+        let mut l = (base + jitter) * 1_000 * link_slowdown(&self.cfg.faults.slow_links, a, b);
         if let Some((until, f)) = self.spike
             && self.now_us < until
         {
@@ -1452,8 +1535,26 @@ impl World {
         let bytes: usize = d.msgs.iter().map(msg_size).sum();
         let n = &mut self.nodes[to];
         n.bytes_in += bytes as u64;
-        let Some(core) = n.core.as_mut() else { return };
-        core.on_messages(d.from, (*d.msgs).clone(), now);
+        if n.core.is_none() {
+            return;
+        }
+        let mut msgs = (*d.msgs).clone();
+        if n.behaviour == Behaviour::DivergentVerifier {
+            let before = msgs.len();
+            let seen = &mut n.signed_seen;
+            msgs.retain(|m| {
+                if !matches!(m, Message::Vote(_) | Message::Certificate(_)) {
+                    return true;
+                }
+                *seen += 1;
+                !seen.is_multiple_of(4)
+            });
+            self.report.faults.refused_signed_messages += (before - msgs.len()) as u64;
+        }
+        let Some(core) = self.nodes[to].core.as_mut() else {
+            return;
+        };
+        core.on_messages(d.from, msgs, now);
         self.process(to);
     }
 
@@ -1476,6 +1577,23 @@ impl World {
             let (a, b) = pair(id, p);
             self.links.pending.push((self.now_us + d, a, b, epoch));
         }
+    }
+
+    /// Closes one live link, chosen by the seed, and dials it again after
+    /// the connect delay.
+    fn drop_link(&mut self, now: u64) {
+        let mut live: Vec<((u32, u32), u64)> =
+            self.links.up.iter().map(|(k, e)| (*k, *e)).collect();
+        if live.is_empty() {
+            return;
+        }
+        live.sort_unstable();
+        let ((a, b), epoch) = live[self.rng.gen_range(0..live.len())];
+        self.links.up.remove(&(a, b));
+        let d = self.connect_delay_us(a, b);
+        self.links.pending.push((now + d, a, b, epoch));
+        self.report.faults.link_drops += 1;
+        self.calm_since_us = now;
     }
 
     fn connect_due(&mut self) {
@@ -1929,6 +2047,23 @@ impl World {
             };
             self.crash(i, now + down_ms * 1_000, long);
         }
+        if let Some(h) = f.threshold_halts.as_ref()
+            && self.quorum_ok(&[])
+            && self.rng.r#gen::<f64>() < per_s(h.per_hour)
+        {
+            self.threshold_halt(h, now);
+        }
+        // Drawn only when the fault is on, so a run without it replays the
+        // same seed as before.
+        if f.link_drops_per_hour > 0.0 {
+            // A rate above one drop a second draws the whole part as drops
+            // and the rest as a chance, so the rate keeps its meaning.
+            let rate = per_s(f.link_drops_per_hour);
+            let drops = rate.floor() as u32 + u32::from(self.rng.r#gen::<f64>() < rate.fract());
+            for _ in 0..drops {
+                self.drop_link(now);
+            }
+        }
         if self.partition.is_none() && self.rng.r#gen::<f64>() < per_s(f.partitions_per_hour) {
             let ids: Vec<u32> = self
                 .epochs
@@ -1977,6 +2112,54 @@ impl World {
             self.spike = Some((now + dur * 1_000, factor));
             self.report.faults.delay_spikes += 1;
         }
+    }
+
+    /// Stops honest validators of the running committee together, in an
+    /// order drawn from the seed, until the ones left up are no quorum, or
+    /// every validator for a cold start. A stop the committee still
+    /// tolerated outlasts the halt by the tail.
+    fn threshold_halt(&mut self, h: &ThresholdHalts, now: u64) {
+        let Some((committee, members, _)) = self.epochs.last_key_value().map(|(_, e)| e.clone())
+        else {
+            return;
+        };
+        let honest_up = |n: &Node| n.status == Status::Up && n.behaviour == Behaviour::Honest;
+        let tolerated = committee.total_seats().saturating_sub(1) / 3;
+        let mut bad: u64 = members
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| !honest_up(&self.nodes[**id as usize]))
+            .map(|(seat, _)| committee.seats(seat as ValidatorIndex))
+            .sum();
+        let mut pool: Vec<(usize, u32)> = members
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, id)| honest_up(&self.nodes[*id as usize]))
+            .collect();
+        let cold = self.rng.r#gen::<f64>() < h.cold_start_share;
+        let until = now + self.rng.gen_range(h.down_ms.0..=h.down_ms.1) * 1_000;
+        let tail = self.rng.gen_range(h.tail_ms.0..=h.tail_ms.1) * 1_000;
+        while !pool.is_empty() && (cold || bad <= tolerated) {
+            let (seat, id) = pool.swap_remove(self.rng.gen_range(0..pool.len()));
+            bad += committee.seats(seat as ValidatorIndex);
+            let tolerated_stop = !cold && bad <= tolerated;
+            self.crash(
+                id as usize,
+                if tolerated_stop { until + tail } else { until },
+                false,
+            );
+        }
+        if cold {
+            // Validators outside the committee stop with it.
+            for i in 0..self.nodes.len() {
+                if honest_up(&self.nodes[i]) {
+                    self.crash(i, until, false);
+                }
+            }
+            self.report.faults.cold_starts += 1;
+        }
+        self.report.faults.threshold_halts += 1;
     }
 
     fn reconnect_cross(&mut self, id: u32) {
@@ -2324,7 +2507,10 @@ impl World {
                                 enact_after: cal + timelock + timelock / 10,
                             };
                         }
-                        (GovStage::Enacting, true) => {
+                        // An enacting execute whose result came after the
+                        // resend moved the stage back to the timelock is the
+                        // enactment all the same: the queue step is past.
+                        (GovStage::Enacting | GovStage::Timelock { .. }, true) => {
                             *self.gov.kinds_done.entry(p.kind).or_default() += 1;
                             self.report.governance.enacted += 1;
                             self.gov.active = None;
@@ -2514,6 +2700,7 @@ impl World {
                     }) && let Some(p) = self.gov.active.as_mut()
                     {
                         p.stage = GovStage::Closing;
+                        p.retry_at_cal = cal + GOV_RESEND_MS;
                     }
                 }
                 if cal > proposed + 60 * 86_400_000 {
@@ -2533,11 +2720,25 @@ impl World {
                     }) && let Some(p) = self.gov.active.as_mut()
                     {
                         p.stage = GovStage::Enacting;
+                        p.retry_at_cal = cal + GOV_RESEND_MS;
                     }
                 }
                 if cal > proposed + 60 * 86_400_000 {
                     self.gov.failures.push("proposal stuck for 60 days".into());
                     self.gov.active = None;
+                }
+            }
+            // An execute sent to a proposer that then crashed never lands:
+            // send it again after a while.
+            Some((GovStage::Closing, _, resend, _)) if cal >= resend => {
+                if let Some(p) = self.gov.active.as_mut() {
+                    p.stage = GovStage::Voting;
+                    p.retry_at_cal = 0;
+                }
+            }
+            Some((GovStage::Enacting, _, resend, _)) if cal >= resend => {
+                if let Some(p) = self.gov.active.as_mut() {
+                    p.stage = GovStage::Timelock { enact_after: cal };
                 }
             }
             Some((_, proposed, ..)) => {
@@ -2881,6 +3082,11 @@ impl World {
         r.stake_exits = self.stake.exits;
         r.stake_withdrawals = self.stake.withdrawals;
         r.stake_top_ups = self.stake.top_ups;
+        r.state_root = self
+            .ledger
+            .at(self.network_height)
+            .map(|e| hex::encode(e.root))
+            .unwrap_or_default();
         r.total_supply = self.ledger.total_supply().to_string();
         r.genesis_supply = self.ledger.genesis_supply.to_string();
         r.ledger_index_bytes = self.ledger.index_bytes() as u64;

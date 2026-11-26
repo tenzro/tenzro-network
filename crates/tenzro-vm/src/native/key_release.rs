@@ -140,7 +140,7 @@ fn plan(state: &dyn VmState, from: &[u8], now_ms: i64, op: &KeyReleaseOp) -> Res
             })?;
             owned(&m)?;
             let did = &request.evidence.operator_did;
-            if is_identity_revoked(state, did) {
+            if identity_revoked_in_force(state, did) {
                 return Err(refuse(format!("{did} is revoked")));
             }
             let admitted = machine_attestation(state, did)

@@ -8,6 +8,7 @@
 //! | `mandate.checkout.1` | closed Checkout Mandate: one merchant-signed checkout |
 //! | `mandate.payment.1` | closed Payment Mandate: one payment for that checkout |
 //! | `mandate.payment.open.1` | open Payment Mandate: constraints plus the agent key (`cnf`) |
+//! | `mandate.checkout.open.1` | open Checkout Mandate: defined by the spec, refused here (only a closed Checkout Mandate is checked) |
 //!
 //! A mandate never grants authority. The paying agent's Terms decide every
 //! payment; a mandate can only narrow what the Terms already allow, and a
@@ -209,11 +210,35 @@ pub struct VerifiedSdJwt {
     pub iss: Option<String>,
 }
 
+/// Seconds a key-binding JWT's `iat` may lie behind the verifier's clock.
+pub const KB_JWT_MAX_AGE_SECS: i64 = 300;
+
+/// Seconds a key-binding JWT's `iat` may lie ahead of the verifier's clock.
+pub const KB_JWT_MAX_SKEW_SECS: i64 = 60;
+
+/// What a key-binding JWT must name to be accepted by this verifier.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyBindingExpectation<'a> {
+    /// The verifier the presentation is made to (`aud`).
+    pub audience: &'a str,
+    /// The verifier's challenge the presentation answers (`nonce`).
+    pub nonce: &'a str,
+    /// The verifier's clock, unix seconds.
+    pub now: i64,
+}
+
 /// Verify an SD-JWT (`<issuer-jwt>~<disclosure>~...~[<kb-jwt>]`) and apply
-/// its disclosures. The issuer key is taken from the issuer JWT's header and
-/// returned for the caller to attribute. A key-binding JWT, when present,
-/// must be signed by the key in `cnf` and cover this exact presentation.
-pub fn verify_sd_jwt(presentation: &str) -> Result<VerifiedSdJwt> {
+/// its disclosures. The issuer JWT must be `typ` `dc+sd-jwt`; the issuer key
+/// is taken from its header and returned for the caller to attribute. A
+/// key-binding JWT, when present, must be signed by the key in `cnf`, cover
+/// this exact presentation, name `expect.audience` as `aud` and
+/// `expect.nonce` as `nonce`, and be issued within
+/// [`KB_JWT_MAX_AGE_SECS`] before and [`KB_JWT_MAX_SKEW_SECS`] after
+/// `expect.now`, so it cannot be replayed to another verifier or later.
+pub fn verify_sd_jwt(
+    presentation: &str,
+    expect: &KeyBindingExpectation<'_>,
+) -> Result<VerifiedSdJwt> {
     let parts: Vec<&str> = presentation.split('~').collect();
     if parts.len() < 2 {
         return Err(refuse("not an SD-JWT"));
@@ -225,6 +250,9 @@ pub fn verify_sd_jwt(presentation: &str) -> Result<VerifiedSdJwt> {
         None => (None, rest),
     };
     let (jws, issuer_key) = verify_jws(issuer_jwt, None)?;
+    if jws.header.get("typ").and_then(Value::as_str) != Some("dc+sd-jwt") {
+        return Err(refuse("the issuer JWT is not typ dc+sd-jwt"));
+    }
     if let Some(alg) = jws.claims.get("_sd_alg").and_then(Value::as_str)
         && alg != "sha-256"
     {
@@ -264,6 +292,20 @@ pub fn verify_sd_jwt(presentation: &str) -> Result<VerifiedSdJwt> {
             != Some(b64_sha256(presented.as_bytes()).as_str())
         {
             return Err(refuse("the key-binding JWT covers another presentation"));
+        }
+        if kb.claims.get("aud").and_then(Value::as_str) != Some(expect.audience) {
+            return Err(refuse("the key-binding JWT is for another verifier"));
+        }
+        if kb.claims.get("nonce").and_then(Value::as_str) != Some(expect.nonce) {
+            return Err(refuse("the key-binding JWT answers another challenge"));
+        }
+        let iat = kb
+            .claims
+            .get("iat")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| refuse("the key-binding JWT states no iat"))?;
+        if iat < expect.now - KB_JWT_MAX_AGE_SECS || iat > expect.now + KB_JWT_MAX_SKEW_SECS {
+            return Err(refuse("the key-binding JWT is not fresh"));
         }
     }
     Ok(VerifiedSdJwt {
@@ -306,6 +348,9 @@ pub struct ProposedPayment<'a> {
     pub currency: &'a str,
     /// The chain the payment settles on, for the Terms check.
     pub chain: &'a str,
+    /// The challenge the payment answers; a key-binding JWT must carry it
+    /// as `nonce` and name the payee as `aud`.
+    pub nonce: &'a str,
 }
 
 /// What the verifier reads about identities.
@@ -476,11 +521,16 @@ pub fn verify(
     terms: &dyn TermsGate,
 ) -> Result<VerifiedMandates> {
     let now = now_secs();
+    let expect = KeyBindingExpectation {
+        audience: pay.payee,
+        nonce: pay.nonce,
+        now,
+    };
     let (checkout, _) = verify_jws(&presented.checkout_jwt, merchant_key)?;
     check_time(&checkout.claims, now, "checkout")?;
     let transaction_id = b64_sha256(presented.checkout_jwt.as_bytes());
 
-    let closed = verify_sd_jwt(&presented.payment_mandate)?;
+    let closed = verify_sd_jwt(&presented.payment_mandate, &expect)?;
     let c = &closed.claims;
     if c.get("vct").and_then(Value::as_str) != Some(VCT_PAYMENT) {
         return Err(refuse(format!(
@@ -524,7 +574,7 @@ pub fn verify(
             controller.clone()
         }
         Some(open) => {
-            let open = verify_sd_jwt(open)?;
+            let open = verify_sd_jwt(open, &expect)?;
             let o = &open.claims;
             if o.get("vct").and_then(Value::as_str) != Some(VCT_PAYMENT_OPEN) {
                 return Err(refuse(format!(
@@ -681,6 +731,28 @@ mod tests {
 
     /// An SD-JWT with every top-level claim but `vct` selectively disclosed.
     fn sd_jwt(k: &SigningKey, claims: Value, kb: Option<&SigningKey>) -> String {
+        sd_jwt_typed(k, claims, kb, Some("dc+sd-jwt"))
+    }
+
+    /// A presentation ending in `~` with a key-binding JWT by `holder`
+    /// appended, stating `aud`, `nonce` and `iat`.
+    fn kb_over(bare: &str, holder: &SigningKey, aud: &str, nonce: &str, iat: i64) -> String {
+        let mut h = Map::new();
+        h.insert("alg".into(), "ES256".into());
+        h.insert("typ".into(), "kb+jwt".into());
+        let claims = serde_json::json!({
+            "iat": iat, "aud": aud, "nonce": nonce,
+            "sd_hash": b64_sha256(bare.as_bytes()),
+        });
+        format!("{bare}{}", sign_jws(&h, &claims, |m| holder.sign(m)))
+    }
+
+    fn sd_jwt_typed(
+        k: &SigningKey,
+        claims: Value,
+        kb: Option<&SigningKey>,
+        typ: Option<&str>,
+    ) -> String {
         let mut digests = Vec::new();
         let mut discs = Vec::new();
         let mut body = Map::new();
@@ -695,23 +767,22 @@ mod tests {
         }
         body.insert("_sd".into(), Value::Array(digests));
         body.insert("_sd_alg".into(), "sha-256".into());
-        let mut out = jws(k, Value::Object(body));
+        let mut h = Map::new();
+        h.insert("alg".into(), "ES256".into());
+        if let Some(typ) = typ {
+            h.insert("typ".into(), typ.into());
+        }
+        h.insert("jwk".into(), jwk_of(k.verifying_key()));
+        let mut out = sign_jws(&h, &Value::Object(body), |m| k.sign(m));
         for d in discs {
             out.push('~');
             out.push_str(&d);
         }
         out.push('~');
-        if let Some(holder) = kb {
-            let mut h = Map::new();
-            h.insert("alg".into(), "ES256".into());
-            h.insert("typ".into(), "kb+jwt".into());
-            let claims = serde_json::json!({
-                "iat": now_secs(), "aud": PAYEE, "nonce": "n",
-                "sd_hash": b64_sha256(out.as_bytes()),
-            });
-            out.push_str(&sign_jws(&h, &claims, |m| holder.sign(m)));
+        match kb {
+            Some(holder) => kb_over(&out, holder, PAYEE, "n", now_secs()),
+            None => out,
         }
-        out
     }
 
     struct Keys {
@@ -843,12 +914,51 @@ mod tests {
             amount,
             currency: "TNZO",
             chain: "tenzro:1337",
+            nonce: "n",
         }
     }
 
     fn reference(w: &World) -> Value {
         serde_json::json!({"type": "payment.reference",
                            "conditional_transaction_id": b64_sha256(w.checkout.as_bytes())})
+    }
+
+    #[test]
+    fn a_presentation_is_held_to_its_type_and_to_this_verifier_challenge_and_clock() {
+        let issuer = key();
+        let holder = key();
+        let claims = serde_json::json!({
+            "vct": VCT_PAYMENT_OPEN,
+            "cnf": {"jwk": jwk_of(holder.verifying_key())},
+            "exp": now_secs() + 600,
+        });
+        let bare = sd_jwt(&issuer, claims.clone(), None);
+        let now = now_secs();
+        let expect = KeyBindingExpectation {
+            audience: PAYEE,
+            nonce: "n",
+            now,
+        };
+        assert!(verify_sd_jwt(&kb_over(&bare, &holder, PAYEE, "n", now), &expect).is_ok());
+        let stale = now - KB_JWT_MAX_AGE_SECS - 1;
+        let ahead = now + KB_JWT_MAX_SKEW_SECS + 1;
+        for (aud, nonce, iat, why) in [
+            ("did:tenzro:machine:other", "n", now, "another verifier"),
+            (PAYEE, "m", now, "another challenge"),
+            (PAYEE, "n", stale, "not fresh"),
+            (PAYEE, "n", ahead, "not fresh"),
+        ] {
+            let err = verify_sd_jwt(&kb_over(&bare, &holder, aud, nonce, iat), &expect)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(why), "{aud} {nonce} {iat}: {err}");
+        }
+        for typ in [None, Some("jwt")] {
+            let err = verify_sd_jwt(&sd_jwt_typed(&issuer, claims.clone(), None, typ), &expect)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("dc+sd-jwt"), "{err}");
+        }
     }
 
     #[test]

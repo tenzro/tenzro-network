@@ -167,6 +167,12 @@ const NODE_WRITES: &[(&str, &str, usize, &str)] = &[
         "LOCAL: this node's copy of the measurement transparency log; answers verification queries, moves no value",
     ),
     (
+        "crates/tenzro-node/src/conditions.rs",
+        "cf",
+        2,
+        "LOCAL: the operator's acknowledgements of open conditions (condition_ack:<id>), kept across a restart and deleted when the condition ends; operator metadata, moves no value",
+    ),
+    (
         "crates/tenzro-node/src/epoch_state_store.rs",
         "cf",
         1,
@@ -181,8 +187,8 @@ const NODE_WRITES: &[(&str, &str, usize, &str)] = &[
     (
         "crates/tenzro-node/src/history_archive.rs",
         "cf",
-        1,
-        "LOCAL: pruning cursor and pointers to segments the DA layer holds",
+        2,
+        "LOCAL: pruning cursor (kept as a node restored from a snapshot first sets it) and pointers to segments the DA layer holds; moves no value",
     ),
     (
         "crates/tenzro-node/src/machine_access.rs",
@@ -195,6 +201,18 @@ const NODE_WRITES: &[(&str, &str, usize, &str)] = &[
         "cf",
         1,
         "LOCAL: index of published snapshot manifests, each checked against its state root",
+    ),
+    (
+        "crates/tenzro-node/src/usage_payer.rs",
+        "cf",
+        1,
+        "LOCAL: who paid for a settled generation, shown beside its usage record; the payment itself settled in consensus, moves no value",
+    ),
+    (
+        "crates/tenzro-node/src/a2a/task_manager.rs",
+        "cf",
+        3,
+        "LOCAL: A2A tasks kept so a restart does not lose them; message records, moves no value",
     ),
     (
         "crates/tenzro-node/src/visibility_rpc.rs",
@@ -773,9 +791,19 @@ fn node_code_moves_no_value_outside_consensus() {
 /// `GOVERNED_PARAMS` (as its key or genesis value) or listed here.
 const NOT_GOVERNED: &[(&str, &str, &str)] = &[
     (
+        "crates/tenzro-vm/src/evm/osaka.rs",
+        "TRANSACTION_GAS_CAP",
+        "STANDARD: the per-transaction gas limit EIP-7825 sets for the Osaka rules, taken from the engine's own constant; an EVM client applies it as the Ethereum standard writes it, and the chain's own block and default gas limits are governed",
+    ),
+    (
         "crates/tenzro-vm/src/feature_gate.rs",
         "MIN_NOTICE_EPOCHS",
         "BOUND: epochs of notice a vote on a feature gate must give so every validator sees the new activation epoch before it applies; it is the safety margin of the gate itself, and a vote that could shorten it could switch a rule on under validators that have not yet seen it",
+    ),
+    (
+        "crates/tenzro-vm/src/native/identity_keys.rs",
+        "MAX_KEY_EPOCHS",
+        "BOUND: size limit of the key history one identity carries, so a root's history stays small and its key lookups bounded; an identity at the limit succeeds to a new root, so no policy is decided here",
     ),
     (
         "crates/tenzro-vm/src/governance.rs",

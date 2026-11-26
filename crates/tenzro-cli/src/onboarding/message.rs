@@ -458,15 +458,15 @@ mod tests {
     }
 
     /// The cases use a fixed test environment, not foundation_config.json, so filling in
-    /// the real channels never makes the file stale. The wallet app
-    /// (apps/tenzro-control/src/lib/onboarding.ts) re-implements
-    /// this builder in TypeScript. Both must produce these exact lines, so the
-    /// cases and their expected output are written to one JSON file that the
-    /// wallet's own tests replay. This test fails when the file is stale;
-    /// regenerate it with `UPDATE_ONBOARDING_FIXTURES=1 cargo test -p tenzro-cli
+    /// the real channels never makes the file stale. A client that builds
+    /// these messages itself must produce these exact lines, so the cases and
+    /// their expected output are written to one JSON file
+    /// (`sdk/fixtures/onboarding/messages.json`) that its own tests replay.
+    /// This test fails when the file is stale; regenerate it with
+    /// `UPDATE_ONBOARDING_FIXTURES=1 cargo test -p tenzro-cli
     /// onboarding::message`.
     #[test]
-    fn wallet_fixture_is_current() {
+    fn the_shared_fixture_is_current() {
         use ApplicationState::*;
         let states = [
             NotApplied,
@@ -530,7 +530,7 @@ mod tests {
         text.push('\n');
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/tenzro-control/src/lib/onboarding-fixtures.json"
+            "/../../sdk/fixtures/onboarding/messages.json"
         );
         if std::env::var_os("UPDATE_ONBOARDING_FIXTURES").is_some() {
             std::fs::write(path, &text).unwrap();

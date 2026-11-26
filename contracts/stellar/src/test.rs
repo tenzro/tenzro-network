@@ -32,7 +32,10 @@ fn hex(b: &[u8]) -> std::string::String {
 }
 
 fn unhex(s: &str) -> std::vec::Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 fn key(seed: u8) -> SigningKey {
@@ -76,20 +79,34 @@ struct Setup {
     asset_xdr: soroban_sdk::xdr::Asset,
 }
 
-fn add_ledger_entry(env: &Env, key: soroban_sdk::xdr::LedgerKey, data: soroban_sdk::xdr::LedgerEntryData) {
+fn add_ledger_entry(
+    env: &Env,
+    key: soroban_sdk::xdr::LedgerKey,
+    data: soroban_sdk::xdr::LedgerEntryData,
+) {
     use soroban_sdk::xdr::{LedgerEntry, LedgerEntryExt};
-    let entry = LedgerEntry { data, last_modified_ledger_seq: 0, ext: LedgerEntryExt::V0 };
-    env.host().add_ledger_entry(&std::rc::Rc::new(key), &std::rc::Rc::new(entry), None).unwrap();
+    let entry = LedgerEntry {
+        data,
+        last_modified_ledger_seq: 0,
+        ext: LedgerEntryExt::V0,
+    };
+    env.host()
+        .add_ledger_entry(&std::rc::Rc::new(key), &std::rc::Rc::new(entry), None)
+        .unwrap();
 }
 
 /// Give the account `a` a ledger entry and a trustline for the asset, as a
 /// holder of a Stellar asset has.
 fn hold(s: &Setup, a: &Address) {
     use soroban_sdk::xdr::*;
-    let ScAddress::Account(account_id) = ScAddress::from(a) else { panic!("an account") };
+    let ScAddress::Account(account_id) = ScAddress::from(a) else {
+        panic!("an account")
+    };
     add_ledger_entry(
         &s.env,
-        LedgerKey::Account(LedgerKeyAccount { account_id: account_id.clone() }),
+        LedgerKey::Account(LedgerKeyAccount {
+            account_id: account_id.clone(),
+        }),
         LedgerEntryData::Account(AccountEntry {
             account_id: account_id.clone(),
             balance: 0,
@@ -110,7 +127,10 @@ fn hold(s: &Setup, a: &Address) {
     };
     add_ledger_entry(
         &s.env,
-        LedgerKey::Trustline(LedgerKeyTrustLine { account_id: account_id.clone(), asset: asset.clone() }),
+        LedgerKey::Trustline(LedgerKeyTrustLine {
+            account_id: account_id.clone(),
+            asset: asset.clone(),
+        }),
         LedgerEntryData::Trustline(TrustLineEntry {
             account_id,
             asset,
@@ -129,7 +149,9 @@ impl Setup {
 }
 
 fn setup() -> Setup {
-    let env = Env::new_with_config(soroban_sdk::testutils::EnvTestConfig { capture_snapshot_at_drop: false });
+    let env = Env::new_with_config(soroban_sdk::testutils::EnvTestConfig {
+        capture_snapshot_at_drop: false,
+    });
     env.mock_all_auths();
     let id = contract_at(&env, [0x33; 32]);
     env.register_at(&id, Bridge, ());
@@ -138,7 +160,14 @@ fn setup() -> Setup {
     let (asset, asset_xdr) = (sac.address(), sac.asset());
     StellarAssetClient::new(&env, &asset).set_admin(&id);
     let bridge = BridgeClient::new(&env, &id);
-    let committee = Vec::from_array(&env, [eth_address(&env, &key(1)), eth_address(&env, &key(2)), eth_address(&env, &key(3))]);
+    let committee = Vec::from_array(
+        &env,
+        [
+            eth_address(&env, &key(1)),
+            eth_address(&env, &key(2)),
+            eth_address(&env, &key(3)),
+        ],
+    );
     bridge.initialize(
         &asset,
         &1337,
@@ -152,7 +181,12 @@ fn setup() -> Setup {
         &1,
         &1_000_000,
     );
-    Setup { env, id, asset, asset_xdr }
+    Setup {
+        env,
+        id,
+        asset,
+        asset_xdr,
+    }
 }
 
 #[test]
@@ -165,17 +199,23 @@ fn a_transfer_to_tenzro_emits_the_record_tenzro_decodes() {
     });
     hold(&s, &user);
     StellarAssetClient::new(&s.env, &s.asset).mint(&user, &30_000_000);
-    s.bridge().send_to_tenzro(&user, &30_000_000, &BytesN::from_array(&s.env, &[0x55; 32]));
+    s.bridge()
+        .send_to_tenzro(&user, &30_000_000, &BytesN::from_array(&s.env, &[0x55; 32]));
     use soroban_sdk::xdr::{ContractEventBody, Limits, ScVal, WriteXdr};
     let events = s.env.events().all().filter_by_contract(&s.id);
     let event = events.events().last().unwrap().clone();
     let ContractEventBody::V0(body) = &event.body;
     assert_eq!(body.topics.len(), 1);
-    let ScVal::Bytes(record) = &body.data else { panic!("the data is the record's bytes") };
+    let ScVal::Bytes(record) = &body.data else {
+        panic!("the data is the record's bytes")
+    };
     assert_eq!(record.as_slice(), unhex(TRANSFER_OUT).as_slice());
     // The event exactly as the ledger records it, which Tenzro's Stellar
     // route decodes.
-    assert_eq!(hex(&event.to_xdr(Limits::none()).unwrap()), TRANSFER_OUT_EVENT);
+    assert_eq!(
+        hex(&event.to_xdr(Limits::none()).unwrap()),
+        TRANSFER_OUT_EVENT
+    );
     assert_eq!(TokenClient::new(&s.env, &s.asset).balance(&user), 0);
     assert_eq!(s.bridge().sequence(), 1);
 }
@@ -183,7 +223,9 @@ fn a_transfer_to_tenzro_emits_the_record_tenzro_decodes() {
 #[test]
 fn the_committee_digest_is_the_one_tenzro_computes() {
     let s = setup();
-    let digest = s.bridge().outbound_digest(&Bytes::from_slice(&s.env, &unhex(OUTBOUND)));
+    let digest = s
+        .bridge()
+        .outbound_digest(&Bytes::from_slice(&s.env, &unhex(OUTBOUND)));
     assert_eq!(digest.to_array().to_vec(), unhex(OUTBOUND_DIGEST));
 }
 
@@ -197,8 +239,14 @@ fn a_record_the_committee_signed_is_executed_once() {
     hold(&s, &account(&s.env, k));
     s.bridge().execute(&record, &sign(&s.env, &[1, 3], &digest));
     assert!(s.bridge().is_executed(&7));
-    assert_eq!(TokenClient::new(&s.env, &s.asset).balance(&account(&s.env, k)), 50_000_000);
-    assert!(s.bridge().try_execute(&record, &sign(&s.env, &[2, 3], &digest)).is_err());
+    assert_eq!(
+        TokenClient::new(&s.env, &s.asset).balance(&account(&s.env, k)),
+        50_000_000
+    );
+    assert!(s
+        .bridge()
+        .try_execute(&record, &sign(&s.env, &[2, 3], &digest))
+        .is_err());
 }
 
 #[test]
@@ -206,18 +254,33 @@ fn signatures_short_of_a_quorum_or_over_another_record_are_refused() {
     let s = setup();
     let record = Bytes::from_slice(&s.env, &unhex(OUTBOUND));
     let digest: [u8; 32] = unhex(OUTBOUND_DIGEST).try_into().unwrap();
-    assert!(s.bridge().try_execute(&record, &sign(&s.env, &[2, 2], &digest)).is_err());
-    assert!(s.bridge().try_execute(&record, &sign(&s.env, &[1, 9], &digest)).is_err());
+    assert!(s
+        .bridge()
+        .try_execute(&record, &sign(&s.env, &[2, 2], &digest))
+        .is_err());
+    assert!(s
+        .bridge()
+        .try_execute(&record, &sign(&s.env, &[1, 9], &digest))
+        .is_err());
     let mut tampered = unhex(OUTBOUND);
     tampered[150] ^= 1;
-    assert!(s.bridge().try_execute(&Bytes::from_slice(&s.env, &tampered), &sign(&s.env, &[1, 2], &digest)).is_err());
+    assert!(s
+        .bridge()
+        .try_execute(
+            &Bytes::from_slice(&s.env, &tampered),
+            &sign(&s.env, &[1, 2], &digest)
+        )
+        .is_err());
     assert!(!s.bridge().is_executed(&7));
 }
 
 #[test]
 fn the_handover_digest_is_the_one_tenzro_computes() {
     let s = setup();
-    let members = Vec::from_array(&s.env, [0x41u8, 0x42, 0x43].map(|b| BytesN::from_array(&s.env, &[b; 20])));
+    let members = Vec::from_array(
+        &s.env,
+        [0x41u8, 0x42, 0x43].map(|b| BytesN::from_array(&s.env, &[b; 20])),
+    );
     let digest = s.bridge().handover_digest(&2, &members, &2, &2_000_000_000);
     assert_eq!(hex(&digest.to_array()), HANDOVER_DIGEST);
 }
@@ -225,8 +288,18 @@ fn the_handover_digest_is_the_one_tenzro_computes() {
 #[test]
 fn the_committee_hands_over_only_with_its_own_quorum_to_a_higher_set() {
     let s = setup();
-    let next = Vec::from_array(&s.env, [eth_address(&s.env, &key(4)), eth_address(&s.env, &key(5)), eth_address(&s.env, &key(6))]);
-    let digest = s.bridge().handover_digest(&2, &next, &2, &2_000_000).to_array();
+    let next = Vec::from_array(
+        &s.env,
+        [
+            eth_address(&s.env, &key(4)),
+            eth_address(&s.env, &key(5)),
+            eth_address(&s.env, &key(6)),
+        ],
+    );
+    let digest = s
+        .bridge()
+        .handover_digest(&2, &next, &2, &2_000_000)
+        .to_array();
     let mut m = b"tenzro/bridge/route-committee".to_vec();
     m.extend_from_slice(&1337u64.to_be_bytes());
     m.extend_from_slice(&(29u64).to_be_bytes());
@@ -239,23 +312,41 @@ fn the_committee_hands_over_only_with_its_own_quorum_to_a_higher_set() {
     m.extend_from_slice(&2u32.to_be_bytes());
     m.extend_from_slice(&2_000_000u64.to_be_bytes());
     assert_eq!(digest, <[u8; 32]>::from(Keccak256::digest(&m)));
-    assert!(s.bridge().try_rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[4, 5], &digest)).is_err());
-    let same = s.bridge().handover_digest(&1, &next, &2, &2_000_000).to_array();
+    assert!(s
+        .bridge()
+        .try_rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[4, 5], &digest))
+        .is_err());
+    let same = s
+        .bridge()
+        .handover_digest(&1, &next, &2, &2_000_000)
+        .to_array();
     assert!(
-        s.bridge().try_rotate_committee(&1, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &same)).is_err(),
+        s.bridge()
+            .try_rotate_committee(&1, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &same))
+            .is_err(),
         "the set index it already holds is refused"
     );
-    s.bridge().rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &digest));
+    s.bridge()
+        .rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &digest));
     assert_eq!(s.bridge().committee_set(), (2, 2_000_000));
     // A replay of the same handover is stale.
-    assert!(s.bridge().try_rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &digest)).is_err());
+    assert!(s
+        .bridge()
+        .try_rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &digest))
+        .is_err());
     let mut k = [0u8; 32];
     k[31] = 0x0b;
     hold(&s, &account(&s.env, k));
     let record = Bytes::from_slice(&s.env, &unhex(OUTBOUND));
     let outbound: [u8; 32] = unhex(OUTBOUND_DIGEST).try_into().unwrap();
-    assert!(s.bridge().try_execute(&record, &sign(&s.env, &[1, 2], &outbound)).is_err(), "the old committee no longer executes");
-    s.bridge().execute(&record, &sign(&s.env, &[4, 6], &outbound));
+    assert!(
+        s.bridge()
+            .try_execute(&record, &sign(&s.env, &[1, 2], &outbound))
+            .is_err(),
+        "the old committee no longer executes"
+    );
+    s.bridge()
+        .execute(&record, &sign(&s.env, &[4, 6], &outbound));
 }
 
 #[test]
@@ -268,8 +359,24 @@ fn an_expired_committee_neither_executes_nor_hands_over() {
     hold(&s, &account(&s.env, k));
     let record = Bytes::from_slice(&s.env, &unhex(OUTBOUND));
     let outbound: [u8; 32] = unhex(OUTBOUND_DIGEST).try_into().unwrap();
-    assert!(s.bridge().try_execute(&record, &sign(&s.env, &[1, 2], &outbound)).is_err());
-    let next = Vec::from_array(&s.env, [eth_address(&s.env, &key(4)), eth_address(&s.env, &key(5)), eth_address(&s.env, &key(6))]);
-    let digest = s.bridge().handover_digest(&2, &next, &2, &2_000_000).to_array();
-    assert!(s.bridge().try_rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &digest)).is_err());
+    assert!(s
+        .bridge()
+        .try_execute(&record, &sign(&s.env, &[1, 2], &outbound))
+        .is_err());
+    let next = Vec::from_array(
+        &s.env,
+        [
+            eth_address(&s.env, &key(4)),
+            eth_address(&s.env, &key(5)),
+            eth_address(&s.env, &key(6)),
+        ],
+    );
+    let digest = s
+        .bridge()
+        .handover_digest(&2, &next, &2, &2_000_000)
+        .to_array();
+    assert!(s
+        .bridge()
+        .try_rotate_committee(&2, &next, &2, &2_000_000, &sign(&s.env, &[1, 2], &digest))
+        .is_err());
 }

@@ -168,7 +168,7 @@ pub async fn passkey_page(
         .and_then(|sid| {
             let url = format!(
                 "{}/auth/passkey?session={}",
-                super::oauth::derive_base_url(&headers),
+                super::oauth::derive_base_url(&headers)?,
                 sid
             );
             qrcode::QrCode::new(url.as_bytes()).ok()
@@ -207,7 +207,7 @@ const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tenzro Passkey</title>
 <style>
-  /* Tenzro design language, ported from apps/tenzro-control/src/index.css.
+  /* Tenzro design language.
      Monochrome with one indigo accent; 0px radius throughout is a deliberate
      brand choice, not an oversight. Fonts degrade to the system stack rather
      than fetching Geist — this page is served by a node that may have no

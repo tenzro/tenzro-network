@@ -2,13 +2,16 @@
 resolver = "2"
 members = [
   "crates/tenzro-types",
+  "crates/tenzro-native-ops",
   "crates/tenzro-onboarding-types",
   "crates/tenzro-update-notice",
+  "crates/tenzro-fleet-proof",
   "crates/tenzro-crypto",
   "crates/tenzro-secure-enclave",
     "crates/tenzro-tee",
   "crates/tenzro-zk",
   "crates/tenzro-network",
+  "crates/tenzro-state-proof",
   "crates/tenzro-storage",
   "crates/tenzro-wallet",
   "crates/tenzro-keystore-unlock",
@@ -17,6 +20,9 @@ members = [
   "crates/tenzro-device-key",
   "sdk/tenzro-ts-sdk/native",
   "sdk/tenzro-py/native",
+  "sdk/tenzro-ffi",
+  "sdk/tenzro-light-wasm",
+  "sdk/tenzro-android-node/native",
   "crates/tenzro-consensus",
   "crates/tenzro-vm",
   "crates/tenzro-token",
@@ -36,21 +42,24 @@ members = [
   "crates/tenzro-cli",
   "crates/tenzro-cert-stark",
   "crates/tenzro-finality",
+  "crates/tenzro-light",
   "crates/tenzro-sim",
   "crates/tenzro-econsim",
   "crates/tenzro-openshell",
+  "crates/tenzro-mailbox",
 ]
 exclude = [
   # The finality prover and its zkVM guest: their own workspace, built only
   # where proofs are made.
   "crates/tenzro-finality-prover",
-  # Vendored lance-linalg 6.0.0 with its AVX-512 cfg corrected. Wired via
-  # [patch.crates-io] at the end of this file.
-  "vendor/lance-linalg",
-  # Vendored iroh 1.3.0 that opens custom-transport paths on existing
-  # connections. Wired via [patch.crates-io] at the end of this file.
+  # Placeholder for the Osaka EVM engine's unused c-kzg 2 dependency. Wired
+  # via [patch.crates-io] at the end of this file.
+  "vendor/c-kzg-unlinked",
+  # Vendored iroh 1.4.1 that opens custom-transport paths on existing
+  # connections, among other changes. Wired via [patch.crates-io] at the end of this file.
   "vendor/iroh",
-  # Vendored noq-proto 1.3.0 with the quinn-proto 0.11.19 receive-side fixes. Wired via
+  # Vendored noq-proto 1.4.0 with the ACK_FREQUENCY bound fix and dead-path
+  # scheduling. Wired via
   # [patch.crates-io] at the end of this file.
   "vendor/noq-proto",
   # Vendored reed-solomon-erasure 6.0.0 on lru 0.18. Wired via
@@ -87,6 +96,13 @@ double_must_use = "allow"
 # save a stack move on a type that is about to be written to a socket anyway.
 # Same judgement as `large_enum_variant` above.
 result_large_err = "allow"
+# A lock or a RefCell borrow held across an await blocks every other task
+# that wants it for as long as the awaited peer takes.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+# The calls clippy.toml lists wait on a peer or a permit with no bound of
+# their own; they go through `tenzro_iroh::bounded`, which takes one.
+disallowed_methods = "deny"
 
 [workspace.dependencies]
 # Workspace crates. Each entry pins `version = "0.1.0"` alongside the
@@ -96,7 +112,11 @@ result_large_err = "allow"
 tenzro-types = { path = "crates/tenzro-types", version = "0.2.0" }
 tenzro-onboarding-types = { path = "crates/tenzro-onboarding-types", version = "0.2.0" }
 tenzro-update-notice = { path = "crates/tenzro-update-notice", version = "0.2.0" }
+tenzro-fleet-proof = { path = "crates/tenzro-fleet-proof", version = "0.2.0" }
+tenzro-state-proof = { path = "crates/tenzro-state-proof", version = "0.2.0" }
+tenzro-light = { path = "crates/tenzro-light", version = "0.2.0" }
 tenzro-crypto = { path = "crates/tenzro-crypto", version = "0.2.0" }
+tenzro-native-ops = { path = "crates/tenzro-native-ops", version = "0.2.0" }
 tenzro-tee = { path = "crates/tenzro-tee", version = "0.2.0" }
 tenzro-zk = { path = "crates/tenzro-zk", version = "0.2.0" }
 tenzro-cert-stark = { path = "crates/tenzro-cert-stark", version = "0.2.0", default-features = false }
@@ -125,8 +145,8 @@ tenzro-identity = { path = "crates/tenzro-identity", version = "0.2.0" }
 tenzro-payments = { path = "crates/tenzro-payments", version = "0.2.0" }
 tenzro-openshell = { path = "crates/tenzro-openshell", version = "0.2.0" }
 tenzro-auth = { path = "crates/tenzro-auth", version = "0.2.0" }
-tenzro-node = { path = "crates/tenzro-node", version = "0.2.0" }
-tenzro-cli = { path = "crates/tenzro-cli", version = "0.2.0" }
+tenzro-node = { path = "crates/tenzro-node", version = "0.2.2" }
+tenzro-cli = { path = "crates/tenzro-cli", version = "0.2.2" }
 tenzro-sdk = { path = "sdk/tenzro-sdk", version = "0.9.0" }
 
 # Async runtime
@@ -166,12 +186,13 @@ anyhow = "1"
 # p256 0.14 internally consume sha2 0.11 (via `digest = "0.11"`); cargo
 # resolves both, but the duplicate is contained in the RustCrypto 0.14-RC
 # subgraph and never crosses into application code.
-ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
-k256 = { version = "=0.14.0-rc.12", features = ["ecdsa"] }
-elliptic-curve = { version = "=0.14.0-rc.35", features = ["sec1"] }
-ecdsa = "=0.17.0-rc.20"
-primeorder = "=0.14.0-rc.12"
-hash2curve = "=0.14.0-rc.12"
+ed25519-dalek = { version = "3", features = ["serde", "rand_core"] }
+k256 = { version = "0.14.0", features = ["ecdsa"] }
+elliptic-curve = { version = "0.14.3", features = ["sec1"] }
+ecdsa = "0.17.0"
+primeorder = "0.14.0"
+primefield = "0.14.0"
+hash2curve = "0.14"
 signature = "=3.0.0"
 ff = "=0.14.0"
 group = "=0.14.0"
@@ -183,6 +204,14 @@ risc0-zkvm = { version = "3.0.6", default-features = false, features = ["std", "
 aes-gcm = "0.10"
 x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
 rand = "0.8"
+# MLS (RFC 9420) group sessions of the mailbox (preview), with the hybrid
+# X25519 + ML-KEM-768 cipher suite.
+openmls = { version = "=0.9.2", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
+# The age v1 file format of the mailbox's file sharing (preview).
+age = { version = "=0.11.5", default-features = false }
+age-core = "=0.11.0"
 # Halo2 (PLONKish, inner-product-argument commitments over Pasta): the proof
 # system implemented independently of Plonky3 in tenzro-zk.
 halo2_proofs = "0.3"
@@ -196,13 +225,13 @@ curve25519-dalek = { version = "4", features = ["alloc"] }
 #               composite signature
 # 0.1.1 is past both the verifier advisory (duplicate hint indices) and the
 # decomposition timing advisory.
-ml-dsa = { version = "0.1.1", features = ["zeroize"] }
+ml-dsa = { version = "0.1.2", features = ["zeroize"] }
 # Second, independent ML-DSA-65 verifier: every ML-DSA signature must be
 # accepted by both implementations (see tenzro-crypto pq.rs).
 libcrux-ml-dsa = { version = "0.0.11", default-features = false, features = ["mldsa65"] }
 # ML-KEM-768 — FIPS 203, the post-quantum half of the consensus channel
 # handshake's per-connection key exchange.
-ml-kem = { version = "0.3.0-rc.2", features = ["getrandom"] }
+ml-kem = { version = "0.3.4", features = ["getrandom"] }
 # Formally verified ML-KEM-768: the consensus channel KEM uses its results and
 # checks every one against ml-kem (see tenzro-consensus kem.rs).
 libcrux-ml-kem = { version = "0.0.11", default-features = false, features = ["mlkem768"] }
@@ -218,6 +247,10 @@ rustls = { version = "0.23.46", default-features = false, features = [
 tokio-rustls = { version = "0.26", default-features = false, features = [
   "aws-lc-rs",
 ] }
+# WebTransport for the node's app transport and the SDK client of it. No
+# default features: those bring ring and a certificate generator; the TLS
+# provider is the workspace's aws-lc-rs and certificates come from the node.
+wtransport = { version = "=0.7.2", default-features = false, features = ["aws-lc-rs"] }
 hyper-rustls = { version = "0.27", default-features = false, features = [
   "http1",
   "http2",
@@ -241,14 +274,14 @@ celestia-types = "1.0.0"
 # Used via the new tenzro-iroh crate for blob distribution (model weights,
 # outer gradients, sealed shards, DA receipts, agent memory archives) and
 # CRDT documents (sealed-dataset manifests, agent template registry).
-# iroh 1.3 carries the rustls fix for RUSTSEC-2026-0285. The companion crates below are the
+# iroh 1.4 carries the rustls fix for RUSTSEC-2026-0285. The companion crates below are the
 # releases built against iroh 1.x — keep them in lockstep when upgrading.
 # All Apache-2.0.
-iroh = "1.3"
-iroh-base = "1.3"
-iroh-blobs = "0.103.1"
+iroh = "1.4.1"
+iroh-base = "1.4.1"
+iroh-blobs = "0.104.1"
 iroh-docs = "0.101"
-iroh-gossip = "0.101"
+iroh-gossip = "0.102"
 iroh-mdns-address-lookup = "0.6"
 irpc = "0.17"
 
@@ -266,11 +299,11 @@ netdev = "0.46"
 # Watchable values and UDP receive metadata for the transport the node adds
 # to iroh (crates/tenzro-iroh/src/paths.rs). Apache-2.0 OR MIT.
 n0-watcher = "1"
-noq-udp = { version = "1.3", default-features = false }
+noq-udp = { version = "1.4", default-features = false }
 # noq-proto underlies iroh's QUIC transport (see the [patch.crates-io] entry
 # below); depended on directly only to reach its concrete congestion
 # controllers (crates/tenzro-iroh/src/identity_transport.rs's BBRv3 setup).
-noq-proto = { version = "1.3", default-features = false }
+noq-proto = { version = "1.4", default-features = false }
 rayon = "1.11"
 
 # Compression
@@ -292,7 +325,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # but never applied — every window was evaluated in UTC, so a CEST schedule ran
 # one to two hours off depending on DST. Resolving the zone needs the real
 # database; a fixed offset cannot express DST.
-chrono-tz = "0.10"
+jiff = { version = "0.2.41", default-features = false, features = ["std", "tzdb-bundle-always"] }
 # mmdb reader for territorial licence enforcement (see tenzro-node/src/territory.rs).
 #
 # Despite the name this reads the mmdb *format*, not MaxMind data specifically —
@@ -333,8 +366,8 @@ reqwest = { version = "0.12", default-features = false, features = [
   "charset",
   "system-proxy",
 ] }
-base64 = "0.22"
-jsonwebtoken = { version = "10.3", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+base64 = "0.23"
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 
 # ZK — Plonky3 STARKs (transparent setup). Two proof systems over one statement set:
 # KoalaBear + SHA-256 FRI and Goldilocks + BLAKE3 FRI; statements hash with Keccak-f in-circuit.
@@ -377,7 +410,7 @@ toml = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # MCP (Model Context Protocol)
-rmcp = { version = "3.4.1", features = [
+rmcp = { version = "=3.9.0", features = [
   "server",
   "transport-streamable-http-server",
   "transport-async-rw",
@@ -385,9 +418,29 @@ rmcp = { version = "3.4.1", features = [
 schemars = "1"
 
 # EVM execution
+# `optional_no_base_fee` lets the ERC-7786 gateway's delivery call run at gas
+# price zero under the block's real base fee; no other call sets it. `blst`
+# and `c-kzg` carry the BLS12-381 and KZG point evaluation precompiles
+# of the Prague rule set; without them the engine has neither.
 revm = { version = "19", default-features = false, features = [
   "std",
   "serde-json",
+  "blst",
+  "c-kzg",
+  "optional_no_base_fee",
+] }
+# The engine that executes EVM transactions once feature.evm_osaka is live,
+# linked beside the one above in every build: a node that lacked it would
+# leave the chain at the activation epoch. `blst` is the BLS12-381 backend of
+# its precompiles, KZG point evaluation included; `portable` keeps it off
+# instructions the building machine has and the running one may not. Its
+# `c-kzg` feature must stay off (see [patch.crates-io]). `optional_no_base_fee`
+# is the same gateway delivery switch as on the engine above.
+revm-osaka = { package = "revm", version = "=43.0.3", default-features = false, features = [
+  "std",
+  "blst",
+  "portable",
+  "optional_no_base_fee",
 ] }
 rlp = "0.6"
 ripemd = "0.1"
@@ -401,38 +454,36 @@ flate2 = "1"
 fs4 = { version = "0.13.1", features = ["sync"] }
 
 # SVM execution — Anza solana-svm, gated behind the tenzro-vm `svm-full` feature.
-# The processor crates are pinned to an exact 4.1.2 release train; interface
-# crates use the exact versions solana-svm 4.1.2 itself depends on. `svm-full`
+# The processor crates are pinned to an exact 4.4.1 release train; interface
+# crates use the versions solana-svm 4.4.1 itself depends on. `svm-full`
 # opts these in via `dep:` gates; without the feature they are not compiled.
-# solana-svm + solana-svm-callback need `agave-unstable-api` for the public
-# TransactionBatchProcessor callback surface.
-solana-svm = { version = "=4.1.2", features = ["agave-unstable-api"] }
-solana-svm-callback = { version = "=4.1.2", features = ["agave-unstable-api"] }
-solana-svm-feature-set = { version = "=4.1.2" }
-solana-program-runtime = { version = "=4.1.2" }
-solana-syscalls = { version = "=4.1.2" }
-# The whole crate is `#![cfg(feature = "agave-unstable-api")]`; without the
-# feature it compiles to nothing and `Entrypoint` does not exist.
-solana-bpf-loader-program = { version = "=4.1.2", features = ["agave-unstable-api"] }
-solana-system-program = { version = "=4.1.2", features = ["agave-unstable-api"] }
-solana-transaction-context = { version = "=4.1.2" }
-solana-account = { version = "4.3.0" }
-solana-clock = { version = "3.0.1" }
-solana-instruction = { version = "3.4.0", features = ["std"] }
-solana-message = { version = "4.1.1" }
+# Every processor crate is `#![cfg(feature = "agave-unstable-api")]`: without
+# the feature it compiles to nothing.
+solana-svm = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-svm-callback = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-svm-feature-set = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-program-runtime = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-syscalls = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-bpf-loader-program = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-system-program = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-transaction-context = { version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-account = { version = "5.0.0" }
+solana-clock = { version = "4.0.0", features = ["serde"] }
+solana-instruction = { version = "4.0.0", features = ["std"] }
+solana-message = { version = "5.0.0" }
 # `blake3` gates `SanitizedTransaction::try_from_legacy_transaction`.
-solana-transaction = { version = "4.1.1", features = ["blake3"] }
-solana-pubkey = { version = "4.2.0" }
+solana-transaction = { version = "5.0.0", features = ["blake3"] }
+solana-pubkey = { version = "4.3.0" }
 solana-sdk-ids = { version = "3.1.0" }
-solana-fee-structure = { version = "3.0.0" }
-solana-hash = { version = "4.3.0" }
-solana-rent = { version = "4.2.0" }
+solana-fee-structure = { version = "4.1.0" }
+solana-hash = { version = "4.6.0" }
+solana-rent = { version = "4.4.0" }
 
 # X.509 certificate parsing & signature verification
 x509-cert = "0.2"
 x509-ocsp = "0.2"
-p256 = { version = "=0.14.0-rc.12", features = ["ecdsa", "pkcs8", "pem"] }
-p384 = { version = "=0.14.0-rc.12", features = ["ecdsa", "pkcs8", "pem"] }
+p256 = { version = "0.14.0", features = ["ecdsa", "pkcs8", "pem"] }
+p384 = { version = "0.14.0", features = ["ecdsa", "pkcs8", "pem"] }
 # RUSTSEC-2023-0071 (Marvin timing sidechannel, potential key recovery) has no
 # patched release — every 0.9.x is affected and there is no 0.10.
 #
@@ -458,16 +509,16 @@ hf-hub = { version = "0.4", features = ["tokio"] }
 # Praecise Engine (github.com/Praecise/praecise-engine): the batch engine and its
 # llama.cpp bindings, a third-party dependency pinned by commit. Upgrading it is
 # bumping this one rev (all six crates come from the same commit).
-llama-cpp-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "4feb740dc1fd93712c5d98e2bc55d97b92c090f3" }
-llama-cpp-sys-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "4feb740dc1fd93712c5d98e2bc55d97b92c090f3" }
+llama-cpp-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
+llama-cpp-sys-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
 # No features here: without `bundled-llama` praecise-runtime is the engine-free
 # part (admission, commitments, KV blob types). tenzro-model's `engine` feature
 # turns on `bundled-llama` and `image-gen`.
-praecise-runtime = { git = "https://github.com/Praecise/praecise-engine", rev = "4feb740dc1fd93712c5d98e2bc55d97b92c090f3" }
-praecise-host = { git = "https://github.com/Praecise/praecise-engine", rev = "4feb740dc1fd93712c5d98e2bc55d97b92c090f3" }
-praecise-diffusion = { git = "https://github.com/Praecise/praecise-engine", rev = "4feb740dc1fd93712c5d98e2bc55d97b92c090f3" }
-praecise-train = { git = "https://github.com/Praecise/praecise-engine", rev = "4feb740dc1fd93712c5d98e2bc55d97b92c090f3" }
-praecise-onnx = { git = "https://github.com/Praecise/praecise-engine", rev = "4feb740dc1fd93712c5d98e2bc55d97b92c090f3" }
+praecise-runtime = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
+praecise-host = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
+praecise-diffusion = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
+praecise-train = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
+praecise-onnx = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021", default-features = false }
 
 ndarray = "0.16"
 # Safetensors parsing for MoE per-expert weight blobs and gating networks.
@@ -519,7 +570,9 @@ bitflags = "2"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
+# Function names stay in the binary, so a logged backtrace and a core dump
+# name the functions; the debug sections go.
+strip = "debuginfo"
 
 # The edge tier (docs/NODE.md, "Node tiers"): the light build for small,
 # embedded and edge devices, built by `scripts/build-tier.sh edge`. Same code
@@ -527,6 +580,12 @@ strip = "symbols"
 # its processor never shares artifacts with the generic release build.
 [profile.edge]
 inherits = "release"
+# The edge tier is the small-device build with a size budget (scripts/edge-budget.sh, 100,000,000 bytes). Measured on
+# launch 110d551e0 (x86_64): release settings give 148,572,800 bytes (the symbol table is 24.7 MB of it), without the
+# symbol table 123,868,536, and with size-optimised code as well 84,795,904. A device that needs function names in
+# backtraces, or the speed of opt-level 3, takes the release build.
+strip = "symbols"
+opt-level = "s"
 
 # Same optimization level, built to be *built* fast rather than to run fastest.
 #
@@ -566,38 +625,28 @@ opt-level = 2
 opt-level = 0
 
 [patch.crates-io]
-# lance-linalg 6.0.0 emits `cfg(kernel_support="avx512")` from three
-# independent C builds, and `build_f16_with_flags` returns Ok(()) *without
-# compiling anything* when the `fp16kernels` feature is off. The cfg is set,
-# the Rust side compiles its AVX-512 branch, and the C definition never
-# exists — the link dies on `sum_4bit_dist_table_32bytes_batch_avx512`.
-#
-# The vendored copy emits the cfg only when all three kernels actually built,
-# replaces a `-march=native` that cannot describe an x86_64 target from an
-# aarch64 build host, and adds the `rerun-if-changed=build.rs` upstream omits
-# (declaring rerun-if-changed narrows the default set, so edits to build.rs
-# were silently ignored).
-#
-# Dropping the cfg costs nothing here: the AVX-512 path is runtime-dispatched
-# behind `is_x86_feature_detected!`, and the deployment targets are Broadwell
-# Xeons with no AVX-512 at all, so the AVX2 path is what would run regardless.
-lance-linalg = { path = "vendor/lance-linalg" }
-
-# noq-proto 1.3.0 (iroh's QUIC state machine) is a fork of quinn-proto and lacks
-# the fixes quinn-proto shipped in 0.11.15 to 0.11.19. The vendored copy carries:
-#   - the stream reassembly chunk cap (RUSTSEC-2026-0185), checked after every
-#     insert including the unordered dedup loop, with compaction past twice the
-#     cap (RUSTSEC-2026-0341);
-#   - a bound on RETIRE_CONNECTION_ID frames queued for already-retired
-#     sequence numbers (RUSTSEC-2026-0339);
-#   - the ACK_FREQUENCY max-ack-delay bound that no longer panics when the
-#     peer's min_ack_delay exceeds the RTT bound (RUSTSEC-2026-0340);
-#   - a fixed per-datagram charge against both datagram buffers, so empty
-#     DATAGRAM frames cannot queue without bound (RUSTSEC-2026-0342).
-# RUSTSEC-2026-0338 does not apply: noq's assembler dedups through
-# ArrayRangeSet, whose insert already ignores empty ranges.
-# Drop this override once a noq-proto release includes these fixes.
+# noq-proto 1.4.0 (iroh's QUIC state machine) computes the ACK_FREQUENCY
+# max-ack-delay with `clamp`, which panics when the peer's min_ack_delay
+# exceeds the RTT bound (RUSTSEC-2026-0340 in quinn-proto). The vendored copy
+# applies the two bounds in order (connection/ack_frequency.rs), and the two
+# tests beside it fail without it.
+# Its second change: a path on which two probe timeouts in a row fired no
+# longer keeps data off the paths that still answer, and its in-flight stream
+# data and frames are queued again for them (connection/mod.rs, paths.rs,
+# spaces.rs; src/tests/multipath.rs, which fail without it). A connection with one
+# path is unchanged.
+# Drop this override once a noq-proto release includes both.
 noq-proto = { path = "vendor/noq-proto" }
+
+# The EVM engine of the Osaka rule set (`revm-osaka`) and the engine it
+# replaces each name `c-kzg` as an optional dependency, at major versions 2
+# and 1. Both declare `links = "ckzg"`, and Cargo allows one such package per
+# dependency graph even when neither is enabled, so the two engines cannot
+# resolve together. The Osaka engine verifies KZG proofs with its BLS12-381
+# backend and never enables the dependency: this placeholder without the
+# `links` key takes its place and fails the build if it is ever compiled.
+# Drop it with the first engine.
+c-kzg = { path = "vendor/c-kzg-unlinked" }
 
 # reed-solomon-erasure 6.0.0, the latest release, pins lru 0.7.8, whose
 # LruCache::pop is not panic-safe (RUSTSEC-2026-0253, fixed in lru 0.18.2).
@@ -606,32 +655,40 @@ noq-proto = { path = "vendor/noq-proto" }
 # Drop this override once a reed-solomon-erasure release moves past lru 0.7.
 reed-solomon-erasure = { path = "vendor/reed-solomon-erasure" }
 
-# iroh 1.3.0 opens paths only to IP addresses holepunching finds and to the
+# iroh 1.4.1 opens paths only to IP addresses holepunching finds and to the
 # relay; a path over a custom transport (crates/tenzro-iroh/src/paths.rs) that
 # the application names after the connection started on the relay is never
 # opened. The vendored copy opens such a path on every connection to that
 # remote when it is named (socket/remote_map/remote_state.rs, ResolveRemote).
-# It also counts a custom-transport path's round-trip time 10 ms worse than
-# an IP path's (socket/biased_rtt_path_selector.rs), since such a path may run
-# through a third node. And it queues a path waiting for a free path id once
-# (schedule_open_path in remote_state.rs): requeued once per connection on each
-# retry, the queue grew exponentially and exhausted the node's memory.
+# Its path selector (socket/biased_rtt_path_selector.rs) ranks a
+# custom-transport path below a working IP path and counts its round-trip time
+# 10 ms worse, since such a path may run through a third node; chooses a path
+# that has received nothing only when no path has been measured; and grows the
+# switching threshold with a quarter of the current path's round-trip time.
 # It also takes a separate TLS provider for endpoint-to-endpoint handshakes
 # (Builder::peer_crypto_provider in endpoint.rs), so endpoints can require
 # the X25519MLKEM768 hybrid while relay HTTPS keeps X25519 for terminators
-# that lack it.
+# that lack it. And it closes a redundant IP path only once the selected path
+# is established on that connection (is_redundant_ip_path in remote_state.rs):
+# closing earlier tried to close the connection's last open path and logged an
+# error on every path selection. And it forgets the last hole punch when the
+# last connection to a remote closes (handle_connection_close in
+# remote_state.rs): kept, it held a connection opened to that remote within
+# the next five seconds on the relay until the hole-punch interval had passed.
+# And it names the remote in the warning for a failed accept and logs it at
+# most once a minute per remote address, twenty lines a minute in all
+# (protocol.rs): one line per failed attempt let any sender fill the log.
+# And a relay connection backing off after a failed dial drops the datagrams
+# queued for it (ActiveRelayActor::sleep_backoff in
+# socket/transports/relay/actor.rs): left queued, they filled its queue and
+# stalled the relay traffic of the whole endpoint, healthy relays included.
 # Drop this override, and this vendored copy, once iroh opens custom paths
-# itself, bounds that queue and separates the two providers.
+# itself, separates the two providers, waits for the
+# selected path before closing others, punches at once for a remote it has
+# no connection left to, bounds that warning and drains a backing-off relay's
+# queue.
 iroh = { path = "vendor/iroh" }
 
-# iroh-gossip 0.101.0's actor waits for room in a peer's send queue
-# (src/net.rs, handle_in_event_inner). While it waits it reads no connection,
-# so a peer that is itself waiting to send to this node is never read, and
-# the two wait on each other for good: the topic goes silent on both, with
-# the connections still open. The vendored copy drops a message for a peer
-# whose queue is full instead of waiting. Drop this override once iroh-gossip
-# stops waiting on a peer's queue.
-iroh-gossip = { path = "vendor/iroh-gossip" }
 
 # openh264-sys2 0.9.8 collects its C++ and assembly sources with an unsorted
 # directory walk, so the order of the objects it links follows the build

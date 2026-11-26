@@ -12,7 +12,7 @@
 //! restart. A node binds the hash before the bytes enter its store, so they
 //! are never served unbound.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use futures_util::StreamExt;
@@ -22,9 +22,10 @@ use iroh_blobs::{
     api::Store as BlobStore,
     provider::events::{
         AbortReason, ConnectMode, EventMask, EventSender, ProviderMessage, RequestMode,
+        ThrottleMode,
     },
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::discovery::DiscoveryStore;
 use crate::error::{IrohError, IrohResult};
@@ -72,15 +73,42 @@ pub async fn licences_of(store: &BlobStore, hash: Hash) -> IrohResult<Vec<String
     Ok(out)
 }
 
-/// Whether `peer` may fetch every one of `hashes` from `store`: a hash bound
-/// to licences goes only to a peer whose current record accepts each of
-/// them. A store that cannot be read refuses.
+/// The blobs a peer without a registered identity may fetch: the files of
+/// the state snapshots this node retains. A node joining by snapshot is not
+/// registered yet; everything else in the store stays closed to it.
+#[derive(Clone, Default)]
+pub struct SnapshotBlobs(Arc<RwLock<HashSet<Hash>>>);
+
+impl SnapshotBlobs {
+    /// Replaces the set with the files of the snapshots retained now.
+    pub fn set(&self, hashes: impl IntoIterator<Item = [u8; 32]>) {
+        *self.0.write() = hashes.into_iter().map(Hash::from_bytes).collect();
+    }
+
+    fn holds(&self, hash: &Hash) -> bool {
+        self.0.read().contains(hash)
+    }
+}
+
+/// Whether `peer` may fetch every one of `hashes` from `store`. A peer
+/// without full access gets only snapshot files. A hash bound to licences
+/// goes only to a peer whose current record accepts each of them. A store
+/// that cannot be read refuses.
 async fn may_fetch(
     store: &BlobStore,
     discovery: Option<&DiscoveryStore>,
     peer: Option<EndpointId>,
+    full_access: bool,
+    snapshots: &SnapshotBlobs,
     hashes: &[Hash],
 ) -> bool {
+    if !full_access && !hashes.iter().all(|h| snapshots.holds(h)) {
+        tracing::debug!(
+            ?peer,
+            "blob refused to a peer with no registered identity: not a snapshot file"
+        );
+        return false;
+    }
     for hash in hashes {
         let licences = match licences_of(store, *hash).await {
             Ok(l) => l,
@@ -108,11 +136,27 @@ async fn may_fetch(
 /// request served from `store`. A request for a hash sequence's children is
 /// refused: the network fetches single blobs, and a sequence would name
 /// children no per-hash check saw.
-pub fn events(store: BlobStore, discovery: Option<Arc<DiscoveryStore>>) -> EventSender {
+///
+/// `gate` says whether the requesting peer is a registered identity; one
+/// that is not is served only the files in `snapshots`. With a `pacer`,
+/// every chunk sent waits for the peer's upload rate
+/// ([`crate::bulk_pacer`]).
+pub fn events(
+    store: BlobStore,
+    discovery: Option<Arc<DiscoveryStore>>,
+    gate: crate::identity_gate::IdentityGate,
+    snapshots: SnapshotBlobs,
+    pacer: Option<Arc<crate::bulk_pacer::BulkPacer>>,
+) -> EventSender {
     let mask = EventMask {
         connected: ConnectMode::Intercept,
         get: RequestMode::Intercept,
         get_many: RequestMode::Intercept,
+        throttle: if pacer.is_some() {
+            ThrottleMode::Intercept
+        } else {
+            ThrottleMode::None
+        },
         ..EventMask::DEFAULT
     };
     let (tx, mut rx) = EventSender::channel(64, mask);
@@ -135,8 +179,17 @@ pub fn events(store: BlobStore, discovery: Option<Arc<DiscoveryStore>>) -> Event
                     }
                     let (store, discovery, hash) =
                         (store.clone(), discovery.clone(), msg.request.hash);
+                    let (full, snapshots) = (gate.holds_full_access(peer), snapshots.clone());
                     tokio::spawn(async move {
-                        let ok = may_fetch(&store, discovery.as_deref(), peer, &[hash]).await;
+                        let ok = may_fetch(
+                            &store,
+                            discovery.as_deref(),
+                            peer,
+                            full,
+                            &snapshots,
+                            &[hash],
+                        )
+                        .await;
                         msg.tx
                             .send(if ok {
                                 Ok(())
@@ -151,8 +204,17 @@ pub fn events(store: BlobStore, discovery: Option<Arc<DiscoveryStore>>) -> Event
                     let peer = peers.lock().get(&msg.connection_id).copied().flatten();
                     let (store, discovery, hashes) =
                         (store.clone(), discovery.clone(), msg.request.hashes.clone());
+                    let (full, snapshots) = (gate.holds_full_access(peer), snapshots.clone());
                     tokio::spawn(async move {
-                        let ok = may_fetch(&store, discovery.as_deref(), peer, &hashes).await;
+                        let ok = may_fetch(
+                            &store,
+                            discovery.as_deref(),
+                            peer,
+                            full,
+                            &snapshots,
+                            &hashes,
+                        )
+                        .await;
                         msg.tx
                             .send(if ok {
                                 Ok(())
@@ -162,6 +224,21 @@ pub fn events(store: BlobStore, discovery: Option<Arc<DiscoveryStore>>) -> Event
                             .await
                             .ok();
                     });
+                }
+                ProviderMessage::Throttle(msg) => {
+                    let peer = peers.lock().get(&msg.connection_id).copied().flatten();
+                    match (peer, pacer.clone()) {
+                        (Some(peer), Some(pacer)) => {
+                            let size = msg.size;
+                            tokio::spawn(async move {
+                                pacer.pace(peer, size).await;
+                                msg.tx.send(Ok(())).await.ok();
+                            });
+                        }
+                        _ => {
+                            msg.tx.send(Ok(())).await.ok();
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -219,6 +296,114 @@ mod tests {
             hash: hash.to_string(),
             provider_hint: Some(provider.endpoint().id().to_string()),
         }
+    }
+
+    /// A registry in which nobody is registered.
+    struct NobodyRegistered;
+    impl crate::identity_gate::RegistryView for NobodyRegistered {
+        fn standing(&self, _: &str) -> tenzro_onboarding_types::onboarding::Standing {
+            tenzro_onboarding_types::onboarding::Standing::Unregistered
+        }
+    }
+
+    /// A blob served to a peer whose path shows a queue goes at the pacer's
+    /// floor; the same blob to a peer with no queue goes at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_upload_to_a_peer_behind_a_queue_is_paced() {
+        let lookup = MemoryLookup::new();
+        let paths = crate::paths::Paths::new();
+        let provider = IrohBackedResolver::bind_for_test_with_paths(
+            &lookup,
+            Arc::new(DiscoveryStore::new()),
+            Some(paths.clone()),
+        )
+        .await
+        .unwrap();
+        let (queued, _) = node(&lookup).await;
+        let (clear, _) = node(&lookup).await;
+        let blob = Bytes::from(vec![7u8; 768 * 1024]);
+        let hash = match provider.publish_bytes(blob.clone()).await.unwrap() {
+            TenzroUri::Blob { hash, .. } => hash,
+            other => panic!("{other}"),
+        };
+        let addr = iroh::TransportAddr::Ip("192.0.2.1:1".parse().unwrap());
+        let t = std::time::Instant::now();
+        for (peer, queue_ms) in [(queued.endpoint().id(), 100), (clear.endpoint().id(), 0)] {
+            let latency = paths.latency_source();
+            latency.record_sample(peer, addr.clone(), std::time::Duration::from_millis(10), t);
+            latency.record_sample(
+                peer,
+                addr.clone(),
+                std::time::Duration::from_millis(10 + queue_ms),
+                t,
+            );
+        }
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            clear.fetch_bytes(&from(&provider, &hash)).await.unwrap(),
+            blob
+        );
+        let unpaced = started.elapsed();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            queued.fetch_bytes(&from(&provider, &hash)).await.unwrap(),
+            blob
+        );
+        let paced = started.elapsed();
+        // 768 KiB at the 256 KiB/s floor, the first chunk free: about 3 s.
+        assert!(
+            paced >= std::time::Duration::from_secs(2),
+            "the upload behind a queue took {paced:?}"
+        );
+        assert!(
+            unpaced < std::time::Duration::from_secs(1),
+            "the upload with no queue took {unpaced:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_with_no_registered_identity_fetches_snapshot_files_and_nothing_else() {
+        use tenzro_onboarding_types::onboarding::{GateMode, OnboardingPolicy};
+
+        let lookup = MemoryLookup::new();
+        let (provider, _) = node(&lookup).await;
+        let (joiner, _) = node(&lookup).await;
+        let snapshot = Bytes::from_static(b"a bucket of a retained snapshot");
+        let weights = Bytes::from_static(b"model weights");
+        let hash_of = |uri: TenzroUri| match uri {
+            TenzroUri::Blob { hash, .. } => hash,
+            other => panic!("{other}"),
+        };
+        let snapshot_hash = hash_of(provider.publish_bytes(snapshot.clone()).await.unwrap());
+        let weights_hash = hash_of(provider.publish_bytes(weights.clone()).await.unwrap());
+
+        // The provider's gate is in force and knows the joiner as nobody.
+        provider.identity_gate().set_policy(OnboardingPolicy {
+            mode: GateMode::Enforce,
+            ..OnboardingPolicy::default()
+        });
+        provider
+            .identity_gate()
+            .install_registry(Arc::new(NobodyRegistered));
+        provider
+            .snapshot_blobs()
+            .set([*Hash::new(&snapshot).as_bytes()]);
+
+        assert_eq!(
+            joiner
+                .fetch_bytes(&from(&provider, &snapshot_hash))
+                .await
+                .unwrap(),
+            snapshot
+        );
+        assert!(
+            joiner
+                .fetch_bytes(&from(&provider, &weights_hash))
+                .await
+                .is_err(),
+            "a blob that is no snapshot file went to a peer with no registered identity"
+        );
     }
 
     #[tokio::test]

@@ -59,12 +59,14 @@ METHODS: dict[str, Access] = {
     "simulateTransaction": "open",
     "tenzro_acceptClusterMembership": "admin",
     "tenzro_accessChallenge": "open",
+    "tenzro_acknowledgeCondition": "admin",
     "tenzro_addMachineAccess": "owner",
     "tenzro_agentAccounts": "open",
     "tenzro_agentAct": "owner",
     "tenzro_agentNodePqKey": "open",
     "tenzro_agentVoucher": "owner",
     "tenzro_agentWalletConsent": "open",
+    "tenzro_approveDeviceCode": "admin",
     "tenzro_attestFinalityProof": "open",
     "tenzro_auditInferenceChallenge": "open",
     "tenzro_autotuneDecisions": "open",
@@ -75,7 +77,6 @@ METHODS: dict[str, Access] = {
     "tenzro_buildReserveAttestationFromPor": "open",
     "tenzro_canTransfer": "open",
     "tenzro_chat": "open",
-    "tenzro_chatByIntent": "open",
     "tenzro_checkDelegateTarget": "open",
     "tenzro_cleanupIdleLocalModelServices": "admin",
     "tenzro_closePaymentChannel": "owner",
@@ -106,25 +107,32 @@ METHODS: dict[str, Access] = {
     "tenzro_detectTee": "open",
     "tenzro_discoverModels": "open",
     "tenzro_enrollPasskey": "owner",
+    "tenzro_estimateGas": "open",
     "tenzro_eventStatus": "open",
     "tenzro_exchangeToken": "owner",
     "tenzro_exportConfig": "admin",
     "tenzro_exportEvidencePack": "open",
     "tenzro_fabricProfile": "open",
+    "tenzro_fileChallengeFault": "admin",
     "tenzro_fileInferenceChallenge": "open",
     "tenzro_finalizeChallenge": "open",
     "tenzro_flagAgentAudit": "admin",
+    "tenzro_fleetHostEvidence": "admin",
     "tenzro_forecast": "open",
     "tenzro_forgetIdentity": "admin",
     "tenzro_get7702Delegation": "open",
     "tenzro_getAccessPolicy": "admin",
     "tenzro_getAccountContention": "open",
     "tenzro_getAccountOutflow": "open",
+    "tenzro_getAccountSigningKey": "open",
     "tenzro_getAgentAuditCommit": "open",
     "tenzro_getAgentBond": "open",
     "tenzro_getAgentGrantProof": "open",
     "tenzro_getAgentQuarantine": "open",
     "tenzro_getAgentTerms": "open",
+    "tenzro_getAgentTermsCredential": "open",
+    "tenzro_getAppTransportInfo": "open",
+    "tenzro_getAppTransportUsage": "open",
     "tenzro_getAttestationLog": "open",
     "tenzro_getBalance": "open",
     "tenzro_getBeacon": "open",
@@ -136,8 +144,8 @@ METHODS: dict[str, Access] = {
     "tenzro_getBridgeOutflow": "open",
     "tenzro_getBridgeRoute": "open",
     "tenzro_getBurnRateConfig": "open",
-    "tenzro_getBurnRateRecommendation": "open",
     "tenzro_getCatalogEntry": "open",
+    "tenzro_getChallengeInputs": "open",
     "tenzro_getCheckpointCertificate": "open",
     "tenzro_getCommittee": "open",
     "tenzro_getCompactCertificate": "open",
@@ -216,6 +224,7 @@ METHODS: dict[str, Access] = {
     "tenzro_getStateProof": "open",
     "tenzro_getStateRoot": "open",
     "tenzro_getStatusList": "open",
+    "tenzro_getStorageHoldingReceipt": "open",
     "tenzro_getSupplyMetrics": "open",
     "tenzro_getTeeAttestation": "open",
     "tenzro_getTerritoryPolicy": "open",
@@ -241,12 +250,13 @@ METHODS: dict[str, Access] = {
     "tenzro_imageTextSimilarity": "open",
     "tenzro_inferenceRequest": "open",
     "tenzro_installSealedModel": "admin",
+    "tenzro_installUpdate": "admin",
     "tenzro_introspectToken": "open",
     "tenzro_iroh_fetchBlob": "open",
     "tenzro_iroh_getEndpointId": "open",
     "tenzro_iroh_getInfo": "open",
     "tenzro_iroh_listAlpns": "open",
-    "tenzro_iroh_publishBlob": "open",
+    "tenzro_iroh_publishBlob": "admin",
     "tenzro_iroh_resolveTenzroUri": "open",
     "tenzro_issueAccessToken": "open",
     "tenzro_issueKyaCredential": "open",
@@ -262,6 +272,7 @@ METHODS: dict[str, Access] = {
     "tenzro_listCatalog": "open",
     "tenzro_listCircuits": "open",
     "tenzro_listComputeBonds": "open",
+    "tenzro_listConditions": "admin",
     "tenzro_listDecisionCatalog": "open",
     "tenzro_listDetectionCatalog": "open",
     "tenzro_listDuties": "open",
@@ -280,6 +291,7 @@ METHODS: dict[str, Access] = {
     "tenzro_listModelEndpoints": "open",
     "tenzro_listModels": "open",
     "tenzro_listNetworkLegs": "open",
+    "tenzro_listPairedDevices": "admin",
     "tenzro_listPayments": "open",
     "tenzro_listPeers": "open",
     "tenzro_listPlans": "open",
@@ -292,9 +304,11 @@ METHODS: dict[str, Access] = {
     "tenzro_listRoleEndpoints": "open",
     "tenzro_listRpcMethods": "open",
     "tenzro_listSealedModels": "open",
+    "tenzro_listSeatDuties": "admin",
     "tenzro_listSegmentationCatalog": "open",
     "tenzro_listSettlements": "open",
     "tenzro_listSnapshots": "open",
+    "tenzro_listStorageProviders": "open",
     "tenzro_listTeeProviders": "open",
     "tenzro_listTextEmbeddingCatalog": "open",
     "tenzro_listTextSegmentationCatalog": "open",
@@ -349,10 +363,12 @@ METHODS: dict[str, Access] = {
     "tenzro_onboardDelegatedAgent": "owner",
     "tenzro_onboardHuman": "owner",
     "tenzro_openPaymentChannel": "open",
+    "tenzro_pairDevice": "owner",
     "tenzro_peerCount": "open",
     "tenzro_permit2NonceUsed": "open",
     "tenzro_permit2VerifyAndConsume": "open",
     "tenzro_pinModel": "admin",
+    "tenzro_pollDeviceCode": "open",
     "tenzro_prefixProbe": "open",
     "tenzro_previewAccess": "admin",
     "tenzro_previewServe": "open",
@@ -367,13 +383,15 @@ METHODS: dict[str, Access] = {
     "tenzro_quotePayment": "open",
     "tenzro_readPorReserve": "open",
     "tenzro_recordAgentAuditSession": "admin",
-    "tenzro_recordRouteOutcome": "admin",
+    "tenzro_recordExecutionReceipt": "owner",
     "tenzro_redeemSealedDelivery": "open",
+    "tenzro_reexecuteChallenge": "admin",
     "tenzro_refreshToken": "open",
     "tenzro_registerIdentity": "owner",
     "tenzro_registerKeyRelease": "owner",
     "tenzro_registerMachineIdentity": "owner",
     "tenzro_registerModelEndpoint": "admin",
+    "tenzro_requestDeviceCode": "open",
     "tenzro_requestKeyRelease": "owner",
     "tenzro_requestRemoteGrant": "owner",
     "tenzro_rerank": "open",
@@ -381,6 +399,8 @@ METHODS: dict[str, Access] = {
     "tenzro_resolveCredential": "open",
     "tenzro_resolveDidDocument": "open",
     "tenzro_resolveIdentity": "open",
+    "tenzro_resolvePaymentIntent": "open",
+    "tenzro_restartNode": "admin",
     "tenzro_retryNetworkLeg": "admin",
     "tenzro_revealChallengeVote": "admin",
     "tenzro_revokeAccessToken": "admin",
@@ -390,8 +410,6 @@ METHODS: dict[str, Access] = {
     "tenzro_revokeKeyRelease": "owner",
     "tenzro_revokeMachineAccess": "owner",
     "tenzro_rotateIdentityToPq": "open",
-    "tenzro_routeDifficultyStats": "open",
-    "tenzro_routeIntent": "open",
     "tenzro_scanModelFiles": "admin",
     "tenzro_sealModel": "admin",
     "tenzro_segment": "open",
@@ -412,6 +430,7 @@ METHODS: dict[str, Access] = {
     "tenzro_signRemoteAction": "owner",
     "tenzro_signRemoteChannelVoucher": "owner",
     "tenzro_signalUpgradeReady": "admin",
+    "tenzro_slaGetEnergy": "open",
     "tenzro_slaGetParams": "open",
     "tenzro_slaIssueProbe": "admin",
     "tenzro_slaListOutstandingProbes": "open",
@@ -424,6 +443,7 @@ METHODS: dict[str, Access] = {
     "tenzro_storageSetPricing": "admin",
     "tenzro_storageStatus": "open",
     "tenzro_storageStoreObject": "admin",
+    "tenzro_submitApproval": "admin",
     "tenzro_submitReconciliation": "open",
     "tenzro_submitReserveAttestation": "owner",
     "tenzro_submitTrustRecord": "open",
@@ -453,6 +473,7 @@ METHODS: dict[str, Access] = {
     "tenzro_unloadTrainingModel": "admin",
     "tenzro_unloadVideoModel": "admin",
     "tenzro_unloadVisionModel": "admin",
+    "tenzro_unpairDevice": "admin",
     "tenzro_unpinModel": "admin",
     "tenzro_unregisterModelEndpoint": "admin",
     "tenzro_updateAgentTerms": "owner",
@@ -470,6 +491,7 @@ METHODS: dict[str, Access] = {
     "tenzro_verifyEvidence": "open",
     "tenzro_verifyInferenceCommitment": "open",
     "tenzro_verifyInferenceReceipt": "open",
+    "tenzro_verifyJurisdictionReceipt": "open",
     "tenzro_verifyKyaCredential": "open",
     "tenzro_verifyModelFiles": "admin",
     "tenzro_verifyNodeDidDocument": "open",
@@ -669,6 +691,10 @@ class Methods:
         """``tenzro_accessChallenge``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_accessChallenge", params)
 
+    def acknowledge_condition(self, params: Params = None) -> Any:
+        """``tenzro_acknowledgeCondition``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_acknowledgeCondition", params)
+
     def add_machine_access(self, params: Params = None) -> Any:
         """``tenzro_addMachineAccess``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
         return self.call("tenzro_addMachineAccess", params)
@@ -692,6 +718,10 @@ class Methods:
     def agent_wallet_consent(self, params: Params = None) -> Any:
         """``tenzro_agentWalletConsent``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_agentWalletConsent", params)
+
+    def approve_device_code(self, params: Params = None) -> Any:
+        """``tenzro_approveDeviceCode``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_approveDeviceCode", params)
 
     def attest_finality_proof(self, params: Params = None) -> Any:
         """``tenzro_attestFinalityProof``. Open to any caller the node's access policy admits."""
@@ -732,10 +762,6 @@ class Methods:
     def chat(self, params: Params = None) -> Any:
         """``tenzro_chat``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_chat", params)
-
-    def chat_by_intent(self, params: Params = None) -> Any:
-        """``tenzro_chatByIntent``. Open to any caller the node's access policy admits."""
-        return self.call("tenzro_chatByIntent", params)
 
     def check_delegate_target(self, params: Params = None) -> Any:
         """``tenzro_checkDelegateTarget``. Open to any caller the node's access policy admits."""
@@ -857,6 +883,10 @@ class Methods:
         """``tenzro_enrollPasskey``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
         return self.call("tenzro_enrollPasskey", params)
 
+    def estimate_gas(self, params: Params = None) -> Any:
+        """``tenzro_estimateGas``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_estimateGas", params)
+
     def event_status(self, params: Params = None) -> Any:
         """``tenzro_eventStatus``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_eventStatus", params)
@@ -877,6 +907,10 @@ class Methods:
         """``tenzro_fabricProfile``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_fabricProfile", params)
 
+    def file_challenge_fault(self, params: Params = None) -> Any:
+        """``tenzro_fileChallengeFault``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_fileChallengeFault", params)
+
     def file_inference_challenge(self, params: Params = None) -> Any:
         """``tenzro_fileInferenceChallenge``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_fileInferenceChallenge", params)
@@ -888,6 +922,10 @@ class Methods:
     def flag_agent_audit(self, params: Params = None) -> Any:
         """``tenzro_flagAgentAudit``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_flagAgentAudit", params)
+
+    def fleet_host_evidence(self, params: Params = None) -> Any:
+        """``tenzro_fleetHostEvidence``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_fleetHostEvidence", params)
 
     def forecast(self, params: Params = None) -> Any:
         """``tenzro_forecast``. Open to any caller the node's access policy admits."""
@@ -913,6 +951,10 @@ class Methods:
         """``tenzro_getAccountOutflow``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getAccountOutflow", params)
 
+    def get_account_signing_key(self, params: Params = None) -> Any:
+        """``tenzro_getAccountSigningKey``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_getAccountSigningKey", params)
+
     def get_agent_audit_commit(self, params: Params = None) -> Any:
         """``tenzro_getAgentAuditCommit``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getAgentAuditCommit", params)
@@ -932,6 +974,18 @@ class Methods:
     def get_agent_terms(self, params: Params = None) -> Any:
         """``tenzro_getAgentTerms``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getAgentTerms", params)
+
+    def get_agent_terms_credential(self, params: Params = None) -> Any:
+        """``tenzro_getAgentTermsCredential``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_getAgentTermsCredential", params)
+
+    def get_app_transport_info(self, params: Params = None) -> Any:
+        """``tenzro_getAppTransportInfo``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_getAppTransportInfo", params)
+
+    def get_app_transport_usage(self, params: Params = None) -> Any:
+        """``tenzro_getAppTransportUsage``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_getAppTransportUsage", params)
 
     def get_attestation_log(self, params: Params = None) -> Any:
         """``tenzro_getAttestationLog``. Open to any caller the node's access policy admits."""
@@ -977,13 +1031,13 @@ class Methods:
         """``tenzro_getBurnRateConfig``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getBurnRateConfig", params)
 
-    def get_burn_rate_recommendation(self, params: Params = None) -> Any:
-        """``tenzro_getBurnRateRecommendation``. Open to any caller the node's access policy admits."""
-        return self.call("tenzro_getBurnRateRecommendation", params)
-
     def get_catalog_entry(self, params: Params = None) -> Any:
         """``tenzro_getCatalogEntry``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getCatalogEntry", params)
+
+    def get_challenge_inputs(self, params: Params = None) -> Any:
+        """``tenzro_getChallengeInputs``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_getChallengeInputs", params)
 
     def get_checkpoint_certificate(self, params: Params = None) -> Any:
         """``tenzro_getCheckpointCertificate``. Open to any caller the node's access policy admits."""
@@ -1297,6 +1351,10 @@ class Methods:
         """``tenzro_getStatusList``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getStatusList", params)
 
+    def get_storage_holding_receipt(self, params: Params = None) -> Any:
+        """``tenzro_getStorageHoldingReceipt``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_getStorageHoldingReceipt", params)
+
     def get_supply_metrics(self, params: Params = None) -> Any:
         """``tenzro_getSupplyMetrics``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_getSupplyMetrics", params)
@@ -1397,6 +1455,10 @@ class Methods:
         """``tenzro_installSealedModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_installSealedModel", params)
 
+    def install_update(self, params: Params = None) -> Any:
+        """``tenzro_installUpdate``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_installUpdate", params)
+
     def introspect_token(self, params: Params = None) -> Any:
         """``tenzro_introspectToken``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_introspectToken", params)
@@ -1418,7 +1480,7 @@ class Methods:
         return self.call("tenzro_iroh_listAlpns", params)
 
     def iroh_publish_blob(self, params: Params = None) -> Any:
-        """``tenzro_iroh_publishBlob``. Open to any caller the node's access policy admits."""
+        """``tenzro_iroh_publishBlob``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_iroh_publishBlob", params)
 
     def iroh_resolve_tenzro_uri(self, params: Params = None) -> Any:
@@ -1480,6 +1542,10 @@ class Methods:
     def list_compute_bonds(self, params: Params = None) -> Any:
         """``tenzro_listComputeBonds``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_listComputeBonds", params)
+
+    def list_conditions(self, params: Params = None) -> Any:
+        """``tenzro_listConditions``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_listConditions", params)
 
     def list_decision_catalog(self, params: Params = None) -> Any:
         """``tenzro_listDecisionCatalog``. Open to any caller the node's access policy admits."""
@@ -1553,6 +1619,10 @@ class Methods:
         """``tenzro_listNetworkLegs``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_listNetworkLegs", params)
 
+    def list_paired_devices(self, params: Params = None) -> Any:
+        """``tenzro_listPairedDevices``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_listPairedDevices", params)
+
     def list_payments(self, params: Params = None) -> Any:
         """``tenzro_listPayments``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_listPayments", params)
@@ -1601,6 +1671,10 @@ class Methods:
         """``tenzro_listSealedModels``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_listSealedModels", params)
 
+    def list_seat_duties(self, params: Params = None) -> Any:
+        """``tenzro_listSeatDuties``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_listSeatDuties", params)
+
     def list_segmentation_catalog(self, params: Params = None) -> Any:
         """``tenzro_listSegmentationCatalog``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_listSegmentationCatalog", params)
@@ -1612,6 +1686,10 @@ class Methods:
     def list_snapshots(self, params: Params = None) -> Any:
         """``tenzro_listSnapshots``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_listSnapshots", params)
+
+    def list_storage_providers(self, params: Params = None) -> Any:
+        """``tenzro_listStorageProviders``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_listStorageProviders", params)
 
     def list_tee_providers(self, params: Params = None) -> Any:
         """``tenzro_listTeeProviders``. Open to any caller the node's access policy admits."""
@@ -1829,6 +1907,10 @@ class Methods:
         """``tenzro_openPaymentChannel``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_openPaymentChannel", params)
 
+    def pair_device(self, params: Params = None) -> Any:
+        """``tenzro_pairDevice``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
+        return self.call("tenzro_pairDevice", params)
+
     def peer_count(self, params: Params = None) -> Any:
         """``tenzro_peerCount``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_peerCount", params)
@@ -1844,6 +1926,10 @@ class Methods:
     def pin_model(self, params: Params = None) -> Any:
         """``tenzro_pinModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_pinModel", params)
+
+    def poll_device_code(self, params: Params = None) -> Any:
+        """``tenzro_pollDeviceCode``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_pollDeviceCode", params)
 
     def prefix_probe(self, params: Params = None) -> Any:
         """``tenzro_prefixProbe``. Open to any caller the node's access policy admits."""
@@ -1901,13 +1987,17 @@ class Methods:
         """``tenzro_recordAgentAuditSession``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_recordAgentAuditSession", params)
 
-    def record_route_outcome(self, params: Params = None) -> Any:
-        """``tenzro_recordRouteOutcome``. Operator only: the node's access policy admits the operator DID or a policy admin."""
-        return self.call("tenzro_recordRouteOutcome", params)
+    def record_execution_receipt(self, params: Params = None) -> Any:
+        """``tenzro_recordExecutionReceipt``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
+        return self.call("tenzro_recordExecutionReceipt", params)
 
     def redeem_sealed_delivery(self, params: Params = None) -> Any:
         """``tenzro_redeemSealedDelivery``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_redeemSealedDelivery", params)
+
+    def reexecute_challenge(self, params: Params = None) -> Any:
+        """``tenzro_reexecuteChallenge``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_reexecuteChallenge", params)
 
     def refresh_token(self, params: Params = None) -> Any:
         """``tenzro_refreshToken``. Open to any caller the node's access policy admits."""
@@ -1928,6 +2018,10 @@ class Methods:
     def register_model_endpoint(self, params: Params = None) -> Any:
         """``tenzro_registerModelEndpoint``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_registerModelEndpoint", params)
+
+    def request_device_code(self, params: Params = None) -> Any:
+        """``tenzro_requestDeviceCode``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_requestDeviceCode", params)
 
     def request_key_release(self, params: Params = None) -> Any:
         """``tenzro_requestKeyRelease``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
@@ -1956,6 +2050,14 @@ class Methods:
     def resolve_identity(self, params: Params = None) -> Any:
         """``tenzro_resolveIdentity``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_resolveIdentity", params)
+
+    def resolve_payment_intent(self, params: Params = None) -> Any:
+        """``tenzro_resolvePaymentIntent``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_resolvePaymentIntent", params)
+
+    def restart_node(self, params: Params = None) -> Any:
+        """``tenzro_restartNode``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_restartNode", params)
 
     def retry_network_leg(self, params: Params = None) -> Any:
         """``tenzro_retryNetworkLeg``. Operator only: the node's access policy admits the operator DID or a policy admin."""
@@ -1992,14 +2094,6 @@ class Methods:
     def rotate_identity_to_pq(self, params: Params = None) -> Any:
         """``tenzro_rotateIdentityToPq``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_rotateIdentityToPq", params)
-
-    def route_difficulty_stats(self, params: Params = None) -> Any:
-        """``tenzro_routeDifficultyStats``. Open to any caller the node's access policy admits."""
-        return self.call("tenzro_routeDifficultyStats", params)
-
-    def route_intent(self, params: Params = None) -> Any:
-        """``tenzro_routeIntent``. Open to any caller the node's access policy admits."""
-        return self.call("tenzro_routeIntent", params)
 
     def scan_model_files(self, params: Params = None) -> Any:
         """``tenzro_scanModelFiles``. Operator only: the node's access policy admits the operator DID or a policy admin."""
@@ -2081,6 +2175,10 @@ class Methods:
         """``tenzro_signalUpgradeReady``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_signalUpgradeReady", params)
 
+    def sla_get_energy(self, params: Params = None) -> Any:
+        """``tenzro_slaGetEnergy``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_slaGetEnergy", params)
+
     def sla_get_params(self, params: Params = None) -> Any:
         """``tenzro_slaGetParams``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_slaGetParams", params)
@@ -2128,6 +2226,10 @@ class Methods:
     def storage_store_object(self, params: Params = None) -> Any:
         """``tenzro_storageStoreObject``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_storageStoreObject", params)
+
+    def submit_approval(self, params: Params = None) -> Any:
+        """``tenzro_submitApproval``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_submitApproval", params)
 
     def submit_reconciliation(self, params: Params = None) -> Any:
         """``tenzro_submitReconciliation``. Open to any caller the node's access policy admits."""
@@ -2245,6 +2347,10 @@ class Methods:
         """``tenzro_unloadVisionModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_unloadVisionModel", params)
 
+    def unpair_device(self, params: Params = None) -> Any:
+        """``tenzro_unpairDevice``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return self.call("tenzro_unpairDevice", params)
+
     def unpin_model(self, params: Params = None) -> Any:
         """``tenzro_unpinModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return self.call("tenzro_unpinModel", params)
@@ -2312,6 +2418,10 @@ class Methods:
     def verify_inference_receipt(self, params: Params = None) -> Any:
         """``tenzro_verifyInferenceReceipt``. Open to any caller the node's access policy admits."""
         return self.call("tenzro_verifyInferenceReceipt", params)
+
+    def verify_jurisdiction_receipt(self, params: Params = None) -> Any:
+        """``tenzro_verifyJurisdictionReceipt``. Open to any caller the node's access policy admits."""
+        return self.call("tenzro_verifyJurisdictionReceipt", params)
 
     def verify_kya_credential(self, params: Params = None) -> Any:
         """``tenzro_verifyKyaCredential``. Open to any caller the node's access policy admits."""
@@ -2554,6 +2664,10 @@ class AsyncMethods:
         """``tenzro_accessChallenge``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_accessChallenge", params)
 
+    async def acknowledge_condition(self, params: Params = None) -> Any:
+        """``tenzro_acknowledgeCondition``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_acknowledgeCondition", params)
+
     async def add_machine_access(self, params: Params = None) -> Any:
         """``tenzro_addMachineAccess``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
         return await self.call("tenzro_addMachineAccess", params)
@@ -2577,6 +2691,10 @@ class AsyncMethods:
     async def agent_wallet_consent(self, params: Params = None) -> Any:
         """``tenzro_agentWalletConsent``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_agentWalletConsent", params)
+
+    async def approve_device_code(self, params: Params = None) -> Any:
+        """``tenzro_approveDeviceCode``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_approveDeviceCode", params)
 
     async def attest_finality_proof(self, params: Params = None) -> Any:
         """``tenzro_attestFinalityProof``. Open to any caller the node's access policy admits."""
@@ -2617,10 +2735,6 @@ class AsyncMethods:
     async def chat(self, params: Params = None) -> Any:
         """``tenzro_chat``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_chat", params)
-
-    async def chat_by_intent(self, params: Params = None) -> Any:
-        """``tenzro_chatByIntent``. Open to any caller the node's access policy admits."""
-        return await self.call("tenzro_chatByIntent", params)
 
     async def check_delegate_target(self, params: Params = None) -> Any:
         """``tenzro_checkDelegateTarget``. Open to any caller the node's access policy admits."""
@@ -2742,6 +2856,10 @@ class AsyncMethods:
         """``tenzro_enrollPasskey``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
         return await self.call("tenzro_enrollPasskey", params)
 
+    async def estimate_gas(self, params: Params = None) -> Any:
+        """``tenzro_estimateGas``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_estimateGas", params)
+
     async def event_status(self, params: Params = None) -> Any:
         """``tenzro_eventStatus``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_eventStatus", params)
@@ -2762,6 +2880,10 @@ class AsyncMethods:
         """``tenzro_fabricProfile``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_fabricProfile", params)
 
+    async def file_challenge_fault(self, params: Params = None) -> Any:
+        """``tenzro_fileChallengeFault``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_fileChallengeFault", params)
+
     async def file_inference_challenge(self, params: Params = None) -> Any:
         """``tenzro_fileInferenceChallenge``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_fileInferenceChallenge", params)
@@ -2773,6 +2895,10 @@ class AsyncMethods:
     async def flag_agent_audit(self, params: Params = None) -> Any:
         """``tenzro_flagAgentAudit``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_flagAgentAudit", params)
+
+    async def fleet_host_evidence(self, params: Params = None) -> Any:
+        """``tenzro_fleetHostEvidence``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_fleetHostEvidence", params)
 
     async def forecast(self, params: Params = None) -> Any:
         """``tenzro_forecast``. Open to any caller the node's access policy admits."""
@@ -2798,6 +2924,10 @@ class AsyncMethods:
         """``tenzro_getAccountOutflow``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getAccountOutflow", params)
 
+    async def get_account_signing_key(self, params: Params = None) -> Any:
+        """``tenzro_getAccountSigningKey``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_getAccountSigningKey", params)
+
     async def get_agent_audit_commit(self, params: Params = None) -> Any:
         """``tenzro_getAgentAuditCommit``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getAgentAuditCommit", params)
@@ -2817,6 +2947,18 @@ class AsyncMethods:
     async def get_agent_terms(self, params: Params = None) -> Any:
         """``tenzro_getAgentTerms``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getAgentTerms", params)
+
+    async def get_agent_terms_credential(self, params: Params = None) -> Any:
+        """``tenzro_getAgentTermsCredential``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_getAgentTermsCredential", params)
+
+    async def get_app_transport_info(self, params: Params = None) -> Any:
+        """``tenzro_getAppTransportInfo``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_getAppTransportInfo", params)
+
+    async def get_app_transport_usage(self, params: Params = None) -> Any:
+        """``tenzro_getAppTransportUsage``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_getAppTransportUsage", params)
 
     async def get_attestation_log(self, params: Params = None) -> Any:
         """``tenzro_getAttestationLog``. Open to any caller the node's access policy admits."""
@@ -2862,13 +3004,13 @@ class AsyncMethods:
         """``tenzro_getBurnRateConfig``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getBurnRateConfig", params)
 
-    async def get_burn_rate_recommendation(self, params: Params = None) -> Any:
-        """``tenzro_getBurnRateRecommendation``. Open to any caller the node's access policy admits."""
-        return await self.call("tenzro_getBurnRateRecommendation", params)
-
     async def get_catalog_entry(self, params: Params = None) -> Any:
         """``tenzro_getCatalogEntry``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getCatalogEntry", params)
+
+    async def get_challenge_inputs(self, params: Params = None) -> Any:
+        """``tenzro_getChallengeInputs``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_getChallengeInputs", params)
 
     async def get_checkpoint_certificate(self, params: Params = None) -> Any:
         """``tenzro_getCheckpointCertificate``. Open to any caller the node's access policy admits."""
@@ -3182,6 +3324,10 @@ class AsyncMethods:
         """``tenzro_getStatusList``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getStatusList", params)
 
+    async def get_storage_holding_receipt(self, params: Params = None) -> Any:
+        """``tenzro_getStorageHoldingReceipt``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_getStorageHoldingReceipt", params)
+
     async def get_supply_metrics(self, params: Params = None) -> Any:
         """``tenzro_getSupplyMetrics``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_getSupplyMetrics", params)
@@ -3282,6 +3428,10 @@ class AsyncMethods:
         """``tenzro_installSealedModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_installSealedModel", params)
 
+    async def install_update(self, params: Params = None) -> Any:
+        """``tenzro_installUpdate``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_installUpdate", params)
+
     async def introspect_token(self, params: Params = None) -> Any:
         """``tenzro_introspectToken``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_introspectToken", params)
@@ -3303,7 +3453,7 @@ class AsyncMethods:
         return await self.call("tenzro_iroh_listAlpns", params)
 
     async def iroh_publish_blob(self, params: Params = None) -> Any:
-        """``tenzro_iroh_publishBlob``. Open to any caller the node's access policy admits."""
+        """``tenzro_iroh_publishBlob``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_iroh_publishBlob", params)
 
     async def iroh_resolve_tenzro_uri(self, params: Params = None) -> Any:
@@ -3365,6 +3515,10 @@ class AsyncMethods:
     async def list_compute_bonds(self, params: Params = None) -> Any:
         """``tenzro_listComputeBonds``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_listComputeBonds", params)
+
+    async def list_conditions(self, params: Params = None) -> Any:
+        """``tenzro_listConditions``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_listConditions", params)
 
     async def list_decision_catalog(self, params: Params = None) -> Any:
         """``tenzro_listDecisionCatalog``. Open to any caller the node's access policy admits."""
@@ -3438,6 +3592,10 @@ class AsyncMethods:
         """``tenzro_listNetworkLegs``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_listNetworkLegs", params)
 
+    async def list_paired_devices(self, params: Params = None) -> Any:
+        """``tenzro_listPairedDevices``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_listPairedDevices", params)
+
     async def list_payments(self, params: Params = None) -> Any:
         """``tenzro_listPayments``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_listPayments", params)
@@ -3486,6 +3644,10 @@ class AsyncMethods:
         """``tenzro_listSealedModels``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_listSealedModels", params)
 
+    async def list_seat_duties(self, params: Params = None) -> Any:
+        """``tenzro_listSeatDuties``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_listSeatDuties", params)
+
     async def list_segmentation_catalog(self, params: Params = None) -> Any:
         """``tenzro_listSegmentationCatalog``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_listSegmentationCatalog", params)
@@ -3497,6 +3659,10 @@ class AsyncMethods:
     async def list_snapshots(self, params: Params = None) -> Any:
         """``tenzro_listSnapshots``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_listSnapshots", params)
+
+    async def list_storage_providers(self, params: Params = None) -> Any:
+        """``tenzro_listStorageProviders``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_listStorageProviders", params)
 
     async def list_tee_providers(self, params: Params = None) -> Any:
         """``tenzro_listTeeProviders``. Open to any caller the node's access policy admits."""
@@ -3714,6 +3880,10 @@ class AsyncMethods:
         """``tenzro_openPaymentChannel``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_openPaymentChannel", params)
 
+    async def pair_device(self, params: Params = None) -> Any:
+        """``tenzro_pairDevice``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
+        return await self.call("tenzro_pairDevice", params)
+
     async def peer_count(self, params: Params = None) -> Any:
         """``tenzro_peerCount``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_peerCount", params)
@@ -3729,6 +3899,10 @@ class AsyncMethods:
     async def pin_model(self, params: Params = None) -> Any:
         """``tenzro_pinModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_pinModel", params)
+
+    async def poll_device_code(self, params: Params = None) -> Any:
+        """``tenzro_pollDeviceCode``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_pollDeviceCode", params)
 
     async def prefix_probe(self, params: Params = None) -> Any:
         """``tenzro_prefixProbe``. Open to any caller the node's access policy admits."""
@@ -3786,13 +3960,17 @@ class AsyncMethods:
         """``tenzro_recordAgentAuditSession``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_recordAgentAuditSession", params)
 
-    async def record_route_outcome(self, params: Params = None) -> Any:
-        """``tenzro_recordRouteOutcome``. Operator only: the node's access policy admits the operator DID or a policy admin."""
-        return await self.call("tenzro_recordRouteOutcome", params)
+    async def record_execution_receipt(self, params: Params = None) -> Any:
+        """``tenzro_recordExecutionReceipt``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
+        return await self.call("tenzro_recordExecutionReceipt", params)
 
     async def redeem_sealed_delivery(self, params: Params = None) -> Any:
         """``tenzro_redeemSealedDelivery``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_redeemSealedDelivery", params)
+
+    async def reexecute_challenge(self, params: Params = None) -> Any:
+        """``tenzro_reexecuteChallenge``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_reexecuteChallenge", params)
 
     async def refresh_token(self, params: Params = None) -> Any:
         """``tenzro_refreshToken``. Open to any caller the node's access policy admits."""
@@ -3813,6 +3991,10 @@ class AsyncMethods:
     async def register_model_endpoint(self, params: Params = None) -> Any:
         """``tenzro_registerModelEndpoint``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_registerModelEndpoint", params)
+
+    async def request_device_code(self, params: Params = None) -> Any:
+        """``tenzro_requestDeviceCode``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_requestDeviceCode", params)
 
     async def request_key_release(self, params: Params = None) -> Any:
         """``tenzro_requestKeyRelease``. Needs the owner's proof (signature, passkey assertion or DPoP-bound token) in ``params``."""
@@ -3841,6 +4023,14 @@ class AsyncMethods:
     async def resolve_identity(self, params: Params = None) -> Any:
         """``tenzro_resolveIdentity``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_resolveIdentity", params)
+
+    async def resolve_payment_intent(self, params: Params = None) -> Any:
+        """``tenzro_resolvePaymentIntent``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_resolvePaymentIntent", params)
+
+    async def restart_node(self, params: Params = None) -> Any:
+        """``tenzro_restartNode``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_restartNode", params)
 
     async def retry_network_leg(self, params: Params = None) -> Any:
         """``tenzro_retryNetworkLeg``. Operator only: the node's access policy admits the operator DID or a policy admin."""
@@ -3877,14 +4067,6 @@ class AsyncMethods:
     async def rotate_identity_to_pq(self, params: Params = None) -> Any:
         """``tenzro_rotateIdentityToPq``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_rotateIdentityToPq", params)
-
-    async def route_difficulty_stats(self, params: Params = None) -> Any:
-        """``tenzro_routeDifficultyStats``. Open to any caller the node's access policy admits."""
-        return await self.call("tenzro_routeDifficultyStats", params)
-
-    async def route_intent(self, params: Params = None) -> Any:
-        """``tenzro_routeIntent``. Open to any caller the node's access policy admits."""
-        return await self.call("tenzro_routeIntent", params)
 
     async def scan_model_files(self, params: Params = None) -> Any:
         """``tenzro_scanModelFiles``. Operator only: the node's access policy admits the operator DID or a policy admin."""
@@ -3966,6 +4148,10 @@ class AsyncMethods:
         """``tenzro_signalUpgradeReady``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_signalUpgradeReady", params)
 
+    async def sla_get_energy(self, params: Params = None) -> Any:
+        """``tenzro_slaGetEnergy``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_slaGetEnergy", params)
+
     async def sla_get_params(self, params: Params = None) -> Any:
         """``tenzro_slaGetParams``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_slaGetParams", params)
@@ -4013,6 +4199,10 @@ class AsyncMethods:
     async def storage_store_object(self, params: Params = None) -> Any:
         """``tenzro_storageStoreObject``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_storageStoreObject", params)
+
+    async def submit_approval(self, params: Params = None) -> Any:
+        """``tenzro_submitApproval``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_submitApproval", params)
 
     async def submit_reconciliation(self, params: Params = None) -> Any:
         """``tenzro_submitReconciliation``. Open to any caller the node's access policy admits."""
@@ -4130,6 +4320,10 @@ class AsyncMethods:
         """``tenzro_unloadVisionModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_unloadVisionModel", params)
 
+    async def unpair_device(self, params: Params = None) -> Any:
+        """``tenzro_unpairDevice``. Operator only: the node's access policy admits the operator DID or a policy admin."""
+        return await self.call("tenzro_unpairDevice", params)
+
     async def unpin_model(self, params: Params = None) -> Any:
         """``tenzro_unpinModel``. Operator only: the node's access policy admits the operator DID or a policy admin."""
         return await self.call("tenzro_unpinModel", params)
@@ -4197,6 +4391,10 @@ class AsyncMethods:
     async def verify_inference_receipt(self, params: Params = None) -> Any:
         """``tenzro_verifyInferenceReceipt``. Open to any caller the node's access policy admits."""
         return await self.call("tenzro_verifyInferenceReceipt", params)
+
+    async def verify_jurisdiction_receipt(self, params: Params = None) -> Any:
+        """``tenzro_verifyJurisdictionReceipt``. Open to any caller the node's access policy admits."""
+        return await self.call("tenzro_verifyJurisdictionReceipt", params)
 
     async def verify_kya_credential(self, params: Params = None) -> Any:
         """``tenzro_verifyKyaCredential``. Open to any caller the node's access policy admits."""

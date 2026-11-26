@@ -127,7 +127,8 @@ pub(crate) async fn handle_load(
         .and_then(Value::as_str)
         .ok_or_else(|| missing_param("model_id"))?
         .to_string();
-    tenzro_model::get_model_by_id(&model_id)
+    node.catalog()
+        .get_model_by_id(&model_id)
         .ok_or_else(|| invalid(format!("{model_id} is not a language model in the catalog")))?;
     let path = node
         .hf_downloader
@@ -313,7 +314,7 @@ pub(crate) async fn handle_round(
 
     let units = BillableUnits::default().with_trained_tokens(result.trained_tokens);
     let bytes_out = (result.adapter.len() + result.state.len()) as u64;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         &model_id,
@@ -359,6 +360,7 @@ pub(crate) async fn handle_round(
         obj.insert("units".into(), units_to_json(&units));
         obj.insert("cost_wei".into(), json!(cost_wei.to_string()));
         obj.insert("settlement".into(), settlement.to_json());
+        obj.insert("generation_id".into(), Value::String(generation_id));
     }
     Ok(out)
 }

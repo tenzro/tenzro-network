@@ -1,7 +1,8 @@
 //! A model of the proposed fee design: governed fiat floor prices per
-//! resource with a bounded congestion multiplier, fully burned; a mint set
-//! in TNZO with a bounded staking-ratio controller; capped app rewards
-//! weighted by fees burned; and a rate that starts as a governed value,
+//! resource with a bounded congestion multiplier, fully burned; rewards
+//! paid from the genesis-funded rewards pool on the ledger's declining
+//! schedule, so supply only falls; capped app rewards weighted by fees
+//! burned; and a rate that starts as a governed value,
 //! then becomes a median of validator reports with a move cap, a band
 //! against a slow anchor, and challenges.
 //!
@@ -15,6 +16,8 @@
 //! other trading.
 
 use serde::Serialize;
+use tenzro_vm::governance::genesis_param;
+use tenzro_vm::native::rewards as vr;
 
 /// The design's governed parameters.
 #[derive(Debug, Clone, Serialize)]
@@ -33,19 +36,13 @@ pub struct Design {
     pub congestion_max: f64,
     /// Actions the chain carries per day at full capacity.
     pub capacity_per_day: f64,
-    /// Base mint, TNZO per year, and its yearly decay.
-    pub mint_base: f64,
-    /// Yearly decay of the base mint.
-    pub mint_decay: f64,
-    /// Staking-ratio goal.
-    pub stake_goal: f64,
-    /// Controller step per year.
-    pub mint_adj_rate: f64,
-    /// Controller bounds on the mint multiple.
-    pub mint_min: f64,
-    /// Upper bound.
-    pub mint_max: f64,
-    /// Share of mint paid to apps by fees burned.
+    /// Reward schedule in year zero, TNZO per year.
+    pub reward_base: f64,
+    /// Yearly decay of the schedule.
+    pub reward_decay: f64,
+    /// Floor of the schedule, TNZO per year.
+    pub reward_floor: f64,
+    /// Share of rewards paid to apps by fees burned.
     pub app_reward_share: f64,
     /// Rate move cap per rate epoch.
     pub rate_move_cap: f64,
@@ -69,12 +66,9 @@ impl Default for Design {
             congestion_step: 0.125,
             congestion_max: 100.0,
             capacity_per_day: 2.5e8,
-            mint_base: 60.0e6,
-            mint_decay: 0.15,
-            stake_goal: 0.30,
-            mint_adj_rate: 0.13,
-            mint_min: 0.5,
-            mint_max: 2.0,
+            reward_base: genesis_param(vr::MINT_BASE_PARAM) as f64,
+            reward_decay: genesis_param(vr::MINT_DECAY_PARAM) as f64 / 1e4,
+            reward_floor: genesis_param(vr::MINT_FLOOR_PARAM) as f64,
             app_reward_share: 0.2,
             rate_move_cap: 0.01,
             rate_epochs_per_day: 24.0,
@@ -102,6 +96,8 @@ pub struct World {
     pub price0: f64,
     /// Supply, TNZO.
     pub supply: f64,
+    /// Rewards pool at the start, TNZO.
+    pub rewards_pool: f64,
     /// Stake at the start, TNZO.
     pub stake0: f64,
     /// Validator costs, USD per year in total.
@@ -122,6 +118,7 @@ impl Default for World {
             pool_depth_usd: 1_000_000.0,
             price0: 0.10,
             supply: 1.0e9,
+            rewards_pool: tenzro_token::rewards::NETWORK_REWARDS_POOL as f64 / 1e18,
             stake0: 50.0e6,
             validator_cost_usd_year: 31.0 * 6_000.0,
             required_yield: 0.08,
@@ -149,8 +146,10 @@ pub struct DayState {
     pub fees_usd: f64,
     /// Burned, TNZO.
     pub burned: f64,
-    /// Minted, TNZO.
-    pub minted: f64,
+    /// Rewards paid from the pool, TNZO.
+    pub paid: f64,
+    /// Rewards pool left, TNZO.
+    pub pool: f64,
     /// Supply, TNZO.
     pub supply: f64,
     /// Stake, TNZO.
@@ -175,8 +174,6 @@ pub struct Stress {
     /// Agents all react to the fee in the same epoch: demand falls to zero
     /// above this multiple of the floor and returns below it.
     pub swarm_threshold: Option<f64>,
-    /// Staking-ratio controller on.
-    pub controller: bool,
     /// The governed rate (phase 1) drifts from the market by this factor;
     /// validators' shadow reports and challenges watch it.
     pub governed_drift: Option<f64>,
@@ -191,7 +188,7 @@ pub fn run(d: &Design, w: &World, s: &Stress, days: u32) -> Vec<DayState> {
     let mut rate = w.price0;
     let mut anchor = w.price0;
     let mut cong = 1.0;
-    let mut mint_mult = 1.0;
+    let mut pool = w.rewards_pool;
     let mut out = Vec::with_capacity(days as usize);
     let mut demand_factor = 1.0;
     for day in 0..days {
@@ -260,15 +257,12 @@ pub fn run(d: &Design, w: &World, s: &Stress, days: u32) -> Vec<DayState> {
         usd += buy_usd;
         tnzo -= bought;
         let burned = fees_usd / rate;
-        // Mint: base decaying, times the staking-ratio controller.
-        if s.controller {
-            let ratio = stake / supply;
-            mint_mult = (mint_mult + d.mint_adj_rate / 365.25 * (1.0 - ratio / d.stake_goal))
-                .clamp(d.mint_min, d.mint_max);
-        }
-        let minted = d.mint_base * (1.0 - d.mint_decay).powf(years) / 365.25 * mint_mult;
-        supply += minted - burned;
-        let to_stakers = minted * (1.0 - d.app_reward_share);
+        // Rewards come out of the pool on the schedule until it is empty;
+        // nothing is minted, so supply only falls by what is burned.
+        let paid = (schedule_per_year(d, years) / 365.25).min(pool);
+        pool -= paid;
+        supply -= burned;
+        let to_stakers = paid * (1.0 - d.app_reward_share);
         // Validators sell enough to cover costs.
         let price = usd / tnzo;
         let sell = (w.validator_cost_usd_year / 365.25 / price).min(to_stakers);
@@ -290,7 +284,8 @@ pub fn run(d: &Design, w: &World, s: &Stress, days: u32) -> Vec<DayState> {
             utilization: util,
             fees_usd,
             burned,
-            minted,
+            paid,
+            pool,
             supply,
             stake,
             yield_year,
@@ -301,6 +296,12 @@ pub fn run(d: &Design, w: &World, s: &Stress, days: u32) -> Vec<DayState> {
         });
     }
     out
+}
+
+/// The ledger's reward schedule in `years`: the base decaying once per whole
+/// year, never below the floor.
+pub fn schedule_per_year(d: &Design, years: f64) -> f64 {
+    (d.reward_base * (1.0 - d.reward_decay).powf(years.floor())).max(d.reward_floor)
 }
 
 /// One test's outcome.
@@ -332,7 +333,6 @@ pub fn tests() -> Vec<TestResult> {
             &w,
             &Stress {
                 rate_bias: Some((share, bias)),
-                controller: true,
                 ..Default::default()
             },
             60,
@@ -359,7 +359,6 @@ pub fn tests() -> Vec<TestResult> {
             &w,
             &Stress {
                 price_shock: Some((10, f)),
-                controller: true,
                 ..Default::default()
             },
             40,
@@ -412,7 +411,6 @@ pub fn tests() -> Vec<TestResult> {
             &ww,
             &Stress {
                 demand_shock: Some((20, 0.6)),
-                controller: true,
                 ..Default::default()
             },
             120,
@@ -438,15 +436,7 @@ pub fn tests() -> Vec<TestResult> {
             batching,
             ..w.clone()
         };
-        let v = run(
-            &d,
-            &ww,
-            &Stress {
-                controller: true,
-                ..Default::default()
-            },
-            30,
-        );
+        let v = run(&d, &ww, &Stress::default(), 30);
         let last = v.last().cloned().unwrap_or_default();
         let marginal = w.validator_cost_usd_year / 365.25 / d.capacity_per_day;
         out.push(TestResult {
@@ -460,35 +450,26 @@ pub fn tests() -> Vec<TestResult> {
         });
     }
     // 6: app-reward farming break-even.
-    let v = run(
-        &d,
-        &w,
-        &Stress {
-            controller: true,
-            ..Default::default()
-        },
-        30,
-    );
+    let v = run(&d, &w, &Stress::default(), 30);
     let last = v.last().cloned().unwrap_or_default();
-    let ratio = d.app_reward_share * last.minted / last.burned.max(1e-9);
+    let ratio = d.app_reward_share * last.paid / last.burned.max(1e-9);
     out.push(TestResult {
         number: 6,
         name: "wash activity for app rewards".into(),
         pass: ratio < 1.0,
         detail: format!(
-            "app share x mint/burn = {ratio:.1} (farming pays when above 1); break-even burn {:.0} TNZO/day against {:.0}",
-            d.app_reward_share * last.minted,
+            "app share x paid/burn = {ratio:.1} (farming pays when above 1); break-even burn {:.0} TNZO/day against {:.0}",
+            d.app_reward_share * last.paid,
             last.burned
         ),
     });
-    // 7: validator income crash, controller on and off.
-    for controller in [true, false] {
+    // 7: validator income crash.
+    {
         let v = run(
             &d,
             &w,
             &Stress {
                 price_shock: Some((30, 0.2)),
-                controller,
                 ..Default::default()
             },
             730,
@@ -507,36 +488,33 @@ pub fn tests() -> Vec<TestResult> {
             .fold(f64::MAX, f64::min);
         out.push(TestResult {
             number: 7,
-            name: format!("-80% price, controller {}", if controller { "on" } else { "off" }),
+            name: "-80% price".into(),
             pass: end >= before * 0.8,
             detail: format!("stake ratio {before:.2} -> low {low:.2} -> {end:.2} after two years; lowest cost to a third ${coc:.0}"),
         });
     }
-    // 8: supply under long low usage.
+    // 8: the rewards pool under long low usage: supply never grows, and
+    // the pool still pays after ten years.
     let ww = World {
         agents: 1_000.0,
         agent_growth: 0.0,
         ..w.clone()
     };
-    let v = run(
-        &d,
-        &ww,
-        &Stress {
-            controller: true,
-            ..Default::default()
-        },
-        3_650,
-    );
-    let grew = v.last().map(|x| x.supply / w.supply - 1.0).unwrap_or(0.0);
+    let v = run(&d, &ww, &Stress::default(), 3_650);
+    let last = v.last().cloned().unwrap_or_default();
+    let grew = v.iter().any(|x| x.supply > w.supply);
     out.push(TestResult {
         number: 8,
         name: "ten years of low usage".into(),
-        pass: grew < 0.5,
+        pass: !grew && last.pool > 0.0,
         detail: format!(
-            "supply +{:.0}% over ten years with base mint {:.0}M/yr decaying {:.0}%/yr",
-            grew * 100.0,
-            d.mint_base / 1e6,
-            d.mint_decay * 100.0
+            "pool {:.0}M of {:.0}M TNZO left after ten years at a schedule of {:.0}M/yr decaying {:.0}%/yr to {:.0}M; supply {:.0}M",
+            last.pool / 1e6,
+            w.rewards_pool / 1e6,
+            d.reward_base / 1e6,
+            d.reward_decay * 100.0,
+            d.reward_floor / 1e6,
+            last.supply / 1e6
         ),
     });
     // 9: bootstrap capture of the governed rate.
@@ -546,7 +524,6 @@ pub fn tests() -> Vec<TestResult> {
             &w,
             &Stress {
                 governed_drift: Some(drift),
-                controller: true,
                 ..Default::default()
             },
             30,
@@ -579,7 +556,6 @@ pub fn tests() -> Vec<TestResult> {
             &w,
             &Stress {
                 demand_shock: Some((180, f)),
-                controller: true,
                 ..Default::default()
             },
             1_095,
@@ -610,7 +586,6 @@ pub fn tests() -> Vec<TestResult> {
         &ww,
         &Stress {
             swarm_threshold: Some(1.5),
-            controller: true,
             ..Default::default()
         },
         120,
@@ -639,7 +614,6 @@ pub fn tests() -> Vec<TestResult> {
         &ww,
         &Stress {
             governed_drift: Some(1.08),
-            controller: true,
             ..Default::default()
         },
         1_095,
@@ -658,16 +632,16 @@ pub fn tests() -> Vec<TestResult> {
     out
 }
 
-/// Burn-mint balance over agent counts: when burn first exceeds mint and
-/// the price then, machine-only.
+/// Burn against rewards paid over agent counts: when burn first exceeds
+/// the pool's payout and the price then, machine-only.
 #[derive(Debug, Clone, Serialize)]
 pub struct Equilibrium {
     /// Agents.
     pub agents: f64,
     /// Fees, USD per year at the start.
     pub fees_usd_year: f64,
-    /// First day burn exceeds mint, if within the horizon.
-    pub day_burn_exceeds_mint: Option<u32>,
+    /// First day burn exceeds rewards paid, if within the horizon.
+    pub day_burn_exceeds_paid: Option<u32>,
     /// Price after the horizon, USD.
     pub price_end: f64,
     /// Cost to buy a third of stake after the horizon, USD.
@@ -685,23 +659,40 @@ pub fn equilibrium(agent_counts: &[f64], days: u32) -> Vec<Equilibrium> {
                 agent_growth: 0.0,
                 ..World::default()
             };
-            let v = run(
-                &d,
-                &w,
-                &Stress {
-                    controller: true,
-                    ..Default::default()
-                },
-                days,
-            );
+            let v = run(&d, &w, &Stress::default(), days);
             let last = v.last().cloned().unwrap_or_default();
             Equilibrium {
                 agents: a,
                 fees_usd_year: v.first().map(|x| x.fees_usd * 365.25).unwrap_or(0.0),
-                day_burn_exceeds_mint: v.iter().find(|x| x.burned > x.minted).map(|x| x.day),
+                day_burn_exceeds_paid: v.iter().find(|x| x.burned > x.paid).map(|x| x.day),
                 price_end: last.price,
                 coc_end_usd: last.coc_usd,
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewards_come_from_the_pool_and_supply_never_grows() {
+        let d = Design::default();
+        let w = World {
+            agents: 1_000.0,
+            agent_growth: 0.0,
+            ..World::default()
+        };
+        let v = run(&d, &w, &Stress::default(), 3_650);
+        let paid: f64 = v.iter().map(|x| x.paid).sum();
+        let last = v.last().unwrap();
+        assert!(v.windows(2).all(|p| p[1].supply <= p[0].supply));
+        assert!((w.rewards_pool - last.pool - paid).abs() < 1.0);
+        assert!((v[0].paid * 365.25 - d.reward_base).abs() < 1e-3);
+        assert_eq!(
+            schedule_per_year(&d, 1.5),
+            (d.reward_base * (1.0 - d.reward_decay)).max(d.reward_floor)
+        );
+    }
 }

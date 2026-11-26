@@ -31,7 +31,7 @@ use tenzro_consensus::announce::{
     DisclosureSecret, EndpointAnnouncement, EndpointBook, EndpointOpening, PublishedAnnouncement,
     SealedEndpoint,
 };
-use tenzro_consensus::batch::{BatchPart, BatchPayload, MAX_PART_BYTES, assigned_validator};
+use tenzro_consensus::batch::{BatchPart, BatchPayload, assigned_validator};
 use tenzro_consensus::channel::{
     AwaitingAccept, Challenge, ChannelContext, Hello, Initiator, Opener, Responder, Sealer,
     StreamKind, TranscriptSignature,
@@ -40,7 +40,7 @@ use tenzro_consensus::checkpoint::{
     Certificate, CertificateContext, Checkpoint, CheckpointEquivocation, CheckpointVote,
     FULL_BUNDLE_EVERY, PublishedCertificate,
 };
-use tenzro_consensus::compact::{CompactCertificate, ProofSetups, is_compacted, prove_after_ms};
+use tenzro_consensus::compact::{is_compacted, prove_after_ms};
 use tenzro_consensus::compact_work::CompactWork;
 use tenzro_consensus::mempool::Pick;
 use tenzro_consensus::session::{SessionBook, SessionCertificate, SessionKey};
@@ -49,11 +49,12 @@ use tenzro_consensus::{
     Record, Segment, Target, TimeRules, ValidatorIndex, ValidatorSet, ValidatorSigner,
     VoteHighWater, sign_checkpoint,
 };
+use tenzro_light::compact::{CompactCertificate, ProofSetups};
 use tenzro_storage::KvStore;
 use tenzro_types::primitives::{Address, Hash};
 use tenzro_types::transaction::SignedTransaction;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{NodeError, Result};
 
@@ -213,12 +214,45 @@ const RESEAL_RETRY: Duration = Duration::from_secs(3);
 /// Quick repeats after a change: 3 s, 6 s, 12 s, 24 s.
 const RESEAL_QUICK_REPEATS: u32 = 4;
 
+/// Attempts at signing one checkpoint before it goes without this
+/// validator's vote.
+const SIGN_ATTEMPTS: u32 = 3;
+
+/// Wait before a checkpoint's signing is tried again.
+const SIGN_RETRY: Duration = Duration::from_millis(200);
+
+/// Runs `sign` until it succeeds, at most [`SIGN_ATTEMPTS`] times with
+/// `pause` between them. A refused vote is final: the high-water mark
+/// refuses what must never be signed. Any other failure (the store, the
+/// hardware key certifying the session) may pass, and signing the same
+/// checkpoint again is the same signature.
+fn sign_retried<T>(
+    pause: Duration,
+    mut sign: impl FnMut() -> tenzro_consensus::Result<T>,
+) -> tenzro_consensus::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match sign() {
+            Err(e)
+                if attempt < SIGN_ATTEMPTS
+                    && !matches!(e, tenzro_consensus::ConsensusError::VoteRefused(_)) =>
+            {
+                debug!(attempt, error = %e, "checkpoint signing failed; trying again");
+                attempt += 1;
+                std::thread::sleep(pause);
+            }
+            other => return other,
+        }
+    }
+}
+
 /// What woke the announcer.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wake {
     Tick,
     Kick,
     Retry,
+    Pull,
 }
 
 /// Whether an announcement carries the sealed endpoints. `repeats` counts the
@@ -234,6 +268,75 @@ fn sealed_due(changed: bool, kicked: bool, since_sealed: u32, repeats: &mut u32)
         return true;
     }
     since_sealed >= RESEAL_EVERY
+}
+
+/// Times a member is asked for its sealed endpoints at growing intervals
+/// before it is asked only once per [`PULL_REST`].
+const PULL_QUICK_ASKS: u32 = 6;
+
+/// How often a member that has not answered [`PULL_QUICK_ASKS`] requests is
+/// asked again. A member may never answer (it runs a release without the
+/// request, or its sealed copy does not open here); asking it for ever at
+/// the announcement interval would have every member that does answer
+/// republish its set that often for nothing.
+const PULL_REST: Duration = Duration::from_secs(30 * 60);
+
+/// When a validator asks for the endpoints it holds no opened copy of. A
+/// peer publishes its sealed endpoints when it records this validator's
+/// announcement and a few times after; a validator that missed those (it
+/// restarted while messages were being lost) would otherwise wait for the
+/// peer's next periodic republication of the set. It cannot dial the peer
+/// to ask, the endpoint being what it lacks, so it asks in its own
+/// publication.
+#[derive(Default)]
+struct Pull {
+    /// When the next member is due to be asked.
+    at: Option<tokio::time::Instant>,
+    /// Each member whose endpoint is missing: how often it was asked and
+    /// when it is asked next.
+    members: HashMap<[u8; 32], (u32, tokio::time::Instant)>,
+}
+
+impl Pull {
+    /// The wait after a member was asked for the `asks`-th time.
+    fn wait_after(asks: u32) -> Duration {
+        if asks >= PULL_QUICK_ASKS {
+            PULL_REST
+        } else {
+            (RESEAL_RETRY * (1 << asks)).min(ANNOUNCE_INTERVAL)
+        }
+    }
+
+    /// The members to ask at `now`, of those `missing`. A member is not
+    /// asked while its own publications may still arrive ([`RESEAL_RETRY`]
+    /// after its endpoint went missing), then at growing intervals, and
+    /// after [`PULL_QUICK_ASKS`] requests once per [`PULL_REST`]. A member
+    /// whose endpoint opened starts over the next time it is missing.
+    fn due(&mut self, missing: Vec<[u8; 32]>, now: tokio::time::Instant) -> Vec<[u8; 32]> {
+        self.members.retain(|member, _| missing.contains(member));
+        let mut wanted = Vec::new();
+        for member in missing {
+            let (asks, next) = self
+                .members
+                .entry(member)
+                .or_insert((0, now + RESEAL_RETRY));
+            if now >= *next {
+                *asks += 1;
+                *next = now + Self::wait_after(*asks);
+                wanted.push(member);
+            }
+        }
+        self.at = self.members.values().map(|(_, next)| *next).min();
+        wanted
+    }
+
+    /// Puts a wake that is due off by [`RESEAL_RETRY`] without counting a
+    /// request: the pass it woke could publish nothing.
+    fn put_off(&mut self, now: tokio::time::Instant) {
+        if self.at.is_some_and(|at| at <= now) {
+            self.at = Some(now + RESEAL_RETRY);
+        }
+    }
 }
 
 /// How long the higher index of a pair waits for the lower one to dial
@@ -343,6 +446,24 @@ impl FrameSink for tenzro_iroh::SendStream {
     }
 }
 
+/// The sending half of a consensus channel: an iroh stream on the network,
+/// any byte stream under test.
+trait ChannelSend: FrameSink + tokio::io::AsyncWrite + Unpin + 'static {
+    /// Puts this stream behind control streams on its connection.
+    fn deprioritize(&mut self);
+}
+
+impl ChannelSend for tenzro_iroh::SendStream {
+    fn deprioritize(&mut self) {
+        let _ = self.set_priority(-1);
+    }
+}
+
+/// The receiving half of a consensus channel.
+trait ChannelRecv: tokio::io::AsyncRead + Unpin + Send + 'static {}
+
+impl<R: tokio::io::AsyncRead + Unpin + Send + 'static> ChannelRecv for R {}
+
 /// Writes the frames queued for one peer until the queue closes or the send
 /// side fails. Each write must complete within [`CHANNEL_WRITE_STALL`]. With
 /// `keepalive`, that frame is written whenever nothing was queued for
@@ -425,8 +546,6 @@ pub const LEADERSHIP_HORIZON: u64 = 32;
 const CF: &str = tenzro_storage::CF_BLOCKS;
 const LATEST_CERTIFICATE_KEY: &[u8] = b"consensus/certificate/latest";
 const LATEST_COMPACT_KEY: &[u8] = b"consensus/compact/latest";
-/// Bytes of a bincode `Vec` length prefix.
-const VEC_PREFIX_BYTES: usize = 8;
 
 /// The transactions of a batch, part by part. A malformed body contributes
 /// nothing, and a malformed part is skipped; every node decodes the same
@@ -440,9 +559,43 @@ fn batch_transactions(p: &BatchPayload) -> Vec<SignedTransaction> {
         .collect()
 }
 
+/// How far above a missing checkpoint body a held one is looked for.
+pub const BODY_GAP_LOOKAHEAD: u64 = 4096;
+
+/// What a look for missing checkpoint bodies found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyGap {
+    /// No body is missing from where the look began.
+    Complete,
+    /// The bodies `first..=last` are missing below a held one.
+    Missing {
+        /// First missing index of the run.
+        first: u64,
+        /// Last missing index, just below the held body.
+        last: u64,
+    },
+    /// Bodies are missing with no held one within the lookahead: the look
+    /// goes on from `resume`.
+    Unanchored {
+        /// Where to look from next.
+        resume: u64,
+    },
+}
+
+/// Key of the index below which checkpoint bodies were pruned.
+const BODIES_FLOOR_KEY: &[u8] = b"consensus/bodies-floor";
+
 fn body_key(index: u64) -> Vec<u8> {
     let mut k = b"consensus/checkpoint/".to_vec();
     k.extend_from_slice(&index.to_be_bytes());
+    k
+}
+
+/// Where the issue time of the last endpoint announcement the validator
+/// with key fingerprint `validator` signed on this node is kept.
+fn announcement_issued_key(validator: &[u8; 32]) -> Vec<u8> {
+    let mut k = b"consensus/announcement/issued/".to_vec();
+    k.extend_from_slice(validator);
     k
 }
 
@@ -572,7 +725,7 @@ pub struct Launcher {
     pub evidence: mpsc::UnboundedSender<CheckpointEquivocation>,
     /// Receives this validator's endpoint announcement to publish, every
     /// [`ANNOUNCE_INTERVAL`], with its endpoint sealed to committee members.
-    pub announcements: mpsc::UnboundedSender<PublishedAnnouncement>,
+    pub announcements: mpsc::UnboundedSender<tenzro_consensus::announce::Publication>,
 }
 
 enum Input {
@@ -640,6 +793,19 @@ enum Input {
         cert: Box<Certificate>,
         sessions: Vec<SessionCertificate>,
     },
+}
+
+/// What stopping this validator would leave of its committee's quorum, as
+/// its consensus engine sees the committee: its own seats, everyone's, the
+/// seats a certificate needs, and the seats of the other members it has an
+/// open consensus channel to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuorumStanding {
+    pub epoch: u64,
+    pub seats: u64,
+    pub total_seats: u64,
+    pub quorum: u64,
+    pub reached_seats: u64,
 }
 
 /// What the running core measures, for tuning a live network. Read by the
@@ -793,6 +959,33 @@ fn already_batched(
     }
 }
 
+/// Whether a pooled transaction goes into the part being cut.
+#[derive(Debug, PartialEq, Eq)]
+enum Fit {
+    /// It fits and was counted.
+    Fits,
+    /// The part is full: the cut ends here.
+    Full,
+    /// It is larger than any part: no cut can take it.
+    Never,
+}
+
+/// Whether `tx` fits in a part of `budget` bytes already holding `chosen`
+/// transactions of `bytes` bytes, counting it in `bytes` when it does. One
+/// that fits in no part is set apart rather than ending the cut, or it
+/// would end every cut while it heads the pool.
+fn part_fit(bytes: &mut usize, tx: &SignedTransaction, budget: usize, chosen: usize) -> Fit {
+    let size = bincode::serialized_size(tx).map_or(usize::MAX, |s| s as usize);
+    if size > budget {
+        Fit::Never
+    } else if *bytes + size > budget || chosen >= tenzro_types::block::MAX_TRANSACTIONS_PER_BLOCK {
+        Fit::Full
+    } else {
+        *bytes += size;
+        Fit::Fits
+    }
+}
+
 /// How many of its own batches a validator holds unordered before it stops
 /// cutting more: well above what ordering at full load leaves outstanding,
 /// far below what a network stalled for minutes would pile up.
@@ -838,8 +1031,15 @@ pub struct ConsensusHandle {
     /// imported. `ordered` also counts the heights a certificate covers,
     /// which a node catching up may not have executed yet.
     executed: AtomicU64,
+    /// What this node heard of the network's height and when it last imported.
+    follow: crate::follow_state::FollowTracker,
+    /// Every body from the pruning floor up to this index is held.
+    bodies_complete: AtomicU64,
     certified: AtomicU64,
     latest: RwLock<Option<Certificate>>,
+    /// Set by the running consensus engine whenever its committee or its
+    /// channels change; `None` while no engine runs.
+    quorum: RwLock<Option<QuorumStanding>>,
     committees: RwLock<HashMap<u64, Committee>>,
     /// Each epoch's session certificates this node has checked against the
     /// epoch's committee: the bundle its certificates are verified with.
@@ -898,6 +1098,12 @@ pub struct ConsensusHandle {
     /// let one restart, under packet loss thinning the gossip that carries
     /// it, stall liveness for minutes (chaos seed 3054677367).
     reseal_kick: Arc<tokio::sync::Notify>,
+    /// Set when a member asked for this validator's sealed endpoints: the
+    /// announcer's next publication carries the set.
+    sealed_asked: std::sync::atomic::AtomicBool,
+    /// When a request for this validator's sealed endpoints was last
+    /// answered, whoever asked.
+    sealed_answered: parking_lot::Mutex<Option<std::time::Instant>>,
     /// This validator's own current announcement, once signed, and the
     /// endpoint and salt it commits to.
     announcement: Arc<RwLock<Option<(EndpointAnnouncement, EndpointOpening)>>>,
@@ -924,6 +1130,10 @@ pub struct ConsensusHandle {
     /// Held while a committee is derived, from staging to the transition, so
     /// two callers at one boundary derive it one after the other.
     derivation: parking_lot::Mutex<()>,
+    /// The executed height and latest certificate index at the last attempt to
+    /// adopt a held closing checkpoint's committee: another attempt waits for
+    /// either to change.
+    adopt_tried: parking_lot::Mutex<Option<(u64, u64, u64)>>,
     /// When a pending epoch end is tried again after a failure, and how long
     /// the wait grows to: from a second, doubling, to half a minute.
     close_retry: parking_lot::Mutex<CloseRetry>,
@@ -939,8 +1149,25 @@ pub struct ConsensusHandle {
     /// fast-forwarded to (0 when none): until the node's tip reaches it, the
     /// node imports blocks like a follower.
     fast_forward_to: AtomicU64,
-    /// The latest checkpoint index peers report certified.
-    network_checkpoint: AtomicU64,
+    /// The highest checkpoint the committee's machines were found at
+    /// ([`NetworkStanding::Members`]), 0 before any.
+    network_by_members: AtomicU64,
+    /// The checkpoint peers were found at in the last round too few members
+    /// answered ([`NetworkStanding::Peers`]), 0 before any and after a round
+    /// nobody answered. Replaced each such round: kept as a maximum, one
+    /// false answer would pass every old handover for good.
+    network_by_peers: AtomicU64,
+}
+
+/// Where the network stands, as block sync last heard it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkStanding {
+    /// The middle of the checkpoints three or more of the committee's own
+    /// machines reported certified.
+    Members(u64),
+    /// The middle of the checkpoints every answering peer reported
+    /// certified, when too few members answered to take theirs.
+    Peers(u64),
 }
 
 impl ConsensusHandle {
@@ -1024,8 +1251,11 @@ impl ConsensusHandle {
             records,
             ordered: AtomicU64::new(certified),
             executed: AtomicU64::new(0),
+            follow: crate::follow_state::FollowTracker::new(),
+            bodies_complete: AtomicU64::new(0),
             certified: AtomicU64::new(certified),
             latest: RwLock::new(latest),
+            quorum: RwLock::new(None),
             committees: RwLock::new(committees),
             sessions: RwLock::new(sessions),
             published_sessions: parking_lot::Mutex::new((0, HashSet::new())),
@@ -1054,6 +1284,8 @@ impl ConsensusHandle {
             boundaries: RwLock::new(boundaries),
             endpoints: Arc::new(RwLock::new(EndpointBook::new())),
             reseal_kick: Arc::new(tokio::sync::Notify::new()),
+            sealed_asked: std::sync::atomic::AtomicBool::new(false),
+            sealed_answered: parking_lot::Mutex::new(None),
             announcement: Arc::new(RwLock::new(None)),
             session,
             disclosure: Arc::new(DisclosureSecret::generate()),
@@ -1063,12 +1295,14 @@ impl ConsensusHandle {
             metrics: RwLock::new(None),
             closing: parking_lot::Mutex::new(None),
             derivation: parking_lot::Mutex::new(()),
+            adopt_tried: parking_lot::Mutex::new(None),
             close_retry: parking_lot::Mutex::new(CloseRetry::default()),
             close_retry_in_flight: std::sync::atomic::AtomicBool::new(false),
             executed_tail: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             awaiting_handover: AtomicBool::new(false),
             fast_forward_to: AtomicU64::new(0),
-            network_checkpoint: AtomicU64::new(0),
+            network_by_members: AtomicU64::new(0),
+            network_by_peers: AtomicU64::new(0),
         }))
     }
 
@@ -1121,10 +1355,28 @@ impl ConsensusHandle {
     /// and the endpoint it carries sealed to this node, if any. Returns the
     /// endpoint it disclosed to this node, if a sealed copy opened.
     pub fn offer_announcement(&self, published: PublishedAnnouncement) -> Option<[u8; 32]> {
-        let PublishedAnnouncement {
-            announcement,
-            sealed,
-        } = published;
+        self.offer_publication(tenzro_consensus::announce::Publication {
+            published,
+            wanted: Vec::new(),
+        })
+    }
+
+    /// [`Self::offer_announcement`] for a publication as the network
+    /// carries it: when it names this validator among the members whose
+    /// endpoints its sender asks for, this validator's sealed endpoints are
+    /// published again.
+    pub fn offer_publication(
+        &self,
+        publication: tenzro_consensus::announce::Publication,
+    ) -> Option<[u8; 32]> {
+        let tenzro_consensus::announce::Publication {
+            published:
+                PublishedAnnouncement {
+                    announcement,
+                    sealed,
+                },
+            wanted,
+        } = publication;
         let sender = announcement.validator;
         let key = self
             .committees
@@ -1154,6 +1406,7 @@ impl ConsensusHandle {
         if recorded {
             self.reseal_kick.notify_one();
         }
+        let asks_me = self.own_key.read().is_some_and(|me| wanted.contains(&me));
         let opened = match *self.own_key.read() {
             Some(me) if !sealed.is_empty() => book.open(&sender, &me, &sealed, &self.disclosure),
             _ => false,
@@ -1164,10 +1417,72 @@ impl ConsensusHandle {
             None
         };
         drop(book);
+        // The announcement verified, so a member asks: this validator's
+        // sealed endpoints go out again if it is one of those named. The
+        // request is not signed and anyone can replay a member's
+        // announcement with one, so the answer is limited for all of them
+        // together; one publication carries the endpoint sealed to every
+        // member, so it answers every request made in the same interval.
+        if asks_me && self.pull_live() && self.answers_sealed_request(std::time::Instant::now()) {
+            self.sealed_asked.store(true, Ordering::Release);
+            self.reseal_kick.notify_one();
+        }
         if disclosed.is_some() {
             self.share_record_with_committee();
         }
         disclosed
+    }
+
+    /// Whether validators ask each other for sealed endpoints: the gate
+    /// `feature.sealed_endpoint_pull.activation_epoch` is live in this
+    /// node's chain state. Until then no publication carries a request and
+    /// none is answered.
+    fn pull_live(&self) -> bool {
+        self.storage.as_ref().is_some_and(|s| {
+            tenzro_vm::feature_gate::is_live_now(
+                &tenzro_vm::StateAdapter::with_storage(s.clone()),
+                tenzro_vm::governance::SEALED_ENDPOINT_PULL_GATE,
+            )
+        })
+    }
+
+    /// Whether a request for this validator's sealed endpoints is answered
+    /// at `now`: once per [`RESEAL_RETRY`] whoever asks, so requests from
+    /// every member, repeated or replayed, buy one publication in that time
+    /// and no more.
+    fn answers_sealed_request(&self, now: std::time::Instant) -> bool {
+        let mut answered = self.sealed_answered.lock();
+        if answered.is_some_and(|at| now.duration_since(at) < RESEAL_RETRY) {
+            return false;
+        }
+        *answered = Some(now);
+        true
+    }
+
+    /// The members this validator asks for their sealed endpoints: none
+    /// while the gate is dormant, and otherwise those of the committees of
+    /// the epoch it runs and later ones, other than `me`, whose endpoint it
+    /// holds no opened copy of. A committee of an earlier epoch is not
+    /// asked: its members' endpoints are needed no more.
+    fn members_to_ask(&self, me: [u8; 32], now: u64) -> Vec<[u8; 32]> {
+        if !self.pull_live() {
+            return Vec::new();
+        }
+        let running = self.running_epoch.load(Ordering::Acquire);
+        let book = self.endpoints.read();
+        let mut missing: Vec<[u8; 32]> = self
+            .committees
+            .read()
+            .iter()
+            .filter(|(epoch, _)| **epoch >= running)
+            .flat_map(|(_, c)| c.members().iter())
+            .filter(|m| book.disclosed(&m.public_key, now).is_none())
+            .map(|m| m.public_key.fingerprint())
+            .filter(|f| *f != me)
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        missing
     }
 
     /// Shares this machine's endpoint record only with the machines of the
@@ -1238,10 +1553,17 @@ impl ConsensusHandle {
             let mut repeats: u32 = 0;
             let mut retry_at: Option<tokio::time::Instant> = None;
             let mut quick: u32 = 0;
+            let mut pull = Pull::default();
             loop {
                 let wake = tokio::select! {
                     _ = tick.tick() => Wake::Tick,
                     _ = kick.notified() => Wake::Kick,
+                    _ = async {
+                        match pull.at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => Wake::Pull,
                     _ = async {
                         match retry_at {
                             Some(at) => tokio::time::sleep_until(at).await,
@@ -1249,7 +1571,7 @@ impl ConsensusHandle {
                         }
                     } => Wake::Retry,
                 };
-                let kicked = wake == Wake::Kick;
+                let kicked = matches!(wake, Wake::Kick | Wake::Pull);
                 let Some(handle) = handle.upgrade() else {
                     return;
                 };
@@ -1264,6 +1586,11 @@ impl ConsensusHandle {
                     .as_ref()
                     .map(|(a, _)| a.clone())
                     .filter(|a| a.validator == me);
+                // An announcement issued below the issue time this node
+                // keeps is signed again once the clock has passed that time.
+                let kept = handle.kept_announcement_issue(&me);
+                let held = held
+                    .filter(|a| !tenzro_consensus::announce::reissue_due(a.issued_ms, kept, now));
                 let renewed = !matches!(&held, Some(a) if !a.due_for_renewal(now));
                 let announcement = match held {
                     Some(a) if !a.due_for_renewal(now) => a,
@@ -1272,6 +1599,8 @@ impl ConsensusHandle {
                         let session_key = session_key.clone();
                         let disclosure_key = disclosure_key.clone();
                         let o = opening.clone();
+                        let last = handle.last_announcement_issued(signer.public_key(), &me);
+                        let issued = tenzro_consensus::announce::issue_time(now, last);
                         let signed = tokio::task::spawn_blocking(move || {
                             EndpointAnnouncement::sign(
                                 &*s,
@@ -1280,31 +1609,37 @@ impl ConsensusHandle {
                                 &o,
                                 session_key,
                                 disclosure_key,
-                                now,
+                                issued,
                                 lifetime_ms,
                             )
                         })
                         .await;
                         match signed {
                             Ok(Ok(a)) => {
+                                handle.record_announcement_issued(&me, last, a.issued_ms, now);
                                 *own.write() = Some((a.clone(), opening.clone()));
                                 a
                             }
                             Ok(Err(e)) => {
                                 warn!(error = %e, "could not sign the endpoint announcement");
+                                pull.put_off(tokio::time::Instant::now());
                                 continue;
                             }
                             Err(e) => {
                                 warn!(error = %e, "endpoint announcement signing task failed");
+                                pull.put_off(tokio::time::Instant::now());
                                 continue;
                             }
                         }
                     }
                 };
                 let changed = handle.reseal(&opening, me, now, &mut sealed);
-                // A wake-up publishes only what it changed; the periodic tick
+                let asked = handle.sealed_asked.swap(false, Ordering::AcqRel);
+                let wanted = pull.due(handle.members_to_ask(me, now), tokio::time::Instant::now());
+                // A wake-up publishes only what it changed, what a member
+                // asked for and what this validator asks; the periodic tick
                 // republishes for peers that joined or restarted since.
-                if kicked && !changed && !renewed {
+                if kicked && !changed && !renewed && !asked && wanted.is_empty() {
                     continue;
                 }
                 if changed {
@@ -1318,6 +1653,7 @@ impl ConsensusHandle {
                 since_sealed += 1;
                 let sealed_out = if sealed_due(changed, kicked, since_sealed, &mut repeats)
                     || wake == Wake::Retry
+                    || asked
                 {
                     since_sealed = 0;
                     sealed.values().map(|(_, s)| s.clone()).collect()
@@ -1325,9 +1661,12 @@ impl ConsensusHandle {
                     Vec::new()
                 };
                 if publish
-                    .send(PublishedAnnouncement {
-                        announcement,
-                        sealed: sealed_out,
+                    .send(tenzro_consensus::announce::Publication {
+                        published: PublishedAnnouncement {
+                            announcement,
+                            sealed: sealed_out,
+                        },
+                        wanted,
                     })
                     .is_err()
                 {
@@ -1629,6 +1968,7 @@ impl ConsensusHandle {
         self.fast_forward_to.store(0, Ordering::Release);
         let tx = self.inputs.write().take();
         *self.me.write() = None;
+        *self.quorum.write() = None;
         if let Some(tx) = tx {
             let _ = tx.send(Input::Stop);
         }
@@ -1641,6 +1981,7 @@ impl ConsensusHandle {
         self.fast_forward_to.store(0, Ordering::Release);
         let tx = self.inputs.write().take();
         *self.me.write() = None;
+        *self.quorum.write() = None;
         if let Some(tx) = tx {
             let _ = tx.send(Input::StandDown);
         }
@@ -1727,6 +2068,28 @@ impl ConsensusHandle {
         last_height: u64,
         expected_root: Option<[u8; 32]>,
     ) -> Result<Committee> {
+        self.derive_next_committee_through(closing, last_height, expected_root, last_height)
+    }
+
+    /// [`Self::derive_next_committee`] for a node that may have executed up to
+    /// `through`, past the epoch's last block. Only a follower that checks the
+    /// set against a certified root passes more than `last_height`: blocks
+    /// ordered between the closing checkpoint and its handover leave the
+    /// registry the committee comes from as it was, and a node whose state
+    /// they did change derives another root and refuses.
+    fn derive_next_committee_through(
+        &self,
+        closing: u64,
+        last_height: u64,
+        expected_root: Option<[u8; 32]>,
+        through: u64,
+    ) -> Result<Committee> {
+        if expected_root.is_none() && through != last_height {
+            return Err(NodeError::Other(
+                "a derivation past the epoch's last block needs the certified root to check it against"
+                    .to_string(),
+            ));
+        }
         let _derivation = self.derivation.lock();
         let em = &self.epoch_manager;
         if em.current_epoch().number > closing {
@@ -1745,11 +2108,23 @@ impl ConsensusHandle {
         // last block. A node that has executed further, or not as far, would
         // read other state and derive another committee: it refuses.
         let executed = self.executed_height();
-        if executed != last_height {
+        if executed < last_height || executed > through {
             return Err(NodeError::Other(format!(
                 "the next committee is derived from the state at height {last_height}, but this node has executed through height {executed}"
             )));
         }
+        // The committee of the next epoch holds at most the governed number
+        // of validators once the cap is in force for that epoch, read from
+        // the state at `last_height` as the rest of the derivation is. A
+        // handle without storage (a test's) has no state to read and sets no
+        // limit; a node always has it, and the check above has already
+        // refused a derivation from state this node has not executed.
+        em.set_member_cap(self.storage.as_ref().and_then(|s| {
+            tenzro_vm::governance::committee_member_cap(
+                &tenzro_vm::StateAdapter::with_storage(s.clone()),
+                closing + 1,
+            )
+        }));
         let planner = self.planner.read().clone();
         let token = match &planner {
             Some(p) => Some(p.stage_next_epoch().map_err(|e| {
@@ -1822,7 +2197,13 @@ impl ConsensusHandle {
             }
             return Ok(());
         }
-        let committee = self.derive_next_committee(last.epoch, last.last_height, Some(root))?;
+        // Blocks ordered after the closing checkpoint, up to the handover's
+        // last block, may have been executed already: the root decides.
+        let through = self
+            .checkpoint(last.index + self.time.handover_confirmations)
+            .map_or(last.last_height, |h| h.last_height.max(last.last_height));
+        let committee =
+            self.derive_next_committee_through(last.epoch, last.last_height, Some(root), through)?;
         if committee.root() != root {
             return Err(NodeError::Other(format!(
                 "checkpoint {} commits a next committee this node does not derive from its state",
@@ -1832,6 +2213,106 @@ impl ConsensusHandle {
         self.record_boundary(last.epoch, last.index);
         self.add_committee(committee);
         Ok(())
+    }
+
+    /// On a follower: adopts the committee of the epoch after the latest one
+    /// it knows, when it holds that epoch's closing checkpoint and has not
+    /// derived it. A follower that executed the blocks after the closing
+    /// checkpoint before it derived the committee never passes the closing
+    /// checkpoint again, since the evidence served from then on starts after
+    /// it, and stayed in its epoch. Says what it did.
+    pub fn adopt_pending_committee(&self) {
+        let known = self.known_epoch();
+        let Some(closing) = self.pending_closing(known) else {
+            return;
+        };
+        let position = (
+            self.executed_height(),
+            self.latest
+                .read()
+                .as_ref()
+                .map_or(0, |c| c.checkpoint.index),
+            closing.index,
+        );
+        {
+            let mut tried = self.adopt_tried.lock();
+            if *tried == Some(position) {
+                return;
+            }
+            *tried = Some(position);
+        }
+        match self.adopt_next_committee(&closing) {
+            Ok(()) if self.known_epoch() > known => info!(
+                epoch = known + 1,
+                closing = closing.index,
+                "Block-sync: adopted the committee of epoch {} from the closing checkpoint held",
+                known + 1
+            ),
+            Ok(()) => {}
+            Err(e) => warn!(
+                epoch = known + 1,
+                closing = closing.index,
+                error = %e,
+                "Block-sync: the committee of the next epoch could not be adopted; a node that stays behind recovers by state sync"
+            ),
+        }
+    }
+
+    /// The closing checkpoint of epoch `known` when this node holds its body
+    /// and has not derived the next committee: by the boundary it recorded, or
+    /// by the handover certificate it holds, which names it as the checkpoint
+    /// `handover_confirmations` before it.
+    fn pending_closing(&self, known: u64) -> Option<Checkpoint> {
+        if self.committee(known + 1).is_some() {
+            return None;
+        }
+        let closing =
+            |c: Checkpoint| (c.epoch == known && c.next_committee_root.is_some()).then_some(c);
+        self.boundary(known)
+            .and_then(|b| self.checkpoint(b))
+            .and_then(closing)
+            .or_else(|| {
+                let latest = self.latest.read().as_ref()?.checkpoint.index;
+                let b = latest.checked_sub(self.time.handover_confirmations)?;
+                self.checkpoint(b).and_then(closing)
+            })
+    }
+
+    /// What decides whether this follower adopts the next committee, for the
+    /// log: the epoch it knows, whether the next one is derived, the boundary
+    /// it recorded, the latest certificate and whether its body is held, the
+    /// closing checkpoint found, and what is wanted from a peer.
+    pub fn adoption_state(&self) -> String {
+        let known = self.known_epoch();
+        let latest = self.latest.read().as_ref().map(|c| c.checkpoint.clone());
+        format!(
+            "known_epoch={known} next_committee={} boundary={:?} handover_confirmations={} \
+             latest={:?} latest_body_held={} closing_found={:?} wanted={:?} executed={}",
+            self.committee(known + 1).is_some(),
+            self.boundary(known),
+            self.time.handover_confirmations,
+            latest.as_ref().map(|c| (c.epoch, c.index, c.last_height)),
+            latest
+                .as_ref()
+                .is_some_and(|c| self.checkpoint(c.index).is_some()),
+            self.pending_closing(known).map(|c| c.index),
+            self.closing_body_wanted(),
+            self.executed_height()
+        )
+    }
+
+    /// The bodies a follower lacks to adopt the next committee: the closing
+    /// checkpoint of the epoch it is in, which the handover certificate it holds
+    /// names, up to the body before that certificate. Fetched from a peer and
+    /// authenticated through the certificate's predecessor digests.
+    pub fn closing_body_wanted(&self) -> Option<(u64, u64)> {
+        let known = self.known_epoch();
+        if self.committee(known + 1).is_some() || self.pending_closing(known).is_some() {
+            return None;
+        }
+        let latest = self.latest.read().as_ref()?.checkpoint.clone();
+        let first = latest.index.checked_sub(self.time.handover_confirmations)?;
+        (latest.epoch == known && first < latest.index).then_some((first, latest.index - 1))
     }
 
     /// Records the index of `epoch`'s last checkpoint, durably: the handover
@@ -1878,20 +2359,49 @@ impl ConsensusHandle {
         if cp.index != boundary + self.time.handover_confirmations {
             return false;
         }
-        // A handover certified longer ago than an epoch lasts is history this
-        // node is catching up through when its peers certified past it: the
-        // network has left that epoch, and a core started in it would only
-        // hold up the import of the blocks after it. The node joins at a
-        // current handover. One its peers certified nothing past is where
-        // the network stands, however long ago: a network short of a quorum
-        // without this validator certifies no later handover to join at.
-        let epoch_ms = self
-            .time
-            .epoch_checkpoints
-            .saturating_mul(self.time.checkpoint_interval_ms);
-        if unix_ms().saturating_sub(cp.timestamp_ms) > epoch_ms
-            && self.network_checkpoint.load(Ordering::Acquire) > cp.index
-        {
+        // A handover its peers stand more than an epoch of checkpoints past
+        // is history this node is catching up through: the network has left
+        // the epoch it starts, and a core started in it would only hold up
+        // the import of the blocks after it. The node joins at a current
+        // handover. One its peers stand within an epoch of is where the
+        // network is, however long ago it was certified: a network short of
+        // a quorum without this validator certifies no later handover to
+        // join at.
+        //
+        // How far the network is past it is read in checkpoints, which every
+        // node counts alike, from the committee's own machines: an epoch
+        // that certifies a checkpoint every interval has its own handover
+        // exactly an epoch of checkpoints after this one, so at that
+        // distance there is a later handover to join at. A majority of the
+        // members naming a checkpoint far ahead keeps the node following;
+        // that many lying members is outside what consensus tolerates.
+        //
+        // A node that reaches fewer than three members (a committee of
+        // three or fewer, or one cut off from most of it) has no middle of
+        // theirs to read. It reads the middle of what every answering peer
+        // reported, and passes a handover over only when that is past it
+        // and the handover is older than an epoch by its clock. Peers that
+        // are most of those answering and report falsely, or a clock wrong
+        // by an epoch, can keep it following while they do; with one peer
+        // answering, that peer alone can.
+        //
+        // The members' estimate only rises: a checkpoint three or more
+        // members put the network at is not undone by a round in which fewer
+        // of them answered. The peers' estimate is the last round's, and a
+        // round nobody answered clears it, so a peer that answered falsely
+        // once misleads the node for that round only.
+        let members = self.network_by_members.load(Ordering::Acquire);
+        let peers = self.network_by_peers.load(Ordering::Acquire);
+        let passed = if members > 0 {
+            members >= cp.index.saturating_add(self.time.epoch_checkpoints)
+        } else {
+            let epoch_ms = self
+                .time
+                .epoch_checkpoints
+                .saturating_mul(self.time.checkpoint_interval_ms);
+            peers > cp.index && unix_ms().saturating_sub(cp.timestamp_ms) > epoch_ms
+        };
+        if passed {
             debug!(
                 epoch = cp.epoch + 1,
                 "not starting consensus at a past handover"
@@ -1907,6 +2417,12 @@ impl ConsensusHandle {
     /// of every validator running them at once.
     pub fn leads_soon(&self) -> bool {
         self.leads_soon.load(Ordering::Acquire)
+    }
+
+    /// What stopping this validator would leave of its committee's quorum;
+    /// `None` on a node that runs no consensus engine.
+    pub fn quorum_standing(&self) -> Option<QuorumStanding> {
+        *self.quorum.read()
     }
 
     /// Round this validator last proposed in (0 on a follower).
@@ -1957,9 +2473,19 @@ impl ConsensusHandle {
         self.behind.send_modify(|_| {});
     }
 
-    /// Records the latest checkpoint index a peer reports certified.
-    pub fn note_network_checkpoint(&self, index: u64) {
-        self.network_checkpoint.fetch_max(index, Ordering::AcqRel);
+    /// Records where the network stands, from what this node's peers
+    /// reported certified when they last answered: the members' estimate
+    /// keeps the highest it was given, the peers' the latest.
+    pub fn note_network_checkpoint(&self, standing: NetworkStanding) {
+        match standing {
+            NetworkStanding::Members(index) => {
+                self.network_by_members.fetch_max(index, Ordering::AcqRel)
+            }
+            NetworkStanding::Peers(index) => {
+                self.network_by_peers.store(index, Ordering::Release);
+                index
+            }
+        };
     }
 
     /// Heights block-sync is told this node is behind.
@@ -2084,6 +2610,36 @@ impl ConsensusHandle {
     }
 
     /// The checkpoint body with `index`, if known.
+    /// The next committee's root the network certified when the epoch that
+    /// `handover` hands over closed: from the closing checkpoint's
+    /// certificate, or from its body when the bodies from it to `handover`
+    /// chain to `handover` by their predecessor digests, which a body of this
+    /// validator's own that the network did not certify does not. `None`
+    /// while neither is held.
+    pub(crate) fn certified_next_root(&self, handover: &Checkpoint) -> Option<[u8; 32]> {
+        let boundary = handover
+            .index
+            .checked_sub(self.time.handover_confirmations)?;
+        if boundary == handover.index {
+            return handover.next_committee_root;
+        }
+        if let Some(c) = self.certificate(boundary) {
+            return c.checkpoint.next_committee_root;
+        }
+        let mut expected = handover.prev;
+        for index in (boundary..handover.index).rev() {
+            let body = self.checkpoint(index)?;
+            if body.digest() != expected {
+                return None;
+            }
+            if index == boundary {
+                return body.next_committee_root;
+            }
+            expected = body.prev;
+        }
+        None
+    }
+
     pub fn checkpoint(&self, index: u64) -> Option<Checkpoint> {
         self.records
             .as_ref()?
@@ -2098,6 +2654,11 @@ impl ConsensusHandle {
     /// Returns how many were deleted.
     pub fn prune_bodies_below(&self, index: u64) -> usize {
         let Some(s) = &self.records else { return 0 };
+        if index > self.bodies_floor()
+            && let Err(e) = s.put(CF, BODIES_FLOOR_KEY, &index.to_be_bytes())
+        {
+            warn!(index, error = %e, "failed to record the floor of kept checkpoint bodies");
+        }
         let prefix = b"consensus/checkpoint/";
         let mut ops = Vec::new();
         for key in s.get_keys_with_prefix(CF, prefix).unwrap_or_default() {
@@ -2116,7 +2677,7 @@ impl ConsensusHandle {
             let hands_over = self
                 .boundary(cp.epoch)
                 .is_some_and(|b| i == b + self.time.handover_confirmations);
-            if !closes && !hands_over {
+            if !closes && !hands_over && s.get(CF, &certificate_key(i)).ok().flatten().is_none() {
                 ops.push(tenzro_storage::WriteOp::Delete {
                     cf: CF.to_string(),
                     key,
@@ -2252,6 +2813,66 @@ impl ConsensusHandle {
         {
             warn!(index = cp.index, error = %e, "failed to persist checkpoint body");
         }
+    }
+
+    /// The index below which bodies were pruned: only those that close or
+    /// hand over an epoch are kept there.
+    fn bodies_floor(&self) -> u64 {
+        self.records
+            .as_ref()
+            .and_then(|s| s.get(CF, BODIES_FLOOR_KEY).ok().flatten())
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map_or(0, u64::from_be_bytes)
+    }
+
+    /// The lowest run of checkpoint bodies this node lacks below one it
+    /// holds, looking from `from` up. A node that does not validate records
+    /// a body when it accepts that checkpoint's certificate; one it missed
+    /// for a checkpoint that ordered no block is never asked for by a range,
+    /// and the evidence served to a peer stops there. A run is at most
+    /// `limit` long, counted down from the held body above it, whose
+    /// predecessor digest authenticates what a peer serves for it. A stretch
+    /// with no held body within [`BODY_GAP_LOOKAHEAD`] has nothing to
+    /// authenticate it by: a node that joined from a snapshot holds nothing
+    /// below it.
+    pub fn body_gap(&self, limit: u64, from: u64) -> BodyGap {
+        let Some(latest) = self.latest.read().as_ref().map(|c| c.checkpoint.index) else {
+            return BodyGap::Complete;
+        };
+        let complete = self
+            .bodies_complete
+            .load(Ordering::Acquire)
+            .max(self.bodies_floor());
+        let mut first = complete.max(from);
+        while first <= latest && self.checkpoint(first).is_some() {
+            first += 1;
+        }
+        if from <= complete {
+            self.bodies_complete.store(first, Ordering::Release);
+        }
+        if first >= latest {
+            return BodyGap::Complete;
+        }
+        let end = latest.min(first.saturating_add(BODY_GAP_LOOKAHEAD));
+        match (first + 1..=end).find(|i| self.checkpoint(*i).is_some()) {
+            Some(above) => BodyGap::Missing {
+                first: first.max(above.saturating_sub(limit)),
+                last: above - 1,
+            },
+            None if end == latest => BodyGap::Complete,
+            None => BodyGap::Unanchored { resume: end },
+        }
+    }
+
+    /// The bodies held from `last` down towards `first` without a break, in
+    /// ascending order.
+    pub fn bodies_down_from(&self, first: u64, last: u64) -> Vec<Checkpoint> {
+        let mut bodies: Vec<Checkpoint> = (first..=last)
+            .rev()
+            .map_while(|i| self.checkpoint(i))
+            .collect();
+        bodies.reverse();
+        bodies
     }
 
     /// The stored checkpoint covering `height`, if any.
@@ -2475,9 +3096,32 @@ impl ConsensusHandle {
         (bodies, None)
     }
 
+    /// What this node heard of the network's height and when it last
+    /// imported, for its follow state.
+    pub fn follow(&self) -> &crate::follow_state::FollowTracker {
+        &self.follow
+    }
+
+    /// Whether this node is the only member of its committee: there is no
+    /// network to hear from, and its own height is the chain's.
+    pub fn validates_alone(&self) -> bool {
+        self.is_validator()
+            && self
+                .committee(self.known_epoch())
+                .is_some_and(|c| c.size() == 1)
+    }
+
     /// Whether this node runs as a validator of the current committee.
     pub fn is_validator(&self) -> bool {
         self.me.read().is_some()
+    }
+
+    /// This validator's position in the committee of the epoch it runs and
+    /// that committee's size; `None` on a node that does not validate.
+    pub fn committee_position(&self) -> Option<(u64, u64)> {
+        let me = (*self.me.read())?;
+        let committee = self.committee(self.running_epoch.load(Ordering::Acquire))?;
+        Some((u64::from(me), committee.size() as u64))
     }
 
     /// This validator's turn to record the signers of `cert`'s epoch on
@@ -2799,6 +3443,44 @@ impl ConsensusHandle {
         }
     }
 
+    /// Checkpoints looked back over for the one before `cp` that covers a block.
+    const OPENING_LOOKBACK: u64 = 256;
+
+    /// Whether `cp` is among the first checkpoints of its epoch that cover a
+    /// block: the ones that cover the block a snapshot is taken at (the
+    /// epoch's first block) and the block that commits its state root,
+    /// [`tenzro_consensus::STATE_ROOT_LAG`] blocks later, which is the anchor a
+    /// joining node certifies. Their certificates are kept, as the closing
+    /// and the handover ones are: a snapshot anchor is certified by one of them,
+    /// long after the checkpoints around it were pruned. Epoch 0 opens with
+    /// block 1.
+    fn keeps_snapshot_anchor(&self, cp: &Checkpoint) -> bool {
+        if cp.first_height > cp.last_height {
+            return false;
+        }
+        if cp.first_height <= 1 {
+            return cp.epoch == 0;
+        }
+        let mut earlier_in_epoch = 0u64;
+        for before in (cp.index.saturating_sub(Self::OPENING_LOOKBACK)..cp.index).rev() {
+            let Some(p) = self.checkpoint(before) else {
+                return false;
+            };
+            if p.first_height > p.last_height {
+                continue;
+            }
+            if p.epoch < cp.epoch {
+                return earlier_in_epoch <= tenzro_consensus::STATE_ROOT_LAG;
+            }
+            earlier_in_epoch += 1;
+            if earlier_in_epoch > tenzro_consensus::STATE_ROOT_LAG {
+                return false;
+            }
+        }
+        // No earlier checkpoint covers a block: epoch 0, opening with block 1.
+        cp.epoch == 0 && cp.first_height <= tenzro_consensus::STATE_ROOT_LAG + 1
+    }
+
     fn record_certificate(&self, cert: &Certificate) {
         let index = cert.checkpoint.index;
         if let Some(s) = &self.records {
@@ -2833,6 +3515,7 @@ impl ConsensusHandle {
             if index.is_multiple_of(CERTIFICATE_RETENTION_STRIDE)
                 || cert.checkpoint.next_committee_root.is_some()
                 || handover
+                || self.keeps_snapshot_anchor(&cert.checkpoint)
             {
                 debug!(
                     index,
@@ -3118,19 +3801,19 @@ impl ConsensusHandle {
     pub fn checkpoint_proof(
         &self,
         index: u64,
-    ) -> Option<tenzro_consensus::light_client::CheckpointProof> {
+    ) -> Option<tenzro_light::light_client::CheckpointProof> {
         let certificate = self.certificate(index)?;
         let handovers = (0..certificate.checkpoint.epoch)
             .map(|epoch| {
                 let (certificate, sessions, next) = self.handover(epoch)?;
-                Some(tenzro_consensus::light_client::EpochHandover {
+                Some(tenzro_light::light_client::EpochHandover {
                     certificate,
                     sessions,
                     next_members: next.members().to_vec(),
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        Some(tenzro_consensus::light_client::CheckpointProof {
+        Some(tenzro_light::light_client::CheckpointProof {
             genesis_members: self.committee_of(0)?.members().to_vec(),
             handovers,
             sessions: self.session_bundle(&certificate),
@@ -3229,17 +3912,21 @@ impl ConsensusHandle {
         };
         self.persist_active(epoch, &start)?;
         let core = Core::new(
-            governed_timing(&self.config, self.storage.as_ref()).core(
-                self.chain_id,
-                self.genesis_hash,
-                &self.time,
+            with_governed_fault_bound(
+                governed_timing(&self.config, self.storage.as_ref()).core(
+                    self.chain_id,
+                    self.genesis_hash,
+                    &self.time,
+                ),
+                self.storage.as_ref(),
             ),
             committee.clone(),
             me,
             start,
         );
+        let bound = core.fault_bound();
         self.spawn_engine(launcher, committee, me, core, 0, 0);
-        info!(epoch, validator = me, "consensus started");
+        info!(epoch, validator = me, ?bound, "consensus started");
         Ok(())
     }
 
@@ -3272,10 +3959,13 @@ impl ConsensusHandle {
         }
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
         let mut core = Core::recover(
-            governed_timing(&self.config, self.storage.as_ref()).core(
-                self.chain_id,
-                self.genesis_hash,
-                &self.time,
+            with_governed_fault_bound(
+                governed_timing(&self.config, self.storage.as_ref()).core(
+                    self.chain_id,
+                    self.genesis_hash,
+                    &self.time,
+                ),
+                self.storage.as_ref(),
             ),
             committee.clone(),
             me,
@@ -3429,6 +4119,7 @@ impl ConsensusHandle {
             channels: EpochChannels::new(committee_epoch),
             dial_diag: parking_lot::Mutex::new(HashMap::new()),
             dial_stage: parking_lot::Mutex::new(HashMap::new()),
+            unreached: parking_lot::Mutex::new(HashSet::new()),
         });
         launcher.handler.set(links.clone());
         links.dial_all();
@@ -3516,7 +4207,62 @@ impl ConsensusHandle {
                 }
             });
         });
+        engine.note_quorum();
         tokio::spawn(engine.run());
+    }
+
+    /// The latest issue time among this validator's endpoint announcements
+    /// this node knows of: the one it recorded when it last signed, in this
+    /// boot or an earlier one, and the one its peers' gossip returned to it.
+    fn last_announcement_issued(
+        &self,
+        key: &tenzro_consensus::ValidatorPublicKey,
+        validator: &[u8; 32],
+    ) -> Option<u64> {
+        // The book's entry is read whether or not it is still current: only
+        // its issue time is taken, as a time this validator must issue
+        // after, and an expired announcement was issued no later than a
+        // current one would be. What `issue_time` does with a value far
+        // ahead of the clock holds for it too.
+        let heard = self.endpoints.read().current(key, 0).map(|a| a.issued_ms);
+        self.kept_announcement_issue(validator).max(heard)
+    }
+
+    /// The issue time this node keeps for `validator`'s announcements.
+    fn kept_announcement_issue(&self, validator: &[u8; 32]) -> Option<u64> {
+        self.records
+            .as_ref()
+            .and_then(|s| {
+                s.get(CF, &announcement_issued_key(validator))
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map(u64::from_be_bytes)
+    }
+
+    /// Keeps the issue time of the announcement this validator just signed
+    /// at `now_ms`, or the later one `last` it knew of before, for the boots
+    /// after this one and for signing again once the clock passes it.
+    fn record_announcement_issued(
+        &self,
+        validator: &[u8; 32],
+        last: Option<u64>,
+        issued_ms: u64,
+        now_ms: u64,
+    ) {
+        let kept = tenzro_consensus::announce::kept_issue_time(last, issued_ms, now_ms);
+        // Written through to disk before the announcement goes out: lost in
+        // a crash, the next boot would issue below what peers hold.
+        if let Some(s) = self.records.as_ref()
+            && let Err(e) = s.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                cf: CF.to_string(),
+                key: announcement_issued_key(validator),
+                value: kept.to_be_bytes().to_vec(),
+            }])
+        {
+            warn!(error = %e, "the endpoint announcement's issue time was not recorded");
+        }
     }
 
     fn self_arc(&self) -> Arc<Self> {
@@ -3552,6 +4298,9 @@ struct Links {
     /// entry surviving many ticks in a row for a peer not in `peers`
     /// localises exactly which await inside dial() that call is stuck on.
     dial_stage: parking_lot::Mutex<HashMap<ValidatorIndex, (&'static str, u64)>>,
+    /// Peers whose last connection, made to the address their held record
+    /// gives, did not open: the next dial asks the peer for a newer record.
+    unreached: parking_lot::Mutex<HashSet<ValidatorIndex>>,
 }
 
 /// The consensus channels open per epoch and peer, with the inbound byte
@@ -3708,6 +4457,60 @@ impl EpochChannels {
     }
 }
 
+/// Ends a control channel: its lease leaves the registry and the engine is
+/// told the channel is down, then, when another channel to the peer is
+/// still live, told to route through that one. In that order: the engine
+/// drops a route only for the channel that went down, so the survivor's
+/// `PeerUp` after it always leaves the peer routed.
+fn retire_control(
+    lease: ChannelLease<'_>,
+    down: PeerQueue,
+    epoch: u64,
+    peer: ValidatorIndex,
+    inputs: &mpsc::UnboundedSender<Input>,
+) {
+    let survivor = lease.retire();
+    drop(lease);
+    let _ = inputs.send(Input::PeerDown { peer, sender: down });
+    if let Some(sender) = survivor {
+        let _ = inputs.send(Input::PeerUp {
+            epoch,
+            peer,
+            sender,
+        });
+    }
+}
+
+/// Takes `sender` as the engine's route to `peer` when the channel is of the
+/// epoch the engine runs, `running`. A channel of another epoch (one
+/// dialled ahead of its handover) routes nothing yet: the engine takes it
+/// from the registry when it enters that epoch. Returns whether it routed.
+fn route_up(
+    peers: &mut HashMap<ValidatorIndex, PeerQueue>,
+    running: u64,
+    epoch: u64,
+    peer: ValidatorIndex,
+    sender: PeerQueue,
+) -> bool {
+    if epoch != running {
+        return false;
+    }
+    peers.insert(peer, sender);
+    true
+}
+
+/// Drops the engine's route to `peer` when it is the channel `sender` that
+/// went down: a newer one to the same peer may already have replaced it.
+fn route_down(
+    peers: &mut HashMap<ValidatorIndex, PeerQueue>,
+    peer: ValidatorIndex,
+    sender: &PeerQueue,
+) {
+    if peers.get(&peer).is_some_and(|s| s.same_channel(sender)) {
+        peers.remove(&peer);
+    }
+}
+
 /// Why a [`ChannelLease`] ended, from [`ChannelLease::ended_or_closed`].
 enum LeaseEnd {
     /// The node moved to the next epoch; this one's channels wind down.
@@ -3771,14 +4574,16 @@ impl std::fmt::Debug for Links {
     }
 }
 
-async fn read_msg<T: serde::de::DeserializeOwned>(recv: &mut tenzro_iroh::RecvStream) -> Result<T> {
-    let bytes = tenzro_iroh::read_frame(recv, 64 * 1024)
+async fn read_msg<T: serde::de::DeserializeOwned>(recv: &mut impl ChannelRecv) -> Result<T> {
+    const HANDSHAKE_FRAME: usize = 64 * 1024;
+    let bytes = tenzro_iroh::read_frame(recv, HANDSHAKE_FRAME)
         .await
         .map_err(|e| NodeError::Other(e.to_string()))?;
-    bincode::deserialize(&bytes).map_err(|e| NodeError::Other(format!("handshake message: {e}")))
+    tenzro_network::wire::decode_bounded(&bytes, HANDSHAKE_FRAME)
+        .map_err(|e| NodeError::Other(format!("handshake message: {e}")))
 }
 
-async fn write_msg<T: serde::Serialize>(send: &mut tenzro_iroh::SendStream, m: &T) -> Result<()> {
+async fn write_msg<T: serde::Serialize>(send: &mut impl ChannelSend, m: &T) -> Result<()> {
     let bytes = bincode::serialize(m).expect("handshake message encodes");
     tenzro_iroh::write_frame(send, &bytes)
         .await
@@ -3791,19 +4596,9 @@ async fn acquire_inbound_budget(
     budget: &Arc<tokio::sync::Semaphore>,
     cost: u32,
 ) -> Result<tokio::sync::OwnedSemaphorePermit> {
-    match tokio::time::timeout(
-        INBOUND_BUDGET_STALL,
-        budget.clone().acquire_many_owned(cost),
-    )
-    .await
-    {
-        Ok(Ok(held)) => Ok(held),
-        Ok(Err(_)) => Err(NodeError::Other("inbound budget closed".into())),
-        Err(_) => Err(NodeError::Other(format!(
-            "the core did not free this peer's inbound budget within {}s",
-            INBOUND_BUDGET_STALL.as_secs()
-        ))),
-    }
+    tenzro_iroh::bounded::acquire_many(budget, cost, INBOUND_BUDGET_STALL)
+        .await
+        .map_err(|e| NodeError::Other(format!("this peer's inbound budget: {e}")))
 }
 
 /// The connection's rtt estimate on its currently selected path, or a
@@ -3882,6 +4677,15 @@ impl Links {
     /// channel has come up for [`ANSWER_GRACE`], so a validator that takes
     /// no inbound connections (behind NAT, outbound only) still reaches
     /// every peer that does.
+    ///
+    /// When the lower index's dial is still in flight past the grace, both
+    /// sides dial and both channels stay up: neither is closed by a
+    /// tie-break. Each side would close the channel the other has just
+    /// started routing on, and under loss the closed one costs a whole
+    /// [`CONNECT_TIMEOUT`] to replace at the moment a handover needs every
+    /// pair of a quorum connected. Two channels cost nothing: a pair holds
+    /// at most one per side, since a side dials only while no channel is
+    /// open, and a dying one hands its route to the survivor.
     async fn keep_dialled(self: Arc<Self>, peer: ValidatorIndex, answers: bool, kind: StreamKind) {
         let epoch = self.committee.read().epoch;
         let mut backoff = Duration::from_millis(200);
@@ -4042,9 +4846,15 @@ impl Links {
             .ok_or_else(|| NodeError::Other("this node resolves no endpoint records".into()))?;
         if let Ok(peer_id) = tenzro_iroh::EndpointId::from_bytes(&endpoint) {
             self.mark_dial_stage(peer, "fetching the peer's disclosed record");
-            identity
-                .fetch_disclosed_record(&self.endpoint, peer_id, &machine)
-                .await;
+            if self.unreached.lock().remove(&peer) {
+                identity
+                    .refetch_disclosed_record(&self.endpoint, peer_id, &machine)
+                    .await;
+            } else {
+                identity
+                    .fetch_disclosed_record(&self.endpoint, peer_id, &machine)
+                    .await;
+            }
         }
         self.mark_dial_stage(peer, "looking up the resolved record");
         let record = identity.store().lookup(&machine).ok_or_else(|| {
@@ -4071,8 +4881,11 @@ impl Links {
                 "the connection did not open within {}s",
                 CONNECT_TIMEOUT.as_secs()
             ))
-        })?
-        .map_err(|e| NodeError::Other(e.to_string()))?;
+        })
+        .and_then(|opened| opened.map_err(|e| NodeError::Other(e.to_string())))
+        .inspect_err(|_| {
+            self.unreached.lock().insert(peer);
+        })?;
         let rtt = path_rtt(&conn);
         let budget = handshake_budget(rtt, scale);
         // A dial that stalls mid-handshake holds nothing past the limit,
@@ -4147,10 +4960,10 @@ impl Links {
 
     /// The dialling side of a handshake, run over an already-open stream:
     /// the channel's two halves.
-    async fn dial_handshake(
+    async fn dial_handshake<S: ChannelSend, R: ChannelRecv>(
         &self,
-        mut send: tenzro_iroh::SendStream,
-        mut recv: tenzro_iroh::RecvStream,
+        mut send: S,
+        mut recv: R,
         committee: &Committee,
         me: ValidatorIndex,
         peer: ValidatorIndex,
@@ -4158,12 +4971,7 @@ impl Links {
         opening: &EndpointOpening,
         peer_announcement: &EndpointAnnouncement,
         kind: StreamKind,
-    ) -> Result<(
-        Sealer,
-        Opener,
-        tenzro_iroh::SendStream,
-        tenzro_iroh::RecvStream,
-    )> {
+    ) -> Result<(Sealer, Opener, S, R)> {
         let ctx = ChannelContext {
             chain_id: self.chain_id,
             genesis_hash: &self.genesis_hash,
@@ -4187,12 +4995,12 @@ impl Links {
         Ok((sealer, opener, send, recv))
     }
 
-    async fn answer(
+    async fn answer<S: ChannelSend, R: ChannelRecv>(
         &self,
         remote: [u8; 32],
         rtt: Duration,
-        mut send: tenzro_iroh::SendStream,
-        mut recv: tenzro_iroh::RecvStream,
+        mut send: S,
+        mut recv: R,
     ) -> Result<()> {
         // A dialler that stalls mid-handshake holds nothing past the limit.
         let budget = handshake_budget(rtt, 1);
@@ -4224,8 +5032,8 @@ impl Links {
     async fn answer_handshake(
         &self,
         remote: [u8; 32],
-        send: &mut tenzro_iroh::SendStream,
-        recv: &mut tenzro_iroh::RecvStream,
+        send: &mut impl ChannelSend,
+        recv: &mut impl ChannelRecv,
     ) -> Result<(u64, ValidatorIndex, StreamKind, Sealer, Opener)> {
         let (committee, me) = self.context_parts();
         let ctx = ChannelContext {
@@ -4289,7 +5097,7 @@ impl Links {
         }
     }
 
-    async fn run_channel(
+    async fn run_channel<S: ChannelSend, R: ChannelRecv>(
         &self,
         epoch: u64,
         peer: ValidatorIndex,
@@ -4297,8 +5105,8 @@ impl Links {
         silence: Duration,
         mut sealer: Sealer,
         mut opener: Opener,
-        mut send: tenzro_iroh::SendStream,
-        mut recv: tenzro_iroh::RecvStream,
+        mut send: S,
+        mut recv: R,
     ) -> Result<()> {
         // Bulk never outranks control for this endpoint's own outgoing
         // bytes: the two now ride separate QUIC streams, so a payload
@@ -4306,7 +5114,7 @@ impl Links {
         // either way, but a lower priority also keeps bulk from winning a
         // local scheduling tie under contention.
         if kind == StreamKind::Bulk {
-            let _ = send.set_priority(-1);
+            send.deprioritize();
         }
         let (tx, mut rx) = PeerQueue::new();
         let Some(mut lease) = self.channels.open(epoch, peer, kind, tx.clone()) else {
@@ -4423,16 +5231,7 @@ impl Links {
                 // own PeerUp happened to be the one the engine is still
                 // using must not leave the peer unreachable while a healthy
                 // sibling sits there unused (`OpenPeer`'s doc comment above).
-                let survivor = lease.retire();
-                drop(lease);
-                let _ = self.inputs.send(Input::PeerDown { peer, sender: down });
-                if let Some(sender) = survivor {
-                    let _ = self.inputs.send(Input::PeerUp {
-                        epoch,
-                        peer,
-                        sender,
-                    });
-                }
+                retire_control(lease, down, epoch, peer, &self.inputs);
             }
             StreamKind::Bulk => {
                 // Best-effort: losing it only means this peer's bulk
@@ -4666,9 +5465,37 @@ impl Engine {
         chrono::Utc::now().timestamp_millis().max(0) as u64
     }
 
+    /// Publishes on the handle what stopping this validator would leave of
+    /// its committee's quorum, with the channels open now.
+    fn note_quorum(&self) {
+        let committee = self.core.committee();
+        let me = self.core.me();
+        let reached_seats = self
+            .peers
+            .keys()
+            .filter(|peer| **peer != me)
+            .map(|peer| committee.seats(*peer))
+            .sum();
+        *self.handle.quorum.write() = Some(QuorumStanding {
+            epoch: committee.epoch,
+            seats: committee.seats(me),
+            total_seats: committee.total_seats(),
+            quorum: committee.quorum(),
+            reached_seats,
+        });
+    }
+
     async fn run(mut self) {
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Nothing is ordered before the genesis time: a validator started
+        // early waits here with its channels already dialled, so no block is
+        // dated before the genesis.
+        let early = crate::calendar::until_genesis_ms();
+        if early > 0 {
+            info!(wait_ms = early, "holding ordering until the genesis time");
+            tokio::time::sleep(Duration::from_millis(early)).await;
+        }
         let now = self.now_ms();
         self.core.start(now);
         let mut diag_round = (0u64, Instant::now(), Instant::now());
@@ -4787,6 +5614,7 @@ impl Engine {
                         .awaiting_handover
                         .store(false, Ordering::Release);
                     *self.handle.me.write() = None;
+                    *self.handle.quorum.write() = None;
                     *self.handle.inputs.write() = None;
                 }
                 info!(
@@ -4865,22 +5693,20 @@ impl Engine {
                 peer,
                 sender,
             } => {
-                if epoch != self.core.committee().epoch {
-                    return;
+                if route_up(
+                    &mut self.peers,
+                    self.core.committee().epoch,
+                    epoch,
+                    peer,
+                    sender,
+                ) {
+                    self.core.on_peer_up(peer, now);
+                    self.note_quorum();
                 }
-                self.peers.insert(peer, sender);
-                self.core.on_peer_up(peer, now);
             }
             Input::PeerDown { peer, sender } => {
-                // Only the channel that went down: a newer one to the same
-                // peer may already have replaced it.
-                if self
-                    .peers
-                    .get(&peer)
-                    .is_some_and(|s| s.same_channel(&sender))
-                {
-                    self.peers.remove(&peer);
-                }
+                route_down(&mut self.peers, peer, &sender);
+                self.note_quorum();
             }
             Input::BulkPeerUp {
                 epoch,
@@ -4938,10 +5764,13 @@ impl Engine {
         // the node would never build those blocks.
         let tip = self.handle.executed_height();
         let mut core = Core::resume(
-            self.handle.config.core(
-                self.handle.chain_id,
-                self.handle.genesis_hash,
-                &self.handle.time,
+            with_governed_fault_bound(
+                self.handle.config.core(
+                    self.handle.chain_id,
+                    self.handle.genesis_hash,
+                    &self.handle.time,
+                ),
+                self.handle.storage.as_ref(),
             ),
             self.core.committee().clone(),
             self.core.me(),
@@ -5121,13 +5950,7 @@ impl Engine {
         let me = self.core.me() as u64;
         let now = Instant::now();
         let mut chosen: Vec<(Hash, SignedTransaction)> = Vec::new();
-        // The part is a bincode `Vec`, whose length prefix counts too.
-        let budget = self
-            .handle
-            .config
-            .batch_max_bytes
-            .min(MAX_PART_BYTES)
-            .saturating_sub(VEC_PREFIX_BYTES);
+        let budget = tenzro_consensus::batch::part_budget(self.handle.config.batch_max_bytes);
         let mut bytes = 0usize;
         // The assigned validator gets twice the typical time to order before
         // the next in turn steps in, and each further one as long again:
@@ -5166,6 +5989,7 @@ impl Engine {
             .map(|s| tenzro_vm::StateAdapter::with_storage(s.clone()));
         let mempool_ref = &self.handle.mempool;
         let mut stale: Vec<Hash> = Vec::new();
+        let mut oversized: Vec<Hash> = Vec::new();
         self.handle.mempool.select_with(|h, tx| {
             if let Some(pick) = already_batched(h, in_flight, ordered) {
                 return pick;
@@ -5194,13 +6018,14 @@ impl Engine {
             {
                 return Pick::Wait;
             }
-            let size = bincode::serialized_size(tx).unwrap_or(0) as usize;
-            if bytes + size > budget
-                || chosen.len() >= tenzro_types::block::MAX_TRANSACTIONS_PER_BLOCK
-            {
-                return Pick::Stop;
+            match part_fit(&mut bytes, tx, budget, chosen.len()) {
+                Fit::Never => {
+                    oversized.push(*h);
+                    return Pick::Wait;
+                }
+                Fit::Full => return Pick::Stop,
+                Fit::Fits => {}
             }
-            bytes += size;
             if turn > 0 {
                 stepping_in.push(from);
             }
@@ -5216,6 +6041,13 @@ impl Engine {
                 "stale beacon contributions left the mempool"
             );
             self.handle.mempool.remove_transactions(&stale);
+        }
+        if !oversized.is_empty() {
+            warn!(
+                dropped = oversized.len(),
+                budget, "transactions too large for any batch part left the mempool"
+            );
+            self.handle.mempool.remove_transactions(&oversized);
         }
         let mempool = &self.handle.mempool;
         self.first_seen.retain(|h, _| mempool.contains(h));
@@ -5300,6 +6132,7 @@ impl Engine {
             if let Err(e) = written {
                 tracing::error!(error = %e, "consensus journal write failed; this validator stops");
                 *self.handle.me.write() = None;
+                *self.handle.quorum.write() = None;
                 *self.handle.inputs.write() = None;
                 return false;
             }
@@ -5472,8 +6305,10 @@ impl Engine {
                     tokio::task::spawn_blocking(move || {
                         // The session key signs; its certificate for this
                         // epoch is signed by the hardware key once per epoch.
-                        let signed = certifier.certificate(cp.epoch).and_then(|cert| {
-                            sign_checkpoint(&*certifier.session, &cert, &*hw, me, &cp)
+                        let signed = sign_retried(SIGN_RETRY, || {
+                            certifier.certificate(cp.epoch).and_then(|cert| {
+                                sign_checkpoint(&*certifier.session, &cert, &*hw, me, &cp)
+                            })
                         });
                         match signed {
                             Ok(v) => {
@@ -5721,6 +6556,40 @@ impl Engine {
             self.pending_handover = Some(handover);
             return true;
         };
+        match handover_step(
+            self.handle.certified_next_root(&handover.checkpoint),
+            next.root(),
+        ) {
+            HandoverStep::Enter => {}
+            HandoverStep::Wait => {
+                if !self.handle.awaiting_handover.swap(true, Ordering::AcqRel) {
+                    info!(
+                        epoch = next_epoch,
+                        "took the handover before holding the certified close of the epoch; waiting for it"
+                    );
+                    self.handle.note_behind_hint(last);
+                }
+                self.next_committee = Some(next);
+                self.pending_handover = Some(handover);
+                return true;
+            }
+            HandoverStep::StandDown => {
+                error!(
+                    epoch = next_epoch,
+                    derived = %hex::encode(next.root()),
+                    certified = ?self.handle.certified_next_root(&handover.checkpoint).map(hex::encode),
+                    "this validator derived another next committee than the network certified: its state differs from the network's; it does not enter the epoch and follows"
+                );
+                self.handle
+                    .awaiting_handover
+                    .store(false, Ordering::Release);
+                self.handle
+                    .end_epoch_journal(handover.checkpoint.epoch, None);
+                *self.handle.me.write() = None;
+                *self.handle.inputs.write() = None;
+                return false;
+            }
+        }
         self.handle
             .awaiting_handover
             .store(false, Ordering::Release);
@@ -5756,10 +6625,13 @@ impl Engine {
                 *self.handle.me.write() = Some(me);
                 self.handle.note_reach_progress();
                 self.core = Core::new(
-                    governed_timing(&self.handle.config, self.handle.storage.as_ref()).core(
-                        self.handle.chain_id,
-                        self.handle.genesis_hash,
-                        &self.handle.time,
+                    with_governed_fault_bound(
+                        governed_timing(&self.handle.config, self.handle.storage.as_ref()).core(
+                            self.handle.chain_id,
+                            self.handle.genesis_hash,
+                            &self.handle.time,
+                        ),
+                        self.handle.storage.as_ref(),
                     ),
                     next,
                     me,
@@ -5768,6 +6640,7 @@ impl Engine {
                 self.handle
                     .epoch_ends_ms
                     .store(self.core.epoch_ends_ms(), Ordering::Release);
+                self.note_quorum();
                 // Parts the last core took but neither ordered nor handed
                 // back are gone with it: their transactions are batched
                 // again. Kept in flight, the sender would wait on them for
@@ -5801,10 +6674,57 @@ impl Engine {
                 self.handle.end_epoch_journal(old_epoch, None);
                 *self.handle.me.write() = None;
                 *self.handle.inputs.write() = None;
+                *self.handle.quorum.write() = None;
                 info!("this node is not in the next committee; following as a full node");
                 false
             }
         }
+    }
+}
+
+/// `cfg` with the first epoch of the whole-member fault bound as governed in
+/// `storage` (its genesis value without storage), read when an epoch's core
+/// is built. From the release floor 0.2.2 on, the epoch moves or is called
+/// off only while it is at least two epochs ahead
+/// (`tenzro_vm::feature_gate::change_allowed`), so a change applies before
+/// the epoch it named starts, and every core of one epoch, on every
+/// validator and after a restart, takes the bound in force at that epoch's
+/// start.
+pub(crate) fn with_governed_fault_bound(
+    mut cfg: tenzro_consensus::CoreConfig,
+    storage: Option<&Arc<dyn KvStore>>,
+) -> tenzro_consensus::CoreConfig {
+    use tenzro_vm::governance as g;
+    cfg.whole_member_fault_bound_from = match storage {
+        Some(s) => tenzro_vm::feature_gate::activation_epoch(
+            &tenzro_vm::StateAdapter::with_storage(s.clone()),
+            g::RBC_WHOLE_MEMBER_FAULT_BOUND_KEY,
+        ),
+        None => g::genesis_param(g::RBC_WHOLE_MEMBER_FAULT_BOUND_KEY),
+    };
+    cfg
+}
+
+/// What a validator does with a handover, given the next committee's root
+/// the network certified (`None` while it holds no certified close of the
+/// epoch) and the root of the committee it derived itself.
+#[derive(Debug, PartialEq, Eq)]
+enum HandoverStep {
+    /// The roots agree: it enters the next epoch.
+    Enter,
+    /// It holds no certified close of the epoch yet: it waits for one.
+    Wait,
+    /// It derived another committee than the network certified: its state
+    /// differs from the network's, and a core on that committee would run
+    /// alone. It does not enter, and follows.
+    StandDown,
+}
+
+fn handover_step(certified: Option<[u8; 32]>, derived: [u8; 32]) -> HandoverStep {
+    match certified {
+        None => HandoverStep::Wait,
+        Some(root) if root == derived => HandoverStep::Enter,
+        Some(_) => HandoverStep::StandDown,
     }
 }
 
@@ -5829,14 +6749,20 @@ fn shared_setups() -> Arc<ProofSetups> {
     SETUPS.get_or_init(|| Arc::new(ProofSetups::new())).clone()
 }
 
-/// The compact-certificate pool of this process. Its budget, one job at a
-/// time on `threads` threads (half the machine's cores when 0), is the
-/// machine's: handles sharing a process share it rather than each taking
-/// half the cores and a proof's peak memory of their own. The first handle
-/// sizes it.
-fn shared_compact_work(threads: usize) -> Arc<CompactWork> {
-    static WORK: std::sync::OnceLock<Arc<CompactWork>> = std::sync::OnceLock::new();
-    WORK.get_or_init(|| Arc::new(CompactWork::with_threads(threads)))
+/// The compact-certificate pool of this process for handles configured
+/// with `threads` threads (half the machine's cores when 0). Its budget, one
+/// job at a time, is the machine's: handles sharing a process and that
+/// setting share it rather than each taking the cores and a proof's peak
+/// memory of their own. A handle configured with another size gets a pool of
+/// the size it asked for, not one sized by whichever handle the process made
+/// first.
+pub fn shared_compact_work(threads: usize) -> Arc<CompactWork> {
+    static WORK: std::sync::OnceLock<parking_lot::Mutex<HashMap<usize, Arc<CompactWork>>>> =
+        std::sync::OnceLock::new();
+    WORK.get_or_init(Default::default)
+        .lock()
+        .entry(threads)
+        .or_insert_with(|| Arc::new(CompactWork::with_threads(threads)))
         .clone()
 }
 
@@ -5885,6 +6811,53 @@ pub(crate) fn governed_failover(storage: Option<&Arc<dyn KvStore>>) -> Duration 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A checkpoint whose signing fails for a passing reason is signed on a
+    /// later attempt; one the high-water mark refuses is never tried again,
+    /// and a failure that does not pass ends after the last attempt.
+    #[test]
+    fn checkpoint_signing_is_retried_unless_refused() {
+        use tenzro_consensus::ConsensusError;
+        let mut calls = 0;
+        let signed = sign_retried(Duration::ZERO, || {
+            calls += 1;
+            if calls < SIGN_ATTEMPTS {
+                Err(ConsensusError::Storage("busy".into()))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(signed.ok(), Some(SIGN_ATTEMPTS));
+
+        let mut calls = 0;
+        let refused: tenzro_consensus::Result<()> = sign_retried(Duration::ZERO, || {
+            calls += 1;
+            Err(ConsensusError::VoteRefused("signed another".into()))
+        });
+        assert!(matches!(refused, Err(ConsensusError::VoteRefused(_))));
+        assert_eq!(calls, 1, "a refused vote was tried again");
+
+        let mut calls = 0;
+        let failed: tenzro_consensus::Result<()> = sign_retried(Duration::ZERO, || {
+            calls += 1;
+            Err(ConsensusError::Storage("gone".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(calls, SIGN_ATTEMPTS);
+    }
+
+    /// A handle gets the compact pool of the size its configuration asks
+    /// for, shared with the handles that ask the same, whichever handle the
+    /// process made first.
+    #[test]
+    fn handles_share_the_compact_pool_of_the_size_they_ask_for() {
+        // Sizes no other test in the process asks for.
+        let first = shared_compact_work(13);
+        let other = shared_compact_work(11);
+        assert!(Arc::ptr_eq(&first, &shared_compact_work(13)));
+        assert!(Arc::ptr_eq(&other, &shared_compact_work(11)));
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
 
     /// A change goes out at once and is repeated on the next periodic
     /// announcements, so a peer whose mesh to this validator formed after the
@@ -6061,6 +7034,53 @@ pub(crate) mod tests {
         );
     }
 
+    /// A core built through the governed switch for the epoch the
+    /// whole-member bound starts at counts with it; a core of an epoch
+    /// before that, and one built while the key is unset, counts with `f`.
+    #[test]
+    fn a_core_counts_with_the_whole_member_bound_from_its_governed_epoch() {
+        use tenzro_consensus::committee::FaultBound;
+        use tenzro_vm::traits::VmState;
+        let c = Committee4::new();
+        let storage = c.handle.storage.clone().expect("the handle's chain state");
+        let committee = c.handle.committee(0).expect("the genesis committee");
+        let core = |storage: Option<&Arc<dyn KvStore>>| {
+            let cfg = with_governed_fault_bound(
+                c.handle
+                    .config
+                    .core(c.handle.chain_id, c.handle.genesis_hash, &c.handle.time),
+                storage,
+            );
+            let start = EpochStart {
+                first_height: 1,
+                first_checkpoint: 0,
+                prev_checkpoint: [0; 32],
+                timestamp_ms: 0,
+                base_blocks: vec![(0, [0xAA; 32], [0xBB; 32])],
+                leader_lookahead_rounds: tenzro_consensus::schedule::LOOKAHEAD_ROUNDS,
+            };
+            Core::new(cfg, committee.clone(), 0, start).fault_bound()
+        };
+        let govern = |epoch: u64| {
+            let mut state = tenzro_vm::StateAdapter::with_storage(storage.clone());
+            state.set_storage(
+                &tenzro_vm::native::SYSTEM_ADDRESS,
+                tenzro_vm::native::governed_param_key(
+                    tenzro_vm::governance::RBC_WHOLE_MEMBER_FAULT_BOUND_KEY,
+                )
+                .as_bytes(),
+                epoch.to_le_bytes().to_vec(),
+            );
+            state.commit().expect("the epoch is stored");
+        };
+        assert_eq!(core(Some(&storage)), FaultBound::Seats, "dormant");
+        assert_eq!(core(None), FaultBound::Seats, "genesis value");
+        govern(committee.epoch);
+        assert_eq!(core(Some(&storage)), FaultBound::WholeMembers);
+        govern(committee.epoch + 1);
+        assert_eq!(core(Some(&storage)), FaultBound::Seats, "the epoch before");
+    }
+
     /// A peer that takes nothing at all, slow or malicious, holds this node
     /// to at most its queue: frames past the byte budget are refused, not
     /// buffered, however many are offered.
@@ -6163,6 +7183,126 @@ pub(crate) mod tests {
                 .is_err(),
             "a live channel ended"
         );
+    }
+
+    /// Whenever the dialler finds a channel to a peer open in the epoch the
+    /// engine runs, the engine's routes hold a sender for that peer once it
+    /// has handled what the channels sent it. Channels come up and end here
+    /// through the calls the channel task makes, and the engine's routes
+    /// change only through the calls its input handler makes: in every
+    /// order of endings, with inputs handled one at a time or all at the
+    /// end, for a channel dialled ahead of its epoch, and for an old
+    /// epoch's channel ending after the engine entered the next.
+    #[test]
+    fn an_open_peer_always_has_a_route_in_the_engine() {
+        type Routes = HashMap<ValidatorIndex, PeerQueue>;
+        const PEER: ValidatorIndex = 1;
+        // Handles every queued input as the engine does, for its routes.
+        fn handle(rx: &mut mpsc::UnboundedReceiver<Input>, routes: &mut Routes, running: u64) {
+            while let Ok(input) = rx.try_recv() {
+                match input {
+                    Input::PeerUp {
+                        epoch,
+                        peer,
+                        sender,
+                    } => {
+                        route_up(routes, running, epoch, peer, sender);
+                    }
+                    Input::PeerDown { peer, sender } => route_down(routes, peer, &sender),
+                    _ => {}
+                }
+            }
+        }
+        // A control channel coming up as the channel task brings it up.
+        fn up<'a>(
+            channels: &'a EpochChannels,
+            inputs: &mpsc::UnboundedSender<Input>,
+            epoch: u64,
+        ) -> (ChannelLease<'a>, PeerQueue) {
+            let (tx, _rx) = PeerQueue::new();
+            let lease = channels
+                .open(epoch, PEER, StreamKind::Control, tx.clone())
+                .expect("a channel");
+            let _ = inputs.send(Input::PeerUp {
+                epoch,
+                peer: PEER,
+                sender: tx.clone(),
+            });
+            (lease, tx)
+        }
+        // Entering an epoch as the engine does.
+        fn enter(channels: &EpochChannels, routes: &mut Routes, epoch: u64) {
+            channels.enter(epoch);
+            routes.clear();
+            for (peer, kind, sender) in channels.open_now(epoch) {
+                if kind == StreamKind::Control {
+                    route_up(routes, epoch, epoch, peer, sender);
+                }
+            }
+        }
+        let agree = |channels: &EpochChannels, routes: &Routes, running: u64, when: &str| {
+            assert_eq!(
+                routes.contains_key(&PEER),
+                channels.is_open(running, PEER, StreamKind::Control),
+                "the engine's route and the open channels disagree {when}"
+            );
+        };
+
+        // Channels end oldest first, newest first, and from the middle out;
+        // the engine handles each input as it comes, or all of them at the
+        // end.
+        let orders: [fn(usize) -> usize; 3] = [|_| 0, |left| left - 1, |left| left / 2];
+        for order in orders {
+            for at_once in [false, true] {
+                let channels = EpochChannels::new(0);
+                let (inputs, mut rx) = mpsc::unbounded_channel();
+                let mut routes = Routes::new();
+                let mut live = Vec::new();
+                for _ in 0..MAX_CHANNELS_PER_PEER {
+                    live.push(up(&channels, &inputs, 0));
+                    if !at_once {
+                        handle(&mut rx, &mut routes, 0);
+                        agree(&channels, &routes, 0, "after a channel came up");
+                    }
+                }
+                while !live.is_empty() {
+                    let (lease, down) = live.remove(order(live.len()));
+                    retire_control(lease, down, 0, PEER, &inputs);
+                    if !at_once {
+                        handle(&mut rx, &mut routes, 0);
+                        agree(&channels, &routes, 0, "after a channel ended");
+                        assert_eq!(routes.contains_key(&PEER), !live.is_empty());
+                    }
+                }
+                handle(&mut rx, &mut routes, 0);
+                agree(&channels, &routes, 0, "after every channel ended");
+                assert!(routes.is_empty());
+            }
+        }
+
+        // A channel dialled ahead of its epoch routes nothing while the
+        // engine runs the epoch before, and is the route once it enters.
+        let channels = EpochChannels::new(0);
+        let (inputs, mut rx) = mpsc::unbounded_channel();
+        let mut routes = Routes::new();
+        let old = up(&channels, &inputs, 0);
+        let ahead = up(&channels, &inputs, 1);
+        handle(&mut rx, &mut routes, 0);
+        agree(&channels, &routes, 0, "with a channel dialled ahead");
+        assert!(routes.get(&PEER).is_some_and(|s| s.same_channel(&old.1)));
+        enter(&channels, &mut routes, 1);
+        agree(&channels, &routes, 1, "after entering the next epoch");
+        assert!(routes.get(&PEER).is_some_and(|s| s.same_channel(&ahead.1)));
+        // The old epoch's channel ends after the engine has moved on: the
+        // route of the new epoch stays.
+        retire_control(old.0, old.1, 0, PEER, &inputs);
+        handle(&mut rx, &mut routes, 1);
+        agree(&channels, &routes, 1, "after the old epoch's channel ended");
+        assert!(routes.get(&PEER).is_some_and(|s| s.same_channel(&ahead.1)));
+        retire_control(ahead.0, ahead.1, 1, PEER, &inputs);
+        handle(&mut rx, &mut routes, 1);
+        agree(&channels, &routes, 1, "after the last channel ended");
+        assert!(routes.is_empty());
     }
 
     /// A peer's control and bulk channels are leased independently: one
@@ -6324,6 +7464,34 @@ pub(crate) mod tests {
         assert!(!channels.is_open(0, 1, StreamKind::Control));
     }
 
+    /// Both sides of a pair dialling at once keep both channels: opening
+    /// the second ends neither, and the first stays live beside it.
+    #[tokio::test]
+    async fn a_pair_dialling_at_once_keeps_both_channels() {
+        let channels = EpochChannels::new(0);
+        let (first_tx, _first_rx) = PeerQueue::new();
+        let mut first = channels
+            .open(0, 1, StreamKind::Control, first_tx)
+            .expect("a channel");
+        let (second_tx, _second_rx) = PeerQueue::new();
+        let mut second = channels
+            .open(0, 1, StreamKind::Control, second_tx)
+            .expect("the other side's channel");
+        for lease in [&mut first, &mut second] {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), lease.ended_or_closed())
+                    .await
+                    .is_err(),
+                "neither channel of a simultaneous dial is closed"
+            );
+        }
+        drop(second);
+        assert!(
+            channels.is_open(0, 1, StreamKind::Control),
+            "the first channel is still live"
+        );
+    }
+
     /// The backstop for any route the engine cannot otherwise explain: a
     /// force-closed peer's live channels end even though nothing about them
     /// looks unhealthy on their own.
@@ -6398,10 +7566,12 @@ pub(crate) mod tests {
         }
 
         let c = Committee4::new();
-        let server = tenzro_iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let server = tenzro_iroh::identity_transport::on_loopback(tenzro_iroh::Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let (inputs, _rx) = mpsc::unbounded_channel();
         let links = Links {
             endpoint: server.clone(),
@@ -6417,6 +7587,7 @@ pub(crate) mod tests {
             channels: EpochChannels::new(0),
             dial_diag: parking_lot::Mutex::new(HashMap::new()),
             dial_stage: parking_lot::Mutex::new(HashMap::new()),
+            unreached: parking_lot::Mutex::new(HashSet::new()),
         };
         let (streams, mut accepted) = mpsc::unbounded_channel();
         let _router = iroh::protocol::Router::builder(server.clone())
@@ -6425,10 +7596,12 @@ pub(crate) mod tests {
                 tenzro_iroh::consensus::ConsensusProtocol::new(Arc::new(Hand(streams))),
             )
             .spawn();
-        let client = tenzro_iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let client = tenzro_iroh::identity_transport::on_loopback(tenzro_iroh::Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let (mut send, _recv) = tenzro_iroh::open_consensus_stream(&client, server.addr())
             .await
             .unwrap();
@@ -6510,6 +7683,246 @@ pub(crate) mod tests {
         );
     }
 
+    /// A validator that lacks a member's endpoint waits for the member's
+    /// own publications first, then asks at growing intervals, and after a
+    /// few unanswered requests only once in a long while: a member that
+    /// never answers is not asked for ever at the announcement interval.
+    /// A member whose endpoint opened starts over, and each member keeps
+    /// its own count.
+    #[test]
+    fn a_member_that_never_answers_is_asked_a_few_times_and_then_rarely() {
+        let (silent, late) = ([7u8; 32], [8u8; 32]);
+        let t0 = tokio::time::Instant::now();
+        let mut pull = Pull::default();
+        assert!(pull.due(vec![silent], t0).is_empty(), "asked at once");
+        assert_eq!(pull.at, Some(t0 + RESEAL_RETRY));
+        assert!(
+            pull.due(vec![silent], t0 + RESEAL_RETRY / 2).is_empty(),
+            "asked before the wait ended"
+        );
+        // Asked whenever it is due, the waits never shrink and reach the
+        // long rest after the quick requests.
+        let mut now = t0;
+        let mut waits = Vec::new();
+        for _ in 0..PULL_QUICK_ASKS + 2 {
+            let at = pull.at.expect("a member is missing");
+            waits.push(at - now);
+            now = at;
+            assert_eq!(pull.due(vec![silent], now), vec![silent]);
+        }
+        assert!(waits.windows(2).all(|w| w[0] <= w[1]), "{waits:?}");
+        assert!(
+            waits[..PULL_QUICK_ASKS as usize]
+                .iter()
+                .all(|w| *w <= ANNOUNCE_INTERVAL)
+        );
+        assert_eq!(waits.last(), Some(&PULL_REST));
+        assert_eq!(pull.at, Some(now + PULL_REST));
+
+        // A second member goes missing: it is asked on its own schedule and
+        // the silent one is not asked with it.
+        assert!(pull.due(vec![silent, late], now).is_empty());
+        assert_eq!(pull.at, Some(now + RESEAL_RETRY));
+        now += RESEAL_RETRY;
+        assert_eq!(pull.due(vec![silent, late], now), vec![late]);
+        // Its endpoint opens; nothing is due before the silent one's rest.
+        assert!(pull.due(vec![silent], now).is_empty());
+        assert_eq!(pull.at, Some(now - RESEAL_RETRY + PULL_REST));
+        // Every endpoint opened: nothing is asked and no wake is set.
+        assert!(pull.due(Vec::new(), now).is_empty());
+        assert_eq!(pull.at, None);
+        // The silent member missing again starts over.
+        assert!(pull.due(vec![silent], now).is_empty());
+        assert_eq!(pull.at, Some(now + RESEAL_RETRY));
+    }
+
+    /// A wake that could publish nothing is put off without counting a
+    /// request, and a wake that is not due is left alone.
+    #[test]
+    fn a_pass_that_published_nothing_puts_the_request_off_without_counting_it() {
+        let member = [7u8; 32];
+        let t0 = tokio::time::Instant::now();
+        let mut pull = Pull::default();
+        let _ = pull.due(vec![member], t0);
+        pull.put_off(t0);
+        assert_eq!(pull.at, Some(t0 + RESEAL_RETRY), "a wake not yet due moved");
+        let due = t0 + RESEAL_RETRY;
+        pull.put_off(due);
+        assert_eq!(pull.at, Some(due + RESEAL_RETRY));
+        assert_eq!(pull.members[&member].0, 0, "a request was counted");
+        assert_eq!(pull.due(vec![member], due + RESEAL_RETRY), vec![member]);
+    }
+
+    /// A member that names this validator among those it wants the sealed
+    /// endpoints of has them published again, once in a while however often
+    /// it asks; a publication that names another validator, or none, is
+    /// answered with nothing. While the gate is dormant no request is
+    /// answered at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_asking_for_the_sealed_endpoints_is_answered_once_in_a_while() {
+        use tenzro_consensus::announce::Publication;
+        use tenzro_vm::traits::VmState;
+        let c = Committee4::new();
+        let me = c.keys[3].public_key().fingerprint();
+        *c.handle.own_key.write() = Some(me);
+        let storage = c.handle.storage.clone().expect("the handle's chain state");
+        let gate = |epoch: u64| {
+            let mut state = tenzro_vm::StateAdapter::with_storage(storage.clone());
+            state.set_storage(
+                &tenzro_vm::native::SYSTEM_ADDRESS,
+                tenzro_vm::native::governed_param_key(
+                    tenzro_vm::governance::SEALED_ENDPOINT_PULL_GATE,
+                )
+                .as_bytes(),
+                epoch.to_le_bytes().to_vec(),
+            );
+            state.commit().expect("the gate is stored");
+        };
+        let asking = |wanted: Vec<[u8; 32]>, at: u64| {
+            let opening = EndpointOpening::new([41; 32], "did:tenzro:machine:test41".to_string())
+                .expect("opening");
+            let announcement = EndpointAnnouncement::sign(
+                &c.keys[0],
+                7,
+                [1; 32],
+                &opening,
+                c.keys[0].public_key().clone(),
+                DisclosureSecret::generate().public().clone(),
+                at,
+                6 * 3_600 * 1_000,
+            )
+            .expect("announcement");
+            Publication {
+                published: PublishedAnnouncement {
+                    announcement,
+                    sealed: Vec::new(),
+                },
+                wanted,
+            }
+        };
+        let now = unix_ms();
+        let asked = || c.handle.sealed_asked.swap(false, Ordering::AcqRel);
+
+        // Dormant: a request names this validator and nothing answers.
+        assert!(!c.handle.pull_live());
+        c.handle.offer_publication(asking(vec![me], now));
+        assert!(!asked(), "answered while the gate is dormant");
+        gate(0);
+        assert!(c.handle.pull_live());
+
+        c.handle.offer_publication(asking(Vec::new(), now + 1));
+        assert!(!asked(), "nothing was asked");
+        c.handle.offer_publication(asking(vec![[9; 32]], now + 2));
+        assert!(!asked(), "another validator was asked");
+
+        let request = asking(vec![[9; 32], me], now + 3);
+        c.handle.offer_publication(request.clone());
+        assert!(asked(), "a member's request was not answered");
+        // The same request again, and a fresh one, within the interval.
+        c.handle.offer_publication(request);
+        c.handle.offer_publication(asking(vec![me], now + 4));
+        assert!(!asked(), "answered again at once");
+        let later = std::time::Instant::now() + RESEAL_RETRY;
+        assert!(
+            c.handle.answers_sealed_request(later),
+            "never answered again"
+        );
+
+        // A request whose announcement does not verify is no member's.
+        let mut forged = asking(vec![me], now + 5);
+        forged.published.announcement.issued_ms += 1;
+        *c.handle.sealed_answered.lock() = None;
+        c.handle.offer_publication(forged);
+        assert!(!asked(), "a forged request was answered");
+    }
+
+    /// Every member's announcement replayed with a request, many times over:
+    /// the validator named answers once per interval in all, not once per
+    /// member.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replayed_requests_from_every_member_buy_one_answer_per_interval() {
+        use tenzro_consensus::announce::Publication;
+        use tenzro_vm::traits::VmState;
+        let c = Committee4::new();
+        let me = c.keys[3].public_key().fingerprint();
+        *c.handle.own_key.write() = Some(me);
+        let storage = c.handle.storage.clone().expect("the handle's chain state");
+        let mut state = tenzro_vm::StateAdapter::with_storage(storage);
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::governed_param_key(tenzro_vm::governance::SEALED_ENDPOINT_PULL_GATE)
+                .as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+        state.commit().expect("the gate is stored");
+        let now = unix_ms();
+        let published = |member: usize| {
+            let opening = EndpointOpening::new(
+                [50 + member as u8; 32],
+                format!("did:tenzro:machine:test{member}"),
+            )
+            .expect("opening");
+            let announcement = EndpointAnnouncement::sign(
+                &c.keys[member],
+                7,
+                [1; 32],
+                &opening,
+                c.keys[member].public_key().clone(),
+                DisclosureSecret::generate().public().clone(),
+                now,
+                6 * 3_600 * 1_000,
+            )
+            .expect("announcement");
+            Publication {
+                published: PublishedAnnouncement {
+                    announcement,
+                    sealed: Vec::new(),
+                },
+                wanted: vec![me],
+            }
+        };
+        let mut answers = 0;
+        for _ in 0..20 {
+            for member in 0..3 {
+                c.handle.offer_publication(published(member));
+                answers += usize::from(c.handle.sealed_asked.swap(false, Ordering::AcqRel));
+            }
+        }
+        assert_eq!(answers, 1, "{answers} answers to replayed requests");
+    }
+
+    /// The members a validator asks: none while the gate is dormant, every
+    /// other member of its running committee it holds no endpoint of once
+    /// it is live, and none of a committee of an earlier epoch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_validator_asks_its_running_committee_only_and_nothing_while_dormant() {
+        use tenzro_vm::traits::VmState;
+        let c = Committee4::new();
+        let me = c.keys[3].public_key().fingerprint();
+        let now = unix_ms();
+        assert!(
+            c.handle.members_to_ask(me, now).is_empty(),
+            "asked while dormant"
+        );
+        let storage = c.handle.storage.clone().expect("the handle's chain state");
+        let mut state = tenzro_vm::StateAdapter::with_storage(storage);
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::governed_param_key(tenzro_vm::governance::SEALED_ENDPOINT_PULL_GATE)
+                .as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+        state.commit().expect("the gate is stored");
+        let asked = c.handle.members_to_ask(me, now);
+        assert_eq!(asked.len(), 3, "the other members of the running committee");
+        assert!(!asked.contains(&me));
+        c.handle.running_epoch.store(1, Ordering::Release);
+        assert!(
+            c.handle.members_to_ask(me, now).is_empty(),
+            "a committee of an earlier epoch was asked"
+        );
+    }
+
     /// A validator key known by its public half only: seating looks at
     /// nothing else.
     struct PublicOnly(tenzro_consensus::ValidatorPublicKey);
@@ -6543,10 +7956,12 @@ pub(crate) mod tests {
             .public_key()
             .clone();
         let old_signer: Arc<dyn ValidatorSigner> = Arc::new(PublicOnly(old.clone()));
-        let endpoint = tenzro_iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let endpoint = tenzro_iroh::identity_transport::on_loopback(
+            tenzro_iroh::Endpoint::builder(iroh::endpoint::presets::Minimal),
+        )
+        .bind()
+        .await
+        .unwrap();
         let (segments, _) = mpsc::channel(1);
         let (certificates, _) = mpsc::unbounded_channel();
         let (compact, _) = mpsc::unbounded_channel();
@@ -6699,10 +8114,12 @@ pub(crate) mod tests {
 
         // A server that accepts every stream and then never says another
         // word on any of them: held alive, never read, never written to.
-        let server = tenzro_iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let server = tenzro_iroh::identity_transport::on_loopback(tenzro_iroh::Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let (streams, mut accepted) = mpsc::unbounded_channel();
         let _router = iroh::protocol::Router::builder(server.clone())
             .accept(
@@ -6719,10 +8136,12 @@ pub(crate) mod tests {
         });
 
         let (inputs, _rx) = mpsc::unbounded_channel();
-        let client = tenzro_iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let client = tenzro_iroh::identity_transport::on_loopback(tenzro_iroh::Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let links = Links {
             endpoint: client,
             identity: None,
@@ -6737,6 +8156,7 @@ pub(crate) mod tests {
             channels: EpochChannels::new(committee.epoch),
             dial_diag: parking_lot::Mutex::new(HashMap::new()),
             dial_stage: parking_lot::Mutex::new(HashMap::new()),
+            unreached: parking_lot::Mutex::new(HashSet::new()),
         };
 
         // Raw: the handshake itself carries no bound at all - that is the
@@ -6793,6 +8213,206 @@ pub(crate) mod tests {
         assert!(
             matches!(wrapped, Ok(Err(_))),
             "the stalled dial was still held after HANDSHAKE_TIMEOUT"
+        );
+    }
+
+    type Pipe = (
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    );
+
+    impl FrameSink for tokio::io::WriteHalf<tokio::io::DuplexStream> {
+        async fn write(&mut self, frame: Vec<u8>) -> bool {
+            tenzro_iroh::write_frame(self, &frame).await.is_ok()
+        }
+    }
+
+    impl ChannelSend for tokio::io::WriteHalf<tokio::io::DuplexStream> {
+        fn deprioritize(&mut self) {}
+    }
+
+    /// Two ends of an in-memory byte stream, each split as a channel's
+    /// send and receive halves.
+    fn pipe() -> (Pipe, Pipe) {
+        let (a, b) = tokio::io::duplex(256 * 1024);
+        let (ar, aw) = tokio::io::split(a);
+        let (br, bw) = tokio::io::split(b);
+        ((aw, ar), (bw, br))
+    }
+
+    /// Seven validators open channels to one another over in-memory streams,
+    /// with the clock paused: every pair completes the handshake both
+    /// directions authenticate, frames sealed on one side open on the other,
+    /// and a peer that never answers costs the dialler exactly
+    /// HANDSHAKE_TIMEOUT of the paused clock and no wall time.
+    #[tokio::test]
+    async fn seven_validators_open_channels_over_any_stream_on_a_paused_clock() {
+        const N: usize = 7;
+        let keys: Vec<_> = (0..N)
+            .map(|_| SessionKey::generate().expect("key"))
+            .collect();
+        let validators = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                tenzro_consensus::validator::ValidatorInfo::new(
+                    Address::new([i as u8 + 1; 32]),
+                    k.public_key().clone(),
+                    [i as u8 + 1; 32],
+                    1 << 80,
+                )
+            })
+            .collect();
+        let em = Arc::new(EpochManager::new(validators, 100).expect("epoch manager"));
+        let handle = ConsensusHandle::new(
+            tenzro_consensus::ConsensusConfig::default(),
+            TimeRules::default(),
+            7,
+            [1; 32],
+            em,
+            Some(Arc::new(tenzro_storage::MemoryStore::new())),
+            Some(Arc::new(tenzro_storage::MemoryStore::new())),
+        )
+        .expect("consensus handle");
+        let committee = handle.committee(0).expect("the genesis committee");
+        let endpoint = tenzro_iroh::identity_transport::on_loopback(
+            tenzro_iroh::Endpoint::builder(iroh::endpoint::presets::Minimal),
+        )
+        .bind()
+        .await
+        .unwrap();
+        tokio::time::pause();
+
+        // Validator `v` holds the seat's key, a session key for this boot,
+        // and an announcement the seat's key signed for endpoint [v + 1; 32].
+        let mut links = Vec::new();
+        let mut published = Vec::new();
+        for v in 0..N {
+            let member = committee.member(v as ValidatorIndex).expect("seated");
+            let key = keys
+                .iter()
+                .find(|k| k.public_key() == &member.public_key)
+                .expect("the seat's key");
+            let session = SessionKey::generate().expect("key");
+            let opening =
+                EndpointOpening::new([v as u8 + 1; 32], format!("did:tenzro:machine:test{v}"))
+                    .expect("opening");
+            let announcement = EndpointAnnouncement::sign(
+                key,
+                7,
+                [1; 32],
+                &opening,
+                session.public_key().clone(),
+                DisclosureSecret::generate().public().clone(),
+                unix_ms(),
+                6 * 3_600 * 1_000,
+            )
+            .expect("announcement");
+            let (inputs, _rx) = mpsc::unbounded_channel();
+            links.push(Links {
+                endpoint: endpoint.clone(),
+                identity: None,
+                session: Arc::new(session),
+                chain_id: 7,
+                genesis_hash: [1; 32],
+                committee: RwLock::new(committee.clone()),
+                me: RwLock::new(v as ValidatorIndex),
+                inputs,
+                endpoints: Arc::new(RwLock::new(EndpointBook::new())),
+                announcement: Arc::new(RwLock::new(None)),
+                channels: EpochChannels::new(committee.epoch),
+                dial_diag: parking_lot::Mutex::new(HashMap::new()),
+                dial_stage: parking_lot::Mutex::new(HashMap::new()),
+                unreached: parking_lot::Mutex::new(HashSet::new()),
+            });
+            published.push((announcement, opening));
+        }
+
+        for i in 0..N {
+            for j in (0..N).filter(|&j| j != i) {
+                let ((dial_send, dial_recv), (mut answer_send, mut answer_recv)) = pipe();
+                let (dialled, answered) = tokio::join!(
+                    links[i].dial_handshake(
+                        dial_send,
+                        dial_recv,
+                        &committee,
+                        i as ValidatorIndex,
+                        j as ValidatorIndex,
+                        &published[i].0,
+                        &published[i].1,
+                        &published[j].0,
+                        StreamKind::Control,
+                    ),
+                    links[j].answer_handshake(
+                        [i as u8 + 1; 32],
+                        &mut answer_send,
+                        &mut answer_recv,
+                    ),
+                );
+                let (mut dial_sealer, mut dial_opener, mut dial_send, mut dial_recv) =
+                    dialled.unwrap_or_else(|e| panic!("{i} dialling {j}: {e}"));
+                let (epoch, peer, kind, mut answer_sealer, mut answer_opener) =
+                    answered.unwrap_or_else(|e| panic!("{j} answering {i}: {e}"));
+                assert_eq!(
+                    (epoch, peer, kind),
+                    (0, i as ValidatorIndex, StreamKind::Control)
+                );
+
+                let out = format!("{i} to {j}").into_bytes();
+                let sealed = dial_sealer.seal(&out).expect("seal");
+                tenzro_iroh::write_frame(&mut dial_send, &sealed)
+                    .await
+                    .unwrap();
+                let got = tenzro_iroh::read_frame(&mut answer_recv, MAX_WIRE_FRAME)
+                    .await
+                    .unwrap();
+                assert_eq!(answer_opener.open(&got).expect("opens"), out);
+
+                let back = format!("{j} to {i}").into_bytes();
+                let sealed = answer_sealer.seal(&back).expect("seal");
+                tenzro_iroh::write_frame(&mut answer_send, &sealed)
+                    .await
+                    .unwrap();
+                let got = tenzro_iroh::read_frame(&mut dial_recv, MAX_WIRE_FRAME)
+                    .await
+                    .unwrap();
+                assert_eq!(dial_opener.open(&got).expect("opens"), back);
+                // A side does not open what it sealed itself: each direction
+                // has its own key.
+                let own = dial_sealer.seal(b"echo").expect("seal");
+                assert!(dial_opener.open(&own).is_err());
+            }
+        }
+
+        // A peer that takes the stream and never answers.
+        let ((dial_send, dial_recv), _silent) = pipe();
+        let wall = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
+        let stalled = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            links[0].dial_handshake(
+                dial_send,
+                dial_recv,
+                &committee,
+                0,
+                1,
+                &published[0].0,
+                &published[0].1,
+                &published[1].0,
+                StreamKind::Control,
+            ),
+        )
+        .await;
+        assert!(stalled.is_err(), "the silent peer's handshake finished");
+        let waited = started.elapsed();
+        assert!(
+            waited >= HANDSHAKE_TIMEOUT && waited < HANDSHAKE_TIMEOUT + Duration::from_millis(10),
+            "{waited:?}"
+        );
+        assert!(
+            wall.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            wall.elapsed()
         );
     }
 
@@ -6884,11 +8504,77 @@ pub(crate) mod tests {
         )
     }
 
+    /// Notes which keys were written by a synced batch.
+    #[derive(Default)]
+    struct SyncNotingStore {
+        inner: tenzro_storage::MemoryStore,
+        synced: parking_lot::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl KvStore for SyncNotingStore {
+        fn get(&self, cf: &str, key: &[u8]) -> tenzro_storage::Result<Option<Vec<u8>>> {
+            self.inner.get(cf, key)
+        }
+        fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> tenzro_storage::Result<()> {
+            self.inner.put(cf, key, value)
+        }
+        fn delete(&self, cf: &str, key: &[u8]) -> tenzro_storage::Result<()> {
+            self.inner.delete(cf, key)
+        }
+        fn write_batch(&self, ops: Vec<tenzro_storage::WriteOp>) -> tenzro_storage::Result<()> {
+            self.inner.write_batch(ops)
+        }
+        fn write_batch_sync(
+            &self,
+            ops: Vec<tenzro_storage::WriteOp>,
+        ) -> tenzro_storage::Result<()> {
+            for op in &ops {
+                if let tenzro_storage::WriteOp::Put { key, .. } = op {
+                    self.synced.lock().push(key.clone());
+                }
+            }
+            self.inner.write_batch_sync(ops)
+        }
+        fn get_keys_with_prefix(
+            &self,
+            cf: &str,
+            prefix: &[u8],
+        ) -> tenzro_storage::Result<Vec<Vec<u8>>> {
+            self.inner.get_keys_with_prefix(cf, prefix)
+        }
+    }
+
+    /// The issue time a validator keeps for its announcements is written by
+    /// a synced batch and read back as kept.
+    #[test]
+    fn the_kept_announcement_issue_time_is_written_through_to_disk() {
+        let records = Arc::new(SyncNotingStore::default());
+        let handle = handle_with_stores(
+            Arc::new(tenzro_storage::MemoryStore::new()),
+            records.clone(),
+        );
+        let me = [5u8; 32];
+        handle.record_announcement_issued(&me, None, 1_000, 1_000);
+        assert!(
+            records
+                .synced
+                .lock()
+                .contains(&announcement_issued_key(&me)),
+            "the issue time was written unsynced"
+        );
+        assert_eq!(handle.kept_announcement_issue(&me), Some(1_000));
+    }
+
     fn handle_with_stores(
         node: Arc<dyn KvStore>,
         records: Arc<dyn KvStore>,
     ) -> Arc<ConsensusHandle> {
-        let key = tenzro_consensus::ValidatorPublicKey::new(
+        handle_with_stakes(&[1 << 80], node, records)
+    }
+
+    /// One validator key, freshly generated.
+    fn fresh_key() -> tenzro_consensus::ValidatorPublicKey {
+        tenzro_consensus::ValidatorPublicKey::new(
             tenzro_crypto::pq::MlDsaSigningKey::generate()
                 .verifying_key_bytes()
                 .to_vec(),
@@ -6896,14 +8582,42 @@ pub(crate) mod tests {
                 .public_key_sec1()
                 .to_vec(),
         )
-        .expect("well-formed key");
-        let v = tenzro_consensus::validator::ValidatorInfo::new(
-            Address::new([1; 32]),
-            key,
-            [1; 32],
-            1 << 80,
-        );
-        let em = Arc::new(EpochManager::new(vec![v], 100).expect("epoch manager"));
+        .expect("well-formed key")
+    }
+
+    /// A handle over the validators of `stakes`, validator `i` holding
+    /// address and node key `[i + 1; 32]`.
+    fn handle_with_stakes(
+        stakes: &[u128],
+        node: Arc<dyn KvStore>,
+        records: Arc<dyn KvStore>,
+    ) -> Arc<ConsensusHandle> {
+        let keys: Vec<_> = stakes.iter().map(|_| fresh_key()).collect();
+        handle_with_keyed_stakes(stakes, &keys, node, records)
+    }
+
+    /// [`handle_with_stakes`] with the validators' keys given, so that
+    /// handles standing for the nodes of one network hold the same set.
+    fn handle_with_keyed_stakes(
+        stakes: &[u128],
+        keys: &[tenzro_consensus::ValidatorPublicKey],
+        node: Arc<dyn KvStore>,
+        records: Arc<dyn KvStore>,
+    ) -> Arc<ConsensusHandle> {
+        let validators: Vec<_> = stakes
+            .iter()
+            .zip(keys)
+            .enumerate()
+            .map(|(i, (stake, key))| {
+                tenzro_consensus::validator::ValidatorInfo::new(
+                    Address::new([i as u8 + 1; 32]),
+                    key.clone(),
+                    [i as u8 + 1; 32],
+                    *stake,
+                )
+            })
+            .collect();
+        let em = Arc::new(EpochManager::new(validators, 100).expect("epoch manager"));
         ConsensusHandle::new(
             tenzro_consensus::ConsensusConfig::default(),
             TimeRules::default(),
@@ -6936,6 +8650,104 @@ pub(crate) mod tests {
         fn block_base_fee(&self) -> u128 {
             0
         }
+    }
+
+    /// A transfer signed by `seed` at `nonce` and `gas_price`, carrying a
+    /// memo of `memo` bytes.
+    fn sized_transfer(seed: u8, nonce: u64, gas_price: u64, memo: usize) -> SignedTransaction {
+        use tenzro_crypto::composite::HybridSigner as _;
+        use tenzro_types::transaction::{Transaction, TransactionType};
+        let signer = tenzro_crypto::composite::testing::TestHybridSigner::p256_only(seed);
+        let mut tx = Transaction::new(
+            tenzro_types::primitives::ChainId::from(1),
+            Address::new([seed; 32]),
+            Address::default(),
+            tenzro_types::primitives::Nonce::from(nonce),
+            TransactionType::Transfer { amount: 1 },
+            21_000,
+            gas_price,
+        );
+        tx.memo = (memo > 0).then(|| "m".repeat(memo));
+        let sig = signer
+            .sign(
+                tenzro_crypto::composite::SignatureContext::Transaction,
+                tx.hash().as_bytes(),
+            )
+            .unwrap();
+        SignedTransaction::new(tx, signer.public_key().p256.clone(), sig)
+    }
+
+    /// A transaction larger than any part, at the head of the pool (it pays
+    /// most), is set apart and the cut goes on to the transfers behind it;
+    /// before, the walk stopped on it and cut nothing while it headed the
+    /// pool. A part that fills still ends the cut.
+    #[test]
+    fn a_transaction_too_large_for_any_part_does_not_stop_the_cut() {
+        const BUDGET: usize = 4_000;
+        let mempool = tenzro_consensus::mempool::Mempool::new(Arc::new(
+            tenzro_consensus::ConsensusConfig::default(),
+        ));
+        mempool.set_state_reader(Arc::new(AtNonce(0))).unwrap();
+        let mut big = sized_transfer(1, 0, 5_000_000_000, 2 * BUDGET);
+        mempool.add_transaction(big.clone()).unwrap();
+        for seed in 2..=4 {
+            mempool
+                .add_transaction(sized_transfer(seed, 0, 1_000_000_000, 0))
+                .unwrap();
+        }
+        let walk = |budget: usize| {
+            let (mut bytes, mut chosen, mut never) = (0usize, Vec::new(), Vec::new());
+            mempool.select_with(
+                |h, tx| match part_fit(&mut bytes, tx, budget, chosen.len()) {
+                    Fit::Never => {
+                        never.push(*h);
+                        Pick::Wait
+                    }
+                    Fit::Full => Pick::Stop,
+                    Fit::Fits => {
+                        chosen.push(*h);
+                        Pick::Take
+                    }
+                },
+            );
+            (chosen, never)
+        };
+        let (chosen, never) = walk(BUDGET);
+        assert_eq!(
+            never,
+            vec![big.hash()],
+            "the oversized transaction is set apart"
+        );
+        assert_eq!(chosen.len(), 3, "the transfers behind it are cut");
+
+        let one = bincode::serialized_size(&sized_transfer(2, 0, 1, 0)).unwrap() as usize;
+        let (chosen, _) = walk(2 * one + one / 2);
+        assert_eq!(chosen.len(), 2, "a full part still ends the cut");
+    }
+
+    /// The pool refuses a transaction no part can carry, whose sender is
+    /// told why, and takes one that just fits.
+    #[test]
+    fn the_pool_refuses_a_transaction_no_part_can_carry() {
+        let config = tenzro_consensus::ConsensusConfig {
+            batch_max_bytes: 4_000,
+            ..tenzro_consensus::ConsensusConfig::default()
+        };
+        let carried = tenzro_consensus::batch::part_budget(config.batch_max_bytes);
+        let mempool = tenzro_consensus::mempool::Mempool::new(Arc::new(config));
+        mempool.set_state_reader(Arc::new(AtNonce(0))).unwrap();
+        let base =
+            bincode::serialized_size(&sized_transfer(1, 0, 1_000_000_000, 1)).unwrap() as usize;
+        let fits = sized_transfer(1, 0, 1_000_000_000, 1 + carried - base);
+        assert_eq!(bincode::serialized_size(&fits).unwrap() as usize, carried);
+        mempool.add_transaction(fits).unwrap();
+        let refused = mempool
+            .add_transaction(sized_transfer(2, 0, 1_000_000_000, 2 + carried - base))
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("no block can take it"),
+            "{refused}"
+        );
     }
 
     /// A sender's later transaction is not cut into a new part while the
@@ -7053,6 +8865,154 @@ pub(crate) mod tests {
         }
     }
 
+    /// A validator enters the next epoch only on the committee the network
+    /// certified: a matching root enters, another root stands it down, and
+    /// no certified close yet makes it wait.
+    #[test]
+    fn a_validator_enters_only_on_the_certified_next_committee() {
+        assert_eq!(handover_step(Some([9; 32]), [9; 32]), HandoverStep::Enter);
+        assert_eq!(
+            handover_step(Some([9; 32]), [8; 32]),
+            HandoverStep::StandDown,
+            "a validator with a divergent registry entered"
+        );
+        assert_eq!(handover_step(None, [9; 32]), HandoverStep::Wait);
+    }
+
+    /// The certified root comes from the closing certificate when it is
+    /// held; otherwise from the closing body, but only when the bodies up
+    /// to the handover chain to it. A divergent body of this validator's
+    /// own at the boundary gives nothing, so the validator waits rather
+    /// than trusts it; and with nothing held it waits too.
+    #[test]
+    fn the_certified_next_root_comes_only_from_what_the_network_certified() {
+        let handle = handle_with_one_validator();
+        let h = handle.time.handover_confirmations;
+        assert!(h > 0);
+        let chain = |closing: Checkpoint| {
+            let mut bodies = vec![closing];
+            for i in 1..=h {
+                let mut next = body(0, bodies[0].index + i, 6, 5, false);
+                next.prev = bodies.last().unwrap().digest();
+                bodies.push(next);
+            }
+            bodies
+        };
+        let boundary = 10;
+        let honest = chain(body(0, boundary, 6, 5, true));
+        let handover = honest.last().unwrap().clone();
+        assert_eq!(handle.certified_next_root(&handover), None, "nothing held");
+
+        // The network's bodies are held: the root is read through the chain.
+        for b in &honest[..honest.len() - 1] {
+            handle.record_body(b);
+        }
+        assert_eq!(handle.certified_next_root(&handover), Some([9; 32]));
+
+        // This validator's own closing body, with another root, sits at the
+        // boundary instead: it does not chain to the handover.
+        let mut own = body(0, boundary, 6, 5, true);
+        own.next_committee_root = Some([8; 32]);
+        handle.record_body(&own);
+        assert_eq!(
+            handle.certified_next_root(&handover),
+            None,
+            "a body the network did not certify was trusted"
+        );
+
+        // The closing certificate is held: it decides.
+        handle.record_certificate(&certified(honest[0].clone()));
+        assert_eq!(handle.certified_next_root(&handover), Some([9; 32]));
+    }
+
+    /// The validator waits, and does not enter, on the two cases that give
+    /// no root: the bodies from the closing checkpoint to the handover are
+    /// not all held (one missing in the middle), and a held closing body
+    /// that carries no root. Both end by data arriving: the missing body is
+    /// fetched by block sync's body-gap pass (the wait asks it to run), and
+    /// a closing checkpoint is never cut without a root, so the second does
+    /// not occur on a certified chain.
+    #[test]
+    fn a_handover_without_a_root_or_without_all_its_bodies_waits_until_they_are_held() {
+        let handle = handle_with_one_validator();
+        let h = handle.time.handover_confirmations;
+        let boundary = 20;
+        let mut bodies = vec![body(0, boundary, 6, 5, true)];
+        for i in 1..=h {
+            let mut next = body(0, boundary + i, 6, 5, false);
+            next.prev = bodies.last().unwrap().digest();
+            bodies.push(next);
+        }
+        let handover = bodies.last().unwrap().clone();
+        let held = bodies.len() - 1;
+
+        // Every body but the middle one: nothing is read, and the step is to wait.
+        for (n, b) in bodies[..held].iter().enumerate() {
+            if n != held / 2 || held == 1 {
+                handle.record_body(b);
+            }
+        }
+        if held > 1 {
+            let certified = handle.certified_next_root(&handover);
+            assert_eq!(certified, None, "a gap in the bodies gave a root");
+            assert_eq!(handover_step(certified, [9; 32]), HandoverStep::Wait);
+            handle.record_body(&bodies[held / 2]);
+        }
+        assert_eq!(handle.certified_next_root(&handover), Some([9; 32]));
+
+        // A closing body with no root certifies nothing.
+        let mut rootless = bodies.clone();
+        rootless[0].next_committee_root = None;
+        for i in 1..rootless.len() {
+            rootless[i].prev = rootless[i - 1].digest();
+        }
+        let handover = rootless.last().unwrap().clone();
+        for b in &rootless[..rootless.len() - 1] {
+            handle.record_body(b);
+        }
+        let certified = handle.certified_next_root(&handover);
+        assert_eq!(certified, None);
+        assert_eq!(handover_step(certified, [9; 32]), HandoverStep::Wait);
+    }
+
+    /// The certificates of the first checkpoints of an epoch that cover a
+    /// block are kept (the epoch's first block, and the block that commits
+    /// its state root, `STATE_ROOT_LAG` blocks later, are in them), so a
+    /// snapshot taken at the epoch's first block can be certified from them
+    /// later; the ones after are kept only on the retention stride. A
+    /// checkpoint covering no block keeps nothing.
+    #[test]
+    fn the_certificates_of_the_first_checkpoints_of_an_epoch_are_kept() {
+        let handle = handle_with_one_validator();
+        let cps = [
+            body(2, 10, 4, 5, false),
+            body(3, 11, 6, 5, false),
+            body(3, 12, 6, 7, false),
+            body(3, 13, 8, 9, false),
+            body(3, 14, 10, 11, false),
+            body(3, 15, 12, 13, false),
+            body(3, 16, 14, 15, false),
+        ];
+        for cp in &cps {
+            handle.record_certificate(&certified(cp.clone()));
+        }
+        assert!(handle.certificate(11).is_none(), "it covers no block");
+        for index in [12, 13, 14] {
+            assert!(
+                handle.certificate(index).is_some(),
+                "checkpoint {index} is among the first of epoch 3 to cover a block"
+            );
+        }
+        assert!(handle.certificate(15).is_none());
+        assert!(handle.keeps_snapshot_anchor(&cps[2]) && !handle.keeps_snapshot_anchor(&cps[1]));
+        assert!(handle.keeps_snapshot_anchor(&cps[4]));
+        assert!(!handle.keeps_snapshot_anchor(&cps[5]));
+        assert!(
+            handle.keeps_snapshot_anchor(&body(0, 1, 1, 3, false)),
+            "epoch 0 opens with block 1"
+        );
+    }
+
     fn certified(cp: Checkpoint) -> Certificate {
         Certificate {
             checkpoint: cp,
@@ -7083,6 +9043,101 @@ pub(crate) mod tests {
         let mut expected = vec![39, 39 + h];
         expected.extend(50..70);
         assert_eq!(held, expected);
+    }
+
+    /// A node that missed the certificate of a checkpoint ordering no block
+    /// lacks its body, and serves no evidence for a range across it; with
+    /// the body fetched the range is served to the epoch's end.
+    #[test]
+    fn a_missing_body_is_found_and_once_filled_a_range_is_served_across_it() {
+        let handle = handle_with_one_validator();
+        handle.record_boundary(0, 9);
+        for i in (0..=9u64).filter(|i| *i != 5) {
+            handle.record_body(&body(0, i, i, i, i == 9));
+        }
+        handle.record_certificate(&certified(body(0, 9, 9, 9, true)));
+        assert_eq!(
+            handle.body_gap(512, 0),
+            BodyGap::Missing { first: 5, last: 5 }
+        );
+        assert!(handle.evidence_for(3, 8, 0, None).1.is_none());
+
+        handle.record_body(&body(0, 5, 5, 5, false));
+        assert_eq!(handle.body_gap(512, 0), BodyGap::Complete);
+        let (bodies, cert) = handle.evidence_for(3, 8, 0, None);
+        assert_eq!(cert.map(|c| c.checkpoint.index), Some(9));
+        assert_eq!(
+            bodies.iter().map(|b| b.index).collect::<Vec<_>>(),
+            (3..9).collect::<Vec<_>>()
+        );
+    }
+
+    /// A run longer than one request is fetched from its top, where the
+    /// held body above authenticates it.
+    #[test]
+    fn a_long_run_of_missing_bodies_is_asked_for_from_its_top() {
+        let handle = handle_with_one_validator();
+        for i in [0u64, 1, 40] {
+            handle.record_body(&body(0, i, i, i, false));
+        }
+        handle.record_certificate(&certified(body(0, 40, 40, 40, false)));
+        assert_eq!(
+            handle.body_gap(16, 0),
+            BodyGap::Missing {
+                first: 24,
+                last: 39
+            }
+        );
+        assert_eq!(
+            handle.body_gap(512, 0),
+            BodyGap::Missing { first: 2, last: 39 }
+        );
+    }
+
+    /// A node that joined from a snapshot holds no body below it: the look
+    /// moves on past the stretch nothing can authenticate, and finds a run
+    /// above it when told where to look from.
+    #[test]
+    fn a_stretch_with_no_held_body_above_is_passed_over() {
+        let handle = handle_with_one_validator();
+        let top = BODY_GAP_LOOKAHEAD + 20;
+        for i in [top - 3, top] {
+            handle.record_body(&body(0, i, i, i, false));
+        }
+        handle.record_certificate(&certified(body(0, top, top, top, false)));
+        assert_eq!(
+            handle.body_gap(512, 0),
+            BodyGap::Unanchored {
+                resume: BODY_GAP_LOOKAHEAD
+            }
+        );
+        assert_eq!(
+            handle.body_gap(512, BODY_GAP_LOOKAHEAD),
+            BodyGap::Missing {
+                first: BODY_GAP_LOOKAHEAD,
+                last: top - 4
+            }
+        );
+        assert_eq!(
+            handle.body_gap(512, top - 3),
+            BodyGap::Missing {
+                first: top - 2,
+                last: top - 1
+            }
+        );
+    }
+
+    /// Bodies pruned below the history floor are not fetched again.
+    #[test]
+    fn bodies_pruned_below_the_history_floor_are_not_a_gap() {
+        let handle = handle_with_one_validator();
+        handle.record_boundary(0, 39);
+        for i in 0..70u64 {
+            handle.record_body(&body(u64::from(i > 39), i, i, i, i == 39));
+        }
+        handle.record_certificate(&certified(body(1, 69, 69, 69, false)));
+        handle.prune_bodies_below(50);
+        assert_eq!(handle.body_gap(512, 0), BodyGap::Complete);
     }
 
     /// Below the history floor a node keeps what a proof from genesis and
@@ -7117,12 +9172,27 @@ pub(crate) mod tests {
                 .filter(|i| records.get(CF, &prefix(*i)).unwrap().is_some())
                 .collect()
         };
-        assert_eq!(held(certificate_key), vec![0, 20, 39, 40, 39 + h, 60]);
+        // The first checkpoints of an epoch that cover a block are kept too,
+        // up to the block that commits a snapshot's state root: checkpoints
+        // 0 to 2 open epoch 0 and the three after the handover open epoch 1.
+        let kept: std::collections::BTreeSet<u64> = [0, 1, 2, 20, 39, 40, 60]
+            .into_iter()
+            .chain(39 + h..=39 + h + 3)
+            .collect();
+        assert_eq!(
+            held(certificate_key),
+            kept.iter().copied().collect::<Vec<_>>()
+        );
         assert_eq!(held(compact_key).len(), 70);
 
         handle.prune_certificates_below(50);
 
-        assert_eq!(held(certificate_key), vec![39, 39 + h, 60]);
+        let after: Vec<u64> = kept
+            .iter()
+            .copied()
+            .filter(|i| *i >= 50 || *i == 39 || *i == 39 + h)
+            .collect();
+        assert_eq!(held(certificate_key), after);
         assert_eq!(held(compact_key), (50..70).collect::<Vec<_>>());
         assert_eq!(held(body_key).len(), 70, "every checkpoint body stays");
         assert!(records.get(CF, LATEST_CERTIFICATE_KEY).unwrap().is_some());
@@ -7145,7 +9215,7 @@ pub(crate) mod tests {
     #[test]
     fn a_checkpoint_past_pruned_records_is_certified_from_the_proof_log() {
         use crate::proof_log::{ChainProof, ProofLog, certification};
-        use tenzro_consensus::light_client::{Certification, EpochHandover, HandoverChainJournal};
+        use tenzro_light::light_client::{Certification, EpochHandover, HandoverChainJournal};
 
         let node: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
         let records: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
@@ -7223,10 +9293,10 @@ pub(crate) mod tests {
     #[test]
     fn consensus_records_stay_flat_over_years_once_a_chain_proof_covers_them() {
         use crate::proof_log::{ChainProof, ProofLog};
-        use tenzro_consensus::light_client::{EpochHandover, HandoverChainJournal};
         use tenzro_consensus::{
             CompositeSignature, Member, SessionCertificate, ValidatorPublicKey,
         };
+        use tenzro_light::light_client::{EpochHandover, HandoverChainJournal};
 
         // Scaled down from 8,760 hour-long epochs a year; the bound does not
         // depend on the count.
@@ -7402,10 +9472,11 @@ pub(crate) mod tests {
     }
 
     /// A validator that stood down follows; it starts consensus again at a
-    /// handover it imports. One certified longer ago than an epoch lasts is
-    /// passed over while its peers report later certificates, but joined
-    /// when they report none: a network short of a quorum without this
-    /// validator certifies no later handover.
+    /// handover it imports. One its peers stand more than an epoch of
+    /// checkpoints past is passed over; one they stand within an epoch of
+    /// is joined however long ago it was certified and whatever this node's
+    /// clock reads: a network short of a quorum without this validator
+    /// certifies no later handover.
     #[test]
     fn a_follower_joins_at_a_past_handover_its_peers_certified_nothing_past() {
         let handle = handle_with_one_validator();
@@ -7418,19 +9489,77 @@ pub(crate) mod tests {
             "not the handover"
         );
 
-        handle.note_network_checkpoint(3 + h);
-        assert!(!handle.joins_at(&handover), "the network is past it");
+        let epoch = handle.time.epoch_checkpoints;
+        let members = |c| handle.note_network_checkpoint(NetworkStanding::Members(c));
+        members(2 + h);
+        assert!(handle.joins_at(&handover), "the network stands there");
 
-        let stalled = handle_with_one_validator();
-        stalled.record_certificate(&certified(body(0, 2, 6, 5, true)));
-        stalled.note_network_checkpoint(2 + h);
-        assert!(stalled.joins_at(&handover), "the network stands there");
+        // The network certified a little past it and stalled, long ago by
+        // any clock: the epoch it starts is still the network's.
+        members(2 + h + epoch - 1);
+        assert!(
+            handle.joins_at(&handover),
+            "the network is within the epoch"
+        );
+        for timestamp_ms in [unix_ms(), u64::MAX] {
+            let dated = Checkpoint {
+                timestamp_ms,
+                ..handover.clone()
+            };
+            assert!(handle.joins_at(&dated), "the clock decides nothing");
+        }
 
-        let recent = Checkpoint {
+        // Exactly an epoch of checkpoints past it stands the next handover.
+        members(2 + h + epoch);
+        assert!(
+            !handle.joins_at(&handover),
+            "the next handover is certified"
+        );
+        // A later round that finds the network lower does not undo it.
+        members(2 + h);
+        assert!(!handle.joins_at(&handover), "the estimate fell back");
+    }
+
+    /// A node that reached fewer than three members reads the clock: a
+    /// handover older than an epoch with some peer past it is passed over,
+    /// a current one or one no peer is past is joined. With no word at all
+    /// it joins.
+    #[test]
+    fn with_too_few_members_answering_an_old_handover_with_a_peer_past_it_is_passed_over() {
+        let handle = handle_with_one_validator();
+        let h = handle.time.handover_confirmations;
+        handle.record_certificate(&certified(body(0, 2, 6, 5, true)));
+        let old = body(0, 2 + h, 6, 5, false);
+        assert_eq!(old.timestamp_ms, 0, "certified long ago");
+        assert!(handle.joins_at(&old), "no word of the network");
+
+        handle.note_network_checkpoint(NetworkStanding::Peers(2 + h));
+        assert!(handle.joins_at(&old), "the peers are not past it");
+        handle.note_network_checkpoint(NetworkStanding::Peers(3 + h));
+        assert!(!handle.joins_at(&old), "an old handover the peers are past");
+        let current = Checkpoint {
             timestamp_ms: unix_ms(),
-            ..handover.clone()
+            ..old.clone()
         };
-        assert!(handle.joins_at(&recent), "a current handover");
+        assert!(handle.joins_at(&current), "a current handover");
+        // Once members answer, their estimate decides and the clock does not.
+        handle.note_network_checkpoint(NetworkStanding::Members(2 + h));
+        assert!(handle.joins_at(&old), "the members stand there");
+    }
+
+    /// One false answer from the peers, the furthest a checkpoint can be,
+    /// keeps an old handover from being joined for that round only: the
+    /// next round's answers replace it.
+    #[test]
+    fn one_far_answer_from_the_peers_does_not_stick() {
+        let handle = handle_with_one_validator();
+        let h = handle.time.handover_confirmations;
+        handle.record_certificate(&certified(body(0, 2, 6, 5, true)));
+        let old = body(0, 2 + h, 6, 5, false);
+        handle.note_network_checkpoint(NetworkStanding::Peers(u64::MAX));
+        assert!(!handle.joins_at(&old), "the round it was answered");
+        handle.note_network_checkpoint(NetworkStanding::Peers(2 + h));
+        assert!(handle.joins_at(&old), "the false answer stuck");
     }
 
     /// Epoch 0 orders blocks 1-3 and ends on checkpoints that order none;
@@ -7626,6 +9755,72 @@ pub(crate) mod tests {
         );
         assert_eq!(first.root(), again.root());
         assert_eq!(first.epoch, 1);
+    }
+
+    /// Seeds the committee cap into the node store the way a genesis or an
+    /// enacted change leaves it: the gate's activation epoch and the number.
+    fn seed_committee_cap(node: &Arc<dyn KvStore>, activation_epoch: u64, members: u64) {
+        let mut state = tenzro_vm::StateAdapter::with_storage(node.clone());
+        tenzro_vm::native::set_genesis_param(
+            &mut state,
+            tenzro_vm::governance::COMMITTEE_CAP_GATE,
+            activation_epoch,
+        );
+        tenzro_vm::native::set_genesis_param(
+            &mut state,
+            tenzro_vm::governance::MAX_COMMITTEE_MEMBERS_PARAM,
+            members,
+        );
+        state.commit().expect("the cap is stored");
+    }
+
+    /// Seven validators, a cap of four from epoch 1 on: every node that reads
+    /// the state at the closing block derives the same committee of the four
+    /// highest stakes; before the cap's epoch, and with the gate dormant,
+    /// the committee holds all seven.
+    #[test]
+    fn the_next_committee_holds_the_highest_stakes_once_the_cap_is_in_force() {
+        let stakes = [700u128, 100, 600, 200, 500, 300, 400];
+        let keys: Vec<_> = stakes.iter().map(|_| fresh_key()).collect();
+        let derive = |node: &Arc<dyn KvStore>| {
+            let handle = handle_with_keyed_stakes(
+                &stakes,
+                &keys,
+                node.clone(),
+                Arc::new(tenzro_storage::MemoryStore::new()),
+            );
+            handle.executed.store(3, Ordering::Release);
+            let committee = handle.derive_next_committee(0, 3, None).expect("derives");
+            let mut held: Vec<u128> = handle
+                .epoch_manager
+                .current_epoch()
+                .validator_set
+                .iter()
+                .map(|v| v.stake)
+                .collect();
+            held.sort_unstable();
+            (committee, held)
+        };
+        let new_node = || -> Arc<dyn KvStore> { Arc::new(tenzro_storage::MemoryStore::new()) };
+
+        let dormant = new_node();
+        assert_eq!(derive(&dormant).1.len(), 7, "the gate is dormant");
+
+        let later = new_node();
+        seed_committee_cap(&later, 5, 4);
+        assert_eq!(derive(&later).1.len(), 7, "before the cap's epoch");
+
+        let live = new_node();
+        seed_committee_cap(&live, 1, 4);
+        let (first, held) = derive(&live);
+        assert_eq!(held, vec![400, 500, 600, 700], "the four highest stakes");
+        assert_eq!(first.members().len(), 4);
+        let (second, _) = derive(&live);
+        assert_eq!(
+            first.root(),
+            second.root(),
+            "every node derives the same committee"
+        );
     }
 
     /// A committee is derived only from the state at the epoch's last block:
@@ -8363,6 +10558,121 @@ pub(crate) mod tests {
             1,
             "a derivation that held is kept"
         );
+    }
+
+    /// A follower that executed the blocks ordered after the closing
+    /// checkpoint (up to its handover) before it derived the next committee
+    /// derives it from that state when, and only when, the root is the one
+    /// the closing checkpoint commits; a wrong root, or more blocks than the
+    /// handover covers, leave it in its epoch. Held back, it adopts the
+    /// committee from the closing checkpoint it holds.
+    #[test]
+    fn a_follower_past_the_closing_block_adopts_the_committee_the_root_names() {
+        let stakes = [1u128 << 80];
+        let keys = [fresh_key()];
+        let build = || {
+            handle_with_keyed_stakes(
+                &stakes,
+                &keys,
+                Arc::new(tenzro_storage::MemoryStore::new()),
+                Arc::new(tenzro_storage::MemoryStore::new()),
+            )
+        };
+        // The committee the validators derived at the closing block (height 3).
+        let reference = build();
+        reference.executed.store(3, Ordering::Release);
+        let root = reference
+            .derive_next_committee(0, 3, None)
+            .expect("derives")
+            .root();
+
+        let follower = build();
+        follower.executed.store(4, Ordering::Release);
+        assert!(
+            follower.derive_next_committee(0, 3, Some(root)).is_err(),
+            "the strict derivation refuses past the closing height"
+        );
+        assert!(
+            follower
+                .derive_next_committee_through(0, 3, Some([9; 32]), 4)
+                .is_err(),
+            "a root the state does not derive fails"
+        );
+        assert_eq!(follower.epoch_manager.current_epoch().number, 0);
+        let late = build();
+        late.executed.store(5, Ordering::Release);
+        assert!(
+            late.derive_next_committee_through(0, 3, Some(root), 4)
+                .is_err(),
+            "more blocks than the handover covers are refused"
+        );
+        let derived = follower
+            .derive_next_committee_through(0, 3, Some(root), 4)
+            .expect("the root decides");
+        assert_eq!(derived.root(), root);
+
+        // The same follower, holding the closing and handover checkpoints.
+        let adopting = build();
+        let h = adopting.time.handover_confirmations;
+        let mut closing = body(0, 10, 3, 3, true);
+        closing.next_committee_root = Some(root);
+        adopting.record_body(&closing);
+        // The handover's certificate is what records the boundary here, as it
+        // does for a follower that never passed the closing checkpoint.
+        let handover = body(0, 10 + h, 4, 4, false);
+        adopting.record_body(&handover);
+        assert_eq!(adopting.boundary(0), None);
+        adopting.record_certificate(&certified(handover));
+        assert_eq!(adopting.boundary(0), Some(10));
+        adopting.executed.store(4, Ordering::Release);
+        assert_eq!(adopting.known_epoch(), 0);
+        adopting.adopt_pending_committee();
+        assert_eq!(
+            adopting.known_epoch(),
+            1,
+            "the next epoch's committee is known"
+        );
+        assert_eq!(adopting.committee(1).map(|c| c.root()), Some(root));
+
+        // A follower that holds the handover certificate but not the closing
+        // checkpoint's body asks for it, and adopts once it has it, without a
+        // recorded boundary.
+        let fetching = build();
+        let handover = body(0, 10 + h, 4, 4, false);
+        fetching.record_body(&handover);
+        fetching.record_certificate(&certified(handover));
+        fetching.executed.store(4, Ordering::Release);
+        assert_eq!(fetching.boundary(0), None);
+        assert_eq!(fetching.closing_body_wanted(), Some((10, 10 + h - 1)));
+        fetching.adopt_pending_committee();
+        assert_eq!(fetching.known_epoch(), 0, "nothing to adopt from yet");
+        let mut closing = body(0, 10, 3, 3, true);
+        closing.next_committee_root = Some(root);
+        fetching.record_body(&closing);
+        assert_eq!(fetching.closing_body_wanted(), None);
+        fetching.adopt_pending_committee();
+        assert_eq!(fetching.known_epoch(), 1);
+        assert_eq!(fetching.committee(1).map(|c| c.root()), Some(root));
+
+        // Another attempt waits until the executed height or the latest
+        // certificate moves: a peer cannot make the node derive again.
+        let stuck = build();
+        let mut wrong = body(0, 10, 3, 3, true);
+        wrong.next_committee_root = Some([9; 32]);
+        stuck.record_body(&wrong);
+        let handover = body(0, 10 + h, 4, 4, false);
+        stuck.record_body(&handover);
+        stuck.record_certificate(&certified(handover));
+        stuck.executed.store(4, Ordering::Release);
+        stuck.adopt_pending_committee();
+        assert_eq!(
+            stuck.known_epoch(),
+            0,
+            "a root the state does not derive is refused"
+        );
+        assert_eq!(*stuck.adopt_tried.lock(), Some((4, 10 + h, 10)));
+        stuck.adopt_pending_committee();
+        assert_eq!(stuck.known_epoch(), 0);
     }
 
     /// Two callers at one boundary derive the committee one after the other:

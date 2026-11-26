@@ -266,6 +266,26 @@ pub(crate) fn arrival() -> Option<Arrival> {
 /// within the address's identity-check budget, to be admitted only on its
 /// sender's own quota. Rejections return HTTP 429 with a `Retry-After`
 /// header and a body in the limiter's [`Answer`] shape.
+/// `app` behind the edge every public agent-facing listener (MCP, A2A)
+/// puts in front of its concurrency limit: the per-address floor with
+/// `limits`, counted by the address `surface` assigns, then load shedding,
+/// outermost. One source then cannot take every concurrency slot, and under
+/// load a shed request is refused before it costs anything.
+pub fn public_edge(
+    app: axum::Router,
+    limits: LimitsSource,
+    surface: Arc<SurfacePolicy>,
+) -> axum::Router {
+    app.layer(axum::middleware::from_fn_with_state(
+        IpRateLimiter::governed(limits, surface, Answer::JsonRpc),
+        ip_rate_limit,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        crate::load_shed::ShedGate::new(),
+        crate::load_shed::load_shed,
+    ))
+}
+
 pub async fn ip_rate_limit(
     State(limiter): State<Arc<IpRateLimiter>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -351,6 +371,94 @@ mod tests {
     /// Past its floor an address still gets transaction submissions through,
     /// marked so admission takes them only on the sender's own quota, up to
     /// its identity-check budget; any other request is refused.
+    #[tokio::test]
+    async fn the_public_edge_holds_one_address_to_its_floor() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let surface =
+            SurfacePolicy::from_config(&crate::config::NodeConfig::default(), None).unwrap();
+        let limits = AddressLimits {
+            rate_per_sec: 1,
+            burst: 1,
+            identity_checks_per_sec: 0,
+        };
+        let app = public_edge(
+            axum::Router::new().route("/mcp", axum::routing::post(|| async { "served" })),
+            Arc::new(move || limits),
+            Arc::new(surface),
+        );
+        let call = |peer: &str| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#,
+                ))
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let mut statuses = Vec::new();
+        for _ in 0..4 {
+            statuses.push(call("198.51.100.21:4000").await);
+        }
+        assert_eq!(statuses[0], axum::http::StatusCode::OK);
+        assert!(
+            statuses[1..].contains(&axum::http::StatusCode::TOO_MANY_REQUESTS),
+            "{statuses:?}"
+        );
+        // Another address has its own floor.
+        assert_eq!(call("198.51.100.22:4000").await, axum::http::StatusCode::OK);
+    }
+
+    /// A source cannot buy a fresh floor with a forged forwarding header or
+    /// by connecting over loopback: the header counts only from a trusted
+    /// proxy, which a default node lists none of, and no address is exempt.
+    #[tokio::test]
+    async fn the_public_edge_floor_survives_forged_forwarding_and_loopback() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let surface =
+            SurfacePolicy::from_config(&crate::config::NodeConfig::default(), None).unwrap();
+        let limits = AddressLimits {
+            rate_per_sec: 1,
+            burst: 1,
+            identity_checks_per_sec: 0,
+        };
+        let app = public_edge(
+            axum::Router::new().route("/a2a", axum::routing::post(|| async { "served" })),
+            Arc::new(move || limits),
+            Arc::new(surface),
+        );
+        let call = |peer: &str, forwarded: Option<String>| {
+            let mut req = Request::builder().method("POST").uri("/a2a");
+            if let Some(f) = forwarded {
+                req = req.header("x-forwarded-for", f);
+            }
+            let mut req = req
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{}}"#,
+                ))
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        for peer in ["203.0.113.7:5000", "127.0.0.1:5000"] {
+            let mut statuses = Vec::new();
+            for i in 0..4 {
+                statuses.push(call(peer, Some(format!("192.0.2.{i}"))).await);
+            }
+            assert!(
+                statuses[1..].contains(&axum::http::StatusCode::TOO_MANY_REQUESTS),
+                "{peer}: {statuses:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn past_the_floor_only_submissions_go_on_to_the_sender_quota() {
         use axum::body::Body;

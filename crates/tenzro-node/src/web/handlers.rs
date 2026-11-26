@@ -1268,9 +1268,16 @@ pub async fn prometheus_metrics(State(state): State<Arc<WebState>>) -> axum::res
     // Observations are made inline by the SSE handlers in `rpc.rs` —
     // here we just serialize the current state.
     if let Some(ref node) = state.node {
+        // How the prices of the live network offers for each model compare.
+        crate::price_watch::encode_prometheus(node, &mut body);
         node.stream_slo_metrics.encode_prometheus(&mut body);
         // Administrative calls by method and outcome.
         node.admin_audit().encode_prometheus(&mut body);
+    }
+    // Requests refused to delegated agents and untrusted input reaching them.
+    crate::agent_guardrails::encode_prometheus(&mut body);
+    if let Some(node) = &state.node {
+        crate::agent_guardrails::encode_spend_prometheus(node, &mut body);
     }
 
     // Append per-DID admission lane metrics. The

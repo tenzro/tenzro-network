@@ -2091,6 +2091,7 @@ impl IdentityRegistry {
                 "a machine must be transferred to a real identity".to_string(),
             ));
         }
+        self.check_new_controller(machine_did, new_controller)?;
 
         let previous = {
             let mut identity = self
@@ -2169,6 +2170,51 @@ impl IdentityRegistry {
             "Machine {} ownership transferred from {:?} to {}",
             machine_did, previous, new_controller
         );
+        Ok(())
+    }
+
+    /// Refuses a controller that cannot be held to account for `machine_did`:
+    /// the machine itself, one that is unknown or not active, and one that is
+    /// not a root (an active human, an institution, or a machine nobody
+    /// controls). A delegated machine roots nothing, and a machine that
+    /// controls others is not handed on while it does, so every ownership
+    /// chain stays one link deep and no cycle can form.
+    fn check_new_controller(&self, machine_did: &str, new_controller: &str) -> Result<()> {
+        if new_controller == machine_did {
+            return Err(IdentityError::PermissionDenied(
+                "a machine cannot own itself".to_string(),
+            ));
+        }
+        {
+            let owner = self
+                .identities
+                .get(new_controller)
+                .ok_or_else(|| IdentityError::NotFound(new_controller.to_string()))?;
+            if owner.status != IdentityStatus::Active {
+                return Err(IdentityError::PermissionDenied(format!(
+                    "new owner {} is {:?}",
+                    new_controller, owner.status
+                )));
+            }
+            if !(owner.is_human()
+                || owner.is_institution()
+                || (owner.is_machine() && owner.controller_did().is_none()))
+            {
+                return Err(IdentityError::PermissionDenied(
+                    "a machine is transferred to a human, an institution or a machine nobody controls"
+                        .to_string(),
+                ));
+            }
+        }
+        if self
+            .identities
+            .iter()
+            .any(|e| e.controller_did() == Some(machine_did))
+        {
+            return Err(IdentityError::PermissionDenied(
+                "a machine that controls others is not transferred while it does".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -2257,7 +2303,7 @@ impl IdentityRegistry {
     /// `AssertionMethod` public keys matching the Ed25519 keypairs the test
     /// signs with. Production code must not call this — use the typed
     /// `register_*` / `update_*` methods instead.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn upsert_identity_for_test(&self, identity: TenzroIdentity) {
         let key = identity.did.to_string();
         self.persist_identity(&key, &identity);
@@ -2485,6 +2531,92 @@ mod tests {
             .clone()
     }
 
+    /// An agent that leaves the partner it was delegated under keeps its DID,
+    /// keys, post-quantum key and wallet, and the partner's later revocation
+    /// no longer reaches it.
+    #[test]
+    fn an_agent_leaves_its_partner_with_its_identity_intact() {
+        let registry = IdentityRegistry::new();
+        const PARTNER: &str = "did:tenzro:human:7b0c2f3e-5d2a-4d55-9a3e-1c2b3d4e5f61";
+        const OWNER: &str = "did:tenzro:human:7b0c2f3e-5d2a-4d55-9a3e-1c2b3d4e5f62";
+        const AGENT: &str = "did:tenzro:machine:7b0c2f3e-5d2a-4d55-9a3e-1c2b3d4e5f63";
+        let identity = |did: &str, data: IdentityData, seed: u8| TenzroIdentity {
+            did: TenzroDid::parse(did).unwrap(),
+            public_keys: vec![PublicKeyInfo {
+                key_id: "key-1".into(),
+                key_type: "P-256".into(),
+                public_key: test_pubkey(seed),
+                purposes: vec![KeyPurpose::Authentication],
+            }],
+            identity_data: data,
+            status: IdentityStatus::Active,
+            wallet_address: Address::new([seed; 32]),
+            wallet_id: String::new(),
+            pq_verifying_key: vec![seed; 4],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+        };
+        let human = |name: &str, machines: Vec<String>| IdentityData::Human {
+            display_name: name.into(),
+            controlled_machines: machines,
+        };
+        registry.upsert_identity_for_test(identity(
+            PARTNER,
+            human("partner", vec![AGENT.into()]),
+            1,
+        ));
+        registry.upsert_identity_for_test(identity(OWNER, human("owner", Vec::new()), 2));
+        registry.upsert_identity_for_test(identity(
+            AGENT,
+            IdentityData::Machine {
+                capabilities: vec!["payment".into()],
+                controller_did: Some(PARTNER.into()),
+                reputation: 0,
+                tenzro_agent_id: None,
+                erc8004_agent_id: None,
+            },
+            3,
+        ));
+        let before = registry.resolve(AGENT).unwrap();
+
+        registry.set_machine_controller(AGENT, OWNER).unwrap();
+        let after = registry.resolve(AGENT).unwrap();
+        assert_eq!(after.did.to_string(), before.did.to_string());
+        assert_eq!(
+            after.public_keys[0].public_key,
+            before.public_keys[0].public_key
+        );
+        assert_eq!(after.pq_verifying_key, before.pq_verifying_key);
+        assert_eq!(after.wallet_address, before.wallet_address);
+        assert!(matches!(
+            &after.identity_data,
+            IdentityData::Machine { controller_did: Some(c), .. } if c == OWNER
+        ));
+        let controls = |did: &str| match registry.resolve(did).unwrap().identity_data {
+            IdentityData::Human {
+                controlled_machines,
+                ..
+            } => controlled_machines,
+            _ => unreachable!(),
+        };
+        assert!(controls(PARTNER).is_empty());
+        assert_eq!(controls(OWNER), vec![AGENT.to_string()]);
+
+        // The partner is revoked later; the agent it no longer controls stays.
+        registry
+            .revoke_from_chain(PARTNER, "sanctioned".into(), "governance".into())
+            .unwrap();
+        assert_eq!(
+            registry.resolve(PARTNER).unwrap().status,
+            IdentityStatus::Revoked
+        );
+        assert_eq!(
+            registry.resolve(AGENT).unwrap().status,
+            IdentityStatus::Active
+        );
+    }
+
     #[tokio::test]
     async fn test_register_human() {
         let registry = IdentityRegistry::new();
@@ -2557,6 +2689,68 @@ mod tests {
             .unwrap();
         assert_eq!(machines.len(), 1);
         assert_eq!(machines[0].did_string(), machine.did_string());
+    }
+
+    /// Ownership chains stay one link deep: a machine is never handed to
+    /// itself, to a delegated machine, or on while it controls others, so a
+    /// cycle cannot form; a human or a machine nobody controls may take it.
+    #[tokio::test]
+    async fn a_machine_owner_chain_stays_one_link_and_cannot_cycle() {
+        let registry = IdentityRegistry::new();
+        let human = registry
+            .register_human_via_binder(b"cred".to_vec(), test_pubkey(1), "Alice".to_string())
+            .await
+            .unwrap()
+            .identity
+            .did_string();
+        let machine = |key: u8| {
+            let registry = &registry;
+            let human = human.clone();
+            async move {
+                registry
+                    .register_machine_with_fee(&human, test_pubkey(key), vec![])
+                    .await
+                    .unwrap()
+                    .identity
+                    .did_string()
+            }
+        };
+        let (m1, m2) = (machine(2).await, machine(3).await);
+        let a1 = test_autonomous(&registry, 4).await.unwrap().did_string();
+        let a2 = test_autonomous(&registry, 5).await.unwrap().did_string();
+
+        assert!(registry.set_machine_controller(&m1, &m1).is_err(), "itself");
+        assert!(
+            registry.set_machine_controller(&m1, &m2).is_err(),
+            "a delegated machine"
+        );
+        assert!(
+            registry.set_machine_controller(&a1, &m1).is_err(),
+            "a delegated machine"
+        );
+        assert!(
+            registry
+                .set_machine_controller(&m1, "did:tenzro:human:nobody")
+                .is_err()
+        );
+
+        // A machine nobody controls may take another; the pair cannot then
+        // be closed into a cycle, and the owner cannot itself be handed on.
+        registry.set_machine_controller(&a1, &a2).unwrap();
+        assert!(
+            registry.set_machine_controller(&a2, &a1).is_err(),
+            "a cycle"
+        );
+        assert!(
+            registry.set_machine_controller(&a2, &human).is_err(),
+            "owns a1"
+        );
+        registry.set_machine_controller(&m1, &a2).unwrap();
+        registry.set_machine_controller(&m1, &human).unwrap();
+        assert_eq!(
+            registry.resolve(&m1).unwrap().controller_did(),
+            Some(human.as_str())
+        );
     }
 
     /// An autonomous machine whose DID derives from its own bound key.
@@ -3552,5 +3746,66 @@ mod tests {
             a.did, b.did,
             "distinct hardware must derive distinct identities"
         );
+    }
+
+    async fn human_with_machines(
+        registry: &IdentityRegistry,
+        machines: u8,
+    ) -> (String, Vec<String>) {
+        let human = registry
+            .register_human_via_binder(b"cred".to_vec(), test_pubkey(1), "Alice".to_string())
+            .await
+            .unwrap()
+            .identity
+            .did_string();
+        let mut dids = Vec::new();
+        for seed in 0..machines {
+            let machine = registry
+                .register_machine_with_fee(&human, test_pubkey(10 + seed), vec![])
+                .await
+                .unwrap()
+                .identity;
+            dids.push(machine.did_string());
+        }
+        (human, dids)
+    }
+
+    fn controller_of(registry: &IdentityRegistry, did: &str) -> Option<String> {
+        registry
+            .resolve(did)
+            .unwrap()
+            .controller_did()
+            .map(str::to_string)
+    }
+
+    #[tokio::test]
+    async fn a_machine_is_not_handed_to_an_unknown_or_inactive_controller() {
+        let registry = IdentityRegistry::new();
+        let (human, machines) = human_with_machines(&registry, 1).await;
+        let machine = &machines[0];
+
+        let unknown = "did:tenzro:human:00000000-0000-0000-0000-000000000000";
+        assert!(matches!(
+            registry.set_machine_controller(machine, unknown),
+            Err(IdentityError::NotFound(_))
+        ));
+        assert_eq!(controller_of(&registry, machine), Some(human.clone()));
+
+        let other = registry
+            .register_human_via_binder(b"cred-2".to_vec(), test_pubkey(2), "Bob".to_string())
+            .await
+            .unwrap()
+            .identity
+            .did_string();
+        registry.suspend(&other).unwrap();
+        assert!(matches!(
+            registry.set_machine_controller(machine, &other),
+            Err(IdentityError::PermissionDenied(_))
+        ));
+        assert_eq!(controller_of(&registry, machine), Some(human));
+
+        registry.reactivate(&other).unwrap();
+        registry.set_machine_controller(machine, &other).unwrap();
+        assert_eq!(controller_of(&registry, machine), Some(other));
     }
 }

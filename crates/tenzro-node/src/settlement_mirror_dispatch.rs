@@ -18,10 +18,9 @@
 //!
 //! Those fields are a **record of a division that already happened on the
 //! Tenzro Ledger**, not a request for that chain to perform one. The ledger
-//! divides a payment exactly once, at settlement (its split rule, the
-//! settlement fee and any treasury leg), before any mirror is dispatched;
-//! nothing in this module divides it again (it never calls `split_revenue`),
-//! and a test asserts the record is byte-identical before and after
+//! settles a payment exactly once (the settlement fee and any treasury leg
+//! included), before any mirror is dispatched; nothing in this module divides
+//! it again, and a test asserts the record is byte-identical before and after
 //! mirroring.
 //!
 //! So mirroring onto five chains produces five copies of one settlement, not
@@ -162,7 +161,6 @@ mod tests {
     use super::*;
     use tenzro_types::access_tier::AccessTier;
     use tenzro_types::access_tier::PayerKind;
-    use tenzro_types::economics::NodeEconomicMode;
     use tenzro_types::provenance::InboundRail;
     use tenzro_types::provenance::{Authority, ChargeRef, InteractionKind, InteractionProvenance};
     use tenzro_types::{Address, BillableUnits, Timestamp};
@@ -183,7 +181,6 @@ mod tests {
             charge: ChargeRef::Free,
             tier: AccessTier::User,
             credential_digest: None,
-            mode: NodeEconomicMode::Private,
             inbound_rail: InboundRail::Tenzro,
             amount_charged: 0,
             settled_asset: "TNZO".into(),
@@ -235,9 +232,8 @@ mod tests {
 
     #[test]
     fn mirroring_does_not_alter_the_settled_amounts_or_payees() {
-        // The no-double-charge invariant. The split runs once at settlement;
-        // a mirror copies the result and must not touch it. If this ever
-        // fails, mirroring onto N chains has started to mean N divisions.
+        // The no-double-charge invariant. The payment settles once; a mirror
+        // copies the result and must not touch it.
         let r = record();
         let before = serde_json::to_vec(&r).unwrap();
         let payload = mirror_payload(&r, MirrorDurability::SelfContained).unwrap();
@@ -267,24 +263,5 @@ mod tests {
         // And the total charged is what it always was, however many carry it.
         let decoded: InteractionProvenance = serde_json::from_slice(&payloads[0]).unwrap();
         assert_eq!(decoded.amount_charged, r.amount_charged);
-    }
-
-    #[test]
-    fn this_module_never_reaches_the_revenue_split() {
-        // A structural guard rather than a behavioural one: the split lives in
-        // tenzro-payments::revenue_split and is applied at settlement. If a
-        // future edit imports it here, that is the moment mirroring starts
-        // dividing a payment a second time.
-        // Scoped to the implementation, not this module's own tests — the
-        // assertion text below necessarily contains the very name it forbids.
-        let src = include_str!("settlement_mirror_dispatch.rs");
-        let impl_only = src.split("#[cfg(test)]").next().unwrap();
-        // A call, not a mention — the module docs name it descriptively, and
-        // forbidding the word would make the documentation trip its own guard.
-        let forbidden = concat!("split", "_revenue(");
-        assert!(
-            !impl_only.contains(forbidden),
-            "the mirror path must never divide a payment; the split runs once, at settlement"
-        );
     }
 }

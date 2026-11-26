@@ -125,12 +125,6 @@ fn quick_admission() -> tenzro_node::identity_gate::OnboardingConfig {
     cfg
 }
 
-fn free_udp_port() -> std::net::SocketAddr {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .expect("a free loopback port")
-}
-
 // ---------------------------------------------------------------------------
 // The mock endpoint
 // ---------------------------------------------------------------------------
@@ -409,7 +403,7 @@ async fn connector(upstream_url: &str) -> Node {
     let mut config = NodeConfig {
         data_dir: tmp.path().to_path_buf(),
         iroh: tenzro_iroh::TenzroIrohConfig {
-            bind_addr: free_udp_port(),
+            bind_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
             endpoint_secret: endpoint_secret(tmp.path()),
             ..Default::default()
         },
@@ -452,7 +446,7 @@ async fn gateway() -> Node {
     let config = NodeConfig {
         data_dir: tmp.path().to_path_buf(),
         iroh: tenzro_iroh::TenzroIrohConfig {
-            bind_addr: free_udp_port(),
+            bind_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
             endpoint_secret: endpoint_secret(tmp.path()),
             ..Default::default()
         },
@@ -555,7 +549,12 @@ fn assert_billable_receipt(connector: &Node, model: &str, receipt: &Value, outpu
         },
     };
     assert_eq!(
-        leg.billable(Some(tokens()), Some(receipt), output_hash),
+        leg.billable(
+            &connector.node.catalog(),
+            Some(tokens()),
+            Some(receipt),
+            output_hash,
+        ),
         (tokens(), BillingBasis::SignedReceipt),
         "a gateway bills the leg from this receipt"
     );

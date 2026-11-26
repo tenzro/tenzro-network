@@ -164,7 +164,7 @@ mod tests {
         let keys = vec![k.public_sec1()];
         let s = NoticeStore::open(d.path());
         let p = policy(&keys, NOW);
-        let v3 = signed(&k, &notice("0.2.3", Severity::Normal));
+        let v3 = signed(&k, &notice("0.2.9", Severity::Normal));
         s.offer(&v3, &p).unwrap();
         // An older release, even correctly signed, is refused and the cache is unchanged.
         let err = s
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(s.raw().unwrap(), v3);
         assert!(matches!(s.offer(&v3, &p).unwrap(), Offer::Known(_)));
         // The same release signed later (a raised severity) replaces it.
-        let mut again = notice("0.2.3", Severity::Security);
+        let mut again = notice("0.2.9", Severity::Security);
         again.issued_ms += 60_000;
         assert!(matches!(
             s.offer(&signed(&k, &again), &p).unwrap(),

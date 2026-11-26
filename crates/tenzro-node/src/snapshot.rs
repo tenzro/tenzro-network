@@ -56,8 +56,11 @@ use tenzro_types::primitives::{BlockHeight, Hash};
 use tracing::{info, warn};
 
 /// Default spacing between snapshots, in blocks. A snapshot is taken at the
-/// first epoch start at least this far past the previous one.
-pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 100_000;
+/// first epoch start at least this far past the previous one, so a node that
+/// restores the newest snapshot replays at most this many blocks plus the
+/// rest of an epoch: at the public network's 500 ms spacing, a joiner's tail
+/// is minutes, not hours.
+pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 10_000;
 
 /// Default number of snapshots kept.
 pub const DEFAULT_SNAPSHOT_RETAIN_COUNT: usize = 2;
@@ -67,6 +70,27 @@ const INDEX_PREFIX: &[u8] = b"state_snapshot:";
 
 /// Metadata key recording the height a node restored its state at.
 pub const RESTORED_HEIGHT_KEY: &[u8] = b"state_sync_restored_height";
+
+/// The snapshot height a join from the checkpoint block at
+/// `checkpoint_height` restores: block `A` commits the state root of
+/// `A - STATE_ROOT_LAG`.
+pub fn snapshot_height_for(checkpoint_height: u64) -> Result<u64> {
+    checkpoint_height
+        .checked_sub(STATE_ROOT_LAG)
+        .filter(|h| *h > 0)
+        .ok_or_else(|| {
+            NodeError::Other(format!(
+                "checkpoint height {checkpoint_height} commits no snapshot height: it must be above {STATE_ROOT_LAG}"
+            ))
+        })
+}
+
+/// The join checkpoint of the snapshot at `snapshot_height`: the height of
+/// the block that commits its state root, the inverse of
+/// [`snapshot_height_for`].
+pub const fn checkpoint_height_for(snapshot_height: u64) -> u64 {
+    snapshot_height + STATE_ROOT_LAG
+}
 
 /// Whether the block at `height` opens its epoch, read from the stored
 /// headers: it is the first block after genesis, or its header names a later
@@ -79,14 +103,18 @@ pub async fn opens_epoch_at(store: &Arc<RocksDbStore>, height: u64) -> Result<bo
 }
 
 /// Whether a snapshot can be cut at `height`: it opens an epoch
-/// ([`opens_epoch_at`]) and the epoch holds a second block, so the closing
-/// checkpoint a restored node adopts the next committee from exists.
+/// ([`opens_epoch_at`]) and a block follows it, in the same epoch or in a
+/// later one. A node restored from it then takes the epoch's closing
+/// checkpoint from the evidence a peer serves with the blocks after, and an
+/// epoch that holds this one block is as good as one that holds more: on a
+/// chain whose epochs are shorter than the time between blocks it is the only
+/// kind there is.
 pub async fn can_snapshot_at(store: &Arc<RocksDbStore>, height: u64) -> Result<bool> {
     Ok(epoch_open_shape(store, height).await?.unwrap_or(false))
 }
 
-/// `None` when `height` opens no epoch; otherwise whether the next block
-/// carries the same epoch.
+/// `None` when `height` opens no epoch; otherwise whether a next block is
+/// stored.
 async fn epoch_open_shape(store: &Arc<RocksDbStore>, height: u64) -> Result<Option<bool>> {
     let blocks = BlockStoreImpl::new(store.clone()).map_err(NodeError::Storage)?;
     let Some(block) = blocks
@@ -117,7 +145,7 @@ async fn epoch_open_shape(store: &Arc<RocksDbStore>, height: u64) -> Result<Opti
         .await
         .map_err(NodeError::Storage)?
         .map(|b| b.header.epoch);
-    Ok(Some(next_epoch == Some(block.header.epoch)))
+    Ok(Some(next_epoch.is_some()))
 }
 
 /// The newest height at or below `up_to` that opens an epoch ([`opens_epoch_at`]).
@@ -329,16 +357,11 @@ pub fn check_anchor_chain(height: u64, chain: &[Block], trusted: &Hash) -> Resul
             "the snapshot at height {height} is not at the start of an epoch"
         )));
     }
-    // The epoch must hold more than that one block: a node restored at an
-    // epoch's only block has no closing checkpoint to adopt the next
-    // committee from. On a quiet network every epoch can be a single block,
-    // and then no snapshot is taken; a node joins by full sync, which is
-    // cheap on a chain with so few blocks.
-    if chain[2].header.epoch != chain[1].header.epoch {
-        return Err(NodeError::Other(format!(
-            "the snapshot at height {height} is the only block of its epoch"
-        )));
-    }
+    // The epoch may hold this one block only: a node restored at it takes
+    // the epoch's closing checkpoint, and so the next committee, from the
+    // evidence a peer serves with the block that follows. On a quiet chain
+    // every epoch is a single block, and refusing them left no snapshot to
+    // join from.
     let last = chain.last().expect("length checked above");
     if last.hash() != *trusted {
         return Err(NodeError::Other(format!(
@@ -363,6 +386,11 @@ pub trait BlobStore: Send + Sync {
     async fn release(&self, _hashes: &[[u8; 32]]) -> Result<()> {
         Ok(())
     }
+}
+
+/// Decodes a blob a peer served as one value with nothing after it.
+fn peer_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> bincode::Result<T> {
+    tenzro_network::wire::decode_bounded(bytes, bytes.len())
 }
 
 /// A peer to sync from: answers which manifest it holds for a height.
@@ -444,11 +472,18 @@ impl ManifestSource for IrohSnapshotTransport {
     }
 }
 
-/// A snapshot this node holds, as listed over RPC.
+/// A snapshot this node holds, as listed over RPC. `checkpoint_height` and
+/// `checkpoint_hash` are the join checkpoint a node passes as
+/// `--checkpoint-height` / `--checkpoint-hash` to restore this snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct SnapshotSummary {
     /// Height of the committed state.
     pub height: u64,
+    /// Height of the block that commits the state root:
+    /// `height + STATE_ROOT_LAG`.
+    pub checkpoint_height: u64,
+    /// Hash of that block, hex with `0x`.
+    pub checkpoint_hash: String,
     /// State root at that height.
     pub state_root: String,
     /// BLAKE3 hash of the manifest blob.
@@ -470,9 +505,33 @@ pub struct SnapshotStore {
     leases: parking_lot::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
     /// Held while a snapshot is produced or snapshots are removed.
     work: tokio::sync::Mutex<()>,
+    /// Told the files of the retained snapshots whenever they change.
+    served: Option<ServedBlobs>,
 }
 
+/// Receives the blob hashes of every retained snapshot.
+pub type ServedBlobs = Arc<dyn Fn(std::collections::HashSet<[u8; 32]>) + Send + Sync>;
+
 impl SnapshotStore {
+    /// Reports the files of the retained snapshots to `served` after every
+    /// change, so the blob provider can serve them to a joining node that
+    /// has no registered identity yet.
+    pub fn with_served_blobs(mut self, served: ServedBlobs) -> Self {
+        self.served = Some(served);
+        self
+    }
+
+    async fn announce_served(&self) {
+        let Some(served) = &self.served else { return };
+        match self.index() {
+            Ok(index) => match self.referenced(&index).await {
+                Ok(hashes) => served(hashes),
+                Err(e) => warn!(error = %e, "the retained snapshots' files could not be listed"),
+            },
+            Err(e) => warn!(error = %e, "the snapshot index could not be read"),
+        }
+    }
+
     /// Checks the free space of the volume holding `dir` before every
     /// snapshot, and refuses to start one it cannot finish.
     pub fn with_data_dir(mut self, dir: std::path::PathBuf) -> Self {
@@ -495,6 +554,7 @@ impl SnapshotStore {
             data_dir: None,
             leases: Default::default(),
             work: Default::default(),
+            served: None,
         }
     }
 
@@ -541,13 +601,29 @@ impl SnapshotStore {
         })?))
     }
 
-    /// Every snapshot this node holds, newest first.
+    /// Every snapshot this node holds, newest first, each with the join
+    /// checkpoint that restores it. The checkpoint block is read from the
+    /// snapshot's own anchor chain, the blocks a joiner checks it against.
     pub async fn list(&self) -> Result<Vec<SnapshotSummary>> {
         let mut out = Vec::new();
         for (height, hash) in self.index()?.into_iter().rev() {
             if let Some(m) = self.manifest(height).await? {
+                let chain: Vec<Block> =
+                    bincode::deserialize(&self.blobs.fetch(&m.anchor_chain).await?)
+                        .map_err(|e| NodeError::Other(format!("decode anchor chain: {e}")))?;
+                let checkpoint_height = checkpoint_height_for(height);
+                let checkpoint = chain
+                    .last()
+                    .filter(|b| b.header.height.0 == checkpoint_height)
+                    .ok_or_else(|| {
+                        NodeError::Other(format!(
+                            "the anchor chain of the snapshot at {height} does not end at block {checkpoint_height}"
+                        ))
+                    })?;
                 out.push(SnapshotSummary {
                     height,
+                    checkpoint_height,
+                    checkpoint_hash: format!("0x{}", checkpoint.hash()),
                     state_root: m.state_root.to_string(),
                     manifest_blob: hex::encode(hash),
                     buckets: m.buckets.len(),
@@ -625,6 +701,7 @@ impl SnapshotStore {
         )?;
         put_metadata(&*self.store, &Self::index_key(state_height), &manifest_hash)?;
         self.retain_locked(cap, 0).await?;
+        self.announce_served().await;
         Ok(manifest)
     }
 
@@ -865,7 +942,9 @@ impl SnapshotStore {
     pub async fn maintain(&self) -> Result<()> {
         let _work = self.work.lock().await;
         let cap = self.cap()?;
-        self.retain_locked(cap, 0).await
+        let kept = self.retain_locked(cap, 0).await;
+        self.announce_served().await;
+        kept
     }
 }
 
@@ -886,6 +965,231 @@ impl tenzro_iroh::SnapshotDirectory for SnapshotStore {
         }
         hash
     }
+}
+
+/// The block a snapshot join restores to, as a serving peer certifies it:
+/// the block that commits the snapshot's state root, the certification of
+/// the checkpoint covering it, and every header hash that checkpoint covers,
+/// which rebuild its blocks root. What a node with no checkpoint of its own
+/// joins from once it has verified it from its genesis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertifiedAnchor {
+    /// Height of the block.
+    pub height: u64,
+    /// The checkpoint's certification, as the proof log writes it.
+    pub proof: Vec<u8>,
+    /// Header hashes of the checkpoint's blocks, in height order.
+    pub block_hashes: Vec<[u8; 32]>,
+}
+
+impl CertifiedAnchor {
+    /// The block this anchor names, once the certification verifies from
+    /// `genesis` (a chained one against the handover program `program`)
+    /// and the block hashes rebuild the certified checkpoint's blocks root
+    /// with the block among them.
+    pub fn verify(
+        &self,
+        genesis: &tenzro_light::TrustAnchor,
+        program: Option<[u8; 32]>,
+    ) -> Result<(u64, Hash)> {
+        let proof = crate::storage_maintenance::decode_proof(&self.proof)?;
+        let cp = crate::proof_log::verify_certification(&proof, genesis, program)
+            .map_err(|e| NodeError::Other(format!("the anchor is not certified: {e}")))?;
+        if self.height < cp.first_height || self.height > cp.last_height {
+            return Err(NodeError::Other(format!(
+                "checkpoint {} covers heights {}..={}, not the anchor {}",
+                cp.index, cp.first_height, cp.last_height, self.height
+            )));
+        }
+        if self.block_hashes.len() as u64 != cp.last_height - cp.first_height + 1
+            || tenzro_consensus::checkpoint::merkle_root(&self.block_hashes) != cp.blocks_root
+        {
+            return Err(NodeError::Other(format!(
+                "the anchor's block hashes do not rebuild checkpoint {}'s blocks root",
+                cp.index
+            )));
+        }
+        let hash = self.block_hashes[(self.height - cp.first_height) as usize];
+        Ok((self.height, Hash::new(hash)))
+    }
+}
+
+/// Serves the certified anchor of the newest snapshot this node holds whose
+/// block a checkpoint it can certify covers.
+pub struct SnapshotAnchors {
+    snapshots: Arc<SnapshotStore>,
+    consensus: Arc<crate::consensus_driver::ConsensusHandle>,
+    proof_log: Option<Arc<parking_lot::Mutex<crate::proof_log::ProofLog>>>,
+    cache: AnchorCache,
+}
+
+/// How long a built anchor is served again without building it anew.
+const ANCHOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long the finding that no anchor can be built is kept.
+const NO_ANCHOR_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The anchor served for the newest snapshot, built once and kept, so peers
+/// that cost nothing to make cannot make the node prove its chain from genesis
+/// again and again. One build runs at a time: a request that finds the cache
+/// cold while another build runs is told it is busy, and asks again.
+#[derive(Default)]
+struct AnchorCache {
+    /// The snapshot height it was built for, what the build gave, and when.
+    slot: parking_lot::Mutex<Option<(u64, Option<Vec<u8>>, std::time::Instant)>>,
+    building: std::sync::atomic::AtomicBool,
+}
+
+/// Lets go of the build slot when the build ends, however it ends.
+struct Building<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for Building<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl AnchorCache {
+    /// The anchor for the snapshot at `newest`: the kept one while it is fresh,
+    /// otherwise what `build` makes, when no other build runs.
+    async fn serve<F, Fut>(
+        &self,
+        newest: u64,
+        now: std::time::Instant,
+        build: F,
+    ) -> tenzro_iroh::AnchorAnswer
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<Vec<u8>>>,
+    {
+        use tenzro_iroh::AnchorAnswer;
+        let answer =
+            |bytes: Option<Vec<u8>>| bytes.map_or(AnchorAnswer::None, AnchorAnswer::Anchor);
+        if let Some((height, bytes, at)) = self.slot.lock().as_ref() {
+            let ttl = if bytes.is_some() {
+                ANCHOR_CACHE_TTL
+            } else {
+                NO_ANCHOR_TTL
+            };
+            if *height == newest && now.saturating_duration_since(*at) < ttl {
+                return answer(bytes.clone());
+            }
+        }
+        if self
+            .building
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return AnchorAnswer::Busy;
+        }
+        let _building = Building(&self.building);
+        let built = build().await;
+        *self.slot.lock() = Some((newest, built.clone(), now));
+        answer(built)
+    }
+}
+
+impl std::fmt::Debug for SnapshotAnchors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotAnchors").finish_non_exhaustive()
+    }
+}
+
+impl SnapshotAnchors {
+    /// Anchors of `snapshots`, certified by `consensus` and, for epochs it
+    /// pruned, the proof log.
+    pub fn new(
+        snapshots: Arc<SnapshotStore>,
+        consensus: Arc<crate::consensus_driver::ConsensusHandle>,
+        proof_log: Option<Arc<parking_lot::Mutex<crate::proof_log::ProofLog>>>,
+    ) -> Self {
+        Self {
+            snapshots,
+            consensus,
+            proof_log,
+            cache: AnchorCache::default(),
+        }
+    }
+
+    async fn anchor_at(&self, height: u64) -> Option<CertifiedAnchor> {
+        let cp = self.consensus.checkpoint_covering(height)?;
+        let proof =
+            crate::proof_log::certification(&self.consensus, self.proof_log.as_deref(), cp.index)?;
+        let blocks = BlockStoreImpl::new(self.snapshots.store.clone()).ok()?;
+        let mut block_hashes = Vec::new();
+        for h in cp.first_height..=cp.last_height {
+            block_hashes.push(
+                blocks
+                    .get_block_by_height(BlockHeight(h))
+                    .await
+                    .ok()??
+                    .hash()
+                    .0,
+            );
+        }
+        Some(CertifiedAnchor {
+            height,
+            proof: crate::proof_log::encode_proof(&proof),
+            block_hashes,
+        })
+    }
+}
+
+#[async_trait]
+impl tenzro_iroh::AnchorSource for SnapshotAnchors {
+    async fn newest_anchor(&self) -> tenzro_iroh::AnchorAnswer {
+        let Ok(summaries) = self.snapshots.list().await else {
+            return tenzro_iroh::AnchorAnswer::None;
+        };
+        let Some(newest) = summaries.first().map(|s| s.checkpoint_height) else {
+            return tenzro_iroh::AnchorAnswer::None;
+        };
+        self.cache
+            .serve(newest, std::time::Instant::now(), || async {
+                for summary in &summaries {
+                    if let Some(anchor) = self.anchor_at(summary.checkpoint_height).await {
+                        return bincode::serialize(&anchor).ok();
+                    }
+                }
+                None
+            })
+            .await
+    }
+}
+
+/// The block to join from, taken from the first of `peers` whose certified
+/// snapshot anchor verifies from `genesis`. An error, naming each peer's
+/// reason, when none serves one: a peer that does not speak the anchor ALPN
+/// counts as serving none.
+pub async fn certified_anchor_from_peers(
+    endpoint: &tenzro_iroh::Endpoint,
+    peers: &[tenzro_iroh::EndpointId],
+    genesis: &tenzro_light::TrustAnchor,
+    program: Option<[u8; 32]>,
+) -> Result<(u64, Hash)> {
+    let mut reasons = Vec::new();
+    for peer in peers {
+        let anchor = match tenzro_iroh::request_anchor(endpoint, *peer).await {
+            Ok(Some(bytes)) => bincode::deserialize::<CertifiedAnchor>(&bytes)
+                .map_err(|e| NodeError::Other(format!("the anchor does not decode: {e}")))
+                .and_then(|a| a.verify(genesis, program)),
+            Ok(None) => Err(NodeError::Other("serves no certified anchor".to_string())),
+            Err(e) => Err(NodeError::Other(e.to_string())),
+        };
+        match anchor {
+            Ok((height, hash)) => {
+                info!(%peer, height, %hash, "Joining from a snapshot anchor certified from genesis");
+                return Ok((height, hash));
+            }
+            Err(e) => {
+                warn!(%peer, error = %e, "No certified snapshot anchor from peer");
+                reasons.push(format!("{peer}: {e}"));
+            }
+        }
+    }
+    Err(NodeError::Other(format!(
+        "no peer serves a certified snapshot anchor ({})",
+        reasons.join("; ")
+    )))
 }
 
 /// Outcome of a completed state sync.
@@ -920,11 +1224,7 @@ pub async fn state_sync(
     anchor_hash: Hash,
     epoch_duration: u64,
 ) -> Result<SyncedState> {
-    let height = anchor_height.checked_sub(STATE_ROOT_LAG).ok_or_else(|| {
-        NodeError::Other(format!(
-            "checkpoint height {anchor_height} is below the state-root lag"
-        ))
-    })?;
+    let height = snapshot_height_for(anchor_height)?;
     let kv = store.clone() as Arc<dyn KvStore>;
     let trie = StateTrie::new(kv.clone());
     match trie.latest_version().map_err(NodeError::Storage)? {
@@ -937,9 +1237,13 @@ pub async fn state_sync(
     }
 
     let manifest_hash = source.manifest_for(height).await?.ok_or_else(|| {
-        NodeError::Other(format!("the peer holds no snapshot at height {height}"))
+        NodeError::Other(format!(
+            "the peer holds no snapshot at height {height}, the state checkpoint {anchor_height} commits; \
+             a join checkpoint must be one a serving node lists (`tenzro node snapshots`: \
+             checkpoint_height, checkpoint_hash)"
+        ))
     })?;
-    let manifest: SnapshotManifest = bincode::deserialize(&blobs.fetch(&manifest_hash).await?)
+    let manifest: SnapshotManifest = peer_blob(&blobs.fetch(&manifest_hash).await?)
         .map_err(|e| NodeError::Other(format!("decode manifest: {e}")))?;
     if manifest.height != height {
         return Err(NodeError::Other(format!(
@@ -947,7 +1251,7 @@ pub async fn state_sync(
             manifest.height
         )));
     }
-    let chain: Vec<Block> = bincode::deserialize(&blobs.fetch(&manifest.anchor_chain).await?)
+    let chain: Vec<Block> = peer_blob(&blobs.fetch(&manifest.anchor_chain).await?)
         .map_err(|e| NodeError::Other(format!("decode anchor chain: {e}")))?;
     let trusted_root = check_anchor_chain(height, &chain, &anchor_hash)?;
     // The state at `height` is hashed under the scheme its block's protocol
@@ -988,8 +1292,8 @@ pub async fn state_sync(
         {
             continue;
         }
-        let entries: Vec<StateEntry> = bincode::deserialize(&blobs.fetch(&bucket.blob).await?)
-            .map_err(|e| {
+        let entries: Vec<StateEntry> =
+            peer_blob(&blobs.fetch(&bucket.blob).await?).map_err(|e| {
                 NodeError::Other(format!("decode bucket {}: {e}", bucket.summary.index))
             })?;
         verify_bucket(
@@ -1059,6 +1363,64 @@ pub async fn state_sync(
         state_root: trusted_root,
         buckets_fetched: fetched,
     })
+}
+
+/// Restores the state the checkpoint block `(anchor_height, anchor_hash)`
+/// commits from the first of `peers` that holds its snapshot, asking each in
+/// turn. A peer that fails part-way is followed by the next, which resumes
+/// from the buckets already written. Fails, naming every peer's reason, when
+/// none restores it: a node that asked for a checkpoint join does not fall
+/// back to replaying blocks.
+pub async fn state_sync_from_peers<P, L>(
+    store: &Arc<RocksDbStore>,
+    peers: &[(L, P)],
+    anchor_height: u64,
+    anchor_hash: Hash,
+    epoch_duration: u64,
+) -> Result<SyncedState>
+where
+    P: ManifestSource + BlobStore,
+    L: std::fmt::Display,
+{
+    let height = snapshot_height_for(anchor_height)?;
+    let mut reasons = Vec::new();
+    for (peer, source) in peers {
+        match state_sync(
+            store,
+            source,
+            source,
+            anchor_height,
+            anchor_hash,
+            epoch_duration,
+        )
+        .await
+        {
+            Ok(s) => {
+                info!(
+                    %peer,
+                    height = s.height,
+                    checkpoint_height = anchor_height,
+                    state_root = %s.state_root,
+                    buckets_fetched = s.buckets_fetched,
+                    "State sync complete: restored state reproduces the checkpoint's root"
+                );
+                return Ok(s);
+            }
+            Err(e) => {
+                warn!(%peer, error = %e, "State sync from peer failed; trying the next");
+                reasons.push(format!("{peer}: {e}"));
+            }
+        }
+    }
+    if reasons.is_empty() {
+        return Err(NodeError::Config(format!(
+            "state sync from checkpoint {anchor_height}: no state-sync peer to ask"
+        )));
+    }
+    Err(NodeError::Other(format!(
+        "state sync from checkpoint {anchor_height} (snapshot height {height}): no peer restored it ({})",
+        reasons.join("; ")
+    )))
 }
 
 /// Whether a state sync began on this store and did not finish: buckets
@@ -1190,41 +1552,14 @@ fn restore_consensus_records(
         value: bincode::serialize(&restored).map_err(|e| NodeError::Other(e.to_string()))?,
     });
 
-    let registry_cf = tenzro_storage::CF_TOKENS;
-    for value in registry {
-        let entry: tenzro_token::validator_registry::ValidatorRegistryEntry =
-            bincode::deserialize(&value)
-                .map_err(|e| NodeError::Other(format!("decode registry entry: {e}")))?;
-        ops.push(WriteOp::Put {
-            cf: registry_cf.to_string(),
-            key: format!(
-                "{}{}",
-                tenzro_token::validator_registry::VALIDATOR_PREFIX,
-                hex::encode(entry.address.as_bytes())
-            )
-            .into_bytes(),
-            value,
-        });
-    }
-    if let Some(registry_side) = side.and_then(|s| s.registry) {
-        for (key, value) in registry_side.storage_rows() {
-            ops.push(WriteOp::Put {
-                cf: registry_cf.to_string(),
-                key,
-                value,
-            });
-        }
-    }
-    if let Some(index) = index {
-        let hexes: Vec<String> = index.iter().map(|a| hex::encode(a.as_bytes())).collect();
-        ops.push(WriteOp::Put {
-            cf: registry_cf.to_string(),
-            key: tenzro_token::validator_registry::VALIDATOR_INDEX_KEY
-                .as_bytes()
-                .to_vec(),
-            value: bincode::serialize(&hexes).map_err(|e| NodeError::Other(e.to_string()))?,
-        });
-    }
+    ops.extend(
+        crate::state_commitment::registry_store_writes(
+            registry,
+            side.and_then(|s| s.registry),
+            index,
+        )
+        .map_err(NodeError::Other)?,
+    );
     kv.write_batch_sync(ops).map_err(NodeError::Storage)
 }
 
@@ -1324,6 +1659,140 @@ mod tests {
             prev = block.hash();
             blocks.put_block(&block).await.unwrap();
         }
+    }
+
+    /// However many peers ask, an anchor is built once per snapshot, one
+    /// build runs at a time, a request that finds the cache cold meanwhile is
+    /// told it is busy, and the finding that none can be built is kept for a
+    /// short time only.
+    #[tokio::test]
+    async fn an_anchor_is_built_once_however_many_peers_ask() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        use tenzro_iroh::AnchorAnswer;
+
+        let cache = AnchorCache::default();
+        let builds = AtomicUsize::new(0);
+        let t0 = Instant::now();
+        let build = |bytes: Option<Vec<u8>>| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            async move { bytes }
+        };
+        for _ in 0..200 {
+            assert_eq!(
+                cache.serve(10, t0, || build(Some(vec![7]))).await,
+                AnchorAnswer::Anchor(vec![7])
+            );
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "built once for 200 peers");
+        // A newer snapshot, or a later time past the cache's life, builds again.
+        assert_eq!(
+            cache.serve(20, t0, || build(Some(vec![8]))).await,
+            AnchorAnswer::Anchor(vec![8])
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        let later = t0 + ANCHOR_CACHE_TTL + Duration::from_secs(1);
+        assert_eq!(
+            cache.serve(20, later, || build(Some(vec![9]))).await,
+            AnchorAnswer::Anchor(vec![9])
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 3);
+
+        // No anchor can be built: the finding is kept for a short time.
+        let empty = AnchorCache::default();
+        assert_eq!(empty.serve(5, t0, || build(None)).await, AnchorAnswer::None);
+        assert_eq!(empty.serve(5, t0, || build(None)).await, AnchorAnswer::None);
+        assert_eq!(builds.load(Ordering::SeqCst), 4, "the finding is kept");
+        let after = t0 + NO_ANCHOR_TTL + Duration::from_secs(1);
+        assert_eq!(
+            empty.serve(5, after, || build(Some(vec![1]))).await,
+            AnchorAnswer::Anchor(vec![1])
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 5);
+
+        // While one build runs, another request is told it is busy and
+        // does not build.
+        let busy = Arc::new(AnchorCache::default());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first = {
+            let (busy, started, release) = (busy.clone(), started.clone(), release.clone());
+            tokio::spawn(async move {
+                busy.serve(1, Instant::now(), || async {
+                    started.notify_one();
+                    release.notified().await;
+                    Some(vec![4])
+                })
+                .await
+            })
+        };
+        started.notified().await;
+        let ran = AtomicUsize::new(0);
+        let second = busy
+            .serve(1, Instant::now(), || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                async { Some(vec![5]) }
+            })
+            .await;
+        assert_eq!(
+            second,
+            AnchorAnswer::Busy,
+            "a cold cache while a build runs says it is busy"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "and does not build");
+        release.notify_one();
+        assert_eq!(first.await.unwrap(), AnchorAnswer::Anchor(vec![4]));
+        let third = busy
+            .serve(1, Instant::now(), || async { Some(vec![6]) })
+            .await;
+        assert_eq!(
+            third,
+            AnchorAnswer::Anchor(vec![4]),
+            "the finished build is kept"
+        );
+    }
+
+    /// A block at each `(height, epoch)`, chained from the first.
+    async fn chain_of(store: &Arc<RocksDbStore>, epochs: &[(u64, u64)]) {
+        let mut blocks = BlockStoreImpl::new(store.clone()).unwrap();
+        let mut prev = Hash::new([1u8; 32]);
+        for (h, epoch) in epochs {
+            let mut header = BlockHeader::new(
+                BlockHeight(*h),
+                prev,
+                Hash::zero(),
+                Hash::new([*h as u8; 32]),
+                Address::new([2u8; 32]),
+            );
+            header.epoch = *epoch;
+            let block = Block::new(header, vec![]);
+            prev = block.hash();
+            blocks.put_block(&block).await.unwrap();
+        }
+    }
+
+    /// A snapshot is cut at the first block of an epoch once a block follows
+    /// it, whether the epoch holds more blocks or the next block is already
+    /// in a later epoch (an epoch of one block, as on a quiet chain); not at
+    /// a block that opens nothing, and not before any block follows.
+    #[tokio::test]
+    async fn an_epoch_of_one_block_that_has_ended_can_be_snapshotted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        chain_of(&store, &[(1, 1), (2, 2), (3, 3), (4, 3), (5, 4)]).await;
+        // One block, and the next block is of a later epoch.
+        assert!(can_snapshot_at(&store, 1).await.unwrap());
+        assert!(can_snapshot_at(&store, 2).await.unwrap());
+        // Two blocks in the epoch.
+        assert!(can_snapshot_at(&store, 3).await.unwrap());
+        // Opens no epoch: its parent is of the same epoch.
+        assert!(!can_snapshot_at(&store, 4).await.unwrap());
+        assert!(!opens_epoch_at(&store, 4).await.unwrap());
+        // Opens an epoch, but no block follows yet.
+        assert!(opens_epoch_at(&store, 5).await.unwrap());
+        assert!(!can_snapshot_at(&store, 5).await.unwrap());
+        chain_of(&store, &[(6, 4)]).await;
+        assert!(can_snapshot_at(&store, 5).await.unwrap());
     }
 
     struct Directory(Arc<SnapshotStore>);
@@ -1429,6 +1898,29 @@ mod tests {
                 max_volume_pct: DEFAULT_SNAPSHOT_MAX_VOLUME_PCT,
             },
         ))
+    }
+
+    /// The tail a joiner replays after restoring the newest snapshot is
+    /// bounded by the interval: no snapshot is due before it, and the first
+    /// epoch start after it is.
+    #[tokio::test]
+    async fn the_default_cadence_bounds_the_tail_a_joiner_replays() {
+        let pdir = tempfile::tempdir().unwrap();
+        let (pstore, _) = producer(&pdir).await;
+        let snapshots = Arc::new(SnapshotStore::new(
+            pstore.clone(),
+            Arc::new(MemBlobs::default()),
+            SnapshotConfig {
+                enabled: Some(true),
+                ..SnapshotConfig::default()
+            },
+        ));
+        snapshots.produce(HEIGHT).await.unwrap();
+        let interval = DEFAULT_SNAPSHOT_INTERVAL_BLOCKS;
+        assert!(interval <= 10_000, "a joiner replays at most 10,000 blocks");
+        assert!(!snapshots.due(HEIGHT + interval - 1, true).unwrap());
+        assert!(snapshots.due(HEIGHT + interval, true).unwrap());
+        assert!(!snapshots.due(HEIGHT + interval, false).unwrap());
     }
 
     #[tokio::test]
@@ -1743,6 +2235,153 @@ mod tests {
         assert!(err.contains("holds no snapshot"), "{err}");
     }
 
+    /// A join from checkpoint block `A` restores the snapshot at
+    /// `A - STATE_ROOT_LAG`, and a snapshot's listed checkpoint maps back to
+    /// it; a checkpoint too low to commit a snapshot height is refused.
+    #[test]
+    fn a_checkpoint_resolves_to_the_snapshot_height_it_commits() {
+        assert_eq!(
+            snapshot_height_for(10_803).unwrap(),
+            10_803 - STATE_ROOT_LAG
+        );
+        for s in [1u64, 8157, 100_000] {
+            assert_eq!(snapshot_height_for(checkpoint_height_for(s)).unwrap(), s);
+        }
+        for low in 0..=STATE_ROOT_LAG {
+            assert!(snapshot_height_for(low).is_err(), "checkpoint {low}");
+        }
+    }
+
+    /// A peer: its snapshot directory and its blobs.
+    struct Peer(Option<Arc<SnapshotStore>>, Arc<MemBlobs>);
+
+    #[async_trait]
+    impl ManifestSource for Peer {
+        async fn manifest_for(&self, height: u64) -> Result<Option<[u8; 32]>> {
+            match &self.0 {
+                Some(s) => s.manifest_hash(height),
+                None => Ok(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlobStore for Peer {
+        async fn publish(&self, bytes: Vec<u8>) -> Result<[u8; 32]> {
+            self.1.publish(bytes).await
+        }
+
+        async fn fetch(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {
+            self.1.fetch(hash).await
+        }
+    }
+
+    fn checkpoint_of(s: &SnapshotSummary) -> (u64, Hash) {
+        let bytes: [u8; 32] = hex::decode(s.checkpoint_hash.trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        (s.checkpoint_height, Hash::new(bytes))
+    }
+
+    /// The listed snapshots are exactly the ones retention keeps, and each
+    /// names the checkpoint block that commits it: its height maps to a
+    /// snapshot this node holds and its hash is the stored block's.
+    #[tokio::test]
+    async fn every_listed_checkpoint_names_a_snapshot_the_node_holds() {
+        let pdir = tempfile::tempdir().unwrap();
+        let (pstore, _anchor) = producer(&pdir).await;
+        let blobs = Arc::new(MemBlobs::default());
+        let snapshots = store_with(&pstore, blobs.clone(), 2, u64::MAX);
+        snapshots.produce(HEIGHT).await.unwrap();
+        for h in [20u64, 30, 40] {
+            extend(&pstore, h, 5).await;
+            snapshots.produce(h).await.unwrap();
+        }
+        let listed = snapshots.list().await.unwrap();
+        assert_eq!(
+            listed.iter().map(|s| s.height).collect::<Vec<_>>(),
+            vec![40, 30],
+            "the two newest are kept and listed, newest first"
+        );
+        let blocks = BlockStoreImpl::new(pstore.clone()).unwrap();
+        for s in &listed {
+            let (height, hash) = checkpoint_of(s);
+            assert_eq!(height, s.height + STATE_ROOT_LAG);
+            assert_eq!(
+                blocks
+                    .get_block_by_height(BlockHeight(height))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .hash(),
+                hash
+            );
+            assert!(
+                snapshots
+                    .manifest_hash(snapshot_height_for(height).unwrap())
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        for gone in [HEIGHT, 20] {
+            assert_eq!(snapshots.manifest_hash(gone).unwrap(), None);
+        }
+    }
+
+    /// A join from the checkpoint a serving node lists asks every peer in
+    /// turn and restores from the one holding the snapshot; when none holds
+    /// it, the join fails naming every peer instead of reporting success.
+    #[tokio::test]
+    async fn a_join_from_a_listed_checkpoint_asks_every_peer_and_fails_when_none_serves_it() {
+        let pdir = tempfile::tempdir().unwrap();
+        let (pstore, anchor) = producer(&pdir).await;
+        let blobs = Arc::new(MemBlobs::default());
+        let snapshots = snapshot_store(&pstore, blobs.clone());
+        let manifest = snapshots.produce(HEIGHT).await.unwrap();
+        let listed = snapshots.list().await.unwrap();
+        let (checkpoint_height, checkpoint_hash) = checkpoint_of(&listed[0]);
+        assert_eq!(checkpoint_hash, anchor);
+
+        let empty = || Peer(None, Arc::new(MemBlobs::default()));
+        let jdir = tempfile::tempdir().unwrap();
+        let joiner = open(&jdir);
+        let err = state_sync_from_peers(
+            &joiner,
+            &[("a", empty()), ("b", empty())],
+            checkpoint_height,
+            checkpoint_hash,
+            100,
+        )
+        .await
+        .expect_err("no peer holds the snapshot")
+        .to_string();
+        assert!(err.contains("no peer restored it"), "{err}");
+        assert!(err.contains("a: ") && err.contains("b: "), "{err}");
+        assert!(err.contains("holds no snapshot at height 10"), "{err}");
+        assert!(
+            state_sync_from_peers::<Peer, &str>(&joiner, &[], checkpoint_height, anchor, 100)
+                .await
+                .is_err(),
+            "no peer to ask is an error too"
+        );
+
+        let synced = state_sync_from_peers(
+            &joiner,
+            &[
+                ("a", empty()),
+                ("b", Peer(Some(snapshots.clone()), blobs.clone())),
+            ],
+            checkpoint_height,
+            checkpoint_hash,
+            100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(synced.height, HEIGHT);
+        assert_eq!(synced.state_root, manifest.state_root);
+    }
+
     /// A sync that stops after it began writing leaves a store that neither
     /// replay nor the next boot may treat as fresh; one that completes, or
     /// never began, is not reported as interrupted.
@@ -2006,10 +2645,11 @@ mod tests {
         assert!(err.contains("start of an epoch"), "{err}");
     }
 
-    /// An epoch of one block gives a restored node no closing checkpoint to
-    /// adopt the next committee from, so a snapshot there is refused.
+    /// A snapshot at the only block of its epoch is accepted: the restored
+    /// node learns the epoch's end from the evidence served with the next
+    /// block.
     #[test]
-    fn a_snapshot_at_the_only_block_of_its_epoch_is_refused() {
+    fn a_snapshot_at_the_only_block_of_its_epoch_is_accepted() {
         let mut prev = Hash::new([1u8; 32]);
         let mut chain = Vec::new();
         for h in HEIGHT - 1..=HEIGHT + STATE_ROOT_LAG {
@@ -2033,9 +2673,7 @@ mod tests {
             chain.push(block);
         }
         let trusted = chain.last().unwrap().hash();
-        let err = check_anchor_chain(HEIGHT, &chain, &trusted)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("only block of its epoch"), "{err}");
+        let root = check_anchor_chain(HEIGHT, &chain, &trusted).unwrap();
+        assert_eq!(root, chain.last().unwrap().header.state_root);
     }
 }

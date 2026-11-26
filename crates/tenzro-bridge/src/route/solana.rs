@@ -266,6 +266,7 @@ impl RouteAdapter for SolanaCcipAdapter {
             token_pool: t.source_pool,
             token,
             amount: t.amount,
+            finality: super::finality::WAIT_FOR_FINALITY,
         })
     }
 
@@ -342,6 +343,7 @@ impl RouteAdapter for SolanaCcipAdapter {
             token_pool,
             token,
             amount,
+            finality: super::finality::WAIT_FOR_FINALITY,
         })
     }
 

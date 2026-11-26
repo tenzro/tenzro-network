@@ -71,7 +71,7 @@ impl MultiVmRuntime {
             Caller::Sender => tx.from.clone(),
             Caller::Agent(action) => agent_wallet(&action.agent_did).to_vec(),
         };
-        let now_ms = crate::native::deterministic_now_ms(tx).max(0) as u64;
+        let now_ms = crate::native::deterministic_now_ms(tx)?.max(0) as u64;
 
         let mut gas_used: u64 = 0;
         let mut supply_change: i128 = 0;
@@ -120,7 +120,7 @@ impl MultiVmRuntime {
                 Ok(executor) => executor.execute_transaction(&sub, state).await,
                 Err(e) => Err(e),
             };
-            let r = match outcome {
+            let mut r = match outcome {
                 Ok(r) => r,
                 Err(e) => {
                     let charged = remaining.min(crate::gas::evm_gas_costs::TRANSACTION);
@@ -130,6 +130,12 @@ impl MultiVmRuntime {
                     ));
                 }
             };
+            // A message the EVM call sent through the ERC-7786 gateway goes
+            // to its route in this transaction, as it does for a top-level
+            // EVM transaction: left queued, it would be delivered by an
+            // unrelated transaction, and a route that refused it would fail
+            // every EVM transaction after.
+            crate::evm::gateway::deliver_outbox(&sub, state, &mut r);
             gas_used = gas_used.saturating_add(r.gas_used);
             if !r.success {
                 let reason = r.revert_reason.unwrap_or_else(|| "reverted".to_string());
@@ -740,6 +746,7 @@ mod tests {
                 ComputeClaimOp::Accept {
                     claim_id: crate::native::compute_claim::claim_id_for(&writer, 0),
                     max_total: ONE,
+                    placement: None,
                 },
                 0,
             ),
@@ -954,8 +961,11 @@ mod tests {
     /// state and through the native Token transaction elsewhere. After every
     /// operation each state agrees on the outcome and on every ledger slot,
     /// and the SVM Pausable extension reports the halt.
-    #[tokio::test]
-    async fn every_vm_view_of_a_token_agrees_over_ten_thousand_operations() {
+    ///
+    /// Run with the final ERC-7943 rules dormant or live. Dormant, a frozen
+    /// amount never passes its balance. Returns the trace root and whether a
+    /// frozen amount ever passed its balance.
+    async fn every_vm_view_of_a_token_agrees(final_rules: bool) -> (String, bool) {
         use crate::evm::token_factory::{selector, selectors};
         use crate::native::SELECTOR_TOKEN;
         use crate::precompiles::PRECOMPILE_TOKEN_FACTORY;
@@ -1004,6 +1014,13 @@ mod tests {
             }
             token = crate::token_ledger::create(&mut state, &keys[issuer], &spec, &mut Vec::new())
                 .unwrap();
+            if final_rules {
+                crate::native::set_governed_param_for_test(
+                    &mut state,
+                    crate::token_ledger::ERC7943_FINAL_KEY,
+                    0,
+                );
+            }
             states.push(state);
         }
 
@@ -1102,6 +1119,7 @@ mod tests {
         // seeded, so this root is a fixed vector and a change in any view's
         // semantics changes it.
         let mut trace = <sha2::Sha256 as sha2::Digest>::new();
+        let mut frozen_past_balance = false;
         for n in 0..OPS {
             let (a, b) = ((next() % 4) as usize, (next() % 4) as usize);
             let held = crate::token_ledger::balance(&states[NATIVE], &token, &keys[a]);
@@ -1221,11 +1239,13 @@ mod tests {
             }
             for (k, key) in keys.iter().enumerate() {
                 let state = &states[NATIVE];
+                let past = crate::token_ledger::frozen(state, &token, key)
+                    > crate::token_ledger::balance(state, &token, key);
                 assert!(
-                    crate::token_ledger::frozen(state, &token, key)
-                        <= crate::token_ledger::balance(state, &token, key),
+                    final_rules || !past,
                     "op {n}: holder {k} frozen past its balance"
                 );
+                frozen_past_balance |= past;
             }
             if (55..65).contains(&pick) {
                 // The SVM view has no burn: Token-2022 Burn is refused and moves nothing.
@@ -1274,10 +1294,40 @@ mod tests {
         }
         // Every kind of operation succeeded at some point.
         assert!(counts.iter().all(|c| *c > 0), "{counts:?}");
-        let root = hex::encode(sha2::Digest::finalize(trace));
+        (
+            hex::encode(sha2::Digest::finalize(trace)),
+            frozen_past_balance,
+        )
+    }
+
+    #[tokio::test]
+    async fn every_vm_view_of_a_token_agrees_over_ten_thousand_operations() {
+        let (root, frozen_past_balance) = every_vm_view_of_a_token_agrees(false).await;
+        assert!(!frozen_past_balance);
         assert_eq!(
             root, CROSS_VM_TRACE_ROOT,
             "the seeded 10 000-operation trace changed"
+        );
+    }
+
+    /// The same 10 000 operations under the final ERC-7943 rules: the views
+    /// still agree after every operation, the EVM factory's freeze and forced
+    /// transfer leave the frozen amounts the native transaction leaves, and
+    /// a frozen amount does pass its balance along the way.
+    #[tokio::test]
+    async fn every_vm_view_of_a_token_agrees_under_the_final_erc7943_rules() {
+        let (root, frozen_past_balance) = every_vm_view_of_a_token_agrees(true).await;
+        assert!(
+            frozen_past_balance,
+            "the run never froze past a balance, so it did not exercise the rule"
+        );
+        assert_ne!(
+            root, CROSS_VM_TRACE_ROOT,
+            "the final rules change the trace"
+        );
+        assert_eq!(
+            root, CROSS_VM_FINAL_TRACE_ROOT,
+            "the seeded 10 000-operation trace under the final rules changed"
         );
     }
 
@@ -1286,4 +1336,9 @@ mod tests {
     /// [`every_vm_view_of_a_token_agrees_over_ten_thousand_operations`].
     const CROSS_VM_TRACE_ROOT: &str =
         "81124efccd81a091a0487d20fae64305f4d4b5fbd8609333034e4b83f994f0f8";
+
+    /// [`CROSS_VM_TRACE_ROOT`] for the same seeded operations under the final
+    /// ERC-7943 rules.
+    const CROSS_VM_FINAL_TRACE_ROOT: &str =
+        "b1f840d0dd83968e98aa6d0faa0eff600cdac530dca4f11f855b814883a9cb10";
 }

@@ -1,24 +1,47 @@
 //! A continuity session on a batched model moves to another node's engine.
 //!
-//! `#[ignore]`d by default: it fetches `qwen3.5-0.8b` (attention plus
-//! recurrent layers) through the node's own downloader and runs it on the CPU.
-//! Run explicitly with:
+//! One test per architecture class, each on a small model of that class:
+//!
+//! | test | model | class | download |
+//! |---|---|---|---|
+//! | `attention_only` | `qwen3-0.6b` | attention layers only | 397 MB |
+//! | `attention_with_recurrent_layers` | `qwen3.5-0.8b` | attention plus recurrent layers | 533 MB |
+//! | `mixture_of_experts` | `granite-3.1-1b-a400m` | attention with routed experts | 850 MB |
+//! | `state_space_only_serves_no_session` | `mamba-130m` | selective state space, no attention | 90 MB |
+//! | `recurrent_only_serves_no_session` | `rwkv7-0.1b` | recurrent network, no attention | 133 MB |
+//!
+//! A session is a chat session. The catalog's state-space and recurrent-only
+//! models are not chat models: one carries no chat template and the other
+//! only names one. Their two tests hold that such a model is refused a
+//! session turn with that reason, rather than being served a prompt that is
+//! not the conversation.
+//!
+//! `#[ignore]`d by default: each fetches its model through the node's own
+//! downloader (about 2.0 GB for all five) and runs it on the CPU. Run
+//! explicitly, all or one, with:
 //!
 //!   TENZRO_TEST_MODELS_DIR=/path/to/models \
-//!     cargo test -p tenzro-model --test batch_session_migration -- --ignored --nocapture
+//!     cargo test -p tenzro-model --test batch_session_migration -- --ignored --nocapture --test-threads 1
 //!
-//! Engine A serves a turn and checkpoints it through its reply. Engine B, a
-//! separate runtime of the same weights, rebuilds the session from that
-//! checkpoint alone and serves the next turn. B must answer exactly as A does
-//! when A serves that turn itself, and must not prefill again what the
-//! checkpoint carried: neither the history nor the reply.
+//! Engine A serves a turn and checkpoints it from the turn's own sequence:
+//! the conversation through that turn's prompt. Engine B, a separate runtime
+//! of the same weights, rebuilds the session from that checkpoint alone and
+//! serves the next turn. B must answer exactly as A does when A serves that
+//! turn itself, and must prefill only what came after the checkpointed
+//! prompt, the reply and the next message, not the history.
+//!
+//! A template may render the end of a prompt differently from the same turn
+//! in the next history. An attention cache is cut back to where they part; a
+//! cache with recurrent state cannot be, so a model with recurrent layers
+//! then has no checkpoint, and its turn must say so with that reason.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tenzro_model::{Catalog, CatalogCell};
 use tenzro_model::{
     ChatMessage, DownloadProgress, DownloadState, GenerationConfig, HfDownloader, ModelRuntime,
-    SequenceEngine, SessionTurn, SourcePolicy, get_model_by_id,
+    SequenceEngine, SessionTurn, SourcePolicy, TurnCheckpoint,
 };
 
 /// Loading a model starts this executable again as the model parser. This
@@ -34,13 +57,19 @@ extern "C" fn enter_parse_jail_child() {
     tenzro_model::parse_jail::enter_if_requested();
 }
 
-const MODEL: &str = "qwen3.5-0.8b";
 const SESSION: &str = "session-under-test";
 
-async fn fetch(dir: &Path) -> PathBuf {
-    tenzro_catalog::install_test_seed();
-    let entry = get_model_by_id(MODEL).unwrap_or_else(|| panic!("{MODEL} must be in the catalog"));
-    let downloader = HfDownloader::new(dir.to_path_buf());
+/// Most positions at the end of a turn's prompt that the next turn's history
+/// may render differently (a generation prompt's own opening), plus the one
+/// token a successor feeds after the chain.
+const PROMPT_END_ALLOWANCE: u32 = 16;
+
+async fn fetch(model: &str, dir: &Path) -> PathBuf {
+    let catalog = Catalog::test_seed();
+    let entry = catalog
+        .get_model_by_id(model)
+        .unwrap_or_else(|| panic!("{model} must be in the catalog"));
+    let downloader = HfDownloader::new(dir.to_path_buf(), CatalogCell::new(catalog));
     if downloader.is_downloaded(&entry.id) {
         return downloader.model_path(&entry.id);
     }
@@ -54,12 +83,12 @@ async fn fetch(dir: &Path) -> PathBuf {
     downloader
         .download_model(&entry, None, SourcePolicy::HuggingFace, tx)
         .await
-        .unwrap_or_else(|e| panic!("download {MODEL}: {e}"))
+        .unwrap_or_else(|e| panic!("download {model}: {e}"))
 }
 
-async fn runtime(path: &Path) -> Arc<ModelRuntime> {
-    let rt = Arc::new(ModelRuntime::new().expect("runtime"));
-    rt.load_model_with_context(MODEL, path, Some(4096))
+async fn runtime(model: &str, path: &Path) -> Arc<ModelRuntime> {
+    let rt = Arc::new(ModelRuntime::new(CatalogCell::new(Catalog::test_seed())).expect("runtime"));
+    rt.load_model_with_context(model, path, Some(4096))
         .await
         .expect("load");
     rt
@@ -77,20 +106,76 @@ fn greedy(max_tokens: u32) -> GenerationConfig {
     }
 }
 
-async fn turn(rt: &Arc<ModelRuntime>, messages: Vec<ChatMessage>) -> SessionTurn {
-    let rt = rt.clone();
-    tokio::task::spawn_blocking(move || rt.turn(MODEL, SESSION, &messages, &greedy(24)))
+async fn turn(rt: &Arc<ModelRuntime>, model: &str, messages: Vec<ChatMessage>) -> SessionTurn {
+    let (rt, model) = (rt.clone(), model.to_string());
+    tokio::task::spawn_blocking(move || rt.turn(&model, SESSION, &messages, &greedy(24)))
         .await
         .unwrap()
         .expect("turn")
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore]
-async fn a_batched_session_checkpointed_on_one_engine_continues_on_another() {
+#[ignore = "loads real weights; scripts/model-weight-tests.sh runs it"]
+async fn attention_only() {
+    a_session_checkpointed_on_one_engine_continues_on_another("qwen3-0.6b").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "loads real weights; scripts/model-weight-tests.sh runs it"]
+async fn attention_with_recurrent_layers() {
+    a_session_checkpointed_on_one_engine_continues_on_another("qwen3.5-0.8b").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "loads real weights; scripts/model-weight-tests.sh runs it"]
+async fn mixture_of_experts() {
+    a_session_checkpointed_on_one_engine_continues_on_another("granite-3.1-1b-a400m").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "loads real weights; scripts/model-weight-tests.sh runs it"]
+async fn state_space_only_serves_no_session() {
+    a_model_with_no_chat_template_is_refused_a_session_turn(
+        "mamba-130m",
+        "carries no chat template",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "loads real weights; scripts/model-weight-tests.sh runs it"]
+async fn recurrent_only_serves_no_session() {
+    a_model_with_no_chat_template_is_refused_a_session_turn(
+        "rwkv7-0.1b",
+        "names the chat template `rwkv-world`",
+    )
+    .await;
+}
+
+async fn a_model_with_no_chat_template_is_refused_a_session_turn(model: &str, reason: &str) {
     let dir =
         PathBuf::from(std::env::var("TENZRO_TEST_MODELS_DIR").expect("TENZRO_TEST_MODELS_DIR"));
-    let path = fetch(&dir).await;
+    let path = fetch(model, &dir).await;
+    let rt = runtime(model, &path).await;
+    let messages = vec![ChatMessage::new(
+        "user",
+        "Name a river that flows through Europe.",
+    )];
+    let refused = {
+        let (rt, model) = (rt.clone(), model.to_string());
+        tokio::task::spawn_blocking(move || rt.turn(&model, SESSION, &messages, &greedy(24)))
+            .await
+            .unwrap()
+    };
+    let why = refused.expect_err("a turn was served").to_string();
+    assert!(why.contains(reason), "{model}: {why}");
+    println!("refused ({model}): {why}");
+}
+
+async fn a_session_checkpointed_on_one_engine_continues_on_another(model: &str) {
+    let dir =
+        PathBuf::from(std::env::var("TENZRO_TEST_MODELS_DIR").expect("TENZRO_TEST_MODELS_DIR"));
+    let path = fetch(model, &dir).await;
 
     let system = "You are a concise assistant. Answer in one short sentence. ".repeat(8);
     let first = vec![
@@ -99,9 +184,35 @@ async fn a_batched_session_checkpointed_on_one_engine_continues_on_another() {
     ];
 
     // Engine A serves the first turn and checkpoints it.
-    let a = runtime(&path).await;
-    let t1 = turn(&a, first.clone()).await;
+    let a = runtime(model, &path).await;
+    let t1 = turn(&a, model, first.clone()).await;
     assert!(t1.completion_tokens > 0, "the first turn answered");
+    if let TurnCheckpoint::Unavailable(why) = &t1.checkpoint {
+        // The one reason a turn that answered may have none: recurrent state
+        // behind a prompt the next history renders differently.
+        assert!(
+            why.contains("recurrent state cannot be cut back"),
+            "{model}: {why}"
+        );
+        let exported = {
+            let a = a.clone();
+            tokio::task::spawn_blocking(move || a.export_delta(SESSION))
+                .await
+                .unwrap()
+                .expect("export")
+        };
+        assert!(
+            exported.is_none(),
+            "a turn with no checkpoint exports nothing"
+        );
+        println!("no checkpoint ({model}): {why}");
+        return;
+    }
+    assert_eq!(
+        t1.checkpoint,
+        TurnCheckpoint::Ready,
+        "the first turn left a checkpoint ({model})"
+    );
     let delta = {
         let a = a.clone();
         tokio::task::spawn_blocking(move || a.export_delta(SESSION))
@@ -113,15 +224,15 @@ async fn a_batched_session_checkpointed_on_one_engine_continues_on_another() {
     let blob = tenzro_model::KvBlob::decode(&delta.blob).expect("blob");
     let carried = blob.tokens.len() as u32;
     assert_eq!(blob.base_pos, 0, "a batched checkpoint is a whole chain");
-    // The conversation through the first turn's reply, as the next turn's
-    // history renders it: longer than the first prompt by the reply.
+    // The conversation through the first turn's prompt, and what of its
+    // reply was decoded when the cache was copied.
     assert!(
-        carried > t1.prompt_tokens,
+        carried >= t1.prompt_tokens,
         "{carried} positions for a prompt of {}",
         t1.prompt_tokens
     );
     println!(
-        "checkpoint: {carried} positions, {} bytes",
+        "checkpoint: {carried} positions, {} bytes ({model})",
         delta.blob.len()
     );
     // Nothing new to send until another turn is checkpointed.
@@ -139,38 +250,41 @@ async fn a_batched_session_checkpointed_on_one_engine_continues_on_another() {
     second.push(ChatMessage::new("user", "Which sea does it flow into?"));
 
     // Engine B holds only the checkpoint.
-    let b = runtime(&path).await;
+    let b = runtime(model, &path).await;
     let rebuilt = {
-        let (b, chain) = (b.clone(), vec![delta.blob.clone()]);
-        tokio::task::spawn_blocking(move || b.import_chain(MODEL, SESSION, &chain))
+        let (b, chain, model) = (b.clone(), vec![delta.blob.clone()], model.to_string());
+        tokio::task::spawn_blocking(move || b.import_chain(&model, SESSION, &chain))
             .await
             .unwrap()
             .expect("import")
     };
     assert_eq!(rebuilt, carried);
     assert!(b.has_session(SESSION));
-    let on_b = turn(&b, second.clone()).await;
+    let on_b = turn(&b, model, second.clone()).await;
 
     // The same turn served by A, where the session ran all along.
-    let on_a = turn(&a, second.clone()).await;
+    let on_a = turn(&a, model, second.clone()).await;
     println!(
-        "turn 2: A reused {}/{} prompt tokens, B reused {}/{}",
+        "turn 2: A reused {}/{} prompt tokens, B reused {}/{} ({model})",
         on_a.reused_tokens, on_a.prompt_tokens, on_b.reused_tokens, on_b.prompt_tokens
     );
     assert_eq!(on_b.prompt_tokens, on_a.prompt_tokens);
-    // At most the two positions around the end of the checkpoint are decoded
-    // again: the token fed after it, and a cache restored to one position
-    // before the end of the next history. The reply is among what is reused.
+    // B prefills what the conversation added after the first turn's prompt,
+    // the reply and the next message, and not the history before it. The
+    // allowance covers the end of that prompt where the next history renders
+    // it differently, and the token fed after the chain.
+    let added = on_b.prompt_tokens - t1.prompt_tokens;
+    let prefilled = on_b.prompt_tokens - on_b.reused_tokens;
     assert!(
-        on_b.reused_tokens + 2 >= carried,
-        "B prefilled again what the checkpoint carried: reused {} of {carried}",
-        on_b.reused_tokens
+        prefilled <= added + PROMPT_END_ALLOWANCE,
+        "B read the history again: prefilled {prefilled} of {}, {added} of them new",
+        on_b.prompt_tokens
     );
     assert!(
-        on_b.prompt_tokens - on_b.reused_tokens <= on_b.prompt_tokens - carried + 2,
-        "B re-read the last reply: prefilled {} of {}",
-        on_b.prompt_tokens - on_b.reused_tokens,
-        on_b.prompt_tokens
+        on_b.reused_tokens + PROMPT_END_ALLOWANCE >= t1.prompt_tokens,
+        "B reused {} positions of a first prompt of {}",
+        on_b.reused_tokens,
+        t1.prompt_tokens
     );
     assert_eq!(
         on_b.text, on_a.text,
@@ -182,8 +296,8 @@ async fn a_batched_session_checkpointed_on_one_engine_continues_on_another() {
     let mut forged = blob.clone();
     forged.model = tenzro_model::ModelFingerprint::of_bytes(b"other weights");
     let refused = {
-        let (b, chain) = (b.clone(), vec![forged.encode()]);
-        tokio::task::spawn_blocking(move || b.import_chain(MODEL, "other-session", &chain))
+        let (b, chain, model) = (b.clone(), vec![forged.encode()], model.to_string());
+        tokio::task::spawn_blocking(move || b.import_chain(&model, "other-session", &chain))
             .await
             .unwrap()
     };

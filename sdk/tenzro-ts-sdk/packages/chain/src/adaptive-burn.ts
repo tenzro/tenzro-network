@@ -23,20 +23,24 @@ export class AdaptiveBurnClient {
   }
 
   /**
-   * Returns the economic policy this node applies to every settlement — how a
-   * payment divides, the network's default settlement asset, and the
-   * micro-settlement floor.
+   * Returns the economic policy governance last set: the network's default
+   * settlement asset and the micro-settlement floor.
    *
-   * Read this before paying rather than inferring the split from a receipt
-   * afterwards. The response also reports, per capability, which economic mode
-   * the node is in: a **private** capability keeps the whole payment, a
-   * **public validating** one shares with the treasury, and a **public
-   * delegated** one also pays the RPC provider validating on its behalf.
-   *
-   * Every rate is governance-set; see `docs/ECONOMICS.md`.
+   * What a settlement pays (the governed fee, the class treasury leg, the
+   * HTTP-402 share and the RPC-provider leg) is in the governed network
+   * parameters; see `docs/ECONOMICS.md`.
    */
   async getEconomicPolicy(): Promise<any> {
     return this.rpc.call("tenzro_getEconomicPolicy", [{}]);
+  }
+
+  /**
+   * The validator an address names as its RPC provider, the governed leg paid
+   * to it, whether the leg is in force, and what the leg has paid the address
+   * as a validator (`tenzro_getRpcProviderLeg`).
+   */
+  async getRpcProviderLeg(address: string): Promise<any> {
+    return this.rpc.call("tenzro_getRpcProviderLeg", { address });
   }
 
   /**
@@ -47,16 +51,6 @@ export class AdaptiveBurnClient {
    */
   async getSupplyMetrics(): Promise<any> {
     return this.rpc.call("tenzro_getSupplyMetrics", [{}]);
-  }
-
-  /**
-   * Computes the recommended adaptive-burn action from the current
-   * metrics and configured supply targets. May return `NoChange`,
-   * `IncreaseBurnPct`, `DecreaseBurnPct`, or alarm variants.
-   * @returns `BurnRateRecommendation`
-   */
-  async getBurnRateRecommendation(): Promise<any> {
-    return this.rpc.call("tenzro_getBurnRateRecommendation", [{}]);
   }
 
   /**

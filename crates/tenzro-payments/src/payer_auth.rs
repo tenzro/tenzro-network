@@ -529,6 +529,12 @@ pub const AS_OF_MS_KEY: &str = "as_of_ms";
 /// Absent for a voucher signed ahead of delivery.
 pub const BINDING_KEY: &str = "binding";
 
+/// Credential `extra` key of the call chain a voucher attributes its payment
+/// to: an object with any of `app_did`, `agent_did` and `tool_did`. The
+/// voucher's signature covers it. Absent for a voucher that attributes
+/// nothing.
+pub const ATTRIBUTION_KEY: &str = "attribution";
+
 /// Verify a credential that pays with a cumulative escrow voucher.
 ///
 /// The credential's `amount` is this request's charge; the voucher's
@@ -569,6 +575,17 @@ pub fn verify_escrow_voucher(
             .ok_or_else(|| {
                 PaymentError::CredentialError("binding must be 32 bytes of hex".into())
             })?,
+    };
+    let attribution = match credential.extra.get(ATTRIBUTION_KEY) {
+        None => None,
+        Some(v) => {
+            let a: tenzro_types::settlement::CallAttribution = serde_json::from_value(v.clone())
+                .map_err(|e| {
+                    PaymentError::CredentialError(format!("attribution is malformed: {e}"))
+                })?;
+            a.check().map_err(PaymentError::CredentialError)?;
+            Some(a)
+        }
     };
     if credential.amount == 0 || credential.amount > cumulative {
         return Err(PaymentError::VerificationFailed(format!(
@@ -614,7 +631,7 @@ pub fn verify_escrow_voucher(
                 machine_did: field(MACHINE_DID_KEY)?.to_string(),
                 as_of_ms,
             }),
-            attribution: None,
+            attribution,
         });
     }
     let public_key = hex::decode(field(PUBLIC_KEY_KEY)?.trim_start_matches("0x"))
@@ -628,7 +645,7 @@ pub fn verify_escrow_voucher(
             PaymentError::CredentialError("credential carries no signature".to_string())
         })?,
         agent: None,
-        attribution: None,
+        attribution,
     };
     verify_voucher_signature(keys, challenge_chain_id(challenge)?, &voucher)?;
     Ok(voucher)

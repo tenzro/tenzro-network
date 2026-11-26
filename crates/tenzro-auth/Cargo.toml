@@ -43,6 +43,7 @@ hex = { workspace = true }
 # Constant-time comparison for the admission gate's hashed service keys.
 
 [dev-dependencies]
+tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0", features = ["test-root"] }
 tenzro-tee = { workspace = true, features = ["test-ca"] }
 tokio = { workspace = true }
 tempfile = "3"

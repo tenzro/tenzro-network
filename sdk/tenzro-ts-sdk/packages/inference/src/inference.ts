@@ -36,60 +36,6 @@ export interface LoadedModels {
 }
 
 /**
- * A use-case hint that biases model selection toward the right modality and
- * quality tier. Mirrors `UseCase::ALL` on the node.
- */
-export type UseCase =
-  | "chat"
-  | "code"
-  | "reasoning"
-  | "research"
-  | "summarize"
-  | "extract"
-  | "embed";
-
-/**
- * The shared intent fields consumed by `routeIntent` and `chatByIntent`.
- * `budget` is the smallest TNZO unit as a decimal string (a u128 exceeds
- * JavaScript's safe integer range).
- */
-export interface IntentParams {
-  useCase: UseCase;
-  budget?: string;
-  /** Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. */
-  optimize?: number;
-  /** Reject any model below this tier. */
-  qualityFloor?: "cheap" | "strong";
-  estInputTokens?: number;
-  estOutputTokens?: number;
-  /** Payer DID — enables the per-DID rolling-window budget gate. */
-  payerDid?: string;
-  /** Payer wallet address (hex) — enables the wallet-balance hard ceiling. */
-  payerAddress?: string;
-  /**
-   * Text the model will answer, used only to place the request in a difficulty
-   * cluster. It is not sent to any provider by `routeIntent`. On `chatByIntent`
-   * the node derives it from the chat turns, so it only needs setting when
-   * routing without dispatching.
-   */
-  prompt?: string;
-  /** Where the request may be served (ISO 3166-1 codes and bloc tokens, comma-separated). Unmet pins are refused. */
-  jurisdiction?: string;
-  /** p95 latency target in ms; providers observed slower are skipped. */
-  maxP95Ms?: number;
-  /**
-   * Continuity level. Above `none` the network assigns a successor that holds
-   * the session's KV cache; needs `jurisdiction` and `sessionId`.
-   */
-  continuity?: "none" | "standby" | "hot_successor";
-  /** The session the turns belong to, when continuity is above `none`. */
-  sessionId?: string;
-}
-
-/** How a routed call turned out, reported through `recordRouteOutcome`. */
-export type RouteOutcome = "resolved" | "escalated" | "failed";
-
-/**
  * What one finished generation consumed and cost, as recorded by the node.
  *
  * The dimensions past prompt and completion appear only when the call actually
@@ -203,54 +149,6 @@ export interface InferenceUsage {
   providers?: ProviderUsageStats[];
 }
 
-/** The model-selection decision returned by `routeIntent`. */
-export interface RouteDecision {
-  model_id: string;
-  tier: string;
-  /** Estimated cost, smallest TNZO unit, decimal string. */
-  estimated_cost: string;
-  alternates: string[];
-  /**
-   * Difficulty cluster the prompt landed in. Null when no prompt was supplied
-   * or the node has no embedding model loaded. Echo it back to
-   * `recordRouteOutcome` so the observation lands on the right cluster.
-   */
-  cluster?: number | null;
-  /**
-   * The chosen model's observed adverse-outcome rate in that cluster. Null when
-   * the cluster has no observations, meaning the decision was made on declared
-   * metadata alone.
-   */
-  expected_error?: number | null;
-  /**
-   * Wallet address (hex) of the provider whose announced offer won. Absent when
-   * the winner came from this node's own catalog, where the serving operator is
-   * resolved at dispatch time.
-   */
-  provider?: string | null;
-  /** The winning offer's endpoint, present alongside `provider`. */
-  endpoint?: string | null;
-  reason: string;
-}
-
-/** Serializes {@link IntentParams} into the node's snake_case RPC param shape. */
-function intentToParams(p: IntentParams): Record<string, unknown> {
-  const out: Record<string, unknown> = { use_case: p.useCase };
-  if (p.budget !== undefined) out.budget = p.budget;
-  if (p.optimize !== undefined) out.optimize = p.optimize;
-  if (p.qualityFloor !== undefined) out.quality_floor = p.qualityFloor;
-  if (p.estInputTokens !== undefined) out.est_input_tokens = p.estInputTokens;
-  if (p.estOutputTokens !== undefined) out.est_output_tokens = p.estOutputTokens;
-  if (p.payerDid !== undefined) out.payer_did = p.payerDid;
-  if (p.payerAddress !== undefined) out.payer_address = p.payerAddress;
-  if (p.prompt !== undefined) out.prompt = p.prompt;
-  if (p.jurisdiction !== undefined) out.jurisdiction = p.jurisdiction;
-  if (p.maxP95Ms !== undefined) out.max_p95_ms = p.maxP95Ms;
-  if (p.continuity !== undefined) out.continuity = p.continuity;
-  if (p.sessionId !== undefined) out.session_id = p.sessionId;
-  return out;
-}
-
 /**
  * Client for AI inference operations.
  * Supports model discovery and inference requests.
@@ -294,80 +192,19 @@ export class InferenceClient {
   }
 
   /**
-   * Resolve an intent to the best model without naming one. Discovery only:
-   * no provider is dialed and no spend is recorded, but the per-DID budget
-   * gate and the wallet-balance ceiling are still consulted, so an
-   * unaffordable request is rejected at discovery time. Feed the returned
-   * `model_id` into {@link request} or the chat surface to run it.
-   */
-  async routeIntent(params: IntentParams): Promise<RouteDecision> {
-    return this.rpc.call<RouteDecision>("tenzro_routeIntent", [
-      intentToParams(params),
-    ]);
-  }
-
-  /**
-   * Report how a routed call turned out, so per-cluster error rates reflect what
-   * happened rather than only what the catalog declares. `cluster` is the
-   * `cluster` from the routing decision.
-   *
-   * In practice this carries `escalated` — the outcome only the caller knows,
-   * because it means the caller took the answer to a stronger model. `resolved`
-   * and `failed` are already recorded by {@link chatByIntent} from the dispatch
-   * itself. Reporting is advisory: `retained: false` in the response means the
-   * node has no difficulty index wired, so the feedback was accepted and
-   * discarded.
-   */
-  async recordRouteOutcome(
-    modelId: string,
-    cluster: number,
-    outcome: RouteOutcome
-  ): Promise<Record<string, unknown>> {
-    return this.rpc.call<Record<string, unknown>>("tenzro_recordRouteOutcome", [
-      { model_id: modelId, cluster, outcome },
-    ]);
-  }
-
-  /**
-   * Read the node's difficulty index: how many clusters it has discovered and
-   * how many prompts landed in each. With `modelId`, also returns that model's
-   * per-cluster outcome counters and error rate. An operator diagnostic —
-   * routing does not depend on it.
-   */
-  async routeDifficultyStats(
-    modelId?: string
-  ): Promise<Record<string, unknown>> {
-    const body: Record<string, unknown> = {};
-    if (modelId !== undefined) body.model_id = modelId;
-    return this.rpc.call<Record<string, unknown>>(
-      "tenzro_routeDifficultyStats",
-      [body]
-    );
-  }
-
-  /**
-   * Resolve an intent to a model and run a chat completion through the same
-   * path a named-model request takes. `messages` is the rich chat shape;
-   * `message` is the simple single-turn shape. The chosen `RouteDecision`
-   * is attached to the response under `route`.
-   */
-  async chatByIntent(
-    params: IntentParams & {
-      message?: string;
-      messages?: Array<{ role: string; content: string }>;
-    }
-  ): Promise<Record<string, unknown>> {
-    const body: Record<string, unknown> = intentToParams(params);
-    if (params.message !== undefined) body.message = params.message;
-    if (params.messages !== undefined) body.messages = params.messages;
-    return this.rpc.call<Record<string, unknown>>("tenzro_chatByIntent", [body]);
-  }
-
-  /**
    * List all model service endpoints with load information.
    */
   async listModelEndpoints(): Promise<ModelEndpoint[]> {
     return this.rpc.call<ModelEndpoint[]>("tenzro_listModelEndpoints");
+  }
+
+  /**
+   * Check a jurisdiction receipt on the node: its signature in either form,
+   * the identity-key form against the node's chain state, and whether the
+   * hardware key it names is the one registered for its machine.
+   */
+  async verifyJurisdictionReceipt(receipt: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.rpc.call<Record<string, unknown>>("tenzro_verifyJurisdictionReceipt", { receipt });
   }
 
   /**

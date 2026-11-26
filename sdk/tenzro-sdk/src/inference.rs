@@ -96,83 +96,28 @@ impl InferenceClient {
             .charge_wei(units, crate::pricing::default_billable, rate)
     }
 
-    /// Resolves an intent to the best model without naming one. Discovery
-    /// only: no provider is dialed and no spend is recorded, but the per-DID
-    /// budget gate and the wallet-balance ceiling are still consulted, so an
-    /// unaffordable request is rejected at discovery time. Feed the returned
-    /// `model_id` into [`InferenceClient::request`] or a chat surface to run
-    /// it.
-    pub async fn route_intent(&self, params: &IntentParams) -> SdkResult<RouteDecision> {
-        self.rpc
-            .call("tenzro_routeIntent", serde_json::json!([params.to_json()]))
-            .await
-    }
-
-    /// Resolves an intent to a model and runs a chat completion through the
-    /// same path a named-model request takes. `messages` is the rich chat
-    /// shape (role/content turns). The chosen route is attached to the
-    /// response under `route`. Returns the raw chat response object.
-    pub async fn chat_by_intent(
-        &self,
-        params: &IntentParams,
-        messages: serde_json::Value,
-    ) -> SdkResult<serde_json::Value> {
-        let mut body = params.to_json();
-        body["messages"] = messages;
-        self.rpc
-            .call("tenzro_chatByIntent", serde_json::json!([body]))
-            .await
-    }
-
-    /// Reports how a routed call turned out, so per-cluster error rates
-    /// reflect what happened rather than only what the catalog declares.
-    /// `cluster` is the `cluster` from the routing decision.
-    ///
-    /// In practice this carries [`RouteOutcome::Escalated`] — the outcome only
-    /// the caller knows, because it means the caller took the answer to a
-    /// stronger model. `resolved` and `failed` are already recorded by
-    /// `chat_by_intent` from the dispatch itself. Reporting is advisory:
-    /// `retained: false` in the response means the node has no difficulty
-    /// index wired, so the feedback was accepted and discarded.
-    pub async fn record_route_outcome(
-        &self,
-        model_id: &str,
-        cluster: u32,
-        outcome: RouteOutcome,
-    ) -> SdkResult<serde_json::Value> {
-        self.rpc
-            .call(
-                "tenzro_recordRouteOutcome",
-                serde_json::json!({
-                    "model_id": model_id,
-                    "cluster": cluster,
-                    "outcome": outcome.as_str(),
-                }),
-            )
-            .await
-    }
-
-    /// Reads the node's difficulty index: how many clusters it has discovered
-    /// and how many prompts landed in each. With `model_id`, also returns that
-    /// model's per-cluster outcome counters and error rate. An operator
-    /// diagnostic — routing does not depend on it.
-    pub async fn route_difficulty_stats(
-        &self,
-        model_id: Option<&str>,
-    ) -> SdkResult<serde_json::Value> {
-        let params = match model_id {
-            Some(id) => serde_json::json!({ "model_id": id }),
-            None => serde_json::json!({}),
-        };
-        self.rpc.call("tenzro_routeDifficultyStats", params).await
-    }
-
     /// Reads the inference router's live metrics snapshot: total requests
     /// routed, hedges dispatched, hedges won, and requests abandoned on the
     /// whole-request deadline. Returns the raw metrics object.
     pub async fn router_metrics(&self) -> SdkResult<serde_json::Value> {
         self.rpc
             .call("tenzro_getRouterMetrics", serde_json::json!({}))
+            .await
+    }
+
+    /// Checks a jurisdiction receipt on the node: its signature in either
+    /// form, the identity-key form against the node's chain state, and
+    /// whether the hardware key it names is the one registered for its
+    /// machine. Returns the node's verdict object.
+    pub async fn verify_jurisdiction_receipt(
+        &self,
+        receipt: serde_json::Value,
+    ) -> SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_verifyJurisdictionReceipt",
+                serde_json::json!({ "receipt": receipt }),
+            )
             .await
     }
 
@@ -230,238 +175,6 @@ impl InferenceClient {
                 serde_json::Value::Object(params),
             )
             .await
-    }
-}
-
-/// The shared intent fields consumed by `route_intent` and `chat_by_intent`.
-///
-/// Build with [`IntentParams::new`] and refine with the `with_*` setters.
-/// `budget` is a decimal string in the smallest TNZO unit (a u128 exceeds
-/// JSON's safe integer range).
-#[derive(Debug, Clone, Default)]
-pub struct IntentParams {
-    /// Use case: `chat`, `code`, `reasoning`, `research`, `summarize`,
-    /// `extract`, or `embed`.
-    pub use_case: String,
-    /// Per-request cost cap, smallest TNZO unit, decimal string.
-    pub budget: Option<String>,
-    /// Cost-quality knob in `[0.0, 1.0]`.
-    pub optimize: Option<f64>,
-    /// Reject any model below this tier (`cheap` | `strong`).
-    pub quality_floor: Option<String>,
-    /// Estimated input tokens for cost estimation.
-    pub est_input_tokens: Option<u64>,
-    /// Estimated output tokens for cost estimation.
-    pub est_output_tokens: Option<u64>,
-    /// Payer DID — enables the per-DID budget gate.
-    pub payer_did: Option<String>,
-    /// Payer wallet address (hex) — enables the wallet-balance ceiling.
-    pub payer_address: Option<String>,
-    /// Text the model will answer, used only to place the request in a
-    /// difficulty cluster. It is not sent to any provider by `route_intent`.
-    /// On `chat_by_intent` the node derives it from the chat turns, so it only
-    /// needs setting when routing without dispatching.
-    pub prompt: Option<String>,
-    /// Where the request may be served (ISO 3166-1 codes and bloc tokens,
-    /// comma-separated). An intent no provider satisfies is refused.
-    pub jurisdiction: Option<String>,
-    /// The p95 latency target in ms; providers observed slower are skipped.
-    pub max_p95_ms: Option<u64>,
-    /// Continuity level: `none`, `standby` or `hot_successor`. Above `none`
-    /// the network assigns a successor that holds the session's KV cache;
-    /// it needs `jurisdiction` and `session_id`.
-    pub continuity: Option<String>,
-    /// The session the turns belong to, when continuity is above `none`.
-    pub session_id: Option<String>,
-}
-
-impl IntentParams {
-    /// Builds intent params for a use case with no other constraints.
-    pub fn new(use_case: impl Into<String>) -> Self {
-        Self {
-            use_case: use_case.into(),
-            ..Default::default()
-        }
-    }
-
-    /// Sets the per-request budget cap (decimal string, smallest TNZO unit).
-    #[must_use]
-    pub fn with_budget(mut self, budget: impl Into<String>) -> Self {
-        self.budget = Some(budget.into());
-        self
-    }
-
-    /// Sets the cost-quality knob in `[0.0, 1.0]`.
-    #[must_use]
-    pub fn with_optimize(mut self, optimize: f64) -> Self {
-        self.optimize = Some(optimize);
-        self
-    }
-
-    /// Sets the minimum quality tier (`cheap` | `strong`).
-    #[must_use]
-    pub fn with_quality_floor(mut self, floor: impl Into<String>) -> Self {
-        self.quality_floor = Some(floor.into());
-        self
-    }
-
-    /// Sets the token estimates used for cost estimation.
-    #[must_use]
-    pub fn with_tokens(mut self, input: u64, output: u64) -> Self {
-        self.est_input_tokens = Some(input);
-        self.est_output_tokens = Some(output);
-        self
-    }
-
-    /// Sets the payer DID (enables the per-DID budget gate).
-    #[must_use]
-    pub fn with_payer_did(mut self, did: impl Into<String>) -> Self {
-        self.payer_did = Some(did.into());
-        self
-    }
-
-    /// Sets the payer wallet address (enables the wallet-balance ceiling).
-    #[must_use]
-    pub fn with_payer_address(mut self, addr: impl Into<String>) -> Self {
-        self.payer_address = Some(addr.into());
-        self
-    }
-
-    /// Pins where the request may be served.
-    #[must_use]
-    pub fn with_jurisdiction(mut self, pin: impl Into<String>) -> Self {
-        self.jurisdiction = Some(pin.into());
-        self
-    }
-
-    /// Sets the p95 latency target in ms.
-    #[must_use]
-    pub fn with_max_p95_ms(mut self, target: u64) -> Self {
-        self.max_p95_ms = Some(target);
-        self
-    }
-
-    /// Asks for session continuity at `level` for `session_id`.
-    #[must_use]
-    pub fn with_continuity(
-        mut self,
-        level: impl Into<String>,
-        session_id: impl Into<String>,
-    ) -> Self {
-        self.continuity = Some(level.into());
-        self.session_id = Some(session_id.into());
-        self
-    }
-
-    /// Sets the prompt used to place the request in a difficulty cluster.
-    #[must_use]
-    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.prompt = Some(prompt.into());
-        self
-    }
-
-    /// Serializes into the node's snake_case RPC param object.
-    fn to_json(&self) -> serde_json::Value {
-        let mut obj = serde_json::json!({ "use_case": self.use_case });
-        if let Some(ref b) = self.budget {
-            obj["budget"] = serde_json::json!(b);
-        }
-        if let Some(o) = self.optimize {
-            obj["optimize"] = serde_json::json!(o);
-        }
-        if let Some(ref f) = self.quality_floor {
-            obj["quality_floor"] = serde_json::json!(f);
-        }
-        if let Some(i) = self.est_input_tokens {
-            obj["est_input_tokens"] = serde_json::json!(i);
-        }
-        if let Some(o) = self.est_output_tokens {
-            obj["est_output_tokens"] = serde_json::json!(o);
-        }
-        if let Some(ref j) = self.jurisdiction {
-            obj["jurisdiction"] = serde_json::json!(j);
-        }
-        if let Some(t) = self.max_p95_ms {
-            obj["max_p95_ms"] = serde_json::json!(t);
-        }
-        if let Some(ref c) = self.continuity {
-            obj["continuity"] = serde_json::json!(c);
-        }
-        if let Some(ref s) = self.session_id {
-            obj["session_id"] = serde_json::json!(s);
-        }
-        if let Some(ref d) = self.payer_did {
-            obj["payer_did"] = serde_json::json!(d);
-        }
-        if let Some(ref a) = self.payer_address {
-            obj["payer_address"] = serde_json::json!(a);
-        }
-        if let Some(ref p) = self.prompt {
-            obj["prompt"] = serde_json::json!(p);
-        }
-        obj
-    }
-}
-
-/// The model-selection decision returned by `route_intent`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteDecision {
-    /// Chosen model id.
-    #[serde(default)]
-    pub model_id: String,
-    /// Selected tier label.
-    #[serde(default)]
-    pub tier: String,
-    /// Estimated cost, smallest TNZO unit, decimal string.
-    #[serde(default)]
-    pub estimated_cost: String,
-    /// Ordered alternate model ids, best first.
-    #[serde(default)]
-    pub alternates: Vec<String>,
-    /// Difficulty cluster the prompt landed in. `None` when no prompt was
-    /// supplied or the node has no embedding model loaded. Echo it back to
-    /// [`InferenceClient::record_route_outcome`] so the observation lands on
-    /// the right cluster.
-    #[serde(default)]
-    pub cluster: Option<u32>,
-    /// The chosen model's observed adverse-outcome rate in that cluster.
-    /// `None` when the cluster has no observations, meaning the decision was
-    /// made on declared metadata alone.
-    #[serde(default)]
-    pub expected_error: Option<f64>,
-    /// Wallet address (hex) of the provider whose announced offer won. Absent
-    /// when the winner came from this node's own catalog, where the serving
-    /// operator is resolved at dispatch time.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// The winning offer's endpoint, present alongside `provider`.
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    /// Human-readable selection reason.
-    #[serde(default)]
-    pub reason: String,
-}
-
-/// How a routed call turned out, reported through
-/// [`InferenceClient::record_route_outcome`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteOutcome {
-    /// The selected model answered acceptably.
-    Resolved,
-    /// The caller took the answer to a stronger model.
-    Escalated,
-    /// The call did not produce a usable answer.
-    Failed,
-}
-
-impl RouteOutcome {
-    /// The wire label the node expects.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Resolved => "resolved",
-            Self::Escalated => "escalated",
-            Self::Failed => "failed",
-        }
     }
 }
 
@@ -750,22 +463,25 @@ pub struct InferenceUsage {
 
 impl InferenceClient {
     /// Commits a committee vote. `voter_node` is the voting validator's own
-    /// node: it signs the commit with its consensus key
-    /// (`tenzro_signChallengeVote`), and the signed commit goes to this
-    /// client's node (`tenzro_commitChallengeVote`).
+    /// node: it signs a commit of `verdict` under `salt` (hex) with its
+    /// validator key (`tenzro_signChallengeVote`), which it does only for the
+    /// verdict its own re-execution found, and the signed commit goes to this
+    /// client's node (`tenzro_commitChallengeVote`). Keep `salt` for the
+    /// reveal.
     pub async fn commit_challenge_vote(
         &self,
         voter_node: &RpcClient,
         challenge_id: &str,
-        commit_hash: &str,
+        verdict: bool,
+        salt: &str,
     ) -> crate::error::SdkResult<serde_json::Value> {
         let signed: serde_json::Value = voter_node
             .call(
                 "tenzro_signChallengeVote",
-                serde_json::json!({ "challenge_id": challenge_id, "commit_hash": commit_hash }),
+                serde_json::json!({ "phase": "commit", "challenge_id": challenge_id, "verdict": verdict, "salt": salt }),
             )
             .await?;
-        self.rpc.call("tenzro_commitChallengeVote", serde_json::json!({ "challenge_id": challenge_id, "voter": signed["voter"], "commit_hash": commit_hash, "signature": signed["signature"] })).await
+        self.rpc.call("tenzro_commitChallengeVote", serde_json::json!({ "challenge_id": challenge_id, "voter": signed["voter"], "commit_hash": signed["commit_hash"], "signature": signed["signature"] })).await
     }
 
     /// Reveals a committed vote: `voter_node` signs `(verdict, salt)`, and the
@@ -778,18 +494,58 @@ impl InferenceClient {
         verdict: bool,
         salt: &str,
     ) -> crate::error::SdkResult<serde_json::Value> {
-        let signed: serde_json::Value = voter_node.call("tenzro_signChallengeVote", serde_json::json!({ "challenge_id": challenge_id, "verdict": verdict, "salt": salt })).await?;
+        let signed: serde_json::Value = voter_node.call("tenzro_signChallengeVote", serde_json::json!({ "phase": "reveal", "challenge_id": challenge_id, "verdict": verdict, "salt": salt })).await?;
         self.rpc.call("tenzro_revealChallengeVote", serde_json::json!({ "challenge_id": challenge_id, "voter": signed["voter"], "verdict": verdict, "salt": salt, "signature": signed["signature"] })).await
     }
 
-    /// Calls `tenzro_fileInferenceChallenge`: file inference challenge.
+    /// Calls `tenzro_fileInferenceChallenge`: files a challenge with the
+    /// provider's signed `receipt` and the `inputs` it commits to
+    /// (`{kind: "prompt", prompt}` or `{kind: "chat", messages, render, media}`,
+    /// `render` being `{tools, enable_thinking, reasoning_effort}`).
+    /// `commitment` is needed when the node did not serve the response.
     pub async fn file_inference_challenge(
         &self,
         commitment_hash: &str,
         challenger: &str,
         reason: Option<&str>,
+        receipt: &serde_json::Value,
+        inputs: &serde_json::Value,
+        commitment: Option<&serde_json::Value>,
     ) -> crate::error::SdkResult<serde_json::Value> {
-        self.rpc.call("tenzro_fileInferenceChallenge", serde_json::json!({ "commitment_hash": commitment_hash, "challenger": challenger, "reason": reason })).await
+        let mut params = serde_json::json!({
+            "commitment_hash": commitment_hash,
+            "challenger": challenger,
+            "reason": reason,
+            "receipt": receipt,
+            "inputs": inputs,
+        });
+        if let Some(c) = commitment {
+            params["commitment"] = c.clone();
+        }
+        self.rpc.call("tenzro_fileInferenceChallenge", params).await
+    }
+
+    /// Calls `tenzro_reexecuteChallenge` (operator only) on a seat's own
+    /// node: re-executes the challenged inputs and records the verdict the
+    /// node may then sign.
+    pub async fn reexecute_challenge(
+        &self,
+        challenge_id: &str,
+        inputs: Option<&serde_json::Value>,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        let mut params = serde_json::json!({ "challenge_id": challenge_id });
+        if let Some(i) = inputs {
+            params["inputs"] = i.clone();
+        }
+        self.rpc.call("tenzro_reexecuteChallenge", params).await
+    }
+
+    /// Calls `tenzro_listSeatDuties` (operator only): the open challenges
+    /// this node holds a seat on.
+    pub async fn list_seat_duties(&self) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call("tenzro_listSeatDuties", serde_json::json!({}))
+            .await
     }
 
     /// Calls `tenzro_finalizeChallenge`: finalize challenge.
@@ -801,6 +557,45 @@ impl InferenceClient {
             .call(
                 "tenzro_finalizeChallenge",
                 serde_json::json!({ "challenge_id": challenge_id }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_fileChallengeFault` (operator only): take a challenge
+    /// its committee upheld to the chain. `dispute` is the answer the
+    /// challenged commitment was signed into (`{receipt, request, output}`).
+    pub async fn file_challenge_fault(
+        &self,
+        challenge_id: &str,
+        dispute: serde_json::Value,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_fileChallengeFault",
+                serde_json::json!({ "challenge_id": challenge_id, "dispute": dispute }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_getChallengeInputs`: the inputs of a challenge, served
+    /// to a drawn seat. `signature` is the seat's validator-key signature over
+    /// the challenge id, `voter` and `requested_at`.
+    pub async fn get_challenge_inputs(
+        &self,
+        challenge_id: &str,
+        voter: &str,
+        requested_at: u64,
+        signature: &str,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_getChallengeInputs",
+                serde_json::json!({
+                    "challenge_id": challenge_id,
+                    "voter": voter,
+                    "requested_at": requested_at,
+                    "signature": signature,
+                }),
             )
             .await
     }
@@ -845,19 +640,25 @@ impl InferenceClient {
             .await
     }
 
-    /// Calls `tenzro_verifyInferenceCommitment`: re-run the stored commitment
+    /// Calls `tenzro_verifyInferenceCommitment`: re-run the commitment
     /// against `prompt`; with the provider's `receipt`, the decode is checked
-    /// too.
+    /// too. A node that did not serve the response needs `commitment` (the
+    /// `commitment` field of [`Self::get_inference_commitment`] on the node
+    /// that did) together with `receipt`, which names its model and provider.
     pub async fn verify_inference_commitment(
         &self,
         commitment_hash: &str,
         prompt: &str,
         receipt: Option<serde_json::Value>,
+        commitment: Option<serde_json::Value>,
     ) -> crate::error::SdkResult<serde_json::Value> {
         let mut params =
             serde_json::json!({ "commitment_hash": commitment_hash, "prompt": prompt });
         if let Some(r) = receipt {
             params["receipt"] = r;
+        }
+        if let Some(c) = commitment {
+            params["commitment"] = c;
         }
         self.rpc
             .call("tenzro_verifyInferenceCommitment", params)

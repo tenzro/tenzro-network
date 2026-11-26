@@ -507,7 +507,7 @@ mod tests {
     /// Prints one `GATE {json}` line. Run with `--release --ignored
     /// --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn gate_signature_verification_micro() {
         let iters: usize = std::env::var("TDC_MICRO_ITERS")
             .ok()

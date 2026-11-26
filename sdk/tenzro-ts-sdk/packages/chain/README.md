@@ -1,6 +1,6 @@
 # @tenzro/chain
 
-Tenzro chain operations: tokens, NFTs, staking, validators, governance, contracts, TEE, ZK, storage and events.
+Tenzro chain operations: tokens, NFTs, staking, validators, governance, contracts, TEE, ZK, storage, compute rental, data availability and events.
 
 Offline helpers: `abiEncode` / `abiDecode` / `encodeFunctionCall` / `functionSelector` / `eventTopic` (Solidity ABI for any EVM contract or precompile), and for NFTs on the factory precompile at `0x…1006`: `nftCalldata.*` builders, `nftDecode.*` for return data, `decodeNftTransfer` for logs, `nftCollectionId`, and `nftTransaction(...)`, which runs factory calls as one all-or-nothing `ContractCall` transaction for `TypedTxClient`. `NftClient` reads collections, owners, balances and token URIs through `eth_call`.
 

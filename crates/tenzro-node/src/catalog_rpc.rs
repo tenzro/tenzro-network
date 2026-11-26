@@ -46,7 +46,7 @@ pub(crate) async fn handle_list(
 ) -> Result<Value, JsonRpcError> {
     let p = object_params(params);
     let engine = p.get("engine").and_then(Value::as_str);
-    let catalog = tenzro_model::catalog::store::current();
+    let catalog = node.catalog();
     let entries: Vec<Value> = catalog
         .entries()
         .iter()
@@ -84,12 +84,12 @@ pub(crate) async fn handle_get(
         .filter(|r| r.model == model && r.entry.is_some())
         .map(|r| r.publisher)
         .collect();
-    if let Some(entry) = tenzro_model::catalog::entry(model) {
+    if let Some(entry) = node.catalog().entry(model) {
         return Ok(json!({
             "model": model,
             "served": true,
             "publishers": published_by,
-            "entry": with_billed_on(&entry),
+            "entry": with_billed_on(entry),
         }));
     }
     let reason = status
@@ -159,12 +159,16 @@ pub(crate) async fn handle_engine_releases(node: &Arc<TenzroNode>) -> Result<Val
     }))
 }
 
-/// Engine-specific catalog rows as the per-modality listings return them:
-/// each row with its entry's licence (`license`, `license_id`,
-/// `license_tier`, `license_conditions`), whether it may be served for pay
-/// (`paid_serving`) and whether it is `gated`.
-pub(crate) fn with_licence<T: serde::Serialize>(rows: &[T]) -> Vec<Value> {
-    rows.iter()
+/// Engine-specific catalog rows, as `rows` reads them from `catalog`, the way
+/// the per-modality listings return them: each row with its entry's licence
+/// (`license`, `license_id`, `license_tier`, `license_conditions`), whether it
+/// may be served for pay (`paid_serving`) and whether it is `gated`.
+pub(crate) fn with_licence<T: serde::Serialize>(
+    catalog: &tenzro_model::Catalog,
+    rows: impl FnOnce(&tenzro_model::Catalog) -> Vec<T>,
+) -> Vec<Value> {
+    rows(catalog)
+        .iter()
         .filter_map(|row| serde_json::to_value(row).ok())
         .map(|mut row| {
             let id = row
@@ -172,9 +176,7 @@ pub(crate) fn with_licence<T: serde::Serialize>(rows: &[T]) -> Vec<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            if let (Some(entry), Some(obj)) =
-                (tenzro_model::catalog::entry(&id), row.as_object_mut())
-            {
+            if let (Some(entry), Some(obj)) = (catalog.entry(&id), row.as_object_mut()) {
                 obj.insert("license".into(), json!(entry.licence.name));
                 obj.insert("license_id".into(), json!(entry.licence.id));
                 obj.insert("license_tier".into(), json!(entry.licence.effective_tier()));

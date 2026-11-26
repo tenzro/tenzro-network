@@ -128,8 +128,7 @@ pub use state_adapter::{CacheStats, PersistentState, PrefetchKeys, StateAdapter}
 pub use svm::SvmExecutor;
 pub use traits::{VmExecutor, VmState, VmType};
 pub use types::{
-    CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log, StateChange,
-    VmTransaction,
+    CallResult, ContractCall, ExecutionResult, Log, StateChange, VmFeePayer, VmTransaction,
 };
 
 /// VM module version

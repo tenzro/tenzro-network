@@ -101,13 +101,6 @@ impl StakeNeed {
                     .into(),
             ),
             (LineKind::Command, self.account.clone()),
-            (
-                LineKind::Text,
-                "3. Continue without a staked role. The machine joins as a participant, and you \
-                 can stake later:"
-                    .into(),
-            ),
-            (LineKind::Command, "tenzro setup --mode consume".into()),
         ]
     }
 
@@ -231,11 +224,10 @@ mod tests {
             .iter()
             .position(|t| t.starts_with("2. Receive TNZO"))
             .unwrap();
-        let without = texts
-            .iter()
-            .position(|t| t.starts_with("3. Continue without"))
-            .unwrap();
-        assert!(sponsor < receive && receive < without);
+        assert!(sponsor < receive);
+        // Every option leads to the staked role: none sets the machine up
+        // without one.
+        assert!(!texts.iter().any(|t| t.contains("--mode consume")));
     }
 
     #[test]

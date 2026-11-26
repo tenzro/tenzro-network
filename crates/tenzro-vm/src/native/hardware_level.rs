@@ -219,7 +219,7 @@ pub fn counted_gpus(state: &dyn VmState, did: &str, counts: impl Fn(u64) -> bool
         if counts(gpu.epoch)
             && !gpus.iter().any(|g| g.device == gpu.device)
             && !gpu_holder(state, &gpu.device)
-                .is_some_and(|holder| holder != did && !is_identity_revoked(state, &holder))
+                .is_some_and(|holder| holder != did && !identity_revoked_in_force(state, &holder))
         {
             gpus.push(gpu);
         }
@@ -358,14 +358,18 @@ pub fn read_possession(state: &dyn VmState, did: &str) -> Option<Possession> {
 /// and the beacon round it is drawn from; `None` until the beacon has taken
 /// a value since the epoch began.
 pub fn current_challenge(state: &dyn VmState, did: &str) -> Option<(u64, u64, [u8; 32])> {
+    let (epoch, round, mix) = current_draw(state)?;
+    Some((epoch, round, possession_challenge(did, epoch, round, &mix)))
+}
+
+/// What every possession challenge of the current reward epoch is drawn
+/// from: the epoch, and the round and value of the first entry the
+/// randomness beacon took in it; `None` until it has taken one.
+pub fn current_draw(state: &dyn VmState) -> Option<(u64, u64, [u8; 32])> {
     let start = epoch_start(state)?;
     let entry = super::beacon::first_at_or_after(state, start.at_ms)?;
     let mix = super::beacon::entry_mix(&entry)?;
-    Some((
-        start.epoch,
-        entry.round,
-        possession_challenge(did, start.epoch, entry.round, &mix),
-    ))
+    Some((start.epoch, entry.round, mix))
 }
 
 /// Applies a `HardwareProof` sent from `from`.
@@ -387,7 +391,7 @@ pub(super) fn prove(
             hex::encode(from)
         ))
     })?;
-    if is_identity_revoked(state, &did) {
+    if identity_revoked_in_force(state, &did) {
         return Err(refuse(format!("{did} is revoked")));
     }
     let admitted = super::funding::machine_attestation(state, &did).map_err(|e| {
@@ -550,8 +554,20 @@ pub fn device_holder(state: &dyn VmState, device: &str) -> Option<String> {
 /// the current epoch or the one before counts, so a machine that proves
 /// itself every epoch keeps its level while it answers the new challenge.
 pub fn derive(state: &dyn VmState, address: &[u8], now_ms: i64) -> (HardwareStamp, String, String) {
+    let (stamp, did, device, _) = explain(state, address, now_ms);
+    (stamp, did, device)
+}
+
+/// [`derive`], plus why the account is at level 0 when it is: the first
+/// piece of evidence the derivation found missing or refused. `None` when
+/// verified hardware stands behind the level.
+pub fn explain(
+    state: &dyn VmState,
+    address: &[u8],
+    now_ms: i64,
+) -> (HardwareStamp, String, String, Option<String>) {
     let current = epoch_start(state).map(|s| s.epoch);
-    derive_in(state, address, now_ms, |proven| {
+    derive_explained(state, address, now_ms, |proven| {
         current.is_some_and(|c| proven == c || proven.saturating_add(1) == c)
     })
 }
@@ -564,11 +580,28 @@ fn derive_in(
     now_ms: i64,
     counts: impl Fn(u64) -> bool + Copy,
 ) -> (HardwareStamp, String, String) {
+    let (stamp, did, device, _) = derive_explained(state, address, now_ms, counts);
+    (stamp, did, device)
+}
+
+/// [`derive_in`], with the reason a level-0 result is level 0.
+fn derive_explained(
+    state: &dyn VmState,
+    address: &[u8],
+    now_ms: i64,
+    counts: impl Fn(u64) -> bool + Copy,
+) -> (HardwareStamp, String, String, Option<String>) {
     let Some(did) = identity_of_wallet(state, address) else {
-        return (HardwareStamp::default(), String::new(), String::new());
+        return (
+            HardwareStamp::default(),
+            String::new(),
+            String::new(),
+            Some("the account is not the wallet of a registered identity".into()),
+        );
     };
     let Some(record) = super::funding::identity_record(state, &did) else {
-        return (HardwareStamp::default(), did, String::new());
+        let why = format!("{did} is not registered");
+        return (HardwareStamp::default(), did, String::new(), Some(why));
     };
     let pq = if record.pq_verifying_key.is_empty() {
         ""
@@ -582,23 +615,40 @@ fn derive_in(
         spec: String::new(),
         scheme: format!("p256{pq}"),
     };
-    if is_identity_revoked(state, &did) {
-        return (software, did, String::new());
+    if identity_revoked_in_force(state, &did) {
+        let why = format!("{did} is revoked");
+        return (software, did, String::new(), Some(why));
     }
-    let Ok(att) = super::funding::machine_attestation(state, &did) else {
-        return (software, did, String::new());
+    let att = match super::funding::machine_attestation(state, &did) {
+        Ok(att) => att,
+        Err(e) => {
+            let why = if e.ends_with("carries no TPM attestation") {
+                format!(
+                    "{e}; a node attaches its machine root's TPM attestation by itself once the \
+                     registration is on chain, and `tenzro validator attach-attestation` \
+                     attaches it by hand"
+                )
+            } else {
+                e
+            };
+            return (software, did, String::new(), Some(why));
+        }
     };
-    if super::funding::machine_endorsed(state, &did, now_ms).is_err() {
-        return (software, did, String::new());
+    if let Err(e) = super::funding::machine_endorsed(state, &did, now_ms) {
+        let why = format!("the TPM endorsement is not recognised: {e}");
+        return (software, did, String::new(), Some(why));
     }
     if !read_possession(state, &did).is_some_and(|p| counts(p.epoch)) {
-        return (software, did, String::new());
+        let why = "no possession quote counts for this epoch; the node quotes each epoch's \
+                   challenge once the randomness beacon has its first value of the epoch"
+            .to_string();
+        return (software, did, String::new(), Some(why));
     }
     let (vendor, spec) =
         tenzro_tee::tpm_attest::ek_certificate_profile(&att.evidence.ek_certificate);
     let device = device_id(&att.evidence.ek_public);
     let held_by_another = device_holder(state, &device)
-        .is_some_and(|holder| holder != did && !is_identity_revoked(state, &holder));
+        .is_some_and(|holder| holder != did && !identity_revoked_in_force(state, &holder));
     // The TPM holds the identity's own ML-DSA key: level 2; as a restricted
     // ML-DSA attestation key: level 3. A later enrolment of another key
     // matches no certification.
@@ -627,7 +677,10 @@ fn derive_in(
         spec,
         scheme: format!("ecdsa-p256{pq}{second}"),
     };
-    (stamp, did, device)
+    let why = held_by_another.then(|| {
+        format!("the TPM {device} is admitted under another identity that is not revoked")
+    });
+    (stamp, did, device, why)
 }
 
 /// Refuses a quote's or receipt's hardware stamp for `payee` unless it is
@@ -777,7 +830,7 @@ fn check_fleet_host(
     taken: &dyn Fn(&str) -> bool,
 ) -> std::result::Result<AcceptedHost, String> {
     let did = host.did.as_str();
-    if is_identity_revoked(state, did) {
+    if identity_revoked_in_force(state, did) {
         return Err(format!("{did} is revoked"));
     }
     let admitted = super::funding::machine_attestation(state, did)?;
@@ -850,7 +903,7 @@ fn check_fleet_host(
         }
         if let Some(holder) = gpu_holder(state, &device)
             && holder != did
-            && !is_identity_revoked(state, &holder)
+            && !identity_revoked_in_force(state, &holder)
         {
             return Err(format!("{did} GPU {i}: GPU {device} is held by {holder}"));
         }
@@ -889,7 +942,7 @@ fn prove_fleet(
             hex::encode(from)
         ))
     })?;
-    if is_identity_revoked(state, &operator) {
+    if identity_revoked_in_force(state, &operator) {
         return Err(refuse(format!("{operator} is revoked")));
     }
     let rules = GpuRules {

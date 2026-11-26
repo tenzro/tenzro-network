@@ -16,6 +16,22 @@ impl NodeClient {
 }
 
 impl NodeClient {
+    /// Calls `tenzro_verifyJurisdictionReceipt`: whether a jurisdiction
+    /// receipt's signature holds in either form (`record`, or `identity_key`
+    /// checked against the machine's key history on chain) and the key is
+    /// registered.
+    pub async fn verify_jurisdiction_receipt(
+        &self,
+        receipt: serde_json::Value,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_verifyJurisdictionReceipt",
+                serde_json::json!({ "receipt": receipt }),
+            )
+            .await
+    }
+
     /// Calls `tenzro_autotuneDecisions`: autotune decisions.
     pub async fn autotune_decisions(&self) -> crate::error::SdkResult<serde_json::Value> {
         self.rpc
@@ -75,6 +91,22 @@ impl NodeClient {
                 "tenzro_standbyQuote",
                 serde_json::json!({ "model_id": model_id, "jurisdiction": jurisdiction }),
             )
+            .await
+    }
+
+    /// Calls `tenzro_getAppTransportInfo`: where devices reach the node's app
+    /// transport, and the certificates to pin, signed by the node.
+    pub async fn app_transport_info(&self) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call("tenzro_getAppTransportInfo", serde_json::json!({}))
+            .await
+    }
+
+    /// Calls `tenzro_getAppTransportUsage`: what the node's app transport carried
+    /// for the signed-in caller, or for every identity to an administrator.
+    pub async fn app_transport_usage(&self) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call("tenzro_getAppTransportUsage", serde_json::json!({}))
             .await
     }
 
@@ -158,6 +190,77 @@ impl NodeClient {
             .await
     }
 
+    /// Calls `tenzro_listConditions` (operator only): what on this node is
+    /// open and needs its operator's attention, the most severe first.
+    pub async fn list_conditions(&self) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call("tenzro_listConditions", serde_json::Value::Null)
+            .await
+    }
+
+    /// Calls `tenzro_acknowledgeCondition` (operator only): acknowledge an
+    /// open condition. `since` is as the list gives it; `reason` is 1 to 500
+    /// characters.
+    pub async fn acknowledge_condition(
+        &self,
+        id: &str,
+        since: serde_json::Value,
+        reason: &str,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_acknowledgeCondition",
+                serde_json::json!({ "id": id, "since": since, "reason": reason }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_submitApproval` (operator only): answer an open condition
+    /// that asks. An approval carries the operator passkey's `assertion`
+    /// (`credential_id`, `authenticator_data`, `client_data_json`,
+    /// `signature`, base64url) over the condition's challenge; a decline needs
+    /// none.
+    pub async fn submit_approval(
+        &self,
+        condition_id: &str,
+        approve: bool,
+        assertion: Option<serde_json::Value>,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_submitApproval",
+                serde_json::json!({
+                    "condition_id": condition_id,
+                    "approve": approve,
+                    "assertion": assertion,
+                }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_installUpdate` (operator only): start the installed
+    /// updater for the newest verified release this node knows of.
+    pub async fn install_update(&self) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call("tenzro_installUpdate", serde_json::Value::Null)
+            .await
+    }
+
+    /// Calls `tenzro_restartNode` (operator only): restart this node through
+    /// the service that runs it; refused when no service runs it.
+    pub async fn restart_node(
+        &self,
+        max_wait_secs: Option<u64>,
+        force: Option<bool>,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_restartNode",
+                serde_json::json!({ "max_wait_secs": max_wait_secs, "force": force }),
+            )
+            .await
+    }
+
     /// Calls `tenzro_iroh_resolveTenzroUri`: iroh resolve tenzro uri.
     pub async fn iroh_resolve_tenzro_uri(
         &self,
@@ -225,18 +328,21 @@ impl NodeClient {
             .await
     }
 
-    /// Calls `tenzro_getStateProof`: get state proof.
+    /// Calls `tenzro_getStateProof`: the value of (`namespace`, `key`, hex)
+    /// and its proof, at `height` or the latest committed height. Ask at a
+    /// certified checkpoint's state height to check the proof against that
+    /// checkpoint's state root.
     pub async fn get_state_proof(
         &self,
         namespace: &str,
         key: &str,
+        height: Option<u64>,
     ) -> crate::error::SdkResult<StateProof> {
-        self.rpc
-            .call(
-                "tenzro_getStateProof",
-                serde_json::json!({ "namespace": namespace, "key": key }),
-            )
-            .await
+        let mut params = serde_json::json!({ "namespace": namespace, "key": key });
+        if let Some(height) = height {
+            params["height"] = height.into();
+        }
+        self.rpc.call("tenzro_getStateProof", params).await
     }
 
     /// Calls `tenzro_getAccountContention`: get account contention.
@@ -290,6 +396,9 @@ pub struct StateProof {
     pub height: u64,
     /// The state root the proof is against.
     pub state_root: String,
+    /// The node hash of the state trie at that height (`sha256`,
+    /// `sha3_256`), the scheme the proof is checked under.
+    pub state_trie_hash: String,
     /// The checkpoint that certifies this height, when one does.
     #[serde(default)]
     pub certified_by_checkpoint: Option<u64>,

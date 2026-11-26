@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tenzro"
-version = "0.2.0"
+version = "0.2.2"
 description = "Tenzro Network SDK: a thin core (every node RPC method, typed transactions signed in hardware) and capability subpackages for x402 payments and the publisher gate, settlement, delegated agents, bridge, inference and chain verification"
 readme = "README.md"
 license = {file = "LICENSE"}

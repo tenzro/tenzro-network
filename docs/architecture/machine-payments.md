@@ -123,6 +123,9 @@ allow-list or the client's network location:
   tokens its operator lists in `payments.ledger_assets` (token ids) besides
   TNZO.
 - **Payee**: a quote names the assets it accepts.
+- **Buyer's jurisdiction**: a token whose policy serves or refuses jurisdictions is
+  settled only for a payer whose live jurisdiction claim, under an issuer the
+  token names, passes those rules at the time of the request.
 - **Agent**: an agent pays only in assets its Terms list in `asset_limits`,
   each with its own per-payment and daily limit, counted at its USD price.
 - **Issuer**: eligibility is the token's policy on the ledger. A
@@ -257,6 +260,14 @@ same directory, rendered from the agent's Terms at the current height; a
 revoked, quarantined or expired agent's directory is empty from the next
 block. A node signs agent requests only
 when its operator has published an origin (`external_rpc_addr`).
+
+A node's HTTP payment gate also checks the trusted agent signatures a card
+network's agent program has agents send (RFC 9421, `tag` `agent-browser-auth`
+or `agent-payer-auth`, covering `@authority` and `@path`, a single-use nonce,
+at most eight minutes between `created` and `expires`), against the key sets
+its operator lists in `payments.trusted_agent_keys` (Ed25519 JWKs). A request
+carrying one is served only when it verifies, and the verified agent is a
+signal to the handlers behind the gate; it pays like any caller.
 
 ## Governed settings
 

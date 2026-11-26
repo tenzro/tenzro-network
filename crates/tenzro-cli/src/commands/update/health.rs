@@ -13,6 +13,10 @@
 //!   identity files changed. The previous release is put back by the same
 //!   rename the manual `tenzro update rollback` does, with nothing downloaded.
 //!
+//! A trial applies to the release it was opened for. When the install's
+//! `current` names another release (the installer was run again), the trial
+//! ends as superseded and nothing is rolled back.
+//!
 //! The counter is advanced by `tenzro update boot-check`, which the node unit
 //! runs before the node starts. It never blocks a start: after a rollback it
 //! lets the restored release come up.
@@ -69,6 +73,9 @@ pub enum TrialState {
     Good,
     /// Given up on; the previous release was restored.
     RolledBack,
+    /// Another release was made current outside the trial (the installer was
+    /// run again, or `current` was moved by hand): the trial no longer applies.
+    Superseded,
 }
 
 /// Why a release was rolled back.
@@ -266,6 +273,9 @@ pub fn record_boot(data_dir: &Path, layout: &Layout, now_ms: u64) -> Result<Boot
     if t.state != TrialState::Pending {
         return Ok(BootDecision::NoTrial);
     }
+    if supersede(data_dir, layout, &mut t)? {
+        return Ok(BootDecision::NoTrial);
+    }
     let attempt = t.boot_attempts + 1;
     if attempt > t.max_boot_attempts {
         let reason = Reason::BootAttempts {
@@ -289,6 +299,21 @@ pub fn record_boot(data_dir: &Path, layout: &Layout, now_ms: u64) -> Result<Boot
     t.first_boot_ms.get_or_insert(now_ms);
     save(data_dir, &t)?;
     Ok(BootDecision::Proceed { attempt })
+}
+
+/// Ends `t` as superseded when the install's `current` is not the release
+/// under trial. A rollback from that state would restore `previous`, which
+/// is not the release the operator chose to run. Flat installs carry no
+/// release name and are never superseded.
+fn supersede(data_dir: &Path, layout: &Layout, t: &mut Trial) -> Result<bool> {
+    match layout.current_release() {
+        Some(current) if current != t.release => {
+            t.state = TrialState::Superseded;
+            save(data_dir, t)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// What one probe of the running node saw.
@@ -360,6 +385,13 @@ pub async fn run_gate(
             "the trial for {} already ended as {:?}",
             t.release,
             t.state
+        ));
+    }
+    if supersede(data_dir, layout, &mut t)? {
+        return Err(anyhow!(
+            "the trial for {} no longer applies: release {} is current",
+            t.release,
+            layout.current_release().unwrap_or_default()
         ));
     }
     if identity_fingerprint(identity_roots)? != t.identity_sha256 {

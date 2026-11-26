@@ -100,7 +100,13 @@ pub fn key_leaf(sec1_public_key: &[u8; 65], operator_did: &[u8]) -> [u8; 32] {
 /// A target leaf: the target and the function on it, each length-prefixed
 /// (u16, big-endian).
 pub fn target_leaf(target: &[u8], selector: &[u8]) -> [u8; 32] {
-    sha(&[&[0x00], &(target.len() as u16).to_be_bytes(), target, &(selector.len() as u16).to_be_bytes(), selector])
+    sha(&[
+        &[0x00],
+        &(target.len() as u16).to_be_bytes(),
+        target,
+        &(selector.len() as u16).to_be_bytes(),
+        selector,
+    ])
 }
 
 /// Whether `leaf` is under `root` with `proof` (sibling hashes, pairs hashed
@@ -116,8 +122,21 @@ pub fn merkle_verify(root: &[u8; 32], leaf: &[u8; 32], proof: &[[u8; 32]]) -> bo
 
 /// The digest serving nodes sign for action number `nonce` under grant `seq`
 /// of `account` on `chain`, over the encoded action.
-pub fn act_digest(chain: &[u8; 32], account: &[u8; 32], seq: u64, nonce: u64, action: &[u8]) -> [u8; 32] {
-    sha(&[ACT_DOMAIN, chain, account, &seq.to_be_bytes(), &nonce.to_be_bytes(), action])
+pub fn act_digest(
+    chain: &[u8; 32],
+    account: &[u8; 32],
+    seq: u64,
+    nonce: u64,
+    action: &[u8],
+) -> [u8; 32] {
+    sha(&[
+        ACT_DOMAIN,
+        chain,
+        account,
+        &seq.to_be_bytes(),
+        &nonce.to_be_bytes(),
+        action,
+    ])
 }
 
 /// The selector of an action that pays: the account moves the action's
@@ -134,14 +153,27 @@ pub const PAID_REPORT_LEN: usize = 1 + 32 * 3 + 8 + 8 + PAY_DATA_LEN + 16;
 /// The report an account emits when action `nonce` under grant `g` paid
 /// `amount`, in the layout Tenzro records proven payments from: kind 4,
 /// chain, account, agent, seq, nonce, the action's pay data, amount.
-pub fn paid_report(g: &Grant, nonce: u64, data: &[u8], amount: u128) -> Option<[u8; PAID_REPORT_LEN]> {
+pub fn paid_report(
+    g: &Grant,
+    nonce: u64,
+    data: &[u8],
+    amount: u128,
+) -> Option<[u8; PAID_REPORT_LEN]> {
     if data.len() != PAY_DATA_LEN {
         return None;
     }
     let mut out = [0u8; PAID_REPORT_LEN];
     out[0] = 4;
     let mut at = 1;
-    for part in [&g.chain[..], &g.account, &g.agent, &g.seq.to_be_bytes(), &nonce.to_be_bytes(), data, &amount.to_be_bytes()] {
+    for part in [
+        &g.chain[..],
+        &g.account,
+        &g.agent,
+        &g.seq.to_be_bytes(),
+        &nonce.to_be_bytes(),
+        data,
+        &amount.to_be_bytes(),
+    ] {
         out[at..at + part.len()].copy_from_slice(part);
         at += part.len();
     }

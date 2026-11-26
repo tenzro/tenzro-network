@@ -191,7 +191,9 @@ pub async fn token_exchange_handler(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let htu = full_request_uri(&headers, "/oauth/token");
+            let Some(htu) = full_request_uri(&headers, "/oauth/token") else {
+                return no_host();
+            };
             let dpop_validation = tenzro_auth::DpopValidation {
                 proof: &dpop_proof,
                 expected_htm: "POST",
@@ -384,7 +386,9 @@ pub async fn protected_resource_metadata_handler(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Response {
-    let base = derive_base_url(&headers);
+    let Some(base) = derive_base_url(&headers) else {
+        return no_host();
+    };
     let issuer = node_issuer(&state).unwrap_or_else(|| base.clone());
 
     Json(ProtectedResourceMetadata {
@@ -443,7 +447,9 @@ pub async fn as_metadata_handler(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Response {
-    let base = derive_base_url(&headers);
+    let Some(base) = derive_base_url(&headers) else {
+        return no_host();
+    };
     let issuer = node_issuer(&state).unwrap_or_else(|| base.clone());
 
     Json(AsMetadata {
@@ -510,18 +516,25 @@ fn auth_engine(
 }
 
 /// Derive the public base URL of this node from the incoming `Host`
-/// and `X-Forwarded-Proto` headers. Caddy / our reverse proxy sets
-/// these; for direct hits we default to `http`.
-pub(super) fn derive_base_url(headers: &HeaderMap) -> String {
+/// and `X-Forwarded-Proto` headers. A reverse proxy sets these; for direct
+/// hits we default to `https`. A request that names no host has no base URL:
+/// the node names no gateway of its own to answer with.
+pub(super) fn derive_base_url(headers: &HeaderMap) -> Option<String> {
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("https");
-    let host = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("api.tenzro.com");
-    format!("{}://{}", scheme, host)
+    let host = headers.get("host").and_then(|v| v.to_str().ok())?;
+    Some(format!("{}://{}", scheme, host))
+}
+
+/// The refusal for a request that names no host.
+fn no_host() -> Response {
+    oauth_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "the request names no Host header",
+    )
 }
 
 /// The node's configured issuer, if available. Falls back to the
@@ -666,8 +679,8 @@ pub(super) async fn validate_wallet_auth(
 /// Build the `htu` value (full request URL minus query/fragment per
 /// RFC 9449 §4.2) from the inbound headers + path. The wallet must
 /// sign DPoP proofs over this same string.
-pub(super) fn full_request_uri(headers: &axum::http::HeaderMap, path: &str) -> String {
-    format!("{}{}", derive_base_url(headers), path)
+pub(super) fn full_request_uri(headers: &axum::http::HeaderMap, path: &str) -> Option<String> {
+    Some(format!("{}{}", derive_base_url(headers)?, path))
 }
 
 /// Map an `AuthError` to the closest OAuth/HTTP status code.
@@ -698,5 +711,27 @@ fn auth_error_to_response(e: AuthError) -> Response {
             "server_error",
             &e.to_string(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_naming_no_host_has_no_base_url() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(derive_base_url(&headers), None);
+        assert_eq!(full_request_uri(&headers, "/oauth/token"), None);
+        headers.insert("host", "node.example:8080".parse().unwrap());
+        assert_eq!(
+            derive_base_url(&headers).as_deref(),
+            Some("https://node.example:8080")
+        );
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert_eq!(
+            full_request_uri(&headers, "/oauth/token").as_deref(),
+            Some("http://node.example:8080/oauth/token")
+        );
     }
 }

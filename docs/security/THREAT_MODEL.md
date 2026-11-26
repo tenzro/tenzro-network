@@ -95,10 +95,10 @@ except where they widen an attack surface.
   Fuzzed by `fuzz/bridge_route_delivery`.
 - Replay: each delivery nonce is recorded in consensus state
   (`bridge_nonce:<route>:<nonce>`) and refused for good once used.
-- Key theft: the bridge signer is a raw secp256k1 key from operator
-  config, which neither a TPM nor a Secure Enclave can hold. Hardware
-  custody for EVM chains is a P-256 hardware key controlling a P-256 smart
-  account on the destination chain.
+- Key theft: the relayer key is a secp256k1 key in a hardware wallet
+  (`evm_signer.rs EvmTransactionSigner::from_hardware`); no constructor
+  takes key bytes. It pays fees only: every transaction it signs carries
+  zero native value.
 
 ### Settlement (`tenzro-settlement`)
 - Voucher forgery: a `ClaimEscrow` pays only the advance of a payer-signed
@@ -147,9 +147,9 @@ except where they widen an attack surface.
 1. **Bridge routes trust their committees.** Until light clients are
    installed for a chain family, a route's safety rests on its committee
    quorum (bounded by the caps, the breaker and the supply invariant).
-2. **Raw-env-key bridge signer backend still exists** for development;
-   an operator who deploys with it holds a plaintext secp256k1 key in
-   the environment.
+2. **A relayer key is a hardware wallet outside the TPM.** A secp256k1
+   key cannot live in a TPM or a Secure Enclave, so the relayer's custody
+   is the hardware wallet's and its operator's handling of it.
 3. **A media receipt binds bytes, not fidelity.** The commitment
    proves which bytes the provider produced, not that they are the
    result of running the named model for the named number of steps.
@@ -158,5 +158,6 @@ except where they widen an attack surface.
 5. **RocksDB contents are trusted on hydration.** A disk-write
    attacker on a validator can inject state; mitigations are host
    hardening, not protocol checks.
-6. **No external security audit has been performed yet.** This
-   document scopes that engagement.
+6. **No external security audit has been performed yet.** The audit
+   scope document and the threat coverage matrix, which lists each attack
+   class with its test or its gap, are available to auditors.

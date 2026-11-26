@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 use tenzro_consensus::Certificate;
 use tenzro_identity::IdentityRegistry;
 use tenzro_iroh::IrohResolver;
-use tenzro_network::{MessagePayload, NetworkMessage, NetworkService, TenzroNetworkService};
+use tenzro_network::{NetworkMessage, NetworkService, TenzroNetworkService};
 
 use crate::consensus_driver::{ConsensusHandle, OrderedSegment};
 use tenzro_storage::traits::BlockStore;
@@ -47,28 +47,40 @@ use crate::metrics::MetricsCollector;
 /// Static context needed to assemble periodic `ProviderAnnouncementMessage`
 /// broadcasts from inside the event loop.
 ///
-/// Snapshot semantics: `hardware`, `region`, `provider_address`,
-/// `provider_type`, `capabilities` are captured once at node
-/// startup. Per-tick we still re-read `served_models` from the live
-/// `Arc<DashMap>` so additions / withdrawals propagate without a node restart.
+/// `region` and `provider_address` are captured once at node startup, and
+/// `hardware` the first time the node announces. Per tick the roles served
+/// and `served_models` are read live, so a role or a model taken up or
+/// withdrawn reaches peers without a node restart.
 #[derive(Clone, Debug)]
 pub struct ProviderAnnouncementContext {
-    /// `tenzro_types::HardwareCapabilities::detect()` evaluated once at startup.
-    pub hardware: tenzro_types::HardwareCapabilities,
+    /// `tenzro_types::HardwareCapabilities::detect()`, evaluated once: at
+    /// startup on a node configured with a role that announces, else on the
+    /// first heartbeat that announces, so a node serving none of them never
+    /// runs the vendor probes.
+    pub hardware: Arc<std::sync::OnceLock<tenzro_types::HardwareCapabilities>>,
+    /// Whether this node's confidential-compute provider is initialized; it
+    /// sets the detected hardware's `tee_available`.
+    pub tee_available: bool,
     /// Operator-declared coarse region (`NodeConfig::region`). `None` means
     /// "unknown" — receivers must NOT treat it as a wildcard.
     pub region: Option<String>,
     /// Provider wallet address (hex-encoded with `0x` prefix or empty if
     /// the node has no provisioned identity yet).
     pub provider_address: String,
-    /// Provider class string (`"ai"`, `"tee"`, `"storage"`, `"general"`, ...).
-    pub provider_type: String,
-    /// Capability labels (e.g. `"inference"`, `"tee-attestation"`).
-    pub capabilities: Vec<String>,
+    /// The roles this node serves now. Each heartbeat reads them: the
+    /// provider class and capabilities, the verifiable-inference flag and the
+    /// cluster profile follow them, so a role taken up or put down while the
+    /// node runs reaches peers on the next heartbeat, and a node serving no
+    /// role that announces sends nothing.
+    pub roles: Arc<parking_lot::RwLock<tenzro_types::RoleSet>>,
+    /// The confidential-compute hardware this node's `tee`-level answers are
+    /// attested by, when it has any.
+    pub tee_vendor: Option<tenzro_types::tee::TeeVendor>,
     /// TTL in seconds for each announcement record. Receivers evict entries
     /// whose `last_seen + ttl_secs < now`.
     pub ttl_secs: u64,
-    /// Cluster membership held by this node, present only when it serves AI.
+    /// Cluster membership held by this node when it is configured to serve
+    /// AI; announced only while it does.
     /// Each announcement carries the cluster profile built from it, so a
     /// membership change reaches peers on the next heartbeat.
     pub cluster_identity: Option<std::sync::Arc<crate::cluster_identity::ClusterIdentity>>,
@@ -80,6 +92,27 @@ pub struct ProviderAnnouncementContext {
     /// serving delegated agents; `capabilities` then carries
     /// `agent_serving`.
     pub agent_serving: Option<(String, String)>,
+}
+
+/// The replicas of a shard a node configured for storage pins, while the
+/// roles it serves include storage; `None` while they do not.
+fn replicas_now(
+    replicas: Option<&(usize, Arc<parking_lot::RwLock<tenzro_types::RoleSet>>)>,
+) -> Option<usize> {
+    replicas
+        .filter(|(_, roles)| roles.read().serves_storage())
+        .map(|(n, _)| *n)
+}
+
+impl ProviderAnnouncementContext {
+    /// What this node announces now: its provider class, its capabilities
+    /// and whether it serves models, from the roles it serves at this moment;
+    /// `None` while it serves no role that announces.
+    fn announced_now(&self) -> Option<(&'static str, Vec<String>, bool)> {
+        let roles = self.roles.read();
+        crate::node::own_announced_services(&roles, self.agent_serving.is_some())
+            .map(|(class, capabilities)| (class, capabilities, roles.serves_ai()))
+    }
 }
 
 /// The identity a node signs its gossip announcements as: its record signer
@@ -127,17 +160,116 @@ fn announcer_key_in(
     let identity = registry
         .resolve(machine_did)
         .map_err(|_| format!("{machine_did} has no registered identity"))?;
+    // A revoked machine speaks for nothing: its key stays in the registry
+    // for the record, yet nothing it signs is accepted.
+    if registry.is_revoked(machine_did) {
+        return Err(format!("{machine_did} is revoked"));
+    }
     tenzro_identity::identity_key(&identity)
         .ok_or_else(|| format!("{machine_did} has no registered hardware key"))
 }
 
+/// Why a gossip announcement was not accepted.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AnnouncementRefusal {
+    /// This node holds no key for the machine the announcement names, so
+    /// nothing can check it: the machine is not registered, or this node
+    /// has not applied the block that registered it.
+    AnnouncerNotRegistered(String),
+    /// The key registered for the machine did not sign the announcement.
+    BadSignature(String),
+}
+
+impl AnnouncementRefusal {
+    /// The refusal in a few words, for the log line.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::AnnouncerNotRegistered(_) => "announcer not registered",
+            Self::BadSignature(_) => "signature verification failed",
+        }
+    }
+}
+
+impl std::fmt::Display for AnnouncementRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AnnouncerNotRegistered(e) | Self::BadSignature(e) => f.write_str(e),
+        }
+    }
+}
+
 /// Verify a gossip announcement against the key `registry` holds for the
 /// machine DID it names.
-fn verify_announcement_in<A: tenzro_network::SignedAnnouncement>(
+pub(crate) fn verify_announcement_in<A: tenzro_network::SignedAnnouncement>(
     registry: Option<&IdentityRegistry>,
     ann: &A,
+) -> std::result::Result<(), AnnouncementRefusal> {
+    let key = announcer_key_in(registry, ann.machine_did())
+        .map_err(AnnouncementRefusal::AnnouncerNotRegistered)?;
+    ann.verify(&key).map_err(AnnouncementRefusal::BadSignature)
+}
+
+/// Whether the payee a model announcement names was bound to the announcing
+/// machine by its operator: the machine's own account, the wallet its
+/// registered identity names, or the wallet of the identity registered as
+/// its controller. Each was written under the operator's authority; a payee
+/// the announcement merely names is not, and a call routed to that machine
+/// would pay whoever it named.
+fn payee_bound_in(
+    registry: Option<&IdentityRegistry>,
+    machine_did: &str,
+    provider: &str,
 ) -> std::result::Result<(), String> {
-    ann.verify(&announcer_key_in(registry, ann.machine_did())?)
+    use tenzro_identity::{IdentityData, IdentityStatus};
+    let payee =
+        Address::from_hex(provider).map_err(|_| format!("payee {provider} is not an account"))?;
+    let registry = registry.ok_or("no identity registry to resolve the payee's binding")?;
+    let machine = registry
+        .resolve(machine_did)
+        .map_err(|_| format!("{machine_did} has no registered identity"))?;
+    if machine.wallet_address == payee {
+        return Ok(());
+    }
+    if let IdentityData::Machine {
+        controller_did: Some(controller),
+        ..
+    } = &machine.identity_data
+        && registry
+            .resolve(controller)
+            .is_ok_and(|c| c.status == IdentityStatus::Active && c.wallet_address == payee)
+    {
+        return Ok(());
+    }
+    if tenzro_identity::identity_key(&machine)
+        .is_some_and(|key| Address::new(key.account_slot()) == payee)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "payee {provider} is bound to neither {machine_did} nor its controller"
+    ))
+}
+
+/// Wait between two validators' turns to publish a block.
+const PUBLISH_STAGGER: Duration = Duration::from_millis(150);
+
+/// Turns after which every validator that has not seen the block publishes
+/// it: the longest a block waits for its publication is this many staggers.
+const PUBLISH_TURNS: u64 = 4;
+
+/// How long the validator at `position` of a committee of `committee`
+/// waits before it publishes the block at `height`, unless gossip brings it
+/// the block first. The turn rotates with the height, so no validator is
+/// always first, and is read from what every validator already holds: no
+/// clock is shared and nothing is sent to agree on it. A validator whose
+/// turn is past [`PUBLISH_TURNS`] waits no longer than that, so a block the
+/// first publishers could not send still goes out after four staggers.
+fn publish_turn_delay(position: u64, committee: u64, height: u64) -> Duration {
+    if committee == 0 {
+        return Duration::ZERO;
+    }
+    let turn = (position % committee + height % committee) % committee;
+    PUBLISH_STAGGER * turn.min(PUBLISH_TURNS) as u32
 }
 
 /// Whether `tx` carries a nonce below its sender's account nonce in
@@ -163,6 +295,97 @@ fn refusal_level(e: &tenzro_vm::VmError) -> tracing::Level {
         tenzro_vm::VmError::InvalidNonce { .. } => tracing::Level::WARN,
         _ => tracing::Level::ERROR,
     }
+}
+
+/// Blocks short of the heard head within which a node counts as catching
+/// up for [`key_refusal_report`]. A node further behind than this reports
+/// every refusal: how far its peers say the head is cannot be checked, and
+/// a head named far ahead must not quieten the node for as long as it
+/// stands.
+const KEY_LAG_QUIET_BLOCKS: u64 = 10_000;
+
+/// How recently a node must have imported a block to count as catching up
+/// for [`key_refusal_report`].
+const KEY_LAG_RECENT_IMPORT_MS: u64 = 30_000;
+
+/// Least time between two warnings of a refusal on a node that is behind.
+const KEY_WARN_EVERY: Duration = Duration::from_secs(10);
+
+/// How a gossiped transaction whose signature does not verify against the
+/// keys in this node's state is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyRefusalReport {
+    /// For debugging only.
+    Quiet,
+    /// As a warning, at most one per [`KEY_WARN_EVERY`].
+    Limited,
+    /// As a warning, each one.
+    Loud,
+}
+
+/// How the refusal of a transaction is reported, given whether its sender
+/// has `no_key_enrolled` in the state this node holds and where the node
+/// stands.
+///
+/// A node that is behind reads the keys of an earlier state: an account
+/// that enrolled a key in a block the node has yet to import signs with a
+/// key the node holds none for. That is the node's lag and no forgery; the
+/// sender's node publishes the transaction again and it is admitted at the
+/// head. It is reported quietly only for that one refusal, and only while
+/// the node is a bounded way short of the head it heard and importing. Any
+/// other refusal on a node that is behind (a signature that fails against a
+/// key the node does hold, a node far behind or importing nothing) is a
+/// warning, limited in rate because a node catching up sees many; at the
+/// head, or with no word of the network, every refusal is a warning.
+fn key_refusal_report(
+    no_key_enrolled: bool,
+    follow: &crate::follow_state::FollowState,
+) -> KeyRefusalReport {
+    let Some(behind) = follow.behind.filter(|b| *b > 0) else {
+        return KeyRefusalReport::Loud;
+    };
+    let importing = follow
+        .last_import_ms
+        .is_some_and(|ago| ago <= KEY_LAG_RECENT_IMPORT_MS);
+    if no_key_enrolled && behind <= KEY_LAG_QUIET_BLOCKS && importing {
+        KeyRefusalReport::Quiet
+    } else {
+        KeyRefusalReport::Limited
+    }
+}
+
+/// Lets one warning through per [`KEY_WARN_EVERY`] and counts the ones it
+/// held back, so the next warning says how many there were.
+#[derive(Debug, Default)]
+struct WarnLimiter {
+    last: Option<Instant>,
+    held_back: u64,
+}
+
+impl WarnLimiter {
+    /// Whether a warning goes out at `now`, with the number held back since
+    /// the last one.
+    fn due(&mut self, now: Instant) -> Option<u64> {
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < KEY_WARN_EVERY)
+        {
+            self.held_back += 1;
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.held_back))
+    }
+}
+
+/// Whether `tx` carries an ML-DSA-65 signature for an account with no
+/// ML-DSA-65 key enrolled in `state`, and is not the transaction enrolling
+/// one: the refusal a node behind the enrolling block gives.
+fn no_key_enrolled(tx: &SignedTransaction, state: &dyn tenzro_vm::traits::VmState) -> bool {
+    !tx.transaction.tx_type.is_external()
+        && tx.signature.pq.is_some()
+        && !matches!(tx.transaction.tx_type, TransactionType::AccountKeys { .. })
+        && tenzro_vm::account_keys::enrolled_pq_key(state, &tx.public_key).is_none()
 }
 
 fn log_refused_transaction(tx_hash: &Hash, e: &tenzro_vm::VmError) {
@@ -248,7 +471,8 @@ fn refusal_passes(e: &NodeError) -> bool {
             C::RateLimited { .. }
             | C::FeeFloorTooLow { .. }
             | C::NonceGapTooLarge { .. }
-            | C::SenderCapExceeded { .. },
+            | C::SenderCapExceeded { .. }
+            | C::FeePayerCapExceeded { .. },
         ) => true,
         NodeError::Consensus(C::Mempool(m)) => {
             m.starts_with("Mempool full") || m.starts_with("Mempool size limit")
@@ -346,10 +570,13 @@ const INGRESS_QUEUE: usize = 4_096;
 /// mempool again as blocks execute.
 const PARKED_BACK_QUEUE: usize = 4_096;
 
-/// Checks transactions from gossip, and from the RPC layer of a node that
-/// does not propose blocks, and offers them to the mempool, on a task of its
-/// own. Checking signatures is the costliest step a transaction takes; done
-/// on the event loop, a flood of transactions held up the blocks queued
+/// Takes transactions from gossip, and from the RPC layer of a node that
+/// does not propose blocks, on a task of its own. Every node checks what
+/// needs no state, the signature included; a node that proposes blocks also
+/// checks each against its state and offers it to the mempool, while a node
+/// that does not keeps nothing and checks nothing against a state that may be
+/// behind. Checking signatures is the costliest step a transaction takes;
+/// done on the event loop, a flood of transactions held up the blocks queued
 /// behind them and finality stood still.
 struct Ingress {
     chain_id: u64,
@@ -360,6 +587,8 @@ struct Ingress {
     parked: mpsc::Sender<SignedTransaction>,
     /// Whether GPU proofs are checked for revoked certificates first.
     gpu_revocation: crate::config::GpuRevocationConfig,
+    /// Holds back repeated warnings of refusals while this node is behind.
+    key_warns: parking_lot::Mutex<WarnLimiter>,
 }
 
 impl Ingress {
@@ -368,6 +597,24 @@ impl Ingress {
             if let Err(e) = self.admit(tx).await {
                 debug!(error = %e, "transaction refused at ingress");
             }
+        }
+    }
+
+    /// How the refusal of `tx` against `state` is reported: by where this
+    /// node stands, read from its executed tip and what block sync heard.
+    /// A node with no consensus handle has no word of the network.
+    fn key_refusal_report(
+        &self,
+        tx: &SignedTransaction,
+        state: &dyn tenzro_vm::traits::VmState,
+    ) -> KeyRefusalReport {
+        match &self.consensus {
+            Some(c) => key_refusal_report(
+                no_key_enrolled(tx, state),
+                &c.follow()
+                    .state(self.chain_tip.load(Ordering::Acquire), false),
+            ),
+            None => KeyRefusalReport::Loud,
         }
     }
 
@@ -406,35 +653,80 @@ impl Ingress {
                 tx.transaction.chain_id.0, self.chain_id
             )));
         }
+        // A node that does not propose blocks keeps nothing: gossip has
+        // carried the transaction on to the validators, which judge it. Its
+        // own state may be behind theirs (a node still replaying the chain has
+        // not seen the sender's balance or enrolled keys yet), so it refuses
+        // nothing on that state; what needs no state is still checked.
+        let proposer = self.consensus.as_ref().filter(|_| self.orders_blocks());
         // A sender holding nothing cannot pay for gas, so its transaction is
         // refused before any signature is checked: a flood from fresh
         // accounts then costs one balance read each. The treasury pays a
-        // Funding transaction's gas, so its sender may hold nothing.
-        if !external && !matches!(tx.transaction.tx_type, TransactionType::Funding { .. }) {
+        // Funding transaction's gas, so its sender may hold nothing. Once
+        // the fee payer rule is live, a transaction that names a fee payer is
+        // held to this by the payer's balance.
+        if proposer.is_some()
+            && !external
+            && !matches!(tx.transaction.tx_type, TransactionType::Funding { .. })
+        {
             use tenzro_vm::traits::VmState as _;
-            let balance = StateAdapter::with_storage(self.storage.clone())
-                .get_balance(tx.transaction.from.as_bytes());
-            if balance == 0 {
+            let state = StateAdapter::with_storage(self.storage.clone());
+            let pays = fee_payer_in_force(&state, &tx.transaction)
+                .and_then(|named| named.ok())
+                .map_or(tx.transaction.from, |consent| consent.fee_payer);
+            if state.get_balance(pays.as_bytes()) == 0 {
                 return Err(NodeError::InvalidTransaction(
-                    "sender holds nothing to pay gas with".to_string(),
+                    "the account paying the fee holds nothing to pay gas with".to_string(),
                 ));
             }
         }
 
         // Verify transaction signature cryptographically.
-        let verified = match verify_transaction_signature(&tx) {
-            Ok(()) => {
-                let state = self.state_adapter.lock().await;
-                verify_transaction_pq_leg(&tx, &*state)
-                    .and_then(|()| verify_transaction_sender(&tx, &*state))
-            }
-            Err(e) => Err(e),
-        };
-        if let Err(e) = verified {
+        if let Err(e) = verify_transaction_signature(&tx) {
             warn!(hash = %tx_hash, error = %e, "Rejecting transaction with invalid signature");
             return Err(NodeError::InvalidTransaction(format!(
                 "Invalid signature: {e}"
             )));
+        }
+        let Some(consensus) = proposer else {
+            debug!(hash = %tx_hash, "Transaction relayed (node does not propose blocks)");
+            return Ok(());
+        };
+        // The keys an account signs with are read from this node's state.
+        let against_state = {
+            let state = self.state_adapter.lock().await;
+            verify_transaction_pq_leg(&tx, &*state)
+                .and_then(|()| verify_transaction_sender(&tx, &*state))
+                .map_err(|e| (e, self.key_refusal_report(&tx, &*state)))
+        };
+        if let Err((e, report)) = against_state {
+            match report {
+                KeyRefusalReport::Quiet => debug!(
+                    hash = %tx_hash,
+                    error = %e,
+                    "Transaction not admitted: this node has blocks to import that may enrol the key it is signed with"
+                ),
+                KeyRefusalReport::Limited => {
+                    if let Some(held_back) = self.key_warns.lock().due(Instant::now()) {
+                        warn!(
+                            hash = %tx_hash,
+                            error = %e,
+                            held_back,
+                            "Rejecting transaction with invalid signature (this node is behind; similar warnings are held back)"
+                        );
+                    }
+                }
+                KeyRefusalReport::Loud => {
+                    warn!(hash = %tx_hash, error = %e, "Rejecting transaction with invalid signature")
+                }
+            }
+            return Err(NodeError::InvalidTransaction(format!(
+                "Invalid signature: {e}"
+            )));
+        }
+        {
+            let state = self.state_adapter.lock().await;
+            evm_gas_limit_admitted(&tx, &*state)?;
         }
         if self.gpu_revocation.enabled {
             let now = std::time::SystemTime::now()
@@ -465,29 +757,21 @@ impl Ingress {
 
         // Never re-broadcast here: gossip already carried it on, and
         // republishing under a new envelope defeats gossip's dedup.
-        if self.orders_blocks()
-            && let Some(consensus) = &self.consensus
-        {
-            match consensus.submit_transaction(tx.clone()) {
-                Ok(()) => {
-                    info!(hash = %tx_hash, "Transaction submitted to consensus mempool");
-                }
-                Err(e) if refusal_passes(&e) => {
-                    // Held by the event loop and offered to the mempool again
-                    // as blocks execute.
-                    debug!(hash = %tx_hash, error = %e, "Holding a transaction from the network refused for now");
-                    if self.parked.try_send(tx).is_err() {
-                        debug!(hash = %tx_hash, "held transactions full: transaction dropped");
-                    }
-                }
-                Err(e) => {
-                    debug!(hash = %tx_hash, error = %e, "Dropping non-admittable transaction received from network");
+        match consensus.submit_transaction(tx.clone()) {
+            Ok(()) => {
+                info!(hash = %tx_hash, "Transaction submitted to consensus mempool");
+            }
+            Err(e) if refusal_passes(&e) => {
+                // Held by the event loop and offered to the mempool again
+                // as blocks execute.
+                debug!(hash = %tx_hash, error = %e, "Holding a transaction from the network refused for now");
+                if self.parked.try_send(tx).is_err() {
+                    debug!(hash = %tx_hash, "held transactions full: transaction dropped");
                 }
             }
-        } else {
-            // This node does not propose blocks: gossip has carried the tx
-            // on to the validators and nothing is kept here.
-            debug!(hash = %tx_hash, "Transaction relayed (node does not propose blocks)");
+            Err(e) => {
+                debug!(hash = %tx_hash, error = %e, "Dropping non-admittable transaction received from network");
+            }
         }
         Ok(())
     }
@@ -502,7 +786,7 @@ const ANNOUNCE_MAX_FUTURE_SKEW_MS: i64 = 60_000;
 /// The signature covers `timestamp` + `ttl_secs`, so a captured
 /// announcement is only replayable inside its own TTL window; after the
 /// provider stops serving (or changes endpoint), the stale capture expires.
-fn check_announcement_freshness(
+pub(crate) fn check_announcement_freshness(
     timestamp_ms: i64,
     ttl_secs: u64,
 ) -> std::result::Result<(), String> {
@@ -605,6 +889,10 @@ pub enum NodeEvent {
     /// shards they rank for into their local iroh blob store, spreading the
     /// object across independent providers.
     ShardReplication(tenzro_network::ShardReplicationMessage),
+    /// Shard replication request whose buyer constrained where it may be
+    /// held, already verified and fresh: only a node inside the constraint
+    /// ranks for its shards, among candidates inside it.
+    ConstrainedShardReplication(tenzro_network::ConstrainedShardReplicationMessage),
     /// Shutdown signal
     Shutdown,
 }
@@ -617,7 +905,7 @@ pub enum NodeEvent {
 /// emitted logs, and any deployed contract address rather than fabricating
 /// a synthetic `0x1` / `gas_limit` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TxReceiptRecord {
+pub struct TxReceiptRecord {
     /// Whether VM execution succeeded (false on revert or VM error).
     pub success: bool,
     /// Actual gas consumed by this transaction.
@@ -639,7 +927,7 @@ pub(crate) struct TxReceiptRecord {
     pub contract_address: Option<String>,
     /// Raw logs emitted during execution. Encoded with hex addresses/topics/data
     /// so the receipt JSON can be served without re-decoding VM types.
-    pub logs: Vec<TxReceiptLog>,
+    pub(crate) logs: Vec<TxReceiptLog>,
     /// Net native TNZO the transaction minted (positive) or burned
     /// (negative), as its execution declared it. Zero in a receipt written
     /// before the field was kept.
@@ -756,7 +1044,10 @@ impl HeldBlocks {
     /// Holds `block` at height `h`, replacing any block held there; false
     /// when it does not fit under the budget.
     fn insert(&mut self, h: u64, block: Block) -> bool {
-        let Ok(size) = serde_json::to_vec(&block).map(|v| v.len()) else {
+        // The size a block takes on the wire: it is measured the way blocks
+        // are sent, so a block whose body JSON cannot write (a map keyed by
+        // something other than a string) is held all the same.
+        let Ok(size) = bincode::serialized_size(&block).map(|n| n as usize) else {
             return false;
         };
         if size > UNCERTIFIED_BYTES {
@@ -778,6 +1069,11 @@ impl HeldBlocks {
         }
         self.bytes += size;
         true
+    }
+
+    /// How many blocks are held.
+    fn len(&self) -> usize {
+        self.blocks.len()
     }
 
     fn get(&self, h: &u64) -> Option<&Block> {
@@ -988,8 +1284,8 @@ pub struct EventLoop {
     /// `HardwareCapabilities`. `None` on nodes with no router (light clients).
     provider_manager: Option<Arc<tenzro_model::ProviderManager>>,
     /// This node's own provider address. Heartbeated every tick so the
-    /// local-served-models provider entry stays healthy for intent dispatch
-    /// (chatByIntent) — local serving has no gossip heartbeat of its own.
+    /// local-served-models provider entry stays healthy for the router's
+    /// dispatch — local serving has no gossip heartbeat of its own.
     local_provider_address: Option<Address>,
     /// Provider announcement broadcast context. When `Some`, the periodic
     /// `provider_heartbeat` tick rebuilds a `ProviderAnnouncementMessage`
@@ -1002,6 +1298,9 @@ pub struct EventLoop {
     /// disables announcement broadcast (unsigned announcements are rejected
     /// network-wide).
     announce_identity: Option<AnnounceIdentity>,
+    /// Holds announcements back while the account they would name is not
+    /// this machine identity's registered wallet.
+    announce_gate: Option<Arc<crate::announced_account::SenderGate>>,
     /// Shared reference to the ModelRuntime for idle-TTL liveness checks of
     /// local model service instances.
     #[cfg(feature = "inference")]
@@ -1022,8 +1321,17 @@ pub struct EventLoop {
     /// Endpoints the operator named to sync from (`--state-sync-from`):
     /// asked for blocks whether or not gossip has connected them.
     sync_peers: Vec<[u8; 32]>,
+    /// The boot identities resolved so far, as endpoints: block sync asks
+    /// them whether or not gossip holds them, so a follower that is no
+    /// committee member and has lost its gossip links still has peers.
+    boot_peers: Option<Arc<tenzro_iroh::IdentityTransport>>,
+    /// Direct addresses the operator gave the peers it syncs from.
+    sync_addrs: Vec<tenzro_iroh::EndpointAddr>,
     block_sync: crate::config::BlockSyncConfig,
     gpu_revocation: crate::config::GpuRevocationConfig,
+    /// What executed blocks have shown of EVM engine errors; the pool's own
+    /// admission rule.
+    evm_guard: Arc<crate::evm_pool_guard::EvmPoolGuard>,
     /// Where each announcement rotation stopped.
     ///
     /// Every heartbeat used to enumerate its whole inventory and publish one
@@ -1032,6 +1340,9 @@ pub struct EventLoop {
     /// gossip queue consensus uses — on this network that queue overflowed and
     /// the drops included blocks. See [`crate::announce`].
     blob_rotation: crate::announce::Rotation,
+    /// Replay-window rejections of blob announcements, logged once per
+    /// publishing endpoint a minute.
+    blob_reject_log: crate::announce::KeyedLogGate,
     model_rotation: crate::announce::Rotation,
     /// Identity registry. Wired so the post-execute scan can resolve a
     /// machine DID (carried on the kill-switch log) to the staker
@@ -1056,8 +1367,8 @@ pub struct EventLoop {
 
     /// Adaptive burn rate manager — receives `SupplyMetricsSnapshot` records
     /// at every epoch boundary so the transfer function can score the
-    /// supply's deviation from its target and surface a burn-rate
-    /// recommendation through `tenzro_getBurnRateRecommendation`.
+    /// supply's deviation from its target, from which the validators'
+    /// proposal generator drafts burn-rate changes.
     /// Without this wired, `record_metrics` never gets called and the
     /// recommendation engine reports against stale/empty metrics.
     burn_rate_manager: Option<Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>>,
@@ -1110,7 +1421,7 @@ pub struct EventLoop {
     /// membership view, and shards this node ranks in the top `r` are pinned
     /// into its iroh blob store. `None` on non-storage nodes — they ignore
     /// replication requests entirely.
-    storage_replicas: Option<usize>,
+    storage_replicas: Option<(usize, Arc<parking_lot::RwLock<tenzro_types::RoleSet>>)>,
     /// Replication requests whose shards are being fetched, at most
     /// [`REPLICATIONS_AT_ONCE`].
     replication_slots: Arc<tokio::sync::Semaphore>,
@@ -1134,6 +1445,78 @@ const STATE_TRIE_RETAIN_HEIGHTS: u64 = 10_000;
 
 /// Prune the state trie once every this many heights.
 const STATE_TRIE_PRUNE_EVERY: u64 = 1_000;
+
+/// The committee caps in force at an epoch boundary
+/// ([`tenzro_vm::native::operator_cap`]): each a share of the seats and the
+/// group an account counts in for it.
+pub(crate) struct GroupCaps<'a> {
+    /// The committee's seat budget.
+    pub(crate) seat_budget: u64,
+    /// Each cap, bps, with the group of an account from chain state; an
+    /// account with no group counts as a group of its own.
+    pub(crate) caps: Vec<(u32, &'a dyn Fn(&[u8]) -> Option<String>)>,
+}
+
+impl GroupCaps<'_> {
+    /// The voting power of each of `active` under the caps, by address:
+    /// the registry power, with every group over its cap scaled down
+    /// (`tenzro_consensus::committee::cap_group_stakes`). Empty when the
+    /// stakes cannot be capped, so the registry powers stand.
+    fn powers(
+        &self,
+        active: &[tenzro_token::validator_registry::ValidatorRegistryEntry],
+    ) -> std::collections::HashMap<Address, u128> {
+        let mut infos = Vec::new();
+        for entry in active {
+            let Ok(key) = tenzro_consensus::ValidatorPublicKey::new(
+                entry.ml_dsa_pubkey.clone(),
+                entry.p256_pubkey.clone(),
+            ) else {
+                continue;
+            };
+            infos.push(tenzro_consensus::validator::ValidatorInfo::new(
+                entry.address,
+                key,
+                entry.node_key,
+                EventLoop::consensus_voting_power(entry.self_stake),
+            ));
+        }
+        let numbered: Vec<Vec<usize>> = self
+            .caps
+            .iter()
+            .map(|(_, group_of)| {
+                let mut seen: std::collections::BTreeMap<String, usize> = Default::default();
+                let mut next = 0usize;
+                infos
+                    .iter()
+                    .map(|v| {
+                        let fresh = next;
+                        let g = match group_of(v.address.as_bytes()) {
+                            Some(name) => *seen.entry(name).or_insert(fresh),
+                            None => fresh,
+                        };
+                        if g == fresh {
+                            next += 1;
+                        }
+                        g
+                    })
+                    .collect()
+            })
+            .collect();
+        let groupings: Vec<(&[usize], u32)> = numbered
+            .iter()
+            .zip(&self.caps)
+            .map(|(g, (cap, _))| (g.as_slice(), *cap))
+            .collect();
+        match tenzro_consensus::committee::cap_group_stakes(&infos, &groupings, self.seat_budget) {
+            Ok(stakes) => infos.iter().map(|v| v.address).zip(stakes).collect(),
+            Err(e) => {
+                warn!(error = %e, "the committee caps could not be applied; the registry powers stand");
+                Default::default()
+            }
+        }
+    }
+}
 
 impl EventLoop {
     /// Creates a new event loop
@@ -1201,18 +1584,23 @@ impl EventLoop {
             local_provider_address: None,
             provider_announcement_ctx: None,
             announce_identity: None,
+            announce_gate: None,
             #[cfg(feature = "inference")]
             model_runtime: None,
             load_tracker: None,
             lifecycle: None,
             iroh_resolver: None,
             sync_peers: Vec::new(),
+            boot_peers: None,
+            sync_addrs: Vec::new(),
             block_sync: crate::config::BlockSyncConfig::default(),
             gpu_revocation: crate::config::GpuRevocationConfig::default(),
+            evm_guard: Default::default(),
             blob_rotation: crate::announce::Rotation::new(
                 BLOB_HASHES_PER_TICK,
                 std::time::Duration::from_secs(BLOB_HEARTBEAT_SECS),
             ),
+            blob_reject_log: crate::announce::KeyedLogGate::new(std::time::Duration::from_secs(60)),
             model_rotation: crate::announce::Rotation::new(
                 MODELS_PER_TICK,
                 std::time::Duration::from_secs(BLOB_HEARTBEAT_SECS),
@@ -1255,11 +1643,21 @@ impl EventLoop {
         self
     }
 
+    /// How many replicas of a shard this node pins, while it serves the
+    /// storage role; `None` while it does not.
+    fn replicating_shards(&self) -> Option<usize> {
+        replicas_now(self.storage_replicas.as_ref())
+    }
+
     /// Marks this node as storage-serving with the given per-shard replica
     /// target. Inbound `ShardReplication` requests then run rendezvous (HRW)
     /// self-selection and pin the shards this node ranks for.
-    pub fn with_storage_replicas(mut self, replicas: usize) -> Self {
-        self.storage_replicas = Some(replicas.max(1));
+    pub fn with_storage_replicas(
+        mut self,
+        replicas: usize,
+        roles: Arc<parking_lot::RwLock<tenzro_types::RoleSet>>,
+    ) -> Self {
+        self.storage_replicas = Some((replicas.max(1), roles));
         self
     }
 
@@ -1386,9 +1784,8 @@ impl EventLoop {
     /// `SupplyMetricsSnapshot` from consensus counters (total supply, epoch
     /// supply delta, burn, mint, rolling-window bps) and feeds it into
     /// `BurnRateConfigManager::record_metrics`. The transfer function
-    /// (`current_recommendation()`) and the
-    /// `tenzro_getBurnRateRecommendation` RPC then read from the
-    /// freshly-persisted snapshot. Without this wire, `record_metrics`
+    /// (`current_recommendation()`) and `tenzro_getSupplyMetrics` then read
+    /// from the freshly-persisted snapshot. Without this wire, `record_metrics`
     /// is dead code and the recommendation engine scores against
     /// `SupplyMetricsSnapshot::default()`.
     pub fn with_burn_rate_manager(
@@ -1465,6 +1862,37 @@ impl EventLoop {
         self
     }
 
+    /// Wires the gate that holds announcements back while the account they
+    /// would name is not this machine identity's registered wallet.
+    pub fn with_announce_gate(mut self, gate: Arc<crate::announced_account::SenderGate>) -> Self {
+        self.announce_gate = Some(gate);
+        self
+    }
+
+    /// The announcement context, the signing identity and the account to
+    /// announce, when this node announces now: both are wired and its payee,
+    /// read again now, is one its peers take as this machine's. Without a
+    /// gate the account is the one the context was built with.
+    fn announcing(&self) -> Option<(&ProviderAnnouncementContext, &AnnounceIdentity, String)> {
+        let ctx = self.provider_announcement_ctx.as_ref()?;
+        let signer = self.announce_identity.as_ref()?;
+        let account = match &self.announce_gate {
+            Some(gate) => gate.announced_account()?,
+            None => ctx.provider_address.clone(),
+        };
+        Some((ctx, signer, account))
+    }
+
+    /// Whether `account`, named by an announcement `machine_did` signed, is
+    /// the wallet registered for that machine identity.
+    fn account_is_the_announcers(
+        &self,
+        machine_did: &str,
+        account: &str,
+    ) -> std::result::Result<(), crate::announced_account::Unbound> {
+        crate::announced_account::check(self.identity_registry.as_deref(), machine_did, account)
+    }
+
     /// The hardware identity key registered for the machine DID an
     /// announcement names: the only key it may be signed under.
     fn announcer_key(
@@ -1476,10 +1904,176 @@ impl EventLoop {
 
     /// Verify a gossip announcement against the key registered for the
     /// machine DID it names.
+    /// Pins the shards of `req` this node ranks for, by rendezvous
+    /// self-selection over the storage providers it knows. Under a buyer's
+    /// `constraint` only a node inside it takes part, ranking only
+    /// candidates inside it, and keeps a holding record for the receipts it
+    /// signs.
+    fn replicate_announced_shards(
+        &self,
+        req: &tenzro_network::ShardReplicationMessage,
+        constraint: Option<&tenzro_storage_provider::PlacementConstraint>,
+    ) {
+        let (Some(replicas), Some(resolver)) =
+            (self.replicating_shards(), self.iroh_resolver.as_ref())
+        else {
+            return;
+        };
+        let own_endpoint = resolver.endpoint_id().to_string();
+        // Never pin from ourselves — the origin already
+        // holds every shard.
+        let own_admitted = constraint.is_none_or(|c| {
+            self.provider_announcement_ctx
+                .as_ref()
+                .is_some_and(|ctx| c.admits(ctx.region.as_deref(), &ctx.provider_address))
+        });
+        if own_endpoint != req.origin_endpoint_id && own_admitted {
+            // Candidate membership view: storage-capable providers
+            // discovered via gossip, plus the origin, plus self, each with
+            // what the chain records about its provider. Every node ranks
+            // the same candidates the same way, itself included, so the
+            // holders they self-select agree. The view is a local snapshot;
+            // skew self-heals as heartbeats converge.
+            use tenzro_storage_provider::RankedCandidate;
+            let chain = tenzro_vm::StateAdapter::with_storage(
+                self.storage.clone() as Arc<dyn tenzro_storage::KvStore>
+            );
+            let now = crate::calendar::now_ms() as i64;
+            let candidate = |endpoint_id: &str, provider_address: Option<&str>| {
+                let record = provider_address
+                    .and_then(|a| hex::decode(a.trim_start_matches("0x")).ok())
+                    .map(|account| crate::provider_standing::record(&chain, &account, now));
+                RankedCandidate {
+                    endpoint_id: endpoint_id.to_string(),
+                    standing: record.map_or(0, |r| r.standing),
+                    judged: record.is_some_and(|r| r.judged),
+                }
+            };
+            let own_address = self
+                .provider_announcement_ctx
+                .as_ref()
+                .map(|ctx| ctx.provider_address.as_str());
+            let mut candidates = vec![candidate(&own_endpoint, own_address)];
+            let mut origin_address = None;
+            if let Some(ref np) = self.network_providers {
+                for entry in np.iter() {
+                    let ann = &entry.value().announcement;
+                    if ann.iroh_endpoint_id == req.origin_endpoint_id {
+                        origin_address = Some(ann.provider_address.clone());
+                    }
+                    if ann.capabilities.iter().any(|c| c == "storage")
+                        && !ann.iroh_endpoint_id.is_empty()
+                        && constraint
+                            .is_none_or(|c| c.admits(ann.region.as_deref(), &ann.provider_address))
+                    {
+                        candidates.push(candidate(
+                            &ann.iroh_endpoint_id,
+                            Some(&ann.provider_address),
+                        ));
+                    }
+                }
+            }
+            // The origin just published the shards and is a candidate too.
+            candidates.push(candidate(
+                &req.origin_endpoint_id,
+                origin_address.as_deref(),
+            ));
+            let new_share = tenzro_vm::native::network_param(
+                &chain,
+                tenzro_vm::governance::STORAGE_NEW_PROVIDER_SHARE_PARAM,
+            );
+
+            let origin = req.origin_endpoint_id.clone();
+            // The fetches run off the event loop; only
+            // the choice of shards is made here.
+            let mut selected = Vec::new();
+            let mut held = Vec::new();
+            for shard in &req.shards {
+                if selected.len() == MAX_SHARDS_PER_REPLICATION {
+                    break;
+                }
+                if tenzro_storage_provider::should_replicate_ranked(
+                    &shard.commitment,
+                    &own_endpoint,
+                    &candidates,
+                    replicas,
+                    new_share,
+                ) {
+                    resolver.record_blob_provider(
+                        &shard.blob_hash,
+                        match origin.parse::<tenzro_iroh::EndpointId>() {
+                            Ok(ep) => ep,
+                            Err(e) => {
+                                warn!(
+                                    object_id = %req.object_id,
+                                    origin = %origin,
+                                    error = %e,
+                                    "Shard replication: unparseable origin endpoint id"
+                                );
+                                break;
+                            }
+                        },
+                    );
+                    held.push(crate::storage_placement::HeldShard {
+                        blob_hash: shard.blob_hash.clone(),
+                        commitment: shard.commitment.clone(),
+                    });
+                    selected.push(tenzro_iroh::TenzroUri::Blob {
+                        hash: shard.blob_hash.clone(),
+                        provider_hint: Some(origin.clone()),
+                    });
+                }
+            }
+            if !selected.is_empty() {
+                match self.replication_slots.clone().try_acquire_owned() {
+                    Ok(slot) => {
+                        let resolver: Arc<dyn IrohResolver> = resolver.clone();
+                        let object_id = req.object_id.to_string();
+                        let total_shards = req.shards.len();
+                        let gate = self.shard_gate.clone();
+                        let store = self.storage.clone();
+                        let holding = constraint.map(|c| crate::storage_placement::HoldingRecord {
+                            object_id: req.object_id.clone(),
+                            origin_endpoint_id: req.origin_endpoint_id.clone(),
+                            constraint: c.clone(),
+                            shards: held.clone(),
+                            pinned_at_ms: chrono::Utc::now().timestamp_millis(),
+                        });
+                        tokio::spawn(async move {
+                            let pinned = pin_shards(resolver.as_ref(), &selected, &gate).await;
+                            drop(slot);
+                            if pinned > 0 {
+                                info!(
+                                    object_id = %object_id,
+                                    pinned,
+                                    total_shards,
+                                    "Pinned shards via rendezvous self-selection"
+                                );
+                            }
+                            if pinned > 0
+                                && let Some(holding) = holding
+                                && let Err(e) = crate::storage_placement::record_holding(
+                                    store.as_ref(),
+                                    &holding,
+                                )
+                            {
+                                warn!(object_id = %object_id, error = %e, "Could not keep the holding record");
+                            }
+                        });
+                    }
+                    Err(_) => warn!(
+                        object_id = %req.object_id,
+                        "Shard replication: every replication slot is busy; request dropped"
+                    ),
+                }
+            }
+        }
+    }
+
     fn verify_announcement<A: tenzro_network::SignedAnnouncement>(
         &self,
         ann: &A,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), AnnouncementRefusal> {
         verify_announcement_in(self.identity_registry.as_deref(), ann)
     }
 
@@ -1499,10 +2093,48 @@ impl EventLoop {
         self
     }
 
+    /// Names the addresses the peers block sync asks were given with.
+    pub fn with_sync_addrs(mut self, addrs: Vec<tenzro_iroh::EndpointAddr>) -> Self {
+        self.sync_addrs = addrs;
+        self
+    }
+
+    /// Names the boot identities block sync asks as well, as they resolve.
+    pub fn with_boot_peers(
+        mut self,
+        identity: Option<Arc<tenzro_iroh::IdentityTransport>>,
+    ) -> Self {
+        self.boot_peers = identity;
+        self
+    }
+
     /// How long, how many and how often gossiped transactions refused for
     /// a reason that passes are held and offered to the mempool again.
     pub fn with_held_transactions(mut self, config: crate::config::HeldTransactionsConfig) -> Self {
         self.parked.config = config;
+        self
+    }
+
+    /// Makes the engine-error guard the pool's own admission rule, so every
+    /// transaction offered to the pool meets it, from a peer or from this
+    /// node's RPC.
+    fn install_pool_guard(&self) {
+        if let Some(consensus) = &self.consensus
+            && consensus
+                .mempool()
+                .set_pool_guard(self.evm_guard.clone() as Arc<dyn tenzro_consensus::PoolGuard>)
+                .is_err()
+        {
+            warn!(
+                "the pool already has an admission guard; the engine-error guard is not installed"
+            );
+        }
+    }
+
+    /// This node's values for holding senders of transactions that end in
+    /// an EVM engine error.
+    pub fn with_evm_pool_guard(mut self, config: crate::config::EvmPoolGuardConfig) -> Self {
+        self.evm_guard = Arc::new(crate::evm_pool_guard::EvmPoolGuard::new(config));
         self
     }
 
@@ -1628,7 +2260,7 @@ impl EventLoop {
     /// manager holds it, or a block of it is in the chain. The chain is
     /// consulted too because the manager's own write can be the one that was
     /// lost.
-    pub(crate) fn registry_tag_uncommitted(
+    pub fn registry_tag_uncommitted(
         tag: &str,
         tip: u64,
         manager_epoch: Option<u64>,
@@ -1647,6 +2279,80 @@ impl EventLoop {
         } else {
             false
         }
+    }
+
+    /// The registry rows the chain implies at `tip`, a block inside its
+    /// epoch: the rows the epoch's first block committed, with the validator
+    /// logs of every block since replayed on them. `None` when the node keeps
+    /// no event log, or the event log or the state trie no longer reaches back
+    /// to that block; the start check then falls back on the registry's mark.
+    async fn replayed_registry_rows(
+        &self,
+        tip: u64,
+    ) -> Option<tenzro_storage::state_trie::capture::Writes> {
+        use tenzro_storage::state_trie::{NS_EPOCH, NS_VALIDATOR_REGISTRY};
+        use tenzro_types::chain_event::ChainEventKind;
+        let log = self.event_log.as_ref()?;
+        let epoch = self.tip_epoch().await;
+        let record: crate::state_commitment::EpochRecord = self
+            .state_trie
+            .get(tip, NS_EPOCH, &crate::state_commitment::epoch_key(epoch))
+            .ok()
+            .flatten()
+            .and_then(|b| bincode::deserialize(&b).ok())?;
+        let open = record.start_height;
+        if open >= tip
+            || !matches!(self.state_trie.root_at(open), Ok(Some(_)))
+            || log.floor().ok()? > open.saturating_add(1)
+            || log.tip()? < tip
+        {
+            return None;
+        }
+        let mut blocks = Vec::new();
+        for height in open + 1..=tip {
+            let events = log.block(height).ok()?;
+            blocks.push(
+                events
+                    .into_iter()
+                    .filter_map(|e| match e.kind {
+                        ChainEventKind::Log { topics, data, .. } => Some((topics, data)),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
+        let trie = self.state_trie.clone();
+        let committed = move |key: &[u8]| {
+            trie.get(open, NS_VALIDATOR_REGISTRY, key)
+                .map_err(|e| format!("reading the committed validator registry: {e}"))
+        };
+        match crate::state_commitment::replayed_registry_rows(&committed, epoch, blocks) {
+            Ok(rows) => Some(rows),
+            Err(e) => {
+                warn!(error = %e, "the validator registry could not be replayed from the chain");
+                None
+            }
+        }
+    }
+
+    /// Whether the tip block is the first of its epoch, as far as the blocks
+    /// this node holds say: false when the tip or its parent is not held.
+    async fn tip_opens_epoch(&self) -> bool {
+        let tip = self.current_height;
+        let Some(parent) = tip.checked_sub(1) else {
+            return false;
+        };
+        let Ok(store) = BlockStoreImpl::new(self.storage.clone()) else {
+            return false;
+        };
+        let mut epochs = Vec::with_capacity(2);
+        for height in [parent, tip] {
+            match store.get_block_by_height(BlockHeight(height)).await {
+                Ok(Some(block)) => epochs.push(block.header.epoch),
+                _ => return false,
+            }
+        }
+        crate::state_commitment::opens_epoch(BlockHeight(tip), epochs[1], epochs[0])
     }
 
     /// The epoch the tip block carries (0 with no block).
@@ -1805,7 +2511,8 @@ impl EventLoop {
                     NodeError::Other(format!(
                         "the validator registry could not be put back after a stop before a commit: {e}. \
                          `tenzro-node registry-undo` lists the undo records; `tenzro-node registry-undo --discard` \
-                         removes them and starts the registry from what the last run left, which may hold the changes of a block that never committed"
+                         removes them and puts nothing back, after which the node starts only where it can compare \
+                         the registry with the chain, and otherwise needs a snapshot restore"
                     ))
                 })?;
             if undone > 0 {
@@ -1814,6 +2521,42 @@ impl EventLoop {
                     "The validator registry was put back after a stop before a commit"
                 );
             }
+            // The registry is compared with what the chain holds before
+            // anything runs on one it does not: the rows committed at the tip
+            // when the tip opens an epoch, and inside an epoch the rows its
+            // first block committed with the validator logs since replayed.
+            let opens_epoch =
+                self.tip_opens_epoch().await && matches!(self.state_trie.root_at(tip), Ok(Some(_)));
+            let trie = self.state_trie.clone();
+            let at_tip = move |key: &[u8]| {
+                trie.get(tip, tenzro_storage::state_trie::NS_VALIDATOR_REGISTRY, key)
+                    .map_err(|e| format!("reading the committed validator registry: {e}"))
+            };
+            let replayed = if opens_epoch {
+                None
+            } else {
+                self.replayed_registry_rows(tip).await
+            };
+            let from_replay = |key: &[u8]| {
+                Ok(replayed.as_ref().and_then(|rows| {
+                    rows.get(&(
+                        tenzro_storage::state_trie::NS_VALIDATOR_REGISTRY.to_string(),
+                        key.to_vec(),
+                    ))
+                    .cloned()
+                    .flatten()
+                }))
+            };
+            let source: Option<&dyn Fn(&[u8]) -> std::result::Result<Option<Vec<u8>>, String>> =
+                if opens_epoch {
+                    Some(&at_tip)
+                } else if replayed.is_some() {
+                    Some(&from_replay)
+                } else {
+                    None
+                };
+            crate::state_commitment::registry_start_check(registry, source)
+                .map_err(NodeError::Other)?;
         }
         // The consensus driver bases an epoch start on the last executed
         // block: hand it the tip this node executed before it stopped.
@@ -1835,6 +2578,7 @@ impl EventLoop {
             }
         }
 
+        self.install_pool_guard();
         let (ingress_tx, ingress_rx) = mpsc::channel(INGRESS_QUEUE);
         let (parked_tx, parked_rx) = mpsc::channel(PARKED_BACK_QUEUE);
         tokio::spawn(
@@ -1846,6 +2590,7 @@ impl EventLoop {
                 chain_tip: self.chain_tip.clone(),
                 parked: parked_tx,
                 gpu_revocation: self.gpu_revocation.clone(),
+                key_warns: Default::default(),
             }
             .run(ingress_rx),
         );
@@ -1869,8 +2614,28 @@ impl EventLoop {
             self.block_import_rx = Some(importer_rx);
             let network = self.network.clone();
             let named = self.sync_peers.clone();
+            let boot = self.boot_peers.clone();
+            let named_addrs = self.sync_addrs.clone();
+            let boot_addrs = self.boot_peers.clone();
+            let addr_book: crate::block_sync::AddrBook = Arc::new(move |id: &[u8; 32]| {
+                named_addrs
+                    .iter()
+                    .find(|a| a.id.as_bytes() == id)
+                    .cloned()
+                    .or_else(|| {
+                        boot_addrs.as_ref().and_then(|b| {
+                            b.peer_addrs()
+                                .into_iter()
+                                .map(|(_, a)| a)
+                                .find(|a| a.id.as_bytes() == id)
+                        })
+                    })
+            });
             let connected: crate::block_sync::ConnectedPeers = Arc::new(move || {
                 let mut peers = named.clone();
+                if let Some(identity) = boot.as_ref() {
+                    peers.extend(identity.peer_addrs().iter().map(|(_, a)| *a.id.as_bytes()));
+                }
                 if let Some(n) = network.as_ref() {
                     peers.extend(n.gossip_peers().iter().map(|p| *p.as_bytes()));
                 }
@@ -1883,7 +2648,8 @@ impl EventLoop {
                 importer_tx,
                 self.block_sync.clone(),
                 connected,
-            );
+            )
+            .with_addr_book(addr_book);
             tokio::spawn(engine.run(self.shutdown_tx.subscribe()));
             info!("Block-sync engine spawned");
         }
@@ -1918,6 +2684,11 @@ impl EventLoop {
         // Proof of life: a signed heartbeat every few seconds, so peers stop
         // routing to this node within seconds of it failing.
         let heartbeat_failures = Arc::new(crate::provider_heartbeat::SigningFailureLog::new(10));
+        let heartbeat_session: Arc<
+            parking_lot::Mutex<
+                Option<Arc<tenzro_crypto::heartbeat_session::HeartbeatSessionSigner>>,
+            >,
+        > = Arc::new(parking_lot::Mutex::new(None));
         let mut liveness_heartbeat =
             tokio::time::interval(crate::provider_heartbeat::HEARTBEAT_INTERVAL);
         liveness_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2111,8 +2882,8 @@ impl EventLoop {
                         }
                     }
 
-                    // 1b. Keep THIS node's own provider entry healthy so intent
-                    // dispatch (chatByIntent) keeps routing to locally-served
+                    // 1b. Keep THIS node's own provider entry healthy so the
+                    // router's dispatch keeps reaching locally-served
                     // models. Independent of network advertisement — local
                     // serving works even when AI is private, and the entry
                     // otherwise goes stale (no gossip heartbeat of its own) and
@@ -2134,13 +2905,11 @@ impl EventLoop {
                     // Read per tick, so a change to the node's visibility
                     // re-announces or stops announcing every model without an
                     // override on the next heartbeat.
-                    if let (Some(network), Some(served), Some(ctx), Some(signer)) = (
-                        &self.network,
-                        &self.served_models,
-                        &self.provider_announcement_ctx,
-                        &self.announce_identity,
-                    ) {
-                        let provider_address = ctx.provider_address.clone();
+                    if let (Some(network), Some(served), Some((ctx, signer, account))) =
+                        (&self.network, &self.served_models, self.announcing())
+                        && ctx.announced_now().is_some_and(|(_, _, serves_ai)| serves_ai)
+                    {
+                        let provider_address = account;
                         let signer = signer.clone();
                         let pricing = self.provider_pricing.as_ref().map(|p| p.read().clone());
                         let schedule = self.provider_schedule.as_ref().map(|s| s.read().clone());
@@ -2281,11 +3050,11 @@ impl EventLoop {
                     // Broadcast our own provider announcement (only if context +
                     // announce signer wired — unsigned announcements are rejected
                     // by every consumer).
-                    if let (Some(network), Some(ctx), Some(signer)) = (
-                        &self.network,
-                        &self.provider_announcement_ctx,
-                        &self.announce_identity,
-                    ) {
+                    if let (Some(network), Some((ctx, signer, account))) =
+                        (&self.network, self.announcing())
+                        && let Some((provider_type, capabilities, serves_ai)) =
+                            ctx.announced_now()
+                    {
                         // Private models are excluded from provider announcements;
                         // gated ones are listed and flagged as key-required.
                         let (served, key_required_models) = self.announced_models();
@@ -2308,18 +3077,14 @@ impl EventLoop {
                             .provider_manager
                             .as_ref()
                             .and_then(|pm| {
-                                let hexstr = ctx
-                                    .provider_address
-                                    .strip_prefix("0x")
-                                    .unwrap_or(&ctx.provider_address);
+                                let hexstr = account.strip_prefix("0x").unwrap_or(&account);
                                 tenzro_types::primitives::Address::from_hex(hexstr)
                                     .ok()
                                     .and_then(|addr| pm.get_provider(&addr).ok())
                             })
                             .map(|p| {
                                 let mut c = p.capacity.advertised();
-                                c.verifiable_inference =
-                                    c.verifiable_inference || ctx.capacity.verifiable_inference;
+                                c.verifiable_inference = c.verifiable_inference || serves_ai;
                                 // Node config is the single source of truth for
                                 // this node's jurisdiction claim — a self
                                 // provider entry never overrides it.
@@ -2328,7 +3093,14 @@ impl EventLoop {
                                 c.standby_fee_per_hour = ctx.capacity.standby_fee_per_hour;
                                 c
                             })
-                            .unwrap_or_else(|| ctx.capacity.clone());
+                            .unwrap_or_else(|| {
+                                // The built-in llama.cpp runtime reads raw logits
+                                // in-process, so a node serving models can produce
+                                // TOPLOC commitments without configuration.
+                                let mut c = ctx.capacity.clone();
+                                c.verifiable_inference = serves_ai;
+                                c
+                            });
 
                         // Refresh the advertised warm-prefix count from the
                         // serving runtime each tick. Only the count rides the
@@ -2372,33 +3144,50 @@ impl EventLoop {
                                 .fold(0u32, |acc, s| acc.saturating_add(s.active_requests));
                         }
 
+                        // The vendor probes run off the loop's thread, once.
+                        let hardware = match ctx.hardware.get() {
+                            Some(found) => found.clone(),
+                            None => {
+                                let mut found = tokio::task::spawn_blocking(
+                                    tenzro_types::HardwareCapabilities::detect,
+                                )
+                                .await
+                                .unwrap_or_default();
+                                found.tee_available = ctx.tee_available;
+                                ctx.hardware.get_or_init(|| found).clone()
+                            }
+                        };
                         let mut ann = tenzro_network::ProviderAnnouncementMessage {
-                            provider_address: ctx.provider_address.clone(),
-                            provider_type: ctx.provider_type.clone(),
+                            provider_address: account.clone(),
+                            provider_type: provider_type.to_string(),
                             served_models: served,
                             key_required_models,
-                            capabilities: ctx.capabilities.clone(),
+                            capabilities,
                             status: "active".to_string(),
                             timestamp: chrono::Utc::now().timestamp_millis(),
                             ttl_secs: ctx.ttl_secs,
                             runtime_support: tenzro_types::RuntimeSupport::default(),
                             network_profile: tenzro_types::NodeNetworkProfile::default(),
-                            trust_profile: tenzro_types::TrustProfile {
-                                // Report the root this node actually started
-                                // with. Left empty if identity has not been
-                                // derived, which consumers read as the weakest
-                                // tier rather than the strongest.
-                                identity_root: tenzro_network::service::identity_root()
+                            // Report the root this node actually started
+                            // with. Left empty if identity has not been
+                            // derived, which consumers read as the weakest
+                            // tier rather than the strongest.
+                            trust_profile: crate::verifiable_inference::announced_trust_profile(
+                                tenzro_network::service::identity_root()
                                     .map(|r| r.as_str().to_string())
                                     .unwrap_or_default(),
-                                ..Default::default()
-                            },
+                                ctx.tee_vendor,
+                            ),
                             worker_roles: Vec::new(),
-                            hardware: ctx.hardware.clone(),
+                            hardware,
                             capacity,
                             region: ctx.region.clone(),
                             iroh_endpoint_id,
-                            cluster_profile: ctx.cluster_identity.as_ref().and_then(|c| c.profile()),
+                            cluster_profile: ctx
+                                .cluster_identity
+                                .as_ref()
+                                .filter(|_| serves_ai)
+                                .and_then(|c| c.profile()),
                             machine_did: String::new(),
                             operator_did: ctx.agent_serving.as_ref().map(|(_, o)| o.clone()),
                             signature: None,
@@ -2468,29 +3257,53 @@ impl EventLoop {
                     }
                 }
                 _ = liveness_heartbeat.tick() => {
-                    if let (Some(network), Some(ctx), Some(signer), Some(resolver)) = (
-                        &self.network,
-                        &self.provider_announcement_ctx,
-                        &self.announce_identity,
-                        &self.iroh_resolver,
-                    ) {
+                    if let (Some(network), Some((ctx, signer, account)), Some(resolver)) =
+                        (&self.network, self.announcing(), &self.iroh_resolver)
+                        && ctx.announced_now().is_some()
+                    {
                         let (served, _) = self.announced_models();
                         let load = crate::provider_heartbeat::model_load(
                             &served,
                             self.load_tracker.as_deref(),
                             self.lifecycle.as_deref(),
                         );
-                        let provider_address = ctx.provider_address.clone();
+                        let provider_address = account;
                         let endpoint_id = resolver.endpoint_id().to_string();
                         let (network, signer) = (network.clone(), signer.clone());
                         let failures = heartbeat_failures.clone();
+                        let rules = crate::provider_heartbeat::HeartbeatRules::read(
+                            &*self.state_adapter.lock().await,
+                        );
+                        let (session_live, session_lifetime_ms) =
+                            (rules.session_forms_live, rules.session.max_lifetime_ms);
+                        let session_holder = heartbeat_session.clone();
                         lanes.liveness.submit(move || {
+                            // From the epoch the beat is signed by a session
+                            // key the machine certified once; until a
+                            // certificate is made, or if making it fails,
+                            // by a hardware batch as before.
+                            let session = if session_live {
+                                let mut slot = session_holder.lock();
+                                if slot.is_none() {
+                                    match tenzro_crypto::heartbeat_session::HeartbeatSessionSigner::new(
+                                        Arc::new(signer.signer().clone()),
+                                        session_lifetime_ms,
+                                    ) {
+                                        Ok(s) => *slot = Some(Arc::new(s)),
+                                        Err(e) => warn!(error = %e, "Heartbeat session key not certified; signing this beat by hardware batch"),
+                                    }
+                                }
+                                slot.clone()
+                            } else {
+                                None
+                            };
                             match crate::provider_heartbeat::build(
                                 &provider_address,
                                 &endpoint_id,
                                 false,
                                 load,
                                 &signer,
+                                session.as_deref(),
                             ) {
                                 Ok(hb) => {
                                     if let Some(n) = failures.recovered() {
@@ -2556,7 +3369,10 @@ impl EventLoop {
                             let ann = tenzro_network::BlobAnnouncementMessage {
                                 endpoint_id: endpoint_id.clone(),
                                 blob_hashes: chunk.to_vec(),
-                                timestamp: chrono::Utc::now().timestamp_millis(),
+                                // Stamped again when it is signed: the signing
+                                // lane may be behind, and a stamp from before
+                                // the wait would arrive older than its lifetime.
+                                timestamp: 0,
                                 ttl_secs: plan.ttl_secs,
                                 machine_did: String::new(),
                                 signature: None,
@@ -2574,6 +3390,7 @@ impl EventLoop {
                         lanes.blobs.submit(move || {
                             let mut out = Vec::new();
                             for mut ann in messages {
+                                ann.timestamp = chrono::Utc::now().timestamp_millis();
                                 if let Err(e) = tenzro_network::SignedAnnouncement::sign(&mut ann, signer.machine_did(), signer.signer()) {
                                     warn!(error = %e, "Skipping blob announcement: signing failed");
                                     break;
@@ -2685,7 +3502,8 @@ impl EventLoop {
                                     model_id = %reg.model_id,
                                     provider = %reg.provider,
                                     error = %e,
-                                    "Rejecting model announcement (signature verification failed)"
+                                    reason = e.reason(),
+                                    "Rejecting model announcement"
                                 );
                             } else if let Err(e) = check_announcement_freshness(reg.timestamp, reg.ttl_secs) {
                                 warn!(
@@ -2693,6 +3511,27 @@ impl EventLoop {
                                     provider = %reg.provider,
                                     error = %e,
                                     "Rejecting model announcement (replay window)"
+                                );
+                            } else if let Err(e) =
+                                self.account_is_the_announcers(&reg.machine_did, &reg.provider)
+                            {
+                                warn!(
+                                    model_id = %reg.model_id,
+                                    provider = %reg.provider,
+                                    machine = %reg.machine_did,
+                                    reason = %e,
+                                    "Rejecting model announcement (the account it names is not its machine's)"
+                                );
+                            } else if let Err(e) = payee_bound_in(
+                                self.identity_registry.as_deref(),
+                                &reg.machine_did,
+                                &reg.provider,
+                            ) {
+                                warn!(
+                                    model_id = %reg.model_id,
+                                    provider = %reg.provider,
+                                    error = %e,
+                                    "Rejecting model announcement (payee not bound by its operator)"
                                 );
                             } else if let Some(ref nm) = self.network_models {
                                 let key = format!("{}:{}", reg.model_id, reg.provider);
@@ -2745,10 +3584,12 @@ impl EventLoop {
                                         registration: reg.clone(),
                                         last_seen: std::time::Instant::now(),
                                     });
-                                    // Persist to RocksDB so model endpoints survive restart
+                                    // Persist to RocksDB so model endpoints survive
+                                    // restart, in the wire form that carries the
+                                    // signature: a restored entry is verified again.
                                     {
                                         let storage_key = format!("net_model:{}", key);
-                                        if let Ok(bytes) = serde_json::to_vec(&reg) {
+                                        if let Ok(bytes) = crate::node::stored_model_endpoint(&reg) {
                                             let _ = self.storage.put(tenzro_storage::CF_MODEL_SERVICES, storage_key.as_bytes(), &bytes);
                                         }
                                     }
@@ -2767,11 +3608,15 @@ impl EventLoop {
                                     (e.announcement.provider_address.clone(), e.announcement.machine_did.clone())
                                 });
                                 let key = pinned.as_ref().and_then(|(_, did)| self.announcer_key(did).ok());
+                                let rules = crate::provider_heartbeat::HeartbeatRules::read(
+                                    &*self.state_adapter.lock().await,
+                                );
                                 match crate::provider_heartbeat::accept(
                                     &hb,
                                     pinned.as_ref().zip(key.as_ref()).map(|((a, d), k)| (a.as_str(), d.as_str(), k)),
                                     chrono::Utc::now().timestamp_millis(),
                                     pm.liveness(),
+                                    &rules,
                                 ) {
                                     Ok(_) => {
                                         if let Some(mut entry) = np.get_mut(&hb.iroh_endpoint_id) {
@@ -2814,13 +3659,24 @@ impl EventLoop {
                                     endpoint = %ann.iroh_endpoint_id,
                                     provider_type = %ann.provider_type,
                                     error = %e,
-                                    "Rejecting provider announcement (signature verification failed)"
+                                    reason = e.reason(),
+                                    "Rejecting provider announcement"
                                 );
                             } else if let Err(e) = check_announcement_freshness(ann.timestamp, ann.ttl_secs) {
                                 warn!(
                                     endpoint = %ann.iroh_endpoint_id,
                                     error = %e,
                                     "Rejecting provider announcement (replay window)"
+                                );
+                            } else if let Err(e) = self
+                                .account_is_the_announcers(&ann.machine_did, &ann.provider_address)
+                            {
+                                warn!(
+                                    endpoint = %ann.iroh_endpoint_id,
+                                    provider = %ann.provider_address,
+                                    machine = %ann.machine_did,
+                                    reason = %e,
+                                    "Rejecting provider announcement (the account it names is not its machine's)"
                                 );
                             } else if let Some(Err(e)) =
                                 ann.region.as_deref().map(tenzro_types::provider_listing::coarse_region)
@@ -2922,14 +3778,20 @@ impl EventLoop {
                                 warn!(
                                     endpoint_id = %ann.endpoint_id,
                                     error = %e,
-                                    "Rejecting blob announcement (signature verification failed)"
+                                    reason = e.reason(),
+                                    "Rejecting blob announcement"
                                 );
                             } else if let Err(e) = check_announcement_freshness(ann.timestamp, ann.ttl_secs) {
-                                warn!(
-                                    endpoint_id = %ann.endpoint_id,
-                                    error = %e,
-                                    "Rejecting blob announcement (replay window)"
-                                );
+                                if self
+                                    .blob_reject_log
+                                    .admit(&ann.endpoint_id, std::time::Instant::now())
+                                {
+                                    warn!(
+                                        endpoint_id = %ann.endpoint_id,
+                                        error = %e,
+                                        "Rejecting blob announcement (replay window); at most once a minute per endpoint"
+                                    );
+                                }
                             } else if let Some(ref resolver) = self.iroh_resolver {
                                 match ann.endpoint_id.parse::<tenzro_iroh::EndpointId>() {
                                     Ok(provider) => {
@@ -2955,7 +3817,8 @@ impl EventLoop {
                                 warn!(
                                     object_id = %req.object_id,
                                     error = %e,
-                                    "Rejecting shard replication request (signature verification failed)"
+                                    reason = e.reason(),
+                                    "Rejecting shard replication request"
                                 );
                             } else if let Err(e) =
                                 check_announcement_freshness(req.timestamp, req.ttl_secs)
@@ -2965,114 +3828,22 @@ impl EventLoop {
                                     error = %e,
                                     "Rejecting shard replication request (replay window)"
                                 );
-                            } else if let (Some(replicas), Some(resolver)) =
-                                (self.storage_replicas, self.iroh_resolver.as_ref())
-                            {
-                                let own_endpoint = resolver.endpoint_id().to_string();
-                                // Never pin from ourselves — the origin already
-                                // holds every shard.
-                                if own_endpoint != req.origin_endpoint_id {
-                                    // Candidate membership view: storage-capable
-                                    // providers discovered via gossip, plus the
-                                    // origin, plus self — each tagged with its
-                                    // data-plane reachability. Self is
-                                    // LocalDirect; every announced endpoint is
-                                    // reachable over iroh, directly or through
-                                    // its relay. The view is a local snapshot; skew self-heals
-                                    // as heartbeats converge.
-                                    use tenzro_storage_provider::TieredCandidate;
-                                    let mut candidates: Vec<TieredCandidate> = vec![
-                                        // Self is always on its own segment.
-                                        TieredCandidate::local(own_endpoint.clone()),
-                                        // The origin is directly reachable — it
-                                        // just published the shards.
-                                        TieredCandidate::direct(req.origin_endpoint_id.clone()),
-                                    ];
-                                    if let Some(ref np) = self.network_providers {
-                                        for entry in np.iter() {
-                                            let ann = &entry.value().announcement;
-                                            if ann
-                                                .capabilities
-                                                .iter()
-                                                .any(|c| c == "storage")
-                                                && !ann.iroh_endpoint_id.is_empty()
-                                            {
-                                                // Every announced endpoint is
-                                                // reachable over iroh, directly
-                                                // or through its relay.
-                                                candidates.push(TieredCandidate::direct(
-                                                    ann.iroh_endpoint_id.clone(),
-                                                ));
-                                            }
-                                        }
-                                    }
-
-                                    let origin = req.origin_endpoint_id.clone();
-                                    // The fetches run off the event loop; only
-                                    // the choice of shards is made here.
-                                    let mut selected = Vec::new();
-                                    for shard in &req.shards {
-                                        if selected.len() == MAX_SHARDS_PER_REPLICATION {
-                                            break;
-                                        }
-                                        if tenzro_storage_provider::should_replicate_tiered(
-                                            &shard.commitment,
-                                            &own_endpoint,
-                                            true,
-                                            &candidates,
-                                            replicas,
-                                        ) {
-                                            resolver.record_blob_provider(
-                                                &shard.blob_hash,
-                                                match origin.parse::<tenzro_iroh::EndpointId>() {
-                                                    Ok(ep) => ep,
-                                                    Err(e) => {
-                                                        warn!(
-                                                            object_id = %req.object_id,
-                                                            origin = %origin,
-                                                            error = %e,
-                                                            "Shard replication: unparseable origin endpoint id"
-                                                        );
-                                                        break;
-                                                    }
-                                                },
-                                            );
-                                            selected.push(tenzro_iroh::TenzroUri::Blob {
-                                                hash: shard.blob_hash.clone(),
-                                                provider_hint: Some(origin.clone()),
-                                            });
-                                        }
-                                    }
-                                    if !selected.is_empty() {
-                                        match self.replication_slots.clone().try_acquire_owned() {
-                                            Ok(slot) => {
-                                                let resolver: Arc<dyn IrohResolver> =
-                                                    resolver.clone();
-                                                let object_id = req.object_id.to_string();
-                                                let total_shards = req.shards.len();
-                                                let gate = self.shard_gate.clone();
-                                                tokio::spawn(async move {
-                                                    let pinned =
-                                                        pin_shards(resolver.as_ref(), &selected, &gate)
-                                                            .await;
-                                                    drop(slot);
-                                                    if pinned > 0 {
-                                                        info!(
-                                                            object_id = %object_id,
-                                                            pinned,
-                                                            total_shards,
-                                                            "Pinned shards via rendezvous self-selection"
-                                                        );
-                                                    }
-                                                });
-                                            }
-                                            Err(_) => warn!(
-                                                object_id = %req.object_id,
-                                                "Shard replication: every replication slot is busy; request dropped"
-                                            ),
-                                        }
-                                    }
-                                }
+                            } else {
+                                self.replicate_announced_shards(&req, None);
+                            }
+                        }
+                        NodeEvent::ConstrainedShardReplication(msg) => {
+                            match tenzro_storage_provider::PlacementConstraint::new(
+                                &msg.jurisdiction,
+                                &msg.operators,
+                            ) {
+                                Ok(constraint) => self
+                                    .replicate_announced_shards(&msg.replication, Some(&constraint)),
+                                Err(e) => warn!(
+                                    object_id = %msg.replication.object_id,
+                                    error = %e,
+                                    "Ignoring constrained shard replication (unreadable constraint)"
+                                ),
                             }
                         }
                         NodeEvent::Shutdown => {
@@ -3409,8 +4180,32 @@ impl EventLoop {
         checkpoints: Vec<tenzro_consensus::Checkpoint>,
         certificate: Option<tenzro_consensus::PublishedCertificate>,
     ) -> Result<()> {
+        // A follower that never derived the committee of the epoch it is in
+        // (it executed past the closing block first) does so before anything
+        // else: no certificate of the next epoch verifies without it.
+        if !self.orders_blocks()
+            && let Some(consensus) = self.consensus.as_ref()
+        {
+            consensus.adopt_pending_committee();
+        }
+        let served = blocks.len();
+        let mut refused: Option<(u64, String)> = None;
+        let mut refused_count = 0usize;
         for b in blocks {
-            self.hold_uncertified(b);
+            let height = b.height().0;
+            if let Err(e) = self.hold_uncertified(b) {
+                refused_count += 1;
+                refused.get_or_insert((height, e));
+            }
+        }
+        if let Some((height, why)) = refused {
+            warn!(
+                served,
+                refused = refused_count,
+                first_height = height,
+                reason = %why,
+                "Block-sync: served blocks that cannot be held are dropped"
+            );
         }
         let Some(tenzro_consensus::PublishedCertificate {
             certificate: cert,
@@ -3450,14 +4245,36 @@ impl EventLoop {
             self.current_height,
             |i| consensus.checkpoint(i),
         );
+        info!(
+            tip = self.current_height,
+            certificate = cert.checkpoint.index,
+            certificate_last_height = cert.checkpoint.last_height,
+            bodies = checkpoints.len(),
+            chain = chain.len(),
+            held = self.uncertified.len(),
+            "Block-sync: the served evidence"
+        );
         for cp in chain {
             consensus.record_body(&cp);
             consensus.keep_handover(&cert);
             if cp.last_height > self.current_height {
                 // The evidence may run past the blocks served with it (the
                 // nearest kept certificate lies beyond the range): import up
-                // to there, and the next range carries on from the tip.
+                // to there; the next range carries on past the held blocks,
+                // and their checkpoint imports once all of them are held.
                 if !self.holds_range(&cp) {
+                    let first_missing = (self.current_height.max(cp.first_height.saturating_sub(1))
+                        + 1..=cp.last_height)
+                        .find(|h| !self.uncertified.contains_key(h));
+                    info!(
+                        checkpoint = cp.index,
+                        first_height = cp.first_height,
+                        last_height = cp.last_height,
+                        tip = self.current_height,
+                        held = self.uncertified.len(),
+                        first_missing = ?first_missing,
+                        "Block-sync: the blocks of this checkpoint are not all held yet"
+                    );
                     break;
                 }
                 self.import_certified_range(&cp).await?;
@@ -3488,16 +4305,18 @@ impl EventLoop {
 
     /// Holds a block received from a peer until a certificate covering its
     /// height arrives. Only the successor range of the local tip is kept.
-    fn hold_uncertified(&mut self, block: Block) {
-        const MAX_HELD: u64 = 20_000;
+    fn hold_uncertified(&mut self, block: Block) -> std::result::Result<(), String> {
         let h = block.height().0;
-        if h <= self.current_height || h > self.current_height + MAX_HELD {
-            return;
+        if h <= self.current_height || h > self.current_height + crate::block_sync::MAX_HELD_AHEAD {
+            return Ok(());
         }
-        if block.verify_body().is_err() {
-            return;
+        block.verify_body()?;
+        if !self.uncertified.insert(h, block) {
+            return Err(format!(
+                "block {h} cannot be held: it does not fit the budget or does not encode"
+            ));
         }
-        self.uncertified.insert(h, block);
+        Ok(())
     }
 
     /// Imports every block a verified certificate covers.
@@ -3802,13 +4621,15 @@ impl EventLoop {
         em: &Arc<tenzro_consensus::EpochManager>,
         registry: &Arc<tenzro_token::ValidatorRegistry>,
         admitted: &dyn Fn(&[u8]) -> bool,
+        max_active: Option<usize>,
+        caps: Option<GroupCaps<'_>>,
     ) {
         let next_epoch = em.current_epoch().number + 1;
         // What is queued is rebuilt from the registry at every boundary: a
         // queue a running node kept and a restarted node lost must not make
         // their next sets differ.
         em.clear_pending();
-        let plan = registry.compute_epoch_transition_with(next_epoch, admitted);
+        let plan = registry.compute_epoch_transition_with(next_epoch, admitted, max_active);
         debug!(
             next_epoch = next_epoch,
             activations = plan.effective_activations.len(),
@@ -3884,8 +4705,12 @@ impl EventLoop {
         let live_set = em.current_validator_set();
         let mut active = registry.list_active();
         active.sort_unstable_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()));
+        let capped = caps.map(|c| c.powers(&active)).unwrap_or_default();
         for entry in active {
-            let power = Self::consensus_voting_power(entry.self_stake);
+            let power = capped
+                .get(&entry.address)
+                .copied()
+                .unwrap_or_else(|| Self::consensus_voting_power(entry.self_stake));
             let seated = live_set.get_by_address(&entry.address);
             // A seat matches when its power, its composite key and its node
             // key all agree with the registry.
@@ -4339,6 +5164,49 @@ impl EventLoop {
                 Ok((result, fee_paid)) => {
                     gas_used_total += result.gas_used;
 
+                    // A transaction that ended in an EVM engine error: this
+                    // node holds its sender. When the hold is in force (the
+                    // block is not an old one, replayed or imported) it also
+                    // takes the EVM transactions the sender still has pooled
+                    // out of the pool; the sender's other transactions stay.
+                    let sender = signed_tx.transaction.from.as_bytes();
+                    let block_ms = u64::try_from(block.header.timestamp.as_millis()).unwrap_or(0);
+                    if let Some(noted) = self.evm_guard.note_executed(
+                        sender,
+                        result.revert_reason.as_deref(),
+                        block_ms,
+                        crate::evm_pool_guard::unix_ms(),
+                    ) && noted.in_force
+                    {
+                        warn!(
+                            sender = %hex::encode(sender),
+                            tx = %tx_hash,
+                            "transaction ended in an EVM engine error; holding its sender"
+                        );
+                        if noted.watch_started {
+                            warn!(
+                                tx = %tx_hash,
+                                gas_limit = self.evm_guard.watch_gas_limit(),
+                                "repeated EVM engine errors; admitting no EVM transaction above the gas limit ceiling for now"
+                            );
+                        }
+                        if let Some(consensus) = &self.consensus {
+                            use crate::evm_pool_guard::EvmPoolGuard;
+                            let mut pooled = Vec::new();
+                            consensus.mempool().select_with(|hash, tx| {
+                                if EvmPoolGuard::same_account(
+                                    tx.transaction.from.as_bytes(),
+                                    sender,
+                                ) && EvmPoolGuard::judges(tx)
+                                {
+                                    pooled.push(*hash);
+                                }
+                                tenzro_consensus::mempool::Pick::Taken
+                            });
+                            consensus.mempool().remove_transactions(&pooled);
+                        }
+                    }
+
                     // Hot-state attribution: every distinct address
                     // touched by a successful or reverted tx counts as one
                     // write toward this block's contention sample, and
@@ -4481,6 +5349,9 @@ impl EventLoop {
                     // moves. Every other refusal is permanent.
                     let retry = match &e {
                         tenzro_vm::VmError::InvalidNonce { expected, got } => got > expected,
+                        // Not run because the block had used its gas: it
+                        // runs in the block that has room for it.
+                        tenzro_vm::VmError::BlockGasLimit { .. } => true,
                         // A record that pays no fee is held to no base fee,
                         // so a lower one never makes it executable later.
                         _ => {
@@ -4899,23 +5770,38 @@ impl EventLoop {
         if source == BlockSource::Ordered
             && let Some(ref network) = self.network
         {
+            // Every validator executes the block and holds the same bytes,
+            // so one publication is enough: each waits its turn and
+            // publishes only if no copy has reached it by then.
             let network_clone = network.clone();
-            let msg = NetworkMessage::new(MessagePayload::Block(block.clone()));
+            let msg = NetworkMessage::block(block.clone());
+            let wait = self
+                .consensus
+                .as_ref()
+                .and_then(|c| c.committee_position())
+                .map_or(Duration::ZERO, |(position, committee)| {
+                    publish_turn_delay(position, committee, block_height.0)
+                });
             let height_for_log = block_height;
             let hash_for_log = block_hash;
             tokio::spawn(async move {
-                if let Err(e) = network_clone.broadcast("tenzro/blocks", msg).await {
-                    warn!(
+                tokio::time::sleep(wait).await;
+                match network_clone.broadcast_unseen("tenzro/blocks", msg).await {
+                    Err(e) => warn!(
                         height = %height_for_log,
                         error = %e,
                         "Failed to broadcast finalized block over gossip"
-                    );
-                } else {
-                    debug!(
+                    ),
+                    Ok(true) => debug!(
                         height = %height_for_log,
                         hash = %hash_for_log,
                         "Broadcast finalized block to network"
-                    );
+                    ),
+                    Ok(false) => debug!(
+                        height = %height_for_log,
+                        hash = %hash_for_log,
+                        "Finalized block already carried by gossip; not published again"
+                    ),
                 }
             });
         }
@@ -4957,6 +5843,25 @@ impl EventLoop {
         Ok(Some((block_hash, state_root)))
     }
 
+    /// Whether `block`, at or below the tip, is the block this node holds at
+    /// its height. How old a copy can be is bounded by the age gossip
+    /// accepts a message at.
+    async fn holds_copy(&self, block: &Block) -> bool {
+        let hash = block.hash();
+        if block.height().0 == self.current_height {
+            return hash == self.last_block_hash;
+        }
+        let Ok(store) = BlockStoreImpl::new(self.storage.clone()) else {
+            return false;
+        };
+        store
+            .get_block_by_height(block.height())
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|held| held.hash() == hash)
+    }
+
     /// Handles a block received from the network via gossip.
     ///
     /// A block carries no signature of its own, so nothing about it can be
@@ -4970,6 +5875,15 @@ impl EventLoop {
         verdict: GossipVerdict,
     ) -> Result<()> {
         if block.height().0 <= self.current_height {
+            // A copy of a block this node executed is passed on: the node
+            // does not publish a block gossip already brought it, so its
+            // neighbours get the block from this copy. Blocks can follow
+            // each other faster than the publication turns, so the copy may
+            // arrive after the node executed the next block too. Anything
+            // this node does not hold goes no further.
+            if self.holds_copy(&block).await {
+                verdict.accept();
+            }
             return Ok(());
         }
         if block.verify_body().is_err() {
@@ -4981,7 +5895,7 @@ impl EventLoop {
         }
         verdict.accept();
         if !self.orders_blocks() {
-            self.hold_uncertified(block);
+            let _ = self.hold_uncertified(block);
         }
         Ok(())
     }
@@ -5256,6 +6170,7 @@ impl EventLoop {
                     s == b"IdentityRegister"
                         || s == b"IdentityRevoked"
                         || s == tenzro_vm::native::machine_attestation::MACHINE_ATTESTATION_ATTACHED_TOPIC
+                        || s == tenzro_vm::keystore::KEYSTORE_UPDATED_TOPIC
                 })
                 .unwrap_or(false)
         });
@@ -5274,6 +6189,7 @@ impl EventLoop {
         crate::identity_mirror::mirror_identity_logs(
             registry,
             self.auth_engine.as_deref(),
+            Some(self.storage.as_ref()),
             &result.logs,
         );
     }
@@ -5343,231 +6259,25 @@ impl EventLoop {
         // node's consensus has reached when it happens to execute the block.
         let current_epoch = block_epoch;
 
-        for log in &result.logs {
-            let topic = match log.topics.first() {
-                Some(t) => t.as_slice(),
-                None => continue,
-            };
-
-            if topic == tenzro_vm::native::sponsored_bond::SPONSORED_TOPIC
-                || topic == tenzro_vm::native::sponsored_bond::RECALLED_TOPIC
-            {
-                let Ok(event) = serde_json::from_slice::<
-                    tenzro_vm::native::sponsored_bond::SponsoredBondEvent,
-                >(&log.data) else {
-                    warn!(
-                        len = log.data.len(),
-                        "Malformed sponsored-bond log; skipping"
-                    );
-                    continue;
-                };
-                // The sponsored part counts toward the bond the registry
-                // admits and seats by; a recall takes it back out.
-                let mirrored = if topic == tenzro_vm::native::sponsored_bond::SPONSORED_TOPIC {
-                    registry.increase_self_stake(&event.validator, event.amount)
-                } else {
-                    registry.recall_sponsored_stake(&event.validator, event.amount)
-                };
-                match mirrored {
-                    Ok(total) => info!(
-                        validator = %event.validator,
-                        amount = event.amount,
-                        total,
-                        "Validator sponsored bond mirrored"
-                    ),
-                    Err(e) => warn!(
-                        validator = %event.validator,
-                        error = %e,
-                        "ValidatorRegistry rejected a sponsored-bond mirror; \
-                         registry is out of step with chain state"
-                    ),
-                }
-                continue;
-            }
-
-            match topic {
-                b"ValidatorStakeIncreased" => {
-                    // Layout: from(32) || additional_le(16) || new_total_le(16)
-                    if log.data.len() < 64 {
-                        warn!(
-                            len = log.data.len(),
-                            "Malformed ValidatorStakeIncreased log; skipping"
-                        );
-                        continue;
-                    }
-                    let mut addr_bytes = [0u8; 32];
-                    addr_bytes.copy_from_slice(&log.data[..32]);
-                    let address = tenzro_types::primitives::Address::new(addr_bytes);
-                    let mut add_bytes = [0u8; 16];
-                    add_bytes.copy_from_slice(&log.data[32..48]);
-                    let additional = u128::from_le_bytes(add_bytes);
-
-                    match registry.increase_self_stake(&address, additional) {
-                        Ok(total) => info!(
-                            validator = %address,
-                            additional,
-                            total,
-                            "Validator self-stake increased"
-                        ),
-                        // Non-fatal: the VM already moved the funds and is the
-                        // source of truth. A registry that rejects the mirror is
-                        // out of step with chain state and says so, rather than
-                        // failing the block that already committed.
-                        Err(e) => warn!(
-                            validator = %address,
-                            error = %e,
-                            "ValidatorRegistry rejected increase_self_stake; \
-                             registry is out of step with chain state"
-                        ),
-                    }
-                }
-                b"ValidatorRegister" => {
-                    let parsed = match decode_validator_register_log(&log.data) {
-                        Some(v) => v,
-                        None => {
-                            warn!(
-                                data_len = log.data.len(),
-                                "Malformed ValidatorRegister log payload, skipping"
-                            );
-                            continue;
-                        }
-                    };
-                    let from_addr = parsed.from;
-                    if let Err(e) = registry.register_candidate(
-                        from_addr,
-                        parsed.ml_dsa_pubkey,
-                        parsed.p256_pubkey,
-                        parsed.node_key,
-                        parsed.withdrawal_address,
-                        parsed.self_stake,
+        apply_validator_logs(
+            &registry,
+            result
+                .logs
+                .iter()
+                .map(|l| (l.topics.as_slice(), l.data.as_slice())),
+            current_epoch,
+            |validator, epoch, index, deferred| {
+                if let Some(jailer) = self.equivocation_jailer.as_ref() {
+                    jailer.report_checkpoint_equivocation(
+                        validator,
+                        epoch,
+                        index,
                         current_epoch,
-                        parsed.metadata_uri,
-                    ) {
-                        warn!(
-                            address = %from_addr,
-                            error = %e,
-                            "ValidatorRegistry rejected register_candidate; \
-                             on-chain marker may have outpaced registry state"
-                        );
-                    } else {
-                        debug!(
-                            address = %from_addr,
-                            self_stake = parsed.self_stake,
-                            epoch = current_epoch,
-                            "ValidatorRegistry reflected ValidatorRegister log"
-                        );
-                    }
+                        deferred,
+                    );
                 }
-
-                b"ValidatorExit" => {
-                    let from_addr = match tenzro_vm::native::validator_exit_log_account(&log.data)
-                        .and_then(tenzro_types::primitives::Address::from_bytes)
-                    {
-                        Some(a) => a,
-                        None => {
-                            warn!(
-                                data_len = log.data.len(),
-                                "Malformed ValidatorExit log payload, skipping"
-                            );
-                            continue;
-                        }
-                    };
-                    if let Err(e) = registry.request_exit(&from_addr) {
-                        warn!(
-                            address = %from_addr,
-                            error = %e,
-                            "ValidatorRegistry rejected request_exit"
-                        );
-                    } else {
-                        debug!(
-                            address = %from_addr,
-                            "ValidatorRegistry reflected ValidatorExit log"
-                        );
-                    }
-                }
-
-                t if t == tenzro_vm::native::VALIDATOR_KEY_ROTATION_TOPIC => {
-                    let Some((account, ml_dsa, ecdsa)) =
-                        tenzro_vm::native::decode_validator_key_rotation_log(&log.data)
-                    else {
-                        warn!("Malformed ValidatorKeyRotation log payload, skipping");
-                        continue;
-                    };
-                    let Some(addr) = tenzro_types::primitives::Address::from_bytes(account) else {
-                        continue;
-                    };
-                    if let Err(e) =
-                        registry.request_key_rotation(&addr, ml_dsa.to_vec(), ecdsa.to_vec())
-                    {
-                        warn!(address = %addr, error = %e, "ValidatorRegistry rejected a key rotation");
-                    }
-                }
-
-                b"ValidatorMetadataUpdate" => {
-                    let parsed = match decode_validator_metadata_update_log(&log.data) {
-                        Some(v) => v,
-                        None => {
-                            warn!(
-                                data_len = log.data.len(),
-                                "Malformed ValidatorMetadataUpdate log payload, skipping"
-                            );
-                            continue;
-                        }
-                    };
-                    let from_addr = parsed.from;
-                    let uri = if parsed.metadata_uri.is_empty() {
-                        None
-                    } else {
-                        Some(parsed.metadata_uri)
-                    };
-                    if let Err(e) =
-                        registry.update_metadata(&from_addr, uri, parsed.tee_attestation_hash)
-                    {
-                        warn!(
-                            address = %from_addr,
-                            error = %e,
-                            "ValidatorRegistry rejected update_metadata"
-                        );
-                    } else {
-                        debug!(
-                            address = %from_addr,
-                            "ValidatorRegistry reflected ValidatorMetadataUpdate log"
-                        );
-                    }
-                }
-
-                b"CheckpointEquivocation" => {
-                    // Layout: epoch_be(8) || index_be(8) || p256(65) || ml_dsa
-                    if log.data.len() < 16 + 65 {
-                        warn!(
-                            len = log.data.len(),
-                            "Malformed CheckpointEquivocation log; skipping"
-                        );
-                        continue;
-                    }
-                    let epoch = u64::from_be_bytes(log.data[..8].try_into().expect("8 bytes"));
-                    let index = u64::from_be_bytes(log.data[8..16].try_into().expect("8 bytes"));
-                    let (p256, ml_dsa) = log.data[16..].split_at(65);
-                    let Some(entry) = registry.find_by_key(ml_dsa, p256) else {
-                        warn!(
-                            epoch,
-                            index, "Checkpoint equivocation by a key the registry does not hold"
-                        );
-                        continue;
-                    };
-                    if let Some(jailer) = self.equivocation_jailer.as_ref() {
-                        jailer.report_checkpoint_equivocation(
-                            &entry.address,
-                            epoch,
-                            index,
-                            current_epoch,
-                        );
-                    }
-                }
-
-                _ => {}
-            }
-        }
+            },
+        );
     }
 }
 
@@ -5716,16 +6426,6 @@ fn decode_validator_metadata_update_log(data: &[u8]) -> Option<ParsedValidatorMe
     })
 }
 
-/// Verifies the P-256 leg of a transaction's signature when its key names
-/// the `from` account. It reads no state. A key that does not name the
-/// account must be a passkey of the account's keystore: that, and the
-/// passkey's assertion for the relying party the keystore records for it,
-/// are checked against state at admission by [`verify_transaction_sender`]
-/// and at execution by the VM, as is the ML-DSA-65 leg against the key
-/// enrolled for the P-256 key ([`verify_transaction_pq_leg`]).
-///
-/// The message is `Transaction::hash()` under the transaction signature
-/// context, so a signature minted for another protocol does not verify here.
 /// The protocol version a block at `height` carries: its parent's, or the
 /// major version an enacted protocol upgrade names once the block reaches
 /// the upgrade's activation height. It never goes back. The version selects
@@ -5741,6 +6441,16 @@ pub(crate) fn block_protocol_version(
     named.map_or(parent, |v| v.max(parent))
 }
 
+/// Verifies the P-256 leg of a transaction's signature when its key names
+/// the `from` account. It reads no state. A key that does not name the
+/// account must be a passkey of the account's keystore: that, and the
+/// passkey's assertion for the relying party the keystore records for it,
+/// are checked against state at admission by [`verify_transaction_sender`]
+/// and at execution by the VM, as is the ML-DSA-65 leg against the key
+/// enrolled for the P-256 key ([`verify_transaction_pq_leg`]).
+///
+/// The message is `Transaction::hash()` under the transaction signature
+/// context, so a signature minted for another protocol does not verify here.
 pub(crate) fn verify_transaction_signature(signed_tx: &SignedTransaction) -> Result<()> {
     use tenzro_crypto::composite::{SignatureContext, verify_classical_component};
 
@@ -5910,6 +6620,34 @@ pub(crate) fn external_svm_envelope(
     Ok((signed_tx, ext.signature))
 }
 
+/// Whether a block could run `tx` at its gas limit. Once the Osaka rule set
+/// is live a block refuses an EVM transaction whose gas limit is above that
+/// rule set's cap, so the pool does not take one in; until then no gas limit
+/// is refused here. Called only after the transaction's signature verified.
+fn evm_gas_limit_admitted(
+    tx: &SignedTransaction,
+    state: &dyn tenzro_vm::traits::VmState,
+) -> Result<()> {
+    let Some(cap) = tenzro_vm::evm::transaction_gas_cap(state) else {
+        return Ok(());
+    };
+    let vm_tx = if tx.transaction.tx_type.is_external() {
+        match external_vm_transaction(tx, 0) {
+            Ok(vm_tx) => vm_tx,
+            Err(_) => return Ok(()),
+        }
+    } else {
+        convert_transaction(tx)
+    };
+    if vm_tx.vm_type == VmType::Evm && vm_tx.gas_limit > cap {
+        return Err(NodeError::InvalidTransaction(format!(
+            "gas limit {} is above the EVM transaction gas limit of {cap}",
+            vm_tx.gas_limit
+        )));
+    }
+    Ok(())
+}
+
 /// The VM transaction an external wallet transaction executes as, at the
 /// block's base fee. Called only after [`verify_external_transaction`].
 fn external_vm_transaction(
@@ -5936,10 +6674,253 @@ fn external_vm_transaction(
     Ok(vm_tx)
 }
 
-/// Verifies the ML-DSA-65 leg of a transaction against the key its account
-/// has enrolled in `state`: once one is enrolled, a transaction without the
-/// leg is refused at admission. A leg on an account with none enrolled is
-/// left to execution, which sees any enrollment ordered before it.
+/// Applies the validator-registry logs of one block's transactions, in
+/// order, to `registry`: registrations, exits, key rotations, metadata,
+/// stake increases and sponsored bonds. `current_epoch` is the epoch the
+/// block carries. A checkpoint equivocation is handed to `on_equivocation`
+/// with the offender, the epoch and the index it signed twice, and, when the
+/// transaction's seat-held log came before it (the deferred-removal rule is
+/// live), how its removal waits. Malformed logs and changes the registry
+/// refuses are logged and skipped: the VM already executed them and is the
+/// source of truth.
+pub(crate) fn apply_validator_logs<'a>(
+    registry: &tenzro_token::ValidatorRegistry,
+    logs: impl IntoIterator<Item = (&'a [Vec<u8>], &'a [u8])>,
+    current_epoch: u64,
+    mut on_equivocation: impl FnMut(&Address, u64, u64, Option<&tenzro_token::DeferredRemoval>),
+) {
+    let mut seat_held: Option<tenzro_token::DeferredRemoval> = None;
+    for (topics, data) in logs {
+        let topic = match topics.first() {
+            Some(t) => t.as_slice(),
+            None => continue,
+        };
+
+        if topic == tenzro_vm::native::SLASH_SEAT_HELD_TOPIC {
+            match tenzro_vm::native::SeatHeld::decode(data) {
+                Some(held) => {
+                    seat_held = Some(tenzro_token::DeferredRemoval {
+                        cap_epochs: held.cap_epochs,
+                        absent: held.absent.into_iter().map(Address::new).collect(),
+                    })
+                }
+                None => warn!(len = data.len(), "Malformed SlashSeatHeld log; skipping"),
+            }
+            continue;
+        }
+
+        if topic == tenzro_vm::native::sponsored_bond::SPONSORED_TOPIC
+            || topic == tenzro_vm::native::sponsored_bond::RECALLED_TOPIC
+        {
+            let Ok(event) = serde_json::from_slice::<
+                tenzro_vm::native::sponsored_bond::SponsoredBondEvent,
+            >(data) else {
+                warn!(len = data.len(), "Malformed sponsored-bond log; skipping");
+                continue;
+            };
+            // The sponsored part counts toward the bond the registry
+            // admits and seats by; a recall takes it back out.
+            let mirrored = if topic == tenzro_vm::native::sponsored_bond::SPONSORED_TOPIC {
+                registry.increase_self_stake(&event.validator, event.amount)
+            } else {
+                registry.recall_sponsored_stake(&event.validator, event.amount)
+            };
+            match mirrored {
+                Ok(total) => info!(
+                    validator = %event.validator,
+                    amount = event.amount,
+                    total,
+                    "Validator sponsored bond mirrored"
+                ),
+                Err(e) => warn!(
+                    validator = %event.validator,
+                    error = %e,
+                    "ValidatorRegistry rejected a sponsored-bond mirror; \
+                     registry is out of step with chain state"
+                ),
+            }
+            continue;
+        }
+
+        match topic {
+            b"ValidatorStakeIncreased" => {
+                // Layout: from(32) || additional_le(16) || new_total_le(16)
+                if data.len() < 64 {
+                    warn!(
+                        len = data.len(),
+                        "Malformed ValidatorStakeIncreased log; skipping"
+                    );
+                    continue;
+                }
+                let mut addr_bytes = [0u8; 32];
+                addr_bytes.copy_from_slice(&data[..32]);
+                let address = tenzro_types::primitives::Address::new(addr_bytes);
+                let mut add_bytes = [0u8; 16];
+                add_bytes.copy_from_slice(&data[32..48]);
+                let additional = u128::from_le_bytes(add_bytes);
+
+                match registry.increase_self_stake(&address, additional) {
+                    Ok(total) => info!(
+                        validator = %address,
+                        additional,
+                        total,
+                        "Validator self-stake increased"
+                    ),
+                    // Non-fatal: the VM already moved the funds and is the
+                    // source of truth. A registry that rejects the mirror is
+                    // out of step with chain state and says so, rather than
+                    // failing the block that already committed.
+                    Err(e) => warn!(
+                        validator = %address,
+                        error = %e,
+                        "ValidatorRegistry rejected increase_self_stake; \
+                         registry is out of step with chain state"
+                    ),
+                }
+            }
+            b"ValidatorRegister" => {
+                let parsed = match decode_validator_register_log(data) {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            data_len = data.len(),
+                            "Malformed ValidatorRegister log payload, skipping"
+                        );
+                        continue;
+                    }
+                };
+                let from_addr = parsed.from;
+                if let Err(e) = registry.register_candidate(
+                    from_addr,
+                    parsed.ml_dsa_pubkey,
+                    parsed.p256_pubkey,
+                    parsed.node_key,
+                    parsed.withdrawal_address,
+                    parsed.self_stake,
+                    current_epoch,
+                    parsed.metadata_uri,
+                ) {
+                    warn!(
+                        address = %from_addr,
+                        error = %e,
+                        "ValidatorRegistry rejected register_candidate; \
+                         on-chain marker may have outpaced registry state"
+                    );
+                } else {
+                    debug!(
+                        address = %from_addr,
+                        self_stake = parsed.self_stake,
+                        epoch = current_epoch,
+                        "ValidatorRegistry reflected ValidatorRegister log"
+                    );
+                }
+            }
+
+            b"ValidatorExit" => {
+                let from_addr = match tenzro_vm::native::validator_exit_log_account(data)
+                    .and_then(tenzro_types::primitives::Address::from_bytes)
+                {
+                    Some(a) => a,
+                    None => {
+                        warn!(
+                            data_len = data.len(),
+                            "Malformed ValidatorExit log payload, skipping"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = registry.request_exit(&from_addr) {
+                    warn!(
+                        address = %from_addr,
+                        error = %e,
+                        "ValidatorRegistry rejected request_exit"
+                    );
+                } else {
+                    debug!(
+                        address = %from_addr,
+                        "ValidatorRegistry reflected ValidatorExit log"
+                    );
+                }
+            }
+
+            t if t == tenzro_vm::native::VALIDATOR_KEY_ROTATION_TOPIC => {
+                let Some((account, ml_dsa, ecdsa)) =
+                    tenzro_vm::native::decode_validator_key_rotation_log(data)
+                else {
+                    warn!("Malformed ValidatorKeyRotation log payload, skipping");
+                    continue;
+                };
+                let Some(addr) = tenzro_types::primitives::Address::from_bytes(account) else {
+                    continue;
+                };
+                if let Err(e) =
+                    registry.request_key_rotation(&addr, ml_dsa.to_vec(), ecdsa.to_vec())
+                {
+                    warn!(address = %addr, error = %e, "ValidatorRegistry rejected a key rotation");
+                }
+            }
+
+            b"ValidatorMetadataUpdate" => {
+                let parsed = match decode_validator_metadata_update_log(data) {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            data_len = data.len(),
+                            "Malformed ValidatorMetadataUpdate log payload, skipping"
+                        );
+                        continue;
+                    }
+                };
+                let from_addr = parsed.from;
+                let uri = if parsed.metadata_uri.is_empty() {
+                    None
+                } else {
+                    Some(parsed.metadata_uri)
+                };
+                if let Err(e) =
+                    registry.update_metadata(&from_addr, uri, parsed.tee_attestation_hash)
+                {
+                    warn!(
+                        address = %from_addr,
+                        error = %e,
+                        "ValidatorRegistry rejected update_metadata"
+                    );
+                } else {
+                    debug!(
+                        address = %from_addr,
+                        "ValidatorRegistry reflected ValidatorMetadataUpdate log"
+                    );
+                }
+            }
+
+            b"CheckpointEquivocation" => {
+                // Layout: epoch_be(8) || index_be(8) || p256(65) || ml_dsa
+                if data.len() < 16 + 65 {
+                    warn!(
+                        len = data.len(),
+                        "Malformed CheckpointEquivocation log; skipping"
+                    );
+                    continue;
+                }
+                let epoch = u64::from_be_bytes(data[..8].try_into().expect("8 bytes"));
+                let index = u64::from_be_bytes(data[8..16].try_into().expect("8 bytes"));
+                let (p256, ml_dsa) = data[16..].split_at(65);
+                let deferred = seat_held.take();
+                let Some(entry) = registry.find_by_key(ml_dsa, p256) else {
+                    warn!(
+                        epoch,
+                        index, "Checkpoint equivocation by a key the registry does not hold"
+                    );
+                    continue;
+                };
+                on_equivocation(&entry.address, epoch, index, deferred.as_ref());
+            }
+
+            _ => {}
+        }
+    }
+}
+
 /// Verifies that a transaction's signing key may act for its `from`
 /// account: the key names the account, or it is a passkey of the account's
 /// keystore on chain that may act alone (or, for a change to that keystore,
@@ -5981,6 +6962,65 @@ pub(crate) fn verify_transaction_sender_at(
     .map_err(|e| NodeError::InvalidTransaction(format!("transaction sender: {e}")))
 }
 
+/// The fee payer consent `tx` carries in its memo, once the fee payer rule
+/// is live on `state`: `None` before, and for a memo that names no payer.
+/// Until the rule is live such a memo is a plain memo and the sender pays.
+pub(crate) fn fee_payer_in_force(
+    state: &dyn tenzro_vm::traits::VmState,
+    tx: &tenzro_types::transaction::Transaction,
+) -> Option<
+    std::result::Result<
+        tenzro_crypto::fee_payer::FeePayerConsent,
+        tenzro_crypto::fee_payer::FeePayerError,
+    >,
+> {
+    tenzro_vm::feature_gate::is_live_now(state, tenzro_vm::ledger::FEE_PAYER_GATE)
+        .then(|| tenzro_crypto::fee_payer::named_in(tx))
+        .flatten()
+}
+
+/// Refuses a transaction whose memo names a fee payer whose consent does not
+/// stand, once the rule is live: the memo must be a well-formed consent (it
+/// is never read as a plain memo then), the transaction's type must be one
+/// that may name a payer, the payer another account whose key names it, and
+/// both legs of its signature must verify over the transaction's consent
+/// digest under the fee-payer context, the ML-DSA-65 leg against the key the
+/// payer enrolled. Signature checks only: nothing of the payer's runs.
+fn verify_fee_payer(
+    signed_tx: &SignedTransaction,
+    state: &dyn tenzro_vm::traits::VmState,
+) -> Result<()> {
+    let tx = &signed_tx.transaction;
+    if fee_payer_in_force(state, tx).is_none() {
+        return Ok(());
+    }
+    let refuse = |e: tenzro_crypto::fee_payer::FeePayerError| {
+        NodeError::InvalidTransaction(format!("fee payer: {e}"))
+    };
+    let consent = tenzro_crypto::fee_payer::verify_classical(tx)
+        .unwrap_or(Err(tenzro_crypto::fee_payer::FeePayerError::Malformed(
+            "the memo names no payer",
+        )))
+        .map_err(refuse)?;
+    // Held to the rule a transaction signature of the payer's account is
+    // held to: the ML-DSA-65 leg is required, against the key it enrolled.
+    let (expected, _) = tenzro_vm::account_keys::pq_key_for(state, &consent.public_key, None);
+    let policy = tenzro_crypto::composite::PqPolicy::Required;
+
+    tenzro_crypto::fee_payer::verify_pq_leg(
+        expected.as_deref(),
+        &tenzro_crypto::fee_payer::consent_digest(tx, &consent.fee_payer),
+        &consent.signature,
+        policy,
+    )
+    .map_err(refuse)
+}
+
+/// Verifies the ML-DSA-65 leg of a transaction against the key its account
+/// has enrolled in `state`, or, for the enrolment of an account with none,
+/// against the key it enrols. The leg is required: a transaction without it
+/// is refused at admission, and so is any other transaction from an account
+/// with no key enrolled.
 pub(crate) fn verify_transaction_pq_leg(
     signed_tx: &SignedTransaction,
     state: &dyn tenzro_vm::traits::VmState,
@@ -5990,6 +7030,7 @@ pub(crate) fn verify_transaction_pq_leg(
     if signed_tx.transaction.tx_type.is_external() {
         return Ok(());
     }
+    verify_fee_payer(signed_tx, state)?;
     if !signed_tx.signature.has_classical_leg()
         && !tenzro_vm::account_keys::p256_retired(state, &signed_tx.public_key)
     {
@@ -6683,6 +7724,12 @@ pub(crate) fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransactio
             );
             (0, data, VmType::Tenzro)
         }
+        TransactionType::NativeCall { selector, data } => {
+            let mut call = tenzro_vm::native::native_call::SELECTOR_NATIVE_CALL.to_vec();
+            call.extend_from_slice(selector);
+            call.extend_from_slice(data);
+            (0, call, VmType::Tenzro)
+        }
         TransactionType::FeeRateSubmit {
             epoch,
             commitment,
@@ -7103,8 +8150,84 @@ pub(crate) fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransactio
     // fields.
     vm_tx.signing_digest = Some(signed_tx.transaction.hash().as_bytes().to_vec());
     vm_tx.valid_until_ms = Some(signed_tx.transaction.valid_until.0);
+    // What the memo says about a fee payer, as far as it can be checked
+    // without state; the VM reads it only once the fee payer rule is live.
+    vm_tx.fee_payer = tenzro_crypto::fee_payer::verify_classical(tx).map(|checked| match checked {
+        Ok(consent) => tenzro_vm::VmFeePayer::Consented {
+            digest: tenzro_crypto::fee_payer::consent_digest(tx, &consent.fee_payer).to_vec(),
+            account: consent.fee_payer.as_bytes().to_vec(),
+            public_key: consent.public_key,
+            signature: consent.signature,
+        },
+        Err(e) => tenzro_vm::VmFeePayer::Refused(e.to_string()),
+    });
 
     vm_tx
+}
+
+#[cfg(test)]
+mod payee_binding_tests {
+    use super::payee_bound_in;
+    use tenzro_identity::{
+        IdentityData, IdentityRegistry, IdentityStatus, TenzroDid, TenzroIdentity,
+    };
+    use tenzro_types::primitives::Address;
+
+    const OPERATOR: &str = "did:tenzro:human:7b0c2f3e-5d2a-4d55-9a3e-1c2b3d4e5f61";
+    const MACHINE: &str = "did:tenzro:machine:7b0c2f3e-5d2a-4d55-9a3e-1c2b3d4e5f63";
+
+    fn identity(did: &str, data: IdentityData, wallet: u8) -> TenzroIdentity {
+        TenzroIdentity {
+            did: TenzroDid::parse(did).unwrap(),
+            public_keys: Vec::new(),
+            identity_data: data,
+            status: IdentityStatus::Active,
+            wallet_address: Address::new([wallet; 32]),
+            wallet_id: String::new(),
+            pq_verifying_key: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: Default::default(),
+        }
+    }
+
+    /// A routed call pays only a payee the machine's operator bound to it.
+    #[test]
+    fn an_announcement_pays_only_a_payee_its_operator_bound() {
+        let registry = IdentityRegistry::new();
+        registry.upsert_identity_for_test(identity(
+            OPERATOR,
+            IdentityData::Human {
+                display_name: "operator".into(),
+                controlled_machines: vec![MACHINE.into()],
+            },
+            1,
+        ));
+        registry.upsert_identity_for_test(identity(
+            MACHINE,
+            IdentityData::Machine {
+                capabilities: Vec::new(),
+                controller_did: Some(OPERATOR.into()),
+                reputation: 0,
+                tenzro_agent_id: None,
+                erc8004_agent_id: None,
+            },
+            2,
+        ));
+        let hex = |b: u8| hex::encode([b; 32]);
+        assert!(
+            payee_bound_in(Some(&registry), MACHINE, &hex(2)).is_ok(),
+            "its own wallet"
+        );
+        assert!(
+            payee_bound_in(Some(&registry), MACHINE, &hex(1)).is_ok(),
+            "its controller's"
+        );
+        let err = payee_bound_in(Some(&registry), MACHINE, &hex(9)).unwrap_err();
+        assert!(err.contains("bound to neither"), "{err}");
+        assert!(payee_bound_in(Some(&registry), "did:tenzro:machine:unknown", &hex(2)).is_err());
+        assert!(payee_bound_in(None, MACHINE, &hex(2)).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -7240,7 +8363,7 @@ mod epoch_staging_reconcile_tests {
              whole problem"
         );
 
-        EventLoop::stage_registry_epoch_plan(&em, &registry, &|_| true);
+        EventLoop::stage_registry_epoch_plan(&em, &registry, &|_| true, None, None);
 
         let next = em
             .transition_epoch(BlockHeight::from(100))
@@ -7285,7 +8408,7 @@ mod epoch_staging_reconcile_tests {
             )
             .expect("seed");
 
-        EventLoop::stage_registry_epoch_plan(&em, &registry, &|_| true);
+        EventLoop::stage_registry_epoch_plan(&em, &registry, &|_| true, None, None);
 
         let next = em
             .transition_epoch(BlockHeight::from(100))
@@ -7346,7 +8469,7 @@ mod epoch_staging_reconcile_tests {
                     )
                     .unwrap();
             }
-            EventLoop::stage_registry_epoch_plan(&em, &registry, &|_| true);
+            EventLoop::stage_registry_epoch_plan(&em, &registry, &|_| true, None, None);
             let queued: Vec<Address> = em.pending_validators().iter().map(|v| v.address).collect();
             let mut sorted = queued.clone();
             sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -7460,27 +8583,68 @@ mod tests {
     use tenzro_types::transaction::Transaction;
     use tenzro_vm::traits::VmState;
 
-    /// A sender holding nothing is refused before its signature is checked:
-    /// a transaction whose signature no longer matches its contents is
-    /// refused for the empty balance, not for the signature.
-    #[tokio::test]
-    async fn ingress_refuses_an_unfunded_sender_before_checking_its_signature() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
+    /// An ingress over its own store, proposing blocks when `proposing`.
+    fn ingress(storage: Arc<RocksDbStore>, proposing: bool) -> Ingress {
         let (parked, _held) = mpsc::channel(1);
-        let ingress = Ingress {
+        Ingress {
             chain_id: 1,
             storage: storage.clone(),
             state_adapter: Arc::new(Mutex::new(StateAdapter::with_storage(storage))),
-            consensus: None,
+            consensus: proposing.then(crate::consensus_driver::tests::seated_validator),
             chain_tip: Arc::new(AtomicU64::new(0)),
             parked,
             gpu_revocation: Default::default(),
-        };
-        let mut tx = create_test_transaction(0);
-        tx.transaction.gas_price += 1;
-        let err = ingress.admit(tx).await.unwrap_err().to_string();
+            key_warns: Default::default(),
+        }
+    }
+
+    /// On a node that proposes blocks, a sender holding nothing is refused
+    /// before its signature is checked: a transaction whose signature no
+    /// longer matches its contents is refused for the empty balance, not for
+    /// the signature. Funded, the same transaction is refused for its
+    /// signature.
+    #[tokio::test]
+    async fn ingress_refuses_an_unfunded_sender_before_checking_its_signature() {
+        let sender: [u8; 32] = TestHybridSigner::hybrid(1)
+            .address()
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        let (unfunded, _) = event_loop_with_genesis(&[]).await;
+        let proposer = ingress(unfunded.storage.clone(), true);
+        assert!(proposer.orders_blocks());
+        let mut tampered = create_test_transaction(0);
+        tampered.transaction.gas_price += 1;
+        let err = proposer
+            .admit(tampered.clone())
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("holds nothing"), "{err}");
+
+        let (funded, _) = event_loop_with_genesis(&[(sender, 1)]).await;
+        let proposer = ingress(funded.storage.clone(), true);
+        let err = proposer.admit(tampered).await.unwrap_err().to_string();
+        assert!(err.contains("Invalid signature"), "{err}");
+    }
+
+    /// A node that does not propose blocks keeps no transaction, so it reads
+    /// nothing of its state for one: a sender whose balance and enrolled key
+    /// it has not replayed yet is relayed, not refused. What needs no state is
+    /// still checked: a signature that does not match is refused.
+    #[tokio::test]
+    async fn ingress_of_a_node_that_does_not_propose_checks_only_what_needs_no_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let follower = ingress(
+            Arc::new(RocksDbStore::open_default(dir.path()).unwrap()),
+            false,
+        );
+        assert!(!follower.orders_blocks());
+        follower.admit(create_test_transaction(0)).await.unwrap();
+        let mut tampered = create_test_transaction(0);
+        tampered.transaction.gas_price += 1;
+        let err = follower.admit(tampered).await.unwrap_err().to_string();
+        assert!(err.contains("Invalid signature"), "{err}");
     }
 
     fn create_test_transaction(nonce: u64) -> SignedTransaction {
@@ -7584,7 +8748,247 @@ mod tests {
         let impostor = announcer(&other);
         let mut forged = ann.clone();
         tenzro_network::SignedAnnouncement::sign(&mut forged, &did, impostor.signer()).unwrap();
-        assert!(verify_announcement_in(Some(&registry), &forged).is_err());
+        let refusal = verify_announcement_in(Some(&registry), &forged)
+            .expect_err("the impostor's announcement is refused");
+        assert_eq!(refusal.reason(), "signature verification failed");
+    }
+
+    /// A registered machine that names another operator's account in a
+    /// model or provider announcement signs it validly, and is refused: the
+    /// account is not the wallet its own identity is registered with. A
+    /// heartbeat is held to the announcement accepted for its endpoint
+    /// (`provider_heartbeat::accept`).
+    #[tokio::test]
+    async fn an_announcement_naming_another_operators_account_is_refused() {
+        let (victim, attacker) = (machine_keys(70), machine_keys(80));
+        let registry = IdentityRegistry::new();
+        register_machine(&registry, &victim).await;
+        register_machine(&registry, &attacker).await;
+        // `register_machine` registers each machine with this wallet.
+        let wallet = |keys: &HashMap<&'static str, Arc<TestHybridSigner>>| {
+            let key = keys[tenzro_types::did_derivation::MACHINE_KEY_LABEL].public_key();
+            format!("0x{}", hex::encode(key.account_slot()))
+        };
+        let identity = announcer(&attacker);
+        let bound = |machine: &str, account: &str| {
+            crate::announced_account::check(Some(&registry), machine, account)
+        };
+
+        for (account, taken) in [(wallet(&attacker), true), (wallet(&victim), false)] {
+            let mut model = tenzro_network::ModelRegistrationMessage {
+                model_id: "qwen3-0.6b".into(),
+                provider: account.clone(),
+                ..Default::default()
+            };
+            tenzro_network::SignedAnnouncement::sign(
+                &mut model,
+                identity.machine_did(),
+                identity.signer(),
+            )
+            .unwrap();
+            verify_announcement_in(Some(&registry), &model).expect("signed by its machine");
+            assert_eq!(
+                bound(&model.machine_did, &model.provider).is_ok(),
+                taken,
+                "model announcement for {account}"
+            );
+
+            let mut provider = tenzro_network::ProviderAnnouncementMessage {
+                provider_address: account.clone(),
+                ..Default::default()
+            };
+            tenzro_network::SignedAnnouncement::sign(
+                &mut provider,
+                identity.machine_did(),
+                identity.signer(),
+            )
+            .unwrap();
+            verify_announcement_in(Some(&registry), &provider).expect("signed by its machine");
+            assert_eq!(
+                bound(&provider.machine_did, &provider.provider_address).is_ok(),
+                taken,
+                "provider announcement for {account}"
+            );
+        }
+        assert_eq!(
+            bound(identity.machine_did(), &wallet(&victim)),
+            Err(crate::announced_account::Unbound::AnotherAccount {
+                registered: Address::from_hex(&wallet(&attacker)).unwrap(),
+            })
+        );
+    }
+
+    /// The wallet `register_machine` registers the machine of `keys` with,
+    /// as an announcement names it.
+    fn registered_wallet(keys: &HashMap<&'static str, Arc<TestHybridSigner>>) -> String {
+        let key = keys[tenzro_types::did_derivation::MACHINE_KEY_LABEL].public_key();
+        format!("0x{}", hex::encode(key.account_slot()))
+    }
+
+    /// A fresh model announcement of `model` naming `account`, signed by the
+    /// machine of `keys`.
+    fn model_announcement(
+        keys: &HashMap<&'static str, Arc<TestHybridSigner>>,
+        model: &str,
+        account: &str,
+    ) -> tenzro_network::ModelRegistrationMessage {
+        let identity = announcer(keys);
+        let mut ann = tenzro_network::ModelRegistrationMessage {
+            model_id: model.into(),
+            provider: account.into(),
+            visibility: "public".into(),
+            ttl_secs: 120,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            ..Default::default()
+        };
+        tenzro_network::SignedAnnouncement::sign(
+            &mut ann,
+            identity.machine_did(),
+            identity.signer(),
+        )
+        .unwrap();
+        ann
+    }
+
+    /// Announcements naming another operator's account, sent through the
+    /// event loop's own handlers, leave the model table, the provider table
+    /// and the provider manager as they were; the same machine naming its
+    /// own wallet is taken.
+    #[tokio::test]
+    async fn the_handlers_take_no_announcement_naming_another_operators_account() {
+        let (victim, attacker) = (machine_keys(90), machine_keys(100));
+        let registry = Arc::new(IdentityRegistry::new());
+        register_machine(&registry, &victim).await;
+        register_machine(&registry, &attacker).await;
+        let victim_wallet = registered_wallet(&victim);
+        let models: Arc<DashMap<String, crate::node::NetworkModelEntry>> = Arc::new(DashMap::new());
+        let providers: Arc<DashMap<String, crate::node::NetworkProviderEntry>> =
+            Arc::new(DashMap::new());
+        let manager = Arc::new(tenzro_model::ProviderManager::new());
+        let event_loop = make_event_loop()
+            .await
+            .with_identity_registry(registry.clone())
+            .with_model_discovery(
+                models.clone(),
+                Arc::new(DashMap::new()),
+                Arc::default(),
+                Arc::default(),
+            )
+            .with_provider_discovery(providers.clone())
+            .with_provider_manager(manager.clone(), None);
+        let events = event_loop.event_sender();
+
+        let identity = announcer(&attacker);
+        let provider = |account: &str, endpoint: u8| {
+            let mut ann = tenzro_network::ProviderAnnouncementMessage {
+                provider_address: account.into(),
+                provider_type: "ai".into(),
+                served_models: vec!["qwen3-0.6b".into()],
+                status: "active".into(),
+                ttl_secs: 120,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                ..Default::default()
+            };
+            let endpoint_key = iroh::SecretKey::from_bytes(&[endpoint; 32]);
+            ann.sign_bound(identity.machine_did(), identity.signer(), &endpoint_key)
+                .unwrap();
+            ann
+        };
+        let own_wallet = registered_wallet(&attacker);
+        for event in [
+            NodeEvent::ModelAnnouncement(model_announcement(
+                &attacker,
+                "qwen3-0.6b",
+                &victim_wallet,
+            )),
+            NodeEvent::ProviderAnnouncement(provider(&victim_wallet, 7)),
+            NodeEvent::ModelAnnouncement(model_announcement(&attacker, "qwen3-1.7b", &own_wallet)),
+            NodeEvent::ProviderAnnouncement(provider(&own_wallet, 8)),
+            NodeEvent::Shutdown,
+        ] {
+            events.send(event).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(30), event_loop.run())
+            .await
+            .expect("the loop ends at the shutdown event")
+            .unwrap();
+
+        let victim_address = Address::from_hex(&victim_wallet).unwrap();
+        assert!(
+            !models.contains_key(&format!("qwen3-0.6b:{victim_wallet}")),
+            "no model entry under the victim's account"
+        );
+        assert!(
+            manager.get_provider(&victim_address).is_err(),
+            "no provider for the victim's account"
+        );
+        assert!(
+            providers
+                .iter()
+                .all(|e| e.announcement.provider_address != victim_wallet),
+            "no provider entry naming the victim's account"
+        );
+        // The handlers ran: the same machine naming its own wallet is taken.
+        assert!(models.contains_key(&format!("qwen3-1.7b:{own_wallet}")));
+        assert_eq!(providers.len(), 1);
+        assert!(
+            manager
+                .get_provider(&Address::from_hex(&own_wallet).unwrap())
+                .is_ok()
+        );
+    }
+
+    /// Model endpoints a node persisted are restored only when they pass the
+    /// checks a fresh announcement passes; the others are deleted from
+    /// storage, so an entry planted before the upgrade does not survive it.
+    #[tokio::test]
+    async fn stored_model_endpoints_are_checked_again_when_restored() {
+        use tenzro_storage::KvStore as _;
+        let (victim, attacker) = (machine_keys(110), machine_keys(120));
+        let registry = IdentityRegistry::new();
+        register_machine(&registry, &victim).await;
+        register_machine(&registry, &attacker).await;
+        let victim_wallet = registered_wallet(&victim);
+        let store = tenzro_storage::MemoryStore::new();
+        let put = |key: &str, reg: &tenzro_network::ModelRegistrationMessage| {
+            store
+                .put(
+                    tenzro_storage::CF_MODEL_SERVICES,
+                    format!("net_model:{key}").as_bytes(),
+                    &crate::node::stored_model_endpoint(reg).unwrap(),
+                )
+                .unwrap();
+        };
+        let honest = model_announcement(&victim, "qwen3-0.6b", &victim_wallet);
+        put("honest", &honest);
+        put(
+            "planted",
+            &model_announcement(&attacker, "qwen3-0.6b", &victim_wallet),
+        );
+        let mut forged = honest.clone();
+        forged.model_id = "qwen3-8b".into();
+        put("forged", &forged);
+        store
+            .put(
+                tenzro_storage::CF_MODEL_SERVICES,
+                b"net_model:garbled",
+                b"not json",
+            )
+            .unwrap();
+
+        let restored = DashMap::new();
+        let counts = crate::node::restore_network_models(&store, Some(&registry), &restored);
+        let names: Vec<String> = restored.iter().map(|e| e.key().clone()).collect();
+        assert_eq!(counts, (1, 3), "restored {names:?}");
+        assert!(restored.contains_key("honest"));
+        let left = store
+            .get_keys_with_prefix(tenzro_storage::CF_MODEL_SERVICES, b"net_model:")
+            .unwrap();
+        assert_eq!(
+            left,
+            vec![b"net_model:honest".to_vec()],
+            "the others are deleted"
+        );
     }
 
     #[tokio::test]
@@ -7607,8 +9011,10 @@ mod tests {
         )
         .unwrap();
 
-        let err = verify_announcement_in(Some(&registry), &ann)
+        let refusal = verify_announcement_in(Some(&registry), &ann)
             .expect_err("an announcer with no registered identity is refused");
+        assert_eq!(refusal.reason(), "announcer not registered");
+        let err = refusal.to_string();
         assert!(
             err.contains("has no registered identity"),
             "unexpected error: {err}"
@@ -7619,6 +9025,28 @@ mod tests {
         assert_eq!(did, identity.machine_did());
         verify_announcement_in(Some(&registry), &ann)
             .expect("the same announcement verifies once the machine is registered");
+    }
+
+    #[tokio::test]
+    async fn an_announcement_from_a_revoked_machine_is_refused() {
+        let a = machine_keys(61);
+        let registry = IdentityRegistry::new();
+        let did = register_machine(&registry, &a).await;
+        let identity = announcer(&a);
+        assert_eq!(did, identity.machine_did());
+        let mut ann = tenzro_network::ModelRegistrationMessage {
+            model_id: "qwen3-0.6b".into(),
+            ..Default::default()
+        };
+        tenzro_network::SignedAnnouncement::sign(&mut ann, &did, identity.signer()).unwrap();
+        verify_announcement_in(Some(&registry), &ann).expect("a registered machine is accepted");
+
+        registry
+            .revoke_from_chain(&did, "test".into(), "test".into())
+            .unwrap();
+        let refusal = verify_announcement_in(Some(&registry), &ann)
+            .expect_err("a revoked machine is refused");
+        assert!(refusal.to_string().contains("is revoked"), "{refusal}");
     }
 
     #[test]
@@ -8125,9 +9553,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let r = runtime
-            .execute_transaction(&convert_transaction(&tx), &mut state)
-            .await;
+        let dated =
+            convert_transaction(&tx).with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
+        let r = runtime.execute_transaction(&dated, &mut state).await;
         assert!(
             !matches!(&r, Ok(x) if x.success),
             "an unsigned transaction executed as the victim: {r:?}"
@@ -8238,6 +9666,101 @@ mod tests {
         let grafted = SignedTransaction::new(tx, owner.public_key().p256.clone(), sig);
         verify_transaction_signature(&grafted).unwrap();
         assert!(verify_transaction_pq_leg(&grafted, &state).is_err());
+    }
+
+    /// Once the fee payer rule is live, a transaction whose memo names a fee
+    /// payer is admitted only with that payer's consent: both legs of its
+    /// signature over this transaction's consent digest, the ML-DSA-65 leg
+    /// against the key it enrolled, and a memo with the prefix that is not a
+    /// consent is refused. Before the rule is live the memo is a plain memo:
+    /// every such transaction is admitted as its sender's own.
+    #[test]
+    fn a_fee_payer_memo_is_checked_only_once_the_rule_is_live() {
+        use tenzro_crypto::fee_payer::{FeePayerConsent, MEMO_PREFIX, consent_digest};
+        let sender = TestHybridSigner::hybrid(40);
+        let payer = TestHybridSigner::hybrid(41);
+        let mut state = tenzro_vm::StateAdapter::new();
+        enroll(&mut state, &sender, &sender);
+        enroll(&mut state, &payer, &payer);
+        let consent = |who: &TestHybridSigner, tx: &Transaction| FeePayerConsent {
+            fee_payer: who.address(),
+            public_key: who.public_key().p256.clone(),
+            signature: who
+                .sign(
+                    SignatureContext::FeePayer,
+                    &consent_digest(tx, &who.address()),
+                )
+                .unwrap(),
+        };
+        let with_memo = |memo: String| {
+            let mut tx = unsigned(&sender, TransactionType::Transfer { amount: 1 }, 0);
+            tx.memo = Some(memo);
+            let sig = sender
+                .sign(SignatureContext::Transaction, tx.hash().as_bytes())
+                .unwrap();
+            SignedTransaction::new(tx, sender.public_key().p256.clone(), sig)
+        };
+        let body = unsigned(&sender, TransactionType::Transfer { amount: 1 }, 0);
+        // `unsigned` stamps the time it runs at; the consent is over the
+        // body the sender then signs, so both use this one.
+        let signed_with = |memo: String| {
+            let mut tx = body.clone();
+            tx.memo = Some(memo);
+            let sig = sender
+                .sign(SignatureContext::Transaction, tx.hash().as_bytes())
+                .unwrap();
+            SignedTransaction::new(tx, sender.public_key().p256.clone(), sig)
+        };
+        let good = signed_with(consent(&payer, &body).to_memo().unwrap());
+        let mut classical = consent(&payer, &body);
+        classical.signature.pq = None;
+        let mut other_nonce = body.clone();
+        other_nonce.nonce = Nonce::from(1);
+        let bad = [
+            // Not a consent at all.
+            with_memo(format!("{MEMO_PREFIX}not-a-consent")),
+            // The P-256 leg alone, for a payer with an ML-DSA-65 key enrolled.
+            signed_with(classical.to_memo().unwrap()),
+            // A consent the payer gave for the sender's next transaction.
+            signed_with(consent(&payer, &other_nonce).to_memo().unwrap()),
+            // The sender naming itself.
+            signed_with(consent(&sender, &body).to_memo().unwrap()),
+        ];
+        let admitted = |tx: &SignedTransaction, state: &tenzro_vm::StateAdapter| {
+            verify_transaction_signature(tx)
+                .and_then(|()| verify_transaction_pq_leg(tx, state))
+                .is_ok()
+        };
+
+        // Dormant: all of them are their sender's own transactions.
+        assert!(admitted(&good, &state));
+        for tx in &bad {
+            assert!(admitted(tx, &state));
+            assert!(fee_payer_in_force(&state, &tx.transaction).is_none());
+        }
+
+        tenzro_vm::native::set_genesis_param(&mut state, tenzro_vm::ledger::FEE_PAYER_GATE, 0);
+        assert!(admitted(&good, &state));
+        for (i, tx) in bad.iter().enumerate() {
+            assert!(!admitted(tx, &state), "case {i}");
+        }
+        // A memo without the prefix stays a memo.
+        assert!(admitted(&with_memo("thanks".to_string()), &state));
+
+        // The VM is handed the payer and the digest it signed.
+        match convert_transaction(&good).fee_payer {
+            Some(tenzro_vm::VmFeePayer::Consented {
+                account, digest, ..
+            }) => {
+                assert_eq!(account, payer.address().as_bytes());
+                assert_eq!(digest, consent_digest(&body, &payer.address()));
+            }
+            other => panic!("expected the consent to reach the VM, got {other:?}"),
+        }
+        assert!(matches!(
+            convert_transaction(&bad[0]).fee_payer,
+            Some(tenzro_vm::VmFeePayer::Refused(_))
+        ));
     }
 
     /// The ML-DSA-65 leg is mandatory by default: a classical-only
@@ -8416,6 +9939,56 @@ mod tests {
         assert_eq!(vm_tx.to, None, "a deployment creates, it calls no one");
     }
 
+    /// The pool takes an EVM transaction of any gas limit until the Osaka
+    /// rule set is live, and none above that rule set's cap from then on. A
+    /// transaction the EVM does not run is never refused for its gas limit.
+    #[test]
+    fn the_pool_refuses_an_evm_gas_limit_above_the_osaka_cap_once_live() {
+        let with_gas = |tx_type: TransactionType, gas_limit: u64| {
+            unsigned_signed_tx(Transaction::new(
+                ChainId::from(1),
+                Address::default(),
+                Address::default(),
+                Nonce::from(0),
+                tx_type,
+                gas_limit,
+                300,
+            ))
+        };
+        let deploy = |gas_limit| {
+            with_gas(
+                TransactionType::ContractDeploy {
+                    code: vec![0x00],
+                    args: Vec::new(),
+                },
+                gas_limit,
+            )
+        };
+        let cap = 16_777_216;
+
+        let mut state = StateAdapter::new();
+        assert_eq!(tenzro_vm::evm::transaction_gas_cap(&state), None);
+        assert!(evm_gas_limit_admitted(&deploy(cap + 1), &state).is_ok());
+
+        {
+            use tenzro_vm::traits::VmState as _;
+            state.set_storage(
+                &tenzro_vm::native::SYSTEM_ADDRESS,
+                tenzro_vm::native::governed_param_key(tenzro_vm::evm::OSAKA_KEY).as_bytes(),
+                0u64.to_le_bytes().to_vec(),
+            );
+        }
+        assert_eq!(tenzro_vm::evm::transaction_gas_cap(&state), Some(cap));
+        assert!(evm_gas_limit_admitted(&deploy(cap), &state).is_ok());
+        let refused = evm_gas_limit_admitted(&deploy(cap + 1), &state);
+        assert!(
+            matches!(&refused, Err(NodeError::InvalidTransaction(why)) if why.contains("16777216")),
+            "{refused:?}"
+        );
+        let transfer = with_gas(TransactionType::Transfer { amount: 1 }, cap + 1);
+        assert!(evm_gas_limit_admitted(&transfer, &state).is_ok());
+    }
+
     // ---- AgentBond log decoders + reflection scan -----------------
 
     /// A certificate over `first..=last` committing `state_root` at `last`.
@@ -8507,6 +10080,140 @@ mod tests {
         assert_eq!(el.held_certificates.keys().next(), Some(&0));
     }
 
+    /// The one refusal a lagging state explains (no key enrolled for the
+    /// sender) is quiet only on a node a bounded way short of the head and
+    /// importing; any other refusal while behind is a warning limited in
+    /// rate, and at the head or with no word of the network every refusal
+    /// is a warning.
+    #[test]
+    fn only_an_unenrolled_sender_on_a_node_catching_up_is_reported_quietly() {
+        use KeyRefusalReport::{Limited, Loud, Quiet};
+        let follow = crate::follow_state::FollowTracker::new();
+        assert_eq!(key_refusal_report(true, &follow.state(10, false)), Loud);
+        follow.local(5);
+        follow.local(10);
+        follow.heard(110);
+        let catching_up = follow.state(10, false);
+        assert_eq!(catching_up.behind, Some(100));
+        assert_eq!(key_refusal_report(true, &catching_up), Quiet);
+        assert_eq!(
+            key_refusal_report(false, &catching_up),
+            Limited,
+            "a signature that fails against a key this node holds"
+        );
+        assert_eq!(key_refusal_report(true, &follow.state(110, false)), Loud);
+
+        // Peers naming a head far ahead do not quieten the node.
+        follow.heard(10 + KEY_LAG_QUIET_BLOCKS + 1);
+        assert_eq!(key_refusal_report(true, &follow.state(10, false)), Limited);
+        // Nor does a head it is importing nothing towards.
+        let idle = crate::follow_state::FollowTracker::new();
+        idle.heard(110);
+        assert_eq!(idle.state(10, false).last_import_ms, None);
+        assert_eq!(key_refusal_report(true, &idle.state(10, false)), Limited);
+    }
+
+    /// Warnings held back are counted and the count goes out with the next
+    /// one.
+    #[test]
+    fn a_limited_warning_goes_out_once_per_interval_with_the_count_held_back() {
+        let t0 = Instant::now();
+        let mut limiter = WarnLimiter::default();
+        assert_eq!(limiter.due(t0), Some(0));
+        assert_eq!(limiter.due(t0 + KEY_WARN_EVERY / 2), None);
+        assert_eq!(
+            limiter.due(t0 + KEY_WARN_EVERY - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(limiter.due(t0 + KEY_WARN_EVERY), Some(2));
+        assert_eq!(limiter.due(t0 + KEY_WARN_EVERY * 2), Some(0));
+    }
+
+    /// Ingress refuses a transaction signed with an ML-DSA-65 key its state
+    /// holds no enrolment for, and reports it by where the node stands: its
+    /// own executed tip against the head block sync heard. Quietly while it
+    /// is catching up, loudly at the head.
+    #[tokio::test]
+    async fn ingress_reports_an_unenrolled_sender_by_where_the_node_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
+        let (parked, _held) = mpsc::channel(1);
+        // A seated validator orders blocks, so it judges the sender's keys.
+        let consensus = crate::consensus_driver::tests::seated_validator();
+        let chain_tip = Arc::new(AtomicU64::new(10));
+        let ingress = Ingress {
+            chain_id: 1,
+            storage: storage.clone(),
+            state_adapter: Arc::new(Mutex::new(StateAdapter::with_storage(storage.clone()))),
+            consensus: Some(consensus.clone()),
+            chain_tip: chain_tip.clone(),
+            parked,
+            gpu_revocation: Default::default(),
+            key_warns: Default::default(),
+        };
+        let tx = create_test_transaction(0);
+        {
+            let mut funded = StateAdapter::with_storage(storage.clone());
+            funded.set_balance(tx.transaction.from.as_bytes(), 1_000_000_000_000_000_000);
+            funded.commit().unwrap();
+        }
+        let err = ingress.admit(tx.clone()).await.unwrap_err().to_string();
+        assert!(err.contains("Invalid signature"), "{err}");
+
+        let report = |ingress: &Ingress| {
+            let state = StateAdapter::with_storage(storage.clone());
+            assert!(no_key_enrolled(&tx, &state));
+            ingress.key_refusal_report(&tx, &state)
+        };
+        // Nothing heard of the network yet.
+        assert_eq!(report(&ingress), KeyRefusalReport::Loud);
+        // Block sync imported up to the executed tip and heard a head ahead.
+        consensus.follow().local(9);
+        consensus.follow().local(10);
+        consensus.follow().heard(110);
+        let seen = consensus
+            .follow()
+            .state(chain_tip.load(Ordering::Acquire), false);
+        assert_eq!((seen.local_height, seen.behind), (10, Some(100)));
+        assert_eq!(report(&ingress), KeyRefusalReport::Quiet);
+        // The node executes up to the head: the same refusal is a warning.
+        chain_tip.store(110, Ordering::Release);
+        assert_eq!(report(&ingress), KeyRefusalReport::Loud);
+        // The same holds for the refusal `admit` makes.
+        let err = ingress.admit(tx.clone()).await.unwrap_err().to_string();
+        assert!(err.contains("Invalid signature"), "{err}");
+    }
+
+    /// A node that does not order blocks keeps nothing of the network's
+    /// transactions and judges none of them on its own state: one signed with
+    /// a key its state holds no enrolment for is let through to the
+    /// validators, which judge it.
+    #[tokio::test]
+    async fn a_node_that_does_not_order_blocks_judges_no_relayed_transaction_on_its_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
+        let (parked, _held) = mpsc::channel(1);
+        let consensus = crate::consensus_driver::tests::handle_with_one_validator();
+        let ingress = Ingress {
+            chain_id: 1,
+            storage: storage.clone(),
+            state_adapter: Arc::new(Mutex::new(StateAdapter::with_storage(storage.clone()))),
+            consensus: Some(consensus.clone()),
+            chain_tip: Arc::new(AtomicU64::new(10)),
+            parked,
+            gpu_revocation: Default::default(),
+            key_warns: Default::default(),
+        };
+        assert!(!ingress.orders_blocks());
+        let tx = create_test_transaction(0);
+        {
+            let mut funded = StateAdapter::with_storage(storage.clone());
+            funded.set_balance(tx.transaction.from.as_bytes(), 1_000_000_000_000_000_000);
+            funded.commit().unwrap();
+        }
+        ingress.admit(tx).await.unwrap();
+    }
+
     /// A transaction refused for its nonce is an ordering race, not a
     /// failure: one ahead of the account is kept for a later block and
     /// reported as a warning, a copy of one already executed only for
@@ -8534,6 +10241,40 @@ mod tests {
                 available: 1
             }),
             tracing::Level::ERROR
+        );
+    }
+
+    /// At every height exactly one validator of a committee publishes at
+    /// once and the first turn moves on with the height; no validator waits
+    /// longer than the bound, however large the committee.
+    #[test]
+    fn one_validator_publishes_a_block_at_once_and_none_waits_past_the_bound() {
+        for committee in [1u64, 4, 7, 100] {
+            for height in [0u64, 1, 2, 99, u64::MAX] {
+                let waits: Vec<Duration> = (0..committee)
+                    .map(|p| publish_turn_delay(p, committee, height))
+                    .collect();
+                assert_eq!(
+                    waits.iter().filter(|w| w.is_zero()).count(),
+                    1,
+                    "committee {committee}, height {height}"
+                );
+                assert!(
+                    waits
+                        .iter()
+                        .all(|w| *w <= PUBLISH_STAGGER * PUBLISH_TURNS as u32)
+                );
+            }
+            if committee > 1 {
+                let first =
+                    |h| (0..committee).find(|p| publish_turn_delay(*p, committee, h).is_zero());
+                assert_ne!(first(10), first(11), "the first turn does not move");
+            }
+        }
+        assert_eq!(publish_turn_delay(3, 0, 5), Duration::ZERO);
+        assert_eq!(
+            PUBLISH_STAGGER * PUBLISH_TURNS as u32,
+            Duration::from_millis(600)
         );
     }
 
@@ -8647,20 +10388,52 @@ mod tests {
             );
             block_at(h, Hash::default(), vec![unsigned_signed_tx(tx)])
         };
-        for h in 1..=200u64 {
+        // Held blocks are measured by their size on the wire; 300 of them
+        // are more than the budget holds, so the farthest are dropped.
+        for h in 1..=300u64 {
             let verdict = GossipVerdict(Arc::new(parking_lot::Mutex::new(None)));
             el.handle_network_block(big(h), verdict).await.unwrap();
         }
         let held: usize = el
             .uncertified
             .values()
-            .map(|b| serde_json::to_vec(b).unwrap().len())
+            .map(|b| bincode::serialized_size(b).unwrap() as usize)
             .sum();
         assert!(held <= budget, "{held} bytes held past the tip");
+        assert!(el.uncertified.len() < 300, "nothing was dropped");
         assert!(
             el.uncertified.contains_key(&1),
             "the next block was dropped"
         );
+    }
+
+    /// A copy of a block the node holds is passed on whether it is the tip
+    /// or one the node has executed past since; a block at that height the
+    /// node does not hold, or one above anything stored, is not.
+    #[tokio::test]
+    async fn a_copy_of_a_block_executed_before_the_tip_is_passed_on() {
+        let (mut el, genesis_hash) = event_loop_with_genesis(&[]).await;
+        let genesis = BlockStoreImpl::new(el.storage.clone())
+            .unwrap()
+            .get_block_by_height(BlockHeight::from(0u64))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(genesis.hash(), genesis_hash);
+        let tip = block_at(1, genesis_hash, Vec::new());
+        el.current_height = 0;
+        el.last_block_hash = genesis_hash;
+        assert!(el.holds_copy(&genesis).await, "the tip");
+        // The node executed a block past it before the copy arrived.
+        el.current_height = 1;
+        el.last_block_hash = tip.hash();
+        assert!(el.holds_copy(&genesis).await, "a block before the tip");
+        assert!(el.holds_copy(&tip).await);
+        let other = block_at(0, Hash::default(), Vec::new());
+        assert_ne!(other.hash(), genesis_hash);
+        assert!(!el.holds_copy(&other).await, "another block at that height");
+        let unknown = block_at(1, Hash::default(), Vec::new());
+        assert!(!el.holds_copy(&unknown).await, "another tip");
     }
 
     /// A resolver whose fetches never finish.
@@ -8849,6 +10622,60 @@ mod tests {
         (event_loop, genesis_block.hash())
     }
 
+    /// A Shutdown event, the one `tenzro_gracefulExit` sends, stops the event
+    /// loop, and the node's record of it, which the binary's main loop and an
+    /// embedding handle end on, says it was asked to stop, within the drain
+    /// time.
+    #[tokio::test]
+    async fn a_shutdown_event_records_a_requested_stop() {
+        let (event_loop, _) = event_loop_with_genesis(&[]).await;
+        let events = event_loop.event_sender();
+        let (stopped, mut seen) = tokio::sync::watch::channel(None);
+        let task = crate::node::spawn_event_loop(event_loop.run(), stopped);
+        assert!(seen.borrow().is_none());
+        events.send(NodeEvent::Shutdown).await.unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(5), seen.wait_for(Option::is_some))
+            .await
+            .expect("the record within the drain time")
+            .unwrap()
+            .clone();
+        assert_eq!(end, Some(crate::node::EventLoopEnd::Shutdown));
+        task.await.unwrap();
+    }
+
+    /// An event loop that panics, or returns an error, is recorded as failed,
+    /// so the process exits with an error and a service manager restarts it.
+    #[tokio::test]
+    async fn a_panicking_or_failing_event_loop_is_recorded_as_failed() {
+        async fn panics() -> Result<()> {
+            panic!("the event loop failed")
+        }
+        async fn fails() -> Result<()> {
+            Err(NodeError::Other("the store went away".to_string()))
+        }
+        let (stopped, mut seen) = tokio::sync::watch::channel(None);
+        let task = crate::node::spawn_event_loop(panics(), stopped);
+        let end = tokio::time::timeout(Duration::from_secs(5), seen.wait_for(Option::is_some))
+            .await
+            .expect("the record within the drain time")
+            .unwrap()
+            .clone();
+        assert!(matches!(end, Some(crate::node::EventLoopEnd::Failed(_))));
+        assert!(task.await.unwrap_err().is_panic());
+
+        let (stopped, mut seen) = tokio::sync::watch::channel(None);
+        crate::node::spawn_event_loop(fails(), stopped)
+            .await
+            .unwrap();
+        let end = seen.wait_for(Option::is_some).await.unwrap().clone();
+        assert_eq!(
+            end,
+            Some(crate::node::EventLoopEnd::Failed(
+                NodeError::Other("the store went away".to_string()).to_string()
+            ))
+        );
+    }
+
     /// Segments ordered at heights 1..=n, one transfer each, stamped now.
     fn ordered_segments(
         n: u64,
@@ -8936,15 +10763,27 @@ mod tests {
         to: [u8; 20],
         value: u128,
     ) -> Vec<u8> {
+        signed_eip1559_with(key, 0, 21_000, max_fee, to, value)
+    }
+
+    /// [`signed_eip1559`] at a chosen nonce and gas limit.
+    fn signed_eip1559_with(
+        key: &k256::ecdsa::SigningKey,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee: u128,
+        to: [u8; 20],
+        value: u128,
+    ) -> Vec<u8> {
         use rlp::RlpStream;
         use sha3::{Digest, Keccak256};
 
         let fields = |s: &mut RlpStream| {
             s.append(&1337u64)
-                .append(&0u64)
+                .append(&nonce)
                 .append(&1u64)
                 .append(&max_fee);
-            s.append(&21_000u64)
+            s.append(&gas_limit)
                 .append(&to.to_vec())
                 .append(&value)
                 .append(&Vec::<u8>::new());
@@ -8954,9 +10793,7 @@ mod tests {
         fields(&mut unsigned);
         let mut preimage = vec![2u8];
         preimage.extend_from_slice(&unsigned.out());
-        let (sig, rid) = key
-            .sign_prehash_recoverable(&Keccak256::digest(&preimage))
-            .unwrap();
+        let (sig, rid) = key.sign_prehash_recoverable(&Keccak256::digest(&preimage));
         let strip = |b: &[u8]| {
             b.iter()
                 .skip_while(|x| **x == 0)
@@ -9039,6 +10876,269 @@ mod tests {
                 .is_none(),
             "no separate balance is kept under the alias"
         );
+    }
+
+    /// A block carrying a transaction that ends in an EVM engine error (a
+    /// call to the KZG point evaluation address) leaves its sender held: the
+    /// EVM transactions the sender still has pooled are taken out, its
+    /// native transactions stay, and the pool admits no further EVM
+    /// transaction from it, by the call the RPC makes and by the call
+    /// transactions from peers go through.
+    #[tokio::test]
+    async fn the_sender_of_an_engine_error_transaction_is_held_after_its_block() {
+        use k256::ecdsa::SigningKey;
+
+        let key = SigningKey::from_slice(&[0x45; 32]).unwrap();
+        let from = evm_address_of(&key);
+        let funded = [(tenzro_vm::external_tx::evm_account(from), 1_000)];
+        let (mut event_loop, genesis) = event_loop_with_genesis(&funded).await;
+        let consensus = crate::consensus_driver::tests::handle_with_one_validator();
+        event_loop.consensus = Some(consensus.clone());
+        event_loop.install_pool_guard();
+        let max_fee =
+            tenzro_vm::ledger::block_base_fee(&*event_loop.state_adapter.lock().await).max(1) * 2;
+        let mut kzg = [0u8; 20];
+        kzg[19] = 0x0a;
+        let envelope = |nonce: u64, to: [u8; 20]| {
+            external_evm_envelope(
+                signed_eip1559_with(&key, nonce, 21_000, max_fee, to, 0),
+                1337,
+            )
+            .unwrap()
+        };
+        let (fault, fault_hash) = envelope(0, kzg);
+        let (next, _) = envelope(1, [0x78; 20]);
+        // What the pool holds of the sender while the first is in a block:
+        // its next EVM transaction and a native transaction.
+        let mut native = next.clone();
+        native.transaction.tx_type = TransactionType::Transfer { amount: 1 };
+        native.transaction.nonce = Nonce::from(2);
+        consensus.mempool().add_transaction(next.clone()).unwrap();
+        consensus.mempool().add_transaction(native.clone()).unwrap();
+
+        // A block of now: a hold runs from the time of the block that
+        // showed the error.
+        let mut block = block_at(1, genesis, vec![fault]);
+        block.header.timestamp = tenzro_types::primitives::Timestamp::now();
+        event_loop
+            .handle_block_finalized_inner(block, BlockSource::Ordered)
+            .await
+            .unwrap();
+        let receipt = receipt_of(&event_loop, &Hash(fault_hash));
+        assert!(!receipt.success);
+        assert!(
+            receipt
+                .revert_reason
+                .as_deref()
+                .is_some_and(tenzro_vm::evm::is_engine_fault),
+            "{:?}",
+            receipt.revert_reason
+        );
+
+        assert!(
+            !consensus.mempool().contains(&next.transaction.hash()),
+            "the sender's pooled EVM transaction is taken out"
+        );
+        assert!(
+            consensus.mempool().contains(&native.transaction.hash()),
+            "its native transaction stays"
+        );
+        // The call the RPC makes, then the call a transaction from a peer
+        // goes through.
+        let refused = consensus
+            .mempool()
+            .add_transaction(next.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("EVM engine error"), "{refused}");
+        let refused = consensus.submit_transaction(next).unwrap_err().to_string();
+        assert!(refused.contains("EVM engine error"), "{refused}");
+    }
+
+    /// A block dated in the past that carries an engine-error transaction,
+    /// as a replayed or imported one is, takes nothing out of the pool and
+    /// holds nobody now.
+    #[tokio::test]
+    async fn an_old_block_with_an_engine_error_leaves_the_pool_alone() {
+        use k256::ecdsa::SigningKey;
+
+        let key = SigningKey::from_slice(&[0x47; 32]).unwrap();
+        let funded = [(
+            tenzro_vm::external_tx::evm_account(evm_address_of(&key)),
+            1_000,
+        )];
+        let (mut event_loop, genesis) = event_loop_with_genesis(&funded).await;
+        let consensus = crate::consensus_driver::tests::handle_with_one_validator();
+        event_loop.consensus = Some(consensus.clone());
+        event_loop.install_pool_guard();
+        let max_fee =
+            tenzro_vm::ledger::block_base_fee(&*event_loop.state_adapter.lock().await).max(1) * 2;
+        let mut kzg = [0u8; 20];
+        kzg[19] = 0x0a;
+        let envelope = |nonce: u64, to: [u8; 20]| {
+            external_evm_envelope(
+                signed_eip1559_with(&key, nonce, 21_000, max_fee, to, 0),
+                1337,
+            )
+            .unwrap()
+        };
+        let (next, _) = envelope(1, [0x78; 20]);
+        let (fault, fault_hash) = envelope(0, kzg);
+        consensus.mempool().add_transaction(next.clone()).unwrap();
+        assert_eq!(consensus.mempool().len(), 1);
+
+        // `block_at` dates its block in 1970. The guard looks at the
+        // block's time, not at where the block came from.
+        let block = block_at(1, genesis, vec![fault]);
+        event_loop
+            .handle_block_finalized_inner(block, BlockSource::Ordered)
+            .await
+            .unwrap();
+        let receipt = receipt_of(&event_loop, &Hash(fault_hash));
+        assert!(
+            receipt
+                .revert_reason
+                .as_deref()
+                .is_some_and(tenzro_vm::evm::is_engine_fault),
+            "the transaction ended in an engine error: {:?}",
+            receipt.revert_reason
+        );
+        assert_eq!(consensus.mempool().len(), 1, "nothing is taken out");
+        consensus
+            .mempool()
+            .remove_transactions(&[next.transaction.hash()]);
+        consensus.mempool().add_transaction(next).unwrap();
+    }
+
+    /// While engine errors repeat, the pool admits no EVM transaction above
+    /// the gas limit ceiling, from any sender, and still admits one within
+    /// it.
+    #[tokio::test]
+    async fn the_pool_refuses_evm_transactions_above_the_ceiling_while_engine_errors_repeat() {
+        use k256::ecdsa::SigningKey;
+
+        let keys = [0x61u8, 0x62, 0x63, 0x64].map(|b| SigningKey::from_slice(&[b; 32]).unwrap());
+        let funded = keys.each_ref().map(|k| {
+            (
+                tenzro_vm::external_tx::evm_account(evm_address_of(k)),
+                1_000,
+            )
+        });
+        let (mut event_loop, genesis) = event_loop_with_genesis(&funded).await;
+        let consensus = crate::consensus_driver::tests::handle_with_one_validator();
+        event_loop.consensus = Some(consensus.clone());
+        event_loop.install_pool_guard();
+        let max_fee =
+            tenzro_vm::ledger::block_base_fee(&*event_loop.state_adapter.lock().await).max(1) * 2;
+        let envelope = |key: &SigningKey, gas_limit: u64, to: [u8; 20]| {
+            external_evm_envelope(signed_eip1559_with(key, 0, gas_limit, max_fee, to, 0), 1337)
+                .unwrap()
+                .0
+        };
+        let bystander = &keys[3];
+        let large = envelope(bystander, 2_000_000, [0x78; 20]);
+        let small = envelope(bystander, 21_000, [0x78; 20]);
+
+        // Before any engine error the pool admits the large one.
+        consensus.mempool().add_transaction(large.clone()).unwrap();
+        consensus
+            .mempool()
+            .remove_transactions(&[large.transaction.hash()]);
+
+        // One block of now with three engine-error transactions, from three
+        // senders.
+        let mut kzg = [0u8; 20];
+        kzg[19] = 0x0a;
+        let faults = keys[..3].iter().map(|k| envelope(k, 21_000, kzg)).collect();
+        let mut block = block_at(1, genesis, faults);
+        block.header.timestamp = tenzro_types::primitives::Timestamp::now();
+        event_loop
+            .handle_block_finalized_inner(block, BlockSource::Ordered)
+            .await
+            .unwrap();
+
+        let refused = consensus
+            .mempool()
+            .add_transaction(large)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("gas limit of 1000000"), "{refused}");
+        consensus.mempool().add_transaction(small).unwrap();
+    }
+
+    /// With the block gas limit in force, an EVM transaction that comes up
+    /// after the block has used its gas is not run: it has no receipt, and
+    /// it runs when it is ordered again in a later block.
+    #[tokio::test]
+    async fn an_evm_transaction_past_the_block_gas_limit_runs_when_ordered_again() {
+        use k256::ecdsa::SigningKey;
+
+        let keys = [0x51u8, 0x52].map(|b| SigningKey::from_slice(&[b; 32]).unwrap());
+        let funded = keys.each_ref().map(|k| {
+            (
+                tenzro_vm::external_tx::evm_account(evm_address_of(k)),
+                1_000,
+            )
+        });
+        let (mut el, _) = event_loop_with_genesis(&funded).await;
+        let base_fee = tenzro_vm::ledger::block_base_fee(&*el.state_adapter.lock().await);
+        {
+            // The conformance rules are live and one plain transfer uses the
+            // whole of the block's gas.
+            let mut st = el.state_adapter.lock().await;
+            for (key, value) in [
+                (tenzro_vm::evm::CONFORMANCE_KEY, 0u64),
+                (tenzro_vm::evm::BLOCK_GAS_LIMIT_PARAM, 21_000),
+            ] {
+                st.set_storage(
+                    &tenzro_vm::native::SYSTEM_ADDRESS,
+                    tenzro_vm::native::governed_param_key(key).as_bytes(),
+                    value.to_le_bytes().to_vec(),
+                );
+            }
+        }
+        let transfers: Vec<(SignedTransaction, Hash)> = keys
+            .iter()
+            .map(|k| {
+                let (tx, hash) = external_evm_envelope(
+                    signed_eip1559(k, base_fee.max(1) * 2, [0x78; 20], 5),
+                    1337,
+                )
+                .unwrap();
+                (tx, Hash(hash))
+            })
+            .collect();
+        let now_ms = tenzro_types::primitives::Timestamp::now().as_millis() as u64;
+        let segment = |height: u64, transactions: Vec<SignedTransaction>| OrderedSegment {
+            height,
+            epoch: 0,
+            round: height * 2,
+            anchor: Hash::new([height as u8; 32]),
+            proposer: Address::zero(),
+            timestamp_ms: now_ms + height,
+            transactions,
+        };
+
+        el.execute_ordered_run(vec![segment(
+            1,
+            transfers.iter().map(|(tx, _)| tx.clone()).collect(),
+        )])
+        .await;
+        assert!(receipt_of(&el, &transfers[0].1).success);
+        assert!(
+            el.storage
+                .get(
+                    CF_TRANSACTIONS,
+                    format!("receipt:{}", transfers[1].1).as_bytes()
+                )
+                .unwrap()
+                .is_none(),
+            "not run in the block that had used its gas, so no receipt"
+        );
+
+        el.execute_ordered_run(vec![segment(2, vec![transfers[1].0.clone()])])
+            .await;
+        assert!(receipt_of(&el, &transfers[1].1).success);
     }
 
     /// The header commits the root of the block's Ethereum receipts trie; a
@@ -9382,5 +11482,95 @@ mod announced_tests {
         assert_eq!(a.due(now, 2, |_| true), vec![h(8), h(7)]);
         assert_eq!(a.due(now, 2, |_| true), vec![h(6)]);
         assert!(a.due(now, 2, |_| true).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod live_role_tests {
+    use super::*;
+    use tenzro_types::RoleSet;
+    use tenzro_types::network::NetworkRole;
+
+    fn context(roles: Arc<parking_lot::RwLock<RoleSet>>) -> ProviderAnnouncementContext {
+        ProviderAnnouncementContext {
+            hardware: Default::default(),
+            tee_available: false,
+            region: None,
+            provider_address: String::new(),
+            roles,
+            tee_vendor: None,
+            ttl_secs: 120,
+            cluster_identity: None,
+            capacity: Default::default(),
+            agent_serving: None,
+        }
+    }
+
+    /// The announcement follows the roles served: a model-serving role taken
+    /// up makes the node announce as an AI provider that can produce
+    /// verifiable inference; put down, the node announces nothing.
+    #[test]
+    fn the_announcement_follows_the_roles_served() {
+        let roles = Arc::new(parking_lot::RwLock::new(RoleSet::client()));
+        let ctx = context(roles.clone());
+        assert_eq!(ctx.announced_now(), None);
+        *roles.write() = RoleSet::from_roles([NetworkRole::ModelProvider]);
+        let (class, capabilities, serves_ai) = ctx.announced_now().expect("announces");
+        assert!(serves_ai);
+        let (expected_class, expected) =
+            crate::node::own_announced_services(&roles.read(), false).unwrap();
+        assert_eq!((class, capabilities), (expected_class, expected));
+        *roles.write() = RoleSet::client();
+        assert_eq!(ctx.announced_now(), None);
+    }
+
+    /// Shards are replicated only while the storage role is served.
+    #[test]
+    fn shards_are_replicated_only_while_storage_is_served() {
+        let roles = Arc::new(parking_lot::RwLock::new(RoleSet::client()));
+        let replicas = (3, roles.clone());
+        assert_eq!(replicas_now(Some(&replicas)), None);
+        *roles.write() = RoleSet::from_roles([NetworkRole::StorageProvider]);
+        assert_eq!(replicas_now(Some(&replicas)), Some(3));
+        *roles.write() = RoleSet::client();
+        assert_eq!(replicas_now(Some(&replicas)), None);
+        assert_eq!(replicas_now(None), None);
+    }
+}
+
+#[cfg(test)]
+mod held_blocks_tests {
+    use super::*;
+    use tenzro_types::block::BlockHeader;
+
+    fn block(h: u64) -> Block {
+        let header = BlockHeader::new(
+            BlockHeight(h),
+            Hash::new([1; 32]),
+            Hash::zero(),
+            Hash::new([h as u8; 32]),
+            Address::new([2; 32]),
+        );
+        Block::new(header, vec![])
+    }
+
+    /// A held block is sized as it is sent, and counted, replaced and
+    /// removed by height.
+    #[test]
+    fn a_block_is_held_by_its_wire_size_and_counted() {
+        let mut held = HeldBlocks::default();
+        assert!(held.insert(5, block(5)));
+        assert!(held.insert(6, block(6)));
+        assert_eq!(held.len(), 2);
+        let each = bincode::serialized_size(&block(5)).unwrap() as usize;
+        assert_eq!(held.bytes, 2 * each);
+        assert!(
+            held.insert(5, block(5)),
+            "a block held again replaces itself"
+        );
+        assert_eq!(held.len(), 2);
+        assert_eq!(held.bytes, 2 * each);
+        assert!(held.remove(&5).is_some());
+        assert_eq!((held.len(), held.bytes), (1, each));
     }
 }

@@ -437,6 +437,124 @@ pub fn check() -> Result<()> {
     check_with(&mut dev, &crate::namespaced(IDENTITY_KEY_LABEL))
 }
 
+/// Who a persistent handle in the node's range belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleOwner {
+    /// The storage root every node key is a child of.
+    StorageRoot,
+    /// The machine attestation key.
+    Attestation,
+    /// The identity key of the namespace this process runs under.
+    ThisIdentity,
+    /// An identity key of another namespace, or of a namespace that no
+    /// longer runs here: the only handles that can be deleted.
+    OtherIdentity,
+}
+
+/// One persistent handle of the node's range that holds a key the node made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeHandle {
+    pub handle: u32,
+    pub owner: HandleOwner,
+}
+
+/// Whether `p` has the shape of an identity key this node makes: a P-256
+/// signing key whose `authPolicy` is a label digest.
+fn has_identity_shape(p: &PublicArea) -> bool {
+    p.attributes == KeyRole::Signing.attributes()
+        && p.auth_policy.len() == tpm_wire::label_unique("").len()
+        && p.p256_sec1().is_some()
+}
+
+/// The persistent identity slots: the default one and the namespaces' after it.
+fn identity_slots() -> std::ops::RangeInclusive<u32> {
+    tpm_wire::NODE_IDENTITY_HANDLE
+        ..=tpm_wire::NODE_IDENTITY_HANDLE + tpm_wire::NAMESPACE_IDENTITY_SLOTS
+}
+
+/// The handles of the node's range that hold keys the node made, read with
+/// `read`, for a process whose identity key is labelled `identity_label`
+/// (already namespaced). Anything else in the range is not listed.
+fn list_with(
+    mut read: impl FnMut(u32) -> Result<Option<PublicArea>>,
+    identity_label: &str,
+) -> Result<Vec<NodeHandle>> {
+    let mut found = Vec::new();
+    for (handle, owner) in [
+        (tpm_wire::NODE_STORAGE_ROOT_HANDLE, HandleOwner::StorageRoot),
+        (tpm_wire::NODE_ATTESTATION_HANDLE, HandleOwner::Attestation),
+    ] {
+        if read(handle)?.is_some() {
+            found.push(NodeHandle { handle, owner });
+        }
+    }
+    for handle in identity_slots() {
+        let Some(p) = read(handle)? else { continue };
+        if is_identity_key(&p, identity_label) {
+            found.push(NodeHandle {
+                handle,
+                owner: HandleOwner::ThisIdentity,
+            });
+        } else if has_identity_shape(&p) {
+            found.push(NodeHandle {
+                handle,
+                owner: HandleOwner::OtherIdentity,
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// Whether `handle`, among the `listed` handles, may be deleted: only a
+/// stale identity key, one the node made in an identity slot for a label this
+/// process does not run under. The storage root, the attestation key, this
+/// process's identity key and anything the node did not make are refused.
+fn check_deletable(listed: &[NodeHandle], handle: u32) -> Result<()> {
+    match listed.iter().find(|n| n.handle == handle) {
+        Some(NodeHandle {
+            owner: HandleOwner::OtherIdentity,
+            ..
+        }) => Ok(()),
+        Some(_) => Err(err(format!(
+            "TPM handle 0x{handle:08x} is in use by this node and is not deleted"
+        ))),
+        None => Err(err(format!(
+            "TPM handle 0x{handle:08x} holds no key this node made"
+        ))),
+    }
+}
+
+/// Removes the persistent `handle` through `t`.
+fn evict(t: &mut dyn TpmTransport, handle: u32) -> Result<()> {
+    let resp = t.submit(&tpm_wire::evict_control_command(handle, handle))?;
+    tpm_wire::response_body(&resp).map_err(wire("delete the persistent handle"))?;
+    Ok(())
+}
+
+fn delete_with(t: &mut dyn TpmTransport, handle: u32, identity_label: &str) -> Result<()> {
+    check_deletable(&list_with(|h| read_public(t, h), identity_label)?, handle)?;
+    evict(t, handle)
+}
+
+/// The persistent handles of this machine's TPM that the node made, and who
+/// they belong to.
+#[cfg(any(target_os = "linux", windows))]
+pub fn list_node_handles() -> Result<Vec<NodeHandle>> {
+    let mut dev = crate::backend_tpm::TpmDevice::open()?;
+    list_with(
+        |h| read_public(&mut dev, h),
+        &crate::namespaced(IDENTITY_KEY_LABEL),
+    )
+}
+
+/// Deletes one stale identity key of the node (see [`HandleOwner::OtherIdentity`]).
+/// The caller confirms with the operator first; nothing here deletes by itself.
+#[cfg(any(target_os = "linux", windows))]
+pub fn delete_node_handle(handle: u32) -> Result<()> {
+    let mut dev = crate::backend_tpm::TpmDevice::open()?;
+    delete_with(&mut dev, handle, &crate::namespaced(IDENTITY_KEY_LABEL))
+}
+
 /// This TPM's endorsement key, made as a transient primary from the TCG
 /// template: the key the manufacturer certified, without reading or using
 /// any persistent handle. The caller flushes the returned handle.
@@ -491,6 +609,91 @@ mod tests {
         }
         assert!(is_identity_key(&p, label));
         p
+    }
+
+    /// A TPM that answers `TPM2_EvictControl` and records the handle.
+    struct FakeTpm {
+        evicted: Vec<u32>,
+    }
+
+    impl super::TpmTransport for FakeTpm {
+        fn submit(&mut self, command: &[u8]) -> crate::Result<Vec<u8>> {
+            assert_eq!(
+                tpm_wire::command_code(command),
+                Some(tpm_wire::TPM2_CC_EVICT_CONTROL)
+            );
+            let object = u32::from_be_bytes(command[14..18].try_into().unwrap());
+            self.evicted.push(object);
+            Ok(vec![0x80, 0x01, 0, 0, 0, 10, 0, 0, 0, 0])
+        }
+    }
+
+    fn other_label() -> String {
+        format!("other-run/{}", crate::IDENTITY_KEY_LABEL)
+    }
+
+    /// The listing names the node's own handles and tells this process's
+    /// identity key from another namespace's; a foreign object in the range
+    /// is not listed.
+    #[test]
+    fn the_listing_names_only_what_the_node_made_and_whose_it_is() {
+        use super::{HandleOwner, NodeHandle, list_with};
+        let mine = crate::IDENTITY_KEY_LABEL;
+        let other = other_label();
+        let other_slot = tpm_wire::node_identity_handle(&other, true);
+        let mut tpm: HashMap<u32, PublicArea> = HashMap::new();
+        tpm.insert(tpm_wire::NODE_IDENTITY_HANDLE, identity_key(mine));
+        tpm.insert(other_slot, identity_key(&other));
+        let mut foreign = identity_key(mine);
+        foreign.attributes = 0;
+        tpm.insert(tpm_wire::NODE_IDENTITY_HANDLE + 7, foreign);
+        let found = list_with(|h| Ok(tpm.get(&h).cloned()), mine).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                NodeHandle {
+                    handle: tpm_wire::NODE_IDENTITY_HANDLE,
+                    owner: HandleOwner::ThisIdentity
+                },
+                NodeHandle {
+                    handle: other_slot,
+                    owner: HandleOwner::OtherIdentity
+                },
+            ]
+        );
+    }
+
+    /// Only another namespace's identity key can be deleted.
+    #[test]
+    fn only_a_stale_identity_key_is_deleted() {
+        use super::{check_deletable, list_with};
+        let mine = crate::IDENTITY_KEY_LABEL;
+        let other = other_label();
+        let other_slot = tpm_wire::node_identity_handle(&other, true);
+        let mut tpm: HashMap<u32, PublicArea> = HashMap::new();
+        tpm.insert(tpm_wire::NODE_IDENTITY_HANDLE, identity_key(mine));
+        tpm.insert(other_slot, identity_key(&other));
+        tpm.insert(tpm_wire::NODE_STORAGE_ROOT_HANDLE, identity_key(mine));
+        let listed = list_with(|h| Ok(tpm.get(&h).cloned()), mine).unwrap();
+        for handle in [
+            tpm_wire::NODE_IDENTITY_HANDLE,
+            tpm_wire::NODE_STORAGE_ROOT_HANDLE,
+            tpm_wire::EK_ECC_PERSISTENT_HANDLE,
+            other_slot + 1,
+        ] {
+            assert!(check_deletable(&listed, handle).is_err(), "{handle:08x}");
+        }
+        check_deletable(&listed, other_slot).unwrap();
+    }
+
+    /// Deleting asks the TPM to evict the handle itself, once.
+    #[test]
+    fn deleting_evicts_the_handle_itself() {
+        let mut tpm = FakeTpm {
+            evicted: Vec::new(),
+        };
+        super::evict(&mut tpm, 0x8101_8105).unwrap();
+        assert_eq!(tpm.evicted, vec![0x8101_8105]);
     }
 
     /// Two namespaces whose labels hash to the same slot.

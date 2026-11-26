@@ -1,7 +1,7 @@
 //! Wallet System for Tenzro Network
 //!
 //! This crate provides identity-bound wallets for Tenzro Network,
-//! an AI-Native, Agentic, Tokenized Settlement Layer blockchain.
+//! a network of compute of every kind, settled in TNZO on the Tenzro Ledger.
 //!
 //! # Key Features
 //!

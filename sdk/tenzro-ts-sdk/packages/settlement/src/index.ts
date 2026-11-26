@@ -1,7 +1,9 @@
 /**
- * Settlement: escrow, the split engine and settlement plans.
+ * Settlement: escrow, the split engine, settlement plans and the interaction
+ * record digest.
  */
 export { SettlementClient, ownerRequestMessage, refundOp } from "./settlement";
+export { INTERACTION_DOMAIN, InteractionError, interactionDigest, interactionPreimage } from "./interaction";
 export type { ChannelClose } from "./settlement";
 export {
   PlanBuilder,

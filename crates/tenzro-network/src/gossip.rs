@@ -61,7 +61,7 @@ impl NetworkGossip {
         let guard = Arc::new(GossipGuard::new(metrics.clone(), limits));
         let (layer, inbound) = GossipLayer::new(guard.clone());
         let routes = Arc::new(Mutex::new(Routes::default()));
-        let dispatch = tokio::spawn(dispatch(inbound, routes.clone()));
+        let dispatch = tokio::spawn(dispatch(inbound, routes.clone(), metrics.clone()));
         Self {
             layer,
             guard,
@@ -88,7 +88,8 @@ impl NetworkGossip {
     }
 
     /// Whether a neighbour must have a registered identity to deliver
-    /// anything but a verified validator announcement; see
+    /// anything but a verified validator announcement or the transactions
+    /// that get its own machine registered; see
     /// [`GossipGuard::set_registered_only`].
     pub fn set_registered_only(&self, on: bool) {
         self.guard.set_registered_only(on);
@@ -109,12 +110,35 @@ impl NetworkGossip {
     /// Publishes `message` on `topic`.
     pub async fn broadcast(&self, topic: &str, message: NetworkMessage) -> Result<()> {
         let bytes = message.to_bytes().map_err(NetworkError::Serialization)?;
+        let size = bytes.len();
         self.layer
             .publish(topic, bytes)
             .await
             .map_err(|e| NetworkError::PublishError(e.to_string()))?;
         self.metrics.gossip_published.inc();
+        if topic == crate::metrics::BLOCKS_TOPIC {
+            self.metrics.block_published(size);
+        }
         Ok(())
+    }
+
+    /// [`Self::broadcast`], unless this node has already seen the same
+    /// message byte for byte. Returns whether it was published.
+    pub async fn broadcast_unseen(&self, topic: &str, message: NetworkMessage) -> Result<bool> {
+        let bytes = message.to_bytes().map_err(NetworkError::Serialization)?;
+        let size = bytes.len();
+        let published = self
+            .layer
+            .publish_unseen(topic, bytes)
+            .await
+            .map_err(|e| NetworkError::PublishError(e.to_string()))?;
+        if published {
+            self.metrics.gossip_published.inc();
+            if topic == crate::metrics::BLOCKS_TOPIC {
+                self.metrics.block_published(size);
+            }
+        }
+        Ok(published)
     }
 
     /// Every message accepted on `topic` from now on.
@@ -160,9 +184,26 @@ impl Drop for NetworkGossip {
     }
 }
 
+/// Decodes one frame a peer sent with `decode`. A decoder defect that panics
+/// on some input costs that frame, refused like any undecodable one, never
+/// this task, which every topic's messages pass through.
+fn decode_jailed(
+    content: &[u8],
+    decode: fn(&[u8]) -> std::result::Result<NetworkMessage, bincode::Error>,
+) -> std::result::Result<NetworkMessage, String> {
+    match std::panic::catch_unwind(|| decode(content)) {
+        Ok(decoded) => decoded.map_err(|e| e.to_string()),
+        Err(_) => Err("the decoder panicked on this frame".to_string()),
+    }
+}
+
 /// Decodes each accepted message and hands it to the topic's subscribers
 /// and judge.
-async fn dispatch(mut inbound: mpsc::Receiver<Inbound>, routes: Arc<Mutex<Routes>>) {
+async fn dispatch(
+    mut inbound: mpsc::Receiver<Inbound>,
+    routes: Arc<Mutex<Routes>>,
+    metrics: Arc<NetworkMetrics>,
+) {
     while let Some(Inbound {
         topic,
         content,
@@ -170,7 +211,7 @@ async fn dispatch(mut inbound: mpsc::Receiver<Inbound>, routes: Arc<Mutex<Routes
         ..
     }) = inbound.recv().await
     {
-        let message = match NetworkMessage::from_bytes(&content) {
+        let message = match decode_jailed(&content, NetworkMessage::from_bytes) {
             Ok(message) => message,
             Err(e) => {
                 tracing::warn!(topic = %topic, error = %e, "undecodable gossip message");
@@ -180,6 +221,10 @@ async fn dispatch(mut inbound: mpsc::Receiver<Inbound>, routes: Arc<Mutex<Routes
                 continue;
             }
         };
+        if let crate::message::MessagePayload::Block(block) = &message.payload {
+            let now = chrono::Utc::now().timestamp_millis();
+            metrics.block_delivered(content.len(), now, block.header.timestamp.as_millis());
+        }
         let mut routes = routes.lock();
         let mut dropped = 0u64;
         if let Some(subscribers) = routes.subscribers.get_mut(&topic) {
@@ -212,5 +257,22 @@ async fn dispatch(mut inbound: mpsc::Receiver<Inbound>, routes: Arc<Mutex<Routes
                 tracing::warn!(topic = %topic, dropped = routes.dropped, "a gossip subscriber is behind; dropping messages");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn panics(_: &[u8]) -> std::result::Result<NetworkMessage, bincode::Error> {
+        panic!("a decoder defect");
+    }
+
+    #[test]
+    fn a_decoder_that_panics_on_a_frame_refuses_that_frame() {
+        let err = decode_jailed(b"any frame", panics).unwrap_err();
+        assert!(err.contains("panicked"), "{err}");
+        // The next frame still decodes on the same thread.
+        assert!(decode_jailed(b"not a message", NetworkMessage::from_bytes).is_err());
     }
 }

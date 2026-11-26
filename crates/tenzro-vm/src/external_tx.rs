@@ -747,7 +747,7 @@ mod tests {
         fields(&mut s);
         let mut pre = vec![ty];
         pre.extend_from_slice(&s.out());
-        let (sig, rid) = k.sign_prehash_recoverable(&keccak(&pre)).unwrap();
+        let (sig, rid) = k.sign_prehash_recoverable(&keccak(&pre));
         let b = sig.to_bytes();
         let mut s = RlpStream::new_list(n + 3);
         fields(&mut s);
@@ -833,7 +833,7 @@ mod tests {
             nonce: 1,
             signature: vec![],
         };
-        let (asig, arid) = k.sign_prehash_recoverable(&auth.signing_hash()).unwrap();
+        let (asig, arid) = k.sign_prehash_recoverable(&auth.signing_hash());
         let ab = asig.to_bytes();
         let raw = sign_typed(
             &k,

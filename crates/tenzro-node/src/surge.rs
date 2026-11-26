@@ -204,7 +204,7 @@ pub async fn act(node: &Arc<TenzroNode>, band: &Band) {
     let candidates: Vec<Candidate> = regional_demand(node, &config.models)
         .into_iter()
         .filter_map(|(model_id, regional_demand)| {
-            let bytes = tenzro_model::catalog::entry(&model_id)?.gguf()?.size_bytes;
+            let bytes = node.catalog().entry(&model_id)?.gguf()?.size_bytes;
             Some(Candidate {
                 loaded: runtime.is_loaded(&model_id),
                 bytes: MemoryBudget::with_headroom(bytes),
@@ -286,11 +286,13 @@ fn scheduled_reservation(node: &TenzroNode, runtime: &tenzro_model::ModelRuntime
                 .unwrap_or_default(),
         )
         .collect();
+    let catalog = node.catalog();
     models
         .iter()
         .filter(|m| !runtime.is_loaded(m))
         .filter_map(|m| {
-            tenzro_model::catalog::entry(m)?
+            catalog
+                .entry(m)?
                 .gguf()
                 .map(|g| MemoryBudget::with_headroom(g.size_bytes))
         })

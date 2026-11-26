@@ -188,12 +188,15 @@ pub struct LocalView {
     pub tip_height: u64,
     /// Its hash.
     pub tip_hash: [u8; 32],
-    /// The epoch that block belongs to.
+    /// The epoch in that block's header.
     pub tip_epoch: u64,
-    /// Index and digest of the checkpoint whose last block is the tip, when
-    /// this node holds that checkpoint (a survivor does; a member that state
-    /// synced to the anchor does not).
-    pub tip_checkpoint: Option<(u64, [u8; 32])>,
+    /// The epoch this node's epoch manager is at: the tip's epoch, or the
+    /// next one once the tip closed its epoch and the successor was derived.
+    pub current_epoch: u64,
+    /// Index, digest and epoch of the checkpoint whose last block is the
+    /// tip, when this node holds that checkpoint (a survivor does; a member
+    /// that state synced to the anchor does not).
+    pub tip_checkpoint: Option<(u64, [u8; 32], u64)>,
 }
 
 /// Why a manifest is refused.
@@ -241,13 +244,23 @@ pub fn check(m: &RecoveryManifest, local: &LocalView) -> Result<(), ManifestRefu
     if local.tip_hash != m.anchor_hash {
         return Err(ManifestRefusal::AnchorHashDiffers);
     }
-    if local
-        .tip_checkpoint
-        .is_some_and(|c| c != (m.anchor_checkpoint_index, m.anchor_checkpoint_digest))
-    {
+    if local.tip_checkpoint.is_some_and(|(index, digest, _)| {
+        (index, digest) != (m.anchor_checkpoint_index, m.anchor_checkpoint_digest)
+    }) {
         return Err(ManifestRefusal::AnchorCheckpointDiffers);
     }
-    if m.from_epoch != local.tip_epoch || m.to_epoch != m.from_epoch.saturating_add(1) {
+    // `from_epoch` is the epoch of the anchor checkpoint: the epoch whose
+    // committee halted. Its last block can be older than that epoch (a
+    // checkpoint covering no block certifies the state after the last one),
+    // and the epoch manager may already hold the successor the closing block
+    // derived; any other epoch manager position cannot take the successor set.
+    let epoch_follows = m.to_epoch == m.from_epoch.saturating_add(1)
+        && local
+            .tip_checkpoint
+            .is_none_or(|(_, _, epoch)| epoch == m.from_epoch)
+        && local.tip_epoch <= m.from_epoch
+        && (local.current_epoch == m.from_epoch || local.current_epoch == m.to_epoch);
+    if !epoch_follows {
         return Err(ManifestRefusal::EpochStep);
     }
     let mut keys: Vec<&[u8]> = Vec::with_capacity(m.successor.len());
@@ -319,7 +332,8 @@ mod tests {
             tip_height: 7341,
             tip_hash: [9; 32],
             tip_epoch: 1233,
-            tip_checkpoint: Some((14, [3; 32])),
+            current_epoch: 1234,
+            tip_checkpoint: Some((14, [3; 32], 1233)),
         }
     }
 
@@ -375,11 +389,47 @@ mod tests {
         l.chain_id = 8;
         assert_eq!(check(&m, &l), Err(ManifestRefusal::WrongChain));
         let mut l = local();
-        l.tip_checkpoint = Some((14, [4; 32])); // a survivor holding another checkpoint
+        l.tip_checkpoint = Some((14, [4; 32], 1233)); // a survivor holding another checkpoint
         assert_eq!(check(&m, &l), Err(ManifestRefusal::AnchorCheckpointDiffers));
         let mut l = local();
         l.tip_checkpoint = None; // a member that state synced holds none
         assert_eq!(check(&m, &l), Ok(()));
+    }
+
+    #[test]
+    fn the_halted_epoch_is_the_anchor_checkpoints() {
+        let m = manifest((0..7).map(|i| member(i, 1, true)).collect());
+        // The tip closed epoch 1233 and the successor 1234 was derived: the
+        // halted epoch is 1233, with or without the derived successor.
+        let mut l = local();
+        assert_eq!(check(&m, &l), Ok(()));
+        l.current_epoch = 1233;
+        assert_eq!(check(&m, &l), Ok(()));
+        // Epoch 1234 started, ordered no block and certified a checkpoint
+        // over the state after block 7341 before it halted: its committee
+        // is the one that halted, while the tip block is still of 1233.
+        let mut halted_later = m.clone();
+        halted_later.from_epoch = 1234;
+        halted_later.to_epoch = 1235;
+        let mut l = local();
+        l.tip_checkpoint = Some((14, [3; 32], 1234));
+        assert_eq!(check(&halted_later, &l), Ok(()));
+        // The block's epoch then does not name the halted committee.
+        assert_eq!(check(&m, &l), Err(ManifestRefusal::EpochStep));
+        // A member that state synced holds no checkpoint and accepts either
+        // epoch its epoch manager can step from.
+        l.tip_checkpoint = None;
+        assert_eq!(check(&halted_later, &l), Ok(()));
+        assert_eq!(check(&m, &l), Ok(()));
+        // An epoch before the tip block's, or one the epoch manager is past.
+        let mut early = m.clone();
+        early.from_epoch = 1232;
+        early.to_epoch = 1233;
+        assert_eq!(check(&early, &l), Err(ManifestRefusal::EpochStep));
+        let mut l = local();
+        l.tip_checkpoint = None;
+        l.current_epoch = 1236;
+        assert_eq!(check(&m, &l), Err(ManifestRefusal::EpochStep));
     }
 
     #[test]

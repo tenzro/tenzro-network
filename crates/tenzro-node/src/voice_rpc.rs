@@ -152,7 +152,9 @@ pub(crate) async fn voice_turn(
         .get("model_id")
         .and_then(Value::as_str)
         .ok_or_else(|| missing_param("model_id"))?;
-    let entry = tenzro_model::get_omni_model_by_id(model_id)
+    let entry = node
+        .catalog()
+        .get_omni_model_by_id(model_id)
         .ok_or_else(|| crate::rpc::not_in_catalog("omni", model_id))?;
     if !node.omni_runtime.contains(model_id) {
         return Err(JsonRpcError {
@@ -217,7 +219,7 @@ pub(crate) async fn voice_turn(
     )
     .with_audio_ms(turn.audio_in_ms)
     .with_audio_out_ms(turn.duration_ms);
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         p,
         model_id,
@@ -244,6 +246,7 @@ pub(crate) async fn voice_turn(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), json!(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok((turn, out))
 }

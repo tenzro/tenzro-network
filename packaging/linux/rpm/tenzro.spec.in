@@ -39,6 +39,14 @@ Open a terminal and run: tenzro
 mkdir -p %{buildroot}
 cp -a /payload/. %{buildroot}/
 
+%pre
+have=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+if [ -n "$have" ] && [ "$(printf '2.39\n%s\n' "$have" | sort -V | head -n1)" != "2.39" ]; then
+    echo "Tenzro needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40). This machine has glibc $have, so nothing was installed." >&2
+    exit 1
+fi
+exit 0
+
 %post
 echo
 if [ "$1" -gt 1 ]; then

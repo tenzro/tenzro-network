@@ -26,8 +26,8 @@ fn bad(code: &'static str, message: impl Into<String>) -> Refusal {
 /// count and frames per second.
 pub(crate) type VideoDefaults = (u32, u32, u32, f32, u32, u32);
 
-fn catalog_defaults(model: &str) -> Option<VideoDefaults> {
-    let m = tenzro_model::get_media_gen_model_by_id(model)?;
+fn catalog_defaults(catalog: &tenzro_model::Catalog, model: &str) -> Option<VideoDefaults> {
+    let m = catalog.get_media_gen_model_by_id(model)?;
     Some((
         m.default_width,
         m.default_height,
@@ -182,7 +182,11 @@ pub(crate) async fn create(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let params = match render_params(&body, catalog_defaults(&model), rand::random) {
+    let params = match render_params(
+        &body,
+        catalog_defaults(&node.catalog(), &model),
+        rand::random,
+    ) {
         Ok(p) => p,
         Err(r) => return refuse(r.status, &r.message, r.code),
     };

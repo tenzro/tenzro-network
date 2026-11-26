@@ -30,7 +30,7 @@ impl TestNode {
             // A loopback endpoint on a port of its own, so the test does not
             // contend with a node already running on the host.
             iroh: tenzro_iroh::TenzroIrohConfig {
-                bind_addr: free_udp_port(),
+                bind_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -724,6 +724,69 @@ async fn another_passkey_cannot_send_from_the_account() {
     n.stop().await;
 }
 
+/// What a verifier outside the node needs to judge a signature as a block
+/// will: the keys a P-256 key signs with for an account.
+#[tokio::test]
+async fn the_signing_key_of_an_account_is_read_from_chain_state() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let owner = Passkey::new(0x61);
+    let linked = Passkey::new(0x62);
+    let stranger = Passkey::new(0x63);
+    let n = TestNode::boot(dir.path()).await;
+    let account = enroll(&n, &owner).await;
+    link(&n, &account, &owner, &linked, 0);
+    let read = |key: Vec<u8>, account: String| {
+        let n = &n;
+        async move {
+            n.rpc(
+                "tenzro_getAccountSigningKey",
+                json!({ "public_key": hex::encode(key), "account": account }),
+            )
+            .await
+        }
+    };
+
+    // A passkey the keystore links: its enrolled ML-DSA-65 key and the
+    // relying party its assertions are for.
+    let resp = read(linked.xy(), account.clone()).await;
+    assert_eq!(
+        resp["result"],
+        json!({
+            "p256": hex::encode(linked.xy()),
+            "ml_dsa": hex::encode(enrolment_pq_key(&linked.xy()).verifying_key_bytes()),
+            "rp_id": rp_id(),
+        }),
+        "{resp}"
+    );
+
+    // A key the account does not know acts for nothing.
+    let resp = read(stranger.xy(), account.clone()).await;
+    assert_eq!(resp["error"]["code"], -32004, "{resp}");
+    assert!(resp["result"].is_null(), "{resp}");
+
+    // A key signs for the account it names with no relying party fixed, and
+    // with no ML-DSA-65 key until it enrolls one.
+    let own = hex::encode(tenzro_crypto::account_address(&stranger.xy()).as_bytes());
+    let resp = read(stranger.xy(), own.clone()).await;
+    assert_eq!(
+        resp["result"],
+        json!({ "p256": hex::encode(stranger.xy()), "ml_dsa": null, "rp_id": null }),
+        "{resp}"
+    );
+    record_enrolled_key(&n, &stranger.xy());
+    let resp = read(stranger.xy(), own).await;
+    assert_eq!(
+        resp["result"]["ml_dsa"],
+        hex::encode(enrolment_pq_key(&stranger.xy()).verifying_key_bytes()),
+        "{resp}"
+    );
+
+    // A key that is not a P-256 point is refused.
+    let resp = read(vec![7; 64], account).await;
+    assert!(resp["error"].is_object(), "{resp}");
+    n.stop().await;
+}
+
 /// Spending is high-risk: one root of control is not enough, however valid
 /// its signature. A second, independent root unlocks it.
 #[tokio::test]
@@ -842,11 +905,4 @@ async fn one_identity_holds_several_wallets_by_salt() {
         "{identity}"
     );
     n.stop().await;
-}
-
-/// A UDP port on loopback that was free a moment ago.
-fn free_udp_port() -> std::net::SocketAddr {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .expect("a free loopback port")
 }

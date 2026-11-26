@@ -8,7 +8,8 @@ use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use tenzro_consensus::Checkpoint;
-use tenzro_consensus::light_client::{Certification, GenesisAnchor};
+use tenzro_light::TrustAnchor;
+use tenzro_light::light_client::Certification;
 use tenzro_types::evidence_pack::{EvidencePack, GovernanceReceipt, ProvenRecord, decode_decision};
 
 use crate::output;
@@ -170,9 +171,9 @@ pub struct EvidenceVerifyCmd {
     /// Genesis block hash, hex
     #[arg(long)]
     genesis_hash: String,
-    /// Root of the genesis committee, hex
+    /// Genesis file: the first committee is read from its validators
     #[arg(long)]
-    genesis_committee_root: String,
+    genesis: std::path::PathBuf,
     /// Image id of the handover program, hex, from the chain's governance:
     /// needed when the pack's checkpoint is certified from a handover chain
     /// proof
@@ -214,7 +215,7 @@ impl EvidenceProfileCmd {
 pub fn verify_profile(
     pack: &EvidencePack,
     profile: &tenzro_consensus::eu_ai_act::Profile,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     handover_program: Option<[u8; 32]>,
 ) -> Result<tenzro_consensus::eu_ai_act::ProfileReport> {
     tenzro_consensus::eu_ai_act::verify_profile(
@@ -237,10 +238,11 @@ pub(crate) fn hex32(s: &str, what: &str) -> Result<[u8; 32]> {
 impl EvidenceVerifyCmd {
     pub fn execute(&self) -> Result<()> {
         let pack: EvidencePack = serde_json::from_slice(&std::fs::read(&self.file)?)?;
-        let anchor = GenesisAnchor {
+        let anchor = TrustAnchor {
+            epoch: 0,
             chain_id: self.chain_id,
             genesis_hash: hex32(&self.genesis_hash, "--genesis-hash")?,
-            committee_root: hex32(&self.genesis_committee_root, "--genesis-committee-root")?,
+            committee_root: super::genesis_file::committee_root(&self.genesis)?,
         };
         let program = self
             .handover_program
@@ -302,7 +304,7 @@ fn check_record(
 /// from genesis, or from a handover chain proof of `handover_program`.
 pub fn certified_checkpoint(
     certification: &serde_json::Value,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     handover_program: Option<[u8; 32]>,
 ) -> Result<Checkpoint> {
     let certification: Certification = serde_json::from_value(certification.clone())
@@ -323,7 +325,7 @@ pub fn certified_checkpoint(
 /// root.
 pub fn verify_pack(
     pack: &EvidencePack,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     handover_program: Option<[u8; 32]>,
 ) -> Result<VerifyReport> {
     tenzro_consensus::evidence_pack::verify_pack_with(
@@ -366,7 +368,7 @@ pub struct ReceiptReport {
 /// for that root.
 pub fn verify_governance_receipt(
     receipt: &GovernanceReceipt,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     handover_program: Option<[u8; 32]>,
 ) -> Result<ReceiptReport> {
     let cp = certified_checkpoint(&receipt.checkpoint, anchor, handover_program)?;
@@ -718,6 +720,14 @@ mod tests {
                 "token_action:aa:0",
                 serde_json::json!({ "kind": "frozen", "at_ms": 1 }),
             ),
+            (
+                "sla:7:did:tenzro:machine:alice:bot",
+                serde_json::json!({ "available": true }),
+            ),
+            (
+                "cclaim:c1",
+                serde_json::json!({ "claim_id": "c1", "provider_did": "did:tenzro:machine:alice:bot" }),
+            ),
         ];
         let trie = StateTrie::new(Arc::new(MemoryStore::new()));
         let mut writes = Writes::new();
@@ -780,6 +790,19 @@ mod tests {
                 ),
             ],
             token_actions: vec![record("token_action", "aa:0", "token_action:aa:0")],
+            service: vec![
+                record(
+                    "sla_verdict",
+                    "7:did:tenzro:machine:alice:bot",
+                    "sla:7:did:tenzro:machine:alice:bot",
+                ),
+                record(
+                    "sla_verdict",
+                    "8:did:tenzro:machine:alice:bot",
+                    "sla:8:did:tenzro:machine:alice:bot",
+                ),
+                record("claim", "c1", "cclaim:c1"),
+            ],
             receipts: vec![],
             models: vec![],
             jurisdiction: Jurisdiction {
@@ -795,7 +818,40 @@ mod tests {
     #[test]
     fn a_pack_verifies_under_its_root_and_every_tampering_is_refused() {
         let (pack, root) = pack();
-        assert_eq!(verify_under_root(&pack, &root).unwrap(), (2, 7));
+        assert_eq!(verify_under_root(&pack, &root).unwrap(), (2, 10));
+
+        // A service record stands only for the machine, hour and claim its
+        // slot names, and only for a machine the pack covers; an hour with no
+        // verdict kept is proven absent.
+        assert!(pack.service[1].value.is_none());
+        let mut p = pack.clone();
+        p.service[0].subject = "8:did:tenzro:machine:alice:bot".into();
+        p.manifest = p.build_manifest();
+        assert!(verify_under_root(&p, &root).is_err());
+        let mut p = pack.clone();
+        p.service[2].subject = "c2".into();
+        p.manifest = p.build_manifest();
+        assert!(verify_under_root(&p, &root).is_err());
+        let mut p = pack.clone();
+        p.service[0].kind = "claim".into();
+        p.manifest = p.build_manifest();
+        assert!(verify_under_root(&p, &root).is_err());
+        let mut p = pack.clone();
+        p.service.remove(0);
+        assert!(
+            verify_under_root(&p, &root).is_err(),
+            "the manifest covers it"
+        );
+        let mut p = pack.clone();
+        p.subject = "did:tenzro:machine:alice:other".into();
+        p.agents = vec![p.subject.clone()];
+        p.commerce.clear();
+        p.manifest = p.build_manifest();
+        let refused = verify_under_root(&p, &root).unwrap_err().to_string();
+        assert!(
+            refused.contains("does not cover") || refused.contains("not a machine the pack covers"),
+            "{refused}"
+        );
 
         // A decision stands only for the proposal record proven beside it.
         let mut p = pack.clone();
@@ -859,7 +915,8 @@ mod tests {
             .join("../../sdk/fixtures/eu_ai_act/pack_from_genesis.json");
         let fixture: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let anchor = GenesisAnchor {
+        let anchor = TrustAnchor {
+            epoch: 0,
             chain_id: fixture["anchor"]["chain_id"].as_u64().unwrap(),
             genesis_hash: hex32(fixture["anchor"]["genesis_hash"].as_str().unwrap(), "g").unwrap(),
             committee_root: hex32(fixture["anchor"]["committee_root"].as_str().unwrap(), "c")
@@ -877,7 +934,7 @@ mod tests {
             .replace("get_balance", "get_secrets")
             .into_bytes();
         assert!(verify_profile(&p, &profile, &anchor, None).is_err());
-        let wrong = GenesisAnchor {
+        let wrong = TrustAnchor {
             chain_id: anchor.chain_id + 1,
             ..anchor
         };
@@ -893,7 +950,8 @@ mod tests {
             .join("../../sdk/fixtures/governance_receipt/receipt_from_genesis.json");
         let fixture: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let anchor = GenesisAnchor {
+        let anchor = TrustAnchor {
+            epoch: 0,
             chain_id: fixture["anchor"]["chain_id"].as_u64().unwrap(),
             genesis_hash: hex32(
                 fixture["anchor"]["genesis_hash"].as_str().unwrap(),
@@ -919,7 +977,7 @@ mod tests {
         assert!(
             verify_governance_receipt(
                 &receipt,
-                &GenesisAnchor {
+                &TrustAnchor {
                     committee_root: [0; 32],
                     ..anchor
                 },
@@ -930,7 +988,7 @@ mod tests {
         assert!(
             verify_governance_receipt(
                 &receipt,
-                &GenesisAnchor {
+                &TrustAnchor {
                     chain_id: anchor.chain_id + 1,
                     ..anchor
                 },

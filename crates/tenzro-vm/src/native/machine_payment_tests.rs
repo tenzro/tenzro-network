@@ -1207,6 +1207,19 @@ fn agent_voucher(
     cumulative: u128,
     as_of_ms: u64,
 ) -> EscrowVoucher {
+    bound_agent_voucher(key, machine, escrow_id, cumulative, [0u8; 32], as_of_ms)
+}
+
+/// [`agent_voucher`] paying for the deliveries whose receipt chain ends at
+/// `binding`.
+fn bound_agent_voucher(
+    key: &SigningKey,
+    machine: &str,
+    escrow_id: [u8; 32],
+    cumulative: u128,
+    binding: [u8; 32],
+    as_of_ms: u64,
+) -> EscrowVoucher {
     let signer = AgentVoucherSigner {
         agent_did: AGENT.into(),
         machine_did: machine.into(),
@@ -1214,11 +1227,11 @@ fn agent_voucher(
     };
     let sig: p256::ecdsa::Signature = key
         .sign_prehash(&agent_voucher_digest(
-            CHAIN, &escrow_id, cumulative, &[0u8; 32], &signer,
+            CHAIN, &escrow_id, cumulative, &binding, &signer,
         ))
         .unwrap();
     EscrowVoucher {
-        binding: [0u8; 32],
+        binding,
         escrow_id,
         cumulative_amount: cumulative,
         public_key: Vec::new(),
@@ -1688,6 +1701,97 @@ async fn channels_settle_at_the_metered_cost_and_the_payer_gets_the_rest() {
     assert_eq!(state.get_balance(&wallet), before + refunded);
 }
 
+/// Submit the payee's `ClaimEscrow` of `amount` under `voucher` at 2 s and
+/// report whether it executed.
+async fn claim_escrow(
+    state: &mut StateAdapter,
+    payee: &Address,
+    voucher: EscrowVoucher,
+    amount: u128,
+) -> bool {
+    use crate::traits::VmExecutor as _;
+    let executor = NativeExecutor::new(crate::config::VmConfig::default()).unwrap();
+    let claims = vec![EscrowClaim { voucher, amount }];
+    let mut data = super::super::SELECTOR_ESCROW_CLAIM.to_vec();
+    data.extend_from_slice(&serde_json::to_vec(&serde_json::json!({ "claims": claims })).unwrap());
+    let mut tx = VmTransaction::new(
+        payee.as_bytes().to_vec(),
+        None,
+        0,
+        data,
+        1_000_000,
+        0,
+        0,
+        crate::VmType::Tenzro,
+        CHAIN,
+    );
+    tx.block_timestamp_ms = Some(2_000);
+    executor
+        .execute_transaction(&tx, state)
+        .await
+        .is_ok_and(|r| r.success)
+}
+
+/// A call paid as it goes: after each interval the payer signs a voucher for
+/// the running total, bound to the chain of receipts delivered so far. The
+/// call drops after the second interval, so a third voucher never exists.
+/// The payee is paid the second voucher's total and not a unit more; the
+/// same voucher with its binding altered pays nothing; past expiry the payer
+/// gets the rest of the escrow back, and every unit is accounted for.
+#[tokio::test]
+async fn a_dropped_call_settles_what_its_last_voucher_paid_and_refunds_the_rest() {
+    use tenzro_types::payment_authorization::receipt_chain_next;
+
+    let mut state = StateAdapter::new();
+    no_settlement_fee(&mut state);
+    let key = agent(&mut state, 100_000, Vec::new());
+    let wallet = agent_wallet(AGENT);
+    state.set_balance(&wallet, 10_000);
+    let payee = Address::new([0x86; 32]);
+    let (lock, per_interval) = (1_000u128, 120u128);
+    let id = open_channel(&mut state, &key, &payee, lock, None);
+    let wallet_after_lock = state.get_balance(&wallet);
+    let payee_before = state.get_balance(payee.as_bytes());
+    assert_eq!(wallet_after_lock, 10_000 - lock);
+
+    let mut head = [0u8; 32];
+    let mut vouchers = Vec::new();
+    for interval in 1..=2u8 {
+        head = receipt_chain_next(&head, &[interval; 32]);
+        vouchers.push(bound_agent_voucher(
+            &key,
+            MACHINE,
+            id,
+            per_interval * u128::from(interval),
+            head,
+            1_500,
+        ));
+    }
+    let last = vouchers.pop().unwrap();
+    let total = 2 * per_interval;
+
+    let mut altered = last.clone();
+    altered.binding[0] ^= 1;
+    assert!(
+        !claim_escrow(&mut state, &payee, altered, total).await,
+        "a voucher whose receipt chain was altered pays nothing"
+    );
+    assert!(
+        !claim_escrow(&mut state, &payee, last.clone(), total + 1).await,
+        "a claim beyond the last voucher is refused"
+    );
+    assert!(claim_escrow(&mut state, &payee, last, total).await);
+    let (_, _, escrow) = super::super::read_escrow_record(&state, &id).unwrap();
+    assert_eq!(escrow.claimed, total);
+    let paid = state.get_balance(payee.as_bytes()) - payee_before;
+    assert_eq!(paid, total, "the payee gets what the last voucher covered");
+
+    super::super::refund_escrow(&mut state, &id, &wallet, 1_000_001).unwrap();
+    let wallet_end = state.get_balance(&wallet);
+    assert_eq!(wallet_end, wallet_after_lock + lock - total);
+    assert_eq!(wallet_end + paid, 10_000, "nothing is created or lost");
+}
+
 /// Submit a `PayerSettle` from an unrelated account and report whether it
 /// executed.
 async fn submit_payer_settle(state: &mut StateAdapter, payload: PayerSettle<'_>) -> bool {
@@ -2046,6 +2150,43 @@ async fn a_generic_settlement_from_an_agents_registered_wallet_is_held_to_its_te
         state.get_balance(payer.address().as_bytes()),
         10_000 - 600 - 400
     );
+}
+
+/// Once the spend expiry gate is live, a `PayerSettle` from an agent's
+/// registered wallet is refused after the agent's terms expired and nothing
+/// moves; while the gate is dormant the same settlement pays.
+#[tokio::test]
+async fn a_generic_settlement_after_the_agents_terms_expired_is_refused_once_the_gate_is_live() {
+    use super::super::agent_terms::{SPEND_EXPIRY_GATE, read_agent_terms, store_terms_unapproved};
+    let mut state = StateAdapter::new();
+    agent(&mut state, 1_000, Vec::new());
+    let mut stored = read_agent_terms(&state, AGENT).unwrap();
+    // Expired before the block the settlements execute in (1_000 ms).
+    stored.terms.expires_at_ms = Some(500);
+    store_terms_unapproved(&mut state, AGENT, &stored);
+    let payer = Payer::enrolled(33, &mut state);
+    state.set_balance(payer.address().as_bytes(), 10_000);
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        super::super::identity_wallet_index_key(payer.address().as_bytes()).as_bytes(),
+        AGENT.as_bytes().to_vec(),
+    );
+    let payee = Address::new([0x93; 32]);
+
+    let auth = payer.authorize("x-1", &payee, 100, TNZO_ASSET, binding(0));
+    assert!(
+        submit_payer_settle(&mut state, payer_settle(&payer, &payee, 100, "x-1", &auth)).await,
+        "the rule before the gate refused a settlement"
+    );
+    assert_eq!(state.get_balance(payer.address().as_bytes()), 10_000 - 100);
+
+    super::super::set_governed_param_for_test(&mut state, SPEND_EXPIRY_GATE, 0);
+    let auth = payer.authorize("x-2", &payee, 100, TNZO_ASSET, binding(0));
+    assert!(
+        !submit_payer_settle(&mut state, payer_settle(&payer, &payee, 100, "x-2", &auth)).await,
+        "a settlement after the terms expired was not refused"
+    );
+    assert_eq!(state.get_balance(payer.address().as_bytes()), 10_000 - 100);
 }
 
 /// A payer with no registered identity pays exactly as before: the new
@@ -3212,6 +3353,7 @@ fn only_the_controller_requires_its_agents_ml_dsa_leg_naming_every_serving_node(
         );
         tx.public_key = Some(payer.key.public_key().p256.clone());
         tx.signing_digest = Some(digest.to_vec());
+        tx.block_timestamp_ms = Some(chrono::Utc::now().timestamp_millis());
         tx
     };
     let op = |nodes: Vec<AgentNodePqKey>| AccountKeysOp::RequireAgentPqLeg {
@@ -3372,4 +3514,260 @@ fn a_suspended_asset_pays_no_validator_and_nothing_stands_in_for_it() {
         crate::token_ledger::balance(&state, &y, validator.as_bytes()),
         0
     );
+}
+
+/// Ten active validators, a cover reserve holding a year of all ten's cost
+/// in a stable at par, and `usage_e6` of stable fees booked since the last
+/// close; closes epoch 0 and returns what the reserve holds after, the
+/// epoch's cover and its log.
+fn cover_ten(
+    usage_e6: u128,
+    params: &[(&str, u64)],
+) -> (u128, crate::native::validator_cover::EpochCover, Vec<u8>) {
+    let mut state = StateAdapter::new();
+    cover_world(&mut state);
+    for (key, value) in params {
+        super::super::set_governed_param_for_test(&mut state, key, *value);
+    }
+    let each = crate::native::validator_cover::cost_each_e6(&state, 365);
+    let (y, _) = treasury_stable(&mut state, "USDY", "USD", 1_000_000_000, 10 * each * 400);
+    let treasury = super::super::derive_treasury_address();
+    super::move_asset(
+        &mut state,
+        &y,
+        treasury.as_bytes(),
+        crate::native::validator_cover::reserve_address().as_bytes(),
+        10 * each * 365,
+        0,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    crate::native::validator_cover::note_stable_fee(&mut state, &y, usage_e6, &mut Vec::new())
+        .unwrap();
+    let validators: Vec<Address> = (0..10u8).map(|i| Address::new([0xa0 + i; 32])).collect();
+    let mut logs = Vec::new();
+    let cover = crate::native::validator_cover::cover_epoch(
+        &mut state,
+        0,
+        &validators,
+        365,
+        86_400_000,
+        &mut Vec::new(),
+        &mut logs,
+    )
+    .unwrap();
+    let reserve = crate::native::validator_cover::reserve_address();
+    let held = crate::token_ledger::balance(&state, &y, reserve.as_bytes());
+    (held, cover, logs[0].data.clone())
+}
+
+/// Until its gate is set, funded seats change nothing: the cover, its log
+/// and the state it writes are what they are with no floor set.
+#[test]
+fn dormant_funded_seats_leave_the_cover_as_it_was() {
+    let (plain_held, plain, plain_log) = cover_ten(1, &[]);
+    let (held, cover, log) = cover_ten(1, &[(crate::native::validator_cover::SEAT_FLOOR_PARAM, 3)]);
+    assert_eq!(cover, plain);
+    assert_eq!(log, plain_log);
+    assert_eq!(plain.paid_e6, plain.need_e6);
+    assert_eq!(held, plain_held);
+}
+
+/// Live, a thin epoch draws on the reserve for the floor's seats only, split
+/// equally over the whole set; the rest of the cost is left to the base
+/// reward, and the log says how many seats were funded.
+#[test]
+fn a_thin_epoch_funds_the_floors_seats_and_keeps_the_rest_of_the_reserve() {
+    let live = [(crate::native::validator_cover::SEATS_GATE, 0)];
+    let (held, cover, log) = cover_ten(1, &live);
+    let (plain_held, _, _) = cover_ten(1, &[]);
+    let each = cover.need_e6 / 10;
+    assert_eq!(cover.validators, 10);
+    assert_eq!(cover.paid_e6, 7 * each / 10 * 10);
+    assert_eq!(held - plain_held, cover.need_e6 - cover.paid_e6);
+    let log: serde_json::Value = serde_json::from_slice(&log).unwrap();
+    assert_eq!(log["funded_seats"], 7);
+}
+
+/// Live, usage that carries the whole set funds every seat.
+#[test]
+fn usage_that_carries_the_set_funds_every_seat() {
+    let live = [(crate::native::validator_cover::SEATS_GATE, 0)];
+    let (_, thin, _) = cover_ten(1, &live);
+    let each = thin.need_e6 / 10;
+    let (_, cover, log) = cover_ten(10 * each, &live);
+    assert_eq!(cover.paid_e6, cover.need_e6);
+    let log: serde_json::Value = serde_json::from_slice(&log).unwrap();
+    assert_eq!(log["funded_seats"], 10);
+    let (_, mid, log) = cover_ten(
+        3 * each + 1,
+        &[
+            (crate::native::validator_cover::SEATS_GATE, 0),
+            (crate::native::validator_cover::SEAT_FLOOR_PARAM, 0),
+        ],
+    );
+    let log: serde_json::Value = serde_json::from_slice(&log).unwrap();
+    assert_eq!(log["funded_seats"], 4);
+    assert_eq!(mid.paid_e6, 4 * each / 10 * 10);
+}
+
+/// A 100-unit stable payment settled on a fresh chain, with the intake
+/// ceiling's gate set when `live` and `treasury_tnzo` in the treasury;
+/// returns what the payee and the treasury gained in the asset, what was
+/// recorded as waived, and whether the waived record was written at all.
+fn stable_intake(live: bool, treasury_tnzo: u128) -> (u128, u128, u128, bool) {
+    let mut state = StateAdapter::new();
+    if live {
+        super::super::set_governed_param_for_test(
+            &mut state,
+            crate::native::settlement_asset::INTAKE_EXPOSURE_GATE,
+            0,
+        );
+    }
+    let treasury = super::super::derive_treasury_address();
+    state.set_balance(treasury.as_bytes(), treasury_tnzo);
+    let payer = Payer::enrolled(5, &mut state);
+    let payee = Address::new([0x96; 32]);
+    let (x, usdx) = token(&mut state, payer.address().as_bytes(), 1_000_000_000);
+    let p = native(
+        &payer.address(),
+        &payee,
+        &usdx,
+        100_000_000,
+        binding(0),
+        "intake-1",
+    );
+    settle_native(&mut state, CHAIN, 7, &p, &mut Vec::new()).unwrap();
+    (
+        crate::token_ledger::balance(&state, &x, payee.as_bytes()),
+        crate::token_ledger::balance(&state, &x, treasury.as_bytes()),
+        crate::native::settlement_asset::intake_waived(&state, &x),
+        state
+            .get_storage(
+                &SYSTEM_ADDRESS,
+                format!("treasury_intake_waived:{}", hex::encode(x)).as_bytes(),
+            )
+            .is_some_and(|b| !b.is_empty()),
+    )
+}
+
+/// Dormant, a stable payment pays the treasury its share however much of
+/// the asset that makes it hold. Live, the treasury's share past the
+/// asset's exposure ceiling is waived to the payee and recorded: the payment
+/// still settles, the payee gains exactly what the treasury forgoes, and a
+/// treasury with room takes its whole share.
+#[test]
+fn the_treasury_share_past_an_assets_ceiling_is_waived_to_the_payee() {
+    let (payee, treasury, waived, recorded) = stable_intake(false, 0);
+    assert!(treasury > 0);
+    assert_eq!(waived, 0);
+    assert!(!recorded, "a dormant rule writes nothing");
+
+    let (live_payee, live_treasury, live_waived, _) = stable_intake(true, 0);
+    assert_eq!(
+        live_treasury, 0,
+        "an empty treasury has no room in any one asset"
+    );
+    assert_eq!(live_waived, treasury);
+    assert_eq!(live_payee - payee, live_waived);
+
+    let roomy = 1_000_000_000 * tenzro_types::constants::ONE_TNZO;
+    assert_eq!(stable_intake(true, roomy), (payee, treasury, 0, false));
+}
+
+/// A chain with the bond on-ramp's gate set when `live`, a funded treasury,
+/// and a buyer holding a stable asset; returns the state, the buyer and the
+/// asset.
+fn onramp_world(live: bool, cap_tnzo: u64) -> (StateAdapter, Address, [u8; 32]) {
+    let mut state = StateAdapter::new();
+    if live {
+        super::super::set_governed_param_for_test(&mut state, crate::native::bond_onramp::GATE, 0);
+    }
+    super::super::set_governed_param_for_test(
+        &mut state,
+        crate::native::bond_onramp::CAP_PARAM,
+        cap_tnzo,
+    );
+    let treasury = super::super::derive_treasury_address();
+    state.set_balance(
+        treasury.as_bytes(),
+        1_000_000_000 * tenzro_types::constants::ONE_TNZO,
+    );
+    let buyer = Address::new([0x97; 32]);
+    let (x, _) = token(&mut state, buyer.as_bytes(), 1_000_000_000);
+    (state, buyer, x)
+}
+
+fn buy(
+    state: &mut StateAdapter,
+    buyer: &Address,
+    x: [u8; 32],
+    units: u128,
+    min_tnzo: u128,
+) -> Result<()> {
+    let op = tenzro_native_ops::bond_with_stable::BondWithStableOp {
+        asset: x.to_vec(),
+        units,
+        min_tnzo,
+    };
+    crate::native::bond_onramp::apply(
+        state,
+        buyer.as_bytes(),
+        &tenzro_native_ops::encode(&op),
+        1_000,
+    )
+    .map(|_| ())
+}
+
+/// Dormant, nothing can be bought; live with the genesis cap of zero,
+/// nothing is paid out either.
+#[test]
+fn the_bond_onramp_pays_nothing_until_the_owner_switches_it_on() {
+    let (mut state, buyer, x) = onramp_world(false, 1_000_000);
+    assert!(buy(&mut state, &buyer, x, 100_000_000, 0).is_err());
+    let (mut state, buyer, x) = onramp_world(true, 0);
+    assert!(buy(&mut state, &buyer, x, 100_000_000, 0).is_err());
+    assert_eq!(
+        crate::native::staking::bonded_stake_of(&state, buyer.as_bytes()),
+        0
+    );
+}
+
+/// Live, a purchase pays the stable to the treasury and the quoted TNZO
+/// straight into the buyer's validator bond: the buyer's free balance never
+/// changes, a purchase under the buyer's least is refused, and the bond
+/// leaves only through unbonding, paid out after the governed period.
+#[test]
+fn a_bought_bond_is_locked_like_any_other_bond() {
+    let (mut state, buyer, x) = onramp_world(true, 1_000_000);
+    let treasury = super::super::derive_treasury_address();
+    let p = crate::native::settlement_asset::permitted(&state, &x).unwrap();
+    let units = 100_000_000;
+    let tnzo = crate::native::bond_onramp::quote(&state, &p, units);
+    assert!(tnzo > 0);
+    assert!(buy(&mut state, &buyer, x, units, tnzo + 1).is_err());
+
+    let held = state.get_balance(treasury.as_bytes());
+    buy(&mut state, &buyer, x, units, tnzo).unwrap();
+    assert_eq!(state.get_balance(buyer.as_bytes()), 0);
+    assert_eq!(
+        crate::native::staking::bonded_stake_of(&state, buyer.as_bytes()),
+        tnzo
+    );
+    assert_eq!(held - state.get_balance(treasury.as_bytes()), tnzo);
+    assert_eq!(
+        crate::token_ledger::balance(&state, &x, treasury.as_bytes()),
+        units
+    );
+    assert_eq!(crate::native::bond_onramp::paid_in_epoch(&state, 0), tnzo);
+
+    crate::native::staking::begin_unbonding(&mut state, buyer.as_bytes(), 2_000).unwrap();
+    assert_eq!(
+        crate::native::staking::bonded_stake_of(&state, buyer.as_bytes()),
+        0
+    );
+    let early =
+        crate::native::staking::withdraw_unbonded(&mut state, buyer.as_bytes(), 3_000).unwrap_or(0);
+    assert_eq!(early, 0, "nothing is paid out before the unbonding period");
+    assert_eq!(state.get_balance(buyer.as_bytes()), 0);
 }

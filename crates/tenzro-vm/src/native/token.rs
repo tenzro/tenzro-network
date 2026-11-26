@@ -383,7 +383,7 @@ impl NativeExecutor {
             Some((balance - cost).to_le_bytes().to_vec()),
         )];
         let mut logs = Vec::new();
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
 
         let (kind, out) = match &op {
             TokenOp::Create {

@@ -430,6 +430,7 @@ pub(super) fn commit(
                 payer_agent: plan.agent_did.clone(),
                 attribution: plan.attribution.clone(),
                 network_share_paid: false,
+                paid_at_ms: None,
             },
             changes,
         )?;
@@ -446,7 +447,14 @@ pub(super) fn commit(
             permitted.rate_nano_usd,
             permitted.asset.decimals,
         );
-        super::super::settlement_asset::admit_inflow(state, &asset, permitted, worth, changes)?;
+        super::super::settlement_asset::admit_inflow(
+            state,
+            &asset,
+            permitted,
+            debtor.as_bytes(),
+            worth,
+            changes,
+        )?;
         super::collect_in_kind(
             state,
             &asset,
@@ -462,6 +470,7 @@ pub(super) fn commit(
                 payer_agent: plan.agent_did.clone(),
                 attribution: plan.attribution.clone(),
                 network_share_paid: false,
+                paid_at_ms: None,
             },
             now_ms as i64,
             changes,

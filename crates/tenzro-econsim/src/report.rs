@@ -207,7 +207,7 @@ pub struct Report {
     pub skipped: Vec<String>,
     /// Whether every phase ran; false in a report saved part way.
     pub complete: bool,
-    /// Burn against mint over agent counts.
+    /// Burn against rewards paid from the pool over agent counts.
     pub design_equilibrium: Vec<crate::bme::Equilibrium>,
     /// Verdict: PASS, WARN or FAIL.
     pub verdict: String,
@@ -473,7 +473,7 @@ impl Report {
             );
             let _ = writeln!(
                 s,
-                "| factor | output | first order | total |\n|---|---|---|---|"
+                "| factor | output | first order (95% interval) | total (95% interval) |\n|---|---|---|---|"
             );
             let mut so = a.sobol.clone();
             so.sort_by(|x, y| {
@@ -484,8 +484,15 @@ impl Report {
             for x in so.iter().filter(|x| x.total > 0.05).take(30) {
                 let _ = writeln!(
                     s,
-                    "| {} | {} | {:.2} | {:.2} |",
-                    x.factor, x.output, x.first, x.total
+                    "| {} | {} | {:.2} ({:.2} to {:.2}) | {:.2} ({:.2} to {:.2}) |",
+                    x.factor,
+                    x.output,
+                    x.first,
+                    x.first_ci.0,
+                    x.first_ci.1,
+                    x.total,
+                    x.total_ci.0,
+                    x.total_ci.1
                 );
             }
             let _ = writeln!(
@@ -862,7 +869,7 @@ impl Report {
             }
             let _ = writeln!(
                 s,
-                "\n| agents | fees USD/yr | first day burn > mint | price after horizon | cost to a third USD |\n|---|---|---|---|---|"
+                "\n| agents | fees USD/yr | first day burn > rewards paid | price after horizon | cost to a third USD |\n|---|---|---|---|---|"
             );
             for e in &self.design_equilibrium {
                 let _ = writeln!(
@@ -870,7 +877,7 @@ impl Report {
                     "| {} | {} | {} | {} | {} |",
                     num(e.agents),
                     num(e.fees_usd_year),
-                    e.day_burn_exceeds_mint
+                    e.day_burn_exceeds_paid
                         .map(|d| d.to_string())
                         .unwrap_or_else(|| "not within horizon".into()),
                     num(e.price_end),

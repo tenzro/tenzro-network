@@ -1180,9 +1180,11 @@ mod tests {
 
     #[test]
     fn a_new_endpoint_key_with_no_record_is_a_new_subject_but_limited_by_source() {
-        let mut p = OnboardingPolicy::default();
-        p.max_new_subjects_per_source_hour = 3;
-        p.max_sessions_per_source = 100;
+        let p = OnboardingPolicy {
+            max_new_subjects_per_source_hour: 3,
+            max_sessions_per_source: 100,
+            ..OnboardingPolicy::default()
+        };
         let mut l = OnboardingLedger::new(p);
         for i in 0..3 {
             l.contact(i, &who(&format!("k{i}"), None, Some("src")))
@@ -1246,10 +1248,12 @@ mod tests {
 
     #[test]
     fn sessions_are_bounded_in_total_per_source_and_per_root() {
-        let mut p = OnboardingPolicy::default();
-        p.max_sessions = 5;
-        p.max_sessions_per_source = 2;
-        p.max_sessions_per_root = 1;
+        let p = OnboardingPolicy {
+            max_sessions: 5,
+            max_sessions_per_source: 2,
+            max_sessions_per_root: 1,
+            ..OnboardingPolicy::default()
+        };
         let mut l = OnboardingLedger::new(p);
         let (a, _) = l.contact(0, &who("a", Some("r1"), Some("s1"))).unwrap();
         assert_eq!(
@@ -1305,8 +1309,10 @@ mod tests {
 
     #[test]
     fn one_subject_on_several_connections_holds_one_session_until_the_last_closes() {
-        let mut p = OnboardingPolicy::default();
-        p.max_sessions_per_root = 1;
+        let p = OnboardingPolicy {
+            max_sessions_per_root: 1,
+            ..OnboardingPolicy::default()
+        };
         let mut l = OnboardingLedger::new(p);
         let w = who("e1", Some("r1"), Some("src"));
         let (s, left) = l.contact(0, &w).unwrap();
@@ -1350,8 +1356,10 @@ mod tests {
 
     #[test]
     fn a_session_takes_the_hardware_root_its_key_names_later() {
-        let mut p = OnboardingPolicy::default();
-        p.max_sessions_per_root = 1;
+        let p = OnboardingPolicy {
+            max_sessions_per_root: 1,
+            ..OnboardingPolicy::default()
+        };
         let mut l = OnboardingLedger::new(p);
         // Connected before any record named it, then named.
         let (s, _) = l.contact(0, &who("e1", None, None)).unwrap();
@@ -1396,11 +1404,13 @@ mod tests {
 
     #[test]
     fn the_ledger_is_bounded_and_fails_closed() {
-        let mut p = OnboardingPolicy::default();
-        p.max_tracked = 4;
-        p.max_sessions = 100;
-        p.max_sessions_per_source = 100;
-        p.max_new_subjects_per_source_hour = 100;
+        let p = OnboardingPolicy {
+            max_tracked: 4,
+            max_sessions: 100,
+            max_sessions_per_source: 100,
+            max_new_subjects_per_source_hour: 100,
+            ..OnboardingPolicy::default()
+        };
         let mut l = OnboardingLedger::new(p);
         // Each unrecorded subject takes one endpoint key.
         for i in 0..4 {

@@ -24,16 +24,24 @@
 //! | 0x500d2f6d | transferFrom(bytes32,address,address,uint256)        |
 //!
 //! The ERC-7943 (uRWA) interface, keyed by token id, reads and writes the
-//! same ledger through the same rule engine: `canTransact(bytes32,address)`,
+//! same ledger through the same rule engine. Once the final rules are live
+//! ([`crate::token_ledger::ERC7943_FINAL_KEY`]): `canSend(bytes32,address)`,
+//! `canReceive(bytes32,address)`,
 //! `canTransfer(bytes32,address,address,uint256)`,
 //! `getFrozenTokens(bytes32,address)`, `setFrozenTokens(bytes32,address,uint256)`,
 //! `forcedTransfer(bytes32,address,address,uint256)`, plus
-//! `facadeOf(bytes32) -> address` and `supportsInterface(bytes4)`.
+//! `facadeOf(bytes32) -> address` and `supportsInterface(bytes4)`. Until
+//! then `canTransact(bytes32,address)` stands where `canSend` and
+//! `canReceive` do, a freeze above the balance is refused, and a facade logs
+//! no ERC-7943 event.
 //!
 //! Every token also answers at its own facade address
 //! ([`facade_address`]): the standard ERC-20 functions and the standard
 //! ERC-7943 functions without a token-id argument, forwarded to this
 //! precompile with the id filled in. A facade has no storage of its own.
+//! Under the final rules it logs the standard events from its own address:
+//! `Frozen` for a changed freeze, and for a forced transfer `Frozen` (when
+//! the move reached into the freeze), then `Transfer`, then `ForcedTransfer`.
 //!
 //! `setFrozenTokens` and `forcedTransfer` act only for an issuer that holds
 //! the power alone under the token's manifest; a council-held power goes
@@ -77,7 +85,17 @@ pub fn selector(signature: &str) -> [u8; 4] {
 
 /// The standard ERC-7943 fungible functions (no token-id argument), whose
 /// selectors XOR to the interface id.
-pub const ERC7943_FUNCTIONS: [&str; 5] = [
+pub const ERC7943_FUNCTIONS: [&str; 6] = [
+    "forcedTransfer(address,address,uint256)",
+    "setFrozenTokens(address,uint256)",
+    "canSend(address)",
+    "canReceive(address)",
+    "getFrozenTokens(address)",
+    "canTransfer(address,address,uint256)",
+];
+
+/// The fungible functions served while the final rules are dormant.
+pub const ERC7943_DRAFT_FUNCTIONS: [&str; 5] = [
     "forcedTransfer(address,address,uint256)",
     "setFrozenTokens(address,uint256)",
     "canTransact(address)",
@@ -182,6 +200,40 @@ pub struct PendingChange {
 
 fn revert(msg: &str) -> Result<PrecompileResult> {
     Ok(PrecompileResult::revert(abi_error_string(msg), 0))
+}
+
+/// The final ERC-7943 refusal of a facade `transfer` or `transferFrom` that
+/// stays within the sender's balance but reaches into its frozen part:
+/// `ERC7943InsufficientUnfrozenBalance(account, amount, unfrozen)`. A
+/// transfer above the whole balance is left to the ledger's own refusal, as
+/// the standard asks.
+fn unfrozen_shortfall(
+    call: &mut PrecompileCall<'_>,
+    id: &[u8; 32],
+    factory_sel: [u8; 4],
+    args: &[u8],
+) -> Result<Option<PrecompileResult>> {
+    let (from, amount) = if factory_sel == selectors::TRANSFER {
+        (Some(call.env.caller), abi::decode_uint256_at(args, 32))
+    } else {
+        (
+            abi::decode_address_at(args, 0),
+            abi::decode_uint256_at(args, 64),
+        )
+    };
+    let (Some(from), Some(amount)) = (from, amount) else {
+        return Ok(None);
+    };
+    let held = call.sload_u128(balance_slot(id, &from))?;
+    let unfrozen = held.saturating_sub(call.sload_u128(frozen_slot(id, &from))?);
+    if amount > held || amount <= unfrozen {
+        return Ok(None);
+    }
+    let mut data = selector("ERC7943InsufficientUnfrozenBalance(address,uint256,uint256)").to_vec();
+    data.extend_from_slice(&abi::encode_address(&from));
+    data.extend_from_slice(&abi::encode_uint256(amount));
+    data.extend_from_slice(&abi::encode_uint256(unfrozen));
+    Ok(Some(PrecompileResult::revert(data, 0)))
 }
 
 pub(crate) fn token_slot(id: &[u8; 32]) -> [u8; 32] {
@@ -527,13 +579,17 @@ fn erc7943(
     caller: [u8; 20],
 ) -> Result<PrecompileResult> {
     let now_ms = (call.env.block_timestamp as i64).saturating_mul(1000);
+    let final_rules = call
+        .state
+        .feature_live(crate::token_ledger::ERC7943_FINAL_KEY);
     if sel == selector("supportsInterface(bytes4)") {
         let Some(word) = abi::word_at(args, 0) else {
             return revert("token factory: bad arguments");
         };
         let id = [word[0], word[1], word[2], word[3]];
         let yes = id == ERC165_INTERFACE_ID
-            || id == interface_id(&ERC7943_FUNCTIONS)
+            || (final_rules && id == interface_id(&ERC7943_FUNCTIONS))
+            || (!final_rules && id == interface_id(&ERC7943_DRAFT_FUNCTIONS))
             || id == interface_id(&ERC20_FUNCTIONS);
         return Ok(PrecompileResult::success(abi::encode_bool(yes), 0));
     }
@@ -546,7 +602,22 @@ fn erc7943(
             0,
         ));
     }
-    if sel == selector("canTransact(bytes32,address)") {
+    if final_rules && sel == selector("canSend(bytes32,address)") {
+        if abi::decode_address_at(args, 32).is_none() {
+            return revert("token factory: bad arguments");
+        }
+        let ok = match crate::token_ledger::read_record(call, &id)? {
+            Some(record) => crate::token_ledger::can_send(call, &id, &record, now_ms)?.is_ok(),
+            None => false,
+        };
+        return Ok(PrecompileResult::success(abi::encode_bool(ok), 0));
+    }
+    let can_receive = if final_rules {
+        "canReceive(bytes32,address)"
+    } else {
+        "canTransact(bytes32,address)"
+    };
+    if sel == selector(can_receive) {
         let Some(account) = abi::decode_address_at(args, 32) else {
             return revert("token factory: bad arguments");
         };
@@ -592,12 +663,14 @@ fn erc7943(
         )? {
             return revert(&reason);
         }
-        let held = call.sload_u128(balance_slot(&id, &account))?;
-        let Some(amount) = crate::token_ledger::freeze_within(amount, held) else {
-            return revert(&format!(
-                "token factory: the holder has {held}, the freeze is {amount}"
-            ));
-        };
+        if !final_rules {
+            let held = call.sload_u128(balance_slot(&id, &account))?;
+            if crate::token_ledger::freeze_within(amount, held).is_none() {
+                return revert(&format!(
+                    "token factory: the holder has {held}, the freeze is {amount}"
+                ));
+            }
+        }
         call.sstore_u128(frozen_slot(&id, &account), amount)?;
         let mut data = id.to_vec();
         data.extend_from_slice(&abi::encode_uint256(amount));
@@ -621,7 +694,8 @@ fn erc7943(
             };
         // The same rule the native forced transfer applies: no halt, lockup
         // or frozen amount stops it, but the recipient must be eligible, and
-        // the frozen amount drops to what the holder keeps.
+        // the frozen amount drops by the part of the move that reached into
+        // it.
         if let Err(refusal) =
             crate::token_ledger::can_receive(call, &id, &record, &to, amount, now_ms)?
         {
@@ -647,8 +721,9 @@ fn erc7943(
         // holder itself keeps its freeze.
         let left = call.sload_u128(from_slot)?;
         let frozen = call.sload_u128(frozen_slot(&id, &from))?;
-        if crate::token_ledger::frozen_after(frozen, left) != frozen {
-            call.sstore_u128(frozen_slot(&id, &from), left)?;
+        let frozen_now = crate::token_ledger::frozen_after(frozen, from_bal, left);
+        if frozen_now != frozen {
+            call.sstore_u128(frozen_slot(&id, &from), frozen_now)?;
         }
         let mut data = id.to_vec();
         data.extend_from_slice(&abi::encode_uint256(amount));
@@ -697,14 +772,15 @@ fn record_action(call: &mut PrecompileCall<'_>, id: &[u8; 32]) -> Result<()> {
     call.emit(vec![issuer_action_topic(), *id], data)
 }
 
-/// `Frozen(address indexed account, uint256 amount)`, with the token id
-/// leading the data.
+/// `Frozen(address indexed account, uint256 amount)`. The factory's own log
+/// leads the data with the token id; a facade's carries the amount alone.
 pub fn frozen_topic() -> [u8; 32] {
     Keccak256::digest(b"Frozen(address,uint256)").into()
 }
 
-/// `ForcedTransfer(address indexed from, address indexed to, uint256 amount)`,
-/// with the token id leading the data.
+/// `ForcedTransfer(address indexed from, address indexed to, uint256 amount)`.
+/// The factory's own log leads the data with the token id; a facade's
+/// carries the amount alone.
 pub fn forced_transfer_topic() -> [u8; 32] {
     Keccak256::digest(b"ForcedTransfer(address,address,uint256)").into()
 }
@@ -716,7 +792,7 @@ pub fn issuer_action_topic() -> [u8; 32] {
 
 /// Entry point for every facade address: the standard ERC-20 and ERC-7943
 /// functions of one token, forwarded to the factory with its id filled in.
-/// Logs a standard ERC-20 `Transfer` or `Approval` from the facade address.
+/// Logs the standard ERC-20 and ERC-7943 events from the facade address.
 pub fn token_facade_precompile(call: &mut PrecompileCall<'_>) -> Result<PrecompileResult> {
     let facade = call.env.address;
     call.env.address = crate::precompiles::PRECOMPILE_TOKEN_FACTORY;
@@ -759,13 +835,24 @@ pub fn token_facade_precompile(call: &mut PrecompileCall<'_>) -> Result<Precompi
     if sel == selector("supportsInterface(bytes4)") {
         return forward(call, sel, None, &args);
     }
+    let final_rules = call
+        .state
+        .feature_live(crate::token_ledger::ERC7943_FINAL_KEY);
     let factory_sel = match sel {
         s if s == selector("balanceOf(address)") => selectors::BALANCE_OF,
         s if s == selector("allowance(address,address)") => selectors::ALLOWANCE,
         s if s == selector("transfer(address,uint256)") => selectors::TRANSFER,
         s if s == selector("approve(address,uint256)") => selectors::APPROVE,
         s if s == selector("transferFrom(address,address,uint256)") => selectors::TRANSFER_FROM,
-        s if s == selector("canTransact(address)") => selector("canTransact(bytes32,address)"),
+        s if final_rules && s == selector("canSend(address)") => {
+            selector("canSend(bytes32,address)")
+        }
+        s if final_rules && s == selector("canReceive(address)") => {
+            selector("canReceive(bytes32,address)")
+        }
+        s if !final_rules && s == selector("canTransact(address)") => {
+            selector("canTransact(bytes32,address)")
+        }
         s if s == selector("canTransfer(address,address,uint256)") => {
             selector("canTransfer(bytes32,address,address,uint256)")
         }
@@ -780,11 +867,39 @@ pub fn token_facade_precompile(call: &mut PrecompileCall<'_>) -> Result<Precompi
         }
         _ => return revert("token facade: unknown selector"),
     };
+    if final_rules
+        && (factory_sel == selectors::TRANSFER || factory_sel == selectors::TRANSFER_FROM)
+        && let Some(refusal) = unfrozen_shortfall(call, &id, factory_sel, &args)?
+    {
+        return Ok(refusal);
+    }
+    let set_frozen = selector("setFrozenTokens(bytes32,address,uint256)");
+    let forced = selector("forcedTransfer(bytes32,address,address,uint256)");
+    // The account whose freeze the call may change, and the freeze before it.
+    let freeze_of = if final_rules && (factory_sel == set_frozen || factory_sel == forced) {
+        abi::decode_address_at(&args, 0)
+    } else {
+        None
+    };
+    let frozen_before = match freeze_of {
+        Some(account) => call.sload_u128(frozen_slot(&id, &account))?,
+        None => 0,
+    };
     let out = forward(call, factory_sel, Some(id), &args)?;
     if !out.success {
         return Ok(out);
     }
     let caller = call.env.caller;
+    if let Some(account) = freeze_of {
+        let frozen_now = call.sload_u128(frozen_slot(&id, &account))?;
+        if factory_sel == set_frozen || frozen_now != frozen_before {
+            call.state.emit_log(
+                facade,
+                vec![frozen_topic(), addr_topic(&account)],
+                abi::encode_uint256(frozen_now),
+            )?;
+        }
+    }
     let standard = match factory_sel {
         selectors::TRANSFER => Some((
             events::transfer_topic(),
@@ -804,6 +919,12 @@ pub fn token_facade_precompile(call: &mut PrecompileCall<'_>) -> Result<Precompi
             abi::decode_address_at(&args, 0),
             abi::decode_uint256_at(&args, 32),
         )),
+        s if final_rules && s == forced => Some((
+            events::transfer_topic(),
+            abi::decode_address_at(&args, 0).unwrap_or_default(),
+            abi::decode_address_at(&args, 32),
+            abi::decode_uint256_at(&args, 64),
+        )),
         _ => None,
     };
     if let Some((topic, a, Some(b), Some(amount))) = standard {
@@ -812,6 +933,13 @@ pub fn token_facade_precompile(call: &mut PrecompileCall<'_>) -> Result<Precompi
             vec![topic, addr_topic(&a), addr_topic(&b)],
             abi::encode_uint256(amount),
         )?;
+        if factory_sel == forced {
+            call.state.emit_log(
+                facade,
+                vec![forced_transfer_topic(), addr_topic(&a), addr_topic(&b)],
+                abi::encode_uint256(amount),
+            )?;
+        }
     }
     Ok(out)
 }

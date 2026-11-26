@@ -2,28 +2,28 @@
 //! content. Every test here reads the catalog through the same accessors a
 //! node uses, after installing the seed in this process.
 
-use std::sync::Once;
+use std::sync::LazyLock;
 
 use tenzro_catalog::*;
 
-fn seeded() {
-    static SEED: Once = Once::new();
-    SEED.call_once(|| {
+/// The seed, built once for this test binary.
+fn seeded() -> &'static Catalog {
+    static SEED: LazyLock<Catalog> = LazyLock::new(|| {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("seed");
         let entries = read_entries(&dir).expect("the seed parses");
         let (catalog, errors) = Catalog::build(entries);
         assert!(errors.is_empty(), "seed entries refused: {errors:?}");
-        store::install(catalog);
+        catalog
     });
+    &SEED
 }
 
-/// Each accessor the tests call installs the seed first.
+/// Each accessor the tests call reads the seed.
 macro_rules! seeded {
     ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
         $(
             fn $name($($arg: $ty),*) -> $ret {
-                seeded();
-                tenzro_catalog::$name($($arg),*)
+                seeded().$name($($arg),*)
             }
         )*
     };
@@ -32,7 +32,10 @@ macro_rules! seeded {
 seeded! {
     get_model_catalog() -> Vec<HfModelEntry>;
     get_model_by_id(id: &str) -> Option<HfModelEntry>;
-    get_model_families() -> Vec<String>;
+    get_rerank_catalog() -> Vec<HfModelEntry>;
+    get_rerank_model_by_id(id: &str) -> Option<HfModelEntry>;
+    get_decision_catalog() -> Vec<HfModelEntry>;
+    get_decision_model_by_id(id: &str) -> Option<HfModelEntry>;
     get_vision_catalog() -> Vec<OnnxVisionEntry>;
     get_vision_model_by_id(id: &str) -> Option<OnnxVisionEntry>;
     get_forecast_catalog() -> Vec<OnnxForecastEntry>;
@@ -46,24 +49,24 @@ seeded! {
     get_detection_catalog() -> Vec<OnnxDetectionEntry>;
     get_detection_model_by_id(id: &str) -> Option<OnnxDetectionEntry>;
     get_audio_catalog() -> Vec<OnnxAudioEntry>;
-    get_decision_catalog() -> Vec<HfModelEntry>;
-    get_decision_model_by_id(id: &str) -> Option<HfModelEntry>;
-    get_rerank_catalog() -> Vec<HfModelEntry>;
-    get_rerank_model_by_id(id: &str) -> Option<HfModelEntry>;
     get_tts_catalog() -> Vec<TtsModelEntry>;
     get_tts_model_by_id(id: &str) -> Option<TtsModelEntry>;
     get_video_catalog() -> Vec<OnnxVideoEntry>;
     get_video_model_by_id(id: &str) -> Option<OnnxVideoEntry>;
     get_media_gen_catalog() -> Vec<MediaGenModelEntry>;
     get_media_gen_model_by_id(id: &str) -> Option<MediaGenModelEntry>;
-    get_media_gen_models_for_kind(kind: tenzro_types::MediaGenKind) -> Vec<MediaGenModelEntry>;
     runnable_media_gen_model(model_id: &str) -> Result<MediaGenModelEntry, String>;
+    get_media_gen_models_for_kind(kind: tenzro_types::MediaGenKind) -> Vec<MediaGenModelEntry>;
     resolve_reasoning_effort(id: &str, effort: Option<&str>) -> Option<(String, String)>;
     resolve_enable_thinking(id: &str, budget: Option<u32>) -> bool;
-    entry(id: &str) -> Option<CatalogEntry>;
     moe_source(id: &str) -> Option<SourceCheckpoint>;
     permits_paid_use(id: &str) -> bool;
     license_tier_of(id: &str) -> Option<LicenseTier>;
+    get_model_families() -> Vec<String>;
+}
+
+fn entry(id: &str) -> Option<CatalogEntry> {
+    seeded().entry(id).cloned()
 }
 
 #[test]
@@ -101,8 +104,7 @@ fn paid_use_follows_the_licence_across_every_model_type() {
 /// pricing and admission read agrees for every entry.
 #[test]
 fn a_licence_that_restricts_paid_serving_is_never_listed_for_paid_serving() {
-    seeded();
-    let catalog = store::current();
+    let catalog = seeded();
     // Licences verified from their licence files to forbid serving for pay
     // without a separate grant (non-commercial, research-only, or a separate
     // licence for any Model-as-a-Service use with no revenue floor).
@@ -459,7 +461,6 @@ fn native_media_entries_pin_the_engine_revision_the_workspace_builds() {
         "qwen-image-2.1",
         "wan2.2-ti2v-5b",
         "janus-pro-1b",
-        "trellis2-4b",
     ] {
         assert!(native.iter().any(|e| e.id == id), "{id} is not native");
     }
@@ -636,6 +637,17 @@ fn flux3_image_klein_is_pinned_gated_and_planned() {
             );
         }
     }
+    // The undistilled Base runs classifier-free guidance at the model card's
+    // 4.0 over 50 steps.
+    let base = get_media_gen_model_by_id("flux-3-image-klein-base").expect("media entry");
+    assert!(!base.distilled);
+    assert_eq!(base.default_guidance_scale, 4.0);
+    assert_eq!(base.default_steps, 50);
+    assert!(
+        base.description.contains("guidance 4.0"),
+        "{}",
+        base.description
+    );
     for (id, file) in [
         ("flux-3-image-klein-fp8", "variants/fp8r/model.safetensors"),
         (
@@ -839,30 +851,6 @@ fn every_in_process_media_entry_pins_its_checkpoint() {
                 "{}",
                 e.id
             );
-            continue;
-        }
-        if e.pipeline_class == "Trellis2ImageTo3DPipeline" {
-            // One checkpoint directory: the pipeline's own models, the
-            // structure decoder it names in another repository and the image
-            // encoder, each at the path pipeline.json names it by.
-            let view = full.checkpoint_view(&[]).expect("no dependencies");
-            let at: Vec<&str> = view.iter().map(|f| f.at).collect();
-            for need in [
-                "pipeline.json",
-                "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
-                "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
-                "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors",
-                "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
-                "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
-                "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.json",
-                "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
-                "facebook/dinov3-vitl16-pretrain-lvd1689m/config.json",
-                "facebook/dinov3-vitl16-pretrain-lvd1689m/model.safetensors",
-            ] {
-                assert!(at.contains(&need), "{}: {need} not in the view", e.id);
-            }
-            // Only the 512 path is served, so the larger paths are not fetched.
-            assert!(!at.iter().any(|p| p.contains("_1024_")), "{}", e.id);
             continue;
         }
         if e.pipeline_class == "Flux3ActionPipeline" {
@@ -1346,6 +1334,25 @@ fn test_drafter_ids_resolve() {
                 drafter_entry.size_bytes,
                 entry.id,
                 entry.size_bytes,
+            );
+        }
+    }
+}
+
+/// A mixture-of-experts target pairs only a drafter trained with it (an MTP
+/// head or a DFlash block drafter). An independent drafter's tokens route to
+/// other experts than the target's own, so verifying a draft loads more
+/// experts than decoding would and the speculative gain is lost.
+#[test]
+fn a_mixture_of_experts_target_pairs_no_independent_drafter() {
+    for entry in get_model_catalog() {
+        if entry.moe.is_some() && entry.drafter_id.is_some() {
+            assert_ne!(
+                entry.mtp_kind,
+                MtpKind::Generic,
+                "MoE target `{}` pairs the independent drafter `{:?}`",
+                entry.id,
+                entry.drafter_id,
             );
         }
     }
@@ -1975,7 +1982,7 @@ fn an_unknown_tts_model_resolves_to_none() {
 ///
 /// Ignored by default — it hits the network, and CI stays hermetic.
 #[tokio::test]
-#[ignore = "hits the HuggingFace API; run with --run-ignored"]
+#[ignore = "hits the Hub; scripts/hub-pin-tests.sh runs it"]
 async fn media_gen_entries_still_satisfy_their_admission_rules() {
     #[derive(serde::Deserialize)]
     struct Sibling {
@@ -2016,7 +2023,7 @@ async fn media_gen_entries_still_satisfy_their_admission_rules() {
 
         // `gated` is `false` when open, or a string like "auto"/"manual".
         let hub_gated = info.gated != serde_json::Value::Bool(false);
-        if hub_gated != tenzro_catalog::entry(&entry.id).is_some_and(|e| e.gated) {
+        if hub_gated != seeded().entry(&entry.id).is_some_and(|e| e.gated) {
             problems.push(format!(
                 "{}: the Hub reports gated = {}",
                 entry.id, info.gated
@@ -2197,7 +2204,6 @@ fn test_media_gen_catalog_membership() {
             "qwen-image-edit",
             "qwen-image-flash",
             "qwen-image-gguf",
-            "trellis2-4b",
             "wan2.1-flf2v-14b",
             "wan2.2-i2v-a14b",
             "wan2.2-t2v-a14b",
@@ -2364,7 +2370,7 @@ fn test_media_gen_kind_filter() {
 // network-gated `verify_promotable_entries_resolve_on_hf` (marked
 // `#[ignore]`) hits the HF API for every promotable entry and is the
 // CI-able regression guard — run with
-// `cargo test -p tenzro-model -- --ignored verify_promotable`.
+// `scripts/hub-pin-tests.sh`.
 
 /// Returns true if `name` looks like the first shard of a
 /// gguf-split set (`...-00001-of-000NN.gguf`).
@@ -2483,9 +2489,9 @@ fn test_gated_entries_are_explicitly_known() {
 /// Network-gated: verifies every promotable GGUF entry resolves on
 /// HuggingFace (repo exists AND the exact `hf_filename` is present).
 /// Ignored by default so offline/`cargo test` stays hermetic; run in
-/// CI with `--ignored`.
+/// `scripts/hub-pin-tests.sh`.
 #[tokio::test]
-#[ignore = "network: hits huggingface.co — run with --ignored in CI"]
+#[ignore = "hits the Hub; scripts/hub-pin-tests.sh runs it"]
 async fn verify_promotable_entries_resolve_on_hf() {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -2582,7 +2588,7 @@ async fn verify_promotable_entries_resolve_on_hf() {
 ///
 /// Network-gated for the same reason as its GGUF sibling.
 #[tokio::test]
-#[ignore = "network: hits huggingface.co — run with --ignored in CI"]
+#[ignore = "hits the Hub; scripts/hub-pin-tests.sh runs it"]
 async fn verify_onnx_catalog_entries_resolve_on_hf() {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -2677,12 +2683,10 @@ async fn verify_onnx_catalog_entries_resolve_on_hf() {
 }
 
 /// Janus-Pro writes images as tokens of its backbone: native, one step per
-/// token of its 24x24 grid, under the DeepSeek model licence. TRELLIS.2 is
-/// native on its 512 path and gated by the licence of its image encoder,
-/// stricter than the MIT of its own weights. HunyuanImage 3.0 is listed for
-/// a large host only and stays planned.
+/// token of its 24x24 grid, under the DeepSeek model licence. HunyuanImage 3.0
+/// is listed for a large host only and stays planned.
 #[test]
-fn unified_image_and_3d_entries_record_how_they_are_served() {
+fn unified_image_entries_record_how_they_are_served() {
     let janus = get_media_gen_model_by_id("janus-pro-1b").expect("catalogued");
     assert!(runnable_media_gen_model("janus-pro-1b").is_ok());
     assert_eq!(janus.default_steps, 24 * 24);
@@ -2691,16 +2695,6 @@ fn unified_image_and_3d_entries_record_how_they_are_served() {
         licence("janus-pro-1b").id.as_deref(),
         Some("deepseek-model")
     );
-
-    let trellis = get_media_gen_model_by_id("trellis2-4b").expect("catalogued");
-    assert!(runnable_media_gen_model("trellis2-4b").is_ok());
-    assert_eq!(trellis.kinds, [tenzro_types::MediaGenKind::Image23d]);
-    assert_eq!(trellis.default_voxel_resolution, Some(512));
-    let e = entry("trellis2-4b").expect("catalogued");
-    assert!(e.gated);
-    assert_eq!(e.licence.tier, LicenseTier::Permissive);
-    assert_eq!(e.licence.effective_tier(), LicenseTier::CommercialCustom);
-    assert_eq!(e.gating_licence(), Some("dinov3"));
 
     let hy3 = get_media_gen_model_by_id("hunyuan-image-3.0").expect("catalogued");
     assert!(runnable_media_gen_model("hunyuan-image-3.0").is_err());
@@ -2734,12 +2728,11 @@ fn planned_media_models_are_listed_and_refused() {
 
 #[test]
 fn every_entry_names_the_units_it_is_billed_on() {
-    seeded();
     let registered: std::collections::BTreeMap<String, bool> = tenzro_types::meter::genesis_units()
         .into_iter()
         .map(|u| (u.id, u.billable))
         .collect();
-    for entry in store::current().entries() {
+    for entry in seeded().entries() {
         let billed = entry.model.billed_on();
         assert!(!billed.is_empty(), "{} names no billable unit", entry.id());
         for unit in billed {

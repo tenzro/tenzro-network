@@ -1,5 +1,5 @@
 /**
- * Chain operations: tokens, NFTs, ABI encoding, staking, validators, governance, contracts, TEE and ZK, storage, events with proofs, quotas and the network's other registries.
+ * Chain operations: tokens, NFTs, ABI encoding, staking, validators, governance, contracts, TEE and ZK, storage, compute rental, data availability, events with proofs, quotas and the network's other registries.
  */
 export { GovernanceClient, parameterChangeProposal, reinstateValidatorProposal, verifyGovernanceReceipt } from "./governance";
 export type { GovernanceReceiptReport, TreasuryAccounts } from "./governance";
@@ -12,8 +12,35 @@ export type {
 } from "./trust";
 export type {
   StoredObject,
+  Placement,
   StorageStatus,
 } from "./storage";
+export { ComputeClient, SLA_EPOCH_MS, rentTransaction } from "./compute";
+export type {
+  ClaimState,
+  ComputeBond,
+  ComputeBondParams,
+  ComputeClaim,
+  ComputeClaimList,
+  PriceFeed,
+  PriceFeedEntry,
+  PriceFeedQuery,
+  RentRequest,
+  WireU128,
+} from "./compute";
+export { DaClient } from "./da";
+export type {
+  DaAvailabilityList,
+  DaAvailabilityScore,
+  DaBlob,
+  DaBlobCertificate,
+  DaBlobList,
+  DaChallengeList,
+  DaChallengeOutcome,
+  DaChallengeRecord,
+  DaCommittee,
+  DaCommitteeMember,
+} from "./da";
 export { StakingClient } from "./staking";
 export type { RoleEndpoint, RoleEndpoints } from "./staking";
 export { TokenClient } from "./token";
@@ -99,7 +126,9 @@ export type {
   SlaProbeIssued,
   SlaOutstandingProbe,
   SlaOutstandingProbes,
+  SlaEnergyReport,
   SlaParams,
+  SlaTierEnergy,
 } from "./sla";
 export { SnapshotClient } from "./snapshot";
 export type {
@@ -119,6 +148,7 @@ export type {
 export type {
   EventFilter,
   EventPage,
+  NodeEvent,
 } from "./events";
 export type {
   CreateTokenParams,

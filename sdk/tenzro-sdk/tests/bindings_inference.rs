@@ -7,11 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tenzro_sdk::TenzroClient;
-use tenzro_sdk::inference::{IntentParams, RouteOutcome};
 use tenzro_sdk::multimodal::{
     DecisionOption, DecisionQuestion, DetectParams, EmbedInput, ForecastParams, ImageEmbedParams,
     LoadModelParams, LoadVideoModelParams, SegmentParams, TaskRouting, TextEmbedParams,
-    TextSegmentParams, TranscribeParams, VideoEmbedParams,
+    TextSegmentParams, TranscribeParams, TranscribeRecordingParams, VideoEmbedParams,
 };
 use tenzro_sdk::provider::{
     ChatMessage, ChatOptions, InstallSealedModelRequest, MicroNodeIdentity, SealModelRequest,
@@ -133,6 +132,7 @@ fn registry_entry() -> Value {
 
 fn answers() -> HashMap<&'static str, Value> {
     HashMap::from([
+        ("tenzro_transcribeStream", json!({ "events": [] })),
         (
             "tenzro_chat",
             json!({
@@ -167,22 +167,6 @@ fn answers() -> HashMap<&'static str, Value> {
                 "served_models": 1, "role_stakes": [{ "role": "ai", "bonded": "1" }], "utilization": "Active",
             }),
         ),
-        (
-            "tenzro_computeBondParams",
-            json!({ "min_bond_wei": "1000", "cooldown_ms": 60000 }),
-        ),
-        (
-            "tenzro_getComputeBond",
-            json!({
-                "provider_did": "did:tenzro:machine:a", "provider_address": "0xab", "amount": "5",
-                "status": "Active", "cooldown_until": null, "vault": "0xcd", "is_eligible": true,
-                "effective_amount": "5",
-            }),
-        ),
-        (
-            "tenzro_listComputeBonds",
-            json!({ "count": 0, "bonds": [] }),
-        ),
         ("tenzro_listModelEndpoints", json!([])),
         (
             "tenzro_listProviders",
@@ -191,6 +175,7 @@ fn answers() -> HashMap<&'static str, Value> {
                     { "endpoint_id": "e1", "provider_address": "0xab", "is_local": true },
                     { "did": "did:tenzro:machine:agent", "source": "delegated" }
                 ],
+                "operators": { "machines": 2, "distinct_operators": 1, "without_identity": 1 },
                 "next_cursor": null
             }),
         ),
@@ -208,17 +193,13 @@ fn answers() -> HashMap<&'static str, Value> {
             }),
         ),
         (
-            "tenzro_routeIntent",
-            json!({ "model_id": MODEL, "tier": "fast", "reason": "cheapest" }),
-        ),
-        (
             "tenzro_getGeneration",
             json!({ "id": "gen-1", "model": MODEL, "input_tokens": 2 }),
         ),
         ("tenzro_listInferenceUsage", json!({ "records": [] })),
         (
             "tenzro_signChallengeVote",
-            json!({ "voter": "0xvv", "public_key": "pk", "signature": "sig" }),
+            json!({ "voter": "0xvv", "public_key": "pk", "commit_hash": "h", "signature": "sig" }),
         ),
         ("tenzro_listForecastCatalog", json!({ "models": [] })),
         ("tenzro_listVisionCatalog", json!({ "models": [] })),
@@ -398,6 +379,7 @@ async fn provider_bindings_send_what_the_node_reads() {
             visibility: Some(Visibility::Gated),
             max_concurrent: Some(4),
             load_drafter: Some(false),
+            context_length: Some(32_768),
         },
     )
     .await
@@ -405,7 +387,7 @@ async fn provider_bindings_send_what_the_node_reads() {
     node.expect(
         &mut seen,
         "tenzro_serveModel",
-        json!({ "model_id": MODEL, "visibility": "gated", "max_concurrent": 4, "load_drafter": false }),
+        json!({ "model_id": MODEL, "visibility": "gated", "max_concurrent": 4, "load_drafter": false, "context_length": 32_768 }),
     );
     p.stop_model(MODEL).await.unwrap();
     node.expect(&mut seen, "tenzro_stopModel", json!({ "model_id": MODEL }));
@@ -537,24 +519,8 @@ async fn provider_bindings_send_what_the_node_reads() {
     p.get_node_status().await.unwrap();
     node.expect(&mut seen, "tenzro_getNodeStatus", json!([]));
 
-    let params = p.compute_bond_params().await.unwrap();
-    assert_eq!(params.min_bond_wei, "1000");
-    node.expect(&mut seen, "tenzro_computeBondParams", json!([]));
-    let bond = p
-        .get_compute_bond("did:tenzro:machine:a")
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(bond.is_eligible);
-    node.expect(
-        &mut seen,
-        "tenzro_getComputeBond",
-        json!([{ "provider_did": "did:tenzro:machine:a" }]),
-    );
-    assert!(p.list_compute_bonds().await.unwrap().is_empty());
-    node.expect(&mut seen, "tenzro_listComputeBonds", json!([]));
     assert_eq!(
-        p.list_providers().await.unwrap()[0].provider_address,
+        p.list_providers().await.unwrap().providers[0].provider_address,
         "0xab"
     );
     node.expect(
@@ -562,13 +528,19 @@ async fn provider_bindings_send_what_the_node_reads() {
         "tenzro_listProviders",
         json!({ "limit": 200, "cursor": null }),
     );
-    p.quote_inference(MODEL, json!({ "input_tokens": 800 }), Some("receipt"), None)
-        .await
-        .unwrap();
+    p.quote_inference(
+        MODEL,
+        json!({ "input_tokens": 800 }),
+        Some("receipt"),
+        None,
+        Some("carbon"),
+    )
+    .await
+    .unwrap();
     node.expect(
         &mut seen,
         "tenzro_quoteInference",
-        json!({ "model": MODEL, "units": { "input_tokens": 800 }, "verification": "receipt", "provider": null }),
+        json!({ "model": MODEL, "units": { "input_tokens": 800 }, "verification": "receipt", "provider": null, "order": "carbon" }),
     );
 
     p.get_sealed_model(MODEL).await.unwrap();
@@ -670,26 +642,6 @@ async fn provider_bindings_send_what_the_node_reads() {
         json!({ "model_id": MODEL, "limit": 2 }),
     );
 
-    p.compute_get_claim("0x01").await.unwrap();
-    node.expect(
-        &mut seen,
-        "tenzro_computeGetClaim",
-        json!({ "claim_id": "0x01" }),
-    );
-    p.compute_list_claims("0xab", Some(5)).await.unwrap();
-    node.expect(
-        &mut seen,
-        "tenzro_computeListClaims",
-        json!({ "party": "0xab", "limit": 5 }),
-    );
-    p.compute_price_feed(Some(MODEL), None, Some(true), None)
-        .await
-        .unwrap();
-    node.expect(
-        &mut seen,
-        "tenzro_computePriceFeed",
-        json!({ "model_id": MODEL, "region": null, "attested_only": true, "limit": null }),
-    );
     p.build_model_manifest(MODEL).await.unwrap();
     node.expect(
         &mut seen,
@@ -718,7 +670,7 @@ async fn provider_bindings_send_what_the_node_reads() {
         json!([{ "model": MODEL, "input": "hi", "sponsor": "did:tenzro:machine:s", "max_tokens": 32 }]),
     );
 
-    assert_eq!(seen.len(), 46, "{seen:?}");
+    assert_eq!(seen.len(), 40, "{seen:?}");
 }
 
 #[tokio::test]
@@ -743,38 +695,6 @@ async fn inference_bindings_send_what_the_node_reads() {
         "tenzro_inferenceRequest",
         json!([{ "model_id": MODEL, "input": "hi", "max_tokens": 16 }]),
     );
-    let decision = i.route_intent(&IntentParams::new("chat")).await.unwrap();
-    assert_eq!(decision.model_id, MODEL);
-    node.expect_fields(
-        &mut seen,
-        "tenzro_routeIntent",
-        json!({ "use_case": "chat" }),
-    );
-    i.chat_by_intent(
-        &IntentParams::new("chat"),
-        json!([{ "role": "user", "content": "hi" }]),
-    )
-    .await
-    .unwrap();
-    node.expect_fields(
-        &mut seen,
-        "tenzro_chatByIntent",
-        json!({ "use_case": "chat", "messages": [{ "role": "user", "content": "hi" }] }),
-    );
-    i.record_route_outcome(MODEL, 3, RouteOutcome::Resolved)
-        .await
-        .unwrap();
-    node.expect(
-        &mut seen,
-        "tenzro_recordRouteOutcome",
-        json!({ "model_id": MODEL, "cluster": 3, "outcome": "resolved" }),
-    );
-    i.route_difficulty_stats(Some(MODEL)).await.unwrap();
-    node.expect(
-        &mut seen,
-        "tenzro_routeDifficultyStats",
-        json!({ "model_id": MODEL }),
-    );
     i.router_metrics().await.unwrap();
     node.expect(&mut seen, "tenzro_getRouterMetrics", json!({}));
     i.get_provenance("ab").await.unwrap();
@@ -794,7 +714,9 @@ async fn inference_bindings_send_what_the_node_reads() {
     );
 
     let voter = RpcClient::new(&node.url, std::time::Duration::from_secs(10), None).unwrap();
-    i.commit_challenge_vote(&voter, "c1", "h").await.unwrap();
+    i.commit_challenge_vote(&voter, "c1", true, "s")
+        .await
+        .unwrap();
     {
         let mut sent = node.sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
@@ -803,7 +725,7 @@ async fn inference_bindings_send_what_the_node_reads() {
         assert_eq!(sign["method"], "tenzro_signChallengeVote");
         assert_eq!(
             sign["params"],
-            json!({ "challenge_id": "c1", "commit_hash": "h" })
+            json!({ "phase": "commit", "challenge_id": "c1", "verdict": true, "salt": "s" })
         );
         assert_eq!(commit["method"], "tenzro_commitChallengeVote");
         assert_eq!(
@@ -823,7 +745,7 @@ async fn inference_bindings_send_what_the_node_reads() {
         let sign = sent.pop().unwrap();
         assert_eq!(
             sign["params"],
-            json!({ "challenge_id": "c1", "verdict": true, "salt": "s" })
+            json!({ "phase": "reveal", "challenge_id": "c1", "verdict": true, "salt": "s" })
         );
         assert_eq!(reveal["method"], "tenzro_revealChallengeVote");
         assert_eq!(
@@ -832,19 +754,37 @@ async fn inference_bindings_send_what_the_node_reads() {
         );
         seen.insert("tenzro_revealChallengeVote".into());
     }
-    i.file_inference_challenge("h", "0xab", Some("r"))
+    let receipt = json!({ "machine_did": "did:tenzro:machine:p" });
+    let inputs = json!({ "kind": "prompt", "prompt": "p" });
+    i.file_inference_challenge("h", "0xab", Some("r"), &receipt, &inputs, None)
         .await
         .unwrap();
     node.expect(
         &mut seen,
         "tenzro_fileInferenceChallenge",
-        json!({ "commitment_hash": "h", "challenger": "0xab", "reason": "r" }),
+        json!({ "commitment_hash": "h", "challenger": "0xab", "reason": "r", "receipt": receipt, "inputs": inputs }),
     );
+    i.reexecute_challenge("c1", None).await.unwrap();
+    node.expect(
+        &mut seen,
+        "tenzro_reexecuteChallenge",
+        json!({ "challenge_id": "c1" }),
+    );
+    i.list_seat_duties().await.unwrap();
+    node.expect(&mut seen, "tenzro_listSeatDuties", json!({}));
     i.finalize_challenge("c1").await.unwrap();
     node.expect(
         &mut seen,
         "tenzro_finalizeChallenge",
         json!({ "challenge_id": "c1" }),
+    );
+    i.file_challenge_fault("c1", json!({ "receipt": 1 }))
+        .await
+        .unwrap();
+    node.expect(
+        &mut seen,
+        "tenzro_fileChallengeFault",
+        json!({ "challenge_id": "c1", "dispute": { "receipt": 1 } }),
     );
     i.get_inference_challenge("c1").await.unwrap();
     node.expect(
@@ -866,13 +806,23 @@ async fn inference_bindings_send_what_the_node_reads() {
         "tenzro_getInferenceCommitment",
         json!({ "commitment_hash": "h" }),
     );
-    i.verify_inference_commitment("h", "p", Some(json!({ "steps": 1 })))
-        .await
-        .unwrap();
+    i.verify_inference_commitment(
+        "h",
+        "p",
+        Some(json!({ "steps": 1 })),
+        Some(json!({ "steps": [] })),
+    )
+    .await
+    .unwrap();
     node.expect(
         &mut seen,
         "tenzro_verifyInferenceCommitment",
-        json!({ "commitment_hash": "h", "prompt": "p", "receipt": { "steps": 1 } }),
+        json!({
+            "commitment_hash": "h",
+            "prompt": "p",
+            "receipt": { "steps": 1 },
+            "commitment": { "steps": [] },
+        }),
     );
     i.audit_inference_challenge("c1").await.unwrap();
     node.expect(
@@ -909,7 +859,7 @@ async fn inference_bindings_send_what_the_node_reads() {
     i.moe_dispute_receipt("k").await.unwrap();
     node.expect(&mut seen, "tenzro_moeDisputeReceipt", json!({ "key": "k" }));
 
-    assert_eq!(seen.len(), 25, "{seen:?}");
+    assert_eq!(seen.len(), 24, "{seen:?}");
 }
 
 #[tokio::test]
@@ -1216,6 +1166,19 @@ async fn multimodal_bindings_send_what_the_node_reads() {
         "tenzro_transcribe",
         json!({ "model_id": "whisper", "audio_base64": "AA==" }),
     );
+    m.transcribe_recording(&TranscribeRecordingParams {
+        model_id: "whisper".into(),
+        audio_base64: "AA==".into(),
+        chunk_ms: Some(100),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    node.expect_fields(
+        &mut seen,
+        "tenzro_transcribeStream",
+        json!({ "model_id": "whisper", "audio_base64": "AA==", "chunk_ms": 100 }),
+    );
 
     catalog!(list_video_catalog, "tenzro_listVideoCatalog");
     assert!(
@@ -1258,7 +1221,7 @@ async fn multimodal_bindings_send_what_the_node_reads() {
     m.list_tts_catalog().await.unwrap();
     node.expect(&mut seen, "tenzro_listTtsCatalog", json!({}));
 
-    assert_eq!(seen.len(), 48, "{seen:?}");
+    assert_eq!(seen.len(), 49, "{seen:?}");
 }
 
 #[tokio::test]

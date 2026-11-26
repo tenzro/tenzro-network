@@ -37,6 +37,7 @@ use praecise_diffusion::{
 use praecise_runtime::image_gen::{JanusRequest, TokenSampling, generate_janus, unconditioned};
 use tenzro_types::{MediaGenExpertRole, MediaGenInputRole, MediaGenKind, MediaGenParams};
 
+use crate::catalog::CatalogCell;
 use crate::error::{ModelError, Result};
 use crate::model_host::{Engine, EngineModels, ModelHost};
 
@@ -355,6 +356,8 @@ fn planar_to_rgb(pixels: &[f32], side: usize) -> Vec<u8> {
 /// Media models loaded on this node.
 pub struct MediaRuntime {
     native: EngineModels<NativeModel>,
+    /// The node's catalog, read for each pipeline's checkpoint layout.
+    catalog: CatalogCell,
 }
 
 impl std::fmt::Debug for MediaRuntime {
@@ -384,17 +387,13 @@ pub const NATIVE_PIPELINES: &[&str] = &[
     "Trellis2ImageTo3DPipeline",
 ];
 
-impl Default for MediaRuntime {
-    fn default() -> Self {
-        Self::with_host(Arc::default())
-    }
-}
-
 impl MediaRuntime {
-    /// A runtime that claims models and admits requests through `host`.
-    pub fn with_host(host: Arc<ModelHost>) -> Self {
+    /// A runtime that claims models and admits requests through `host` and
+    /// reads checkpoint layouts from `catalog`.
+    pub fn with_host(host: Arc<ModelHost>, catalog: CatalogCell) -> Self {
         Self {
             native: EngineModels::new(Engine::Diffusion, host),
+            catalog,
         }
     }
 
@@ -426,6 +425,7 @@ impl MediaRuntime {
         file_bytes: u64,
         precision: Precision,
     ) -> Result<MediaModelInfo> {
+        let catalog = self.catalog.current();
         if !NATIVE_PIPELINES.contains(&pipeline_class) {
             return Err(ModelError::InvalidModel(format!(
                 "{model_id}: the native engine has no {pipeline_class} pipeline"
@@ -496,7 +496,8 @@ impl MediaRuntime {
                     let roots: Vec<_> = dirs.iter().filter(|d| *d != text).cloned().collect();
                     let p = Ltx2Pipeline::load_dir(&roots, text, opts).map_err(failed)?;
                     let d = (p.device().to_string(), p.resident_bytes());
-                    let distilled = tenzro_catalog::get_media_gen_model_by_id(model_id)
+                    let distilled = catalog
+                        .get_media_gen_model_by_id(model_id)
                         .is_some_and(|m| m.distilled);
                     (Pipeline::Ltx2(p), d.0, d.1, distilled)
                 }
@@ -504,7 +505,7 @@ impl MediaRuntime {
                     // An entry whose own files are the reference-conditioned
                     // transformer serves reference images; the rest serve
                     // prompts and keyframes.
-                    let reference = tenzro_catalog::entry(model_id).is_some_and(|e| {
+                    let reference = catalog.entry(model_id).is_some_and(|e| {
                         e.components
                             .iter()
                             .any(|c| c.view_path().starts_with("transformer_ref/"))
@@ -530,7 +531,8 @@ impl MediaRuntime {
                     (Pipeline::MatrixGame(p), d.0, d.1, false)
                 }
                 "JanusProPipeline" => {
-                    let gguf = tenzro_catalog::get_media_gen_model_by_id(model_id)
+                    let gguf = catalog
+                        .get_media_gen_model_by_id(model_id)
                         .and_then(|m| m.gguf_file)
                         .ok_or_else(|| {
                             ModelError::InvalidModel(format!(
@@ -618,6 +620,7 @@ impl MediaRuntime {
         let inputs = job.inputs;
         let seed = job.seed;
         let id = model_id.to_string();
+        let catalog = self.catalog.current();
         self.native
             .run(model_id, move |m| {
                 let mut pipeline = m.pipeline.lock();
@@ -728,7 +731,7 @@ impl MediaRuntime {
                     }
                     (Pipeline::Ltx2(p), MediaGenKind::Text2Video) => {
                         only_roles(&id, &inputs, &[])?;
-                        let spec = tenzro_catalog::get_media_gen_model_by_id(&id);
+                        let spec = catalog.get_media_gen_model_by_id(&id);
                         let distilled = spec.as_ref().is_some_and(|m| m.distilled);
                         let upsample = distilled && spec.as_ref().is_some_and(|m| m.latent_upsampler.is_some());
                         // A distilled checkpoint runs its fixed schedule without guidance.
@@ -803,7 +806,7 @@ impl MediaRuntime {
                         })
                     }
                     (Pipeline::Cosmos3(p), MediaGenKind::ActionPolicy) => {
-                        let spec = tenzro_catalog::get_media_gen_model_by_id(&id).and_then(|m| m.action).ok_or_else(refuse)?;
+                        let spec = catalog.get_media_gen_model_by_id(&id).and_then(|m| m.action).ok_or_else(refuse)?;
                         let bytes = observation(&id, kind, &inputs)?;
                         let started = std::time::Instant::now();
                         let actions = run_policy(p, &spec, &params, bytes, seed).map_err(|e| match e {
@@ -830,7 +833,7 @@ impl MediaRuntime {
                         let chunks = act(p, &params, bytes, seed)?;
                         let r = p.release();
                         let body = serde_json::json!({
-                            "embodiment": tenzro_catalog::get_media_gen_model_by_id(&id).and_then(|m| m.action).map(|a| a.embodiment),
+                            "embodiment": catalog.get_media_gen_model_by_id(&id).and_then(|m| m.action).map(|a| a.embodiment),
                             "action_dim": r.config.action_dim,
                             "chunk_len": r.config.chunk_size,
                             "execute_steps": r.config.n_action_steps,
@@ -872,7 +875,7 @@ impl MediaRuntime {
                         })
                     }
                     (Pipeline::Trellis2(p), MediaGenKind::Image23d) => {
-                        let spec = tenzro_catalog::get_media_gen_model_by_id(&id).ok_or_else(refuse)?;
+                        let spec = catalog.get_media_gen_model_by_id(&id).ok_or_else(refuse)?;
                         let image = object_image(&id, kind, &params, &inputs)?;
                         if params.voxel_resolution.is_some_and(|r| r != 512) {
                             return Err(ModelError::InvalidModel(format!("{id} builds its surface on a 512^3 grid")));
@@ -1416,7 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn rendering_a_model_that_is_not_loaded_is_refused() {
-        let rt = MediaRuntime::default();
+        let rt = MediaRuntime::with_host(Arc::default(), CatalogCell::default());
         assert!(matches!(
             rt.render("absent", job(MediaGenKind::Text2Image)).await,
             Err(ModelError::ModelNotFound(_))
@@ -1429,7 +1432,7 @@ mod tests {
         host.claim("flux2-klein-4b", Engine::Praecise)
             .unwrap()
             .commit();
-        let rt = MediaRuntime::with_host(host);
+        let rt = MediaRuntime::with_host(host, CatalogCell::default());
         let refused = rt
             .load(
                 "flux2-klein-4b",
@@ -1447,7 +1450,7 @@ mod tests {
 
     #[test]
     fn a_pipeline_the_native_engine_lacks_is_refused_before_any_file_is_read() {
-        let rt = MediaRuntime::default();
+        let rt = MediaRuntime::with_host(Arc::default(), CatalogCell::default());
         let refused = rt
             .load(
                 "qwen-image",
@@ -1462,7 +1465,7 @@ mod tests {
 
     #[test]
     fn a_checkpoint_needs_one_directory_per_source_its_pipeline_reads() {
-        let rt = MediaRuntime::default();
+        let rt = MediaRuntime::with_host(Arc::default(), CatalogCell::default());
         let one = [PathBuf::from("/nonexistent")];
         let refused = rt
             .load("ltx-2.3-22b-dev", "LTX2Pipeline", &one, 1, Precision::Bf16)
@@ -1497,7 +1500,7 @@ mod tests {
 
     #[test]
     fn the_qwen_edit_pipeline_reads_one_checkpoint_directory() {
-        let rt = MediaRuntime::default();
+        let rt = MediaRuntime::with_host(Arc::default(), CatalogCell::default());
         let two = [PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent")];
         let refused = rt
             .load(
@@ -1532,7 +1535,7 @@ mod tests {
 
     #[test]
     fn the_qwen_image_21_pipeline_reads_one_checkpoint_directory() {
-        let rt = MediaRuntime::default();
+        let rt = MediaRuntime::with_host(Arc::default(), CatalogCell::default());
         let two = [PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent")];
         let refused = rt
             .load(
@@ -1566,7 +1569,7 @@ mod tests {
 
     #[test]
     fn minimax_h3_loads_from_one_checkpoint_directory() {
-        let rt = MediaRuntime::default();
+        let rt = MediaRuntime::with_host(Arc::default(), CatalogCell::default());
         let one = [PathBuf::from("/nonexistent")];
         let two = [PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent")];
         let refused = rt
@@ -1598,8 +1601,8 @@ mod tests {
     #[test]
     fn every_native_catalog_entry_runs_on_a_native_pipeline() {
         use crate::catalog::MediaGenStatus;
-        tenzro_catalog::install_test_seed();
-        let native: Vec<_> = crate::get_media_gen_catalog()
+        let native: Vec<_> = crate::Catalog::test_seed()
+            .get_media_gen_catalog()
             .into_iter()
             .filter(|e| e.status == MediaGenStatus::Native)
             .collect();
@@ -1640,9 +1643,11 @@ mod tests {
     }
 
     #[test]
-    fn janus_reads_two_sources_and_trellis_one_assembled_checkpoint() {
-        tenzro_catalog::install_test_seed();
-        let rt = MediaRuntime::default();
+    fn janus_reads_two_sources() {
+        let rt = MediaRuntime::with_host(
+            Arc::default(),
+            CatalogCell::new(crate::Catalog::test_seed()),
+        );
         let one = [PathBuf::from("/nonexistent")];
         let refused = rt
             .load("janus-pro-1b", "JanusProPipeline", &one, 1, Precision::Bf16)
@@ -1658,19 +1663,6 @@ mod tests {
             .unwrap_err();
         assert!(
             refused.to_string().contains("generation_config.json"),
-            "{refused}"
-        );
-        let refused = rt
-            .load(
-                "trellis2-4b",
-                "Trellis2ImageTo3DPipeline",
-                &two,
-                1,
-                Precision::Bf16,
-            )
-            .unwrap_err();
-        assert!(
-            refused.to_string().contains("1 source directories"),
             "{refused}"
         );
         assert!(rt.loaded().is_empty());

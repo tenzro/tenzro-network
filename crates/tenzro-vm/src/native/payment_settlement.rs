@@ -41,7 +41,7 @@ use crate::types::{ExecutionResult, Log, StateChange, VmTransaction};
 
 /// Gas for a voucher claim: a signature check, an escrow record rewrite and
 /// a vault-to-payee move per voucher.
-pub(super) const GAS_ESCROW_CLAIM_PER_VOUCHER: u64 = 55_000;
+pub const GAS_ESCROW_CLAIM_PER_VOUCHER: u64 = 55_000;
 
 /// Gas for a hash-lock claim: a hash, an escrow record rewrite and a
 /// vault-to-payee move.
@@ -399,7 +399,7 @@ pub(super) fn settle_asset(
         changes.push(tnzo_change(payee, old, new));
         apply_split(state, token, payee, payout.credit, now_ms, changes)?;
         let rate = super::economy::read_fee_rate(state);
-        let fee = amount - payout.credit;
+        let fee = amount - payout.credit - payout.rpc_leg;
         return Ok(Settled {
             fee,
             burned: payout.burned,
@@ -453,6 +453,14 @@ fn settle_in_kind(
             u128::from(super::economy::treasury_leg_bps(state, class)),
         )
     });
+    let (alloc, leg) =
+        if crate::feature_gate::is_live_now(state, super::settlement_asset::INTAKE_EXPOSURE_GATE) {
+            super::settlement_asset::waive_over_ceiling(
+                state, token, &permitted, alloc, leg, changes,
+            )?
+        } else {
+            (alloc, leg)
+        };
     let outside = alloc.fee.saturating_add(leg);
     if outside > amount {
         return Err(VmError::InvalidTransaction(format!(
@@ -460,7 +468,7 @@ fn settle_in_kind(
             alloc.fee
         )));
     }
-    super::settlement_asset::admit_inflow(state, token, &permitted, worth, changes)?;
+    super::settlement_asset::admit_inflow(state, token, &permitted, from, worth, changes)?;
     let credit = amount - outside;
     move_asset(state, token, from, payee, credit, now_ms, changes)?;
     let chain_rate = super::economy::read_fee_rate(state);
@@ -566,14 +574,19 @@ pub(super) fn collect_in_kind(
 }
 
 /// The receipt fields of a payment settled on the ledger in `asset`.
-fn native_receipt(asset: &str, settled: &Settled) -> tenzro_types::settlement::SettledReceipt {
+fn native_receipt(
+    state: &dyn VmState,
+    asset: &str,
+    settled: &Settled,
+) -> tenzro_types::settlement::SettledReceipt {
+    let (unit, value_units) = super::settlement_asset::valued_in_unit(state, settled.value_e6);
     tenzro_types::settlement::SettledReceipt {
         fee_asset: asset.to_string(),
         fee_tnzo_eq: settled.fee_tnzo_eq,
         burn_eq: settled.burn_eq,
         rate_epoch: settled.rate_epoch,
-        unit: super::settlement_asset::unit_of_account(),
-        value_units: settled.value_e6,
+        unit,
+        value_units,
         payout_asset: settled
             .payout_token
             .map_or_else(|| asset.to_string(), |t| format!("0x{}", hex::encode(t))),
@@ -591,13 +604,14 @@ fn external_receipt(
     payee: &Address,
     amount: u128,
 ) -> tenzro_types::settlement::SettledReceipt {
+    let (unit, value_units) = super::settlement_asset::valued_in_unit(state, u128::from(usd_e6));
     tenzro_types::settlement::SettledReceipt {
         fee_asset: asset.to_string(),
         fee_tnzo_eq: 0,
         burn_eq: 0,
         rate_epoch: super::economy::read_fee_rate(state).epoch,
-        unit: super::settlement_asset::unit_of_account(),
-        value_units: u128::from(usd_e6),
+        unit,
+        value_units,
         payout_asset: asset.to_string(),
         legs: vec![tenzro_types::settlement::ReceiptLeg {
             role: "operator".into(),
@@ -708,6 +722,7 @@ pub(super) fn escrow_earning(
         payer_agent: voucher.and_then(|v| v.agent.as_ref().map(|a| a.agent_did.clone())),
         attribution: voucher.and_then(|v| v.attribution.clone()),
         network_share_paid: false,
+        paid_at_ms: None,
     }
 }
 
@@ -1146,6 +1161,7 @@ pub(super) fn settle_native(
         payer_agent: p.agent_did.map(str::to_string),
         attribution: None,
         network_share_paid: false,
+        paid_at_ms: Some(now_ms),
     };
     let operator = settle_asset(
         state,
@@ -1205,7 +1221,7 @@ pub(super) fn settle_native(
         fee: settled.fee,
         settled: tenzro_types::settlement::SettledReceipt {
             legs: receipt_legs,
-            ..native_receipt(p.asset, &settled)
+            ..native_receipt(&*state, p.asset, &settled)
         },
         binding: p.binding,
         nonce: p.nonce.to_string(),
@@ -1409,6 +1425,7 @@ pub(super) fn apply_payment_op(
                 refunded: 0,
                 recorded_at_ms: now_ms,
             };
+            super::economy::record_external_payment(state, record.binding.usd_e6, changes)?;
             write_record(state, &record, changes)
         }
         PaymentOp::SetSplit { rule } => {
@@ -1542,6 +1559,7 @@ fn record_attested(
         refunded: 0,
         recorded_at_ms: now_ms,
     };
+    super::economy::record_external_payment(state, record.binding.usd_e6, changes)?;
     write_record(state, &record, changes)
 }
 
@@ -1806,6 +1824,16 @@ struct ClaimEscrowPayload {
     claims: Vec<EscrowClaim>,
 }
 
+/// The gas a `ClaimEscrow` payload is charged: one voucher's worth per
+/// claim it carries, or the most a claim may carry when it does not parse.
+pub(super) fn escrow_claim_gas(payload: &[u8]) -> u64 {
+    let claims = serde_json::from_slice::<ClaimEscrowPayload>(payload)
+        .map_or(MAX_VOUCHERS_PER_CLAIM, |p| {
+            p.claims.len().clamp(1, MAX_VOUCHERS_PER_CLAIM)
+        });
+    GAS_ESCROW_CLAIM_PER_VOUCHER.saturating_mul(claims as u64)
+}
+
 impl NativeExecutor {
     /// Handle a `ClaimEscrow` native transaction.
     ///
@@ -1842,7 +1870,7 @@ impl NativeExecutor {
         let gas = GAS_ESCROW_CLAIM_PER_VOUCHER.saturating_mul(payload.claims.len() as u64);
         gas_meter.consume(gas)?;
 
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
         let checked = payload
             .claims
             .iter()
@@ -1878,7 +1906,9 @@ impl NativeExecutor {
                 storage_key,
                 payout,
             } = claim;
-            let earning = escrow_earning(&*state, escrow.payee.as_bytes(), false, Some(voucher));
+            let mut earning =
+                escrow_earning(&*state, escrow.payee.as_bytes(), false, Some(voucher));
+            earning.paid_at_ms = Some(now_ms);
             let settled = pay_from_vault(
                 state,
                 &voucher.escrow_id,
@@ -1994,7 +2024,7 @@ impl NativeExecutor {
                 escrow.status
             )));
         }
-        if deterministic_now_ms(tx) > escrow.expires_at.0 {
+        if deterministic_now_ms(tx)? > escrow.expires_at.0 {
             return Err(VmError::InvalidTransaction(format!(
                 "Escrow {escrow_id_hex} has expired; its remainder belongs to the payer"
             )));
@@ -2021,6 +2051,7 @@ impl NativeExecutor {
         let payout = escrow.amount - escrow.claimed;
         let mut fee_changes = Vec::new();
         let mut earning = escrow_earning(&*state, escrow.payee.as_bytes(), false, None);
+        earning.paid_at_ms = Some(deterministic_now_ms(tx)?);
         // A hash-locked escrow to the treasury is the network share itself.
         earning.network_share_paid = escrow.payee == tenzro_types::network_treasury_address()
             || spend_network_share(state, &escrow, &hash, &mut fee_changes);
@@ -2030,7 +2061,7 @@ impl NativeExecutor {
             &escrow,
             escrow.payee.as_bytes(),
             payout,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
             &earning,
             &mut fee_changes,
         )?;
@@ -2125,7 +2156,7 @@ impl NativeExecutor {
                 escrow.status
             )));
         }
-        let (due, cursor) = stream_progress(&*state, &escrow, deterministic_now_ms(tx), false)
+        let (due, cursor) = stream_progress(&*state, &escrow, deterministic_now_ms(tx)?, false)
             .ok_or_else(|| {
                 VmError::InvalidTransaction(format!("Escrow {escrow_id_hex} is not a stream"))
             })?;
@@ -2153,7 +2184,7 @@ impl NativeExecutor {
             &escrow,
             escrow.payee.as_bytes(),
             due,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
             &earning,
             &mut fee_changes,
         )?;

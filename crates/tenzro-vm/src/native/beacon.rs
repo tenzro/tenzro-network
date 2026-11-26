@@ -201,6 +201,47 @@ pub fn entry_mix(entry: &BeaconEntry) -> Option<[u8; 32]> {
     hex::decode(&entry.mix).ok()?.try_into().ok()
 }
 
+/// Gate of beacon-drawn SLA probes: the first epoch from which a validator
+/// draws each probe under the beacon value in force and a probed node
+/// answers no probe drawn without one.
+pub const PROBE_BEACON_GATE: &str = "feature.probe_beacon.activation_epoch";
+
+/// The beacon's mix when it stood at `round`: the genesis mix before any
+/// contribution, otherwise the mix after contribution `round - 1`. `None`
+/// for a round the beacon has not reached.
+pub fn mix_at(state: &dyn VmState, round: u64) -> Option<[u8; 32]> {
+    match round.checked_sub(1) {
+        None => Some(genesis_mix()),
+        Some(last) => entry_mix(&read_entry(state, last)?),
+    }
+}
+
+/// How a beacon value that something off chain was drawn under stands
+/// against the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The value the beacon holds now, or the one it held before its latest
+    /// contribution (a draw made just as the beacon moved).
+    Current,
+    /// A round this chain has not reached: whoever drew may be ahead.
+    NotYetSeen,
+    /// An older value, or one the chain never took.
+    Refused,
+}
+
+/// Where the beacon value (`round`, `mix`) stands against `state`.
+pub fn standing_of(state: &dyn VmState, round: u64, mix: &[u8; 32]) -> Standing {
+    let head = read_head(state).round;
+    if round > head {
+        return Standing::NotYetSeen;
+    }
+    if head - round <= 1 && mix_at(state, round).as_ref() == Some(mix) {
+        Standing::Current
+    } else {
+        Standing::Refused
+    }
+}
+
 /// Apply one bonded validator's contribution.
 pub(super) fn contribute(
     state: &mut dyn VmState,
@@ -328,6 +369,47 @@ pub(super) fn contribute(
 /// How much later each backup submitter waits than the one before it, ms.
 pub const BACKUP_STEP_MS: i64 = 20_000;
 
+/// Gate of the idle rule: from this epoch validators hold their
+/// contributions while nobody uses the chain. The rule binds what a
+/// validator sends, not what a block may hold, so a contribution sent
+/// without it executes as before.
+pub const IDLE_GATE: &str = "feature.idle_beacon.activation_epoch";
+
+/// Governed key: how old the beacon's latest value may grow, ms, while
+/// nobody uses the chain, before a validator contributes all the same.
+pub const IDLE_INTERVAL_PARAM: &str = "feature.idle_beacon.idle_interval_ms";
+
+/// Whether the idle rule is in force for the block being built on `state`.
+pub fn idle_rule_live(state: &dyn VmState) -> bool {
+    crate::feature_gate::is_live_now(state, IDLE_GATE)
+}
+
+/// The idle interval in force, ms.
+pub fn idle_interval_ms(state: &dyn VmState) -> i64 {
+    i64::try_from(network_param(state, IDLE_INTERVAL_PARAM)).unwrap_or(i64::MAX)
+}
+
+/// When a held contribution's round begins, in chain time, under the idle
+/// rule: at `first_traffic_ms`, the time of the first block after the
+/// beacon's latest value (taken at `latest_ms`) that holds a transaction other
+/// than upkeep, or once that value is `idle_interval_ms` old, whichever comes
+/// first. `None` while neither has come by `now_ms`: the contribution is held.
+/// Every validator reads the same chain, so all count the round's turns from
+/// the same moment and the backups keep their order however long the hold
+/// lasted; nothing in a validator's own pool moves it.
+pub fn hold_ends_at(
+    latest_ms: i64,
+    idle_interval_ms: i64,
+    first_traffic_ms: Option<i64>,
+    now_ms: i64,
+) -> Option<i64> {
+    let expiry = latest_ms.saturating_add(idle_interval_ms);
+    match first_traffic_ms.filter(|t| *t <= expiry) {
+        Some(at) => Some(at),
+        None => (now_ms >= expiry).then_some(expiry),
+    }
+}
+
 /// Whether a contribution for `round` can no longer execute because the
 /// beacon has moved on to `head_round`. A later round is not stale: the
 /// beacon may yet reach it.
@@ -407,6 +489,36 @@ pub(crate) fn record_for_test(state: &mut dyn VmState, at_ms: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hold ends at the first block of traffic after the latest value, or
+    /// at the end of the idle interval, whichever is first; until then it
+    /// goes on. Traffic after the end does not move it.
+    #[test]
+    fn a_hold_ends_at_the_first_traffic_or_the_end_of_the_interval() {
+        let (latest, interval) = (1_000_000, 1_800_000);
+        let end = latest + interval;
+        assert_eq!(hold_ends_at(latest, interval, None, end - 1), None);
+        assert_eq!(hold_ends_at(latest, interval, None, end), Some(end));
+        assert_eq!(hold_ends_at(latest, interval, None, end + 99), Some(end));
+        assert_eq!(
+            hold_ends_at(latest, interval, Some(latest + 500), latest + 600),
+            Some(latest + 500)
+        );
+        assert_eq!(
+            hold_ends_at(latest, interval, Some(end + 500), end + 600),
+            Some(end)
+        );
+    }
+
+    /// The gate ships dormant and the interval reads its genesis value: an
+    /// idle chain under the live rule takes at most 48 values a day.
+    #[test]
+    fn the_idle_rule_is_dormant_until_a_vote_and_reads_its_interval() {
+        let state = crate::StateAdapter::new();
+        assert!(!idle_rule_live(&state));
+        assert_eq!(idle_interval_ms(&state), 1_800_000);
+        assert_eq!(86_400_000 / idle_interval_ms(&state), 48);
+    }
     use crate::state_adapter::StateAdapter;
     use tenzro_crypto::vrf::{VrfProver, VrfSecretKey};
 
@@ -587,6 +699,35 @@ mod tests {
         };
         let firsts: std::collections::HashSet<_> = (0..32).map(first).collect();
         assert!(firsts.len() > 1);
+    }
+
+    /// A value drawn under stands as current while it is the beacon's value
+    /// or the one before its latest contribution; older ones and ones the
+    /// chain never took are refused, and a round not reached yet is not
+    /// seen yet.
+    #[test]
+    fn a_drawn_value_is_current_for_one_contribution_after_it() {
+        let mut state = StateAdapter::new();
+        let genesis = genesis_mix();
+        assert_eq!(standing_of(&state, 0, &genesis), Standing::Current);
+        assert_eq!(standing_of(&state, 0, &[9; 32]), Standing::Refused);
+        assert_eq!(standing_of(&state, 1, &genesis), Standing::NotYetSeen);
+
+        record_for_test(&mut state, 1);
+        let first = mix_at(&state, 1).unwrap();
+        assert_ne!(first, genesis);
+        assert_eq!(standing_of(&state, 1, &first), Standing::Current);
+        assert_eq!(standing_of(&state, 0, &genesis), Standing::Current);
+        // The right round under another round's mix.
+        assert_eq!(standing_of(&state, 1, &genesis), Standing::Refused);
+
+        record_for_test(&mut state, 2);
+        let second = mix_at(&state, 2).unwrap();
+        assert_eq!(standing_of(&state, 2, &second), Standing::Current);
+        assert_eq!(standing_of(&state, 1, &first), Standing::Current);
+        assert_eq!(standing_of(&state, 0, &genesis), Standing::Refused);
+        assert_eq!(standing_of(&state, 3, &second), Standing::NotYetSeen);
+        assert_eq!(mix_at(&state, 3), None);
     }
 
     #[test]

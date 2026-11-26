@@ -1304,8 +1304,8 @@ mod tests {
     /// 1M-token request fit each node.
     #[test]
     fn ultra_smallest_build_is_planned_across_two_nodes_from_its_registry_entry() {
-        tenzro_catalog::install_test_seed();
-        let e = crate::catalog::get_model_by_id("nemotron-3-ultra-550b-a55b-ud-iq1-m")
+        let e = crate::Catalog::test_seed()
+            .get_model_by_id("nemotron-3-ultra-550b-a55b-ud-iq1-m")
             .expect("the smallest Ultra build is in the registry");
         assert!(
             e.hardware_tiers

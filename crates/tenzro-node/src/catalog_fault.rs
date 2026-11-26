@@ -100,7 +100,10 @@ struct LfsRecord {
 async fn hub_held(node: &TenzroNode, repo: &str, revision: &str, path: &str) -> Option<Held> {
     let egress = node.egress();
     let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let listing = format!("https://huggingface.co/api/models/{repo}/tree/{revision}/{dir}");
+    let listing = format!(
+        "{}/api/models/{repo}/tree/{revision}/{dir}",
+        tenzro_model::hf_download::hub_base()
+    );
     let request = egress
         .get(&listing, crate::egress_guard::Scheme::HttpsOnly)
         .ok()?;
@@ -120,7 +123,10 @@ async fn hub_held(node: &TenzroNode, repo: &str, revision: &str, path: &str) -> 
     if entry.size as usize > HUB_INLINE_MAX_BYTES {
         return None;
     }
-    let file = format!("https://huggingface.co/{repo}/resolve/{revision}/{path}");
+    let file = format!(
+        "{}/{repo}/resolve/{revision}/{path}",
+        tenzro_model::hf_download::hub_base()
+    );
     let request = egress
         .get(&file, crate::egress_guard::Scheme::HttpsOnly)
         .ok()?;

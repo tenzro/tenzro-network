@@ -130,6 +130,7 @@ impl VerifiedMembership {
             &PasskeyController {
                 public_key_sec1: approval.passkey_public_key.clone(),
                 rp_id: rp_id.to_string(),
+                app_origins: Vec::new(),
             },
             &challenge,
             &PasskeyAuthorization {

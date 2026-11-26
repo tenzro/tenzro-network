@@ -1,4 +1,5 @@
 import { RpcClient } from "@tenzro/core";
+import type { OperatorCounts } from "@tenzro/core";
 
 /**
  * Validator registry status. Mirrors the Rust
@@ -24,6 +25,11 @@ export type ValidatorStatus =
 export interface ValidatorRegistryEntry {
   /** Base58-encoded 32-byte address. */
   address: string;
+  /**
+   * Root id of the operator behind the account as the chain derives it;
+   * null when the account has no identity on chain.
+   */
+  operator: string | null;
   /** Hardware validator key, ML-DSA-65 leg (1952 bytes), hex-encoded. */
   ml_dsa_pubkey: string;
   /** Hardware validator key, P-256 leg, hex-encoded. */
@@ -39,6 +45,8 @@ export interface ValidatorRegistryEntry {
   activated_at_epoch: number | null;
   exited_at_epoch: number | null;
   jailed_until_epoch: number | null;
+  /** For a jailed validator: when the jail ends, the command that proposes an earlier return, and where to write. */
+  jailed_remedy: string | null;
   tee_attestation_hash: string | null;
   metadata_uri: string;
   /** Unix ms timestamp of last registry mutation. */
@@ -47,6 +55,8 @@ export interface ValidatorRegistryEntry {
 
 export interface ListValidatorsResult {
   count: number;
+  /** The operators behind the validators listed. */
+  operators: OperatorCounts;
   validators: ValidatorRegistryEntry[];
 }
 
@@ -133,6 +143,8 @@ export interface StateRoot {
 
 /** A value in committed state and its proof (`tenzro_getStateProof`). */
 export interface StateProof extends StateRoot {
+  /** The node hash of the state trie at that height (`sha256`, `sha3_256`): the scheme the proof is checked under. */
+  state_trie_hash: string;
   namespace: string;
   /** The key, hex. */
   key: string;
@@ -232,8 +244,12 @@ export class ValidatorClient {
     return this.rpc.call<T>("tenzro_getRewardSchedule");
   }
 
-  /** `tenzro_getStateProof`: a value in committed state and its proof; `key` is hex. */
-  getStateProof<T = StateProof>(params: { namespace: string; key: string }): Promise<T> {
+  /**
+   * `tenzro_getStateProof`: a value in committed state and its proof; `key` is hex. Ask at a
+   * certified checkpoint's state `height` to check the proof against that checkpoint's state root;
+   * without it, the latest committed height.
+   */
+  getStateProof<T = StateProof>(params: { namespace: string; key: string; height?: number }): Promise<T> {
     return this.rpc.call<T>("tenzro_getStateProof", params);
   }
 
@@ -248,6 +264,16 @@ export class ValidatorClient {
    */
   getHardwareLevel<T = unknown>(params: { address?: unknown } = {}): Promise<T> {
     return this.rpc.call<T>("tenzro_getHardwareLevel", params);
+  }
+
+  /**
+   * `tenzro_fleetHostEvidence` (operator only): this machine's evidence for the
+   * fleet hardware proof `operator` sends this reward epoch, with `bind` the
+   * quote that joins it to the operator's fleet and with `gpu` its GPU's
+   * report. Nothing is submitted.
+   */
+  fleetHostEvidence<T = unknown>(params: { operator: string; bind?: boolean; gpu?: boolean }): Promise<T> {
+    return this.rpc.call<T>("tenzro_fleetHostEvidence", params);
   }
 
   /** `tenzro_getVesting`. */

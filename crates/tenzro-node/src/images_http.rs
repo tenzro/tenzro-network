@@ -41,8 +41,8 @@ fn bad(code: &'static str, message: impl Into<String>) -> Refusal {
 /// guidance.
 pub(crate) type Defaults = (u32, u32, u32, f32);
 
-fn catalog_defaults(model: &str) -> Option<Defaults> {
-    tenzro_model::get_media_gen_model_by_id(model).map(|m| {
+fn catalog_defaults(catalog: &tenzro_model::Catalog, model: &str) -> Option<Defaults> {
+    catalog.get_media_gen_model_by_id(model).map(|m| {
         (
             m.default_width,
             m.default_height,
@@ -200,7 +200,11 @@ pub(crate) async fn generations(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let params = match render_params(&body, catalog_defaults(model), rand::random) {
+    let params = match render_params(
+        &body,
+        catalog_defaults(&node.catalog(), model),
+        rand::random,
+    ) {
         Ok(p) => p,
         Err(r) => return refuse(r.status, &r.message, r.code),
     };

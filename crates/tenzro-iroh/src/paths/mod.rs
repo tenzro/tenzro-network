@@ -41,10 +41,14 @@ use iroh::endpoint::transports::{
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_base::CustomAddr;
+
+use crate::connection_limits::ConnectionLimits;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc;
 
+pub mod latency;
 pub mod punch;
+pub use latency::{PathLatency, PathLatencyReport};
 pub use punch::{ALPN_PUNCH, NatSide, PunchService, parse_punched_addr, punched_addr};
 
 /// Transport id of every address this module hands iroh.
@@ -79,16 +83,10 @@ pub fn parse_peer_relay_addr(addr: &CustomAddr) -> Option<(EndpointId, EndpointI
     Some((forwarder, target))
 }
 
-/// Room every forwarder connection starts with: a QUIC packet of the inner
-/// connection (at least 1,200 bytes) plus the forwarding header must fit in
-/// one datagram from the start, before path MTU discovery has run.
-const FORWARDER_INITIAL_MTU: u16 = 1_400;
-
-fn forwarder_connect_options() -> iroh::endpoint::ConnectOptions {
-    let config = iroh::endpoint::QuicTransportConfig::builder()
-        .initial_mtu(FORWARDER_INITIAL_MTU)
-        .build();
-    iroh::endpoint::ConnectOptions::new().with_transport_config(config)
+/// Options of a connection to a forwarder, from the endpoint's own limits.
+fn forwarder_connect_options(limits: &ConnectionLimits) -> iroh::endpoint::ConnectOptions {
+    iroh::endpoint::ConnectOptions::new()
+        .with_transport_config(limits.peer_relay_transport_config())
 }
 
 /// The round-trip time on the path a connection uses now.
@@ -151,6 +149,9 @@ struct Inner {
     /// The endpoint, while attached, for connecting to forwarders. Holding
     /// it keeps the endpoint's sockets bound, so `detach` drops it.
     endpoint: RwLock<Option<Endpoint>>,
+    /// The connection limits of that endpoint, which connections to
+    /// forwarders run under.
+    limits: RwLock<ConnectionLimits>,
     /// Open connections to forwarders, by forwarder id.
     forwarders: RwLock<HashMap<EndpointId, Connection>>,
     /// Forwarders a connection is being opened to.
@@ -166,6 +167,8 @@ struct Inner {
     /// packets this endpoint sends.
     offered: RwLock<std::collections::BTreeSet<EndpointId>>,
     stats: PathStats,
+    /// Round-trip times of every open path, sampled by the endpoint hook.
+    latency: PathLatency,
     /// Punched paths and the attempts that make them.
     punch: punch::PunchState,
 }
@@ -191,24 +194,42 @@ impl Paths {
             inner: Arc::new(Inner {
                 me: RwLock::new(None),
                 endpoint: RwLock::new(None),
+                limits: RwLock::new(ConnectionLimits::default()),
                 forwarders: RwLock::new(HashMap::new()),
                 connecting: Mutex::new(Default::default()),
                 local: n0_watcher::Watchable::new(Vec::new()),
                 inbox_tx: RwLock::new(inbox_tx),
                 offered: RwLock::new(Default::default()),
                 stats: PathStats::default(),
+                latency: PathLatency::default(),
                 punch: Default::default(),
             }),
         }
     }
 
-    /// Hands the transport to the endpoint being built.
+    /// Hands the transport to the endpoint being built, with the hook that
+    /// samples the latency of every path of its connections.
     pub fn install(&self, builder: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
-        builder.add_custom_transport(Arc::new(self.clone()))
+        builder
+            .add_custom_transport(Arc::new(self.clone()))
+            .hooks(self.inner.latency.clone())
+    }
+
+    /// The latency windows themselves, for code that acts on them.
+    pub fn latency_source(&self) -> PathLatency {
+        self.inner.latency.clone()
+    }
+
+    /// Median, worst and jitter of every path the endpoint's connections
+    /// used in the last minute.
+    pub fn latency(&self) -> Vec<PathLatencyReport> {
+        self.inner.latency.report()
     }
 
     /// Binds the transport to the endpoint it was installed in, once bound.
-    pub fn attach(&self, endpoint: &Endpoint) {
+    /// `limits` are the endpoint's; connections to forwarders run under them.
+    pub fn attach(&self, endpoint: &Endpoint, limits: &ConnectionLimits) {
+        *self.inner.limits.write() = *limits;
         *self.inner.me.write() = Some(endpoint.id());
         *self.inner.endpoint.write() = Some(endpoint.clone());
     }
@@ -294,8 +315,9 @@ impl Paths {
             .read()
             .clone()
             .ok_or_else(|| io::Error::other("transport not attached"))?;
+        let limits = *self.inner.limits.read();
         let conn = endpoint
-            .connect_with_opts(addr, ALPN_PEER_RELAY, forwarder_connect_options())
+            .connect_with_opts(addr, ALPN_PEER_RELAY, forwarder_connect_options(&limits))
             .await
             .map_err(io::Error::other)?
             .await
@@ -654,7 +676,22 @@ pub async fn forwarder_answers(
     wait: Duration,
 ) -> bool {
     let probe = async {
-        let conn = endpoint.connect(forwarder, ALPN_PEER_RELAY).await.ok()?;
+        // A probe of its own: only a peer-relay connection accepts the
+        // datagram that answers it.
+        let conn = crate::bounded::bounded(wait, "the dial", async {
+            endpoint
+                .connect_with_opts(
+                    forwarder,
+                    ALPN_PEER_RELAY,
+                    forwarder_connect_options(&ConnectionLimits::default()),
+                )
+                .await
+                .ok()?
+                .await
+                .ok()
+        })
+        .await
+        .ok()??;
         let nonce: [u8; 16] = rand::random();
         // A datagram may be lost on the way there or back, so it is sent
         // again until one comes back.

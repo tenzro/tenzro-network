@@ -213,6 +213,63 @@ impl ValidatorSet {
     }
 }
 
+/// Voting weights with each group (the validators of one operator) held to
+/// at most `cap_bps` of the total the capping leaves. `groups[i]` is the
+/// group of `weights[i]`, numbered from zero. The groups over the cap are
+/// found largest first (ties by number), and every member of a capped group
+/// keeps its share of the group while the group is scaled down to the cap;
+/// nothing is spread to the others, whose share then rises by itself.
+/// Integer math, so every node computes the same weights. A group is never
+/// capped when the groups already capped and it would together need the
+/// whole total: what is left over then fits under the cap anyway.
+pub fn cap_group_weights(weights: &[u128], groups: &[usize], cap_bps: u32) -> Vec<u128> {
+    let cap = u128::from(cap_bps.min(10_000));
+    let count = groups.iter().max().map_or(0, |m| m + 1);
+    let mut of_group = vec![0u128; count];
+    for (w, g) in weights.iter().zip(groups) {
+        of_group[*g] = of_group[*g].saturating_add(*w);
+    }
+    let total = of_group.iter().fold(0u128, |a, w| a.saturating_add(*w));
+    if total == 0 || cap == 0 || weights.len() != groups.len() {
+        return weights.to_vec();
+    }
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_by(|a, b| of_group[*b].cmp(&of_group[*a]).then(a.cmp(b)));
+    let mut capped = 0usize;
+    let mut uncapped = total;
+    while capped < order.len() {
+        let k = capped as u128 + 1;
+        if k * cap >= 10_000 {
+            break;
+        }
+        let next = of_group[order[capped]];
+        if next <= mul_div(cap, uncapped - next, 10_000 - k * cap) {
+            break;
+        }
+        uncapped -= next;
+        capped += 1;
+    }
+    if capped == 0 {
+        return weights.to_vec();
+    }
+    let level = mul_div(cap, uncapped, 10_000 - capped as u128 * cap);
+    let mut is_capped = vec![false; count];
+    for g in &order[..capped] {
+        is_capped[*g] = true;
+    }
+    weights
+        .iter()
+        .zip(groups)
+        .map(|(w, g)| {
+            if is_capped[*g] {
+                mul_div(*w, level, of_group[*g])
+            } else {
+                *w
+            }
+        })
+        .collect()
+}
+
 /// `a * b` as a 256-bit `(high, low)` pair.
 fn wide_mul(a: u128, b: u128) -> (u128, u128) {
     let (a1, a0) = (a >> 64, a & u128::from(u64::MAX));
@@ -228,7 +285,7 @@ fn wide_mul(a: u128, b: u128) -> (u128, u128) {
 }
 
 /// `floor(a * b / c)` for a result that fits 128 bits, without overflow.
-fn mul_div(a: u128, b: u128, c: u128) -> u128 {
+pub(crate) fn mul_div(a: u128, b: u128, c: u128) -> u128 {
     let (high, low) = wide_mul(a, b);
     let mut rem: u128 = 0;
     let mut q: u128 = 0;

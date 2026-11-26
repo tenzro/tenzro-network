@@ -13,7 +13,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```text
 //! use serde::{Deserialize, Serialize};
 //! use tenzro_types::validation::bounded_vec_bytes;
 //!

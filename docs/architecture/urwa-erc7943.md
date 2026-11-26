@@ -8,16 +8,23 @@ refresh). The standard reached Final status on 2026-05-27.
 
 ## The interface
 
-The five standard ERC-7943 fungible functions, whose selectors XOR to the
-interface id:
+The final rules described here run from the epoch governance sets in
+`feature.erc7943_final.activation_epoch`. Until then the network serves the
+interface it launched with: `canTransact(address)` stands where `canSend`
+and `canReceive` do, the interface id is that of those five functions, a
+freeze above the balance is refused, and a facade logs no ERC-7943 event.
+
+The six standard ERC-7943 fungible functions, whose selectors XOR to the
+interface id `0x3edbb4c4`:
 
 | Function | Purpose |
 |---|---|
 | `forcedTransfer(address,address,uint256)` | The issuer moves an amount between accounts: asset recovery, a court order, re-allocation after a default. |
-| `setFrozenTokens(address,uint256)` | The issuer freezes an amount on an account; the remainder stays transferable. |
+| `setFrozenTokens(address,uint256)` | The issuer sets the frozen amount of an account; what the account holds above it stays transferable. The amount is absolute and may exceed the balance, which withholds what the account receives later. |
 | `getFrozenTokens(address)` | The frozen amount of an account. |
-| `canTransact(address)` | Whether an account may transact in the token. |
-| `canTransfer(address,address,uint256)` | Whether a transfer would be allowed now. |
+| `canSend(address)` | Whether an account may send the token now: not while the token is halted or locked up. No rule singles out a sender, so every account gets the same answer. |
+| `canReceive(address)` | Whether an account meets the token's eligibility rules for a recipient. |
+| `canTransfer(address,address,uint256)` | Whether a transfer would be allowed now: both checks above, and the amount within the sender's unfrozen balance. An amount above the whole balance is not refused here; the transfer itself fails. |
 
 Halting every holder transfer of a token (the kill switch) is not part of
 ERC-7943. It is the issuer's `set_halted`, a native `Token` transaction.
@@ -26,7 +33,7 @@ ERC-7943. It is the issuer's `set_halted`, a native `Token` transaction.
 
 The token factory precompile (`0x1002`) serves the ERC-7943 functions keyed
 by token id, over the same ledger and the same rule engine as its ERC-20
-functions: `canTransact(bytes32,address)`,
+functions: `canSend(bytes32,address)`, `canReceive(bytes32,address)`,
 `canTransfer(bytes32,address,address,uint256)`,
 `getFrozenTokens(bytes32,address)`,
 `setFrozenTokens(bytes32,address,uint256)` and
@@ -34,6 +41,20 @@ functions: `canTransact(bytes32,address)`,
 `facadeOf(bytes32)` and `supportsInterface(bytes4)`. Every token also
 answers at its own facade address with the standard functions, which take
 no token id. There is no separate uRWA precompile.
+
+A facade logs the standard events from its own address: `Frozen(account,
+amount)` when `setFrozenTokens` runs, and for `forcedTransfer` a `Frozen`
+with the new amount when the move reached into the freeze, then the ERC-20
+`Transfer`, then `ForcedTransfer(from, to, amount)`. The factory still emits
+its own logs for the same call, from the factory's address: `Frozen` and
+`ForcedTransfer` with the token id leading their data, and the issuer action
+record. An indexer of one token reads the facade's logs; an indexer of every
+token reads the factory's. Neither set replaces the other.
+
+A facade `transfer` or `transferFrom` that stays within the sender's balance
+but reaches into its frozen part reverts with the standard's
+`ERC7943InsufficientUnfrozenBalance(account, amount, unfrozen)`. A transfer
+above the whole balance reverts with the ledger's own reason.
 
 `setFrozenTokens` and `forcedTransfer` act only for an issuer that holds the
 power alone under the token's manifest. A power held by a council goes
@@ -56,8 +77,8 @@ slot; a 20-byte address widens left-aligned, so one frozen amount covers
 every VM view of an account.
 
 The issuer's `forced_transfer` is the one move that does not consult the
-slots. After it debits the sender, the sender's frozen amount is lowered
-to what it still holds.
+slots. It takes the sender's unfrozen balance first, and the sender's
+frozen amount drops by whatever part of the move reached past it.
 
 Not restricted: native TNZO and its wTNZO/SPL views (TNZO is not
 a uRWA asset), mints and burns (supply changes, not transfers between

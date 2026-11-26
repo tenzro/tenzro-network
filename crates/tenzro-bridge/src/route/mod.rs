@@ -52,6 +52,7 @@ pub mod bitcoin_spend;
 pub mod canonical;
 pub mod ethereum_light_client;
 pub mod evm;
+pub mod finality;
 pub mod ibc;
 pub mod ibc_core;
 pub mod lane;
@@ -110,6 +111,10 @@ pub struct RouteMessage {
     pub token: [u8; 32],
     /// Amount in the smallest unit.
     pub amount: u128,
+    /// The finality the sender asked for ([`finality::CcipFinality`]); a
+    /// CCIP 2.0 message carries it, every other transport waits for
+    /// finality ([`finality::WAIT_FOR_FINALITY`]).
+    pub finality: finality::CcipFinality,
 }
 
 /// What one chain family implements. Adapters only translate formats: every
@@ -748,13 +753,22 @@ impl RouteFramework {
             // vault against the representation issued here, so a delivery
             // raises both, up to the vault's cap.
             let (k, v, usage) = state::consume_asset_epoch(state, &route, asset, message.amount)?;
-            let lane = lane::consume_asset_lane(
+            let lane = match finality::consume_fast_inbound(
                 state,
                 &route,
-                asset,
-                LaneDirection::Inbound,
+                Some(&asset.symbol),
+                message.finality,
                 message.amount,
-            )?;
+            )? {
+                Some(fast) => Some(fast),
+                None => lane::consume_asset_lane(
+                    state,
+                    &route,
+                    asset,
+                    LaneDirection::Inbound,
+                    message.amount,
+                )?,
+            };
             let supply = state::read_asset_supply(state, &route, asset)
                 .lock_and_mint(message.amount, &route)?;
             if supply.locked > asset.max_outstanding {
@@ -780,7 +794,16 @@ impl RouteFramework {
                 refuse("no network-wide bridge mint limits are set; no route may mint")
             })?;
             let (k, v, usage) = state::consume_epoch(state, &route, network, message.amount)?;
-            let lane = lane::consume_lane(state, &route, LaneDirection::Inbound, message.amount)?;
+            let lane = match finality::consume_fast_inbound(
+                state,
+                &route,
+                None,
+                message.finality,
+                message.amount,
+            )? {
+                Some(fast) => Some(fast),
+                None => lane::consume_lane(state, &route, LaneDirection::Inbound, message.amount)?,
+            };
             // A deposit route's record counts the asset held under the
             // deposit script on the external chain against the representation
             // credited here, so a deposit raises both; every other route
@@ -908,6 +931,7 @@ impl RouteFramework {
                 token_pool: route.local_endpoint,
                 token: route.remote_token,
                 amount: transfer.amount,
+                finality: finality::WAIT_FOR_FINALITY,
             };
             message.message_id = family.outbound_message_id(&route, &message)?;
             let bytes = family.encode_outbound(&route, &message)?;
@@ -1027,6 +1051,7 @@ impl RouteFramework {
             token_pool: asset.representation_id(),
             token: asset.remote_token,
             amount: transfer.amount,
+            finality: finality::WAIT_FOR_FINALITY,
         };
         message.message_id = family.outbound_message_id(&route, &message)?;
         let bytes = match self.issuer_hook(&asset)? {
@@ -1104,6 +1129,7 @@ impl RouteFramework {
             token_pool: route.local_endpoint,
             token: route.remote_token,
             amount: transfer.amount,
+            finality: finality::WAIT_FOR_FINALITY,
         };
         let mut writes = vec![
             (state::sequence_key(&route), sequence.to_be_bytes().to_vec()),

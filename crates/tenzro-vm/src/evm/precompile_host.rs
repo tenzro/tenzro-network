@@ -48,6 +48,10 @@ pub struct PrecompileEnv {
     pub is_static: bool,
     /// Called from the read-only `eth_call` path.
     pub read_only: bool,
+    /// Called while the ERC-7786 gateway delivers a received message.
+    pub delivering: bool,
+    /// Chain id of the executing chain.
+    pub chain_id: u64,
     /// Height of the block being executed (0 outside block execution).
     pub block_number: u64,
     /// Timestamp of the block being executed, in Unix seconds.
@@ -80,6 +84,10 @@ pub trait PrecompileState {
     /// A system-storage entry (identities, Terms) as last committed. The EVM
     /// never writes system storage, so the committed value is current.
     fn system_storage(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    /// Whether the rule behind the feature gate `gate` runs in the block
+    /// being executed. Free of charge: it is a fact about the block, not
+    /// storage the caller asked to read.
+    fn feature_live(&mut self, gate: &str) -> bool;
     /// Emit an EVM log from `address`.
     fn emit_log(&mut self, address: [u8; 20], topics: Vec<[u8; 32]>, data: Vec<u8>) -> Result<()>;
     /// Gas charged so far by state access and [`PrecompileCall::charge`].
@@ -438,6 +446,11 @@ where
         Ok(self.ctx.evm.inner.db.system_storage(key))
     }
 
+    fn feature_live(&mut self, gate: &str) -> bool {
+        let db = &mut self.ctx.evm.inner.db;
+        crate::feature_gate::is_live_through(|key| db.system_storage(key), gate)
+    }
+
     fn emit_log(&mut self, address: [u8; 20], topics: Vec<[u8; 32]>, data: Vec<u8>) -> Result<()> {
         self.charge(375u64.saturating_add(375u64.saturating_mul(topics.len() as u64)))?;
         self.charge(8u64.saturating_mul(data.len() as u64))?;
@@ -473,6 +486,27 @@ where
 pub struct HostContext {
     /// The call comes from the read-only `eth_call` path.
     pub read_only: bool,
+    /// Whether [`crate::evm::CONFORMANCE_KEY`] is live: the engine then
+    /// serves the whole precompile set of its rule set.
+    pub conformance: bool,
+    /// The call is the ERC-7786 gateway's delivery of a received message.
+    pub delivering: bool,
+}
+
+/// The standard precompiles the engine served as first built, kept until
+/// [`crate::evm::CONFORMANCE_KEY`] is live: the Berlin set, and at `0x0a` an
+/// entry that fails the whole transaction. The BLS12-381 addresses are
+/// ordinary accounts.
+fn first_built_precompiles() -> &'static revm::precompile::Precompiles {
+    static SET: std::sync::OnceLock<revm::precompile::Precompiles> = std::sync::OnceLock::new();
+    SET.get_or_init(|| {
+        let mut set = revm::precompile::Precompiles::berlin().clone();
+        set.extend([revm::precompile::fatal_precompile(
+            revm::precompile::u64_to_address(0x0A),
+            "c-kzg feature is not enabled".into(),
+        )]);
+        set
+    })
 }
 
 /// Install the Tenzro precompile call handler into an EVM handler.
@@ -484,10 +518,20 @@ pub fn register_tenzro_precompiles<EXT, DB>(
     DB: Database + NativeSupplySource,
     DB::Error: std::fmt::Debug,
 {
+    if !host.conformance {
+        handler.pre_execution.load_precompiles = Arc::new(|| {
+            revm::ContextPrecompiles::from_static_precompiles(first_built_precompiles())
+        });
+    }
     let previous = handler.execution.call.clone();
     handler.execution.call = Arc::new(move |ctx, inputs: Box<CallInputs>| {
         let code_address: [u8; 20] = inputs.bytecode_address.into_array();
+        let dormant = registry.gate(&code_address).is_some_and(|gate| {
+            let db = &mut ctx.evm.inner.db;
+            !crate::feature_gate::is_live_through(|key| db.system_storage(key), gate)
+        });
         match registry.get(&code_address) {
+            Some(_) if dormant => previous(ctx, inputs),
             Some(precompile) => {
                 let stateless = registry.is_stateless(&code_address);
                 run_precompile(ctx, &inputs, &precompile, code_address, stateless, host)
@@ -578,6 +622,8 @@ where
         value,
         is_static: inputs.is_static,
         read_only: host.read_only,
+        delivering: host.delivering,
+        chain_id: ctx.evm.env.cfg.chain_id,
         block_number: u64::try_from(ctx.evm.env.block.number).unwrap_or(u64::MAX),
         block_timestamp: u64::try_from(ctx.evm.env.block.timestamp).unwrap_or(u64::MAX),
     };

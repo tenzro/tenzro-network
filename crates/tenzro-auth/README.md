@@ -98,8 +98,8 @@ the device *and* an attestation verified against a pinned vendor root says the
 key lives in a TEE or secure element. The two are separate checks and neither
 implies the other. `parse_attestation` reads the `authenticatorData` flags,
 AAGUID and signature counter out of the CBOR attestation object, then verifies
-the attestation certificate chain against the roots the operator pinned
-(`webauthn_trusted_roots` in `NodeConfig`, base64 DER).
+the attestation certificate chain against the roots governance put in force
+(`WebauthnRootsSet`, read from chain state).
 
 - **`BE` (backup-eligible) is disqualifying, not informational.** A credential
   that *may* sync proves control of a cloud account rather than possession of a

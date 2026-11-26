@@ -23,7 +23,7 @@ use n0_error::{AnyError, e, ensure, stack_error};
 use n0_watcher::Watcher;
 use pin_project::pin_project;
 use tokio_util::sync::WaitForCancellationFutureOwned;
-use tracing::{Instrument, Span, debug, event, info_span, instrument, warn};
+use tracing::{Instrument, Span, debug, event, instrument, warn};
 use url::Url;
 
 #[cfg(feature = "unstable-custom-transports")]
@@ -226,21 +226,21 @@ impl Builder {
     // # The final constructor that everyone needs.
 
     /// Binds the endpoint.
+    #[instrument(name = "endpoint", skip_all, fields(id))]
     pub async fn bind(self) -> Result<Endpoint, BindError> {
         let secret_key = self.secret_key.unwrap_or_else(SecretKey::generate);
+        tracing::Span::current().record(
+            "id",
+            tracing::field::display(secret_key.public().fmt_short()),
+        );
 
         let crypto_provider = self
             .crypto_provider
             .ok_or_else(|| e!(BindError::InvalidCryptoProvider))?;
-
         let token_key = Arc::new(
             RustlsTokenKey::new(&mut rand::rng(), &crypto_provider)
                 .ok_or_else(|| e!(BindError::InvalidCryptoProvider))?,
         );
-
-        let span = info_span!("endpoint", id = %secret_key.public().fmt_short());
-        let _guard = span.enter();
-
         let peer_crypto_provider = self
             .peer_crypto_provider
             .unwrap_or_else(|| crypto_provider.clone());
@@ -258,9 +258,7 @@ impl Builder {
             token_store: Arc::new(noq::TokenMemoryCache::default()),
         };
         let server_config = static_config.create_server_config(self.alpn_protocols);
-
         let metrics = EndpointMetrics::default();
-
         let tls_config = self
             .ca_tls_config
             .unwrap_or_default()
@@ -1524,6 +1522,14 @@ impl Endpoint {
         &self.inner.tls_config
     }
 
+    /// Returns the proxy that HTTP(S) traffic is sent through, if any.
+    ///
+    /// The pkarr publisher and resolver send their HTTP requests through it.
+    #[cfg(not(wasm_browser))]
+    pub(crate) fn proxy_url(&self) -> Option<&Url> {
+        self.inner.proxy_url.as_ref()
+    }
+
     /// Returns the Address Lookup service, if configured.
     ///
     /// # Errors
@@ -2505,6 +2511,74 @@ mod tests {
             ConnectionError::ApplicationClosed(ApplicationClose { .. })
         ));
 
+        Ok(())
+    }
+
+    /// When the last connection to a remote closes, the hole punch made for it
+    /// goes with it, so a connection opened to that remote again at once punches
+    /// at once instead of waiting on the relay for the interval between two
+    /// punches.
+    #[tokio::test]
+    #[traced_test]
+    async fn the_last_closed_connection_takes_its_holepunch_with_it() -> Result {
+        let (relay_map, relay_url, _relay_server_guard) = run_relay_server().await?;
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![TEST_ALPN.to_vec()])
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .bind()
+            .await?;
+        let client = Endpoint::builder(presets::Minimal)
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .relay_mode(RelayMode::Custom(relay_map))
+            .bind()
+            .await?;
+        let accept = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                while let Some(incoming) = server.accept().await {
+                    if let Ok(conn) = incoming.await {
+                        tokio::spawn(async move { conn.closed().await });
+                    }
+                }
+            })
+        };
+        let dst = EndpointAddr::new(server.id()).with_relay_url(relay_url);
+        let conn = client.connect(dst, TEST_ALPN).await?;
+        // The connection starts on the relay; a direct path means a hole punch.
+        let mut paths = conn.paths_stream();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(infos) = paths.next().await {
+                if infos.iter().any(|info| info.is_ip()) {
+                    break;
+                }
+            }
+        })
+        .await
+        .anyerr()?;
+        drop(paths);
+        let held = client
+            .remote_info(server.id())
+            .await
+            .is_some_and(|info| info.holds_holepunch());
+        assert!(held, "the direct path came from a hole punch the remote records");
+
+        conn.close(0u32.into(), b"done");
+        conn.closed().await;
+        drop(conn);
+        // The close reaches the remote's state as an event; nothing else waits.
+        let forgotten = tokio::time::timeout(Duration::from_secs(2), async {
+            while client
+                .remote_info(server.id())
+                .await
+                .is_none_or(|info| info.holds_holepunch())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(forgotten.is_ok(), "the hole punch outlived the last connection");
+        accept.abort();
         Ok(())
     }
 
@@ -3830,7 +3904,8 @@ mod tests {
         Ok(())
     }
 
-    /// Tests that correct logs are emitted when connecting two endpoints with same secret keys to a relay.
+    /// Tests that correct logs are emitted when connecting two endpoints with same secret
+    /// keys to a relay.
     #[tokio::test]
     #[traced_test]
     async fn same_endpoint_id_relay() -> Result {
@@ -3896,10 +3971,14 @@ mod tests {
         // will be routed to the new endpoint and not to the old endpoint anymore.
         // We don't expose being connected to the home relay on the endpoint currently,
         // so we resort to log assertions.
+        // If you think this all wasn't sad enough already,
+        // https://github.com/tokio-rs/tracing/issues/1372 means we need to look for the
+        // repeated `id` field.
         // TODO(Frando): Replace once we add a proper API for this.
         let expected_log_line = format!(
-            "ep2:endpoint{{id={}}}:relay-actor:active-relay{{url={relay_url}}}:connected: iroh::_events::relay::connected",
-            ep2.id().fmt_short()
+            "ep2:endpoint{{id={} id={}}}:relay-actor:active-relay{{url={relay_url}}}:connected: iroh::_events::relay::connected",
+            ep2.id().fmt_short(),
+            ep2.id().fmt_short(),
         );
         tokio::time::timeout(Duration::from_secs(5), async {
             while !logs_contain(&expected_log_line) {

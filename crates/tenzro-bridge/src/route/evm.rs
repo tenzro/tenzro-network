@@ -457,6 +457,9 @@ pub struct OnRampMessage {
     pub data: Vec<u8>,
     /// The token moved, if any.
     pub token: Option<OnRampToken>,
+    /// The finality the sender asked for: a `2.0.0` message carries it,
+    /// the older versions always wait for finality.
+    pub finality: super::finality::CcipFinality,
 }
 
 /// The lane version a CCIP route declares.
@@ -547,6 +550,7 @@ pub fn read_onramp_message(route: &BridgeRoute, r: &mut Reader<'_>) -> Result<On
                 receiver: m.receiver,
                 data: m.data,
                 token,
+                finality: super::finality::WAIT_FOR_FINALITY,
             })
         }
         CcipLaneVersion::V1_5 => read_v1_5(route, &on_ramp, r),
@@ -612,6 +616,7 @@ fn read_v2_0(route: &BridgeRoute, r: &mut Reader<'_>) -> Result<OnRampMessage> {
         receiver,
         data: m.data,
         token,
+        finality: m.finality,
     })
 }
 
@@ -909,6 +914,7 @@ fn read_v1_5(route: &BridgeRoute, on_ramp: &[u8; 20], r: &mut Reader<'_>) -> Res
         receiver: tenzro_receiver,
         data,
         token,
+        finality: super::finality::WAIT_FOR_FINALITY,
     })
 }
 
@@ -1043,6 +1049,7 @@ impl RouteAdapter for EvmCcipAdapter {
             token_pool: word_addr(&t.source_pool),
             token: pad32(&t.dest_token)?,
             amount: t.amount,
+            finality: m.finality,
         })
     }
 
@@ -1141,6 +1148,7 @@ fn decode_outbound_v2_0(route: &BridgeRoute, r: &mut Reader<'_>) -> Result<Route
         token_pool: pad32(&t.source_pool)?,
         token: pad32(&t.dest_token)?,
         amount: t.amount,
+        finality: super::finality::WAIT_FOR_FINALITY,
     };
     if outbound_v2_0(route, &msg)? != m {
         return Err(bad(
@@ -1221,6 +1229,7 @@ fn decode_outbound_v1_6(r: &mut Reader<'_>) -> Result<RouteMessage> {
         token_pool: pad32(&t.source_pool)?,
         token: word_addr(&t.dest_token),
         amount: t.amount,
+        finality: super::finality::WAIT_FOR_FINALITY,
     })
 }
 

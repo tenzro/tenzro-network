@@ -957,6 +957,9 @@ impl PrefetchKeys {
             if let Some(to) = &tx.to {
                 keys.add_account(to);
             }
+            if let Some(crate::types::VmFeePayer::Consented { account, .. }) = &tx.fee_payer {
+                keys.add_account(account);
+            }
         }
         keys
     }
@@ -1833,6 +1836,7 @@ mod tests {
             block_base_fee: None,
             authorization_list: Vec::new(),
             access_list: Vec::new(),
+            fee_payer: None,
         };
 
         let keys = PrefetchKeys::from_transactions(std::slice::from_ref(&tx));

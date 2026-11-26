@@ -11,9 +11,7 @@ use crate::{
     precompiles::PrecompileRegistry,
     svm::SvmExecutor,
     traits::{VmExecutor, VmState, VmType},
-    types::{
-        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction,
-    },
+    types::{CallResult, ContractCall, ExecutionResult, VmTransaction},
 };
 
 /// Evidence that [`MultiVmRuntime::check_signature`] accepted a transaction's
@@ -260,6 +258,44 @@ impl MultiVmRuntime {
         })
     }
 
+    /// The account that pays the fee in the sender's place, once the fee
+    /// payer rule is live and the transaction names one: its consent as the
+    /// signed transaction's memo carried it stands, the transaction is a
+    /// native one, and the ML-DSA-65 leg of the consent verifies against the
+    /// key the payer enrolled. `None` while the rule is dormant or when no
+    /// payer is named; an error when one is named and does not stand.
+    fn fee_payer(tx: &VmTransaction, state: &dyn VmState) -> Result<Option<Vec<u8>>> {
+        use crate::types::VmFeePayer;
+        let refuse = |why: &str| Err(VmError::InvalidTransaction(format!("Fee payer: {why}")));
+        let (account, public_key, signature, digest) =
+            match crate::ledger::fee_payer_in_force(state, tx) {
+                None => return Ok(None),
+                Some(VmFeePayer::Refused(why)) => return refuse(why),
+                Some(VmFeePayer::Consented {
+                    account,
+                    public_key,
+                    signature,
+                    digest,
+                }) => (account, public_key, signature, digest),
+            };
+        if tx.vm_type != VmType::Tenzro {
+            return refuse("only a native transaction names one");
+        }
+        if *account == tx.from {
+            return refuse("it is the sender");
+        }
+        // The consent spends the payer's balance, so it is held to the rule
+        // a transaction signature of that account is held to: the ML-DSA-65
+        // leg is required and verifies against the key the account enrolled.
+        // An account that has enrolled none signs nothing, and pays no fee
+        // for another.
+        let (expected, _) = crate::account_keys::pq_key_for(state, public_key, None);
+        let policy = tenzro_crypto::composite::PqPolicy::Required;
+        tenzro_crypto::fee_payer::verify_pq_leg(expected.as_deref(), digest, signature, policy)
+            .map_err(|e| VmError::InvalidTransaction(format!("Fee payer: {e}")))?;
+        Ok(Some(account.clone()))
+    }
+
     /// Executes a transaction whose signature [`Self::check_signature`] has
     /// accepted.
     pub(crate) async fn execute_checked(
@@ -273,7 +309,7 @@ impl MultiVmRuntime {
         // signature without that leg is refused, so a stolen P-256 key
         // alone cannot spend the account.
         if checked.keystore_signer {
-            let now_ms = crate::native::deterministic_now_ms(tx).max(0) as u64;
+            let now_ms = crate::native::deterministic_now_ms(tx)?.max(0) as u64;
             crate::keystore::authorize_sender(state, tx, now_ms)
                 .map_err(|e| VmError::ExecutionFailed(format!("Transaction sender: {e}")))?;
         }
@@ -313,6 +349,7 @@ impl MultiVmRuntime {
                 VmError::ExecutionFailed(format!("Transaction signature verification failed: {e}"))
             })?;
         }
+        let fee_payer = Self::fee_payer(tx, &*state)?;
         tracing::debug!(
             "Executing transaction: from={}, vm_type={:?}",
             hex::encode(&tx.from),
@@ -362,8 +399,34 @@ impl MultiVmRuntime {
         // would stay open, the transaction would be ordered again in every
         // block, and every later transaction of the account would wait
         // behind it.
+        //
+        // A fee payer advances the most the transaction can owe for gas to
+        // the sender before the handler runs, so every handler charges gas
+        // as it always does, and takes back what the gas did not use once
+        // it has run. A payer that cannot cover the advance pays what it
+        // has and nothing runs.
+        let advanced = match &fee_payer {
+            Some(payer) => {
+                let advance = tx.max_gas_fee();
+                let held = state.get_balance(payer);
+                if held < advance {
+                    state.set_nonce(&tx.from, account_nonce + 1);
+                    return Ok(ExecutionResult::failed(
+                        tx.gas_limit.min(crate::gas::evm_gas_costs::TRANSACTION),
+                        format!(
+                            "fee payer holds {held}, under the {advance} the gas limit can cost"
+                        ),
+                    ));
+                }
+                state.set_balance(payer, held - advance);
+                let sender = state.get_balance(&tx.from);
+                state.set_balance(&tx.from, sender.saturating_add(advance));
+                advance
+            }
+            None => 0,
+        };
         let delegations = crate::delegation_guard::snapshot(tx, state);
-        let outflow_now = crate::native::deterministic_now_ms(tx);
+        let outflow_now = crate::native::deterministic_now_ms(tx)?;
         let mut watched: Vec<(Vec<u8>, u128)> = Vec::new();
         if !crate::account_outflow::is_outflow_op(tx) {
             let mut who: Vec<Vec<u8>> = vec![tx.from.clone()];
@@ -384,8 +447,14 @@ impl MultiVmRuntime {
             ),
         };
         if !delegations.is_empty() {
-            crate::delegation_guard::record(tx, state, &delegations, &mut result);
+            crate::delegation_guard::record(tx, state, &delegations, &mut result, outflow_now);
         }
+        // A gateway message the transaction admitted goes to its recipient;
+        // one that does not accept it fails the transaction.
+        crate::evm::gateway::deliver_inbound(&self.evm, tx, state, &mut result);
+        // Messages the transaction sent through the ERC-7786 gateway go to
+        // their routes; a route that refuses one fails the transaction.
+        crate::evm::gateway::deliver_outbox(tx, state, &mut result);
         // An account that set an outflow limit on itself: what left it in
         // this transaction, by whatever path (a call, a delegated contract,
         // a transfer), counts against its cap. Past the cap the result is a
@@ -407,6 +476,27 @@ impl MultiVmRuntime {
                     );
                     break;
                 }
+            }
+        }
+
+        // What the gas did not use of a fee payer's advance goes back to it.
+        // A sender that spent it has spent its payer's money: the result is
+        // a failure, which block execution reverts and charges to the payer.
+        if result.success
+            && let Some(payer) = &fee_payer
+        {
+            let unused =
+                advanced.saturating_sub(tx.gas_price.saturating_mul(u128::from(result.gas_used)));
+            let sender = state.get_balance(&tx.from);
+            if sender < unused {
+                result = ExecutionResult::failed(
+                    result.gas_used,
+                    "the sender spent the gas fee its fee payer advanced".to_string(),
+                );
+            } else if unused > 0 {
+                state.set_balance(&tx.from, sender - unused);
+                let held = state.get_balance(payer);
+                state.set_balance(payer, held.saturating_add(unused));
             }
         }
 
@@ -449,7 +539,9 @@ impl MultiVmRuntime {
         crate::delegation_guard::check(tx, state)?;
 
         self.config.validate_gas_limit(tx.gas_limit)?;
-        if !crate::native::pays_no_fee(tx) {
+        if !crate::native::pays_no_fee(tx)
+            && !crate::native::first_registration::runs_waived(state, tx)
+        {
             self.config.validate_gas_price(tx.gas_price)?;
         }
 
@@ -511,29 +603,6 @@ impl MultiVmRuntime {
 
         // Execute call
         executor.call(call, state).await
-    }
-
-    /// Deploy a contract with automatic VM routing
-    pub async fn deploy_contract(
-        &self,
-        deployment: &ContractDeployment,
-        state: &mut dyn VmState,
-    ) -> Result<DeployResult> {
-        tracing::info!(
-            "Deploying contract: deployer={}, code_size={}, vm_type={:?}",
-            hex::encode(&deployment.deployer),
-            deployment.code.len(),
-            deployment.vm_type
-        );
-
-        // Validate contract size
-        self.config.validate_contract_size(deployment.code.len())?;
-
-        // Get the appropriate executor
-        let executor = self.get_executor(deployment.vm_type)?;
-
-        // Execute deployment
-        executor.deploy_contract(deployment, state).await
     }
 
     /// Estimate gas for a transaction
@@ -627,7 +696,8 @@ mod tests {
             0,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = runtime.execute_transaction(&tx, &mut state).await;
         assert!(result.is_ok(), "EVM transfer failed: {:?}", result.err());
@@ -645,6 +715,7 @@ mod tests {
             VmType::Evm,
             chain_id,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     /// A transaction at its account's next nonce that a rule refuses spends
@@ -712,7 +783,8 @@ mod tests {
             0,
             VmType::Tenzro,
             runtime.config().chain_id,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         assert!(crate::native::pays_no_fee(&record));
         assert!(matches!(
             runtime.execute_transaction(&record, &mut state).await,

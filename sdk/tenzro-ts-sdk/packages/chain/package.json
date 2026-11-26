@@ -1,7 +1,7 @@
 {
   "name": "@tenzro/chain",
   "version": "0.9.0",
-  "description": "Tenzro chain operations: tokens, staking, validators, governance, contracts, TEE, ZK, storage and events",
+  "description": "Tenzro chain operations: tokens, staking, validators, governance, contracts, TEE, ZK, storage, compute rental, data availability and events",
   "keywords": [
     "tenzro",
     "tenzro-sdk",

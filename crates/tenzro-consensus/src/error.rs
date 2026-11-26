@@ -138,6 +138,15 @@ pub enum ConsensusError {
         cap: usize,
     },
 
+    /// The fee payer a transaction names already pays for the maximum number
+    /// of pending transactions in the mempool.
+    #[error("Fee payer {fee_payer} pays for {pending} pending transactions (cap {cap})")]
+    FeePayerCapExceeded {
+        fee_payer: String,
+        pending: usize,
+        cap: usize,
+    },
+
     /// The sender has no registered identity (or its identity was revoked),
     /// so its transaction is not admitted. Node-local admission policy: the
     /// transaction is not invalid, this node will not pool it.
@@ -151,6 +160,18 @@ pub enum ConsensusError {
 impl From<tenzro_crypto::CryptoError> for ConsensusError {
     fn from(err: tenzro_crypto::CryptoError) -> Self {
         ConsensusError::Crypto(err.to_string())
+    }
+}
+
+impl From<tenzro_light::LightError> for ConsensusError {
+    fn from(err: tenzro_light::LightError) -> Self {
+        use tenzro_light::LightError as L;
+        match err {
+            L::Finality(e) => e.into(),
+            L::InvalidCertificate(m) => ConsensusError::InvalidCertificate(m),
+            L::CommitteeMismatch => ConsensusError::InvalidCertificate(err.to_string()),
+            other => ConsensusError::Malformed(other.to_string()),
+        }
     }
 }
 

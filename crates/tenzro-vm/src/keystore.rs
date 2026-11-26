@@ -47,6 +47,15 @@ use crate::types::{Log, StateChange, VmTransaction};
 pub const SELECTOR_KEYSTORE_UPDATE: [u8; 4] = [0x01, 0x00, 0x00, 0xD4];
 /// Gas for a keystore change: up to a few P-256 and ML-DSA-65 verifications.
 pub const GAS_KEYSTORE_UPDATE: u64 = 120_000;
+/// The gate of recovery rotation: from its epoch a completed recovery
+/// replaces the account's passkeys instead of adding one beside them, and
+/// the keystore log names the owner and the passkeys each change linked and
+/// retired.
+pub const RECOVERY_ROTATION_GATE: &str = "feature.recovery_rotation.activation_epoch";
+/// The gate of the recovery cancel rule: from its epoch one passkey alone
+/// neither cancels a recovery the recovery signers started nor changes the
+/// signers while it is pending.
+pub const RECOVERY_CANCEL_GATE: &str = "feature.recovery_cancel.activation_epoch";
 /// Topic of the log a keystore change emits.
 pub const KEYSTORE_UPDATED_TOPIC: &[u8] = b"KeystoreUpdated";
 
@@ -543,13 +552,7 @@ fn recovery_carries_authority(
                     .iter()
                     .find(|s| s.public_key == a.public_key)
                     .is_some_and(|s| {
-                        recovery_signed(
-                            state,
-                            s,
-                            &digest,
-                            &a.signature,
-                            crate::account_keys::account_pq_policy(state, &update.account),
-                        )
+                        recovery_signed(state, s, &digest, &a.signature, PqPolicy::Required)
                     })
             });
             if record.pending_recovery.is_some() || !approved {
@@ -667,6 +670,30 @@ pub fn check_passkey_root(
     })
 }
 
+/// Indices of the account's recovery signers whose approval of `digest`
+/// verifies and whose kind of signer governance has not paused.
+fn approving_signers(
+    state: &dyn VmState,
+    current: &KeystoreRecord,
+    update: &KeystoreUpdate,
+    digest: &[u8; 32],
+) -> BTreeSet<u32> {
+    let mut approvers = BTreeSet::new();
+    for a in &update.approvals {
+        if let Some((i, signer)) = current
+            .recovery_signers
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.public_key == a.public_key)
+            && factor_open(state, signer.role)
+            && recovery_signed(state, signer, digest, &a.signature, PqPolicy::Required)
+        {
+            approvers.insert(i as u32);
+        }
+    }
+    approvers
+}
+
 /// Apply a [`KeystoreUpdate`] sent in `tx` at block time `now_ms`.
 pub fn apply(
     state: &mut dyn VmState,
@@ -742,7 +769,7 @@ pub fn apply(
                 SignatureContext::AccountOwner,
                 &digest,
                 &a.signature,
-                crate::account_keys::account_pq_policy(&*state, &update.account),
+                PqPolicy::Required,
             )
         {
             signers.insert(a.public_key.clone());
@@ -794,7 +821,7 @@ pub fn apply(
             SignatureContext::AccountOwner,
             &digest,
             possession,
-            crate::account_keys::account_pq_policy(&*state, &update.account),
+            PqPolicy::Required,
         ) {
             return Err(refuse(
                 "the new passkey's proof of possession does not verify",
@@ -802,6 +829,11 @@ pub fn apply(
         }
     }
 
+    // Whether a completed recovery replaces the account's passkeys, and the
+    // log says what each change linked and retired.
+    let rotates = crate::feature_gate::is_live_now(&*state, RECOVERY_ROTATION_GATE);
+    // Whether a recovery the signers started is out of one passkey's reach.
+    let guarded_cancel = crate::feature_gate::is_live_now(&*state, RECOVERY_CANCEL_GATE);
     let mut next = current.clone();
     next.version = current.version + 1;
     match &update.op {
@@ -856,6 +888,18 @@ pub fn apply(
             threshold,
         } => {
             need(required, "changing the recovery signers")?;
+            // The signers who approved a pending recovery can call it off;
+            // one passkey does not swap them for its own meanwhile.
+            if guarded_cancel
+                && current
+                    .pending_recovery
+                    .as_ref()
+                    .is_some_and(|p| !p.approvers.is_empty())
+            {
+                return Err(refuse(
+                    "the recovery signers do not change while a recovery they approved is pending",
+                ));
+            }
             for m in members {
                 if !factor_open(&*state, m.role) {
                     factor_enabled(
@@ -895,17 +939,12 @@ pub fn apply(
                     .enumerate()
                     .find(|(_, s)| s.public_key == a.public_key)
                     && factor_open(&*state, signer.role)
-                    && recovery_signed(
-                        state,
-                        signer,
-                        &digest,
-                        &a.signature,
-                        crate::account_keys::account_pq_policy(&*state, &update.account),
-                    )
+                    && recovery_signed(state, signer, &digest, &a.signature, PqPolicy::Required)
                 {
                     approvers.insert(i as u32);
                 }
             }
+            let approvers = approving_signers(&*state, &current, update, &digest);
             let approving: Vec<&RecoverySigner> = approvers
                 .iter()
                 .map(|i| &current.recovery_signers[*i as usize])
@@ -993,9 +1032,38 @@ pub fn apply(
             next.recovery_code = None;
         }
         KeystoreOp::CancelRecovery => {
-            need(1, "cancelling a recovery")?;
-            if current.pending_recovery.is_none() {
-                return Err(refuse("no recovery is pending"));
+            let pending = current
+                .pending_recovery
+                .as_ref()
+                .ok_or_else(|| refuse("no recovery is pending"))?;
+            if pending.approvers.is_empty() || !guarded_cancel {
+                // Started by the recovery code, or before the cancel rule is
+                // in force: any passkey calls it off.
+                need(1, "cancelling a recovery")?;
+            } else {
+                // Started by the recovery signers. One passkey does not
+                // stop it, since it may be the stolen one the recovery
+                // answers: it takes the passkeys that could spend, or the
+                // signers by the threshold that started it.
+                let passkeys: Vec<&KeystoreCredential> = signers
+                    .iter()
+                    .filter_map(|key| current.credential_by_key(key))
+                    .collect();
+                let approving: Vec<&RecoverySigner> =
+                    approving_signers(&*state, &current, update, &digest)
+                        .iter()
+                        .map(|i| &current.recovery_signers[*i as usize])
+                        .collect();
+                if independent_roots(&passkeys) < SPEND_MIN_INDEPENDENT_ROOTS
+                    && independent_roots(&approving) < current.recovery_threshold as usize
+                {
+                    return Err(refuse(format!(
+                        "cancelling a recovery the recovery signers approved needs \
+                         {SPEND_MIN_INDEPENDENT_ROOTS} independent passkeys of the account, or {} \
+                         independent recovery signers",
+                        current.recovery_threshold
+                    )));
+                }
             }
             next.pending_recovery = None;
         }
@@ -1026,12 +1094,27 @@ pub fn apply(
                 }
             }
             if now_ms < pending.ready_at_ms {
-                return Err(refuse(format!(
-                    "the recovery completes from {} (block time, ms); any passkey of the account can cancel it until then",
-                    pending.ready_at_ms
-                )));
+                return Err(refuse(if pending.approvers.is_empty() || !guarded_cancel {
+                    format!(
+                        "the recovery completes from {} (block time, ms); any passkey of the account can cancel it until then",
+                        pending.ready_at_ms
+                    )
+                } else {
+                    format!(
+                        "the recovery completes from {} (block time, ms); two independent passkeys of the account, or its recovery signers, can cancel it until then",
+                        pending.ready_at_ms
+                    )
+                }));
             }
-            if current
+            if rotates {
+                // The recovered passkey replaces every passkey the account
+                // held: a lost or stolen one acts for the account no longer,
+                // and the policy falls back to the one passkey that is left.
+                let mut joined = pending.credential.clone();
+                joined.added_at_ms = now_ms;
+                next.credentials = vec![joined];
+                next.policy = SecondFactorPolicy::SingleCredential;
+            } else if current
                 .credential_by_id(&pending.credential.credential_id)
                 .is_none()
                 && current
@@ -1061,12 +1144,48 @@ pub fn apply(
 
     let mut changes = Vec::new();
     write_record(state, on_chain.as_ref(), &next, &mut changes)?;
-    let data = serde_json::to_vec(&serde_json::json!({
+    let mut event = serde_json::json!({
         "account": hex::encode(&next.account),
         "version": next.version,
         "commitment": hex::encode(next.commitment()),
-    }))
-    .map_err(|e| VmError::Internal(format!("encode keystore log: {e}")))?;
+    });
+    if rotates {
+        // Passkeys the change linked and unlinked, against the record the
+        // chain held before it: an account's first change names its first
+        // passkey. A completed recovery says so: every passkey it retired
+        // has to be linked again before it acts for the account.
+        let before: &[KeystoreCredential] = on_chain.as_ref().map_or(&[], |r| &r.credentials);
+        let held = |set: &[KeystoreCredential], c: &KeystoreCredential| {
+            set.iter().any(|o| o.credential_id == c.credential_id)
+        };
+        let added: Vec<String> = next
+            .credentials
+            .iter()
+            .filter(|c| !held(before, c))
+            .map(|c| hex::encode(&c.credential_id))
+            .collect();
+        let retired: Vec<String> = before
+            .iter()
+            .filter(|c| !held(&next.credentials, c))
+            .map(|c| hex::encode(&c.credential_id))
+            .collect();
+        event["owner_did"] = next.owner_did.clone().into();
+        event["added"] = added.into();
+        event["retired"] = retired.into();
+        event["recovered"] = matches!(update.op, KeystoreOp::FinishRecovery).into();
+    }
+    let data = serde_json::to_vec(&event)
+        .map_err(|e| VmError::Internal(format!("encode keystore log: {e}")))?;
+    if matches!(update.op, KeystoreOp::FinishRecovery) {
+        crate::native::identity_keys::record_recovery(state, &next.owner_did, now_ms, &mut changes);
+    }
+    crate::native::identity_keys::record_event(
+        state,
+        &next.owner_did,
+        KEYSTORE_UPDATED_TOPIC,
+        &data,
+        &mut changes,
+    )?;
     let log = Log::new(
         SYSTEM_ADDRESS.to_vec(),
         vec![KEYSTORE_UPDATED_TOPIC.to_vec(), next.account.clone()],

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
-use cosmwasm_std::{Api, Empty, Timestamp, coins};
+use cosmwasm_std::{coins, Api, Empty, Timestamp};
 use cw_multi_test::{App, AppBuilder, Contract, ContractWrapper, Executor};
 use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey};
@@ -24,12 +24,23 @@ fn sha(parts: &[&[u8]]) -> [u8; 32] {
 }
 
 fn node(i: usize) -> (SigningKey, &'static str) {
-    let ops = ["did:tenzro:human:operator-a", "did:tenzro:human:operator-b", "did:tenzro:human:operator-a"];
-    (SigningKey::from_slice(&[0x11 * (i as u8 + 1); 32]).unwrap(), ops[i])
+    let ops = [
+        "did:tenzro:human:operator-a",
+        "did:tenzro:human:operator-b",
+        "did:tenzro:human:operator-a",
+    ];
+    (
+        SigningKey::from_slice(&[0x11 * (i as u8 + 1); 32]).unwrap(),
+        ops[i],
+    )
 }
 
 fn sec1(k: &SigningKey) -> [u8; 65] {
-    k.verifying_key().to_encoded_point(false).as_bytes().try_into().unwrap()
+    k.verifying_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .try_into()
+        .unwrap()
 }
 
 fn pair(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
@@ -45,7 +56,14 @@ fn keys() -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
         })
         .collect();
     let n01 = pair(&leaves[0], &leaves[1]);
-    (pair(&n01, &leaves[2]), vec![vec![leaves[1], leaves[2]], vec![leaves[0], leaves[2]], vec![n01]])
+    (
+        pair(&n01, &leaves[2]),
+        vec![
+            vec![leaves[1], leaves[2]],
+            vec![leaves[0], leaves[2]],
+            vec![n01],
+        ],
+    )
 }
 
 struct T {
@@ -78,16 +96,42 @@ fn setup() -> T {
             None,
         )
         .unwrap();
-    app.execute_contract(creator.clone(), registry.clone(), &ExecuteMsg::CreateAccount { did: DID.into() }, &[]).unwrap();
-    let account: Addr = app.wrap().query_wasm_smart(&registry, &QueryMsg::AccountOf { did: DID.into() }).unwrap();
-    app.wrap().query_wasm_contract_info(&account).expect("the account is where the registry says");
-    app.init_modules(|router, _, storage| router.bank.init_balance(storage, &account, coins(1_000_000, "uatom")).unwrap());
-    T { app, registry, account, relayer, seq: 0 }
+    app.execute_contract(
+        creator.clone(),
+        registry.clone(),
+        &ExecuteMsg::CreateAccount { did: DID.into() },
+        &[],
+    )
+    .unwrap();
+    let account: Addr = app
+        .wrap()
+        .query_wasm_smart(&registry, &QueryMsg::AccountOf { did: DID.into() })
+        .unwrap();
+    app.wrap()
+        .query_wasm_contract_info(&account)
+        .expect("the account is where the registry says");
+    app.init_modules(|router, _, storage| {
+        router
+            .bank
+            .init_balance(storage, &account, coins(1_000_000, "uatom"))
+            .unwrap()
+    });
+    T {
+        app,
+        registry,
+        account,
+        relayer,
+        seq: 0,
+    }
 }
 
 impl T {
     fn word(&self) -> [u8; 32] {
-        let c = self.app.api().addr_canonicalize(self.account.as_str()).unwrap();
+        let c = self
+            .app
+            .api()
+            .addr_canonicalize(self.account.as_str())
+            .unwrap();
         let mut w = [0u8; 32];
         w[32 - c.len()..].copy_from_slice(c.as_slice());
         w
@@ -119,10 +163,16 @@ impl T {
         let tk = agent::grant_tree_key(DID.as_bytes(), CAIP2.as_bytes());
         let mut s = sha(&[&[0], grant]);
         for i in 0..8 {
-            s = if (tk[31] >> i) & 1 == 0 { sha(&[&[3], &s, &[0; 32]]) } else { sha(&[&[3], &[0; 32], &s]) };
+            s = if (tk[31] >> i) & 1 == 0 {
+                sha(&[&[3], &s, &[0; 32]])
+            } else {
+                sha(&[&[3], &[0; 32], &s])
+            };
         }
         let root = sha(&[&[2], &tk[..31], &s]);
-        self.app.contract_storage_mut(&self.registry).set(&checkpoint_key(index), &root);
+        self.app
+            .contract_storage_mut(&self.registry)
+            .set(&checkpoint_key(index), &root);
         let mut proof = vec![0u8, 0, 2];
         proof.extend_from_slice(&[0u8; 256]);
         self.app
@@ -143,7 +193,11 @@ impl T {
     }
 
     fn target(&self) -> Vec<u8> {
-        self.app.api().addr_canonicalize(self.app.api().addr_make("payee").as_str()).unwrap().to_vec()
+        self.app
+            .api()
+            .addr_canonicalize(self.app.api().addr_make("payee").as_str())
+            .unwrap()
+            .to_vec()
     }
 
     fn action(&self, target: &[u8], amount: u128, refund: u128) -> Vec<u8> {
@@ -169,24 +223,39 @@ impl T {
         let low = sig.normalize_s().unwrap_or(sig);
         let bytes: [u8; 64] = if high_s {
             let (r, s) = low.split_scalars();
-            Signature::from_scalars(r.to_bytes(), (-*s).to_bytes()).unwrap().to_bytes().into()
+            Signature::from_scalars(r.to_bytes(), (-*s).to_bytes())
+                .unwrap()
+                .to_bytes()
+                .into()
         } else {
             low.to_bytes().into()
         };
         ActSigner {
             key: Binary::from(sec1(&k).to_vec()),
             operator: op.into(),
-            proof: keys().1[i].iter().map(|p| Binary::from(p.to_vec())).collect(),
+            proof: keys().1[i]
+                .iter()
+                .map(|p| Binary::from(p.to_vec()))
+                .collect(),
             signature: Binary::from(bytes.to_vec()),
         }
     }
 
-    fn act(&mut self, action: &[u8], signers: Vec<ActSigner>, target_proof: Vec<Binary>) -> Result<(), String> {
+    fn act(
+        &mut self,
+        action: &[u8],
+        signers: Vec<ActSigner>,
+        target_proof: Vec<Binary>,
+    ) -> Result<(), String> {
         self.app
             .execute_contract(
                 self.relayer.clone(),
                 self.account.clone(),
-                &ExecuteMsg::Act { action: Binary::from(action.to_vec()), signers, target_proof },
+                &ExecuteMsg::Act {
+                    action: Binary::from(action.to_vec()),
+                    signers,
+                    target_proof,
+                },
                 &[],
             )
             .map(|_| ())
@@ -218,7 +287,8 @@ fn the_registry_accepts_a_real_recorded_finality_proof() {
                 chain_id: 1337,
                 genesis_hash: Binary::from([0x6e; 32].to_vec()),
                 genesis_committee_root: Binary::from(
-                    hex::decode("f17b383633cfd64f3bf43b34394ee538096a722322bb16144d845acd28e6e481").unwrap(),
+                    hex::decode("f17b383633cfd64f3bf43b34394ee538096a722322bb16144d845acd28e6e481")
+                        .unwrap(),
                 ),
                 caip2: CAIP2.into(),
             },
@@ -230,11 +300,17 @@ fn the_registry_accepts_a_real_recorded_finality_proof() {
     app.execute_contract(
         creator,
         registry.clone(),
-        &ExecuteMsg::SubmitCheckpoint { journal: Binary::from(h("journal")), seal: Binary::from(h("evm_seal")) },
+        &ExecuteMsg::SubmitCheckpoint {
+            journal: Binary::from(h("journal")),
+            seal: Binary::from(h("evm_seal")),
+        },
         &[],
     )
     .unwrap();
-    let root: Binary = app.wrap().query_wasm_smart(&registry, &QueryMsg::StateRoot { index: 7 }).unwrap();
+    let root: Binary = app
+        .wrap()
+        .query_wasm_smart(&registry, &QueryMsg::StateRoot { index: 7 })
+        .unwrap();
     assert_eq!(root.to_vec(), vec![0x5e; 32]);
 }
 
@@ -256,8 +332,24 @@ fn a_signed_action_sends_and_refunds() {
     let s = t.signer(0, &a, 0, false);
     t.act(&a, vec![s.clone()], vec![]).unwrap();
     let payee = t.app.api().addr_make("payee");
-    assert_eq!(t.app.wrap().query_balance(&payee, "uatom").unwrap().amount.to_string(), "100");
-    assert_eq!(t.app.wrap().query_balance(&t.relayer, "uatom").unwrap().amount.to_string(), "5");
+    assert_eq!(
+        t.app
+            .wrap()
+            .query_balance(&payee, "uatom")
+            .unwrap()
+            .amount
+            .to_string(),
+        "100"
+    );
+    assert_eq!(
+        t.app
+            .wrap()
+            .query_balance(&t.relayer, "uatom")
+            .unwrap()
+            .amount
+            .to_string(),
+        "5"
+    );
     assert!(t.act(&a, vec![s], vec![]).is_err(), "a replay");
 }
 
@@ -266,10 +358,16 @@ fn every_rule_of_the_grant_holds() {
     let mut t = open();
     let target = t.target();
     let a = t.action(&target, 100, 0);
-    assert!(t.act(&a, vec![t.signer(0, &a, 0, true)], vec![]).unwrap_err().contains("low-S"));
+    assert!(t
+        .act(&a, vec![t.signer(0, &a, 0, true)], vec![])
+        .unwrap_err()
+        .contains("low-S"));
     let mut wrong = t.signer(0, &a, 0, false);
     wrong.signature = t.signer(1, &a, 0, false).signature;
-    assert!(t.act(&a, vec![wrong], vec![]).unwrap_err().contains("does not verify"));
+    assert!(t
+        .act(&a, vec![wrong], vec![])
+        .unwrap_err()
+        .contains("does not verify"));
     let mut stranger = t.signer(0, &a, 0, false);
     let k = SigningKey::from_slice(&[0x44; 32]).unwrap();
     let mut m = agent::ACT_DOMAIN.to_vec();
@@ -281,17 +379,53 @@ fn every_rule_of_the_grant_holds() {
     let sig: Signature = k.sign(&m);
     stranger.key = Binary::from(sec1(&k).to_vec());
     stranger.signature = Binary::from(sig.normalize_s().unwrap_or(sig).to_bytes().to_vec());
-    assert!(t.act(&a, vec![stranger], vec![]).unwrap_err().contains("key not in root"));
+    assert!(t
+        .act(&a, vec![stranger], vec![])
+        .unwrap_err()
+        .contains("key not in root"));
     let over = t.action(&target, 401, 0);
-    assert!(t.act(&over, vec![t.signer(0, &over, 0, false)], vec![]).unwrap_err().contains("per-action"));
+    assert!(t
+        .act(&over, vec![t.signer(0, &over, 0, false)], vec![])
+        .unwrap_err()
+        .contains("per-action"));
     let refund = t.action(&target, 100, 11);
-    assert!(t.act(&refund, vec![t.signer(0, &refund, 0, false)], vec![]).unwrap_err().contains("refund"));
+    assert!(t
+        .act(&refund, vec![t.signer(0, &refund, 0, false)], vec![])
+        .unwrap_err()
+        .contains("refund"));
     let big = t.action(&target, 350, 0);
-    assert!(t.act(&big, vec![t.signer(0, &big, 0, false)], vec![]).unwrap_err().contains("cosign"));
-    assert!(t.act(&big, vec![t.signer(0, &big, 0, false), t.signer(2, &big, 0, false)], vec![]).unwrap_err().contains("cosign"));
-    t.act(&big, vec![t.signer(0, &big, 0, false), t.signer(1, &big, 0, false)], vec![]).unwrap();
-    t.act(&big, vec![t.signer(0, &big, 1, false), t.signer(1, &big, 1, false)], vec![]).unwrap();
-    assert!(t.act(&big, vec![t.signer(0, &big, 2, false), t.signer(1, &big, 2, false)], vec![]).unwrap_err().contains("budget"));
+    assert!(t
+        .act(&big, vec![t.signer(0, &big, 0, false)], vec![])
+        .unwrap_err()
+        .contains("cosign"));
+    assert!(t
+        .act(
+            &big,
+            vec![t.signer(0, &big, 0, false), t.signer(2, &big, 0, false)],
+            vec![]
+        )
+        .unwrap_err()
+        .contains("cosign"));
+    t.act(
+        &big,
+        vec![t.signer(0, &big, 0, false), t.signer(1, &big, 0, false)],
+        vec![],
+    )
+    .unwrap();
+    t.act(
+        &big,
+        vec![t.signer(0, &big, 1, false), t.signer(1, &big, 1, false)],
+        vec![],
+    )
+    .unwrap();
+    assert!(t
+        .act(
+            &big,
+            vec![t.signer(0, &big, 2, false), t.signer(1, &big, 2, false)],
+            vec![]
+        )
+        .unwrap_err()
+        .contains("budget"));
 }
 
 #[test]
@@ -306,18 +440,33 @@ fn targets_voids_staleness_and_time_hold() {
     t.install(1, &g).unwrap();
     let a = t.action(&target, 10, 0);
     let s = t.signer(0, &a, 0, false);
-    assert!(t.act(&a, vec![s.clone()], vec![]).unwrap_err().contains("target"));
-    t.act(&a, vec![s], vec![Binary::from(other.to_vec())]).unwrap();
+    assert!(t
+        .act(&a, vec![s.clone()], vec![])
+        .unwrap_err()
+        .contains("target"));
+    t.act(&a, vec![s], vec![Binary::from(other.to_vec())])
+        .unwrap();
     let mut v = g.clone();
     v[321] = 1;
     t.install(2, &v).unwrap();
     let a1 = t.action(&target, 10, 0);
-    assert!(t.act(&a1, vec![t.signer(0, &a1, 1, false)], vec![Binary::from(other.to_vec())]).unwrap_err().contains("void"));
+    assert!(t
+        .act(
+            &a1,
+            vec![t.signer(0, &a1, 1, false)],
+            vec![Binary::from(other.to_vec())]
+        )
+        .unwrap_err()
+        .contains("void"));
     assert!(t.install(3, &g).unwrap_err().contains("stale"));
     let mut t = open();
-    t.app.update_block(|b| b.time = Timestamp::from_nanos((NOW_MS + 600_001) * 1_000_000));
+    t.app
+        .update_block(|b| b.time = Timestamp::from_nanos((NOW_MS + 600_001) * 1_000_000));
     let a = t.action(&t.target(), 10, 0);
-    assert!(t.act(&a, vec![t.signer(0, &a, 0, false)], vec![]).unwrap_err().contains("time window"));
+    assert!(t
+        .act(&a, vec![t.signer(0, &a, 0, false)], vec![])
+        .unwrap_err()
+        .contains("time window"));
 }
 
 #[test]
@@ -329,7 +478,14 @@ fn an_exact_grant_runs_once_and_a_foreign_grant_is_refused() {
     t.install(1, &g).unwrap();
     let exact = |t: &mut T| {
         t.app
-            .execute_contract(t.relayer.clone(), t.account.clone(), &ExecuteMsg::ActExact { action: Binary::from(a.clone()) }, &[])
+            .execute_contract(
+                t.relayer.clone(),
+                t.account.clone(),
+                &ExecuteMsg::ActExact {
+                    action: Binary::from(a.clone()),
+                },
+                &[],
+            )
             .map_err(|e| format!("{e:?}"))
     };
     exact(&mut t).unwrap();
@@ -360,7 +516,10 @@ fn a_paying_action_reports_the_payment_for_tenzro() {
     };
     let short = action(&data[..103]);
     let s = t.signer(0, &short, 0, false);
-    assert!(t.act(&short, vec![s], vec![]).unwrap_err().contains("payee, request, quote and price"));
+    assert!(t
+        .act(&short, vec![s], vec![])
+        .unwrap_err()
+        .contains("payee, request, quote and price"));
 
     let a = action(&data);
     let s = t.signer(0, &a, 0, false);
@@ -369,7 +528,11 @@ fn a_paying_action_reports_the_payment_for_tenzro() {
         .execute_contract(
             t.relayer.clone(),
             t.account.clone(),
-            &ExecuteMsg::Act { action: Binary::from(a.clone()), signers: vec![s], target_proof: vec![] },
+            &ExecuteMsg::Act {
+                action: Binary::from(a.clone()),
+                signers: vec![s],
+                target_proof: vec![],
+            },
             &[],
         )
         .unwrap();
@@ -390,20 +553,37 @@ fn a_paying_action_reports_the_payment_for_tenzro() {
     expected.extend_from_slice(&100u128.to_be_bytes());
     assert_eq!(report, expected);
     let payee = t.app.api().addr_make("payee");
-    assert_eq!(t.app.wrap().query_balance(&payee, "uatom").unwrap().amount.to_string(), "100");
+    assert_eq!(
+        t.app
+            .wrap()
+            .query_balance(&payee, "uatom")
+            .unwrap()
+            .amount
+            .to_string(),
+        "100"
+    );
 }
 
 /// A contract that keeps the last message and funds it was called with.
 fn recorder() -> Box<dyn Contract<Empty>> {
     Box::new(ContractWrapper::new(
-        |deps: DepsMut, _env: Env, info: MessageInfo, msg: serde_json::Value| -> StdResult<Response> {
+        |deps: DepsMut,
+         _env: Env,
+         info: MessageInfo,
+         msg: serde_json::Value|
+         -> StdResult<Response> {
             deps.storage.set(b"msg", &cosmwasm_std::to_json_vec(&msg)?);
-            deps.storage.set(b"funds", &cosmwasm_std::to_json_vec(&info.funds)?);
+            deps.storage
+                .set(b"funds", &cosmwasm_std::to_json_vec(&info.funds)?);
             Ok(Response::new())
         },
-        |_: DepsMut, _: Env, _: MessageInfo, _: Empty| -> StdResult<Response> { Ok(Response::new()) },
+        |_: DepsMut, _: Env, _: MessageInfo, _: Empty| -> StdResult<Response> {
+            Ok(Response::new())
+        },
         |deps: Deps, _: Env, key: String| -> StdResult<Binary> {
-            Ok(Binary::from(deps.storage.get(key.as_bytes()).unwrap_or_default()))
+            Ok(Binary::from(
+                deps.storage.get(key.as_bytes()).unwrap_or_default(),
+            ))
         },
     ))
 }
@@ -413,9 +593,17 @@ fn an_execute_action_calls_the_lock_with_exactly_its_amount() {
     let mut t = open();
     let id = t.app.store_code(recorder());
     let creator = t.app.api().addr_make("creator");
-    let lock = t.app.instantiate_contract(id, creator, &Empty {}, &[], "lock", None).unwrap();
+    let lock = t
+        .app
+        .instantiate_contract(id, creator, &Empty {}, &[], "lock", None)
+        .unwrap();
     let msg = br#"{"lock":{"plan_id":"AA==","index":0,"recipient":"r"}}"#;
-    let target = t.app.api().addr_canonicalize(lock.as_str()).unwrap().to_vec();
+    let target = t
+        .app
+        .api()
+        .addr_canonicalize(lock.as_str())
+        .unwrap()
+        .to_vec();
     let mut a = (target.len() as u16).to_be_bytes().to_vec();
     a.extend_from_slice(&target);
     a.extend_from_slice(&(EXECUTE_SELECTOR.len() as u16).to_be_bytes());
@@ -429,7 +617,26 @@ fn an_execute_action_calls_the_lock_with_exactly_its_amount() {
     let funds: Vec<Coin> = t.app.wrap().query_wasm_smart(&lock, &"funds").unwrap();
     assert_eq!(funds, coins(100, "uatom"));
     let got: serde_json::Value = t.app.wrap().query_wasm_smart(&lock, &"msg").unwrap();
-    assert_eq!(got, serde_json::from_slice::<serde_json::Value>(msg).unwrap());
-    assert_eq!(t.app.wrap().query_balance(&lock, "uatom").unwrap().amount.to_string(), "100");
-    assert_eq!(t.app.wrap().query_balance(&t.account, "uatom").unwrap().amount.to_string(), "999895");
+    assert_eq!(
+        got,
+        serde_json::from_slice::<serde_json::Value>(msg).unwrap()
+    );
+    assert_eq!(
+        t.app
+            .wrap()
+            .query_balance(&lock, "uatom")
+            .unwrap()
+            .amount
+            .to_string(),
+        "100"
+    );
+    assert_eq!(
+        t.app
+            .wrap()
+            .query_balance(&t.account, "uatom")
+            .unwrap()
+            .amount
+            .to_string(),
+        "999895"
+    );
 }

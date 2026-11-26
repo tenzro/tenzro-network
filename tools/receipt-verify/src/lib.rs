@@ -1,9 +1,14 @@
-//! An independent verifier for Tenzro inference receipts.
+//! An independent verifier for Tenzro inference receipts and interaction
+//! records.
 //!
-//! It implements `docs/standards/inference-receipt.md` from the text of that
-//! document, with general-purpose cryptography crates only: it links no
-//! Tenzro crate, so a receipt that verifies here verifies by the published
-//! rules, not by sharing the signer's code.
+//! It implements `docs/standards/inference-receipt.md` and
+//! `docs/standards/interaction-receipt.md` from the text of those documents,
+//! with general-purpose cryptography crates only: it links no Tenzro crate,
+//! so a receipt that verifies here verifies by the published rules, not by
+//! sharing the signer's code.
+
+pub mod interaction;
+pub mod run_manifest;
 
 use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey as Ed25519Key};
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65};

@@ -113,6 +113,10 @@ impl McpStreamHandler for IrohMcpHandler {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
     use std::time::Duration;
@@ -130,14 +134,20 @@ mod tests {
 
     async fn serve(limits: AdmissionLimits) -> Served {
         let (node, tmp) = crate::bare_node().await;
-        let server = base_builder().bind().await.unwrap();
+        let server = tenzro_iroh::identity_transport::on_loopback(base_builder())
+            .bind()
+            .await
+            .unwrap();
         let router = iroh::protocol::Router::builder(server.clone())
             .accept(
                 ALPN_MCP,
                 McpProtocol::new(Arc::new(IrohMcpHandler::new(node)), limits),
             )
             .spawn();
-        let client = base_builder().bind().await.unwrap();
+        let client = tenzro_iroh::identity_transport::on_loopback(base_builder())
+            .bind()
+            .await
+            .unwrap();
         Served {
             server,
             client,

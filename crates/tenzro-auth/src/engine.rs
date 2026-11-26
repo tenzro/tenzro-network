@@ -290,6 +290,12 @@ impl AuthEngine {
         crate::signer::public_jwk(&self.signer.public_key())
     }
 
+    /// The signer of issued tokens, for the other statements a node makes
+    /// under the same key.
+    pub fn signer(&self) -> &Arc<dyn TokenSigner> {
+        &self.signer
+    }
+
     /// Walk `audit:` events at startup and rebuild the revocation set,
     /// including the transitive controller closure.
     ///
@@ -372,6 +378,52 @@ impl AuthEngine {
         authorization_details: AuthorizationDetails,
         ttl_secs: Option<u64>,
     ) -> Result<String> {
+        self.issue_for(
+            self.cfg.audience.clone(),
+            bearer_did,
+            controller_did,
+            cnf_jkt,
+            authorization_details,
+            ttl_secs,
+        )
+    }
+
+    /// Issue a JWT good for one purpose of this node and nothing else,
+    /// bound to the holder's public-key thumbprint. Its audience is
+    /// [`Self::purpose_audience`], so [`Self::validate_jwt`] refuses it as
+    /// it refuses a token for any other audience; only
+    /// [`Self::validate_jwt_or_purpose`] with the same `purpose` accepts it.
+    pub fn issue_purpose_jwt(
+        &self,
+        purpose: &str,
+        bearer_did: &str,
+        cnf_jkt: &str,
+        ttl_secs: Option<u64>,
+    ) -> Result<String> {
+        self.issue_for(
+            self.purpose_audience(purpose),
+            bearer_did,
+            bearer_did,
+            cnf_jkt,
+            AuthorizationDetails::empty(),
+            ttl_secs,
+        )
+    }
+
+    /// The audience of a token issued for `purpose` alone.
+    fn purpose_audience(&self, purpose: &str) -> String {
+        format!("{}#{purpose}", self.cfg.audience)
+    }
+
+    fn issue_for(
+        &self,
+        audience: String,
+        bearer_did: &str,
+        controller_did: &str,
+        cnf_jkt: &str,
+        authorization_details: AuthorizationDetails,
+        ttl_secs: Option<u64>,
+    ) -> Result<String> {
         let now = unix_now();
         let ttl = ttl_secs
             .unwrap_or(self.cfg.default_ttl_secs)
@@ -393,7 +445,7 @@ impl AuthEngine {
         let claims = AuthClaims {
             sub: bearer_did.to_string(),
             iss: self.cfg.issuer.clone(),
-            aud: self.cfg.audience.clone(),
+            aud: audience,
             iat: now,
             nbf: now,
             exp,
@@ -682,9 +734,34 @@ impl AuthEngine {
         token: &str,
         dpop_context: Option<DpopValidation<'_>>,
     ) -> Result<AuthClaims> {
+        self.validate_for(&[&self.cfg.audience], token, dpop_context)
+    }
+
+    /// Validate a JWT as [`Self::validate_jwt`] does, accepting as well a
+    /// token issued for `purpose` alone by [`Self::issue_purpose_jwt`]. For
+    /// the one call that purpose names.
+    pub fn validate_jwt_or_purpose(
+        &self,
+        purpose: &str,
+        token: &str,
+        dpop_context: Option<DpopValidation<'_>>,
+    ) -> Result<AuthClaims> {
+        self.validate_for(
+            &[&self.cfg.audience, &self.purpose_audience(purpose)],
+            token,
+            dpop_context,
+        )
+    }
+
+    fn validate_for(
+        &self,
+        audiences: &[&str],
+        token: &str,
+        dpop_context: Option<DpopValidation<'_>>,
+    ) -> Result<AuthClaims> {
         let mut validation = Validation::new(Algorithm::ES256);
         validation.set_issuer(&[&self.cfg.issuer]);
-        validation.set_audience(&[&self.cfg.audience]);
+        validation.set_audience(audiences);
         validation.set_required_spec_claims(&["sub", "iss", "aud", "exp", "iat", "nbf", "jti"]);
 
         let data = match decode::<AuthClaims>(token, &self.decoding_key, &validation) {
@@ -701,7 +778,7 @@ impl AuthEngine {
                     jsonwebtoken::dangerous::insecure_decode::<AuthClaims>(token)
                 {
                     let c = &unverified.claims;
-                    if c.aud != self.cfg.audience {
+                    if !audiences.contains(&c.aud.as_str()) {
                         return Err(AuthError::InvalidToken(format!(
                             "audience/endpoint mismatch: token aud='{}' but this node expects '{}'",
                             c.aud, self.cfg.audience
@@ -1854,6 +1931,44 @@ mod tests {
         assert_eq!(
             claims.cnf.as_ref().map(|c| c.jkt.as_str()),
             Some("fake-jkt")
+        );
+    }
+
+    #[test]
+    fn a_purpose_token_is_good_for_its_purpose_and_nothing_else() {
+        let e = engine();
+        let did = "did:tenzro:machine:abc";
+        let narrow = e
+            .issue_purpose_jwt("pair-device", did, "jkt", Some(300))
+            .expect("issue");
+        let refusal = e.validate_jwt(&narrow, None).expect_err("refused");
+        assert!(
+            refusal.to_string().contains("audience/endpoint mismatch"),
+            "{refusal}"
+        );
+        assert!(e.validate_jwt_or_purpose("restart", &narrow, None).is_err());
+        let claims = e
+            .validate_jwt_or_purpose("pair-device", &narrow, None)
+            .expect("its own purpose");
+        assert_eq!(claims.sub, did);
+        assert_eq!(claims.controller_did, did);
+        assert_eq!(claims.aud, "https://rpc.test#pair-device");
+        assert_eq!(claims.exp - claims.iat, 300);
+        assert!(claims.authorization_details.details.is_empty());
+
+        // The node's own token passes where a purpose token would.
+        let full = e
+            .issue_jwt(did, did, "jkt", AuthorizationDetails::empty(), None)
+            .expect("issue");
+        assert_eq!(
+            e.validate_jwt(&full, None).expect("validate").aud,
+            "https://rpc.test"
+        );
+        assert_eq!(
+            e.validate_jwt_or_purpose("pair-device", &full, None)
+                .expect("validate")
+                .sub,
+            did
         );
     }
 

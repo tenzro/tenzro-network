@@ -49,25 +49,175 @@ pub fn key_is_delegated() -> bool {
 impl DelegatedKey {
     /// Routes every hardware key this process opens to the key holder.
     /// Returns whether the keys are delegated. Call before any key is opened.
+    /// A process routes its keys once: a second call after the keys are
+    /// delegated reports them delegated and changes nothing.
     pub fn install(&self) -> Result<bool> {
-        match (&self.tpm_key_holder, &self.tpm_label) {
-            (None, None) => Ok(false),
-            (Some(socket), Some(label)) => {
-                tenzro_device_key::remote::use_key_holder(label, socket)
-                    .map_err(|e| anyhow!("the key holder at {}: {e}", socket.display()))?;
-                DELEGATED.store(true, std::sync::atomic::Ordering::Release);
-                Ok(true)
+        // The two arguments are judged first, whatever this process already
+        // routes: half a pair is an error on every call.
+        let pair = match (&self.tpm_key_holder, &self.tpm_label) {
+            (None, None) => None,
+            (Some(socket), Some(label)) => Some((socket, label)),
+            _ => {
+                return Err(anyhow!(
+                    "--tpm-key-holder and --tpm-label go together: the socket of the key holder and \
+                     the key label the provider enrolled for this machine"
+                ));
             }
-            _ => Err(anyhow!(
-                "--tpm-key-holder and --tpm-label go together: the socket of the key holder and \
-                 the key label the provider enrolled for this machine"
-            )),
+        };
+        if key_is_delegated() {
+            return Ok(true);
+        }
+        let Some((socket, label)) = pair else {
+            return Ok(false);
+        };
+        tenzro_device_key::remote::use_key_holder(label, socket)
+            .map_err(|e| anyhow!("the key holder at {}: {e}", socket.display()))?;
+        DELEGATED.store(true, std::sync::atomic::Ordering::Release);
+        Ok(true)
+    }
+}
+
+/// The key holder `tenzro setup` recorded in the CLI configuration, when
+/// this machine's node signs through one.
+pub fn configured_key_holder() -> Option<DelegatedKey> {
+    let cfg = crate::config::load_config();
+    match (cfg.key_holder_socket, cfg.key_holder_label) {
+        (Some(socket), Some(label)) if !socket.is_empty() && !label.is_empty() => {
+            Some(DelegatedKey {
+                tpm_key_holder: Some(socket.into()),
+                tpm_label: Some(label),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether this process's keys are reached through a key holder. On a
+/// machine with no TPM or Secure Enclave of its own, the key holder recorded
+/// in the CLI configuration is installed here, since it is the only place
+/// such a machine has keys. A machine with its own hardware keeps using it
+/// unless a command delegated its keys explicitly.
+pub fn route_keys_to_key_holder() -> Result<bool> {
+    if key_is_delegated() {
+        return Ok(true);
+    }
+    if tenzro_device_key::signer::platform_backend().is_some() {
+        return Ok(false);
+    }
+    match configured_key_holder() {
+        Some(holder) => holder.install(),
+        None => Ok(false),
+    }
+}
+
+/// The key namespace a client account signs under when none is given.
+pub(crate) const DEFAULT_CLIENT_KEY_NAMESPACE: &str = "client";
+
+/// The account a transaction is signed by and paid from, shared by every CLI
+/// command that signs.
+///
+/// Without `--node-account` the client account under `--key-namespace` signs,
+/// from this machine's TPM or Secure Enclave. With it this machine's node
+/// account signs: from the local hardware, or, on a machine with neither,
+/// through the key holder the node uses (`--tpm-key-holder` and
+/// `--tpm-label`, or the key holder `tenzro setup` recorded in the CLI
+/// configuration).
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct SigningAccount {
+    /// Hardware key namespace of the signing client account (default
+    /// `client`); with `--node-account`, the node's `hardware_key_namespace`
+    /// (default: the machine's default node)
+    #[arg(long)]
+    pub key_namespace: Option<String>,
+
+    /// Sign and pay as this machine's node account (the account a node earns
+    /// into and is bonded under) instead of a client account
+    #[arg(long)]
+    pub node_account: bool,
+
+    #[command(flatten)]
+    pub delegated: DelegatedKey,
+}
+
+/// Which account signs a transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSigner<'a> {
+    /// The client account under this key namespace.
+    Client(&'a str),
+    /// The machine's node account, under the node's key namespace.
+    Node(Option<&'a str>),
+}
+
+impl SigningAccount {
+    /// The account the transaction is signed by. A key holder serves a
+    /// node's keys, so naming one for a client account is refused, not
+    /// ignored.
+    pub fn signer(&self) -> Result<AccountSigner<'_>> {
+        if self.node_account {
+            return Ok(AccountSigner::Node(self.key_namespace.as_deref()));
+        }
+        if self.delegated.tpm_key_holder.is_some() || self.delegated.tpm_label.is_some() {
+            return Err(anyhow!(
+                "--tpm-key-holder and --tpm-label apply to the node account: add --node-account \
+                 to sign as the node account, or leave them out (and unset TENZRO_TPM_KEY_HOLDER \
+                 and TENZRO_TPM_LABEL) to sign as a client account"
+            ));
+        }
+        Ok(AccountSigner::Client(
+            self.key_namespace
+                .as_deref()
+                .unwrap_or(DEFAULT_CLIENT_KEY_NAMESPACE),
+        ))
+    }
+
+    /// The key holder a node account signs through: the one named on the
+    /// command line, else the one recorded in the CLI configuration.
+    fn key_holder(&self) -> DelegatedKey {
+        if self.delegated.tpm_key_holder.is_some() || self.delegated.tpm_label.is_some() {
+            return self.delegated.clone();
+        }
+        configured_key_holder().unwrap_or_default()
+    }
+
+    /// The signer and its account address, with the key holder installed
+    /// for a node account before any key is opened.
+    pub fn open(&self) -> Result<(AccountSigner<'_>, [u8; 32])> {
+        let signer = self.signer()?;
+        let address = match signer {
+            AccountSigner::Node(ns) => {
+                let holder = self.key_holder();
+                if holder.install()? {
+                    crate::output::print_info(&format!(
+                        "keys delegated to the key holder {} (label {}): signing through it",
+                        holder
+                            .tpm_key_holder
+                            .as_deref()
+                            .map_or_else(String::new, |p| p.display().to_string()),
+                        holder.tpm_label.as_deref().unwrap_or("none given"),
+                    ));
+                }
+                node_account(ns)?
+            }
+            AccountSigner::Client(ns) => address32(&client_account(ns)?.0)?,
+        };
+        Ok((signer, address))
+    }
+
+    /// Signs `tx_type` as `signer` and submits it. Returns the node's answer.
+    pub async fn send(
+        rpc: &crate::rpc::RpcClient,
+        signer: AccountSigner<'_>,
+        to: [u8; 32],
+        tx_type: serde_json::Value,
+        gas_limit: u64,
+    ) -> Result<serde_json::Value> {
+        match signer {
+            AccountSigner::Node(ns) => Ok(send_as_node(rpc, ns, to, tx_type, gas_limit).await?.0),
+            AccountSigner::Client(ns) => send_as_client(rpc, ns, to, tx_type, gas_limit).await,
         }
     }
 }
 
-/// The client account under `namespace`, as `0x` hex, and its composite public
-/// key.
 /// A 32-byte account address from its `0x`-prefixed or bare hex form.
 pub fn address32(addr: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(addr.trim().trim_start_matches("0x"))
@@ -151,8 +301,8 @@ pub(crate) fn client_signer(namespace: &str) -> Result<tenzro_device_key::Hardwa
 /// session, that key is opened first, as `access sign-in` does, so the
 /// session's requests keep proving with the key its token binds.
 fn select_node_namespace(ns: &str) -> Result<()> {
-    if crate::rpc::session_token().is_some() && crate::dpop::DpopKey::exists() {
-        crate::dpop::DpopKey::load_or_create()?;
+    if crate::rpc::session_token().is_some() && crate::dpop::exists() {
+        crate::dpop::load_or_create()?;
     }
     tenzro_device_key::set_label_namespace(ns).map_err(|e| anyhow!("node key namespace: {e}"))
 }
@@ -232,7 +382,7 @@ fn hardware_identity_registration(
     let sec1 = [&[0x04u8][..], &public.p256].concat();
     let did = tenzro_types::did_derivation::machine_did(&sec1);
     let metadata = if attest {
-        machine_attestation_metadata(&did, &sec1)?
+        machine_attestation_metadata(signer, &did, &sec1)?
     } else {
         std::collections::BTreeMap::new()
     };
@@ -283,19 +433,19 @@ fn hardware_identity_registration(
 /// TPM).
 #[cfg(any(target_os = "linux", windows))]
 fn machine_attestation_metadata(
+    signer: &tenzro_device_key::HardwareHybridSigner,
     did: &str,
     identity_key: &[u8],
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    // A delegated validator's identity key is in the provider's TPM, not in
-    // this machine's: this machine's TPM (if it has one) is not the key's
-    // hardware, so it cannot attest for it, and attesting a different TPM
-    // would admit the wrong one under this identity. Register without a TPM
-    // attestation, as a Secure Enclave machine does.
-    if key_is_delegated() {
+    let nonce: [u8; 32] = rand::random();
+    let Some(att) = machine_attestation(signer, did, identity_key, nonce)? else {
+        // The root registers as a Secure Enclave machine does.
+        crate::output::print_warning(
+            "registering without a TPM attestation: the key holder's TPM does not attest for \
+             this machine's keys",
+        );
         return Ok(std::collections::BTreeMap::new());
-    }
-    let (_, att) = tenzro_tee::tpm_attest::attest_local_machine_as(Some(did), identity_key)
-        .map_err(|e| anyhow!("attesting this machine's TPM for {did}: {e}"))?;
+    };
     let mut metadata = std::collections::BTreeMap::new();
     metadata.insert("machine_anchor".to_string(), "tpm_attested".to_string());
     metadata.insert(
@@ -305,9 +455,49 @@ fn machine_attestation_metadata(
     Ok(metadata)
 }
 
+/// The admission attestation of the machine root `did` for `nonce`, by the
+/// TPM that holds its identity key. A delegated validator's identity key is
+/// in the provider's TPM, not in this machine's, so the provider's TPM
+/// attests for it; this machine's TPM (if it has one) is not the key's
+/// hardware and is never asked. `None` when the provider does not attest
+/// for this machine's keys (its TPM answers for another identity, or it
+/// knows no attestation request).
+#[cfg(any(target_os = "linux", windows))]
+fn machine_attestation(
+    signer: &tenzro_device_key::HardwareHybridSigner,
+    did: &str,
+    identity_key: &[u8],
+    nonce: [u8; 32],
+) -> Result<Option<tenzro_tee::tpm_attest::MachineAttestation>> {
+    if signer.backend() == tenzro_device_key::HardwareBackend::RemoteTpm {
+        let declines = std::cell::Cell::new(false);
+        let attested = tenzro_tee::holder_attest::admission(
+            |request| {
+                signer.holder_attestation(request).map_err(|e| {
+                    declines.set(tenzro_device_key::remote::holder_does_not_attest(&e));
+                    e.to_string()
+                })
+            },
+            identity_key,
+            nonce,
+        );
+        return match attested {
+            Ok(att) => Ok(Some(att)),
+            Err(_) if declines.get() => Ok(None),
+            Err(e) => Err(anyhow!(
+                "the TPM that holds {did}'s key attesting for it: {e}"
+            )),
+        };
+    }
+    tenzro_tee::tpm_attest::attest_local_machine_over(Some(did), identity_key, Some(nonce))
+        .map(|(_, att)| Some(att))
+        .map_err(|e| anyhow!("attesting this machine's TPM for {did}: {e}"))
+}
+
 /// A Secure Enclave has no attestation for the machine root to record.
 #[cfg(not(any(target_os = "linux", windows)))]
 fn machine_attestation_metadata(
+    _signer: &tenzro_device_key::HardwareHybridSigner,
     _did: &str,
     _identity_key: &[u8],
 ) -> Result<std::collections::BTreeMap<String, String>> {
@@ -342,18 +532,21 @@ pub fn machine_attestation_attachment(
     account_nonce: u64,
 ) -> Result<serde_json::Value> {
     use tenzro_crypto::composite::{HybridSigner, SignatureContext};
-    if key_is_delegated() {
+    if crate::key_holder::active() {
         return Err(anyhow!(
-            "this validator's keys are in another machine's TPM, so this machine cannot attest \
-             for them; the TPM attestation is attached from the machine that owns the TPM"
+            "this machine signs through a key holder, so it has no TPM of its own to attest; \
+             a TPM attestation is attached from the machine that owns the TPM"
         ));
     }
     let sec1 = [&[0x04u8][..], &signer.public_key().p256].concat();
     let did = tenzro_types::did_derivation::machine_did(&sec1);
     let nonce = tenzro_types::identity::attach_attestation_nonce(&did, &wallet, account_nonce);
-    let (_, att) =
-        tenzro_tee::tpm_attest::attest_local_machine_over(Some(&did), &sec1, Some(nonce))
-            .map_err(|e| anyhow!("attesting this machine's TPM for {did}: {e}"))?;
+    let att = machine_attestation(signer, &did, &sec1, nonce)?.ok_or_else(|| {
+        anyhow!(
+            "the key holder's TPM does not attest for this machine's keys (its provider file \
+             names another client in `attests_for`, or none), so there is no attestation to attach"
+        )
+    })?;
     let attestation = serde_json::to_string(&att)?;
     let statement = tenzro_types::identity::attach_attestation_statement(&did, &attestation);
     let signature = signer
@@ -442,6 +635,8 @@ pub fn machine_root_approval(
     })
 }
 
+/// The client account under `namespace`, as `0x` hex, and its composite public
+/// key.
 pub fn client_account(
     namespace: &str,
 ) -> Result<(String, tenzro_crypto::composite::CompositePublicKey)> {
@@ -512,12 +707,6 @@ pub fn sign_p256(
         .map_err(|e| anyhow!("reading the hardware key: {e}"))?;
     let sig = key.sign(message).map_err(|e| anyhow!("signing: {e}"))?;
     Ok((public, sig, key.backend()))
-}
-
-/// A DID envelope, as its hex header value, signed by the client account
-/// under `namespace` for `did`, authorizing `method` over `canonical`.
-pub fn did_envelope(namespace: &str, did: &str, method: &str, canonical: &[u8]) -> Result<String> {
-    did_envelope_by(&client_signer(namespace)?, did, method, canonical)
 }
 
 /// A DID envelope, as its hex header value, signed by `signer` (the key `did`
@@ -875,6 +1064,33 @@ pub async fn await_receipt(
     }
 }
 
+/// Waits for the transaction a node answered with `answer` to be executed and
+/// says what became of it: `<what> executed` when it took effect, a warning
+/// when it was in no block after [`RECEIPT_WAIT`], and an error naming the
+/// revert reason when it was executed and reverted, so a refused transaction
+/// is never reported as done and the command exits non-zero.
+pub async fn confirm_executed(
+    rpc: &crate::rpc::RpcClient,
+    answer: &serde_json::Value,
+    what: &str,
+) -> Result<()> {
+    let Some(tx_hash) = submitted_hash(answer) else {
+        return Err(anyhow!(
+            "the node answered the {what} transaction without a transaction hash, so whether \
+             it took effect is not known: {answer}"
+        ));
+    };
+    match await_receipt(rpc, &tx_hash, RECEIPT_WAIT).await? {
+        Some(_) => crate::output::print_success(&format!("{what} transaction executed")),
+        None => crate::output::print_warning(&format!(
+            "The {what} transaction was in no block after {} seconds. It may still be \
+             executed; its receipt (eth_getTransactionReceipt) says whether it took effect.",
+            RECEIPT_WAIT.as_secs()
+        )),
+    }
+    Ok(())
+}
+
 /// Waits for the key enrolment a node answered with `answer` to be executed,
 /// so the transaction that follows it is checked against the enrolled key.
 async fn await_enrollment(rpc: &crate::rpc::RpcClient, answer: &serde_json::Value) -> Result<()> {
@@ -1079,6 +1295,7 @@ mod tpm_contention_tests {
 #[cfg(test)]
 mod receipt_tests {
     use super::*;
+    use crate::rpc::nonce_and_chain_id_tests::node_answering;
 
     #[test]
     fn a_hash_is_read_from_either_answer_form() {
@@ -1120,5 +1337,48 @@ mod receipt_tests {
         assert!(text.contains(reason));
         assert!(text.contains("tenzro identity register-account"));
         assert!(!revert_message("0x01", "out of gas").contains("register-account"));
+    }
+
+    #[tokio::test]
+    async fn a_reverted_transaction_fails_with_its_revert_reason() {
+        let url = node_answering(&[(
+            "eth_getTransactionReceipt",
+            r#"{"status":"0x0","revertReason":"consensus key proof of possession: proof of possession does not verify under the registered key"}"#,
+        )])
+        .await;
+        let rpc = crate::rpc::RpcClient::new(&url);
+        let err = confirm_executed(&rpc, &serde_json::json!("0xabc"), "RegisterValidator")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("0xabc was executed and reverted"), "{err}");
+        assert!(
+            err.contains("does not verify under the registered key"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_executed_transaction_is_confirmed() {
+        let url = node_answering(&[("eth_getTransactionReceipt", r#"{"status":"0x1"}"#)]).await;
+        let rpc = crate::rpc::RpcClient::new(&url);
+        confirm_executed(
+            &rpc,
+            &serde_json::json!({ "tx_hash": "0xabc" }),
+            "Stake bond",
+        )
+        .await
+        .expect("a receipt with status 1 confirms the transaction");
+    }
+
+    #[tokio::test]
+    async fn an_answer_without_a_hash_is_not_reported_as_done() {
+        let url = node_answering(&[]).await;
+        let rpc = crate::rpc::RpcClient::new(&url);
+        let err = confirm_executed(&rpc, &serde_json::json!({}), "ExitValidator")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("without a transaction hash"), "{err}");
     }
 }

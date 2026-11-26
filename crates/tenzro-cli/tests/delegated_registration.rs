@@ -96,10 +96,18 @@ fn rig() -> &'static Rig {
             allowed_prefixes: vec![tenzro_crypto::composite::COMPOSITE_PREFIX.to_vec()],
             allow_prehash: false,
             per_minute: 10_000,
+            requests_per_minute: 100_000,
             derived_prefixes: vec!["tenzro/".into(), "machine/".into()],
         };
         let provider = Arc::new(
-            Provider::new(Tpm, Log, policy).with_derivation(root.clone() as Arc<dyn RemoteDerive>),
+            Provider::new(Tpm, Log, policy)
+                .with_derivation(root.clone() as Arc<dyn RemoteDerive>)
+                .with_attestor(
+                    LABEL,
+                    Arc::new(tenzro_tee::holder_attest::HolderAttestor(
+                        tenzro_tee::tpm_attest::tests::SoftTpm::new(60),
+                    )),
+                ),
         );
         let carried = Arc::new(AtomicUsize::new(0));
         let listener = UnixListener::bind(&socket).unwrap();
@@ -187,8 +195,20 @@ fn delegated_registration_is_signed_through_the_key_holder_and_verifies() {
     assert_eq!(tx_did, did);
     assert!(did.starts_with("did:tenzro:machine:"));
     assert_eq!(wallet_address.as_bytes(), &wallet);
-    // No local TPM attestation for a key that is not in a local TPM.
-    assert!(metadata.is_empty(), "{metadata:?}");
+    // The TPM that holds the key attested for it: the root carries the
+    // provider's attestation, bound to this identity and its key.
+    #[cfg(target_os = "linux")]
+    {
+        let att: tenzro_tee::tpm_attest::MachineAttestation =
+            serde_json::from_str(&metadata[tenzro_tee::identity_evidence::TPM_ATTESTATION_KEY])
+                .unwrap();
+        assert!(att.activated);
+        assert!(tenzro_tee::identity_evidence::tpm_evidence_binds(
+            &did,
+            &controller_pubkey,
+            &att
+        ));
+    }
     let payload = tenzro_types::identity::RegisterIdentityPayload {
         did,
         identity_type,
@@ -212,6 +232,117 @@ fn delegated_registration_is_signed_through_the_key_holder_and_verifies() {
     assert!(!tenzro_tee::identity_evidence::registration_is_authorized(
         &forged, None
     ));
+}
+
+/// A delegated validator's root registered without an attestation gets the
+/// provider's TPM attestation attached: the quote answers the chain
+/// challenge of the account nonce the attach is sent at.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_delegated_attach_carries_the_providers_attestation_for_the_chain_challenge() {
+    rig();
+    let signer = tenzro_cli::keystore::machine_identity_signer(None).unwrap();
+    let wallet = tenzro_cli::keystore::node_account(None).unwrap();
+    let did = tenzro_cli::keystore::machine_root_did(&signer);
+    let key = [&[0x04u8][..], &signer.public_key().p256].concat();
+
+    let tx = tenzro_cli::keystore::machine_attestation_attachment(&signer, wallet, 7).unwrap();
+    let tenzro_types::transaction::TransactionType::AttachMachineAttestation { op } =
+        serde_json::from_value(tx).unwrap()
+    else {
+        panic!("not an AttachMachineAttestation transaction");
+    };
+    assert_eq!(op.did, did);
+    let att: tenzro_tee::tpm_attest::MachineAttestation =
+        serde_json::from_str(&op.attestation).unwrap();
+    assert!(att.activated);
+    assert_eq!(
+        att.nonce,
+        tenzro_types::identity::attach_attestation_nonce(&did, &wallet, 7)
+    );
+    assert!(tenzro_tee::identity_evidence::tpm_evidence_binds(
+        &did, &key, &att
+    ));
+    assert!(tenzro_tee::identity_evidence::controller_signature_holds(
+        &key,
+        &op.statement(),
+        &op.signature,
+        signer.public_key().pq.as_deref(),
+    ));
+}
+
+/// A provider that predates attestation requests, or whose TPM answers for
+/// another identity, leaves the machine root to register without a TPM
+/// attestation, as before; the attach then says why there is nothing to
+/// attach.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_provider_that_does_not_attest_leaves_the_root_without_an_attestation() {
+    use tenzro_device_key::remote::{RemoteTpmSigner, Transport, refusal};
+
+    /// A provider one release older: it refuses request kinds it does not
+    /// know (an attestation request is kind 23).
+    struct Older(Provider<Tpm, Log>);
+    impl Transport for Older {
+        fn call(&self, request: &[u8]) -> tenzro_device_key::Result<Vec<u8>> {
+            if request[1] == 23 {
+                return Ok(refusal("unknown request kind"));
+            }
+            Ok(self.0.handle(b"holder", request))
+        }
+    }
+    /// A provider of this release whose operator named no client to attest for.
+    struct Unnamed(Provider<Tpm, Log>);
+    impl Transport for Unnamed {
+        fn call(&self, request: &[u8]) -> tenzro_device_key::Result<Vec<u8>> {
+            Ok(self.0.handle(b"holder", request))
+        }
+    }
+    fn provider() -> Provider<Tpm, Log> {
+        Provider::new(
+            Tpm,
+            Log,
+            Policy {
+                clients: HashMap::from([(
+                    b"holder".to_vec(),
+                    Grant {
+                        label: LABEL.into(),
+                        derived: false,
+                    },
+                )]),
+                allowed_prefixes: vec![tenzro_crypto::composite::COMPOSITE_PREFIX.to_vec()],
+                allow_prehash: false,
+                per_minute: 10_000,
+                requests_per_minute: 100_000,
+                derived_prefixes: Vec::new(),
+            },
+        )
+    }
+    let label = format!(
+        "{LABEL}/{}",
+        tenzro_types::did_derivation::MACHINE_KEY_LABEL
+    );
+    let signers = [
+        RemoteTpmSigner::open(Older(provider()), &label)
+            .map(|s| Box::new(s) as Box<dyn HardwareSigner>),
+        RemoteTpmSigner::open(Unnamed(provider()), &label)
+            .map(|s| Box::new(s) as Box<dyn HardwareSigner>),
+    ];
+    for p256 in signers {
+        let signer =
+            tenzro_device_key::HardwareHybridSigner::from_parts(p256.unwrap(), None).unwrap();
+        let (_, tx) =
+            tenzro_cli::keystore::machine_identity_registration(&signer, [7u8; 32]).unwrap();
+        let tenzro_types::transaction::TransactionType::RegisterIdentity { metadata, .. } =
+            serde_json::from_value(tx).unwrap()
+        else {
+            panic!("not a RegisterIdentity transaction");
+        };
+        assert!(metadata.is_empty(), "{metadata:?}");
+        let err = tenzro_cli::keystore::machine_attestation_attachment(&signer, [7u8; 32], 0)
+            .unwrap_err();
+        assert!(err.to_string().contains("does not attest"), "{err}");
+    }
 }
 
 // --- A node whose account nonce moves between the read and the submit. ------

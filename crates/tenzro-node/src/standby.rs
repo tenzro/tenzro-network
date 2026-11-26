@@ -81,6 +81,10 @@ pub struct StandbyQuote {
     pub endpoint_id: String,
     /// TNZO per hour, as advertised ([`tenzro_types::AdvertisedCapacity::standby_fee_per_hour`]).
     pub fee_per_hour: u128,
+    /// The fee as basis points of the chain's compute price index for the
+    /// operator's hardware class, both in USD at the rates in force; `None`
+    /// while the class has no index or the operator declares no class.
+    pub fee_bps_of_index: Option<u64>,
 }
 
 /// Standby quotes for `model_id` in `jurisdiction`, cheapest first: every
@@ -97,15 +101,46 @@ pub fn standby_quotes(node: &TenzroNode, model_id: &str, jurisdiction: &str) -> 
     let live = providers.iter().filter(|e| {
         now.duration_since(e.last_seen) < std::time::Duration::from_secs(e.announcement.ttl_secs)
     });
-    standby_quotes_from(live.map(|e| &e.announcement), model_id, jurisdiction)
+    let state = crate::rpc::chain_state_of(node);
+    let tnzo_nano_usd = state.as_ref().map_or(0, |s| {
+        tenzro_vm::native::economy::read_fee_rate(s).rate_nano_usd
+    });
+    let index = |class| {
+        let symbol = tenzro_vm::native::economy::compute_index_symbol(class)?;
+        tenzro_vm::native::economy::read_symbol_rate(state.as_ref()?, symbol).map(|(r, _)| r)
+    };
+    standby_quotes_from(
+        live.map(|e| &e.announcement),
+        model_id,
+        jurisdiction,
+        &index,
+        tnzo_nano_usd,
+    )
+}
+
+/// `fee_wei` per hour as basis points of `index_nano_usd` per compute-hour,
+/// at `tnzo_nano_usd` nano-USD per TNZO.
+fn bps_of_index(fee_wei: u128, tnzo_nano_usd: u128, index_nano_usd: u128) -> Option<u64> {
+    const WEI_PER_TNZO: u128 = tenzro_types::price_card::WEI_PER_TNZO;
+    if index_nano_usd == 0 {
+        return None;
+    }
+    let whole = (fee_wei / WEI_PER_TNZO).checked_mul(tnzo_nano_usd)?;
+    let part = (fee_wei % WEI_PER_TNZO).checked_mul(tnzo_nano_usd)? / WEI_PER_TNZO;
+    let fee_nano_usd = whole.checked_add(part)?;
+    u64::try_from(fee_nano_usd.checked_mul(10_000)? / index_nano_usd).ok()
 }
 
 /// The pure half of [`standby_quotes`]: quotes from already-live
-/// announcements, so it is testable without a running node.
+/// announcements, so it is testable without a running node. `index` is the
+/// compute price index in force for a hardware class, nano-USD per
+/// compute-hour.
 fn standby_quotes_from<'a>(
     live: impl Iterator<Item = &'a tenzro_network::ProviderAnnouncementMessage>,
     model_id: &str,
     jurisdiction: &str,
+    index: &dyn Fn(tenzro_types::hardware::HardwareClass) -> Option<u128>,
+    tnzo_nano_usd: u128,
 ) -> Vec<StandbyQuote> {
     let mut quotes: Vec<StandbyQuote> = live
         .filter(|ann| !ann.iroh_endpoint_id.is_empty() && !ann.provider_address.is_empty())
@@ -120,6 +155,8 @@ fn standby_quotes_from<'a>(
             operator: ann.provider_address.clone(),
             endpoint_id: ann.iroh_endpoint_id.clone(),
             fee_per_hour: ann.capacity.standby_fee_per_hour,
+            fee_bps_of_index: index(ann.hardware.class())
+                .and_then(|i| bps_of_index(ann.capacity.standby_fee_per_hour, tnzo_nano_usd, i)),
         })
         .collect();
     quotes.sort_by_key(|q| q.fee_per_hour);
@@ -162,13 +199,14 @@ mod tests {
     #[test]
     fn standby_quotes_finds_a_live_holder_with_its_advertised_fee() {
         let anns = [announcement(0xb, "s", &["m1"], 100, "DE")];
-        let quotes = standby_quotes_from(anns.iter(), "m1", "DE");
+        let quotes = standby_quotes_from(anns.iter(), "m1", "DE", &|_| None, 0);
         assert_eq!(
             quotes,
             vec![StandbyQuote {
                 operator: hex::encode([0xb; 32]),
                 endpoint_id: "s".into(),
                 fee_per_hour: 100,
+                fee_bps_of_index: None,
             }]
         );
     }
@@ -185,7 +223,7 @@ mod tests {
             // Not holding anything on standby at all.
             announcement(0xe, "s4", &[], 0, "DE"),
         ];
-        assert!(standby_quotes_from(anns.iter(), "m1", "DE").is_empty());
+        assert!(standby_quotes_from(anns.iter(), "m1", "DE", &|_| None, 0).is_empty());
     }
 
     #[test]
@@ -195,10 +233,32 @@ mod tests {
             announcement(0xc, "free", &["m1"], 0, "DE"),
             announcement(0xd, "mid", &["m1"], 100, "DE"),
         ];
-        let fees: Vec<u128> = standby_quotes_from(anns.iter(), "m1", "DE")
+        let fees: Vec<u128> = standby_quotes_from(anns.iter(), "m1", "DE", &|_| None, 0)
             .iter()
             .map(|q| q.fee_per_hour)
             .collect();
         assert_eq!(fees, vec![0, 100, 300]);
+    }
+
+    /// A holder whose class has an index is quoted as a share of it: 0.36 USD
+    /// an hour against a 1.20 USD compute-hour is 3,000 bps. A class with no
+    /// index, or no declared class, quotes none.
+    #[test]
+    fn standby_quotes_state_the_fee_as_a_share_of_the_index() {
+        use tenzro_types::hardware::HardwareClass;
+        let mut gpu = announcement(0xb, "gpu", &["m1"], 3_600_000_000_000_000_000, "DE");
+        gpu.hardware.detected = true;
+        gpu.hardware.vram_gb = 80;
+        let undeclared = announcement(0xc, "plain", &["m1"], 3_600_000_000_000_000_000, "DE");
+        let anns = [gpu, undeclared];
+        let index = |class| (class == HardwareClass::DatacenterGpu).then_some(1_200_000_000u128);
+        let quotes = standby_quotes_from(anns.iter(), "m1", "DE", &index, 100_000_000);
+        let by: Vec<(&str, Option<u64>)> = quotes
+            .iter()
+            .map(|q| (q.endpoint_id.as_str(), q.fee_bps_of_index))
+            .collect();
+        assert!(by.contains(&("gpu", Some(3_000))));
+        assert!(by.contains(&("plain", None)));
+        assert_eq!(bps_of_index(1, 100_000_000, 0), None);
     }
 }

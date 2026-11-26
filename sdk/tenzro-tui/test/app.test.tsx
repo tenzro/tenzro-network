@@ -4,6 +4,8 @@ import React from "react";
 import { render } from "ink-testing-library";
 import { App } from "../src/app.js";
 import { makeTheme } from "../src/theme.js";
+import { HelperAbsent, type Helper } from "../src/helper.js";
+import { redact } from "../src/redact.js";
 import { down, healthy, PAYEE, sourceOf } from "./fixtures.js";
 
 const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
@@ -157,12 +159,12 @@ test("a node that goes away leaves its last values marked STALE", async () => {
   let n = 0;
   const first = healthy();
   const src = {
-    url: "http://127.0.0.1:8545",
+    url: redact("http://127.0.0.1:8545"),
     collect: async (_a: string | null, prev: typeof first) => {
       n++;
       if (n === 1) return first;
       const lastOk = prev.status.state === "ok" ? { value: prev.status.value, at: prev.status.at } : prev.status.state === "error" ? prev.status.last : undefined;
-      const e = { state: "error" as const, error: "gone", at: Date.now(), ...(lastOk ? { last: lastOk } : {}) };
+      const e = { state: "error" as const, error: redact("gone"), at: Date.now(), ...(lastOk ? { last: lastOk } : {}) };
       return { ...first, status: e };
     },
   };
@@ -173,6 +175,241 @@ test("a node that goes away leaves its last values marked STALE", async () => {
   const f = txt(r);
   assert.match(f, /\bDOWN\b/);
   assert.match(f, /STALE/);
+  r.unmount();
+});
+
+test("an answer nothing has replaced for three refresh periods is marked STALE", async () => {
+  const old = Date.now() - 600_000;
+  const aged = () => {
+    const s = healthy();
+    return { ...s, status: { ...s.status, at: old }, chainId: { ...s.chainId, at: old } };
+  };
+  const r = render(<App source={sourceOf(aged)} theme={makeTheme(false)} initialAccount={null} refreshMs={60000} size={{ columns: 80, rows: 24 }} />);
+  await tick();
+  const f = txt(r);
+  assert.match(f, /Height\s+1,234,567 STALE 10m 0s ago/);
+  assert.match(f, /Chain id\s+13380 STALE/);
+  // Readings inside the window are shown plainly.
+  assert.match(f, /Finalized\s+1,234,560\s*$/m);
+  r.unmount();
+});
+
+test("nine screens fit the tab row at 80 columns and each one draws", async () => {
+  const r = mount(healthy);
+  await tick();
+  const headings: [string, RegExp][] = [
+    ["6", /Health: what needs attention/],
+    ["7", /Peers this node has heard from/],
+    ["8", /Log of this console session/],
+    ["9", /Settings of this console/],
+  ];
+  for (const [key, heading] of headings) {
+    r.stdin.write(key);
+    await tick();
+    const f = txt(r);
+    assert.match(f, heading);
+    assert.ok(f.split("\n").every((l) => l.length <= 80), `screen ${key} is wider than 80`);
+    assert.ok(f.split("\n").length <= 24);
+  }
+  r.stdin.write("7");
+  await tick();
+  assert.match(txt(r), /> this node\s+Validator, Provider/);
+  assert.match(txt(r), /machine: did:tenzro:machine:265ad18ed76da11b/);
+  r.stdin.write("6");
+  await tick();
+  assert.match(txt(r), /Nothing needs attention/);
+  assert.match(txt(r), /the console's own rules/);
+  r.unmount();
+});
+
+test("an alert appears after two snapshots, is counted in the header, and is acknowledged with a typed reason", async () => {
+  const lonely = () => {
+    const s = healthy();
+    if (s.status.state !== "ok") throw new Error("fixture");
+    return { ...s, status: { ...s.status, value: { ...s.status.value, peer_count: 0 } } };
+  };
+  const r = mount(lonely);
+  await tick();
+  r.stdin.write("6");
+  await tick();
+  // The engine's own tests hold that one snapshot is not yet an alert; here a second one has arrived.
+  r.stdin.write("r");
+  await tick(150);
+  let f = txt(r);
+  assert.match(f, /1 TO SEE/);
+  assert.match(f, /> WARN .* no\s+The node has no peers/);
+  assert.match(f, /not acknowledged\. Press a/);
+  r.stdin.write("a");
+  await tick();
+  assert.match(txt(r), /Acknowledge an alert/);
+  r.stdin.write("\r");
+  await tick();
+  assert.match(txt(r), /needs a reason/);
+  // Letters typed into the reason never act as screen keys.
+  r.stdin.write("q1 lab node");
+  await tick();
+  r.stdin.write("\r");
+  await tick(150);
+  f = txt(r);
+  assert.match(f, /acknowledged now: q1 lab node/);
+  assert.doesNotMatch(f, /TO SEE/);
+  r.stdin.write("8");
+  await tick();
+  f = txt(r);
+  assert.match(f, /acknowledged\s+WARN\s+The node has no peers/);
+  assert.match(f, /raised\s+WARN\s+The node has no peers/);
+  r.unmount();
+});
+
+test("the help overlay still fits 80x24 with every key listed", async () => {
+  const r = mount(healthy);
+  await tick();
+  r.stdin.write("?");
+  await tick();
+  const f = txt(r);
+  assert.match(f, /1 to 9\s+Go to a screen/);
+  assert.match(f, /Health: acknowledge the selected alert/);
+  assert.match(f, /Status words/);
+  assert.match(f, /DOWN the node did not answer/);
+  r.unmount();
+});
+
+const provider = () => {
+  const s = healthy();
+  if (s.status.state !== "ok") throw new Error("fixture");
+  return { ...s, status: { ...s.status, value: { ...s.status.value, roles: ["Provider"] } } };
+};
+
+function mountWith(snap: () => ReturnType<typeof healthy>, helper: Helper | null) {
+  return render(<App source={sourceOf(snap)} theme={makeTheme(false)} initialAccount={null} refreshMs={60000} helper={helper} size={{ columns: 100, rows: 30 }} />);
+}
+
+test("a stop that would leave the validator set short is blocked and asks the helper for nothing", async () => {
+  const calls: string[] = [];
+  const helper: Helper = { path: "x", call: async (m) => (calls.push(m), {} as never) };
+  const r = mountWith(healthy, helper);
+  await tick();
+  r.stdin.write("S");
+  await tick();
+  const f = txt(r);
+  assert.match(f, /Planned stop of this node/);
+  assert.match(f, /NO\s+1 validators are active; without this one only 0 would remain/);
+  assert.match(f, /The stop is blocked/);
+  r.stdin.write("STOP");
+  await tick();
+  r.stdin.write("\r");
+  await tick(150);
+  assert.deepEqual(calls, []);
+  assert.doesNotMatch(txt(r), /Planned stop/, "Enter closed the blocked view");
+  r.unmount();
+});
+
+test("a stop goes to the helper only after the checks pass and STOP is typed", async () => {
+  const calls: [string, unknown][] = [];
+  const helper: Helper = { path: "x", call: async (m, p) => (calls.push([m, p]), { service: "stopped", reason: "" } as never) };
+  const r = mountWith(provider, helper);
+  await tick();
+  r.stdin.write("S");
+  await tick();
+  assert.match(txt(r), /ok\s+This node does not validate/);
+  assert.match(txt(r), /counted as registered Active, not as up right now/);
+  assert.match(txt(r), /Type STOP and press Enter/);
+  r.stdin.write("stop");
+  await tick();
+  r.stdin.write("\r");
+  await tick(150);
+  assert.match(txt(r), /Nothing was stopped: that was not STOP/);
+  assert.deepEqual(calls, []);
+  r.stdin.write("\u007f\u007f\u007f\u007f");
+  await tick();
+  r.stdin.write("STOP");
+  await tick();
+  r.stdin.write("\r");
+  await tick(200);
+  assert.deepEqual(calls, [["control_service", { action: "stop" }]]);
+  assert.match(txt(r), /The helper answered: the node service is stopped/);
+  r.unmount();
+});
+
+test("without a helper the console stops nothing and shows the command to run", async () => {
+  for (const helper of [null, { path: "x", call: async () => Promise.reject(new HelperAbsent("x")) } as Helper]) {
+    const r = mountWith(provider, helper);
+    await tick();
+    r.stdin.write("S");
+    await tick();
+    r.stdin.write("STOP");
+    await tick();
+    r.stdin.write("\r");
+    await tick(200);
+    const f = txt(r).replace(/\s+/g, " ");
+    assert.match(f, /Nothing was stopped\. To stop it, run as this node's operator: tenzro-node graceful-exit --rpc-url http:\/\/127\.0\.0\.1:8545/);
+    r.unmount();
+  }
+});
+
+test("the palette finds a screen by name and opens it", async () => {
+  const r = mount(healthy);
+  await tick();
+  r.stdin.write("/");
+  await tick();
+  assert.match(txt(r), /Find a screen or an action/);
+  r.stdin.write("heard");
+  await tick();
+  assert.match(txt(r), /> Peers: who this node has heard from/);
+  r.stdin.write("\r");
+  await tick();
+  assert.match(txt(r), /Peers this node has heard from/);
+  // Letters typed into the palette are a filter, never keys: q did not quit.
+  r.stdin.write("/");
+  await tick();
+  r.stdin.write("q");
+  await tick();
+  assert.match(txt(r), /> Quit and restore the terminal/);
+  r.stdin.write("\u001b");
+  await tick(150);
+  assert.match(txt(r), /Peers this node has heard from/);
+  r.unmount();
+});
+
+test("replay steps back through what the console saw, decides nothing, and returns to now", async () => {
+  let n = 0;
+  const climbing = () => {
+    const s = provider();
+    if (s.status.state !== "ok") throw new Error("fixture");
+    n++;
+    return { ...s, at: Date.now(), status: { ...s.status, value: { ...s.status.value, block_height: 1000 + n } } };
+  };
+  const calls: string[] = [];
+  const r = mountWith(climbing, { path: "x", call: async (m) => (calls.push(m), {} as never) });
+  const height = () => Number(/Height\s+1,(\d\d\d)/.exec(txt(r))![1]);
+  await tick();
+  r.stdin.write("r");
+  await tick(150);
+  r.stdin.write("r");
+  await tick(150);
+  const live = height();
+  const total = n;
+  assert.ok(total >= 3 && live === total, `${total} answers collected, height ${live}`);
+  r.stdin.write("[");
+  await tick();
+  assert.match(txt(r), new RegExp(`REPLAY \\d\\d:\\d\\d:\\d\\d UTC, ${total - 1} of ${total}`));
+  assert.equal(height(), live - 1);
+  r.stdin.write("[".repeat(total + 2));
+  await tick();
+  assert.match(txt(r), new RegExp(`1 of ${total}`));
+  assert.equal(height(), 1, "the oldest answer, and no further back");
+  // The past is not a place to act from.
+  r.stdin.write("S");
+  await tick();
+  assert.doesNotMatch(txt(r), /Planned stop/);
+  r.stdin.write("r");
+  await tick(150);
+  assert.equal(n, total, "refresh is held in replay");
+  r.stdin.write("]".repeat(total));
+  await tick();
+  assert.doesNotMatch(txt(r), /REPLAY/);
+  assert.equal(height(), live);
+  assert.deepEqual(calls, []);
   r.unmount();
 });
 

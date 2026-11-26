@@ -183,6 +183,10 @@ pub struct Access {
     meter: TierMeter,
     challenges: SignInChallenges,
     credentials: Mutex<HashMap<String, Vec<HeldCredential>>>,
+    pairings: crate::pairing_rpc::Pairings,
+    device_codes: crate::device_code::DeviceCodes,
+    #[cfg(feature = "paired-devices")]
+    paired_listener: crate::paired_listener::Door,
 }
 
 impl Access {
@@ -193,7 +197,27 @@ impl Access {
             meter: TierMeter::default(),
             challenges: SignInChallenges::default(),
             credentials: Mutex::new(HashMap::new()),
+            pairings: crate::pairing_rpc::Pairings::default(),
+            device_codes: crate::device_code::DeviceCodes::default(),
+            #[cfg(feature = "paired-devices")]
+            paired_listener: crate::paired_listener::Door::default(),
         }
+    }
+
+    /// The device pairings started on this node.
+    pub(crate) fn pairings(&self) -> &crate::pairing_rpc::Pairings {
+        &self.pairings
+    }
+
+    /// The device codes devices with no key of their own sign in with.
+    pub(crate) fn device_codes(&self) -> &crate::device_code::DeviceCodes {
+        &self.device_codes
+    }
+
+    /// The listener paired devices reach this node on.
+    #[cfg(feature = "paired-devices")]
+    pub(crate) fn paired_listener(&self) -> &crate::paired_listener::Door {
+        &self.paired_listener
     }
 
     /// The policy store.
@@ -206,10 +230,10 @@ impl Access {
         self.store.policy()
     }
 
-    /// Whether `did` administers `node`: its operator, or an admin the
-    /// policy names.
+    /// Whether `did` administers `node`: its operator (the configured
+    /// `operator_did`, else the machine itself), or an admin the policy names.
     pub fn is_admin(&self, node: &TenzroNode, did: &str) -> bool {
-        node.config().operator_did.as_deref() == Some(did)
+        node.administrator_did().as_deref() == Some(did)
             || self.policy().admins.iter().any(|a| a == did)
     }
 
@@ -273,7 +297,6 @@ pub fn method_class(method: &str) -> MethodClass {
         "DecisionCatalog",
         "forecast",
         "moe",
-        "routeIntent",
         "quoteInference",
     ]) {
         MethodClass::Inference
@@ -330,6 +353,14 @@ pub enum Decision {
     Refuse(String),
 }
 
+/// Whether `did` is one of `orgs` or an identity delegated under one: a root
+/// (a human or an autonomous machine) admits the agents and machines derived
+/// under it.
+fn in_orgs(orgs: &[String], did: &str) -> bool {
+    orgs.iter()
+        .any(|o| o == did || tenzro_types::identity::is_delegated_under(did, o))
+}
+
 /// What one rule says about `caller`.
 pub(crate) fn admits_rule(node: &TenzroNode, rule: &Rule, caller: &Caller) -> Decision {
     match rule {
@@ -344,14 +375,10 @@ pub(crate) fn admits_rule(node: &TenzroNode, rule: &Rule, caller: &Caller) -> De
             asset: asset.clone(),
         },
         Rule::Allow { dids, orgs } => match &caller.did {
-            Some(did)
-                if dids.contains(did) || orgs.contains(&tenzro_vm::funding::root_did(did)) =>
-            {
-                Decision::Allow {
-                    tier: None,
-                    named: true,
-                }
-            }
+            Some(did) if dids.contains(did) || in_orgs(orgs, did) => Decision::Allow {
+                tier: None,
+                named: true,
+            },
             Some(did) => Decision::Refuse(format!("{did} is not on this node's allow list")),
             None => {
                 Decision::Refuse("sign in: this surface admits named identities only".to_string())
@@ -485,7 +512,7 @@ pub fn evaluate(
     if class == MethodClass::Admin {
         return match &caller.did {
             Some(did)
-                if node.config().operator_did.as_deref() == Some(did.as_str())
+                if node.administrator_did().as_deref() == Some(did.as_str())
                     || policy.admins.contains(did) =>
             {
                 Decision::Allow {
@@ -517,11 +544,28 @@ struct Bucket {
 impl TierMeter {
     /// Charge one request by `who` to tier `tier`, or say when to retry.
     pub fn charge(&self, policy: &NodeAccessPolicy, tier: &str, who: &str) -> Result<(), String> {
+        self.charge_at(
+            policy,
+            tier,
+            who,
+            std::time::Instant::now(),
+            chrono::Utc::now().timestamp() as u64,
+        )
+    }
+
+    /// [`Self::charge`] at `now` (for the rate) and `epoch`, seconds since the
+    /// Unix epoch (for the quota period).
+    fn charge_at(
+        &self,
+        policy: &NodeAccessPolicy,
+        tier: &str,
+        who: &str,
+        now: std::time::Instant,
+        epoch: u64,
+    ) -> Result<(), String> {
         let Some(t) = policy.tier(tier) else {
             return Err(format!("tier {tier} is not defined"));
         };
-        let now = std::time::Instant::now();
-        let epoch = chrono::Utc::now().timestamp() as u64;
         let mut buckets = self.buckets.lock();
         let b = buckets
             .entry((tier.to_string(), who.to_string()))
@@ -580,6 +624,50 @@ pub(crate) fn proved_token(
     node: &Arc<TenzroNode>,
     auth: &AuthContext,
 ) -> Result<Option<tenzro_auth::AuthClaims>, JsonRpcError> {
+    proved_token_for(node, auth, None)
+}
+
+/// [`proved_token`] for a call to `method`, with the token pairing issues
+/// for that call alone verifying too ([`crate::pairing_rpc::purpose_for`]).
+pub(crate) fn proved_token_of(
+    node: &Arc<TenzroNode>,
+    auth: &AuthContext,
+    method: &str,
+) -> Result<Option<tenzro_auth::AuthClaims>, JsonRpcError> {
+    let claims = proved_token_for(node, auth, crate::pairing_rpc::purpose_for(method))?;
+    // A device signed in by device code holds its tokens only while listed.
+    if let Some(c) = &claims
+        && c.aud
+            .ends_with(&format!("#{}", crate::device_code::VIEWER_PURPOSE))
+        && !crate::pairing_rpc::is_viewer(node, &c.sub)
+    {
+        return Err(refused("that device is no longer paired with this node"));
+    }
+    Ok(claims)
+}
+
+/// The claims of the token pairing issued for a few calls only that the
+/// request presents, once it verifies. Such a token names no caller until
+/// the gate knows the method it is for; its proof counts once, so the claims
+/// are kept for the gate ([`crate::rpc::with_proved_token`]).
+pub(crate) fn proved_pairing_token(
+    node: &Arc<TenzroNode>,
+    auth: &AuthContext,
+) -> Option<(tenzro_auth::AuthClaims, &'static str)> {
+    crate::pairing_rpc::PURPOSES.iter().find_map(|&purpose| {
+        proved_token_for(node, auth, Some(purpose))
+            .ok()
+            .flatten()
+            .map(|claims| (claims, purpose))
+    })
+}
+
+/// [`proved_token`], with a token issued for `purpose` alone verifying too.
+fn proved_token_for(
+    node: &Arc<TenzroNode>,
+    auth: &AuthContext,
+    purpose: Option<&str>,
+) -> Result<Option<tenzro_auth::AuthClaims>, JsonRpcError> {
     let is_dpop = auth.authorization.as_deref().is_some_and(|a| {
         a.trim_start()
             .get(..5)
@@ -588,7 +676,7 @@ pub(crate) fn proved_token(
     if !is_dpop {
         return Ok(None);
     }
-    Ok(crate::rpc::validate_access_token(node, auth)?.map(|(_, claims)| claims))
+    Ok(crate::rpc::validate_access_token_for(node, auth, purpose)?.map(|(_, claims)| claims))
 }
 
 /// The DPoP `htu` a request over iroh signs: the ALPN it arrived on, as
@@ -615,7 +703,7 @@ pub(crate) async fn iroh_caller(
     caller_of(node, &auth, None).await
 }
 
-fn refused(message: impl Into<String>) -> JsonRpcError {
+pub(crate) fn refused(message: impl Into<String>) -> JsonRpcError {
     JsonRpcError {
         code: -32004,
         message: message.into(),
@@ -633,8 +721,40 @@ pub(crate) async fn gate(
     auth: &AuthContext,
     ip: Option<IpAddr>,
 ) -> Result<Caller, JsonRpcError> {
-    let caller = caller_of(node, auth, ip).await?;
+    let caller = Caller {
+        did: proved_token_of(node, auth, method)?.map(|claims| claims.sub),
+        ip,
+    };
     admit(node, surface, method, params, caller)
+}
+
+/// The resource a rule names to admit identities to one JSON-RPC method.
+pub(crate) fn method_resource(method: &str) -> String {
+    format!("rpc:{method}")
+}
+
+/// Whether the policy names `caller` for one admin method: a resource rule
+/// for that method which admits the caller by identity. Only the admin calls
+/// a paired device may make are opened this way, whatever the policy says of
+/// any other method, and never to a caller the rule does not name.
+fn named_for_method(
+    node: &TenzroNode,
+    policy: &NodeAccessPolicy,
+    method: &str,
+    caller: &Caller,
+) -> bool {
+    crate::pairing_rpc::PAIRED_DEVICE_METHODS.contains(&method)
+        && policy
+            .resource_rule(&method_resource(method))
+            .is_some_and(|rule| {
+                matches!(
+                    admits_rule(node, rule, caller),
+                    Decision::Allow {
+                        tier: None,
+                        named: true
+                    }
+                )
+            })
 }
 
 /// Apply the policy, and an agent's Terms, to `caller` calling `method`.
@@ -648,8 +768,9 @@ pub(crate) fn admit(
     // An agent reaches only what its consensus Terms allow, whatever the
     // policy admits.
     if let Some(did) = &caller.did
-        && let Err(why) =
-            crate::agent_delegation::check_agent_key_request(node, did, method, params)
+        && let Err(why) = crate::agent_guardrails::counted(
+            crate::agent_delegation::check_agent_key_request(node, did, method, params),
+        )
     {
         return Err(JsonRpcError {
             code: -32003,
@@ -657,8 +778,27 @@ pub(crate) fn admit(
             data: None,
         });
     }
+    // A write the identity rule gives to the caller's registered identity.
+    {
+        use crate::rpc_gates::{EdgeSubject, edge_subject};
+        if edge_subject(method) == Some(EdgeSubject::Caller) {
+            crate::identity_gate::edge_admits(node, method, caller.did.as_deref(), false)
+                .map_err(refused)?;
+        }
+    }
     let policy = node.access().policy();
-    match evaluate(node, &policy, &caller, surface, method_class(method)) {
+    let decision = match evaluate(node, &policy, &caller, surface, method_class(method)) {
+        Decision::Refuse(_)
+            if surface == Surface::Rpc && named_for_method(node, &policy, method, &caller) =>
+        {
+            Decision::Allow {
+                tier: None,
+                named: true,
+            }
+        }
+        decision => decision,
+    };
+    match decision {
         Decision::Allow { tier: None, .. } => Ok(caller),
         Decision::Allow {
             tier: Some(tier), ..
@@ -682,32 +822,34 @@ pub(crate) fn admit(
     }
 }
 
+/// Route prefixes of the media class: requests carrying or returning an
+/// image, a recording or a video.
+const MEDIA_ROUTES: &[&str] = &[
+    "/v1/images",
+    "/v1/video",
+    "/v1/audio",
+    "/tenzro/realtime",
+    "/tenzro/detections",
+    "/tenzro/segmentations",
+    "/tenzro/video",
+];
+
+/// Route prefixes of the inference class.
+const INFERENCE_ROUTES: &[&str] = &[
+    "/v1/chat",
+    "/v1/responses",
+    "/v1/embeddings",
+    "/tenzro/rerank",
+    "/tenzro/forecasts",
+    "/tenzro/decide",
+];
+
 /// The method class an HTTP route serves.
 pub fn route_class(path: &str) -> MethodClass {
     let has = |p: &[&str]| p.iter().any(|x| path.starts_with(x));
-    if has(&[
-        "/v1/images",
-        "/v1/video",
-        "/v1/audio",
-        "/media",
-        "/audio",
-        "/tenzro/realtime",
-        "/tenzro/detections",
-        "/tenzro/segmentations",
-        "/tenzro/video",
-    ]) {
+    if has(MEDIA_ROUTES) {
         MethodClass::Media
-    } else if has(&[
-        "/v1/chat",
-        "/v1/completions",
-        "/v1/responses",
-        "/v1/embeddings",
-        "/v1/rerank",
-        "/v1/messages",
-        "/chat",
-        "/tenzro/rerank",
-        "/tenzro/forecasts",
-    ]) {
+    } else if has(INFERENCE_ROUTES) {
         MethodClass::Inference
     } else {
         MethodClass::Read
@@ -806,7 +948,10 @@ pub fn web_pricing(node: Arc<TenzroNode>) -> crate::web::server::PriceFor {
 /// An issued, not yet answered sign-in challenge.
 #[derive(Debug, Clone)]
 struct PendingSignIn {
-    did: String,
+    /// The identity named when the challenge was asked for; a passkey
+    /// sign-in may name none and is then the identity its passkey's account
+    /// belongs to.
+    did: Option<String>,
     dpop_jkt: String,
     challenge: [u8; 32],
     issued: std::time::Instant,
@@ -820,7 +965,7 @@ pub struct SignInChallenges {
 }
 
 impl SignInChallenges {
-    fn issue(&self, did: &str, dpop_jkt: &str) -> Result<(String, [u8; 32]), String> {
+    fn issue(&self, did: Option<&str>, dpop_jkt: &str) -> Result<(String, [u8; 32]), String> {
         let mut pending = self.pending.lock();
         pending.retain(|_, p| p.issued.elapsed() < CHALLENGE_TTL);
         if pending.len() >= MAX_CHALLENGES {
@@ -832,7 +977,7 @@ impl SignInChallenges {
         pending.insert(
             id.clone(),
             PendingSignIn {
-                did: did.to_string(),
+                did: did.map(str::to_string),
                 dpop_jkt: dpop_jkt.to_string(),
                 challenge,
                 issued: std::time::Instant::now(),
@@ -854,10 +999,12 @@ impl SignInChallenges {
     }
 }
 
-/// The digest a hardware key signs to sign in: binds the node, the DID, the
-/// DPoP key and the challenge.
-pub fn sign_in_digest(issuer: &str, did: &str, dpop_jkt: &str, challenge: &[u8; 32]) -> [u8; 32] {
-    let mut h = Sha256::new();
+/// The message a hardware key signs to sign in: binds the node, the DID, the
+/// DPoP key and the challenge. Each part is length-prefixed and the first is
+/// the domain `tenzro/access/sign-in`, so a key holder that signs only
+/// messages in a Tenzro domain signs this one.
+pub fn sign_in_message(issuer: &str, did: &str, dpop_jkt: &str, challenge: &[u8; 32]) -> Vec<u8> {
+    let mut m = Vec::new();
     for part in [
         b"tenzro/access/sign-in".as_slice(),
         issuer.as_bytes(),
@@ -865,13 +1012,13 @@ pub fn sign_in_digest(issuer: &str, did: &str, dpop_jkt: &str, challenge: &[u8; 
         dpop_jkt.as_bytes(),
         challenge,
     ] {
-        h.update((part.len() as u32).to_be_bytes());
-        h.update(part);
+        m.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        m.extend_from_slice(part);
     }
-    h.finalize().into()
+    m
 }
 
-fn bad(message: impl Into<String>) -> JsonRpcError {
+pub(crate) fn bad(message: impl Into<String>) -> JsonRpcError {
     JsonRpcError {
         code: -32602,
         message: message.into(),
@@ -879,14 +1026,14 @@ fn bad(message: impl Into<String>) -> JsonRpcError {
     }
 }
 
-fn str_param<'a>(p: &'a Value, key: &str) -> Result<&'a str, JsonRpcError> {
+pub(crate) fn str_param<'a>(p: &'a Value, key: &str) -> Result<&'a str, JsonRpcError> {
     p.get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| bad(format!("Missing '{key}'")))
 }
 
-fn first_param(params: Option<Value>) -> Value {
+pub(crate) fn first_param(params: Option<Value>) -> Value {
     match params {
         Some(Value::Array(mut a)) if !a.is_empty() => a.swap_remove(0),
         Some(v) => v,
@@ -894,38 +1041,51 @@ fn first_param(params: Option<Value>) -> Value {
     }
 }
 
-/// `tenzro_accessChallenge { did, dpop_jkt }`: a single-use challenge the
-/// caller answers with its passkey or hardware key.
+/// `tenzro_accessChallenge { did?, dpop_jkt }`: a single-use challenge the
+/// caller answers with its passkey or hardware key. A hardware key names its
+/// `did` and signs `device_message`; a passkey may name none, and is then
+/// found from its credential when it answers.
 pub(crate) async fn handle_challenge(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     let p = first_param(params);
-    let did = str_param(&p, "did")?;
+    let did = match p.get("did") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(str_param(&p, "did")?),
+    };
     let jkt = str_param(&p, "dpop_jkt")?;
     let engine = node
         .auth_engine()
         .ok_or_else(|| refused("this node issues no access tokens"))?;
     let (id, challenge) = node.access().challenges.issue(did, jkt).map_err(refused)?;
     use base64::Engine as _;
-    Ok(json!({
+    let mut answer = json!({
         "challenge_id": id,
         "challenge": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge),
-        "device_digest": hex::encode(sign_in_digest(&engine.config().issuer, did, jkt, &challenge)),
         "expires_in": CHALLENGE_TTL.as_secs(),
-    }))
+    });
+    if let Some(did) = did {
+        answer["device_message"] = json!(hex::encode(sign_in_message(
+            &engine.config().issuer,
+            did,
+            jkt,
+            &challenge
+        )));
+    }
+    Ok(answer)
 }
 
 /// Verify a hardware-key answer: `public_key` (hex, the key `did` derives
 /// from, one registered on it, or for a delegated agent the key a serving
-/// machine holds for it under its Terms, `serving`) signed `digest` (ECDSA
-/// P-256 raw r||s over SHA-256 of the digest, or Ed25519 over the digest).
+/// machine holds for it under its Terms, `serving`) signed `message` (ECDSA
+/// P-256 raw r||s over SHA-256 of the message, or Ed25519 over the message).
 fn verify_device_answer(
     node: &TenzroNode,
     did: &str,
     public_key: &[u8],
     signature: &[u8],
-    digest: &[u8; 32],
+    message: &[u8],
     serving: bool,
 ) -> Result<(), String> {
     let derived = tenzro_identity::TenzroDid::from_device_key(public_key)
@@ -946,7 +1106,7 @@ fn verify_device_answer(
             .map_err(|e| format!("Ed25519 key: {e}"))?;
             let sig = ed25519_dalek::Signature::from_slice(signature)
                 .map_err(|e| format!("signature: {e}"))?;
-            key.verify_strict(digest, &sig)
+            key.verify_strict(message, &sig)
                 .map_err(|_| "the signature does not verify".to_string())
         }
         64 | 65 => {
@@ -960,7 +1120,7 @@ fn verify_device_answer(
                 .map_err(|e| format!("P-256 key: {e}"))?;
             let sig = p256::ecdsa::Signature::from_slice(signature)
                 .map_err(|e| format!("signature: {e}"))?;
-            key.verify(digest, &sig)
+            key.verify(message, &sig)
                 .map_err(|_| "the signature does not verify".to_string())
         }
         n => Err(format!("a {n}-byte key is neither Ed25519 nor P-256")),
@@ -974,8 +1134,15 @@ fn verify_device_answer(
 /// authenticator_data, client_data_json, signature, ml_dsa_signature }`
 /// (base64url, a `webauthn.get` over the challenge, with the ML-DSA-65 leg
 /// over the challenge in hex) or `{ kind: "device", public_key,
-/// signature }` (hex, over `device_digest`). Optional `credentials` are KYA
-/// credentials about the DID, which `credential` rules accept.
+/// signature }` (hex, over `device_message`). Optional `credentials` are KYA
+/// credentials about the DID, which `credential` rules accept. Optional
+/// `pairing_code` is the code of a pairing that is waiting: the token issued
+/// on its strength redeems that code through `tenzro_pairDevice` and is
+/// refused everywhere else.
+///
+/// A passkey proof may leave out `ml_dsa_signature` only to present a
+/// pairing code or to sign in a paired device; the token a paired device gets
+/// that way opens the paired-device calls and nothing else.
 pub(crate) async fn handle_issue(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -987,7 +1154,7 @@ pub(crate) async fn handle_issue(
         .auth_engine()
         .ok_or_else(|| refused("this node issues no access tokens"))?;
     let pending = node.access().challenges.take(id).map_err(refused)?;
-    let (did, credential) = match str_param(proof, "kind")? {
+    let (did, credential, passkey_only) = match str_param(proof, "kind")? {
         "passkey" => {
             let validator = node
                 .webauthn_validator()
@@ -995,65 +1162,96 @@ pub(crate) async fn handle_issue(
             let registry = node
                 .identity_registry()
                 .ok_or_else(|| refused("no identity registry"))?;
+            let account = proof.get("account_address").and_then(Value::as_str);
             let login = crate::mcp::oauth::PasskeyLogin {
-                account_address: str_param(proof, "account_address")?,
+                account_address: account.unwrap_or_default(),
                 credential_id_b64: str_param(proof, "credential_id")?,
                 authenticator_data_b64: str_param(proof, "authenticator_data")?,
                 client_data_json_b64: str_param(proof, "client_data_json")?,
                 signature_b64: str_param(proof, "signature")?,
                 ml_dsa_signature_hex: proof.get("ml_dsa_signature").and_then(Value::as_str),
             };
-            let did = crate::mcp::oauth::verify_passkey_login(
-                validator,
-                &pending.challenge,
-                &login,
-                |did| {
-                    registry
-                        .resolve(did)
-                        .is_ok_and(|i| i.status == tenzro_identity::IdentityStatus::Active)
-                },
-                |account| crate::mcp::oauth::registered_genesis_key(registry, account),
-                |did| registry.resolve(did).ok().map(|i| i.pq_verifying_key),
-            )
+            let active = |did: &str| {
+                registry
+                    .resolve(did)
+                    .is_ok_and(|i| i.status == tenzro_identity::IdentityStatus::Active)
+            };
+            let pq_key = |did: &str| registry.resolve(did).ok().map(|i| i.pq_verifying_key);
+            let (did, post_quantum) = match account {
+                Some(_) => crate::mcp::oauth::verify_passkey_login_for_pairing(
+                    validator,
+                    &pending.challenge,
+                    &login,
+                    active,
+                    |account| crate::mcp::oauth::registered_genesis_key(registry, account),
+                    pq_key,
+                ),
+                // No account named: the node finds it from the credential.
+                None => crate::mcp::oauth::verify_passkey_login_by_credential(
+                    validator,
+                    &pending.challenge,
+                    node.http_surface().webauthn_rp_id(),
+                    &login,
+                    active,
+                    pq_key,
+                ),
+            }
             .map_err(refused)?;
-            if did != pending.did {
+            if let Some(expected) = &pending.did
+                && did != *expected
+            {
                 return Err(refused(format!(
-                    "that passkey signs in {did}, not {}",
-                    pending.did
+                    "that passkey signs in {did}, not {expected}"
                 )));
             }
-            (did, crate::admin_audit::Credential::Passkey)
+            (did, crate::admin_audit::Credential::Passkey, !post_quantum)
         }
         "device" => {
+            let did = pending.did.clone().ok_or_else(|| {
+                bad("a hardware-key sign-in names its 'did' to tenzro_accessChallenge")
+            })?;
             let key = hex::decode(str_param(proof, "public_key")?.trim_start_matches("0x"))
                 .map_err(|_| bad("public_key is not hex"))?;
             let sig = hex::decode(str_param(proof, "signature")?.trim_start_matches("0x"))
                 .map_err(|_| bad("signature is not hex"))?;
-            let digest = sign_in_digest(
+            let message = sign_in_message(
                 &engine.config().issuer,
-                &pending.did,
+                &did,
                 &pending.dpop_jkt,
                 &pending.challenge,
             );
             // A delegated agent signs in on a machine that serves it, with that machine's key for it: the key its
             // approved Terms name for the machine. The token is then bound to the same key, as a delivered one is.
-            let serving = crate::agent_delegation::is_serving_key(
-                node,
-                &pending.did,
-                &key,
-                &pending.dpop_jkt,
-            );
-            verify_device_answer(node, &pending.did, &key, &sig, &digest, serving)
-                .map_err(refused)?;
+            let serving =
+                crate::agent_delegation::is_serving_key(node, &did, &key, &pending.dpop_jkt);
+            verify_device_answer(node, &did, &key, &sig, &message, serving).map_err(refused)?;
             let credential = if serving {
                 crate::admin_audit::Credential::DelegatedAgentKey
             } else {
                 crate::admin_audit::Credential::HardwareKey
             };
-            (pending.did.clone(), credential)
+            (did, credential, false)
         }
         other => return Err(bad(format!("unknown proof kind '{other}'"))),
     };
+    let pairing_code = match p.get("pairing_code") {
+        None | Some(Value::Null) => None,
+        Some(code) => Some(
+            code.as_str()
+                .ok_or_else(|| bad("'pairing_code' is the pairing code, as text"))?,
+        ),
+    };
+    let grant = crate::pairing_rpc::sign_in_grant(node, &did, pairing_code, passkey_only)?;
+    // A token is for a registered identity. A delegated agent signing in with
+    // the key its Terms name for this machine is known by those Terms.
+    let serving = grant.is_some()
+        || matches!(
+            credential,
+            crate::admin_audit::Credential::DelegatedAgentKey
+        );
+    crate::identity_gate::edge_admits(node, "tenzro_issueAccessToken", Some(&did), serving)
+        .map_err(refused)?;
+    let purpose = crate::pairing_rpc::token_purpose(grant, passkey_only).map_err(refused)?;
     let chain = crate::rpc::chain_state_of(node);
     if let Some(chain) = &chain {
         tenzro_vm::native::check_agent_status(
@@ -1095,37 +1293,51 @@ pub(crate) async fn handle_issue(
     let classes: Vec<&str> = tenzro_types::node_access::MethodClass::ALL
         .into_iter()
         .filter(|c| {
-            Surface::ALL.into_iter().any(|s| {
-                matches!(
-                    evaluate(node, &policy, &caller, s, *c),
-                    Decision::Allow { .. } | Decision::Pay { .. }
-                )
-            })
+            purpose.is_none()
+                && Surface::ALL.into_iter().any(|s| {
+                    matches!(
+                        evaluate(node, &policy, &caller, s, *c),
+                        Decision::Allow { .. } | Decision::Pay { .. }
+                    )
+                })
         })
         .map(|c| c.as_str())
         .collect();
-    let token = engine
-        .issue_jwt(
+    let (token, expires_in) = if let Some(purpose) = purpose {
+        // A token that only redeems a pairing code lasts no longer than a code.
+        let ttl = if purpose == crate::pairing_rpc::REDEEM_PURPOSE {
+            policy
+                .token_ttl_secs
+                .min(crate::pairing_rpc::CODE_TTL.as_secs())
+        } else {
+            policy.token_ttl_secs
+        };
+        let token = engine.issue_purpose_jwt(purpose, &did, &pending.dpop_jkt, Some(ttl));
+        (token, ttl)
+    } else {
+        let token = engine.issue_jwt(
             &did,
             &did,
             &pending.dpop_jkt,
             tenzro_auth::AuthorizationDetails::empty(),
             Some(policy.token_ttl_secs),
-        )
-        .map_err(|e| refused(format!("token issuance failed: {e}")))?;
+        );
+        (token, policy.token_ttl_secs)
+    };
+    let token = token.map_err(|e| refused(format!("token issuance failed: {e}")))?;
     crate::admin_audit::record_sign_in(
         node,
         &did,
         &token,
         &pending.dpop_jkt,
         credential,
-        chrono::Utc::now().timestamp().max(0) as u64 + policy.token_ttl_secs,
+        chrono::Utc::now().timestamp().max(0) as u64 + expires_in,
     )
     .await?;
     Ok(json!({
         "access_token": token,
         "token_type": "DPoP",
-        "expires_in": policy.token_ttl_secs,
+        "expires_in": expires_in,
         "did": did,
         "classes": classes,
         "jwk": engine.public_jwk(),
@@ -1134,13 +1346,41 @@ pub(crate) async fn handle_issue(
 
 /// The operator check every access-management RPC shares: `caller` is the
 /// DID the request's access token proved.
-fn require_admin(node: &Arc<TenzroNode>, caller: Option<&str>) -> Result<String, JsonRpcError> {
+pub(crate) fn require_admin(
+    node: &Arc<TenzroNode>,
+    caller: Option<&str>,
+) -> Result<String, JsonRpcError> {
     match caller {
         Some(did) if node.access().is_admin(node, did) => Ok(did.to_string()),
         Some(did) => Err(refused(format!(
             "{did} is not an administrator of this node"
         ))),
         None => Err(refused("sign in as this node's operator")),
+    }
+}
+
+/// The check of an admin call the policy may also name other identities for:
+/// the caller's DID, and whether it administers the node. A caller that does
+/// not is admitted only when a rule for `method` names it.
+pub(crate) fn admin_or_named(
+    node: &Arc<TenzroNode>,
+    method: &str,
+    caller: Option<&str>,
+) -> Result<(String, bool), JsonRpcError> {
+    let did = caller.ok_or_else(|| refused("sign in as this node's operator"))?;
+    if node.access().is_admin(node, did) {
+        return Ok((did.to_string(), true));
+    }
+    let named = Caller {
+        did: Some(did.to_string()),
+        ip: None,
+    };
+    if named_for_method(node, &node.access().policy(), method, &named) {
+        Ok((did.to_string(), false))
+    } else {
+        Err(refused(format!(
+            "{did} is not an administrator of this node"
+        )))
     }
 }
 
@@ -1470,6 +1710,79 @@ load();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The paths the HTTP routers in `rpc.rs` serve, read from its source
+    /// with its test modules and comment lines left out, so a route named in
+    /// a comment or a test string does not count as served.
+    fn served_paths(source: &str) -> Vec<String> {
+        let mut kept = String::new();
+        let mut rest = source;
+        // A test module runs from its `#[cfg(test)]` to the brace closing it
+        // in the first column.
+        while let Some(start) = rest.find("\n#[cfg(test)]") {
+            kept.push_str(&rest[..start]);
+            rest = rest[start..]
+                .find("\n}\n")
+                .map_or("", |end| &rest[start + end + 3..]);
+        }
+        kept.push_str(rest);
+        let code: String = kept
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut out = Vec::new();
+        let mut rest = code.as_str();
+        while let Some(i) = rest.find(".route(") {
+            rest = &rest[i + ".route(".len()..];
+            let trimmed = rest.trim_start();
+            if let Some(path) = trimmed.strip_prefix('"').and_then(|t| t.split('"').next()) {
+                out.push(path.to_string());
+            }
+        }
+        out
+    }
+
+    /// The paths served by the function `name` in `source`.
+    fn served_by(source: &str, name: &str) -> Vec<String> {
+        let start = source
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("rpc.rs has no fn {name}"));
+        let body = &source[start..];
+        served_paths(&body[..body.find("\n}\n").expect("the function ends")])
+    }
+
+    /// Every route prefix the access policy classes is one a router serves,
+    /// and every route a paid router serves is classed for what it charges:
+    /// a class named for a path nobody serves is dead, and a paid route that
+    /// falls to the read class is gated as a read.
+    #[test]
+    fn every_classed_route_is_served_and_every_paid_route_is_classed() {
+        let source = include_str!("rpc.rs");
+        let served = served_paths(source);
+        for prefix in MEDIA_ROUTES.iter().chain(INFERENCE_ROUTES) {
+            assert!(
+                served.iter().any(|p| p.starts_with(prefix)),
+                "{prefix} is classed but no router serves it"
+            );
+        }
+        for router in [
+            "paid_json_routes",
+            "paid_media_routes",
+            "paid_audio_routes",
+            "realtime_routes",
+        ] {
+            let paths = served_by(source, router);
+            assert!(!paths.is_empty(), "{router} serves no route");
+            for path in paths {
+                assert_ne!(
+                    route_class(&path),
+                    MethodClass::Read,
+                    "{path} from {router} is a paid route classed as a read"
+                );
+            }
+        }
+    }
     use tenzro_types::node_access::{SurfaceRule, TierDef};
 
     #[test]
@@ -1479,6 +1792,16 @@ mod tests {
         assert_eq!(method_class("tenzro_storageStatus"), MethodClass::Storage);
         assert_eq!(method_class("tenzro_getBalance"), MethodClass::Read);
         assert_eq!(method_class("tenzro_queryEvents"), MethodClass::Index);
+        // The HTTP inference routes the RPC server serves.
+        for path in [
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1/embeddings",
+            "/tenzro/rerank",
+            "/tenzro/forecasts",
+        ] {
+            assert_eq!(route_class(path), MethodClass::Inference, "{path}");
+        }
     }
 
     #[test]
@@ -1533,6 +1856,20 @@ mod tests {
     }
 
     #[test]
+    fn an_org_admits_what_is_delegated_under_it_whatever_its_root() {
+        for root in ["did:tenzro:human:aa", "did:tenzro:machine:aa"] {
+            let orgs = vec![root.to_string()];
+            assert!(in_orgs(&orgs, root));
+            assert!(in_orgs(&orgs, "did:tenzro:machine:aa:bot"), "{root}");
+            assert!(!in_orgs(&orgs, "did:tenzro:machine:bb:bot"), "{root}");
+            assert!(!in_orgs(&orgs, "did:tenzro:machine:aa:bot:x"), "{root}");
+        }
+        // Before, a machine root's agents read as a human's of the same id.
+        let machine = vec!["did:tenzro:machine:aa".to_string()];
+        assert!(in_orgs(&machine, "did:tenzro:machine:aa:bot"));
+    }
+
+    #[test]
     fn the_file_and_the_rpc_form_store_identical_policies() {
         let p = NodeAccessPolicy {
             default_rule: Rule::Any {
@@ -1569,20 +1906,41 @@ mod tests {
             }],
             ..Default::default()
         };
+        // A fixed clock: how fast the machine runs the test changes nothing.
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
         let m = TierMeter::default();
-        assert!(m.charge(&p, "tiny", "a").is_ok());
-        assert!(m.charge(&p, "tiny", "a").is_ok());
-        assert!(m.charge(&p, "tiny", "a").is_err(), "burst of 2");
-        assert!(m.charge(&p, "tiny", "b").is_ok(), "per caller");
+        let charge = |who: &str, ms: u64, epoch: u64| m.charge_at(&p, "tiny", who, at(ms), epoch);
+        assert!(charge("a", 0, 1_000).is_ok());
+        assert!(charge("a", 0, 1_000).is_ok());
+        let slow = charge("a", 999, 1_000).unwrap_err();
+        assert!(slow.contains("60 requests a minute"), "burst of 2: {slow}");
+        assert!(charge("b", 999, 1_000).is_ok(), "per caller");
+        // One request a second refills one token, and the quota of 3 binds.
+        assert!(charge("a", 2_000, 1_002).is_ok());
+        let used = charge("a", 4_000, 1_004).unwrap_err();
+        assert!(used.contains("quota of 3"), "{used}");
+        // A new period opens the quota again.
+        assert!(charge("a", 6_000, 1_000 + 3_600).is_ok());
     }
 
     #[test]
-    fn the_sign_in_digest_binds_every_part() {
+    fn the_sign_in_message_opens_with_its_tenzro_domain() {
+        // A key holder signs a TPM key only over a message whose first
+        // length-prefixed field begins with `tenzro/`.
+        let m = sign_in_message("http://n", "did:a", "jkt", &[7u8; 32]);
+        let domain = b"tenzro/access/sign-in";
+        assert_eq!(&m[..4], &(domain.len() as u32).to_be_bytes());
+        assert!(m[4..].starts_with(domain));
+    }
+
+    #[test]
+    fn the_sign_in_message_binds_every_part() {
         let c = [7u8; 32];
-        let d = sign_in_digest("http://n", "did:a", "jkt", &c);
-        assert_ne!(d, sign_in_digest("http://m", "did:a", "jkt", &c));
-        assert_ne!(d, sign_in_digest("http://n", "did:b", "jkt", &c));
-        assert_ne!(d, sign_in_digest("http://n", "did:a", "jkt2", &c));
-        assert_ne!(d, sign_in_digest("http://n", "did:a", "jkt", &[8u8; 32]));
+        let d = sign_in_message("http://n", "did:a", "jkt", &c);
+        assert_ne!(d, sign_in_message("http://m", "did:a", "jkt", &c));
+        assert_ne!(d, sign_in_message("http://n", "did:b", "jkt", &c));
+        assert_ne!(d, sign_in_message("http://n", "did:a", "jkt2", &c));
+        assert_ne!(d, sign_in_message("http://n", "did:a", "jkt", &[8u8; 32]));
     }
 }

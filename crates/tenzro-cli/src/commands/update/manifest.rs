@@ -27,10 +27,14 @@ use tenzro_device_key::signer::verify_p256;
 pub const SPEC: &str = "tenzro-update/1";
 const TIMESTAMP_DOMAIN: &[u8] = b"tenzro-update/1\ntimestamp\n";
 const TARGETS_DOMAIN: &[u8] = b"tenzro-update/1\ntargets\n";
+const LIBRARIES_DOMAIN: &[u8] = b"tenzro-update/1\nlibraries\n";
 
 /// Largest `timestamp.json` / `targets.json` read from a channel.
 pub const MAX_TIMESTAMP_BYTES: usize = 64 * 1024;
 pub const MAX_TARGETS_BYTES: usize = 1024 * 1024;
+pub const MAX_LIBRARIES_BYTES: usize = 1024 * 1024;
+/// Most library files and links a libraries document lists.
+pub const MAX_LIBRARY_ENTRIES: usize = 256;
 /// Largest single file a manifest may list.
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// A timestamp may be issued at most this far ahead of the local clock.
@@ -71,8 +75,10 @@ pub enum Reject {
         "manifest number {got} is lower than {installed}, which is installed: refusing a rollback"
     )]
     ManifestRollback { got: u64, installed: u64 },
-    #[error("release {release} is older than the running {running}: refusing a downgrade")]
-    ReleaseRollback { release: String, running: String },
+    #[error("release {release} is older than the installed {installed}: refusing a downgrade")]
+    ReleaseRollback { release: String, installed: String },
+    #[error("the libraries document is not the one of the verified targets document ({0})")]
+    LibrariesMismatch(&'static str),
 }
 
 fn malformed(what: &'static str, why: impl fmt::Display) -> Reject {
@@ -305,6 +311,13 @@ fn lower_hex64(s: &str) -> bool {
 }
 
 /// A path under the channel: relative, `/`-separated, no climbing.
+fn platform_ok(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() <= 64
+        && p.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 fn safe_path(p: &str) -> bool {
     !p.is_empty()
         && p.len() <= 256
@@ -345,13 +358,7 @@ impl Targets {
             if !ALLOWED_NAMES.contains(&f.name.as_str()) {
                 return bad("a file names something other than tenzro or tenzro-node");
             }
-            if f.platform.is_empty()
-                || f.platform.len() > 64
-                || !f
-                    .platform
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            {
+            if !platform_ok(&f.platform) {
                 return bad("bad platform");
             }
             if !safe_path(&f.path) {
@@ -373,6 +380,158 @@ impl Targets {
     }
 }
 
+/// The files a release keeps beside its two binaries, per platform: the
+/// libraries under `lib/`, the ones Windows loads from `bin/`, and the web
+/// console `tenzro control --web` serves, under `share/console/` with its
+/// scripts in `share/console/src/`. Signed by the
+/// targets key under its own domain and published beside `targets.json`, which
+/// stays binaries only; it holds for exactly the release and manifest number
+/// of the targets document it is checked against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Libraries {
+    #[serde(rename = "_type")]
+    pub kind: String,
+    pub spec: String,
+    /// The `version` of the targets document it belongs to.
+    pub version: u64,
+    /// The `release` of the targets document it belongs to.
+    pub release: String,
+    /// Hex SHA-256 of the payload of the targets document it belongs to.
+    pub targets_sha256: String,
+    /// `name` is `<folder>/<file>`, the folder one of [`LIBRARY_FOLDERS`].
+    pub files: Vec<FileEntry>,
+    pub links: Vec<LibraryLink>,
+}
+
+/// A symbolic link among a platform's library files, as the archive has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryLink {
+    pub platform: String,
+    /// `lib/<file>`.
+    pub name: String,
+    /// A file of the same platform and folder, `lib/<file>`.
+    pub target: String,
+}
+
+/// The folders of a release directory whose files the libraries document
+/// carries; each is taken whole from the new release by an update.
+pub const LIBRARY_FOLDERS: [&str; 4] = ["lib", "bin", "share/console", "share/console/src"];
+
+/// `<folder>/<file>`: one plain file name directly in one of
+/// [`LIBRARY_FOLDERS`], never one of the two binaries in any case (Windows
+/// and macOS file systems ignore case, so `bin/Tenzro-Node.exe` is the node).
+fn library_name_ok(name: &str) -> bool {
+    let Some((dir, file)) = name.rsplit_once('/') else {
+        return false;
+    };
+    LIBRARY_FOLDERS.contains(&dir)
+        && !file.is_empty()
+        && file.len() <= 128
+        && !file.starts_with('.')
+        && file
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'))
+        && !(dir == "bin"
+            && ALLOWED_NAMES.iter().any(|n| {
+                file.eq_ignore_ascii_case(n) || file.eq_ignore_ascii_case(&format!("{n}.exe"))
+            }))
+}
+
+impl Libraries {
+    fn check_shape(&self) -> Result<(), Reject> {
+        let bad = |why: &str| Err(malformed("libraries", why));
+        if self.kind != "libraries" || self.spec != SPEC {
+            return bad("wrong type or spec");
+        }
+        if self.release.parse::<Version>().is_err() || self.version == 0 {
+            return bad("no release or manifest number");
+        }
+        if !lower_hex64(&self.targets_sha256) {
+            return bad("no targets digest");
+        }
+        if self.files.len() + self.links.len() > MAX_LIBRARY_ENTRIES {
+            return bad("too many entries");
+        }
+        // Names are told apart without regard to case, as the file systems that ignore it do.
+        let mut seen = std::collections::HashSet::new();
+        for f in &self.files {
+            if !platform_ok(&f.platform) {
+                return bad("bad platform");
+            }
+            if !library_name_ok(&f.name) {
+                return bad("a library is not one file in lib/ or bin/");
+            }
+            if !safe_path(&f.path) {
+                return bad("a file path is not a plain relative path");
+            }
+            if f.length == 0 || f.length > MAX_FILE_BYTES || !lower_hex64(&f.sha256) {
+                return bad("a file has no length or no valid SHA-256");
+            }
+            if !seen.insert((f.platform.as_str(), f.name.to_ascii_lowercase())) {
+                return bad("a platform lists the same library twice");
+            }
+        }
+        for l in &self.links {
+            if !platform_ok(&l.platform) || !l.name.starts_with("lib/") || !library_name_ok(&l.name)
+            {
+                return bad("a link is not one name in lib/");
+            }
+            if !self.files.iter().any(|f| {
+                f.platform == l.platform && f.name == l.target && f.name.starts_with("lib/")
+            }) {
+                return bad("a link points at no library file of its platform");
+            }
+            if !seen.insert((l.platform.as_str(), l.name.to_ascii_lowercase())) {
+                return bad("a platform lists the same library twice");
+            }
+        }
+        Ok(())
+    }
+
+    /// The library files for `platform`.
+    pub fn files_for<'a>(&'a self, platform: &'a str) -> impl Iterator<Item = &'a FileEntry> {
+        self.files.iter().filter(move |f| f.platform == platform)
+    }
+
+    /// The links for `platform`.
+    pub fn links_for<'a>(&'a self, platform: &'a str) -> impl Iterator<Item = &'a LibraryLink> {
+        self.links.iter().filter(move |l| l.platform == platform)
+    }
+}
+
+/// Checks a libraries document: signed by a trusted targets key, well formed,
+/// and for exactly the targets document of `verified` (its payload digest,
+/// release and manifest number), which was checked against the timestamp, so
+/// the libraries are as fresh as it is.
+pub fn verify_libraries(
+    bytes: &[u8],
+    root: &TrustRoot,
+    verified: &Verified,
+) -> Result<Libraries, Reject> {
+    let targets = &verified.targets;
+    let lib: Libraries = serde_json::from_slice(&open(
+        "libraries",
+        "libraries",
+        LIBRARIES_DOMAIN,
+        &root.targets,
+        bytes,
+    )?)
+    .map_err(|e| malformed("libraries", e))?;
+    lib.check_shape()?;
+    if lib.targets_sha256 != verified.targets_payload_sha256 {
+        return Err(Reject::LibrariesMismatch("targets digest"));
+    }
+    if lib.release != targets.release {
+        return Err(Reject::LibrariesMismatch("release"));
+    }
+    if lib.version != targets.version {
+        return Err(Reject::LibrariesMismatch("manifest number"));
+    }
+    Ok(lib)
+}
+
 /// What this machine already knows.
 #[derive(Debug, Clone)]
 pub struct Local {
@@ -380,21 +539,24 @@ pub struct Local {
     pub installed_manifest_version: u64,
     /// Highest timestamp number ever seen.
     pub highest_timestamp_version: u64,
-    pub running_release: Version,
+    /// The release in the install directory (`install::installed_release`).
+    pub installed_release: Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verified {
     pub timestamp_version: u64,
     pub targets: Targets,
+    /// Hex SHA-256 of the targets payload, the exact bytes the targets key signed.
+    pub targets_payload_sha256: String,
 }
 
 impl Verified {
     /// Whether this is an update to something newer than what runs here: a
-    /// manifest number above the installed one and a release above the running one.
+    /// manifest number above the installed one and a release above the installed one.
     pub fn is_newer(&self, local: &Local) -> bool {
         self.targets.version > local.installed_manifest_version
-            && self.targets.release_version() > local.running_release
+            && self.targets.release_version() > local.installed_release
     }
 }
 
@@ -403,7 +565,7 @@ impl Verified {
 /// Fails closed on: an untrusted or missing signature, an expired or
 /// replayed timestamp, a targets document that is not the one the timestamp
 /// vouches for, a manifest number below the installed one, and a release
-/// below the running one. A manifest number equal to the installed one
+/// below the installed one. A manifest number equal to the installed one
 /// verifies; [`Verified::is_newer`] says it is not an update.
 pub fn verify(
     timestamp: &[u8],
@@ -448,14 +610,9 @@ pub fn verify(
     if hex::encode(Sha256::digest(targets)) != ts.targets_sha256 {
         return Err(Reject::TargetsMismatch("SHA-256"));
     }
-    let tg: Targets = serde_json::from_slice(&open(
-        "targets",
-        "targets",
-        TARGETS_DOMAIN,
-        &root.targets,
-        targets,
-    )?)
-    .map_err(|e| malformed("targets", e))?;
+    let payload = open("targets", "targets", TARGETS_DOMAIN, &root.targets, targets)?;
+    let targets_payload_sha256 = hex::encode(Sha256::digest(&payload));
+    let tg: Targets = serde_json::from_slice(&payload).map_err(|e| malformed("targets", e))?;
     tg.check_shape()?;
     if tg.version != ts.targets_version {
         return Err(Reject::TargetsMismatch("version"));
@@ -466,15 +623,16 @@ pub fn verify(
             installed: local.installed_manifest_version,
         });
     }
-    if tg.release_version() < local.running_release {
+    if tg.release_version() < local.installed_release {
         return Err(Reject::ReleaseRollback {
             release: tg.release.clone(),
-            running: local.running_release.to_string(),
+            installed: local.installed_release.to_string(),
         });
     }
     Ok(Verified {
         timestamp_version: ts.version,
         targets: tg,
+        targets_payload_sha256,
     })
 }
 
@@ -519,6 +677,9 @@ pub(crate) mod fixture {
         }
         pub fn sign_timestamp(&self, t: &Timestamp) -> Vec<u8> {
             self.envelope(TIMESTAMP_DOMAIN, &serde_json::to_vec(t).unwrap())
+        }
+        pub fn sign_libraries(&self, l: &Libraries) -> Vec<u8> {
+            self.envelope(LIBRARIES_DOMAIN, &serde_json::to_vec(l).unwrap())
         }
     }
 
@@ -577,7 +738,7 @@ pub(crate) mod fixture {
         Local {
             installed_manifest_version: 3,
             highest_timestamp_version: 10,
-            running_release: "0.2.1".parse().unwrap(),
+            installed_release: "0.2.1".parse().unwrap(),
         }
     }
 }
@@ -616,6 +777,167 @@ mod tests {
             "0.2.2",
             vec![file("tenzro", b"new cli"), file("tenzro-node", b"new node")],
         )
+    }
+
+    fn library(platform: &str, name: &str, content: &[u8]) -> FileEntry {
+        FileEntry {
+            platform: platform.into(),
+            name: name.into(),
+            path: format!("0.2.2/{platform}/{name}"),
+            ..file("tenzro", content)
+        }
+    }
+
+    fn verified_targets() -> Verified {
+        Verified {
+            timestamp_version: 11,
+            targets: good_targets(),
+            targets_payload_sha256: hex::encode(Sha256::digest(
+                serde_json::to_vec(&good_targets()).unwrap(),
+            )),
+        }
+    }
+
+    fn good_libraries() -> Libraries {
+        Libraries {
+            kind: "libraries".into(),
+            spec: SPEC.into(),
+            version: 4,
+            release: "0.2.2".into(),
+            targets_sha256: verified_targets().targets_payload_sha256,
+            files: vec![
+                library("x86_64-linux-cuda", "lib/libonnxruntime.so.1.22.0", b"ort"),
+                library("x86_64-windows-cuda", "bin/onnxruntime.dll", b"ort dll"),
+            ],
+            links: vec![LibraryLink {
+                platform: "x86_64-linux-cuda".into(),
+                name: "lib/libonnxruntime.so.1".into(),
+                target: "lib/libonnxruntime.so.1.22.0".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn the_console_and_its_scripts_are_library_folders() {
+        for name in [
+            "share/console/index.html",
+            "share/console/manifest.webmanifest",
+            "share/console/src/app.js",
+            "lib/libonnxruntime.so.1",
+            "bin/onnxruntime.dll",
+        ] {
+            assert!(library_name_ok(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_libraries_document_of_the_verified_targets_is_accepted() {
+        let tk = Key::new(1);
+        let root = root(&tk, &Key::new(2));
+        let l = verify_libraries(
+            &tk.sign_libraries(&good_libraries()),
+            &root,
+            &verified_targets(),
+        )
+        .unwrap();
+        assert_eq!(l.files_for("x86_64-linux-cuda").count(), 1);
+        assert_eq!(l.links_for("x86_64-linux-cuda").count(), 1);
+        assert_eq!(l.files_for("x86_64-linux").count(), 0);
+    }
+
+    #[test]
+    fn a_libraries_document_of_another_release_key_or_shape_is_refused() {
+        let tk = Key::new(1);
+        let root = root(&tk, &Key::new(2));
+        let refused = |l: &Libraries, key: &Key| {
+            verify_libraries(&key.sign_libraries(l), &root, &verified_targets()).unwrap_err()
+        };
+        let mut other = good_libraries();
+        other.release = "0.2.9".into();
+        assert!(matches!(
+            refused(&other, &tk),
+            Reject::LibrariesMismatch("release")
+        ));
+        let mut other = good_libraries();
+        other.targets_sha256 = "0".repeat(64);
+        assert!(matches!(
+            refused(&other, &tk),
+            Reject::LibrariesMismatch("targets digest")
+        ));
+        let mut other = good_libraries();
+        other.version = 5;
+        assert!(matches!(
+            refused(&other, &tk),
+            Reject::LibrariesMismatch("manifest number")
+        ));
+        // The timestamp key, or any key not trusted for targets, signs no libraries.
+        assert!(matches!(
+            refused(&good_libraries(), &Key::new(2)),
+            Reject::BadSignature(_)
+        ));
+        // A targets envelope is not a libraries document: the domains differ.
+        assert!(matches!(
+            verify_libraries(
+                &tk.sign_targets(&good_targets()),
+                &root,
+                &verified_targets()
+            )
+            .unwrap_err(),
+            Reject::BadSignature(_)
+        ));
+        for name in [
+            "lib/../x",
+            "lib/.hidden",
+            "etc/libx.so",
+            "lib/a/b.so",
+            "lib/",
+            "share/network/13380.toml",
+            "share/console/src/deep/x.js",
+            "share/x.js",
+            "share/console/.hidden",
+            "bin/tenzro-node.exe",
+            "bin/Tenzro-Node.exe",
+            "bin/TENZRO.EXE",
+            "bin/tenzro",
+            "libx.so",
+        ] {
+            let mut bad = good_libraries();
+            bad.files[0].name = name.into();
+            bad.links.clear();
+            assert!(
+                matches!(refused(&bad, &tk), Reject::Malformed("libraries", _)),
+                "{name}"
+            );
+        }
+        let mut dangling = good_libraries();
+        dangling.links[0].target = "lib/libmissing.so".into();
+        assert!(matches!(
+            refused(&dangling, &tk),
+            Reject::Malformed("libraries", _)
+        ));
+        let mut cross = good_libraries();
+        cross.links[0].platform = "x86_64-windows-cuda".into();
+        assert!(matches!(
+            refused(&cross, &tk),
+            Reject::Malformed("libraries", _)
+        ));
+        let mut cased = good_libraries();
+        cased.files.push(library(
+            "x86_64-linux-cuda",
+            "lib/LIBONNXRUNTIME.so.1.22.0",
+            b"same file on a case-blind file system",
+        ));
+        assert!(matches!(
+            refused(&cased, &tk),
+            Reject::Malformed("libraries", _)
+        ));
+        let mut twice = good_libraries();
+        twice.links[0].name = "lib/libonnxruntime.so.1.22.0".into();
+        twice.links[0].target = "lib/libonnxruntime.so.1.22.0".into();
+        assert!(matches!(
+            refused(&twice, &tk),
+            Reject::Malformed("libraries", _)
+        ));
     }
 
     #[test]
@@ -732,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn a_release_older_than_the_running_one_is_rejected_whatever_its_number() {
+    fn a_release_older_than_the_installed_one_is_rejected_whatever_its_number() {
         let (tk, sk) = (Key::new(1), Key::new(2));
         let s = serve(
             &tk,

@@ -57,6 +57,11 @@ pub struct X402PaymentServer {
     /// holds no key of its own (a delegated agent, paying with vouchers its
     /// serving node signs on a channel it funded) can pay it.
     also_offered: Vec<String>,
+    /// A scheme, and the schemes offered beside it, issued instead of
+    /// `scheme` and `also_offered` while its condition holds.
+    scheme_while: Option<(String, Vec<String>, crate::LiveSwitch)>,
+    /// Resolves who stands behind a payer, for its receipt.
+    chains: Arc<dyn crate::principal_chains::PrincipalChains>,
 }
 
 impl X402PaymentServer {
@@ -66,6 +71,20 @@ impl X402PaymentServer {
         if scheme != self.scheme && !self.also_offered.contains(&scheme) {
             self.also_offered.push(scheme);
         }
+        self
+    }
+
+    /// Issues `scheme`, with `also_offered` beside it, while `live` holds,
+    /// and the pinned scheme otherwise. A node that takes up or puts down a
+    /// metered service while it runs changes what its challenges offer
+    /// without the server being rebuilt.
+    pub fn with_scheme_while(
+        mut self,
+        scheme: impl Into<String>,
+        also_offered: Vec<String>,
+        live: crate::LiveSwitch,
+    ) -> Self {
+        self.scheme_while = Some((scheme.into(), also_offered, live));
         self
     }
 
@@ -96,7 +115,19 @@ impl X402PaymentServer {
             meter_signer: None,
             scheme: crate::x402::DEFAULT_SCHEME.to_string(),
             also_offered: Vec::new(),
+            scheme_while: None,
+            chains: Arc::new(crate::principal_chains::Unresolved),
         }
+    }
+
+    /// Record on each receipt the payer's delegation path as `chains`
+    /// resolves it.
+    pub fn with_principal_chains(
+        mut self,
+        chains: Arc<dyn crate::principal_chains::PrincipalChains>,
+    ) -> Self {
+        self.chains = chains;
+        self
     }
 
     /// Sets a shared challenge store
@@ -215,15 +246,18 @@ impl PaymentProtocol for X402PaymentServer {
             .first()
             .cloned()
             .unwrap_or_else(|| "tenzro".to_string());
-        let scheme = self.scheme.clone();
+        let (scheme, also_offered) = match &self.scheme_while {
+            Some((scheme, also, live)) if live() => (scheme.clone(), also.clone()),
+            _ => (self.scheme.clone(), self.also_offered.clone()),
+        };
         let network = self.network_for(&chain);
 
         let mut extra = HashMap::new();
         extra.insert("scheme".to_string(), serde_json::json!(scheme));
         extra.insert("network".to_string(), serde_json::json!(network));
-        if !self.also_offered.is_empty() {
+        if !also_offered.is_empty() {
             let mut offered = vec![scheme.clone()];
-            offered.extend(self.also_offered.iter().cloned());
+            offered.extend(also_offered);
             extra.insert(
                 crate::x402::wire::OFFERED_SCHEMES_KEY.to_string(),
                 serde_json::json!(offered),
@@ -389,10 +423,7 @@ impl PaymentProtocol for X402PaymentServer {
             settlement_tx,
             chain: challenge.chain.clone(),
             settled_at: Utc::now(),
-            principal_chain: tenzro_types::principal_chain::anonymous_chain_for_did(
-                verification.payer_did.clone(),
-                tenzro_types::primitives::BlockHeight::new(0),
-            ),
+            principal_chain: self.chains.chain_of(&verification.payer_did),
             extra,
         })
     }
@@ -513,6 +544,82 @@ mod tests {
         let receipt = server.settle(&ch, &cred, &v).await.unwrap();
         assert_eq!(receipt.amount, 55);
         assert!(receipt.settlement_tx.is_none());
+    }
+
+    /// The x402 receipt of a payment by a delegated agent names the
+    /// controller behind it; without a registry the payer stands alone,
+    /// marked unresolved.
+    #[tokio::test]
+    async fn a_receipt_carries_the_payers_resolved_principal_chain() {
+        use crate::principal_chains::tests::{agent_did, chains, human_did};
+        let keys = std::sync::Arc::new(crate::test_support::SeedKeys);
+        let resolved = X402PaymentServer::new(1337, vec!["tenzro".to_string()], keys.clone())
+            .with_principal_chains(chains());
+        let plain = X402PaymentServer::new(1337, vec!["tenzro".to_string()], keys);
+        for (server, named) in [(&resolved, true), (&plain, false)] {
+            let ch = stamped(server, 55).await;
+            let cred = server
+                .create_credential(&ch, &agent_did(), &signer())
+                .await
+                .unwrap();
+            let v = server.verify_credential(&ch, &cred).await.unwrap();
+            let receipt = server.settle(&ch, &cred, &v).await.unwrap();
+            let chain = &receipt.principal_chain;
+            assert_eq!(chain.actor, agent_did());
+            if named {
+                assert_eq!(chain.controller_did(), human_did());
+                assert!(!chain.has_tombstone());
+                assert_eq!(
+                    chain.frozen_at_block,
+                    tenzro_types::primitives::BlockHeight::new(4242)
+                );
+            } else {
+                assert!(chain.has_tombstone());
+                assert_eq!(chain.controller_did(), agent_did());
+            }
+        }
+    }
+
+    /// A server whose metered scheme follows a live condition offers it only
+    /// while the condition holds, and the pinned scheme otherwise.
+    #[tokio::test]
+    async fn the_metered_scheme_follows_its_live_condition() {
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = live.clone();
+        let server = X402PaymentServer::new(
+            1337,
+            vec!["tenzro".to_string()],
+            std::sync::Arc::new(crate::test_support::SeedKeys),
+        )
+        .with_scheme_while(
+            crate::x402::UPTO_SCHEME,
+            vec![crate::x402::BATCH_SETTLEMENT_SCHEME.to_string()],
+            Arc::new(move || flag.load(std::sync::atomic::Ordering::Acquire)),
+        )
+        .with_meter_signer(Arc::new(signer()));
+        let off = stamped(&server, 5_000).await;
+        assert_eq!(off.extra["scheme"], crate::x402::DEFAULT_SCHEME);
+        assert!(!off.extra.contains_key(crate::metering::METER_KEY));
+        assert!(
+            !off.extra
+                .contains_key(crate::x402::wire::OFFERED_SCHEMES_KEY)
+        );
+        live.store(true, std::sync::atomic::Ordering::Release);
+        let on = stamped(&server, 5_000).await;
+        assert_eq!(on.extra["scheme"], crate::x402::UPTO_SCHEME);
+        assert!(on.extra.contains_key(crate::metering::METER_KEY));
+        assert_eq!(
+            on.extra[crate::x402::wire::OFFERED_SCHEMES_KEY],
+            serde_json::json!([
+                crate::x402::UPTO_SCHEME,
+                crate::x402::BATCH_SETTLEMENT_SCHEME
+            ])
+        );
+        live.store(false, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            stamped(&server, 5_000).await.extra["scheme"],
+            crate::x402::DEFAULT_SCHEME
+        );
     }
 
     #[tokio::test]

@@ -342,7 +342,7 @@ impl NativeExecutor {
         if bond.owner != owner {
             return Err(invalid("only the bond's owner may withdraw it"));
         }
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let mut changes = vec![charge_gas(tx, state, GAS_METER_BOND_WITHDRAW)?];
         let log = match bond.withdrawal_requested_at_ms {
             None => {
@@ -445,7 +445,7 @@ impl NativeExecutor {
             }
         };
 
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let window = dispute_window(state);
         if now > latest_measured.saturating_add(window) {
             return Err(invalid("the dispute window for this record has closed"));

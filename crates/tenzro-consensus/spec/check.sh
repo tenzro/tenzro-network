@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks the commit-rule specification and replays its executions through the
-# consensus core.
+# consensus core, and checks the membership specification.
 #
 # Usage: spec/check.sh <out-dir>
 #
@@ -9,6 +9,7 @@
 #   SEED           simulator seed (default: 1)
 #   TRACES         executions replayed through the core per committee size
 #                  (default: 20)
+#   MEMBERSHIP_SAMPLES  random executions per membership check (default: 1000)
 #   CARGO_WRAP     command the cargo test runs under (default: none)
 #   VERIFY_STEPS   when set, also checks agreement with the symbolic model
 #                  checker up to this many steps (needs Java 21)
@@ -30,7 +31,19 @@
 #      skipped honest slot under a lookahead of 1 are reached (the check fails if the simulator cannot find
 #      them);
 #   6. optional bounded symbolic check of agreement;
-#   7. optional replay of generated executions, and of executions ending on a
+#   7. validator-set membership (membership.qnt), by random simulation:
+#      stops that each pass the stop check one at a time keep every invariant
+#      at seven and nine validators; with one permanent loss, a set whose
+#      ejection never goes below four validators, and a set whose ejection is
+#      held to the launch check, both at equal stake, stay certifying with
+#      one validator down, recoverable, and with a spare; and the states the
+#      rules exist to prevent are reached where the rules are off: the halt
+#      of four validators launched with one gone, an unrecoverable set after
+#      ejection down to three, a halt by stops that each passed the check
+#      against the same state, a set with no spare under unequal stake and a
+#      count-only floor, and one after a slash while another validator is
+#      down (the check fails if the simulator cannot find them);
+#   8. optional replay of generated executions, and of executions ending on a
 #      skipped slot, through the core (cargo test).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -106,6 +119,41 @@ if [[ -n ${VERIFY_STEPS:-} ]]; then
     report "FAIL verify-n4: see $out/verify-n4.log"
     failed=1
   fi
+fi
+
+membership=$here/membership.qnt
+msamples=${MEMBERSHIP_SAMPLES:-1000}
+m_run() {  # m_run <name> <main> <invariant>
+  $quint run "$membership" --main "$2" --invariant "$3" --max-samples "$msamples" --max-steps 60 \
+    --seed "$seed" > "$out/$1.log" 2>&1
+}
+m_holds() {  # m_holds <main> <invariant>
+  if m_run "membership-$1-$2" "$1" "$2"; then report "PASS membership-$1-$2"; else
+    report "FAIL membership-$1-$2: see $out/membership-$1-$2.log"; failed=1
+  fi
+}
+m_reached() {  # m_reached <name> <main> <invariant>: the invariant must be violated
+  if m_run "membership-witness-$1" "$2" "$3"; then
+    report "FAIL membership-witness-$1: not reached in $msamples executions"; failed=1
+  else report "PASS membership-witness-$1"; fi
+}
+if $quint typecheck "$membership" > "$out/membership-typecheck.log" 2>&1; then
+  report "PASS membership-typecheck"
+  for inv in noHalt survivesOneDown recoverableInv liveSetOk spareKept; do
+    m_holds seq7 "$inv"
+    m_holds seq9 "$inv"
+  done
+  for inst in floor4 floor5 floor7 guard4 guard5; do
+    for inv in survivesOneDown recoverableInv spareKept; do m_holds "$inst" "$inv"; done
+  done
+  m_reached launched-with-one-gone-halts old4 noHalt
+  m_reached launched-with-one-gone-unrecoverable old4 recoverableInv
+  m_reached floor-of-three-unrecoverable ship4 recoverableInv
+  m_reached stops-checked-against-one-state-halt par7 noHalt
+  m_reached unequal-stake-count-floor-no-spare weighted7 survivesOneDown
+  m_reached slash-while-one-down-unrecoverable slash5 recoverableInv
+else
+  report "FAIL membership-typecheck: see $out/membership-typecheck.log"; failed=1
 fi
 
 gen() {  # gen <main> <prefix> <steps> <count>: one execution per seed

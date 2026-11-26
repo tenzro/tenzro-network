@@ -154,7 +154,7 @@ impl WebServer {
             // Per-IP GCRA gate, outermost so an abusive source is
             // rejected with 429 before consuming a concurrency slot.
             // 10 req/s sustained per IP with a burst of 50 — the Web API
-            // fronts inference chat and verification, both heavier per
+            // fronts verification, sign-in and DID resolution, heavier per
             // request than plain RPC reads.
             .layer(axum::middleware::from_fn_with_state(
                 crate::ip_rate_limit::IpRateLimiter::new(

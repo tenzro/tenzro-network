@@ -23,6 +23,8 @@ pub enum BridgeCommand {
     Send(BridgeSendCmd),
     /// Deliver a committee-attested inbound transfer
     Deliver(BridgeDeliverCmd),
+    /// Deliver a message to the contract its ERC-7786 gateway body names
+    DeliverMessage(BridgeDeliverMessageCmd),
     /// Relay a light-client update (bootstrap or committee handover) for a route
     LightClient(BridgeLightClientCmd),
     /// Relay an IBC message (a classic handshake step, or a packet's
@@ -60,6 +62,7 @@ impl BridgeCommand {
             Self::Route(cmd) => cmd.execute().await,
             Self::Send(cmd) => cmd.execute().await,
             Self::Deliver(cmd) => cmd.execute().await,
+            Self::DeliverMessage(cmd) => cmd.execute().await,
             Self::LightClient(cmd) => cmd.execute().await,
             Self::Ibc(cmd) => cmd.execute().await,
             Self::Attest(cmd) => cmd.execute().await,
@@ -248,6 +251,61 @@ pub struct BridgeDeliverCmd {
     delivery: String,
     #[command(flatten)]
     signer: super::signer::Signer,
+}
+
+/// Deliver a message to the contract its ERC-7786 gateway body names
+#[derive(Debug, Parser)]
+pub struct BridgeDeliverMessageCmd {
+    /// Route transport: ccip, ibc, deposit or contract
+    #[arg(long)]
+    adapter: String,
+    /// External chain the message comes from
+    #[arg(long)]
+    from_chain: String,
+    /// The attested delivery carrying the gateway body (hex)
+    #[arg(long)]
+    delivery: String,
+    #[command(flatten)]
+    signer: super::signer::Signer,
+}
+
+/// The governed gas the recipient of a gateway message receives.
+const DELIVERY_GAS_PARAM: &str = "feature.erc7786_gateway.delivery_gas";
+
+impl BridgeDeliverMessageCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Bridge Deliver Message");
+        let op = tenzro_native_ops::gateway_delivery::GatewayDeliveryOp {
+            adapter: adapter(&self.adapter)?,
+            source_chain: self.from_chain.to_ascii_lowercase(),
+            delivery: hex::decode(self.delivery.trim_start_matches("0x"))
+                .map_err(|_| anyhow::anyhow!("--delivery must be hex"))?,
+        };
+        op.validate().map_err(|e| anyhow::anyhow!(e))?;
+        let rpc = crate::rpc::RpcClient::new(self.signer.rpc_url());
+        let param: serde_json::Value = rpc
+            .call(
+                "tenzro_getNetworkParams",
+                serde_json::json!({ "key": DELIVERY_GAS_PARAM }),
+            )
+            .await?;
+        let delivery_gas: u64 = param
+            .get("value")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("the node did not report {DELIVERY_GAS_PARAM}"))?;
+        let gas = relay_gas(op.delivery.len()).saturating_add(delivery_gas);
+        self.signer
+            .send_tx_with_gas(
+                tenzro_types::transaction::TransactionType::NativeCall {
+                    selector: tenzro_native_ops::SELECTOR_GATEWAY_DELIVERY,
+                    data: tenzro_native_ops::encode(&op),
+                },
+                "Gateway delivery",
+                gas,
+            )
+            .await
+    }
 }
 
 /// The gas a relayed bridge operation may use: its base plus its payload.

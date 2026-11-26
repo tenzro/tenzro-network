@@ -187,23 +187,30 @@ fn verify_assertion(
             rp_id,
             related_origins,
         }) => {
-            let host = origin_host(&cdj.origin)?;
-            let is_local = host == "localhost" || host == "127.0.0.1";
-            if !is_local && !cdj.origin.starts_with("https://") {
-                return Err(CryptoError::InvalidSignature(
-                    "clientDataJSON origin must be https (except localhost)".to_string(),
-                ));
-            }
-            // The dot-prefixed suffix test is load-bearing: a bare
-            // `ends_with(rp_id)` would also accept `evilnodes.example.org`
-            // for an RP ID of `nodes.example.org`.
-            let under_rp_id = host == rp_id.as_str() || host.ends_with(&format!(".{rp_id}"));
             let related = related_origins.iter().any(|o| o == &cdj.origin);
-            if !under_rp_id && !related {
-                return Err(CryptoError::InvalidSignature(format!(
-                    "clientDataJSON origin {} is not {rp_id}, a subdomain of it, or a related origin",
-                    cdj.origin
-                )));
+            // A native Android app reports the hash of its signing
+            // certificate as its origin. That names no host to place under
+            // the RP ID and no scheme, so it is admitted only by equalling a
+            // listed related origin; every other origin is a web origin.
+            let listed_app = related && is_android_app_origin(&cdj.origin);
+            if !listed_app {
+                let host = origin_host(&cdj.origin)?;
+                let is_local = host == "localhost" || host == "127.0.0.1";
+                if !is_local && !cdj.origin.starts_with("https://") {
+                    return Err(CryptoError::InvalidSignature(
+                        "clientDataJSON origin must be https (except localhost)".to_string(),
+                    ));
+                }
+                // The dot-prefixed suffix test is load-bearing: a bare
+                // `ends_with(rp_id)` would also accept `evilnodes.example.org`
+                // for an RP ID of `nodes.example.org`.
+                let under_rp_id = host == rp_id.as_str() || host.ends_with(&format!(".{rp_id}"));
+                if !under_rp_id && !related {
+                    return Err(CryptoError::InvalidSignature(format!(
+                        "clientDataJSON origin {} is not {rp_id}, a subdomain of it, or a related origin",
+                        cdj.origin
+                    )));
+                }
             }
             // The origin string is browser-supplied; the rpIdHash is what
             // the authenticator itself committed to, and is the check that
@@ -316,8 +323,12 @@ pub enum WebAuthnRelyingParty {
         /// Exact origins outside `rp_id` that may also present credentials
         /// scoped to it, such as a sibling domain run by the same operator.
         /// Browsers allow this only when `https://{rp_id}/.well-known/webauthn`
-        /// lists the origin. The authenticator still commits to `rp_id`, so the
-        /// `rpIdHash` check applies to these origins unchanged.
+        /// lists the origin. A native Android app is listed by the origin it
+        /// reports, `android:apk-key-hash:` followed by the base64url SHA-256
+        /// of its signing certificate; Android allows it only when
+        /// `https://{rp_id}/.well-known/assetlinks.json` names the app. The
+        /// authenticator still commits to `rp_id`, so the `rpIdHash` check
+        /// applies to these origins unchanged.
         related_origins: Vec<String>,
     },
 }
@@ -344,6 +355,17 @@ fn asserted_rp_ids(host: &str) -> impl Iterator<Item = &str> {
             .filter(|p| p.contains('.'));
         Some(current)
     })
+}
+
+/// How the origin a native Android app reports in `clientDataJSON` starts.
+/// The base64url SHA-256 of the certificate the app is signed with follows.
+pub const ANDROID_APP_ORIGIN_PREFIX: &str = "android:apk-key-hash:";
+
+/// Whether `origin` has the form a native Android app reports in
+/// `clientDataJSON`. It says nothing about which app: a relying party admits
+/// one only by listing its whole origin.
+pub fn is_android_app_origin(origin: &str) -> bool {
+    origin.starts_with(ANDROID_APP_ORIGIN_PREFIX)
 }
 
 /// Extracts the host (no scheme, no port, no path) from an `Origin` string
@@ -936,5 +958,102 @@ mod tests {
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
+    }
+
+    /// The origin an Android app signed with the certificate whose SHA-256
+    /// is 32 bytes of `byte` reports.
+    fn android_app_origin(byte: u8) -> String {
+        use base64::Engine as _;
+        format!(
+            "android:apk-key-hash:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([byte; 32])
+        )
+    }
+
+    fn app_rp(listed: &[String]) -> WebAuthnRelyingParty {
+        WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: "tenzro.com".to_string(),
+            related_origins: listed.to_vec(),
+        }
+    }
+
+    /// Whether an assertion scoped to `rp_id` and made at `origin` verifies
+    /// under `rp`.
+    fn verifies_from(rp_id: &str, origin: &str, rp: &WebAuthnRelyingParty) -> bool {
+        let (assertion, kp) = build_assertion_for_rp_id(rp_id, origin, "Y2hhbGxlbmdlLTAx");
+        verify_webauthn_assertion(
+            &assertion,
+            &kp.public_key_bytes(),
+            "Y2hhbGxlbmdlLTAx",
+            rp,
+            WebAuthnCeremonyType::Get,
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn a_listed_android_app_origin_is_accepted() {
+        let app = android_app_origin(0x11);
+        assert!(verifies_from(
+            "tenzro.com",
+            &app,
+            &app_rp(std::slice::from_ref(&app))
+        ));
+    }
+
+    #[test]
+    fn an_android_app_origin_nobody_listed_is_refused() {
+        let app = android_app_origin(0x11);
+        // No list at all, a list of web origins, and a list naming an app
+        // signed with another certificate.
+        assert!(!verifies_from("tenzro.com", &app, &app_rp(&[])));
+        assert!(!verifies_from("tenzro.com", &app, &related_rp()));
+        assert!(!verifies_from(
+            "tenzro.com",
+            &app,
+            &app_rp(&[android_app_origin(0x22)])
+        ));
+    }
+
+    #[test]
+    fn an_android_app_origin_is_matched_whole_and_never_by_prefix() {
+        let app = android_app_origin(0x11);
+        let listed = app_rp(std::slice::from_ref(&app));
+        // Longer than the listed origin, shorter than it, and differing
+        // only in letter case.
+        assert!(!verifies_from("tenzro.com", &format!("{app}A"), &listed));
+        assert!(!verifies_from("tenzro.com", &app[..app.len() - 1], &listed));
+        assert!(!verifies_from("tenzro.com", &app.to_uppercase(), &listed));
+        // A listed entry that is only the scheme admits no app.
+        let scheme_only = app_rp(&["android:apk-key-hash:".to_string()]);
+        assert!(!verifies_from("tenzro.com", &app, &scheme_only));
+    }
+
+    #[test]
+    fn a_listed_android_app_origin_still_requires_the_rp_id_hash() {
+        // The app's credential was minted for another relying party.
+        let app = android_app_origin(0x11);
+        assert!(!verifies_from(
+            "example.org",
+            &app,
+            &app_rp(std::slice::from_ref(&app))
+        ));
+    }
+
+    #[test]
+    fn a_listed_android_app_origin_admits_no_other_non_https_origin() {
+        // Listing an app relaxes the scheme rule for that one string only.
+        let listed = app_rp(&[android_app_origin(0x11)]);
+        assert!(!verifies_from("tenzro.com", "http://tenzro.com", &listed));
+        assert!(!verifies_from(
+            "tenzro.com",
+            "http://app.sibling.example",
+            &listed
+        ));
+        assert!(verifies_from(
+            "tenzro.com",
+            "https://wallet.tenzro.com",
+            &listed
+        ));
     }
 }

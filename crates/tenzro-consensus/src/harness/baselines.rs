@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::driver::{Output, SimBatch, SimNode};
-use crate::committee::{Committee, SeatSet, ValidatorIndex};
+use crate::committee::{Committee, FaultBound, SeatSet, ValidatorIndex};
 use crate::core::Target;
 use crate::dag::Dag;
 use crate::rbc::{RbcAction, ReliableBroadcast, Signal};
@@ -82,7 +82,7 @@ pub fn sailfish_nodes(n: usize, leader_timeout_ms: u64) -> Vec<SailfishNode> {
             schedule: Schedule::new(&c, [5; 32], 1, crate::schedule::LOOKAHEAD_ROUNDS),
             committee: c.clone(),
             me: i as ValidatorIndex,
-            rbc: ReliableBroadcast::new(i as ValidatorIndex),
+            rbc: ReliableBroadcast::new(i as ValidatorIndex, FaultBound::Seats),
             dag: Dag::new(),
             bodies: HashMap::new(),
             no_votes: HashMap::new(),

@@ -23,9 +23,11 @@ pub mod settlement;
 pub mod state_proof;
 
 /// The control root of the recursion circuit, split as public inputs.
-pub const CONTROL_ROOT: [u8; 32] = hex32("a54dc85ac99f851c92d7c96d7318af41dbe7c0194edfcc37eb4d422a998c1f56");
+pub const CONTROL_ROOT: [u8; 32] =
+    hex32("a54dc85ac99f851c92d7c96d7318af41dbe7c0194edfcc37eb4d422a998c1f56");
 /// The BN254 control id, the last public input.
-pub const BN254_CONTROL_ID: [u8; 32] = hex32("04446e66d300eb7fb45c9726bb53c793dda407a62e9601618bb43c5c14657ac0");
+pub const BN254_CONTROL_ID: [u8; 32] =
+    hex32("04446e66d300eb7fb45c9726bb53c793dda407a62e9601618bb43c5c14657ac0");
 
 const fn nibble(c: u8) -> u8 {
     match c {
@@ -121,7 +123,8 @@ pub mod vk {
         ],
     ];
     /// The base field modulus.
-    pub const Q: [u8; 32] = dec32("21888242871839275222246405745257275088696311157297823662689037894645226208583");
+    pub const Q: [u8; 32] =
+        dec32("21888242871839275222246405745257275088696311157297823662689037894645226208583");
 }
 
 /// The curve operations a chain provides, with the encodings of the
@@ -173,7 +176,8 @@ pub fn claim_digest(image_id: &[u8; 32], journal_digest: &[u8; 32]) -> [u8; 32] 
     h.update(2u16.to_le_bytes());
     let output: [u8; 32] = h.finalize().into();
     // The terminal state of a halted program.
-    let post_state: [u8; 32] = hex32("a3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2");
+    let post_state: [u8; 32] =
+        hex32("a3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2");
     let mut h = Sha256::new();
     h.update(tag(b"risc0.ReceiptClaim"));
     h.update([0u8; 32]); // input
@@ -238,7 +242,11 @@ pub fn verify_seal(curve: &impl Bn254, seal: &[u8], claim: &[u8; 32]) -> Result<
     if seal[..4] != SELECTOR {
         return Err(Error::WrongSelector);
     }
-    let w = |i: usize| -> [u8; 32] { seal[4 + 32 * i..4 + 32 * (i + 1)].try_into().expect("32 bytes") };
+    let w = |i: usize| -> [u8; 32] {
+        seal[4 + 32 * i..4 + 32 * (i + 1)]
+            .try_into()
+            .expect("32 bytes")
+    };
     let inputs = public_inputs(claim);
     let mut vk_x = [0u8; 64];
     vk_x[..32].copy_from_slice(&vk::IC[0][0]);
@@ -352,7 +360,13 @@ pub struct Params {
 /// The checkpoint `journal` states, if `seal` proves it for the finality
 /// program and the journal is of this chain under the committee the store
 /// holds for its epoch; nothing is stored.
-pub fn check(curve: &impl Bn254, params: &Params, store: &impl Store, journal: &[u8], seal: &[u8]) -> Result<Journal, Error> {
+pub fn check(
+    curve: &impl Bn254,
+    params: &Params,
+    store: &impl Store,
+    journal: &[u8],
+    seal: &[u8],
+) -> Result<Journal, Error> {
     let digest: [u8; 32] = Sha256::digest(journal).into();
     verify_seal(curve, seal, &claim_digest(&params.image_id, &digest))?;
     let j = Journal::decode(journal)?;
@@ -370,7 +384,13 @@ pub fn check(curve: &impl Bn254, params: &Params, store: &impl Store, journal: &
 /// this chain and name the committee the store holds for its epoch, and the
 /// checkpoint must not be final already. A checkpoint that ends an epoch
 /// hands over to the next committee. Returns the accepted journal.
-pub fn submit(curve: &impl Bn254, params: &Params, store: &mut impl Store, journal: &[u8], seal: &[u8]) -> Result<Journal, Error> {
+pub fn submit(
+    curve: &impl Bn254,
+    params: &Params,
+    store: &mut impl Store,
+    journal: &[u8],
+    seal: &[u8],
+) -> Result<Journal, Error> {
     let j = check(curve, params, store, journal, seal)?;
     if store.is_final(j.index) {
         return Err(Error::AlreadyFinal);
@@ -388,7 +408,8 @@ mod tests {
     use super::*;
 
     /// A real finality proof of a test build of the finality program.
-    const PROOF: &str = include_str!("../../../crates/tenzro-vm/tests/fixtures/finality_proof.json");
+    const PROOF: &str =
+        include_str!("../../../crates/tenzro-vm/tests/fixtures/finality_proof.json");
 
     #[test]
     fn the_journal_of_a_real_proof_decodes() {
@@ -424,16 +445,28 @@ mod tests {
             let (p1, p2) = (h(&e["proof_v1"]), h(&e["proof_v2"]));
             assert!(state_proof::verify_at(&r1, &tk, Some(&g1), &p1));
             assert!(state_proof::verify_at(&r2, &tk, Some(&g2), &p2));
-            assert!(!state_proof::verify_at(&r1, &tk, Some(&g2), &p1), "another value");
-            assert!(!state_proof::verify_at(&r2, &tk, Some(&g2), &p1), "another root");
-            assert!(!state_proof::verify_at(&r1, &tk, None, &p1), "absence of a present entry");
+            assert!(
+                !state_proof::verify_at(&r1, &tk, Some(&g2), &p1),
+                "another value"
+            );
+            assert!(
+                !state_proof::verify_at(&r2, &tk, Some(&g2), &p1),
+                "another root"
+            );
+            assert!(
+                !state_proof::verify_at(&r1, &tk, None, &p1),
+                "absence of a present entry"
+            );
             let atk = h32(&e["absent_tree_key"]);
             let pa = h(&e["proof_absent_v1"]);
             assert!(state_proof::verify_at(&r1, &atk, None, &pa));
             assert!(!state_proof::verify_at(&r1, &atk, Some(&g1), &pa));
             let mut cut = p1.clone();
             cut.pop();
-            assert!(!state_proof::verify_at(&r1, &tk, Some(&g1), &cut), "a truncated proof");
+            assert!(
+                !state_proof::verify_at(&r1, &tk, Some(&g1), &cut),
+                "a truncated proof"
+            );
         }
     }
 
@@ -446,7 +479,8 @@ mod tests {
             let pk: [u8; 65] = h(&k["public_key"]).try_into().unwrap();
             let leaf = agent::key_leaf(&pk, k["operator_did"].as_str().unwrap().as_bytes());
             assert_eq!(leaf, h32(&k["leaf"]));
-            let proof: std::vec::Vec<[u8; 32]> = k["proof"].as_array().unwrap().iter().map(h32).collect();
+            let proof: std::vec::Vec<[u8; 32]> =
+                k["proof"].as_array().unwrap().iter().map(h32).collect();
             assert!(agent::merkle_verify(&keys_root, &leaf, &proof));
         }
         for c in v["chains"].as_array().unwrap() {
@@ -454,17 +488,25 @@ mod tests {
             assert_eq!(g.seq, 1);
             assert_eq!(g.keys_root, keys_root);
             assert_eq!(g.account, h32(&c["account_word"]));
-            assert!(agent::Grant::decode(&h(&c["void_grant"]["bytes"])).unwrap().void);
+            assert!(
+                agent::Grant::decode(&h(&c["void_grant"]["bytes"]))
+                    .unwrap()
+                    .void
+            );
             let caip2 = c["chain"].as_str().unwrap().as_bytes();
             assert_eq!(agent::grant_tree_key(did, caip2), h32(&c["tree_key"]));
             assert_eq!(agent::salt(did), h32(&c["salt"]));
             let action = h(&c["action"]["encoded"]);
-            assert_eq!(agent::act_digest(&g.chain, &g.account, 1, 0, &action), h32(&c["action_digest"]));
+            assert_eq!(
+                agent::act_digest(&g.chain, &g.account, 1, 0, &action),
+                h32(&c["action_digest"])
+            );
             assert_eq!(agent::payload_hash(&action), h32(&c["payload_hash"]));
             if !g.is_exact() {
                 for t in c["targets"].as_array().unwrap() {
                     let leaf = agent::target_leaf(&h(&t["target"]), &h(&t["selector"]));
-                    let proof: std::vec::Vec<[u8; 32]> = t["proof"].as_array().unwrap().iter().map(h32).collect();
+                    let proof: std::vec::Vec<[u8; 32]> =
+                        t["proof"].as_array().unwrap().iter().map(h32).collect();
                     assert!(agent::merkle_verify(&g.targets_root, &leaf, &proof));
                 }
             }

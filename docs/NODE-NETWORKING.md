@@ -46,12 +46,19 @@ Open PowerShell with **Run as administrator** and run:
 tenzro-node doctor --allow-inbound
 ```
 
-It adds one inbound rule, `TenzroNode-UDP`, for the `tenzro-node.exe` you ran
-and its UDP port only, on the Private and Public profiles, and removes any
-block rules a dismissed prompt left for that same binary (block rules win
-over allow rules). A domain-joined machine's rules belong to its
-administrator, so the Domain profile is left alone. Without administrator
-rights it changes nothing and says so.
+It adds one inbound rule, `TenzroNode-UDP`, for the UDP port the node binds
+(its bind port, or the relay UDP port while it serves the relay role), on the
+Private profile only, and removes any block rules a dismissed prompt
+left for the install's binaries (block rules win over allow rules). The rule
+is keyed to the port, not to the program: a node installed with `install.ps1`
+runs through the `current` junction, Windows records it under the release
+directory the junction resolves to, and each update is a new one, so a rule
+for the program would not hold across updates. On a network Windows files as
+Public, inbound stays closed, since the port would be open to everyone on that
+network; on a Domain network it stays closed as well, since a domain's rules
+belong to its administrator. The node works on both through its relays and
+hole punching. `install-node-task.ps1` adds the rule when it registers the
+node's task. Without administrator rights it changes nothing and says so.
 
 To check or remove it by hand:
 
@@ -60,7 +67,7 @@ Get-NetFirewallRule -Name TenzroNode-UDP | Get-NetFirewallPortFilter
 Remove-NetFirewallRule -Name TenzroNode-UDP
 ```
 
-The rule names the binary's full path: after moving the binary, run it again.
+The rule names the port: after changing the node's port or its relay role, run it again.
 
 ### macOS
 
@@ -161,11 +168,11 @@ the router, or forward UDP `9001` to the node's machine.
 ### How the peer relay path is built
 
 The peer relay path is iroh's custom transport, implemented in one module of
-the node (`crates/tenzro-iroh/src/paths/mod.rs`). iroh 1.3 opens paths only to
+the node (`crates/tenzro-iroh/src/paths/mod.rs`). iroh 1.4 opens paths only to
 the addresses hole punching finds and to the relay, so the node carries a
-vendored copy of iroh 1.3.0 that also opens a custom-transport path on every
-connection to a peer as soon as the path is named (`vendor/iroh`, one change
-in `socket/remote_map/remote_state.rs`). When iroh opens such paths itself,
+vendored copy of iroh 1.4.1 that also opens a custom-transport path on every
+connection to a peer as soon as the path is named (`vendor/iroh`; its changes
+are listed beside the override in the workspace `Cargo.toml`). When iroh opens such paths itself,
 or ships its own peer relay or MASQUE transport, the vendored copy is dropped
 and that one module is replaced by iroh's, with nothing else changing.
 
@@ -193,6 +200,14 @@ role:
    chain: `tenzro stake bond --role edge --amount 10000`, then
    `tenzro stake endpoint --role edge --url https://relay.example.org/`.
 
+Who may use the relay follows the node's `[onboarding]` mode, through the same identity gate as its own
+endpoint. A registered machine uses it; a machine that is not registered uses it inside its onboarding
+window, so a machine that is joining can still be reached; a revoked identity cannot. In `audit` mode the
+relay refuses nobody and logs whom it would have refused; in `enforce` mode it refuses them. A node with the
+app transport can also let in the app devices signed in to it (`relay_connections_per_identity` under
+`[app_transport]`, see [APP-TRANSPORT.md](APP-TRANSPORT.md)). The relay decides when a client connects; a
+connection it let in lasts until it closes.
+
 An edge operator's node is also a peer relay (see NAT above) on its UDP
 port. Validators probe each staked relay on the same SLA schedule every
 bonded role is held to: the relay must serve its operator's current signed
@@ -218,6 +233,15 @@ Nodes find relays three ways, none of them run by a single party:
 - relays it met on the network before, remembered in
   `{data_dir}/iroh/known-relays.json`.
 
+A validator whose `[onboarding]` mode is `enforce` is isolated: it dials only
+the machines on its boot list, the validators' machines and the peers named
+with `--state-sync-from`, and forwards peer relay traffic only through
+relay operators among them; the relays above still carry its packets. Inbound connections from other peers are still admitted when
+they pass the identity gate, so nodes can sync from a validator; only its gossip
+neighbours stay within its boot list and the validators. Every validator's boot
+list names the relay and RPC entry points. See
+[NETWORK.md](NETWORK.md) for the full rule.
+
 A relay is never trusted for content: it is admitted only by its operator's
 signature, and it carries only end-to-end encrypted packets.
 
@@ -240,6 +264,8 @@ idle_timeout_secs = 30                    # no traffic: connection closed
 max_concurrent_bidi_streams = 100         # per connection
 max_concurrent_uni_streams = 100          # per connection
 receive_window_bytes = 33554432           # per connection, all streams
+peer_relay_datagram_buffer_bytes = 1250000  # peer-relay connections only; 64 KiB..16 MiB
+peer_relay_datagram_budget_bytes = 201326592  # all connections together: each holds at most this divided by the places both pools admit
 ```
 
 - **Two pools.** Connections on `tenzro/consensus` count in their own pool, so
@@ -257,6 +283,11 @@ receive_window_bytes = 33554432           # per connection, all streams
   and cannot have more than `receive_window_bytes` in flight to the node on
   one connection. The stream and idle values equal the QUIC defaults the node
   ran under before they were made explicit; the receive window was unbounded.
+- **Datagrams.** Only peer-relay connections accept datagrams: those a node
+  that forwards for the peer relay accepts, and those any node opens to a
+  forwarder. Each holds at most `peer_relay_datagram_buffer_bytes` of
+  datagrams not yet forwarded; a value outside 64 KiB..16 MiB is held to the
+  nearer bound. Every other connection offers its peer no datagram buffer.
 - **Streams per surface** are bounded separately, by the `[iroh.admission]`
   table: streams served at once overall and per peer, and the read and write
   timeouts.

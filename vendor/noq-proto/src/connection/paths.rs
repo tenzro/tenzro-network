@@ -1,6 +1,6 @@
-use std::{cmp, net::SocketAddr};
+use alloc::{boxed::Box, vec::Vec};
+use core::{cmp, net::SocketAddr};
 
-use identity_hash::IntMap;
 use thiserror::Error;
 use tracing::{debug, trace};
 
@@ -11,7 +11,7 @@ use super::{
     spaces::{PacketNumberSpace, SentPacket},
 };
 use crate::{
-    ConnectionId, Duration, FourTuple, Instant, TIMER_GRANULARITY, TransportConfig,
+    ConnectionId, Duration, FourTuple, Instant, IntMap, TIMER_GRANULARITY, TransportConfig,
     TransportErrorCode, VarInt,
     coding::{self, Decodable, Encodable},
     congestion,
@@ -27,8 +27,8 @@ use qlog::events::quic::RecoveryMetricsUpdated;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default)]
 pub struct PathId(pub(crate) u32);
 
-impl std::hash::Hash for PathId {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl core::hash::Hash for PathId {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         state.write_u32(self.0);
     }
 }
@@ -86,8 +86,8 @@ impl PathId {
     }
 }
 
-impl std::fmt::Display for PathId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for PathId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -132,6 +132,13 @@ pub(super) struct SentChallengeInfo {
     /// The 4-tuple on which this path challenge was sent.
     pub(super) network_path: FourTuple,
 }
+
+/// Probe timeouts in a row after which a path counts as unresponsive.
+///
+/// Two: the first may be a single lost packet or a delayed acknowledgement; after the
+/// second, at least three probe timeouts' worth of time have passed with nothing
+/// acknowledged on the path.
+const UNRESPONSIVE_AFTER_PTOS: u32 = 2;
 
 /// State of particular network path 4-tuple within a [`PacketNumberSpace`].
 ///
@@ -529,7 +536,7 @@ impl PathData {
                 // the path as validated though, because for a change in local_ip only we do
                 // not need to re-validate the path.
                 let sent_instant = info.sent_instant;
-                if !std::mem::replace(&mut self.validated, true) {
+                if !core::mem::replace(&mut self.validated, true) {
                     trace!("new path validated");
                 }
                 // Clear any other on-path sent challenges and stop sending new ones.
@@ -650,6 +657,17 @@ impl PathData {
 
     pub(crate) fn local_status(&self) -> PathStatus {
         self.status.local_status
+    }
+
+    /// Whether the peer still acknowledges what is sent on this path: fewer than
+    /// [`UNRESPONSIVE_AFTER_PTOS`] probe timeouts in a row have fired on it.
+    ///
+    /// A path that stopped answering loses its preference for application data to any
+    /// path that still answers, so a dead path does not hold traffic until its idle
+    /// timeout. Probes keep going out on it, and the first acknowledgement makes it
+    /// responsive again.
+    pub(super) fn is_responsive(&self) -> bool {
+        self.pto_count < UNRESPONSIVE_AFTER_PTOS
     }
 
     /// Tag uniquely identifying a path in a connection.
@@ -1011,7 +1029,7 @@ impl PathStatusState {
         }
 
         self.local_seq = self.local_seq.saturating_add(1u8);
-        Some(std::mem::replace(&mut self.local_status, status))
+        Some(core::mem::replace(&mut self.local_status, status))
     }
 
     pub(crate) fn seq(&self) -> VarInt {
@@ -1179,7 +1197,7 @@ impl PathRetransmits {
     }
 }
 
-impl std::ops::BitOrAssign for PathRetransmits {
+impl core::ops::BitOrAssign for PathRetransmits {
     fn bitor_assign(&mut self, rhs: Self) {
         let Self { observed_address } = rhs;
         self.observed_address |= observed_address;

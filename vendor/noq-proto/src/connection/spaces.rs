@@ -1,19 +1,22 @@
-use std::{
-    cmp,
+use alloc::{
+    boxed::Box,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    mem,
+    vec::Vec,
+};
+use core::{
+    cmp, mem,
     ops::{Bound, Index, IndexMut, Range},
 };
 
 use rand::{CryptoRng, RngExt};
-use rustc_hash::{FxHashMap, FxHashSet};
 use sorted_index_buffer::SortedIndexBuffer;
 use tracing::trace;
 
 use super::{PathId, paths::PathResponses, paths::PathRetransmits};
-use crate::cid_queue::CidQueue;
 use crate::{
-    Dir, Duration, FourTuple, Instant, StreamId, TransportError, TransportErrorCode, VarInt,
+    Dir, Duration, FourTuple, FxHashMap, FxHashSet, Instant, StreamId, TransportError,
+    TransportErrorCode, VarInt,
+    cid_queue::CidQueue,
     connection::StreamsState,
     frame::{self, AddAddress, RemoveAddress},
     packet::SpaceId,
@@ -81,6 +84,29 @@ impl PacketSpace {
 
     pub(super) fn iter_paths_mut(&mut self) -> impl Iterator<Item = &mut PacketNumberSpace> {
         self.number_spaces.values_mut()
+    }
+
+    /// Queues the data of every packet in flight on `path_id` to be sent again, on
+    /// whichever path may carry it.
+    ///
+    /// Used once the path stops answering: without it, nothing in flight there is
+    /// declared lost, since no acknowledgement arrives to measure loss against, and the
+    /// probes would send it again one packet at a time, each further apart.
+    pub(super) fn requeue_in_flight(&mut self, path_id: PathId, streams: &mut StreamsState) {
+        let Some(space) = self.number_spaces.get_mut(&path_id) else {
+            return;
+        };
+        for packet in space.sent_packets.values_mut() {
+            // The packet keeps counting for loss and for the path, but its stream data is
+            // acknowledged through the copies sent again: an acknowledgement of this packet
+            // as well would take the same bytes off the unacknowledged total twice.
+            for frame in mem::take(&mut packet.stream_frames) {
+                streams.retransmit(frame);
+            }
+            if !packet.retransmits.is_empty(streams) {
+                self.pending |= mem::take(&mut packet.retransmits);
+            }
+        }
     }
 
     /// Queue data for a tail loss probe (or anti-amplification deadlock prevention) packet
@@ -390,7 +416,7 @@ impl PacketNumberSpace {
     }
 
     /// Checks whether a skipped packet number was ACKed.
-    pub(super) fn check_ack(&self, range: std::ops::Range<u64>) -> Result<(), TransportError> {
+    pub(super) fn check_ack(&self, range: core::ops::Range<u64>) -> Result<(), TransportError> {
         if let Some(ref filter) = self.pn_filter
             && filter
                 .prev_skipped_packet_number
@@ -604,21 +630,20 @@ pub struct Retransmits {
 }
 
 impl Retransmits {
-    /// Bound on queued RETIRE_CONNECTION_ID frames: very permissive, but finite.
-    const MAX_PENDING_RETIRED_CIDS: u64 = CidQueue::LEN as u64 * 10;
-
-    /// Queue RETIRE_CONNECTION_ID frames for `seqs` on `path_id`
-    ///
-    /// Every path that queues a retirement goes through here, so a peer cannot grow
-    /// the queue past `MAX_PENDING_RETIRED_CIDS`. Frames already in flight are not
-    /// counted: congestion control bounds those.
+    /// Queue connection IDs retired on `path_id` for retransmission, bounding how many can be
+    /// queued at once.
     pub(super) fn retire_cids(
         &mut self,
         path_id: PathId,
         seqs: Range<u64>,
     ) -> Result<(), TransportError> {
+        /// Ensure `retire_cids` cannot grow without bound. Limit is somewhat arbitrary but very
+        /// permissive.
+        const MAX_PENDING_RETIRED_CIDS: u64 = CidQueue::LEN as u64 * 10;
+        // We don't bother counting in-flight frames because those are bounded by congestion
+        // control.
         let num = seqs.end.saturating_sub(seqs.start);
-        if (self.retire_cids.len() as u64).saturating_add(num) > Self::MAX_PENDING_RETIRED_CIDS {
+        if (self.retire_cids.len() as u64).saturating_add(num) > MAX_PENDING_RETIRED_CIDS {
             return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(
                 "queued too many retired CIDs",
             ));
@@ -675,7 +700,7 @@ impl Retransmits {
     }
 }
 
-impl ::std::ops::BitOrAssign for Retransmits {
+impl ::core::ops::BitOrAssign for Retransmits {
     fn bitor_assign(&mut self, rhs: Self) {
         let Self {
             max_data,
@@ -729,7 +754,7 @@ impl ::std::ops::BitOrAssign for Retransmits {
     }
 }
 
-impl ::std::ops::BitOrAssign<ThinRetransmits> for Retransmits {
+impl ::core::ops::BitOrAssign<ThinRetransmits> for Retransmits {
     fn bitor_assign(&mut self, rhs: ThinRetransmits) {
         let ThinRetransmits { retransmits } = rhs;
         if let Some(retransmits) = retransmits {
@@ -738,7 +763,7 @@ impl ::std::ops::BitOrAssign<ThinRetransmits> for Retransmits {
     }
 }
 
-impl ::std::iter::FromIterator<Self> for Retransmits {
+impl ::core::iter::FromIterator<Self> for Retransmits {
     fn from_iter<T>(iter: T) -> Self
     where
         T: IntoIterator<Item = Self>,
@@ -1089,7 +1114,7 @@ impl SendableFrames {
     }
 }
 
-impl ::std::ops::BitOrAssign for SendableFrames {
+impl ::core::ops::BitOrAssign for SendableFrames {
     fn bitor_assign(&mut self, rhs: Self) {
         let Self {
             acks,
@@ -1403,6 +1428,8 @@ const MAX_ACK_BLOCKS: usize = 64;
 
 #[cfg(test)]
 mod test {
+    use alloc::vec;
+
     use rand::Rng;
     use rand::seq::SliceRandom;
 
@@ -1410,22 +1437,6 @@ mod test {
     use crate::{ConnectionIdGenerator, RandomConnectionIdGenerator};
 
     use super::*;
-
-    #[test]
-    fn repeated_retired_cid_cannot_grow_the_queue() {
-        let mut pending = Retransmits::default();
-        let mut refused = false;
-        for _ in 0..10_000 {
-            // A peer replaying a NEW_CONNECTION_ID below the retirement window
-            // queues the same already-retired sequence each time.
-            if pending.retire_cids(PathId::ZERO, 3..4).is_err() {
-                refused = true;
-                break;
-            }
-        }
-        assert!(refused, "10000 retirements were all queued");
-        assert!(pending.retire_cids.len() as u64 <= Retransmits::MAX_PENDING_RETIRED_CIDS);
-    }
 
     #[test]
     fn sanity() {

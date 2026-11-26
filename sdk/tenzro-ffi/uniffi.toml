@@ -1,0 +1,9 @@
+# Names the generated bindings take; uniffi-bindgen reads this file from the
+# crate root.
+
+[bindings.kotlin]
+package_name = "com.tenzro.light"
+cdylib_name = "tenzro_ffi"
+
+[bindings.swift]
+module_name = "TenzroLight"

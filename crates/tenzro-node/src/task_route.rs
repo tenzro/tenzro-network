@@ -94,7 +94,7 @@ pub(crate) async fn forward(
         .map(|b| b.len())
         .unwrap_or(usize::MAX);
 
-    let bytes = crate::infer::call_provider(
+    let (bytes, head_ms) = crate::infer::call_provider_timed(
         node,
         &svc.iroh_endpoint_id,
         &forward_body,
@@ -109,6 +109,7 @@ pub(crate) async fn forward(
     })?;
     let body: Value = serde_json::from_slice(&bytes)
         .map_err(|e| refused(-32000, format!("Failed to parse provider response: {e}")))?;
+    crate::infer::record_answer_latency(node, &svc.provider_address, &body, head_ms);
     if let Some(err) = body.get("error") {
         return Err(refused(
             err.get("code")
@@ -167,6 +168,7 @@ pub(crate) async fn forward(
         },
     }
     .billable(
+        &node.catalog(),
         result.get("units").map(crate::rpc::units_from_json),
         result.get("tenzro_receipt"),
         &output_hash,
@@ -208,6 +210,7 @@ pub(crate) async fn forward(
                 receipt,
                 request: forward_body,
                 output: answer,
+                commitment: None,
             },
             caller,
             cost_wei,

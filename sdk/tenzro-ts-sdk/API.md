@@ -280,7 +280,7 @@ getBurnRateConfig(): Promise<any>
 
 #### `getEconomicPolicy`
 
-Returns the economic policy this node applies to every settlement — how a payment divides, the network's default settlement asset, and the micro-settlement floor. Read this before paying rather than inferring the split from a receipt afterwards. The response also reports, per capability, which economic mode the node is in: a **private** capability keeps the whole payment, a **public validating** one shares with the treasury, and a **public delegated** one also pays the RPC provider validating on its behalf. Every rate is governance-set; see `docs/ECONOMICS.md`.
+Returns the economic policy governance last set: the network's default settlement asset and the micro-settlement floor. What a settlement pays (the governed fee, the class treasury leg, the HTTP-402 share and the RPC-provider leg) is in the governed network parameters; see `docs/ECONOMICS.md`.
 
 ```ts
 getEconomicPolicy(): Promise<any>
@@ -289,6 +289,24 @@ getEconomicPolicy(): Promise<any>
 **Returns** `Promise<any>`
 
 **Calls** [`tenzro_getEconomicPolicy`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_geteconomicpolicy)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `getRpcProviderLeg`
+
+The validator an address names as its RPC provider, the governed leg paid to it, whether the leg is in force, and what the leg has paid the address as a validator (`tenzro_getRpcProviderLeg`).
+
+```ts
+getRpcProviderLeg(address: string): Promise<any>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `address` | `string` |  |
+
+**Returns** `Promise<any>`
+
+**Calls** [`tenzro_getRpcProviderLeg`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getrpcproviderleg)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -303,20 +321,6 @@ getSupplyMetrics(): Promise<any>
 **Returns** `Promise<any>` Latest `SupplyMetricsSnapshot`
 
 **Calls** [`tenzro_getSupplyMetrics`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getsupplymetrics)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `getBurnRateRecommendation`
-
-Computes the recommended adaptive-burn action from the current metrics and configured supply targets. May return `NoChange`, `IncreaseBurnPct`, `DecreaseBurnPct`, or alarm variants.
-
-```ts
-getBurnRateRecommendation(): Promise<any>
-```
-
-**Returns** `Promise<any>` `BurnRateRecommendation`
-
-**Calls** [`tenzro_getBurnRateRecommendation`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getburnraterecommendation)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -556,52 +560,80 @@ static relay(agentDid: string, chain: string, delivery: Uint8Array): Record<stri
 
 **Errors** Throws on invalid input.
 
+### AgentCardRefused
+
+A card that could not be shown to come from the machine the caller named.
+
 ### AgentClient
 
 Client for AI agent operations. Supports agent registration, messaging, and task delegation.
 
 #### `delegateTask`
 
-Delegate a task to the node's A2A agent with an A2A v1.0 `SendMessage`.
+Delegate a task to the A2A agent of the node whose machine identity is `agentDid`, with an A2A v1.0 `SendMessage`. The task belongs to the sender: only it can read, continue or cancel it. The node's card is fetched and checked first (`getAgentCard`); when it does not prove the endpoint is `agentDid`'s, nothing is sent.
 
 ```ts
-delegateTask(taskDescription: string): Promise<A2aSendMessageResponse>
+delegateTask(sender: EnvelopeSender, agentDid: string, taskDescription: string): Promise<A2aSendMessageResponse>
 ```
 
 | Param | Type | Description |
 |---|---|---|
+| `sender` | `EnvelopeSender` | The DID the call is made as and the key that signs for it |
+| `agentDid` | `string` | Machine DID of the node the task is meant for |
 | `taskDescription` | `string` | Description of the task to delegate |
 
 **Returns** `Promise<A2aSendMessageResponse>` Exactly one of `task` (created or updated) or `message`
 
-**Errors** Throws on invalid input.
+**Errors** AgentCardRefused when the card is unsigned, altered or another machine's
 
 #### `getA2aTask`
 
-Fetch the current state of an A2A task (`GetTask`).
+Fetch the current state of one of the sender's own A2A tasks (`GetTask`). A task another DID opened is reported as not found.
 
 ```ts
-getA2aTask(taskId: string): Promise<A2aTask>
+getA2aTask(sender: EnvelopeSender, agentDid: string, taskId: string): Promise<A2aTask>
 ```
 
 | Param | Type | Description |
 |---|---|---|
+| `sender` | `EnvelopeSender` | The DID the call is made as and the key that signs for it |
+| `agentDid` | `string` | Machine DID of the node that holds the task |
 | `taskId` | `string` | Task identifier |
 
 **Returns** `Promise<A2aTask>`
 
 **Errors** Throws on invalid input.
 
-#### `cancelA2aTask`
+#### `listA2aTasks`
 
-Cancel an A2A task (`CancelTask`).
+List the A2A tasks the sender opened (`ListTasks`), and no others.
 
 ```ts
-cancelA2aTask(taskId: string): Promise<A2aTask>
+listA2aTasks(sender: EnvelopeSender, agentDid: string, filter?: A2aTaskFilter): Promise<A2aTaskList>
 ```
 
 | Param | Type | Description |
 |---|---|---|
+| `sender` | `EnvelopeSender` | The DID the call is made as and the key that signs for it |
+| `agentDid` | `string` | Machine DID of the node that holds the tasks |
+| `filter` | `A2aTaskFilter` | Which of them, and how much of each |
+
+**Returns** `Promise<A2aTaskList>`
+
+**Errors** Throws on invalid input.
+
+#### `cancelA2aTask`
+
+Cancel one of the sender's own A2A tasks (`CancelTask`).
+
+```ts
+cancelA2aTask(sender: EnvelopeSender, agentDid: string, taskId: string): Promise<A2aTask>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `sender` | `EnvelopeSender` | The DID the call is made as and the key that signs for it |
+| `agentDid` | `string` | Machine DID of the node that holds the task |
 | `taskId` | `string` | Task identifier |
 
 **Returns** `Promise<A2aTask>`
@@ -610,15 +642,19 @@ cancelA2aTask(taskId: string): Promise<A2aTask>
 
 #### `getAgentCard`
 
-Fetch the node's public A2A agent card from `/.well-known/agent-card.json`.
+Fetch the node's A2A agent card from `/.well-known/agent-card.json` and check it was signed by the hardware key `agentDid` derives from. No card is returned unchecked.
 
 ```ts
-getAgentCard(): Promise<Record<string, unknown>>
+getAgentCard(agentDid: string): Promise<Record<string, unknown>>
 ```
+
+| Param | Type | Description |
+|---|---|---|
+| `agentDid` | `string` | Machine DID of the node the caller means to reach |
 
 **Returns** `Promise<Record<string, unknown>>`
 
-**Errors** Throws on invalid input.
+**Errors** AgentCardRefused when the card is unsigned, altered or another machine's
 
 #### `discoverModels`
 
@@ -802,6 +838,42 @@ recordAgentAuditSession(params: { session_id: string; mmr_root: string; count: n
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `getAgentTermsCredential`
+
+`tenzro_getAgentTermsCredential`: a delegated agent's Terms as an unsigned W3C VC 2.0 credential its controller signs; null when the agent has no Terms.
+
+```ts
+getAgentTermsCredential<T = unknown>(agentDid: string): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `agentDid` | `string` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_getAgentTermsCredential`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getagenttermscredential)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `recordExecutionReceipt`
+
+`tenzro_recordExecutionReceipt` (owner proof): record, once, a receipt an outside platform gave an agent for work it ran there; the receipt's SHA-256 enters the agent's signed audit log.
+
+```ts
+recordExecutionReceipt<T = unknown>(params: { agent_did: string; platform: string; receipt: string; units?: number; did_envelope: unknown; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ agent_did: string; platform: string; receipt: string; units?: number; did_envelope: unknown; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_recordExecutionReceipt`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_recordexecutionreceipt)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 ### AgentPaymentClient
 
 Reads a delegated agent's spend against its consensus Terms. What an agent may pay is its Terms; what it has spent is consensus state.
@@ -855,6 +927,135 @@ static fromBody(body: unknown): ApiError | undefined
 **Returns** `ApiError \| undefined`
 
 **Errors** Throws on invalid input.
+
+### AppSession
+
+A device's session with a node's app transport.
+
+#### `expiresAt`
+
+Read-only `number`. When the session ends unless renewed, seconds since the epoch.
+
+#### `listen`
+
+Says who may open streams to this device from now on: the identities in `from`, and anyone opening with a label in `apps`. Until it is called, nobody can.
+
+```ts
+listen(who: { from?: string[]; apps?: string[]; }): Promise<void>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `who` | `{ from?: string[]; apps?: string[]; }` |  |
+
+**Returns** `Promise<void>`
+
+**Errors** Throws on invalid input.
+
+#### `renew`
+
+Keeps the session past its token's end with a fresh token for the same identity and device.
+
+```ts
+renew(credential: AccessCredential): Promise<void>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `credential` | `AccessCredential` |  |
+
+**Returns** `Promise<void>`
+
+**Errors** Error when the node refuses it; the session then ends.
+
+#### `open`
+
+Opens a stream to a device of `to`, with the application label `app`.
+
+```ts
+open(to: string, app: string, target?: { device?: string; via?: string; }): Promise<AppStream>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `to` | `string` |  |
+| `app` | `string` |  |
+| `target` | `{ device?: string; via?: string; }` |  |
+
+**Returns** `Promise<AppStream>`
+
+**Errors** Error when no device of `to` takes it.
+
+#### `sendDatagram`
+
+Sends `payload` as a datagram on `flow` (an {@link AppStream.flow}). A datagram may be lost, and the node drops one its meter has no room for.
+
+```ts
+sendDatagram(flow: number, payload: Uint8Array): Promise<void>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `flow` | `number` |  |
+| `payload` | `Uint8Array<ArrayBufferLike>` |  |
+
+**Returns** `Promise<void>`
+
+**Errors** Throws on invalid input.
+
+#### `datagrams`
+
+Datagrams from the devices at the other ends of this session's flows.
+
+```ts
+datagrams(): AsyncGenerator<{ flow: number; payload: Uint8Array; }>
+```
+
+**Returns** `AsyncGenerator<{ flow: number; payload: Uint8Array; }, any, any>`
+
+**Errors** Throws on invalid input.
+
+#### `incoming`
+
+The streams other devices open to this one, as they arrive.
+
+```ts
+incoming(): AsyncGenerator<IncomingStream>
+```
+
+**Returns** `AsyncGenerator<IncomingStream, any, any>`
+
+**Errors** Throws on invalid input.
+
+#### `close`
+
+Ends the session.
+
+```ts
+close(): void
+```
+
+**Returns** `void`
+
+**Errors** Throws on invalid input.
+
+#### `static connect`
+
+Opens a session at `url` and signs in with `credential`.
+
+```ts
+static connect(url: string, credential: AccessCredential, options?: ConnectOptions): Promise<AppSession>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `url` | `string` |  |
+| `credential` | `AccessCredential` |  |
+| `options` | `ConnectOptions` |  |
+
+**Returns** `Promise<AppSession>`
+
+**Errors** Error when the node refuses the sign-in.
 
 ### AuthClient
 
@@ -1480,6 +1681,128 @@ completion(): ChatCompletion
 
 **Errors** Throws on invalid input.
 
+### ComputeClient
+
+Compute rental client: bonds, claims, the price feed and renting.
+
+#### `bondParams`
+
+The governed compute bond minimum and withdrawal cooldown (`tenzro_computeBondParams`).
+
+```ts
+bondParams(): Promise<ComputeBondParams>
+```
+
+**Returns** `Promise<ComputeBondParams>`
+
+**Calls** [`tenzro_computeBondParams`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computebondparams)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `getBond`
+
+The compute bond posted for `providerDid`, or null when it has never posted one (`tenzro_getComputeBond`).
+
+```ts
+getBond(providerDid: string): Promise<ComputeBond | null>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `providerDid` | `string` |  |
+
+**Returns** `Promise<ComputeBond \| null>`
+
+**Calls** [`tenzro_getComputeBond`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getcomputebond)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `listBonds`
+
+Every compute bond on chain (`tenzro_listComputeBonds`).
+
+```ts
+listBonds(): Promise<ComputeBond[]>
+```
+
+**Returns** `Promise<ComputeBond[]>`
+
+**Calls** [`tenzro_listComputeBonds`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_listcomputebonds)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `getClaim`
+
+One compute claim from chain state (`tenzro_computeGetClaim`); the node answers an error when there is none.
+
+```ts
+getClaim(claimId: string): Promise<ComputeClaim>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `claimId` | `string` |  |
+
+**Returns** `Promise<ComputeClaim>`
+
+**Calls** [`tenzro_computeGetClaim`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computegetclaim)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `listClaims`
+
+The claims `party` (hex address) has written, held or been pledged, oldest first (`tenzro_computeListClaims`).
+
+```ts
+listClaims(party: string, limit?: number): Promise<ComputeClaimList>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `party` | `string` |  |
+| `limit` | `number \| undefined` |  |
+
+**Returns** `Promise<ComputeClaimList>`
+
+**Calls** [`tenzro_computeListClaims`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computelistclaims)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `priceFeed`
+
+What validators observed each provider charge, how fast it served and how often it failed (`tenzro_computePriceFeed`).
+
+```ts
+priceFeed(query?: PriceFeedQuery): Promise<PriceFeed>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `query` | `PriceFeedQuery` |  |
+
+**Returns** `Promise<PriceFeed>`
+
+**Calls** [`tenzro_computePriceFeed`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computepricefeed)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `rent`
+
+Rent capacity from a bonded provider: sign and submit the stream escrow {@link rentTransaction} builds, returning `tenzro_sendRawTransaction`'s answer. The provider draws each accrued epoch with `ClaimEscrowStream`; the renter stops the rental with `RefundEscrow`.
+
+```ts
+rent(signer: HybridSigner, request: RentRequest): Promise<unknown>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `signer` | `HybridSigner` |  |
+| `request` | `RentRequest` |  |
+
+**Returns** `Promise<unknown>`
+
+**Errors** Throws on invalid input.
+
 ### ContractClient
 
 Client for deploying EVM contracts and reading them.
@@ -1564,6 +1887,107 @@ verifyVrfProof(pubkey: string, proof: string, alpha: string): Promise<VrfVerifyR
 **Returns** `Promise<VrfVerifyResult>`
 
 **Calls** [`tenzro_verifyVrfProof`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_verifyvrfproof)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+### DaClient
+
+The data-availability committee: members, the blobs they hold slivers of, and the possession challenges that score their availability.
+
+#### `availability`
+
+Every scored member, lowest score first (`tenzro_daAvailability`).
+
+```ts
+availability(): Promise<DaAvailabilityList>
+```
+
+**Returns** `Promise<DaAvailabilityList>`
+
+**Calls** [`tenzro_daAvailability`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_daavailability)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `availabilityOf`
+
+One member's score; the node answers an error for a member never challenged.
+
+```ts
+availabilityOf(address: string): Promise<DaAvailabilityScore>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `address` | `string` |  |
+
+**Returns** `Promise<DaAvailabilityScore>`
+
+**Calls** [`tenzro_daAvailability`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_daavailability)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `challenge`
+
+Challenge member `targetIndex` to prove possession of `commitment` (`tenzro_daChallenge`, operator only).
+
+```ts
+challenge(commitment: string, targetIndex: number): Promise<DaChallengeRecord>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `commitment` | `string` |  |
+| `targetIndex` | `number` |  |
+
+**Returns** `Promise<DaChallengeRecord>`
+
+**Calls** [`tenzro_daChallenge`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dachallenge)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `committee`
+
+The current committee (`tenzro_daCommittee`).
+
+```ts
+committee(): Promise<DaCommittee>
+```
+
+**Returns** `Promise<DaCommittee>`
+
+**Calls** [`tenzro_daCommittee`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dacommittee)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `listBlobs`
+
+The blob commitments this node knows about (`tenzro_daListBlobs`).
+
+```ts
+listBlobs(): Promise<DaBlobList>
+```
+
+**Returns** `Promise<DaBlobList>`
+
+**Calls** [`tenzro_daListBlobs`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dalistblobs)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `listChallenges`
+
+Resolved challenges, most recent first (`tenzro_daListChallenges`); the node defaults `limit` to 100.
+
+```ts
+listChallenges(limit?: number): Promise<DaChallengeList>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `limit` | `number \| undefined` |  |
+
+**Returns** `Promise<DaChallengeList>`
+
+**Calls** [`tenzro_daListChallenges`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dalistchallenges)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -1755,6 +2179,110 @@ routePayment(amountWei: string, asset?: string, tnzoMicroUsd?: number): Promise<
 **Returns** `Promise<any>`
 
 **Calls** [`tenzro_settlementNetworks`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_settlementnetworks)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `requestDeviceCode`
+
+`tenzro_requestDeviceCode`: a device with no passkey or hardware key of its own asks to be signed in; returns a secret `device_code`, a `user_code` to show, `expires_in` and the poll `interval`.
+
+```ts
+requestDeviceCode(params?: { dpop_jkt?: string; label?: string; }): Promise<any>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ dpop_jkt?: string; label?: string; }` |  |
+
+**Returns** `Promise<any>`
+
+**Calls** [`tenzro_requestDeviceCode`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_requestdevicecode)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `pollDeviceCode`
+
+`tenzro_pollDeviceCode`: whether the device with `device_code` is signed in (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or an access token).
+
+```ts
+pollDeviceCode(deviceCode: string): Promise<any>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `deviceCode` | `string` |  |
+
+**Returns** `Promise<any>`
+
+**Calls** [`tenzro_pollDeviceCode`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_polldevicecode)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `approveDeviceCode`
+
+`tenzro_approveDeviceCode` (operator only): answer a device waiting with `user_code`; approving needs the operator's passkey `assertion`, and without it the node answers with the challenge to sign.
+
+```ts
+approveDeviceCode(params: { user_code: string; approve: boolean; assertion?: Record<string, unknown>; }): Promise<any>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ user_code: string; approve: boolean; assertion?: Record<string, unknown>; }` |  |
+
+**Returns** `Promise<any>`
+
+**Calls** [`tenzro_approveDeviceCode`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_approvedevicecode)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `listPairedDevices`
+
+`tenzro_listPairedDevices` (operator only): the devices paired with this node and which one is the caller.
+
+```ts
+listPairedDevices(): Promise<any>
+```
+
+**Returns** `Promise<any>`
+
+**Calls** [`tenzro_listPairedDevices`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_listpaireddevices)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `pairDevice`
+
+`tenzro_pairDevice`: with no arguments an administrator starts a pairing; with `id` reads where one stands; with `secret`, `label` and `kind` a device redeems the code.
+
+```ts
+pairDevice(params?: { id?: string; secret?: string; label?: string; kind?: "phone" | "tablet" | "tv" | "car" | "browser" | "desktop"; }): Promise<any>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ id?: string; secret?: string; label?: string; kind?: "phone" \| "tablet" \| "tv" \| "car" \| "browser" \| "desktop"; }` |  |
+
+**Returns** `Promise<any>`
+
+**Calls** [`tenzro_pairDevice`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_pairdevice)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `unpairDevice`
+
+`tenzro_unpairDevice` (operator only): end a paired device's access and drop its record; a paired device removes only itself.
+
+```ts
+unpairDevice(id: string): Promise<any>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `id` | `string` |  |
+
+**Returns** `Promise<any>`
+
+**Calls** [`tenzro_unpairDevice`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_unpairdevice)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -2059,7 +2587,7 @@ subscribe(filter: EventFilter, fromCursor?: string, waitMs?: number, proofs?: bo
 
 #### `query`
 
-A page of the events `filter` selects after `fromCursor`, each with its proof. With `completeness`, also the proof that the page left nothing out (check it with `verifyCompleteness`), every proof anchored at `anchorIndex` or at the latest certified checkpoint.
+A page of the events `filter` selects after `fromCursor` (from the oldest held height when omitted), each with its proof. With `completeness`, also the proof that the page left nothing out (check it with `verifyCompleteness`), every proof anchored at `anchorIndex` or at the latest certified checkpoint.
 
 ```ts
 query(filter: EventFilter, fromCursor?: string, toCursor?: string, limit?: number, completeness?: boolean, anchorIndex?: number): Promise<EventPage>
@@ -2072,6 +2600,27 @@ query(filter: EventFilter, fromCursor?: string, toCursor?: string, limit?: numbe
 | `toCursor` | `string \| undefined` |  |
 | `limit` | `number` |  |
 | `completeness` | `boolean` |  |
+| `anchorIndex` | `number \| undefined` |  |
+
+**Returns** `Promise<EventPage>`
+
+**Calls** [`tenzro_queryEvents`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_queryevents)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `newest`
+
+The newest events `filter` selects before `beforeCursor` (from the tip when omitted), newest first, each with its proof anchored at `anchorIndex` or at the latest certified checkpoint. Pass the page's `before_cursor` back for the older page; it is `null` once the oldest height the node holds was read.
+
+```ts
+newest(filter: EventFilter, beforeCursor?: string, limit?: number, anchorIndex?: number): Promise<EventPage>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `filter` | `EventFilter` |  |
+| `beforeCursor` | `string \| undefined` |  |
+| `limit` | `number` |  |
 | `anchorIndex` | `number \| undefined` |  |
 
 **Returns** `Promise<EventPage>`
@@ -2155,6 +2704,34 @@ call<T>(method: string, params?: unknown[] | Record<string, unknown>): Promise<T
 | `params` | `unknown[] \| Record<string, unknown>` |  |
 
 **Returns** `Promise<T>`
+
+**Errors** Throws on invalid input.
+
+### FrameReader
+
+Reads frames off a stream, then hands over what follows them.
+
+#### `next`
+
+The next frame, or `null` when the stream ended first.
+
+```ts
+next(): Promise<Frame | null>
+```
+
+**Returns** `Promise<Frame \| null>`
+
+**Errors** Throws on invalid input.
+
+#### `rest`
+
+The rest of the stream as bytes, starting with any already read.
+
+```ts
+rest(): ReadableStream<Uint8Array>
+```
+
+**Returns** `ReadableStream<Uint8Array<ArrayBufferLike>>`
 
 **Errors** Throws on invalid input.
 
@@ -3003,80 +3580,6 @@ request(modelId: string, input: string, maxTokens?: number): Promise<InferenceRe
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
-#### `routeIntent`
-
-Resolve an intent to the best model without naming one. Discovery only: no provider is dialed and no spend is recorded, but the per-DID budget gate and the wallet-balance ceiling are still consulted, so an unaffordable request is rejected at discovery time. Feed the returned `model_id` into {@link request} or the chat surface to run it.
-
-```ts
-routeIntent(params: IntentParams): Promise<RouteDecision>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `IntentParams` |  |
-
-**Returns** `Promise<RouteDecision>`
-
-**Calls** [`tenzro_routeIntent`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_routeintent)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `recordRouteOutcome`
-
-Report how a routed call turned out, so per-cluster error rates reflect what happened rather than only what the catalog declares. `cluster` is the `cluster` from the routing decision. In practice this carries `escalated` — the outcome only the caller knows, because it means the caller took the answer to a stronger model. `resolved` and `failed` are already recorded by {@link chatByIntent} from the dispatch itself. Reporting is advisory: `retained: false` in the response means the node has no difficulty index wired, so the feedback was accepted and discarded.
-
-```ts
-recordRouteOutcome(modelId: string, cluster: number, outcome: RouteOutcome): Promise<Record<string, unknown>>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `modelId` | `string` |  |
-| `cluster` | `number` |  |
-| `outcome` | `RouteOutcome` |  |
-
-**Returns** `Promise<Record<string, unknown>>`
-
-**Calls** [`tenzro_recordRouteOutcome`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_recordrouteoutcome)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `routeDifficultyStats`
-
-Read the node's difficulty index: how many clusters it has discovered and how many prompts landed in each. With `modelId`, also returns that model's per-cluster outcome counters and error rate. An operator diagnostic — routing does not depend on it.
-
-```ts
-routeDifficultyStats(modelId?: string): Promise<Record<string, unknown>>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `modelId` | `string \| undefined` |  |
-
-**Returns** `Promise<Record<string, unknown>>`
-
-**Calls** [`tenzro_routeDifficultyStats`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_routedifficultystats)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `chatByIntent`
-
-Resolve an intent to a model and run a chat completion through the same path a named-model request takes. `messages` is the rich chat shape; `message` is the simple single-turn shape. The chosen `RouteDecision` is attached to the response under `route`.
-
-```ts
-chatByIntent(params: IntentParams & { message?: string; messages?: Array<{ role: string; content: string; }>; }): Promise<Record<string, unknown>>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `IntentParams & { message?: string; messages?: Array<{ role: string; content: string; }>; }` |  |
-
-**Returns** `Promise<Record<string, unknown>>`
-
-**Calls** [`tenzro_chatByIntent`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_chatbyintent)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
 #### `listModelEndpoints`
 
 List all model service endpoints with load information.
@@ -3088,6 +3591,24 @@ listModelEndpoints(): Promise<ModelEndpoint[]>
 **Returns** `Promise<ModelEndpoint[]>`
 
 **Calls** [`tenzro_listModelEndpoints`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_listmodelendpoints)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `verifyJurisdictionReceipt`
+
+Check a jurisdiction receipt on the node: its signature in either form, the identity-key form against the node's chain state, and whether the hardware key it names is the one registered for its machine.
+
+```ts
+verifyJurisdictionReceipt(receipt: Record<string, unknown>): Promise<Record<string, unknown>>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `receipt` | `Record<string, unknown>` |  |
+
+**Returns** `Promise<Record<string, unknown>>`
+
+**Calls** [`tenzro_verifyJurisdictionReceipt`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_verifyjurisdictionreceipt)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -3331,6 +3852,10 @@ pool(): Promise<InsurancePool>
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+### InteractionError
+
+Why a record has no digest: `malformed` when a field is missing, has the wrong JSON type or an unknown value; `not_attestable` when the record is well formed but names no payer, attester or interaction, or its charge contradicts its amount.
+
 ### IrohClient
 
 Iroh consumer surface client for the `tenzro_iroh_*` JSON-RPC namespace. Wraps the shared `IrohBackedResolver` on a `tenzro-node`. The same QUIC + Pkarr + iroh-blobs substrate backs the storage DA backend, model-weight peer fetch, and A2A JSON-RPC over the `tenzro/a2a` ALPN.
@@ -3455,6 +3980,25 @@ getKeystore(account: string, anchor?: KeystoreAnchor): Promise<KeystoreView>
 **Returns** `Promise<KeystoreView>`
 
 **Calls** [`tenzro_getKeystore`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getkeystore)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `accountSigningKey`
+
+The public keys the P-256 key `publicKey` (hex `x || y`) signs with for `account` now, as a signature by it is judged in a block. Rejects when the key does not act for the account.
+
+```ts
+accountSigningKey(publicKey: string, account: string): Promise<AccountSigningKey>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `publicKey` | `string` |  |
+| `account` | `string` |  |
+
+**Returns** `Promise<AccountSigningKey>`
+
+**Calls** [`tenzro_getAccountSigningKey`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getaccountsigningkey)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -4533,6 +5077,24 @@ transcribe(params: TranscribeParams): Promise<unknown>
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `transcribeRecording`
+
+Transcribe a whole recording through the streaming transcription, fed as a live stream would be, and answer every event in order: `partial` transcripts, `final` segments (billed and receipted as `transcribe` is), then `done`. `audio_base64` is a 16-bit PCM WAV; its first channel is transcribed.
+
+```ts
+transcribeRecording(params: { model_id: string; audio_base64: string; language?: string; chunk_ms?: number; verification?: TaskRouting["verification"]; }): Promise<{ events: { event: string; data: unknown; }[]; }>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ model_id: string; audio_base64: string; language?: string; chunk_ms?: number; verification?: TaskRouting["verification"]; }` |  |
+
+**Returns** `Promise<{ events: { event: string; data: unknown; }[]; }>`
+
+**Calls** [`tenzro_transcribeStream`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_transcribestream)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 #### `listVideoCatalog`
 
 The V-JEPA 2 entries the node knows about. They describe the reference clip encoders; the loader below composes over an image encoder instead.
@@ -4715,6 +5277,24 @@ acceptClusterMembership<T = unknown>(params?: { cluster_did?: unknown; seq?: unk
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `verifyJurisdictionReceipt`
+
+`tenzro_verifyJurisdictionReceipt`: whether a jurisdiction receipt's signature holds in either form and the key is registered.
+
+```ts
+verifyJurisdictionReceipt<T = unknown>(params?: { receipt?: unknown; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ receipt?: unknown; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_verifyJurisdictionReceipt`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_verifyjurisdictionreceipt)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 #### `autotuneDecisions`
 
 `tenzro_autotuneDecisions`.
@@ -4800,6 +5380,88 @@ gracefulExit<T = unknown>(params?: { force?: unknown; max_wait_secs?: unknown; }
 **Returns** `Promise<T>`
 
 **Calls** [`tenzro_gracefulExit`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_gracefulexit)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `listConditions`
+
+`tenzro_listConditions` (operator only): what on this node is open and needs its operator's attention, the most severe first.
+
+```ts
+listConditions<T = unknown>(): Promise<T>
+```
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_listConditions`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_listconditions)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `acknowledgeCondition`
+
+`tenzro_acknowledgeCondition` (operator only): acknowledge an open condition; `since` as the list gives it, `reason` 1 to 500 characters.
+
+```ts
+acknowledgeCondition<T = unknown>(params: { id: string; since: unknown; reason: string; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ id: string; since: unknown; reason: string; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_acknowledgeCondition`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_acknowledgecondition)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `submitApproval`
+
+`tenzro_submitApproval` (operator only): answer an open condition that asks; an approval carries the operator passkey's assertion over the condition's challenge.
+
+```ts
+submitApproval<T = unknown>(params: { condition_id: string; approve: boolean; assertion?: { credential_id: string; authenticator_data: string; client_data_json: string; signature: string; }; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ condition_id: string; approve: boolean; assertion?: { credential_id: string; authenticator_data: string; client_data_json: string; signature: string; }; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_submitApproval`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_submitapproval)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `installUpdate`
+
+`tenzro_installUpdate` (operator only): start the installed updater for the newest verified release this node knows of.
+
+```ts
+installUpdate<T = unknown>(): Promise<T>
+```
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_installUpdate`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_installupdate)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `restartNode`
+
+`tenzro_restartNode` (operator only): restart this node through the service that runs it; refused when no service runs it.
+
+```ts
+restartNode<T = unknown>(params?: { max_wait_secs?: number; force?: boolean; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ max_wait_secs?: number; force?: boolean; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_restartNode`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_restartnode)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -5357,6 +6019,24 @@ setSettlementPreference<T = unknown>(signer: HybridSigner, payeeDid: string, ass
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `resolvePaymentIntent`
+
+`tenzro_resolvePaymentIntent`: the settlement plan leg that carries a payment stated without a rail: the payee's first accepted rail the payer can fund and the caller priced. Stateless.
+
+```ts
+resolvePaymentIntent<T = unknown>(params: { usd_e6: number | string; payee: string; accepts: unknown[]; means: unknown[]; amounts: unknown[]; instruction_digest?: string; reserve?: unknown; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ usd_e6: number \| string; payee: string; accepts: unknown[]; means: unknown[]; amounts: unknown[]; instruction_digest?: string; reserve?: unknown; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_resolvePaymentIntent`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_resolvepaymentintent)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 ### PaymentError
 
 A payment step refused, with its code.
@@ -5437,7 +6117,7 @@ Client for provider operations including network participation, model serving, a
 
 #### `serveModel`
 
-Start serving a model on the network. When a model is too large for a single host, the node auto-clusters: it reads the GGUF header for layer count and hidden dimension, discovers LAN members from gossiped cluster announcements, and runs a layer-wise pipeline across them. No extra options are required — the node decides single-host vs. cluster from the model shape and the reachable members. Pass `opts` to set: - `visibility`: `"public"`, `"gated"` or `"private"` for this model. Omitted, the model follows the node's visibility. - `maxConcurrent`: the concurrent requests admitted for this model. - `loadDrafter`: `false` skips loading the catalog drafter for multi-token prediction. Use {@link Discovery.clusterPlan } to preview the layer split and {@link ProviderClient.previewServe} to preview the memory it takes.
+Start serving a model on the network. When a model is too large for a single host, the node auto-clusters: it reads the GGUF header for layer count and hidden dimension, discovers LAN members from gossiped cluster announcements, and runs a layer-wise pipeline across them. No extra options are required — the node decides single-host vs. cluster from the model shape and the reachable members. Pass `opts` to set: - `visibility`: `"public"`, `"gated"` or `"private"` for this model. Omitted, the model follows the node's visibility. - `maxConcurrent`: the concurrent requests admitted for this model. - `loadDrafter`: `false` skips loading the catalog drafter for multi-token prediction. - `contextLength`: tokens of context per request; omitted, the catalog's. Use {@link Discovery.clusterPlan } to preview the layer split and {@link ProviderClient.previewServe} to preview the memory it takes.
 
 ```ts
 serveModel(modelId: string, opts?: ServeOptions): Promise<void>
@@ -5585,7 +6265,7 @@ for (const gpu of profile.gpus) {
 
 #### `setRoles`
 
-Set this node's active roles. One stake backs every role.
+Set this node's active roles. Each role is bonded separately from the same account.
 
 ```ts
 setRoles(roles: string): Promise<void>
@@ -5679,57 +6359,6 @@ modelMetadata(modelId: string): Promise<Record<string, unknown>>
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
-#### `computeBondParams`
-
-Read the compute-bond floor and withdrawal cooldown this node enforces. Call this before {@link register } — a registration whose backing bond is below the floor is refused at admission.
-
-```ts
-computeBondParams(): Promise<ComputeBondParams>
-```
-
-**Returns** `Promise<ComputeBondParams>`
-
-**Calls** [`tenzro_computeBondParams`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computebondparams)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-```typescript
-const params = await client.provider.computeBondParams();
-console.log("Minimum bond:", params.min_bond_wei, "wei");
-```
-
-#### `getComputeBond`
-
-Fetch the compute bond posted against `providerDid`, or null when that provider has never posted one.
-
-```ts
-getComputeBond(providerDid: string): Promise<ComputeBond | null>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `providerDid` | `string` | Provider DID (e.g. "did:tenzro:machine:...") |
-
-**Returns** `Promise<ComputeBond \| null>`
-
-**Calls** [`tenzro_getComputeBond`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getcomputebond)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `listComputeBonds`
-
-List every compute bond this node knows about.
-
-```ts
-listComputeBonds(): Promise<ComputeBond[]>
-```
-
-**Returns** `Promise<ComputeBond[]>`
-
-**Calls** [`tenzro_listComputeBonds`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_listcomputebonds)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
 #### `listModelEndpoints`
 
 List all model service endpoints with load information
@@ -5782,14 +6411,14 @@ if (load) {
 List all providers discovered on the Tenzro Network. Queries the `tenzro_listProviders` JSON-RPC method which merges: - The local node's own provider info (if it is serving models) - All remote providers discovered via the `tenzro/providers` gossipsub topic (announcements refreshed every 60 seconds)
 
 ```ts
-listProviders(providerType?: string): Promise<NetworkProvider[]>
+listProviders(providerType?: string): Promise<ProviderListing>
 ```
 
 | Param | Type | Description |
 |---|---|---|
 | `providerType` | `string \| undefined` | Optional filter by provider class (e.g. "ai", "tee", "storage"), applied to the node's full list. |
 
-**Returns** `Promise<NetworkProvider[]>` Array of discovered network providers
+**Returns** `Promise<ProviderListing>` The providers serving models, every page of them, and the operators behind the whole listing
 
 **Calls** [`tenzro_listProviders`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_listproviders)
 
@@ -5797,7 +6426,8 @@ listProviders(providerType?: string): Promise<NetworkProvider[]>
 
 ```typescript
 // List all providers
-const providers = await client.provider.listProviders();
+const { providers, operators } = await client.provider.listProviders();
+console.log(`${operators.machines} machines, ${operators.distinct_operators} operators`);
 for (const p of providers) {
   console.log(`${p.endpoint_id}:${p.provider_type} — models: ${p.served_models.join(", ")}`);
 }
@@ -5808,10 +6438,10 @@ const aiProviders = await client.provider.listProviders("ai");
 
 #### `quoteInference`
 
-Price one request for `model` at every provider serving it, cheapest first, on each provider's announced rate card plus the governed surcharge for the verification level.
+Price one request for `model` at every provider serving it, on each provider's announced rate card plus the governed surcharge for the verification level, with the carbon intensity of its region's grid.
 
 ```ts
-quoteInference(model: string, units: Record<string, number>, verification?: "none" | "receipt" | "optimistic" | "tee", provider?: string): Promise<unknown>
+quoteInference(model: string, units: Record<string, number>, verification?: "none" | "receipt" | "optimistic" | "tee", provider?: string, order?: "price" | "carbon"): Promise<unknown>
 ```
 
 | Param | Type | Description |
@@ -5820,6 +6450,7 @@ quoteInference(model: string, units: Record<string, number>, verification?: "non
 | `units` | `Record<string, number>` | Billable units, e.g. `{ input_tokens: 800, output_tokens: 200 }` |
 | `verification` | `"none" \| "receipt" \| "optimistic" \| "tee"` | none, receipt, optimistic or tee |
 | `provider` | `string \| undefined` |  |
+| `order` | `"price" \| "carbon"` | price (cheapest first) or carbon (cleanest grid first, for spot work that can run anywhere) |
 
 **Returns** `Promise<unknown>`
 
@@ -5947,60 +6578,6 @@ unregisterModelEndpoint(instanceId: string): Promise<any>
 **Returns** `Promise<any>` Unregistration result
 
 **Calls** [`tenzro_unregisterModelEndpoint`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_unregistermodelendpoint)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `computeGetClaim`
-
-`tenzro_computeGetClaim`.
-
-```ts
-computeGetClaim<T = unknown>(params?: { claim_id?: unknown; }): Promise<T>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `{ claim_id?: unknown; }` |  |
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_computeGetClaim`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computegetclaim)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `computeListClaims`
-
-`tenzro_computeListClaims`.
-
-```ts
-computeListClaims<T = unknown>(params: { party: string; limit?: number; }): Promise<T>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `{ party: string; limit?: number; }` |  |
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_computeListClaims`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computelistclaims)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `computePriceFeed`
-
-`tenzro_computePriceFeed`.
-
-```ts
-computePriceFeed<T = unknown>(params?: { attested_only?: unknown; limit?: unknown; model_id?: unknown; region?: unknown; }): Promise<T>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `{ attested_only?: unknown; limit?: unknown; model_id?: unknown; region?: unknown; }` |  |
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_computePriceFeed`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_computepricefeed)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -6423,6 +7000,14 @@ A JSON-RPC error the node answered with: its `code`, message and `data`. -32602 
 
 Read-only `boolean`. True when the node is the light build of tenzro-node, which runs no model: it refuses a call that needs a local model with code -32004 and `data.build === "light"`. Send such a call to a provider node instead.
 
+#### `isJurisdictionUnmet`
+
+Read-only `boolean`. True when no serving node meets the call's jurisdiction pin (code -32024).
+
+#### `isBelowSettlementFloor`
+
+Read-only `boolean`. True when the call metered less than the network's micro-settlement floor (code -32026): it cannot settle as its own transaction. Open a payment channel and pass a signed `channel_voucher` instead.
+
 ### RpcClient
 
 JSON-RPC and HTTP client for one node. A client carries at most one access credential, presented with a fresh DPoP proof on every request it makes. A caller signed in as several DIDs builds one client per DID. Without one, `TENZRO_BEARER_JWT` and `TENZRO_DPOP_PROOF` are forwarded where a process environment exists.
@@ -6614,6 +7199,10 @@ getApiEndpoint(): string
 **Returns** `string`
 
 **Errors** Throws on invalid input.
+
+### RunManifestError
+
+Why a manifest has no digest: `malformed` when a field is missing, has the wrong type or breaks a rule; `too_large` when it passes a bound; `no_output` when it names no output, so states no useful output.
 
 ### SettleClient
 
@@ -7120,6 +7709,20 @@ listOutstandingProbes(): Promise<SlaOutstandingProbes>
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `energyReport`
+
+What SLA challenges cost the bonded compute fleet in energy at the probe cadence in force (`tenzro_slaGetEnergy`).
+
+```ts
+energyReport(): Promise<SlaEnergyReport>
+```
+
+**Returns** `Promise<SlaEnergyReport>`
+
+**Calls** [`tenzro_slaGetEnergy`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_slagetenergy)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 #### `getParams`
 
 Read the fault-detector parameters this validator is using. Returns the slash threshold (missed probes before slashing fires), the per-crossing slash amount in wei, and this validator's VRF public key.
@@ -7306,14 +7909,14 @@ connectivity(): Promise<Connectivity>
 
 ### StorageClient
 
-Decentralized storage client. A node started with the `storage` role spawns a storage-provider runtime: it erasure-codes objects, publishes their shards over the content-addressed transport. A renter pays for keeping an object through a storage compute claim that commits the object's descriptor digest; each hour the claim pays the provider only if validators found its bond available, which requires a possession proof of the object. These calls target the provider node directly; they succeed only when that node is serving the storage role.
+Decentralized storage client. A node started with the `storage` role spawns a storage-provider runtime: it erasure-codes objects and publishes their shards over the content-addressed transport. The provider prices storage at a fixed rate per byte-epoch that never follows demand ({@link StorageClient.setFixedRate}). Storage is held to proofs of retrievability: a renter pays for keeping an object through a storage compute claim that commits the object's descriptor digest ({@link StoredObject.descriptor_digest}), and each hour the claim pays the provider only if validators found its bond available, which requires a possession proof of the object. The claim is written and bought with the `ComputeClaim` transaction and read through `ComputeClient.getClaim`, where `storage_descriptor` names the object. These calls target the provider node directly; they succeed only when that node is serving the storage role.
 
 #### `storeObject`
 
-Stores an object owned by `ownerDid`: erasure-codes `data` and publishes its shards over the transport. Only `ownerDid` may retrieve it. `signer` holds the key `ownerDid` resolves to and signs the request's envelope.
+Stores an object owned by `ownerDid`: erasure-codes `data` and publishes its shards over the transport. Only `ownerDid` may retrieve it. `signer` holds the key `ownerDid` resolves to and signs the request's envelope. `placement` limits which holders may take its shards; the storing node must itself be inside it. `options.class` (`hot`, `warm` or `cold`) is the storage class the object is bought under, which prices its reads.
 
 ```ts
-storeObject(objectId: string, owner: string, data: Uint8Array, dataShards: number, parityShards: number, ownerDid: string, signer: HybridSigner): Promise<StoredObject>
+storeObject(objectId: string, owner: string, data: Uint8Array, dataShards: number, parityShards: number, ownerDid: string, signer: HybridSigner, placement?: Placement, options?: { class?: "hot" | "warm" | "cold"; }): Promise<StoredObject>
 ```
 
 | Param | Type | Description |
@@ -7325,6 +7928,8 @@ storeObject(objectId: string, owner: string, data: Uint8Array, dataShards: numbe
 | `parityShards` | `number` |  |
 | `ownerDid` | `string` |  |
 | `signer` | `HybridSigner` |  |
+| `placement` | `Placement \| undefined` |  |
+| `options` | `{ class?: "hot" \| "warm" \| "cold"; }` |  |
 
 **Returns** `Promise<StoredObject>`
 
@@ -7347,10 +7952,10 @@ console.log(`stored ${stored.size_bytes} bytes`);
 
 #### `retrieveObject`
 
-Rebuilds an object from its shards for `readerDid` and returns its bytes. The object's access policy must admit `readerDid`; `signer` holds the key it resolves to and signs the request's envelope.
+Rebuilds an object from its shards for `readerDid` and returns its bytes. The object's access policy must admit `readerDid`; `signer` holds the key it resolves to and signs the request's envelope. An object stored under a priced class is paid with `voucher`, a channel voucher to the node covering the read.
 
 ```ts
-retrieveObject(objectId: string, readerDid: string, signer: HybridSigner): Promise<Uint8Array>
+retrieveObject(objectId: string, readerDid: string, signer: HybridSigner, voucher?: Record<string, unknown>): Promise<Uint8Array>
 ```
 
 | Param | Type | Description |
@@ -7358,6 +7963,7 @@ retrieveObject(objectId: string, readerDid: string, signer: HybridSigner): Promi
 | `objectId` | `string` |  |
 | `readerDid` | `string` |  |
 | `signer` | `HybridSigner` |  |
+| `voucher` | `Record<string, unknown> \| undefined` |  |
 
 **Returns** `Promise<Uint8Array<ArrayBufferLike>>`
 
@@ -7383,9 +7989,60 @@ setFixedRate(rate: bigint | string): Promise<Record<string, unknown>>
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `storageHoldingReceipt`
+
+This node's signed receipt for the shards of `objectId` it holds now under a placement constraint, or `null` when it holds none.
+
+```ts
+storageHoldingReceipt(objectId: string): Promise<Record<string, unknown> | null>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `objectId` | `string` |  |
+
+**Returns** `Promise<Record<string, unknown> \| null>`
+
+**Calls** [`tenzro_getStorageHoldingReceipt`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getstorageholdingreceipt)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `storageProviders`
+
+The storage providers the node has heard announce, best record first, each with its standing read from consensus state and whether any SLA verdict judged it.
+
+```ts
+storageProviders(): Promise<Record<string, unknown>>
+```
+
+**Returns** `Promise<Record<string, unknown>>`
+
+**Calls** [`tenzro_listStorageProviders`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_liststorageproviders)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `setReadRates`
+
+Sets the byte-epoch rate and what reading each class costs, wei per gibibyte read, each under its governed ceiling.
+
+```ts
+setReadRates(rate: bigint | string, readRates: { hot: bigint | string; warm: bigint | string; cold: bigint | string; }): Promise<Record<string, unknown>>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `rate` | `string \| bigint` |  |
+| `readRates` | `{ hot: bigint \| string; warm: bigint \| string; cold: bigint \| string; }` |  |
+
+**Returns** `Promise<Record<string, unknown>>`
+
+**Calls** [`tenzro_storageSetPricing`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_storagesetpricing)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 #### `status`
 
-Returns this node's storage-provider status (rate, object count).
+Returns this node's storage-provider status (rates, object count).
 
 ```ts
 status(): Promise<StorageStatus>
@@ -7394,88 +8051,6 @@ status(): Promise<StorageStatus>
 **Returns** `Promise<StorageStatus>`
 
 **Calls** [`tenzro_storageStatus`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_storagestatus)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `daAvailability`
-
-`tenzro_daAvailability`.
-
-```ts
-daAvailability<T = unknown>(params?: { address?: unknown; }): Promise<T>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `{ address?: unknown; }` |  |
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_daAvailability`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_daavailability)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `daChallenge`
-
-`tenzro_daChallenge` (operator only).
-
-```ts
-daChallenge<T = unknown>(params?: { commitment?: unknown; target_index?: unknown; }): Promise<T>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `{ commitment?: unknown; target_index?: unknown; }` |  |
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_daChallenge`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dachallenge)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `daCommittee`
-
-`tenzro_daCommittee`.
-
-```ts
-daCommittee<T = unknown>(): Promise<T>
-```
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_daCommittee`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dacommittee)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `daListBlobs`
-
-`tenzro_daListBlobs`.
-
-```ts
-daListBlobs<T = unknown>(): Promise<T>
-```
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_daListBlobs`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dalistblobs)
-
-**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
-
-#### `daListChallenges`
-
-`tenzro_daListChallenges`.
-
-```ts
-daListChallenges<T = unknown>(params?: { limit?: unknown; }): Promise<T>
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `params` | `{ limit?: unknown; }` |  |
-
-**Returns** `Promise<T>`
-
-**Calls** [`tenzro_daListChallenges`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_dalistchallenges)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -8090,6 +8665,20 @@ nodeInfo(): Promise<NodeStatusReport>
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `clientVersion`
+
+The node software's name and version (`web3_clientVersion`).
+
+```ts
+clientVersion(): Promise<string>
+```
+
+**Returns** `Promise<string>`
+
+**Calls** [`web3_clientVersion`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#web3_clientversion)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 #### `getStatus`
 
 ```ts
@@ -8140,7 +8729,7 @@ getNetworkStats(): Promise<NetworkStats>
 
 #### `isSyncing`
 
-Whether the node is behind the network tip. The node answers `false`, or `{syncing: true, startingBlock, currentBlock, highestBlock}` while it catches up.
+Whether the node is not following the network. The node answers with its state (`starting`, `catching_up`, `following` or `stalled`); any state but `following` counts.
 
 ```ts
 isSyncing(): Promise<boolean>
@@ -8292,7 +8881,7 @@ listPeers(): Promise<any>
 
 #### `getProviderScorecard`
 
-A provider's standing on chain, its announced price cards, and its settled count, value and p50/p95 latency over 24 hours and 7 days.
+A provider's standing on chain, the work consensus verified for it, its settled revenue, its announced price cards, the models its latest heartbeat reports warm, and its settled count, value and p50/p95 latency over 24 hours and 7 days as this node recorded them.
 
 ```ts
 getProviderScorecard(provider: string): Promise<any>
@@ -8302,7 +8891,7 @@ getProviderScorecard(provider: string): Promise<any>
 |---|---|---|
 | `provider` | `string` | The provider's account address |
 
-**Returns** `Promise<any>` `{ provider, standing, reputation, price_cards, settled }`
+**Returns** `Promise<any>` `{ provider, standing, verified_work, reputation, price_cards, revenue, warm_models, settled }`
 
 **Calls** [`tenzro_getProviderScorecard`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getproviderscorecard)
 
@@ -8656,15 +9245,15 @@ commitChallengeVote<T = unknown>(params?: { challenge_id?: unknown; commit_hash?
 
 #### `fileInferenceChallenge`
 
-`tenzro_fileInferenceChallenge`.
+`tenzro_fileInferenceChallenge`: files a challenge with the provider's signed receipt and the inputs it commits to (`{kind: "prompt", prompt}` or `{kind: "chat", messages, render: {tools, enable_thinking, reasoning_effort}, media}`); `commitment` when the node did not serve the response.
 
 ```ts
-fileInferenceChallenge<T = unknown>(params?: { challenger?: unknown; commitment_hash?: unknown; reason?: unknown; }): Promise<T>
+fileInferenceChallenge<T = unknown>(params?: { challenger?: unknown; commitment_hash?: unknown; reason?: unknown; receipt?: unknown; inputs?: unknown; commitment?: unknown; }): Promise<T>
 ```
 
 | Param | Type | Description |
 |---|---|---|
-| `params` | `{ challenger?: unknown; commitment_hash?: unknown; reason?: unknown; }` |  |
+| `params` | `{ challenger?: unknown; commitment_hash?: unknown; reason?: unknown; receipt?: unknown; inputs?: unknown; commitment?: unknown; }` |  |
 
 **Returns** `Promise<T>`
 
@@ -8687,6 +9276,24 @@ finalizeChallenge<T = unknown>(params?: { challenge_id?: unknown; }): Promise<T>
 **Returns** `Promise<T>`
 
 **Calls** [`tenzro_finalizeChallenge`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_finalizechallenge)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `fileChallengeFault`
+
+`tenzro_fileChallengeFault` (operator only): take a challenge its committee upheld to the chain; `dispute` is `{ receipt, request, output }`.
+
+```ts
+fileChallengeFault<T = unknown>(params?: { challenge_id?: unknown; dispute?: unknown; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ challenge_id?: unknown; dispute?: unknown; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_fileChallengeFault`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_filechallengefault)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -8994,19 +9601,69 @@ scanModelFiles<T = unknown>(params: { name?: string; root?: string; path?: strin
 
 #### `signChallengeVote`
 
-`tenzro_signChallengeVote` (operator only).
+`tenzro_signChallengeVote` (operator only): signs a commit or a reveal of the verdict this node's own re-execution found.
 
 ```ts
-signChallengeVote<T = unknown>(params?: { challenge_id?: unknown; commit_hash?: unknown; salt?: unknown; verdict?: unknown; }): Promise<T>
+signChallengeVote<T = unknown>(params?: { phase?: "commit" | "reveal"; challenge_id?: unknown; salt?: unknown; verdict?: unknown; }): Promise<T>
 ```
 
 | Param | Type | Description |
 |---|---|---|
-| `params` | `{ challenge_id?: unknown; commit_hash?: unknown; salt?: unknown; verdict?: unknown; }` |  |
+| `params` | `{ phase?: "commit" \| "reveal"; challenge_id?: unknown; salt?: unknown; verdict?: unknown; }` |  |
 
 **Returns** `Promise<T>`
 
 **Calls** [`tenzro_signChallengeVote`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_signchallengevote)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `reexecuteChallenge`
+
+`tenzro_reexecuteChallenge` (operator only): on a seat's own node, re-executes the challenged inputs and records the verdict it may then sign.
+
+```ts
+reexecuteChallenge<T = unknown>(params?: { challenge_id?: unknown; inputs?: unknown; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ challenge_id?: unknown; inputs?: unknown; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_reexecuteChallenge`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_reexecutechallenge)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `listSeatDuties`
+
+`tenzro_listSeatDuties` (operator only): the open challenges this node holds a seat on.
+
+```ts
+listSeatDuties<T = unknown>(): Promise<T>
+```
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_listSeatDuties`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_listseatduties)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `getChallengeInputs`
+
+`tenzro_getChallengeInputs`: the challenged inputs, served to a drawn seat that signed for them.
+
+```ts
+getChallengeInputs<T = unknown>(params?: { challenge_id?: unknown; voter?: unknown; requested_at?: unknown; signature?: unknown; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ challenge_id?: unknown; voter?: unknown; requested_at?: unknown; signature?: unknown; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_getChallengeInputs`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getchallengeinputs)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -9015,12 +9672,12 @@ signChallengeVote<T = unknown>(params?: { challenge_id?: unknown; commit_hash?: 
 `tenzro_verifyInferenceCommitment`.
 
 ```ts
-verifyInferenceCommitment<T = unknown>(params?: { commitment_hash?: unknown; prompt?: unknown; receipt?: unknown; }): Promise<T>
+verifyInferenceCommitment<T = unknown>(params?: { commitment_hash?: unknown; prompt?: unknown; request?: unknown; receipt?: unknown; commitment?: unknown; receipt_nonce?: unknown; }): Promise<T>
 ```
 
 | Param | Type | Description |
 |---|---|---|
-| `params` | `{ commitment_hash?: unknown; prompt?: unknown; receipt?: unknown; }` |  |
+| `params` | `{ commitment_hash?: unknown; prompt?: unknown; request?: unknown; receipt?: unknown; commitment?: unknown; receipt_nonce?: unknown; }` |  |
 
 **Returns** `Promise<T>`
 
@@ -9344,6 +10001,24 @@ getFinality<T = Finality>(): Promise<T>
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `getUpdateNotice`
+
+`tenzro_getUpdateNotice`: the newest signed release notice the node holds and its epoch position.
+
+```ts
+getUpdateNotice<T = UpdateNoticeReply>(params?: { if_none_match?: string; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ if_none_match?: string; } \| undefined` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_getUpdateNotice`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getupdatenotice)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 #### `getRewardEpoch`
 
 `tenzro_getRewardEpoch`: a closed reward epoch's summary.
@@ -9378,15 +10053,15 @@ getRewardSchedule<T = unknown>(): Promise<T>
 
 #### `getStateProof`
 
-`tenzro_getStateProof`: a value in committed state and its proof; `key` is hex.
+`tenzro_getStateProof`: a value in committed state and its proof; `key` is hex. Ask at a certified checkpoint's state `height` to check the proof against that checkpoint's state root; without it, the latest committed height.
 
 ```ts
-getStateProof<T = StateProof>(params: { namespace: string; key: string; }): Promise<T>
+getStateProof<T = StateProof>(params: { namespace: string; key: string; height?: number; }): Promise<T>
 ```
 
 | Param | Type | Description |
 |---|---|---|
-| `params` | `{ namespace: string; key: string; }` |  |
+| `params` | `{ namespace: string; key: string; height?: number; }` |  |
 
 **Returns** `Promise<T>`
 
@@ -9423,6 +10098,24 @@ getHardwareLevel<T = unknown>(params?: { address?: unknown; }): Promise<T>
 **Returns** `Promise<T>`
 
 **Calls** [`tenzro_getHardwareLevel`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_gethardwarelevel)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
+#### `fleetHostEvidence`
+
+`tenzro_fleetHostEvidence` (operator only): this machine's evidence for the fleet hardware proof `operator` sends this reward epoch, with `bind` the quote that joins it to the operator's fleet and with `gpu` its GPU's report. Nothing is submitted.
+
+```ts
+fleetHostEvidence<T = unknown>(params: { operator: string; bind?: boolean; gpu?: boolean; }): Promise<T>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `params` | `{ operator: string; bind?: boolean; gpu?: boolean; }` |  |
+
+**Returns** `Promise<T>`
+
+**Calls** [`tenzro_fleetHostEvidence`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_fleethostevidence)
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
@@ -9692,6 +10385,24 @@ verifyProof(circuitId: string, publicInputs: string[], proofs: Array<{ system: s
 
 **Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
 
+#### `sendProof`
+
+Hand a proof envelope (bincode `tenzro_zk::Proof`, hex) to every validator of the current committee (`tenzro_sendZkProof`).
+
+```ts
+sendProof(proof: string): Promise<unknown>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `proof` | `string` |  |
+
+**Returns** `Promise<unknown>`
+
+**Calls** [`tenzro_sendZkProof`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_sendzkproof)
+
+**Errors** Rejects with `RpcCallError` carrying the node's JSON-RPC error code and message.
+
 #### `listCircuits`
 
 The circuits the node proves and verifies, with their proof systems.
@@ -9915,6 +10626,42 @@ agentKeyOf(request: SignedHttpRequest): { keyid: string; agent_did: string; }
 
 **Errors** Throws on invalid input.
 
+#### `appTransportInfo`
+
+Where devices reach the node's app transport, and the certificates to pin.
+
+```ts
+appTransportInfo(rpc: RpcClient): Promise<AppTransportInfo>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `rpc` | `RpcClient` |  |
+
+**Returns** `Promise<AppTransportInfo>`
+
+**Calls** [`tenzro_getAppTransportInfo`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getapptransportinfo)
+
+**Errors** Error when the node runs no app transport.
+
+#### `appTransportUsage`
+
+What the node's app transport carried for the signed-in caller, or for every identity when the caller administers the node.
+
+```ts
+appTransportUsage(rpc: RpcClient): Promise<AppTransportUsage>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `rpc` | `RpcClient` |  |
+
+**Returns** `Promise<AppTransportUsage>`
+
+**Calls** [`tenzro_getAppTransportUsage`](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md#tenzro_getapptransportusage)
+
+**Errors** Error when the caller is not signed in or the node runs no app transport.
+
 #### `assessRecipient`
 
 Check `recipient` against trusted addresses and ones that only sent to this account.
@@ -9999,6 +10746,22 @@ blake3(input: Uint8Array): Uint8Array
 | `input` | `Uint8Array<ArrayBufferLike>` |  |
 
 **Returns** `Uint8Array<ArrayBufferLike>`
+
+**Errors** Throws on invalid input.
+
+#### `canonicalJson`
+
+RFC 8785 canonical text of `value`: member names in UTF-16 code unit order, numbers and strings as ECMAScript writes them.
+
+```ts
+canonicalJson(value: unknown): string
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `value` | `unknown` |  |
+
+**Returns** `string`
 
 **Errors** Throws on invalid input.
 
@@ -10164,6 +10927,24 @@ checkSigningPayload(env: Envelope, type: unknown, payload: { kind?: string; dige
 **Returns** `Promise<Uint8Array<ArrayBufferLike>>`
 
 **Errors** Throws on invalid input.
+
+#### `checkToolList`
+
+`result`, a `tools/list` result, checked as `check` and `freshness` say.
+
+```ts
+checkToolList(result: unknown, check?: ToolListCheck, freshness?: ToolListFreshness): Promise<ToolList>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `result` | `unknown` |  |
+| `check` | `ToolListCheck` |  |
+| `freshness` | `ToolListFreshness` |  |
+
+**Returns** `Promise<ToolList>`
+
+**Errors** when the check fails
 
 #### `chooseAsset`
 
@@ -10507,6 +11288,22 @@ encodeF32Base64(values: ArrayLike<number>): string
 
 **Errors** Throws on invalid input.
 
+#### `encodeFrame`
+
+A frame on the wire: a little-endian 32-bit length, then that much JSON.
+
+```ts
+encodeFrame(frame: Frame): Uint8Array
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `frame` | `Frame` |  |
+
+**Returns** `Uint8Array<ArrayBufferLike>`
+
+**Errors** Throws on invalid input.
+
 #### `encodeFunctionCall`
 
 Calldata for `signature` called with `values`: selector, then the encoded arguments.
@@ -10594,20 +11391,38 @@ enrollPqKeyOp(mlDsaPublicKey: Uint8Array, possession: Uint8Array): Record<string
 
 #### `envelopePreimage`
 
-The text the sender signs (UTF-8).
+The text the sender signs (UTF-8) for the node whose machine DID is `audienceDid`.
 
 ```ts
-envelopePreimage(method: string, taskId: string, senderDid: string, nonceHex: string, timestampMs: number, paramsSha256Hex: string): string
+envelopePreimage(audienceDid: string, method: string, taskId: string, senderDid: string, nonceHex: string, timestampMs: number, paramsSha256Hex: string): string
 ```
 
 | Param | Type | Description |
 |---|---|---|
+| `audienceDid` | `string` |  |
 | `method` | `string` |  |
 | `taskId` | `string` |  |
 | `senderDid` | `string` |  |
 | `nonceHex` | `string` |  |
 | `timestampMs` | `number` |  |
 | `paramsSha256Hex` | `string` |  |
+
+**Returns** `string`
+
+**Errors** Throws on invalid input.
+
+#### `envelopeTaskId`
+
+The task id an envelope binds to: `params.message.taskId` for the message methods, `params.id` for the others, empty when there is none.
+
+```ts
+envelopeTaskId(method: string, params: Readonly<Record<string, unknown>>): string
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `method` | `string` |  |
+| `params` | `Readonly<Record<string, unknown>>` |  |
 
 **Returns** `string`
 
@@ -10795,6 +11610,38 @@ grantTreeKey(did: string, caip2: string): Uint8Array
 
 **Errors** Throws on invalid input.
 
+#### `interactionDigest`
+
+The record's digest, lowercase hex, as the node attests it.
+
+```ts
+interactionDigest(record: unknown): Promise<string>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `record` | `unknown` |  |
+
+**Returns** `Promise<string>`
+
+**Errors** Throws on invalid input.
+
+#### `interactionPreimage`
+
+The bytes the digest is taken over. `record` is the record's JSON text, or the value `parseExact` made of it; a value from `JSON.parse` has already rounded any integer past 2^53.
+
+```ts
+interactionPreimage(record: unknown): Uint8Array
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `record` | `unknown` |  |
+
+**Returns** `Uint8Array<ArrayBufferLike>`
+
+**Errors** Throws on invalid input.
+
 #### `jwkThumbprint`
 
 RFC 7638 thumbprint of a P-256 JWK.
@@ -10879,6 +11726,24 @@ liftAgentQuarantineTx(agentDid: string, reasonText?: string): Record<string, unk
 
 **Errors** Throws on invalid input.
 
+#### `listTools`
+
+The tools the MCP server at `mcpUrl` (its Streamable HTTP endpoint, such as `https://mcp.tenzro.com/mcp`) lists, checked as `check` says.
+
+```ts
+listTools(mcpUrl: string, check?: ToolListCheck, freshness?: ToolListFreshness): Promise<ToolList>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `mcpUrl` | `string` | The server's MCP endpoint |
+| `check` | `ToolListCheck` | How the list is checked; a Tenzro signature by default |
+| `freshness` | `ToolListFreshness` | How recent the signature must be, and the newest release seen |
+
+**Returns** `Promise<ToolList>` `{ tools, signedBy, issuedAtMs, listVersion }`
+
+**Errors** when the request fails or the check fails
+
 #### `lookalikeParamsFromGoverned`
 
 ```ts
@@ -10891,6 +11756,38 @@ lookalikeParamsFromGoverned(prefix?: number, suffix?: number): LookalikeParams
 | `suffix` | `number \| undefined` |  |
 
 **Returns** `LookalikeParams`
+
+**Errors** Throws on invalid input.
+
+#### `machineDid`
+
+The machine DID of a hardware P-256 key `x || y` (64 bytes): the key's uncompressed SEC1 form, length-prefixed, hashed under the machine DID domain.
+
+```ts
+machineDid(p256PublicKey: Uint8Array): Promise<string>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `p256PublicKey` | `Uint8Array<ArrayBufferLike>` |  |
+
+**Returns** `Promise<string>`
+
+**Errors** Throws on invalid input.
+
+#### `machineDidOfKey`
+
+The machine DID of the uncompressed P-256 key `sec1`.
+
+```ts
+machineDidOfKey(sec1: Uint8Array): Promise<string>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `sec1` | `Uint8Array<ArrayBufferLike>` |  |
+
+**Returns** `Promise<string>`
 
 **Errors** Throws on invalid input.
 
@@ -11301,6 +12198,23 @@ parameterChangeProposal(key: string, value: number | bigint | string, memo: stri
 
 **Errors** Throws on invalid input.
 
+#### `paramsDigestHex`
+
+Lowercase hex SHA-256 of the canonical `params` with the envelope keys removed, and their metadata object dropped when nothing else is left in it.
+
+```ts
+paramsDigestHex(method: string, params: Readonly<Record<string, unknown>>): Promise<string>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `method` | `string` |  |
+| `params` | `Readonly<Record<string, unknown>>` |  |
+
+**Returns** `Promise<string>`
+
+**Errors** Throws on invalid input.
+
 #### `parseExact`
 
 Parses JSON keeping every integer exact: an integer literal past 2^53 (a u64 amount as the node writes it) comes back as a bigint, every other value as `JSON.parse` returns it.
@@ -11523,6 +12437,25 @@ productionConfig(rpId: string): ResolvedPasskeyConfig
 
 **Errors** Throws on invalid input.
 
+#### `publicationPreimage`
+
+The bytes a publication's signature covers: the domain, the issuer and the listener each behind its length, the signing time, then every hash with its validity; integers are 64-bit big-endian. The node signs their SHA-256.
+
+```ts
+publicationPreimage(issuer: string, listener: string, hashes: PinnedHash[], signedAt: number): Uint8Array<ArrayBuffer>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `issuer` | `string` |  |
+| `listener` | `string` |  |
+| `hashes` | `PinnedHash[]` |  |
+| `signedAt` | `number` |  |
+
+**Returns** `Uint8Array<ArrayBuffer>`
+
+**Errors** Throws on invalid input.
+
 #### `rawP256`
 
 A P-256 key as the keystore holds it (`x || y`, hex), from SPKI DER, SEC1 or raw form.
@@ -11728,6 +12661,23 @@ reinstateValidatorProposal(validator: string, memo: string): TypedTransaction
 
 **Errors** Throws on invalid input.
 
+#### `rentTransaction`
+
+The `CreateEscrow` transaction for a rental signed at `nowMs`. The stream accrues from the block that funds it, not from `nowMs`, so the escrow expires one epoch after the term would end if it were funded now: the funding block has that long to land and the whole term still accrues. Accrual never exceeds the locked amount, so the extra epoch pays nothing more.
+
+```ts
+rentTransaction(request: RentRequest, nowMs: number): TypedTransaction
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `request` | `RentRequest` |  |
+| `nowMs` | `number` |  |
+
+**Returns** `TypedTransaction`
+
+**Errors** Throws on invalid input.
+
 #### `requestBinding`
 
 The bytes a request envelope binds: the params object without its `did_envelope` field, as JSON with object keys sorted at every level and no whitespace. Fields left `undefined` are left out, as they are on the wire.
@@ -11777,6 +12727,71 @@ revocationTarget(did: string, reason: string): Buffer
 
 **Errors** Throws on invalid input.
 
+#### `runManifestDigest`
+
+The manifest's digest, lower-case hex: the registry anchor of its run.
+
+```ts
+runManifestDigest(manifest: unknown): Promise<string>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `manifest` | `unknown` |  |
+
+**Returns** `Promise<string>`
+
+**Errors** Throws on invalid input.
+
+#### `runManifestPreimage`
+
+The bytes the digest is taken over. `manifest` is the manifest's JSON text, or the value `parseExact` made of it.
+
+```ts
+runManifestPreimage(manifest: unknown): Uint8Array
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `manifest` | `unknown` |  |
+
+**Returns** `Uint8Array<ArrayBufferLike>`
+
+**Errors** Throws on invalid input.
+
+#### `runManifestPutTx`
+
+The transaction that anchors `manifest` as the next version of the account's runs entry. The manifest itself stays off chain.
+
+```ts
+runManifestPutTx(accountHex: string, manifest: unknown): Promise<{ Registry: { op: { put: { id: string; kind: string; anchor: string; data: string; }; }; }; }>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `accountHex` | `string` |  |
+| `manifest` | `unknown` |  |
+
+**Returns** `Promise<{ Registry: { op: { put: { id: string; kind: string; anchor: string; data: string; }; }; }; }>`
+
+**Errors** Throws on invalid input.
+
+#### `runsRegistryId`
+
+The registry id an account anchors its runs under.
+
+```ts
+runsRegistryId(accountHex: string): string
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `accountHex` | `string` |  |
+
+**Returns** `string`
+
+**Errors** Throws on invalid input.
+
 #### `setCodeTransactionSigningHash`
 
 The digest the sender signs.
@@ -11788,6 +12803,41 @@ setCodeTransactionSigningHash(tx: SetCodeTransaction): string
 | Param | Type | Description |
 |---|---|---|
 | `tx` | `SetCodeTransaction` |  |
+
+**Returns** `string`
+
+**Errors** Throws on invalid input.
+
+#### `signEnvelope`
+
+`params` with the envelope for `method` to the node whose machine DID is `audienceDid` attached, signed now by `sender`. The input is not changed.
+
+```ts
+signEnvelope<P extends Record<string, unknown>>(audienceDid: string, method: string, params: P, sender: EnvelopeSender): Promise<P>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `audienceDid` | `string` |  |
+| `method` | `string` |  |
+| `params` | `P` |  |
+| `sender` | `EnvelopeSender` |  |
+
+**Returns** `Promise<P>`
+
+**Errors** Throws on invalid input.
+
+#### `signInHtu`
+
+The URI a sign-in proof names: the session's nonce.
+
+```ts
+signInHtu(nonce: string): string
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `nonce` | `string` |  |
 
 **Returns** `string`
 
@@ -11858,6 +12908,24 @@ toErc7930(a: OmniAddress): Uint8Array | undefined
 
 **Errors** Throws on invalid input.
 
+#### `toolListSignedPayload`
+
+What a tool list's signature covers (see the module documentation).
+
+```ts
+toolListSignedPayload(tools: Record<string, unknown>[], issuedAtMs: number, listVersion: string): string
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `tools` | `Record<string, unknown>[]` |  |
+| `issuedAtMs` | `number` |  |
+| `listVersion` | `string` |  |
+
+**Returns** `string`
+
+**Errors** Throws on invalid input.
+
 #### `txType`
 
 The `tx_type` the network decodes.
@@ -11905,6 +12973,23 @@ verifyAgentAuditProof(proof: AgentAuditProof): Promise<string>
 **Returns** `Promise<string>`
 
 **Errors** Throws on invalid input.
+
+#### `verifyAgentCard`
+
+Check that `card` is signed, that every signature on it verifies, and that one of them is by the hardware key `expectedMachineDid` derives from.
+
+```ts
+verifyAgentCard(card: Record<string, unknown>, expectedMachineDid: string): Promise<void>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `card` | `Record<string, unknown>` |  |
+| `expectedMachineDid` | `string` |  |
+
+**Returns** `Promise<void>`
+
+**Errors** AgentCardRefused naming what failed
 
 #### `verifyAgentRequest`
 
@@ -12048,6 +13133,58 @@ verifyOpenShellSignature(body: Uint8Array, signature: Uint8Array, atMs: number, 
 
 **Errors** Throws on invalid input.
 
+#### `verifyPublication`
+
+Checks a node's certificate publication and returns the hashes to pin. A publication carries no expiry of its own: it is refused when it names another node or listener, when its signature is not the node's, when it was signed in the future or longer ago than `maxAgeSecs`, and each hash is kept only while its certificate is valid. Pass the result to {@link AppSession.connect}.
+
+```ts
+verifyPublication(publication: CertificatePublication, expect: PublicationExpectation): Promise<CertificateHash[]>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `publication` | `CertificatePublication` |  |
+| `expect` | `PublicationExpectation` |  |
+
+**Returns** `Promise<CertificateHash[]>`
+
+**Errors** Error when the publication is not one to trust.
+
+#### `verifyToolList`
+
+Checks that `signed` (the `_meta` value `{protected, signature, issuedAtMs, listVersion}`) verifies over `tools` and that its `kid` names the machine DID its key derives.
+
+```ts
+verifyToolList(tools: Record<string, unknown>[], signed: unknown): Promise<SignedToolList>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `tools` | `Record<string, unknown>[]` |  |
+| `signed` | `unknown` |  |
+
+**Returns** `Promise<SignedToolList>`
+
+**Errors** when the signature is malformed, does not verify, or names another machine
+
+#### `verifyWelcome`
+
+Checks that a welcome was signed by the node over this session's `nonce`: by its access-token key and, when `keys.pq` is given, by its ML-DSA-65 key.
+
+```ts
+verifyWelcome(welcome: Welcome, nonce: string, keys: WelcomeKeys): Promise<void>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `welcome` | `{ type: "welcome"; did: string; device: string; expires_at: number; signature: string; pq_signature: string; }` |  |
+| `nonce` | `string` |  |
+| `keys` | `WelcomeKeys` |  |
+
+**Returns** `Promise<void>`
+
+**Errors** Error when a signature is not the node's.
+
 #### `webauthnChallengeOf`
 
 The WebAuthn challenge a passkey signs for `mPrime`: `base64url(SHA-256(mPrime))`, unpadded.
@@ -12061,6 +13198,25 @@ webauthnChallengeOf(mPrime: Uint8Array): Promise<string>
 | `mPrime` | `Uint8Array<ArrayBufferLike>` |  |
 
 **Returns** `Promise<string>`
+
+**Errors** Throws on invalid input.
+
+#### `welcomePreimage`
+
+The bytes a welcome's signatures cover: the domain, then the session's nonce, the DID and the device each behind its length, then `expires_at`; integers are 64-bit big-endian. The node signs their SHA-256.
+
+```ts
+welcomePreimage(nonce: string, did: string, device: string, expiresAt: number): Uint8Array<ArrayBuffer>
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `nonce` | `string` |  |
+| `did` | `string` |  |
+| `device` | `string` |  |
+| `expiresAt` | `number` |  |
+
+**Returns** `Uint8Array<ArrayBuffer>`
 
 **Errors** Throws on invalid input.
 

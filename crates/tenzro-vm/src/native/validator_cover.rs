@@ -19,6 +19,16 @@
 //!   the uncovered part). An asset that may not settle pays nothing and is
 //!   kept; nothing falls back to another asset or to the rewards pool.
 //!
+//! Once `feature.cover_funded_seats.activation_epoch` is in force, the
+//! reserve funds only as many seats as paid usage carries: the stable fees
+//! booked since the last close, at their USD value, divided by one
+//! validator's epoch cost, rounded up, and never below
+//! `feature.cover_funded_seats.seat_floor` nor above the active set. The fill
+//! target and the epoch's payout follow the funded seats, and the payout is
+//! still split equally over every active validator; what it leaves unpaid
+//! falls to the base reward as before. A thin epoch then draws on the
+//! reserve for the floor's seats, not for the whole set.
+//!
 //! An empty reserve, an epoch without stable fees or a set without active
 //! validators pays nothing and waits: nothing is refused, nothing goes
 //! negative, no block is held up.
@@ -38,6 +48,12 @@ pub const FEE_SHARE_PARAM: &str = "validator.stable_cover_fee_share_bps";
 /// Governed: months of the active set's running cost the cover reserve
 /// fills up to.
 pub const TARGET_MONTHS_PARAM: &str = "validator.stable_cover_target_months";
+
+/// Gate: first epoch whose closes fund only the seats paid usage carries.
+pub const SEATS_GATE: &str = "feature.cover_funded_seats.activation_epoch";
+/// Governed: fewest seats the cover reserve funds in an epoch once
+/// [`SEATS_GATE`] is in force.
+pub const SEAT_FLOOR_PARAM: &str = "feature.cover_funded_seats.seat_floor";
 
 pub const DEFAULT_FEE_SHARE_BPS: u64 = 10_000;
 pub const DEFAULT_TARGET_MONTHS: u64 = 12;
@@ -172,9 +188,15 @@ pub(super) fn cover_epoch(
         )?;
     }
     let share = u128::from(network_param(state, FEE_SHARE_PARAM).min(10_000));
+    let seats_live = crate::feature_gate::is_live_now(state, SEATS_GATE);
+    let seats = if seats_live {
+        funded_seats(state, &booked, each, n)
+    } else {
+        n
+    };
     let months_per_year = 12u128;
     let target = each
-        .saturating_mul(n.max(1))
+        .saturating_mul(seats.max(1))
         .saturating_mul(u128::from(epochs_per_year.max(1)))
         / months_per_year
         * u128::from(network_param(state, TARGET_MONTHS_PARAM));
@@ -219,7 +241,7 @@ pub(super) fn cover_epoch(
 
     // Pay, every validator the same, as far as the reserve goes.
     if n > 0 && each > 0 {
-        let pay_each = each.min(held_e6 / n);
+        let pay_each = each.min(held_e6.min(each.saturating_mul(seats)) / n);
         if pay_each > 0 {
             for v in validators {
                 let mut left = pay_each;
@@ -246,20 +268,55 @@ pub(super) fn cover_epoch(
         }
     }
     write_json(state, &cover_key(epoch), &cover, changes)?;
+    let mut log = serde_json::json!({
+        "epoch": epoch,
+        "validators": cover.validators,
+        "need_e6": cover.need_e6.to_string(),
+        "paid_e6": cover.paid_e6.to_string(),
+        "shortfall_e6": cover.need_e6.saturating_sub(cover.paid_e6).to_string(),
+        "filled_e6": cover.filled_e6.to_string(),
+    });
+    if seats_live {
+        log["funded_seats"] = serde_json::json!(seats as u64);
+    }
     logs.push(Log::new(
         SYSTEM_ADDRESS.to_vec(),
         vec![COVER_TOPIC.to_vec()],
-        serde_json::to_vec(&serde_json::json!({
-            "epoch": epoch,
-            "validators": cover.validators,
-            "need_e6": cover.need_e6.to_string(),
-            "paid_e6": cover.paid_e6.to_string(),
-            "shortfall_e6": cover.need_e6.saturating_sub(cover.paid_e6).to_string(),
-            "filled_e6": cover.filled_e6.to_string(),
-        }))
-        .map_err(|e| VmError::Internal(format!("encode validator cover log: {e}")))?,
+        serde_json::to_vec(&log)
+            .map_err(|e| VmError::Internal(format!("encode validator cover log: {e}")))?,
     ));
     Ok(cover)
+}
+
+/// Seats paid usage carries: the USD value of the stable fees `booked`
+/// since the last close over one validator's epoch cost `each`, rounded up,
+/// at least the governed floor and at most the `n` active validators.
+fn funded_seats(
+    state: &dyn VmState,
+    booked: &BTreeMap<String, String>,
+    each: u128,
+    n: u128,
+) -> u128 {
+    let usage_e6 = booked
+        .iter()
+        .filter_map(|(hex_id, units)| {
+            let id = <[u8; 32]>::try_from(hex::decode(hex_id).ok()?).ok()?;
+            let p = permitted(state, &id).ok()?;
+            Some(value_e6(
+                units.parse::<u128>().unwrap_or(0),
+                p.rate_nano_usd,
+                p.asset.decimals,
+            ))
+        })
+        .fold(0u128, u128::saturating_add);
+    let carried = if each == 0 {
+        n
+    } else {
+        usage_e6.div_ceil(each)
+    };
+    carried
+        .max(u128::from(network_param(state, SEAT_FLOOR_PARAM)))
+        .min(n)
 }
 
 /// Share of the running cost `cover` left unpaid, as (numerator,

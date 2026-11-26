@@ -250,7 +250,7 @@ pub(super) fn execute_veto_signal(
     gas_meter.consume(GAS_HOLDER_GOVERNANCE)?;
     let (id, _) = proposal_arg(tx, 52)?;
     let amount = u128::from_le_bytes(tx.data[36..52].try_into().expect("length checked"));
-    let now_ms = deterministic_now_ms(tx);
+    let now_ms = deterministic_now_ms(tx)?;
     let cost = gas_cost(tx);
     let available = state.get_balance(&tx.from);
     let required = amount.saturating_add(cost);
@@ -355,7 +355,7 @@ pub(super) fn execute_veto_withdraw(
     };
     let id: [u8; 32] = tx.data[4..36].try_into().expect("length checked");
     let id_hex = hex::encode(id);
-    let now_ms = deterministic_now_ms(tx);
+    let now_ms = deterministic_now_ms(tx)?;
     let proposal = load(state, &id_hex)?;
     let amount = locked_by(state, &id_hex, &holder);
     if amount == 0 {
@@ -413,7 +413,7 @@ pub(super) fn execute_concern(
 ) -> Result<ExecutionResult> {
     gas_meter.consume(GAS_HOLDER_GOVERNANCE)?;
     let (id, id_hex) = proposal_arg(tx, 36)?;
-    let now_ms = deterministic_now_ms(tx);
+    let now_ms = deterministic_now_ms(tx)?;
     let mut proposal = load(state, &id_hex)?;
     if proposal.status != ProposalStatus::Queued || proposal.is_executable_at(now_ms) {
         return Err(VmError::InvalidTransaction(format!(
@@ -426,7 +426,7 @@ pub(super) fn execute_concern(
             hex::encode(&tx.from)
         ))
     })?;
-    let root = crate::funding::root_did(&did);
+    let root = operator::root_did_in_force(state, &did);
     if !root.starts_with(crate::governance::HUMAN_DID_PREFIX) || is_identity_revoked(state, &root) {
         return Err(VmError::InvalidTransaction(format!(
             "{did} has no live human root; a concern is raised by a human identity"

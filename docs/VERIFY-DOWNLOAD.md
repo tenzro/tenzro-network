@@ -7,8 +7,10 @@ is signed. Check both before you unpack or install anything.
 
 | File | What it is |
 |---|---|
-| `tenzro-node-<platform>-<variant>.tar.gz` or `.zip` | the archive you install |
-| `SHA256SUMS` | one line per archive: its SHA-256 digest and name |
+| `tenzro-node-<platform>-<variant>.tar.gz` or `.zip` | the archive you install; it carries Tenzro Control, the desktop app, in `control/` |
+| `tenzro-<version>-windows-x86_64-cuda.msi`, `tenzro-<version>-macos.pkg`, `tenzro-cpu`, `tenzro-cuda` and `tenzro-control` `.deb` and `.rpm` | the installers, each made from the exact bytes of one archive |
+| `packages.json` | for each installer, the archive it was made from and that archive's digest |
+| `SHA256SUMS` | one line per archive and per installer: its SHA-256 digest and name |
 | `SHA256SUMS.sig` | a cosign signature over `SHA256SUMS` |
 | `tenzro-release.pub` | the public key that verifies the signatures |
 | `matrix.json` | how each archive was built: commit, toolchain, features, lockfile digest |
@@ -49,6 +51,14 @@ cosign verify-blob --key tenzro-release.pub --insecure-ignore-tlog=true --signat
 
 Compare the printed hash, ignoring case, with the line for that archive in `SHA256SUMS`.
 
+## The Assistant's guides and model
+
+The guides the Assistant answers from are compiled into the `tenzro` binary, so the
+archive's digest in the signed `SHA256SUMS` covers them; a release has no separate
+pack to fetch or check. The Assistant's model is not in the release. When you agree
+to `/assistant` in the console, it is downloaded from the network's model catalog
+and checked against the digests its catalog entry pins before it is served.
+
 ## Where the public key lives
 
 The release signing key is a P-256 key created inside the TPM 2.0 of a Tenzro-operated machine. It is
@@ -80,14 +90,24 @@ Once you have verified one release, keep that copy of `tenzro-release.pub` and c
 your kept copy; a changed key is a reason to stop and ask. [SIGNING-LOG.md](SIGNING-LOG.md) lists each
 manifest the key has signed.
 
-## Windows code signing
+## Installers and Tenzro Control
 
-The Windows archives and the Windows control app are not Authenticode-signed unless the build
-machine was configured with a code-signing certificate (`bundle.windows.certificateThumbprint`; see
-`scripts/release/build-control-windows.ps1`). A release that was not so configured will make
-Windows SmartScreen warn about an unknown publisher. That warning is expected for an unsigned build
-and is not a verdict on the archive: the cosign signature and the SHA-256 check above are the
-verification. The macOS app is checked with `codesign --verify --deep --strict` at build time.
+An installer is checked exactly like an archive: its line in the signed `SHA256SUMS` must match
+(`sha256sum -c --ignore-missing SHA256SUMS` on Linux, `shasum -a 256 -c --ignore-missing SHA256SUMS`
+on macOS, the PowerShell steps above on Windows). The Windows and macOS installers put Tenzro
+Control beside the node and open it when they finish; on Linux it is the separate
+`tenzro-control` package, so a machine without a desktop never installs it. `packages.json` names
+the archive each installer repackages, so you can check that the programs it installs are the
+ones in that archive.
+
+## Code signing
+
+The Windows programs and installer carry an Authenticode signature, and the macOS programs, Tenzro
+Control and the installer a Developer ID signature with notarisation, only when the release was
+built with those certificates. Without them Windows SmartScreen warns about an unknown publisher
+and macOS asks you to confirm opening an app from an unidentified developer. That warning is
+expected for an unsigned build and is not a verdict on the download: the cosign signature and the
+SHA-256 check above are the verification.
 
 ## Rebuilding to compare
 

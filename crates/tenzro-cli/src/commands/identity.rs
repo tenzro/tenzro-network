@@ -29,6 +29,12 @@ pub enum IdentityCommand {
     RegisterAccount(IdentityRegisterAccountCmd),
     /// Revoke an identity on its root's authority (a RevokeIdentity transaction)
     Revoke(IdentityRevokeCmd),
+    /// Revoke a root in favour of a successor who may reclaim its agents' funds
+    /// (a native call)
+    RevokeTo(IdentityRevokeToCmd),
+    /// Change an identity's keys on its root's authority: record its next key,
+    /// declare one compromised or revoke a delegation (a native call)
+    Keys(IdentityKeysCmd),
     /// Revoke a single JWT by its `jti` (cascades through the act-chain)
     RevokeJwt(IdentityRevokeJwtCmd),
     /// Hard-delete a revoked identity (TDIP/GDPR Article 17 right-to-erasure)
@@ -48,6 +54,8 @@ impl IdentityCommand {
             Self::RegisterMachine(cmd) => cmd.execute().await,
             Self::RegisterAccount(cmd) => cmd.execute().await,
             Self::Revoke(cmd) => cmd.execute().await,
+            Self::Keys(cmd) => cmd.execute().await,
+            Self::RevokeTo(cmd) => cmd.execute().await,
             Self::RevokeJwt(cmd) => cmd.execute().await,
             Self::Forget(cmd) => cmd.execute().await,
         }
@@ -723,6 +731,240 @@ pub(crate) fn revocation_op(
     Ok(op)
 }
 
+/// Revoke a root in favour of a successor. The root is revoked as by
+/// `revoke`; the agents it delegated are quarantined for good instead of
+/// revoked, and the successor alone may reclaim what their wallets hold
+/// (`tenzro agent reclaim` from the wallet the successor's identity is
+/// registered with). The successor cannot make an agent act: it delegates
+/// agents of its own.
+///
+/// Without `--approval` the command prints what the root has to approve: a
+/// `revoke_identity_to` custody challenge over the printed target on the
+/// root's own account. With it, the CLI signs a `NativeCall`
+/// transaction carrying the approval with the client account and submits
+/// it. The chain refuses the transaction until
+/// `feature.agent_succession.activation_epoch` is in force.
+#[derive(Debug, Parser)]
+pub struct IdentityRevokeToCmd {
+    /// The root to revoke
+    did: String,
+
+    /// The root that takes over what the revoked root's agents hold
+    #[arg(long)]
+    successor: String,
+
+    /// Reason recorded with the revocation; the approval covers it
+    #[arg(long)]
+    reason: Option<String>,
+
+    /// JSON file with the root's approval of the challenge; without it the
+    /// target to approve is printed and nothing is sent
+    #[arg(long)]
+    approval: Option<std::path::PathBuf>,
+
+    /// Hardware key namespace of the account that sends the transaction
+    #[arg(long, default_value = "client")]
+    key_namespace: String,
+
+    /// Gas for the transaction; a root with many agents needs more
+    #[arg(long, default_value_t = crate::keystore::DEFAULT_REVOCATION_GAS)]
+    gas_limit: u64,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+/// The revocation-in-favour operation for `did` in favour of `successor`;
+/// without an approval file, the operation whose target the root has yet to
+/// approve.
+pub(crate) fn succession_op(
+    did: &str,
+    successor: &str,
+    reason: Option<&str>,
+    approval: Option<&std::path::Path>,
+) -> Result<tenzro_native_ops::identity_succession::IdentitySuccessionOp> {
+    let op = tenzro_native_ops::identity_succession::IdentitySuccessionOp {
+        did: did.to_string(),
+        reason: reason
+            .unwrap_or(tenzro_types::identity::DEFAULT_REVOCATION_REASON)
+            .to_string(),
+        successor_did: successor.to_string(),
+        approval: match approval {
+            Some(path) => read_approval(path)?,
+            None => unsigned_approval(),
+        },
+    };
+    if approval.is_some() {
+        op.validate().map_err(|e| anyhow::anyhow!(e))?;
+    }
+    Ok(op)
+}
+
+impl IdentityRevokeToCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Revoke Identity In Favour Of A Successor");
+        let op = succession_op(
+            &self.did,
+            &self.successor,
+            self.reason.as_deref(),
+            self.approval.as_deref(),
+        )?;
+        if self.approval.is_none() {
+            output::print_field("Approver", &self.did);
+            output::print_field("Operation", "revoke_identity_to");
+            output::print_field("Target", &hex::encode(op.target()));
+            output::print_info(
+                "Have the root answer a revoke_identity_to custody challenge over this target, \
+                 then run the command again with --approval <file>.",
+            );
+            return Ok(());
+        }
+        let spinner = output::create_spinner("Signing and submitting the revocation...");
+        let result = crate::keystore::send_as_client(
+            &RpcClient::new(&self.rpc),
+            &self.key_namespace,
+            [0u8; 32],
+            serde_json::to_value(tenzro_types::transaction::TransactionType::NativeCall {
+                selector: tenzro_native_ops::SELECTOR_IDENTITY_SUCCESSION,
+                data: tenzro_native_ops::encode(&op),
+            })?,
+            self.gas_limit,
+        )
+        .await?;
+        spinner.finish_and_clear();
+        output::print_success("Revocation submitted");
+        output::print_field("DID", &self.did);
+        output::print_field("Successor", &self.successor);
+        output::print_json(&result)
+    }
+}
+
+/// Change an identity's keys on its root's authority. The change is JSON:
+/// `{"update":{"version":2,"ed25519":"<hex>","ml_dsa":"<hex>","next_commitment":null}}`
+/// records the identity's next key (optionally committing to the one after
+/// it), `{"compromised":{"version":1}}` declares a recorded key compromised
+/// from now on, and `{"revoke_delegation":{"delegation_id":"<hex>"}}` revokes
+/// a delegation or batch signature the identity issued.
+///
+/// Without `--approval` the command prints what the root has to approve: an
+/// `identity_keys` custody challenge over the printed target on the
+/// approver's account (`tenzro_createCustodyChallenge` with that
+/// `target_hex`). With it, the CLI signs a `NativeCall` transaction
+/// carrying the approval with the client account and submits it; every
+/// validator re-verifies the approval. The chain refuses the transaction
+/// until `feature.identity_keys.activation_epoch` is in force.
+#[derive(Debug, Parser)]
+pub struct IdentityKeysCmd {
+    /// The identity whose keys change
+    did: String,
+
+    /// The change, as JSON, or a file holding it
+    #[arg(long)]
+    change: String,
+
+    /// The approving root's DID; the DID itself when absent
+    #[arg(long)]
+    approver: Option<String>,
+
+    /// JSON file with the approving root's approval of the challenge; without
+    /// it the target to approve is printed and nothing is sent
+    #[arg(long)]
+    approval: Option<std::path::PathBuf>,
+
+    /// Hardware key namespace of the account that sends the transaction
+    #[arg(long, default_value = "client")]
+    key_namespace: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+/// The approval a root's challenge answer is read into before it exists: the
+/// target of an operation does not cover its approval.
+fn unsigned_approval() -> tenzro_types::agent_terms::AgentTermsApproval {
+    tenzro_types::agent_terms::AgentTermsApproval {
+        account: Vec::new(),
+        nonce: [0; 16],
+        root_public_key: Vec::new(),
+        signature: tenzro_types::account_signature::CompositeSignature::classical(
+            tenzro_types::account_signature::ClassicalProof::Raw {
+                signature: Vec::new(),
+            },
+        ),
+    }
+}
+
+/// The approval in the JSON file at `path`.
+fn read_approval(path: &std::path::Path) -> Result<tenzro_types::agent_terms::AgentTermsApproval> {
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+}
+
+/// The identity key operation for `did` with `change` (JSON text or a file
+/// holding it), approved by `approver_did`; without an approval file, the
+/// operation whose target the root has yet to approve.
+pub(crate) fn identity_key_op(
+    did: &str,
+    change: &str,
+    approver_did: &str,
+    approval: Option<&std::path::Path>,
+) -> Result<tenzro_native_ops::identity_keys::IdentityKeyOp> {
+    let raw = std::fs::read_to_string(change).unwrap_or_else(|_| change.to_string());
+    let change = serde_json::from_str(raw.trim())
+        .map_err(|e| anyhow::anyhow!("--change is not a key change: {e}"))?;
+    let op = tenzro_native_ops::identity_keys::IdentityKeyOp {
+        did: did.to_string(),
+        change,
+        approver_did: approver_did.to_string(),
+        approval: match approval {
+            Some(path) => read_approval(path)?,
+            None => unsigned_approval(),
+        },
+    };
+    if approval.is_some() {
+        op.validate().map_err(|e| anyhow::anyhow!(e))?;
+    }
+    Ok(op)
+}
+
+impl IdentityKeysCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Identity Keys");
+        let approver = self.approver.as_deref().unwrap_or(&self.did);
+        let op = identity_key_op(&self.did, &self.change, approver, self.approval.as_deref())?;
+        if self.approval.is_none() {
+            output::print_field("Approver", approver);
+            output::print_field("Operation", "identity_keys");
+            output::print_field("Target", &hex::encode(op.target()));
+            output::print_info(
+                "Have the approver answer an identity_keys custody challenge over this target, \
+                 then run the command again with --approval <file>.",
+            );
+            return Ok(());
+        }
+        let spinner = output::create_spinner("Signing and submitting the key change...");
+        let result = crate::keystore::send_as_client(
+            &RpcClient::new(&self.rpc),
+            &self.key_namespace,
+            [0u8; 32],
+            serde_json::to_value(tenzro_types::transaction::TransactionType::NativeCall {
+                selector: tenzro_native_ops::SELECTOR_IDENTITY_KEYS,
+                data: tenzro_native_ops::encode(&op),
+            })?,
+            crate::keystore::DEFAULT_REVOCATION_GAS,
+        )
+        .await?;
+        spinner.finish_and_clear();
+        output::print_success("Key change submitted");
+        output::print_json(&result)
+    }
+}
+
 /// Revoke a single JWT by its `jti`. Unlike `revoke` (which invalidates
 /// every token in an entire DID's act-chain), this targets one specific
 /// token id — the revocation still cascades transitively to any tokens
@@ -1191,6 +1433,9 @@ impl IdentityRotateToPqRpcCmd {
             tenzro_device_key::HardwareBackend::RemoteTpm => {
                 anyhow::bail!("an ML-DSA-65 key is not held through a remote TPM")
             }
+            tenzro_device_key::HardwareBackend::AndroidKeystore => {
+                anyhow::bail!("an ML-DSA-65 key is not held in the Android Keystore by this build")
+            }
         };
         let new_pq_key = pq
             .verifying_key()
@@ -1402,5 +1647,90 @@ mod public_network_tests {
             .unwrap()
             .cmd;
         assert!(cmd.execute().await.is_err());
+    }
+
+    /// The command a small device prints for its operator to enrol it
+    /// (sdk/tenzro-embedded `tz_enrolment_command`, its lines in the shared
+    /// signing fixture) is one this CLI takes, with the device's key.
+    #[test]
+    fn the_enrolment_command_a_device_prints_is_a_machine_registration() {
+        let fixture = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../sdk/fixtures/signing/composite.txt"),
+        )
+        .expect("the shared signing fixture");
+        let mut seen = 0;
+        for line in fixture.lines().filter(|l| l.starts_with("enrolment|")) {
+            let f: Vec<&str> = line.split('|').collect();
+            let words: Vec<&str> = f[5].split(' ').collect();
+            assert_eq!(&words[..3], ["tenzro", "identity", "register"]);
+            let cmd = IdentityRegisterCmd::try_parse_from(&words[2..]).expect(line);
+            assert_eq!(cmd.identity_type, "machine");
+            assert_eq!(cmd.controller.as_deref(), Some(f[2]));
+            assert_eq!(cmd.capabilities.as_deref(), Some(f[3]));
+            assert_eq!(cmd.public_key.as_deref(), Some(f[4]));
+            seen += 1;
+        }
+        assert!(seen > 0, "the fixture holds enrolment lines");
+    }
+}
+
+#[cfg(test)]
+mod identity_keys_tests {
+    use super::*;
+    use tenzro_native_ops::identity_keys::IdentityKeyChange;
+
+    #[test]
+    fn a_key_change_is_read_from_json_and_its_target_needs_no_approval() {
+        let did = "did:tenzro:machine:aa";
+        let revoke = format!(
+            r#"{{"revoke_delegation":{{"delegation_id":"{}"}}}}"#,
+            "07".repeat(32)
+        );
+        let op = identity_key_op(did, &revoke, did, None).unwrap();
+        assert_eq!(
+            op.change,
+            IdentityKeyChange::RevokeDelegation {
+                delegation_id: [7; 32]
+            }
+        );
+        // The same change approved later has the same target.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("approval.json");
+        let mut approval = unsigned_approval();
+        approval.root_public_key = vec![3; 64];
+        std::fs::write(&file, serde_json::to_vec(&approval).unwrap()).unwrap();
+        let approved = identity_key_op(did, &revoke, did, Some(&file)).unwrap();
+        assert_eq!(approved.target(), op.target());
+        assert_eq!(approved.approval, approval);
+
+        let compromised = identity_key_op(did, r#"{"compromised":{"version":2}}"#, did, None);
+        assert_eq!(
+            compromised.unwrap().change,
+            IdentityKeyChange::Compromised { version: 2 }
+        );
+        assert!(identity_key_op(did, r#"{"rotate":{}}"#, did, None).is_err());
+    }
+
+    #[test]
+    fn a_succession_target_covers_the_successor_and_the_reason() {
+        let root = "did:tenzro:human:aa";
+        let base = succession_op(root, "did:tenzro:human:bb", None, None).unwrap();
+        assert_eq!(
+            base.reason,
+            tenzro_types::identity::DEFAULT_REVOCATION_REASON
+        );
+        let other = succession_op(root, "did:tenzro:human:cc", None, None).unwrap();
+        assert_ne!(base.target(), other.target());
+        let reasoned = succession_op(root, "did:tenzro:human:bb", Some("retiring"), None).unwrap();
+        assert_ne!(base.target(), reasoned.target());
+        // An approved operation is checked: a root does not succeed itself.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("approval.json");
+        let mut approval = unsigned_approval();
+        approval.root_public_key = vec![3; 64];
+        std::fs::write(&file, serde_json::to_vec(&approval).unwrap()).unwrap();
+        assert!(succession_op(root, root, None, Some(&file)).is_err());
+        assert!(succession_op(root, "did:tenzro:human:bb", None, Some(&file)).is_ok());
     }
 }

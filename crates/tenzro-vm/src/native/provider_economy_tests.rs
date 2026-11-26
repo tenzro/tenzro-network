@@ -219,6 +219,7 @@ fn a_controller_paying_through_its_own_agent_earns_nothing() {
         payer_agent: Some(agent.into()),
         attribution: app("did:tenzro:human:dana"),
         network_share_paid: false,
+        paid_at_ms: None,
     };
     settle(&mut state, agent_wallet, controller, 100 * TNZO, &earning);
     assert!(work(&state).is_empty(), "{:?}", work(&state));
@@ -274,6 +275,37 @@ fn a_bonded_payee_earns_provider_work_of_its_class() {
             }
             None => assert!(rows.is_empty(), "{rows:?}"),
         }
+    }
+}
+
+/// A paid request a bonded provider served records its hour on the payee's
+/// identity once the gate is live, and nothing while it is dormant; a
+/// payment that answers no request records nothing.
+#[test]
+fn a_paid_request_records_the_served_hour_only_once_the_gate_is_live() {
+    use super::super::paid_readiness::{PAID_READINESS_KEY, served_paid_in_hour};
+    let did = "did:tenzro:human:carol";
+    let at = 7 * MARKET_EPOCH_MS + 1;
+    for (live, paid_at) in [(false, Some(at)), (true, Some(at)), (true, None)] {
+        let (mut state, payer, payee) = parties();
+        bond_compute(&mut state, payee, did);
+        if live {
+            set_param(&mut state, PAID_READINESS_KEY, 0);
+        }
+        let mut earning =
+            super::super::payment_settlement::escrow_earning(&state, payee.as_bytes(), false, None);
+        earning.paid_at_ms = paid_at;
+        settle(&mut state, payer, payee, 100 * TNZO, &earning);
+        assert_eq!(
+            work(&state).len(),
+            1,
+            "the provider work is recorded either way"
+        );
+        assert_eq!(
+            served_paid_in_hour(&state, did, 7),
+            live && paid_at.is_some(),
+            "live={live} paid_at={paid_at:?}"
+        );
     }
 }
 
@@ -429,4 +461,60 @@ proptest! {
             prop_assert!(rows.is_empty());
         }
     }
+}
+
+/// A provider's settled value is kept in consensus state only once the rule
+/// is live: before, a provider settlement writes nothing; after, each one
+/// adds to the payee's record, and a new reward epoch moves the last one
+/// into the prior slot.
+#[test]
+fn a_providers_settled_value_is_kept_only_once_the_rule_is_live() {
+    let (mut state, payer, payee) = parties();
+    let paid = Earning {
+        provider: Some(WorkClass::ComputeLease),
+        ..Default::default()
+    };
+    settle(&mut state, payer, payee, 100 * TNZO, &paid);
+    assert_eq!(
+        read_provider_earned(&state, payee.as_bytes()),
+        None,
+        "dormant"
+    );
+
+    set_param(&mut state, PROVIDER_REVENUE_KEY, 0);
+    settle(&mut state, payer, payee, 100 * TNZO, &paid);
+    settle(&mut state, payer, payee, 50 * TNZO, &paid);
+    settle(&mut state, payer, payee, 7 * TNZO, &Earning::default());
+    let earned = read_provider_earned(&state, payee.as_bytes()).unwrap();
+    assert_eq!(
+        (earned.epoch, earned.value, earned.settlements),
+        (0, 150 * TNZO, 2)
+    );
+    assert_eq!(earned.prior_epoch, None);
+    assert_eq!(
+        read_provider_earned(&state, payer.as_bytes()),
+        None,
+        "a settlement with no provider work is not a provider's revenue"
+    );
+
+    let mut rs = rewards::read_reward_state(&state).unwrap();
+    rs.current_epoch = 3;
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        rewards::REWARD_STATE_KEY.as_bytes(),
+        serde_json::to_vec(&rs).unwrap(),
+    );
+    settle(&mut state, payer, payee, 20 * TNZO, &paid);
+    let earned = read_provider_earned(&state, payee.as_bytes()).unwrap();
+    assert_eq!(
+        earned,
+        ProviderEarned {
+            epoch: 3,
+            value: 20 * TNZO,
+            settlements: 1,
+            prior_epoch: Some(0),
+            prior_value: 150 * TNZO,
+            prior_settlements: 2,
+        }
+    );
 }

@@ -12,11 +12,13 @@
 //! - [`store`]: the newest verified notice, cached on disk.
 //! - [`banner`]: the one-line message, shown at most once per version per day,
 //!   and the rules that hide it.
+//! - [`rollout`]: when an automatic install may start on this machine.
 //!
 //! The format is described in `docs/UPDATE-NOTICE.md`.
 
 pub mod banner;
 pub mod notice;
+pub mod rollout;
 pub mod store;
 
 pub use notice::{Notice, NoticeError, PlatformArchive, Policy, Severity, Version};

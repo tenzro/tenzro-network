@@ -742,6 +742,10 @@ mod tests {
             let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
             self.publish(Bytes::from(bytes)).await
         }
+
+        async fn release(&self, _hashes: &[[u8; 32]]) -> std::result::Result<(), String> {
+            Ok(())
+        }
     }
 
     fn signed_manifest_roundtrip_input() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
@@ -848,6 +852,87 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("manifest hash mismatch"));
+    }
+
+    /// An attester answering with a fixed measurement and recording the key
+    /// it was asked to attest.
+    struct FixedEnclave(String);
+
+    #[async_trait]
+    impl RecipientEnclaveAttester for FixedEnclave {
+        async fn attest(&self, _did: &str, _key: &HybridPublicKey) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A recipient the owner pinned to an enclave measurement gets the model
+    /// only on a node that proves that measurement: with no attester
+    /// installed, or an enclave measuring something else, the install is
+    /// refused and no file is written; with the pinned measurement it opens.
+    #[tokio::test]
+    async fn a_recipient_pinned_to_a_measurement_unseals_only_for_that_enclave() {
+        let (_dir, path, data) = signed_manifest_roundtrip_input();
+        let fetcher = MemFetcher::new();
+        let recipient_kp = HybridSecretKey::generate();
+        let pinned = "ab".repeat(48);
+        let specs = vec![RecipientSpec {
+            did: "did:tenzro:machine:abc".to_string(),
+            recipient_key: recipient_kp.public().clone(),
+            enclave_measurement_hex: Some(pinned.clone()),
+        }];
+        let mut manifest = seal_model_file(
+            &path,
+            "test-model",
+            "model.gguf",
+            "did:tenzro:human:owner",
+            &specs,
+            512 * 1024,
+            &fetcher,
+        )
+        .await
+        .unwrap();
+        sign_manifest(&mut manifest);
+        let dest = path.parent().unwrap().join("restored.gguf");
+
+        let err = unseal_model_to_file(
+            &manifest,
+            "did:tenzro:machine:abc",
+            &recipient_kp,
+            &dest,
+            &fetcher,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no enclave attester"), "{err}");
+        assert!(!dest.exists());
+
+        let other = FixedEnclave("cd".repeat(48));
+        let err = unseal_model_to_file(
+            &manifest,
+            "did:tenzro:machine:abc",
+            &recipient_kp,
+            &dest,
+            &fetcher,
+            Some(&other),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("measurement mismatch"), "{err}");
+        assert!(!dest.exists());
+
+        let right = FixedEnclave(pinned.to_uppercase());
+        unseal_model_to_file(
+            &manifest,
+            "did:tenzro:machine:abc",
+            &recipient_kp,
+            &dest,
+            &fetcher,
+            Some(&right),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
     }
 
     /// The content key is wrapped hybrid: a recipient holding only the X25519

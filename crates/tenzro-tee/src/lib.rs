@@ -61,6 +61,7 @@
 
 pub mod certs;
 pub mod detection;
+pub mod eat;
 pub mod error;
 pub mod measurements;
 pub mod registry;
@@ -76,6 +77,7 @@ pub mod x509;
 // unmodified. See the crate docs.
 
 pub mod hardware_identity;
+pub mod holder_attest;
 pub mod identity_evidence;
 pub mod nvidia_device;
 pub mod nvidia_rim;
@@ -86,6 +88,9 @@ pub mod tpm_attest;
 
 pub mod confidential_job;
 pub mod key_release;
+
+#[cfg(any(feature = "intel-tdx", feature = "amd-sev-snp"))]
+mod collateral_cache;
 
 #[cfg(feature = "intel-tdx")]
 pub mod intel_tdx;
@@ -123,7 +128,9 @@ pub use error::{Result, TeeError};
 pub use hardware_identity::HardwareIdentity;
 pub use registry::TeeRegistry;
 pub use traits::TeeProvider;
-pub use verify::{VerifiedAttestation, VerifyPolicy, configure_nvidia_jwks, verify_report};
+pub use verify::{
+    VerifiedAttestation, VerifyPolicy, configure_nvidia_jwks, replace_nvidia_jwks, verify_report,
+};
 
 // Re-export vendor implementations
 #[cfg(feature = "intel-tdx")]

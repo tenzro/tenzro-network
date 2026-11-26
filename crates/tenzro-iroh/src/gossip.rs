@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures::StreamExt;
 use iroh::endpoint::{
-    AfterHandshakeOutcome, Connection, EndpointHooks, VarInt, WeakConnectionHandle,
+    AfterHandshakeOutcome, Connection, ConnectionError, EndpointHooks, VarInt, WeakConnectionHandle,
 };
 use iroh::{Endpoint, EndpointId};
 use iroh_gossip::api::{Event, GossipSender};
@@ -48,7 +48,7 @@ use iroh_gossip::{Gossip, TopicId};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::error::{IrohError, IrohResult};
 
@@ -90,6 +90,84 @@ const MIN_NEIGHBOURS: usize = 3;
 /// Close code sent on a gossip connection to a peer that is not allowed.
 const REFUSED: u32 = 1;
 
+/// Reason sent with [`REFUSED`].
+const REFUSED_REASON: &[u8] = b"gossip peer not allowed";
+
+/// How long a peer that refused this node as a gossip neighbour is not
+/// asked again after its first refusal; each further refusal doubles it.
+const REFUSAL_PAUSE: Duration = Duration::from_secs(30);
+
+/// The longest a refusing peer is left alone before it is asked again.
+const REFUSAL_PAUSE_MAX: Duration = Duration::from_secs(15 * 60);
+
+/// Peers whose refusals, given or received, are remembered.
+const MAX_REFUSALS: usize = 1024;
+
+/// The pause after the `count`th time in a row: `first`, doubled each
+/// further time, up to [`REFUSAL_PAUSE_MAX`].
+fn growing_pause(first: Duration, count: u32) -> Duration {
+    let doublings = count.saturating_sub(1).min(16);
+    first.saturating_mul(1 << doublings).min(REFUSAL_PAUSE_MAX)
+}
+
+/// The peers that refused this node as a gossip neighbour, and until when
+/// each is left alone.
+#[derive(Default)]
+struct Refusals {
+    by_peer: HashMap<EndpointId, Refusal>,
+}
+
+struct Refusal {
+    count: u32,
+    until: Instant,
+}
+
+impl Refusals {
+    /// Records that `peer` refused this node at `now`. A refusal met while
+    /// the peer is already left alone changes nothing; otherwise it starts a
+    /// longer pause than the one before and returns the refusals in a row
+    /// and the pause.
+    fn note(&mut self, peer: EndpointId, now: Instant) -> Option<(u32, Duration)> {
+        self.note_from(peer, now, REFUSAL_PAUSE)
+    }
+
+    /// [`Self::note`] with the pause starting at `first`.
+    fn note_from(
+        &mut self,
+        peer: EndpointId,
+        now: Instant,
+        first: Duration,
+    ) -> Option<(u32, Duration)> {
+        if self.paused(peer, now) {
+            return None;
+        }
+        if self.by_peer.len() >= MAX_REFUSALS && !self.by_peer.contains_key(&peer) {
+            self.by_peer.retain(|_, r| now < r.until);
+            if self.by_peer.len() >= MAX_REFUSALS {
+                return None;
+            }
+        }
+        let refusal = self.by_peer.entry(peer).or_insert(Refusal {
+            count: 0,
+            until: now,
+        });
+        refusal.count = refusal.count.saturating_add(1);
+        let pause = growing_pause(first, refusal.count);
+        refusal.until = now + pause;
+        Some((refusal.count, pause))
+    }
+
+    /// Whether `peer` is left alone at `now`.
+    fn paused(&self, peer: EndpointId, now: Instant) -> bool {
+        self.by_peer.get(&peer).is_some_and(|r| now < r.until)
+    }
+
+    /// Forgets the refusals of `peer`: it took this node as a neighbour.
+    fn forgive(&mut self, peer: EndpointId) {
+        self.by_peer.remove(&peer);
+    }
+}
+
 /// The iroh-gossip topic carrying `name` on the chain `chain_id`.
 pub fn topic_id(chain_id: u64, name: &str) -> TopicId {
     let mut hasher = blake3::Hasher::new_derive_key("tenzro gossip topic");
@@ -117,7 +195,7 @@ pub trait GossipValidator: Send + Sync + fmt::Debug + 'static {
     fn admit(&self, topic: &str, from: EndpointId) -> Verdict;
 
     /// Hears that `from` delivered a message this node has already seen.
-    fn duplicate(&self, from: EndpointId);
+    fn duplicate(&self, topic: &str, from: EndpointId, bytes: usize);
 
     /// Judges a message on `topic` delivered by `from`.
     fn check(&self, topic: &str, from: EndpointId, content: &[u8]) -> Verdict;
@@ -146,6 +224,10 @@ pub struct GossipGate {
 struct GateInner {
     validator: RwLock<Option<Arc<dyn GossipValidator>>>,
     connections: Mutex<HashMap<EndpointId, Vec<WeakConnectionHandle>>>,
+    /// Peers that refused this node.
+    refusals: Mutex<Refusals>,
+    /// Peers this node refused and said so about.
+    refused: Mutex<HashSet<EndpointId>>,
 }
 
 impl fmt::Debug for GossipGate {
@@ -177,9 +259,64 @@ impl GossipGate {
             .unwrap_or_default();
         for handle in handles {
             if let Some(conn) = handle.upgrade() {
-                conn.close(VarInt::from_u32(REFUSED), b"gossip peer not allowed");
+                conn.close(VarInt::from_u32(REFUSED), REFUSED_REASON);
             }
         }
+    }
+
+    /// Whether `peer` refused this node and is still left alone.
+    fn paused(&self, peer: EndpointId, now: Instant) -> bool {
+        self.inner.refusals.lock().paused(peer, now)
+    }
+
+    /// `peer` took this node as a neighbour: its earlier refusals are
+    /// forgotten.
+    fn forgive(&self, peer: EndpointId) {
+        self.inner.refusals.lock().forgive(peer);
+    }
+
+    /// `peer` closed a gossip connection as not allowed: it is not asked
+    /// again until a pause that grows with each refusal is over. The reason
+    /// is said once for the peer.
+    fn refused_by(&self, peer: EndpointId) {
+        let Some((count, pause)) = self.inner.refusals.lock().note(peer, Instant::now()) else {
+            return;
+        };
+        if count == 1 {
+            info!(
+                target: "tenzro_iroh::gossip",
+                peer = %peer,
+                pause_secs = pause.as_secs(),
+                "peer refused this node as a gossip neighbour: it accepts only the peers its rules allow (a validator: its boot list and the validators); it is asked again after a growing pause"
+            );
+        } else {
+            debug!(target: "tenzro_iroh::gossip", peer = %peer, count, pause_secs = pause.as_secs(), "peer refused this node as a gossip neighbour again");
+        }
+    }
+
+    /// Watches `conn` for the peer closing it as not allowed.
+    fn watch_for_refusal(&self, conn: &Connection) {
+        let peer = conn.remote_id();
+        let closed = conn.weak_handle().closed();
+        let gate = self.clone();
+        tokio::spawn(async move {
+            let Some(closed) = closed.await else {
+                return;
+            };
+            if let ConnectionError::ApplicationClosed(close) = &closed.reason
+                && close.error_code == VarInt::from_u32(REFUSED)
+                && close.reason.as_ref() == REFUSED_REASON
+            {
+                gate.refused_by(peer);
+            }
+        });
+    }
+
+    /// Whether this is the first gossip connection of `peer` this node
+    /// refuses, of the peers it remembers refusing.
+    fn first_refusal_of(&self, peer: EndpointId) -> bool {
+        let mut refused = self.inner.refused.lock();
+        refused.len() < MAX_REFUSALS && refused.insert(peer)
     }
 }
 
@@ -195,12 +332,17 @@ impl EndpointHooks for GossipGate {
             }
             let remote = conn.remote_id();
             if !self.allows(remote) {
-                debug!(target: "tenzro_iroh::gossip", peer = %remote, "gossip connection refused");
+                if self.first_refusal_of(remote) {
+                    info!(target: "tenzro_iroh::gossip", peer = %remote, "gossip connection refused: this node's rules do not allow the peer as a gossip neighbour (said once for this peer)");
+                } else {
+                    debug!(target: "tenzro_iroh::gossip", peer = %remote, "gossip connection refused");
+                }
                 return AfterHandshakeOutcome::Reject {
                     error_code: VarInt::from_u32(REFUSED),
-                    reason: b"gossip peer not allowed".to_vec(),
+                    reason: REFUSED_REASON.to_vec(),
                 };
             }
+            self.watch_for_refusal(conn);
             let mut connections = self.inner.connections.lock();
             let handles = connections.entry(remote).or_default();
             handles.retain(|h| h.upgrade().is_some());
@@ -283,6 +425,11 @@ impl ValidationTicket {
         }
     }
 
+    /// The neighbour that delivered the message.
+    pub fn from(&self) -> EndpointId {
+        self.from
+    }
+
     /// The message checked out: pass it on to this node's neighbours.
     pub fn accept(mut self) {
         self.report(Verdict::Accept);
@@ -314,9 +461,8 @@ struct SeenCache {
 }
 
 impl SeenCache {
-    /// Records `content`; false if it was already recorded.
-    fn insert(&mut self, content: &[u8]) -> bool {
-        let now = Instant::now();
+    /// Forgets what expired, and the oldest entries of a full cache.
+    fn prune(&mut self, now: Instant) {
         while let Some(&(hash, at)) = self.order.front() {
             if now.duration_since(at) <= SEEN_EXPIRY && self.order.len() < SEEN_CAPACITY {
                 break;
@@ -324,6 +470,18 @@ impl SeenCache {
             self.order.pop_front();
             self.set.remove(&hash);
         }
+    }
+
+    /// Whether `content` is recorded.
+    fn contains(&mut self, content: &[u8]) -> bool {
+        self.prune(Instant::now());
+        self.set.contains(blake3::hash(content).as_bytes())
+    }
+
+    /// Records `content`; false if it was already recorded.
+    fn insert(&mut self, content: &[u8]) -> bool {
+        let now = Instant::now();
+        self.prune(now);
         let hash = *blake3::hash(content).as_bytes();
         if !self.set.insert(hash) {
             return false;
@@ -352,6 +510,11 @@ struct State {
     transport: Option<Attached>,
     known: BTreeSet<EndpointId>,
     topics: HashMap<Arc<str>, Topic>,
+    /// The topics each peer is a direct neighbour on.
+    around: HashMap<EndpointId, usize>,
+    /// Known peers asked to be a neighbour again while a neighbour on no
+    /// topic, and until when each is left alone.
+    unanswered: Refusals,
 }
 
 /// Topic broadcast over iroh-gossip with the node's validation rules on
@@ -476,6 +639,23 @@ impl GossipLayer {
     /// Publishes `content` on `name` to every direct neighbour of the topic,
     /// joining the topic if needed.
     pub async fn publish(self: &Arc<Self>, name: &str, content: Bytes) -> IrohResult<()> {
+        self.publish_if(name, content, false).await.map(|_| ())
+    }
+
+    /// [`Self::publish`], unless this node has already seen `content`,
+    /// delivered by a neighbour or published by itself: a message several
+    /// nodes hold byte for byte goes out from the first of them only.
+    /// Returns whether it was published.
+    pub async fn publish_unseen(self: &Arc<Self>, name: &str, content: Bytes) -> IrohResult<bool> {
+        self.publish_if(name, content, true).await
+    }
+
+    async fn publish_if(
+        self: &Arc<Self>,
+        name: &str,
+        content: Bytes,
+        unseen_only: bool,
+    ) -> IrohResult<bool> {
         if content.len() > MAX_GOSSIP_MESSAGE {
             return Err(IrohError::Backend(format!(
                 "gossip message of {} bytes exceeds {MAX_GOSSIP_MESSAGE}",
@@ -492,22 +672,25 @@ impl GossipLayer {
             .map_err(|_| IrohError::Backend(format!("gossip topic {name} closed")))?
             .clone()
             .ok_or_else(|| IrohError::Backend(format!("gossip topic {name} closed")))?;
-        self.seen.lock().insert(&content);
+        if !self.seen.lock().insert(&content) && unseen_only {
+            return Ok(false);
+        }
         sender
             .broadcast_neighbors(content)
             .await
-            .map_err(|e| IrohError::Backend(format!("gossip publish on {name}: {e}")))
+            .map_err(|e| IrohError::Backend(format!("gossip publish on {name}: {e}")))?;
+        Ok(true)
     }
 
     /// Adds peers this node joins its topics through: they are asked to
     /// become neighbours on every open topic and bootstrap topics opened
-    /// later.
+    /// later. A peer the validator does not allow is not dialled.
     pub async fn add_peers(&self, peers: impl IntoIterator<Item = EndpointId>) {
         let (fresh, senders) = {
             let mut state = self.state.lock();
             let fresh: Vec<EndpointId> = peers
                 .into_iter()
-                .filter(|p| state.known.insert(*p))
+                .filter(|p| self.validator.allows(*p) && state.known.insert(*p))
                 .collect();
             let senders: Vec<GossipSender> = state
                 .topics
@@ -549,11 +732,60 @@ impl GossipLayer {
     }
 
     /// The allowed known peers, best scored first, that a topic opens
-    /// through.
+    /// through. A peer that refused this node is left out until its pause
+    /// is over.
     fn bootstrap(&self) -> Vec<EndpointId> {
         let mut peers = self.peers();
+        if let Some(gate) = self.gate() {
+            let now = Instant::now();
+            peers.retain(|p| !gate.paused(*p, now));
+        }
         peers.truncate(BOOTSTRAP_PEERS);
         peers
+    }
+
+    /// The known peers a topic short of neighbours asks again: the ones not
+    /// in `around`, its own neighbours. A peer that is a neighbour on some
+    /// other topic is asked every time. One that is a neighbour on no topic
+    /// is asked, then left alone for a pause that starts at one check, doubles
+    /// each time it is asked and ends for good once it becomes a neighbour:
+    /// an endpoint key lasts one boot, so the id of a peer that restarted
+    /// never answers again.
+    fn ask_again(&self, around: &HashSet<EndpointId>, now: Instant) -> Vec<EndpointId> {
+        let candidates = self.bootstrap();
+        let mut state = self.state.lock();
+        candidates
+            .into_iter()
+            .filter(|p| !around.contains(p))
+            .filter(|p| {
+                state.around.contains_key(p)
+                    || state.unanswered.note_from(*p, now, REJOIN_CHECK).is_some()
+            })
+            .collect()
+    }
+
+    /// `peer` became a direct neighbour on one more topic.
+    fn neighbour_up(&self, peer: EndpointId) {
+        let mut state = self.state.lock();
+        *state.around.entry(peer).or_default() += 1;
+        state.unanswered.forgive(peer);
+    }
+
+    /// `peer` stopped being a direct neighbour on one topic.
+    fn neighbour_down(&self, peer: EndpointId) {
+        let mut state = self.state.lock();
+        if let Some(topics) = state.around.get_mut(&peer) {
+            *topics -= 1;
+            if *topics == 0 {
+                state.around.remove(&peer);
+            }
+        }
+    }
+
+    /// The gate screening this layer's connections, once a transport is
+    /// attached.
+    fn gate(&self) -> Option<GossipGate> {
+        self.state.lock().transport.as_ref().map(|t| t.gate.clone())
     }
 
     /// Remembers a neighbour met on some topic as a bootstrap candidate.
@@ -575,12 +807,8 @@ impl GossipLayer {
         if self.validator.allows(peer) {
             return;
         }
-        let gate = {
-            let mut state = self.state.lock();
-            state.known.remove(&peer);
-            state.transport.as_ref().map(|t| t.gate.clone())
-        };
-        if let Some(gate) = gate {
+        self.state.lock().known.remove(&peer);
+        if let Some(gate) = self.gate() {
             debug!(target: "tenzro_iroh::gossip", peer = %peer, "dropping gossip neighbour");
             gate.disconnect(peer);
         }
@@ -602,12 +830,23 @@ impl GossipLayer {
             self.drop_if_disallowed(from);
             return;
         }
-        if !self.seen.lock().insert(&content) {
+        if self.seen.lock().contains(&content) {
             trace!(target: "tenzro_iroh::gossip", topic = %topic, "duplicate dropped");
-            self.validator.duplicate(from);
+            self.validator.duplicate(topic, from, content.len());
             return;
         }
-        if self.validator.check(topic, from, &content) != Verdict::Accept {
+        let verdict = self.validator.check(topic, from, &content);
+        // A message the validator could not judge from this neighbour is not
+        // recorded as seen: another neighbour may deliver the same content
+        // and be heard for it. An accepted or an invalid one is recorded, so
+        // its replays cost nothing. Replays of an ignored one are judged
+        // again, each charged to the neighbour's budget by `admit` above.
+        if verdict != Verdict::Ignore && !self.seen.lock().insert(&content) {
+            trace!(target: "tenzro_iroh::gossip", topic = %topic, "duplicate dropped");
+            self.validator.duplicate(topic, from, content.len());
+            return;
+        }
+        if verdict != Verdict::Accept {
             self.drop_if_disallowed(from);
             return;
         }
@@ -713,11 +952,7 @@ async fn run_topic(
                         let Some(layer) = layer.upgrade() else {
                             return;
                         };
-                        let lost: Vec<EndpointId> = layer
-                            .bootstrap()
-                            .into_iter()
-                            .filter(|p| !around.contains(p))
-                            .collect();
+                        let lost = layer.ask_again(&around, Instant::now());
                         if !lost.is_empty()
                             && let Err(e) = sender.join_peers(lost).await
                         {
@@ -743,21 +978,30 @@ async fn run_topic(
                         .await
                 }
                 Ok(Event::NeighborUp(peer)) => {
-                    around.insert(peer);
+                    if around.insert(peer) {
+                        layer.neighbour_up(peer);
+                    }
                     neighbours.store(around.len(), Ordering::Relaxed);
                     if layer.validator.allows(peer) {
                         layer.learn(peer);
+                        if let Some(gate) = layer.gate() {
+                            gate.forgive(peer);
+                        }
                     } else {
                         layer.drop_if_disallowed(peer);
                     }
                 }
                 Ok(Event::NeighborDown(peer)) => {
-                    around.remove(&peer);
+                    if around.remove(&peer) {
+                        layer.neighbour_down(peer);
+                    }
                     neighbours.store(around.len(), Ordering::Relaxed);
                 }
                 Ok(Event::Lagged) => {
                     warn!(target: "tenzro_iroh::gossip", topic = %name, "gossip subscriber lagged; messages were missed");
                 }
+                // The event type can grow; this layer acts on the ones above.
+                Ok(_) => {}
                 Err(e) => {
                     debug!(target: "tenzro_iroh::gossip", topic = %name, error = %e, "gossip topic stream ended");
                     break;
@@ -766,12 +1010,21 @@ async fn run_topic(
         }
         ready.send_replace(None);
         neighbours.store(0, Ordering::Relaxed);
+        if let Some(layer) = layer.upgrade() {
+            for peer in around {
+                layer.neighbour_down(peer);
+            }
+        }
         warn!(target: "tenzro_iroh::gossip", topic = %name, "gossip topic closed; reopening");
         tokio::time::sleep(REJOIN_DELAY).await;
     }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
     use iroh::address_lookup::memory::MemoryLookup;
@@ -781,10 +1034,15 @@ mod tests {
     /// Accepts everything except content starting with `b"bad"`, and bans a
     /// neighbour after two rejected messages. With `only_from` set, messages
     /// delivered by any other neighbour are ignored, which pins the path a
-    /// message takes whatever links the membership layer forms.
+    /// message takes whatever links the membership layer forms. With `named`
+    /// set, only those endpoints are allowed as neighbours at all. With
+    /// `unjudged_from` set, the content check ignores what that neighbour
+    /// delivers.
     #[derive(Debug, Default)]
     struct Rules {
         only_from: Mutex<Option<EndpointId>>,
+        named: Mutex<Option<HashSet<EndpointId>>>,
+        unjudged_from: Mutex<Option<EndpointId>>,
         rejected: AtomicUsize,
         strikes: Mutex<HashMap<EndpointId, i32>>,
     }
@@ -805,8 +1063,11 @@ mod tests {
                 _ => Verdict::Accept,
             }
         }
-        fn duplicate(&self, _from: EndpointId) {}
+        fn duplicate(&self, _topic: &str, _from: EndpointId, _bytes: usize) {}
         fn check(&self, _topic: &str, from: EndpointId, content: &[u8]) -> Verdict {
+            if *self.unjudged_from.lock() == Some(from) {
+                return Verdict::Ignore;
+            }
             if content.starts_with(b"bad") {
                 self.rejected.fetch_add(1, Ordering::Relaxed);
                 self.strike(from);
@@ -822,6 +1083,11 @@ mod tests {
         }
         fn allows(&self, peer: EndpointId) -> bool {
             self.strikes.lock().get(&peer).copied().unwrap_or(0) < 2
+                && self
+                    .named
+                    .lock()
+                    .as_ref()
+                    .is_none_or(|named| named.contains(&peer))
         }
         fn score(&self, peer: EndpointId) -> i32 {
             -self.strikes.lock().get(&peer).copied().unwrap_or(0)
@@ -842,7 +1108,7 @@ mod tests {
 
     async fn node_with_key(lookup: &MemoryLookup, key: iroh::SecretKey) -> Node {
         let gate = GossipGate::default();
-        let endpoint = Endpoint::builder(presets::Minimal)
+        let endpoint = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
             .secret_key(key)
             .hooks(gate.clone())
             .bind()
@@ -1050,13 +1316,59 @@ mod tests {
         }
     }
 
-    /// A gossip connection superseded by a newer one to the same peer is
-    /// closed once neither side sends on it. Each time a peer is dialled
-    /// again the old connection is replaced for sending, and keep-alives
-    /// would otherwise hold every replaced one open: pairs of validators
-    /// gathered hundreds of them.
+    /// Two nodes hold the same message byte for byte. The one that has had
+    /// it delivered does not publish it again; a message it has not seen it
+    /// publishes, and `publish` goes out whatever was seen.
     #[tokio::test]
-    async fn a_superseded_connection_is_closed() {
+    async fn a_message_already_delivered_is_not_published_again() {
+        let lookup = MemoryLookup::new();
+        let first = node(&lookup).await;
+        let mut second = node(&lookup).await;
+        first.layer.join("blocks");
+        second.layer.join("blocks");
+        second.layer.add_peers([first.endpoint.id()]).await;
+        wait_for_neighbours(&first.layer, "blocks", 1).await;
+        let block = Bytes::from_static(b"block 7");
+        assert!(
+            first
+                .layer
+                .publish_unseen("blocks", block.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(&next(&mut second.inbound).await.content[..], b"block 7");
+        assert!(
+            !second
+                .layer
+                .publish_unseen("blocks", block.clone())
+                .await
+                .unwrap(),
+            "published again by the node it was delivered to"
+        );
+        assert!(
+            !first
+                .layer
+                .publish_unseen("blocks", block.clone())
+                .await
+                .unwrap(),
+            "published twice by one node"
+        );
+        assert!(
+            second
+                .layer
+                .publish_unseen("blocks", Bytes::from_static(b"block 8"))
+                .await
+                .unwrap()
+        );
+        second.layer.publish("blocks", block).await.unwrap();
+    }
+
+    /// However often a peer is dialled again, the connections neither side
+    /// sends on are closed: at most one stays open for each direction.
+    /// Keep-alives would otherwise hold every spare one open, and pairs of
+    /// validators gathered hundreds of them.
+    #[tokio::test]
+    async fn spare_connections_to_a_peer_are_closed() {
         let lookup = MemoryLookup::new();
         let a = node(&lookup).await;
         let mut b = node(&lookup).await;
@@ -1091,30 +1403,182 @@ mod tests {
             "one gossip connection before dialling again"
         );
 
-        let again = a
-            .endpoint
-            .connect(b.endpoint.addr(), ALPN_GOSSIP)
-            .await
-            .unwrap();
-        gossip.handle_connection(again).await.unwrap();
+        let mut all = first;
+        for _ in 0..4 {
+            let again = a
+                .endpoint
+                .connect(b.endpoint.addr(), ALPN_GOSSIP)
+                .await
+                .unwrap();
+            gossip.handle_connection(again.clone()).await.unwrap();
+            all.push(again);
+        }
 
-        let mut closed = false;
-        for _ in 0..200 {
-            if first[0].close_reason().is_some() {
-                closed = true;
+        // A connection goes ten seconds after the last stream on it.
+        let mut open = all.len();
+        for _ in 0..800 {
+            open = all.iter().filter(|c| c.close_reason().is_none()).count();
+            if open <= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
-            closed,
-            "the replaced gossip connection was still open 10s after a newer one took over"
+            (1..=2).contains(&open),
+            "five gossip connections to one peer: {open} still open after 40s"
         );
         a.layer
             .publish("blocks", Bytes::from_static(b"two"))
             .await
             .unwrap();
         assert_eq!(&next(&mut b.inbound).await.content[..], b"two");
+    }
+
+    #[test]
+    fn the_pause_after_a_refusal_doubles_up_to_its_limit() {
+        assert_eq!(growing_pause(REFUSAL_PAUSE, 1), REFUSAL_PAUSE);
+        assert_eq!(growing_pause(REFUSAL_PAUSE, 2), REFUSAL_PAUSE * 2);
+        assert_eq!(growing_pause(REFUSAL_PAUSE, 3), REFUSAL_PAUSE * 4);
+        assert_eq!(growing_pause(REFUSAL_PAUSE, 6), REFUSAL_PAUSE_MAX);
+        assert_eq!(growing_pause(REFUSAL_PAUSE, u32::MAX), REFUSAL_PAUSE_MAX);
+    }
+
+    #[test]
+    fn a_refusing_peer_is_left_alone_for_a_growing_pause() {
+        let peer = iroh::SecretKey::from_bytes(&[1; 32]).public();
+        let other = iroh::SecretKey::from_bytes(&[2; 32]).public();
+        let start = Instant::now();
+        let mut refusals = Refusals::default();
+        assert!(!refusals.paused(peer, start));
+
+        assert_eq!(refusals.note(peer, start), Some((1, REFUSAL_PAUSE)));
+        assert!(refusals.paused(peer, start + REFUSAL_PAUSE - Duration::from_secs(1)));
+        assert!(!refusals.paused(other, start));
+        // A refusal met while the peer is left alone starts no new pause.
+        assert_eq!(refusals.note(peer, start + Duration::from_secs(1)), None);
+
+        let again = start + REFUSAL_PAUSE;
+        assert!(!refusals.paused(peer, again));
+        assert_eq!(refusals.note(peer, again), Some((2, REFUSAL_PAUSE * 2)));
+        assert!(refusals.paused(peer, again + REFUSAL_PAUSE));
+        assert!(!refusals.paused(peer, again + REFUSAL_PAUSE * 2));
+
+        refusals.forgive(peer);
+        assert!(!refusals.paused(peer, again));
+        assert_eq!(refusals.note(peer, again), Some((1, REFUSAL_PAUSE)));
+    }
+
+    #[test]
+    fn a_known_peer_that_never_answers_is_asked_again_on_a_growing_pause() {
+        let (layer, _rx) = GossipLayer::new(Arc::new(Rules::default()));
+        let gone = iroh::SecretKey::from_bytes(&[1; 32]).public();
+        let here = iroh::SecretKey::from_bytes(&[2; 32]).public();
+        layer.state.lock().known.extend([gone, here]);
+        // `here` is a neighbour on another topic; `gone` is one on none.
+        layer.neighbour_up(here);
+        let around = HashSet::new();
+        let t0 = Instant::now();
+
+        let mut asked = layer.ask_again(&around, t0);
+        asked.sort();
+        let mut both = vec![gone, here];
+        both.sort();
+        assert_eq!(asked, both, "every missing known peer is asked once");
+
+        // The silent peer is asked one check later, then two, then four;
+        // the peer known to be there at every check.
+        let mut asks = Vec::new();
+        for check in 1..=40u64 {
+            let at = t0 + REJOIN_CHECK * check as u32;
+            let asked = layer.ask_again(&around, at);
+            assert!(asked.contains(&here), "check {check}");
+            if asked.contains(&gone) {
+                asks.push(check);
+            }
+        }
+        assert_eq!(asks, vec![1, 3, 7, 15, 31]);
+
+        // Once it is a neighbour its silence is forgotten: after it is lost
+        // on every topic it is asked at the next check.
+        layer.neighbour_up(gone);
+        layer.neighbour_down(gone);
+        let later = t0 + REJOIN_CHECK * 41;
+        assert!(layer.ask_again(&around, later).contains(&gone));
+        assert!(
+            !layer
+                .ask_again(&around, later + Duration::from_secs(1))
+                .contains(&gone)
+        );
+    }
+
+    #[test]
+    fn a_neighbour_on_several_topics_is_one_until_the_last_is_lost() {
+        let (layer, _rx) = GossipLayer::new(Arc::new(Rules::default()));
+        let peer = iroh::SecretKey::from_bytes(&[3; 32]).public();
+        layer.state.lock().known.insert(peer);
+        layer.neighbour_up(peer);
+        layer.neighbour_up(peer);
+        layer.neighbour_down(peer);
+        assert!(layer.state.lock().around.contains_key(&peer));
+        layer.neighbour_down(peer);
+        assert!(layer.state.lock().around.is_empty());
+        // A report for a peer that is no neighbour changes nothing.
+        layer.neighbour_down(peer);
+        assert!(layer.state.lock().around.is_empty());
+    }
+
+    #[test]
+    fn remembered_refusals_are_bounded() {
+        let start = Instant::now();
+        let mut refusals = Refusals::default();
+        let peer = |n: usize| {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(n as u64 + 1).to_be_bytes());
+            iroh::SecretKey::from_bytes(&key).public()
+        };
+        for n in 0..MAX_REFUSALS {
+            assert!(refusals.note(peer(n), start).is_some());
+        }
+        assert_eq!(refusals.note(peer(MAX_REFUSALS), start), None);
+        // Once the pauses are over the old entries make room.
+        let later = start + REFUSAL_PAUSE;
+        assert!(refusals.note(peer(MAX_REFUSALS), later).is_some());
+        assert_eq!(refusals.by_peer.len(), 1);
+    }
+
+    /// A peer whose rules do not allow this node refuses its gossip
+    /// connection; this node then stops opening topics through it.
+    #[tokio::test]
+    async fn a_peer_that_refuses_this_node_is_not_asked_again_at_once() {
+        let lookup = MemoryLookup::new();
+        let closed = node(&lookup).await;
+        let asker = node(&lookup).await;
+        closed.rules.strike(asker.endpoint.id());
+        closed.rules.strike(asker.endpoint.id());
+        closed.layer.join("t");
+        asker.layer.join("t");
+        asker.layer.add_peers([closed.endpoint.id()]).await;
+
+        let gate = asker.layer.gate().unwrap();
+        for _ in 0..200 {
+            if gate.paused(closed.endpoint.id(), Instant::now()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            gate.paused(closed.endpoint.id(), Instant::now()),
+            "the refusal was noticed"
+        );
+        assert!(
+            asker.layer.peers().contains(&closed.endpoint.id()),
+            "the peer stays known"
+        );
+        assert!(
+            !asker.layer.bootstrap().contains(&closed.endpoint.id()),
+            "a peer that refused is not joined again while it is left alone"
+        );
+        assert_eq!(closed.layer.neighbour_count("t"), Some(0));
     }
 
     /// A neighbour that keeps sending invalid messages loses its gossip
@@ -1166,6 +1630,74 @@ mod tests {
         }
     }
 
+    /// A node that takes only the machines it names as gossip neighbours is
+    /// asked by a crowd of endpoints nobody named, each on a key of its own.
+    /// None becomes its neighbour, none of what they publish reaches it, none
+    /// is kept as a peer to join through, and the neighbour it named still
+    /// delivers.
+    ///
+    /// The rule that names machines is a test double here: this shows that
+    /// the gossip layer holds every connection, delivery and remembered peer
+    /// to whatever its validator's `allows` answers. The rule a node runs is
+    /// `tenzro-network`'s `GossipGuard::allows`, which asks the node's
+    /// identity source (`PeerIdentities::may_neighbour`); only a node set to
+    /// keep to its boot list and the validators' machines refuses an
+    /// endpoint no record names, and that is tested there
+    /// (`an_isolated_node_keeps_no_gossip_neighbour_outside_its_allowed_peers`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_crowd_of_unnamed_endpoints_gains_no_neighbour_and_delivers_nothing() {
+        const CROWD: usize = 24;
+        let lookup = MemoryLookup::new();
+        let mut honest = node(&lookup).await;
+        let named = node(&lookup).await;
+        *honest.rules.named.lock() = Some([named.endpoint.id()].into());
+        honest.layer.join("t");
+        named.layer.join("t");
+        named.layer.add_peers([honest.endpoint.id()]).await;
+        wait_for_neighbours(&honest.layer, "t", 1).await;
+
+        let mut crowd = Vec::new();
+        for _ in 0..CROWD {
+            let s = node(&lookup).await;
+            s.layer.join("t");
+            s.layer.add_peers([honest.endpoint.id()]).await;
+            crowd.push(s);
+        }
+        // Each asks again on a connection of its own, and publishes; with no
+        // neighbour a publish may fail, which is the point.
+        let honest_addr = honest.endpoint.addr();
+        let honest_addr = &honest_addr;
+        futures::future::join_all(crowd.iter().enumerate().map(|(i, s)| async move {
+            let _ = s.endpoint.connect(honest_addr.clone(), ALPN_GOSSIP).await;
+            let _ = s
+                .layer
+                .publish("t", Bytes::from(format!("from the crowd {i}")))
+                .await;
+        }))
+        .await;
+
+        named
+            .layer
+            .publish("t", Bytes::from_static(b"from the named machine"))
+            .await
+            .unwrap();
+        let got = next(&mut honest.inbound).await;
+        assert_eq!(&got.content[..], b"from the named machine");
+        assert_eq!(got.from, named.endpoint.id());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), honest.inbound.recv())
+                .await
+                .is_err(),
+            "something from the crowd was delivered"
+        );
+        assert_eq!(honest.layer.neighbour_count("t"), Some(1));
+        let kept = honest.layer.peers();
+        assert!(
+            crowd.iter().all(|s| !kept.contains(&s.endpoint.id())),
+            "an unnamed endpoint is kept as a peer to join through"
+        );
+    }
+
     /// A peer that went away and came back on the same endpoint key, knowing
     /// nobody, is joined again by the node that knew it: nothing waits for
     /// the peer to find its way back on its own.
@@ -1201,6 +1733,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(joined, "a joined the returning peer again");
+        // The publisher counts the returning peer too before it publishes:
+        // a message sent while only the returning side has the link is lost.
+        wait_for_neighbours(&a.layer, "t", 1).await;
         a.layer
             .publish("t", Bytes::from_static(b"after the return"))
             .await
@@ -1209,5 +1744,69 @@ mod tests {
             &next(&mut back.inbound).await.content[..],
             b"after the return"
         );
+    }
+
+    /// Content a neighbour delivered that the validator could not judge
+    /// from it is still heard from another neighbour, and passed on.
+    #[tokio::test]
+    async fn content_ignored_from_one_neighbour_is_heard_from_another() {
+        let lookup = MemoryLookup::new();
+        let mut hearer = node(&lookup).await;
+        let mut next_hop = node(&lookup).await;
+        hearer.layer.join("t");
+        next_hop.layer.join("t");
+        next_hop.layer.add_peers([hearer.endpoint.id()]).await;
+        wait_for_neighbours(&hearer.layer, "t", 1).await;
+
+        let unjudged = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        let trusted = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        *hearer.rules.unjudged_from.lock() = Some(unjudged);
+        let topic: Arc<str> = Arc::from("t");
+        let sender = {
+            let state = hearer.layer.state.lock();
+            state.topics["t"].sender.borrow().clone().unwrap()
+        };
+        let content = Bytes::from_static(b"a transfer someone else made");
+
+        hearer
+            .layer
+            .on_message(
+                &topic,
+                &sender,
+                unjudged,
+                DeliveryScope::Neighbors,
+                content.clone(),
+            )
+            .await;
+        assert!(
+            hearer.inbound.try_recv().is_err(),
+            "nothing is delivered from the neighbour that is not judged"
+        );
+
+        hearer
+            .layer
+            .on_message(
+                &topic,
+                &sender,
+                trusted,
+                DeliveryScope::Neighbors,
+                content.clone(),
+            )
+            .await;
+        let heard = next(&mut hearer.inbound).await;
+        assert_eq!(heard.from, trusted);
+        assert_eq!(heard.content, content);
+        assert_eq!(
+            next(&mut next_hop.inbound).await.content,
+            content,
+            "and it is passed on"
+        );
+
+        // Delivered once more, it is a duplicate.
+        hearer
+            .layer
+            .on_message(&topic, &sender, trusted, DeliveryScope::Neighbors, content)
+            .await;
+        assert!(hearer.inbound.try_recv().is_err());
     }
 }

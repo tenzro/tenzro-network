@@ -14,7 +14,7 @@ mod registrar;
 
 use base64::Engine;
 use litesvm::LiteSVM;
-use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
+use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
 use sha2::{Digest, Sha256};
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};
@@ -22,13 +22,13 @@ use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
 use solana_message::Message;
 use solana_signer::Signer;
-use solana_transaction::Transaction;
 use solana_transaction::versioned::VersionedTransaction;
+use solana_transaction::Transaction;
 use solana_transaction_error::TransactionError;
 
 use registrar::{
-    RegisterOperation, SignedRegistration, compress_p256, low_s, key_id, owner_address,
-    nonce_address, asset_address, vault_address,
+    asset_address, compress_p256, key_id, low_s, nonce_address, owner_address, vault_address,
+    RegisterOperation, SignedRegistration,
 };
 
 /// The registry's program id as declared by the vendored source.
@@ -166,7 +166,11 @@ impl Env {
 
     /// Send the transaction exactly as the node builds it: the shared
     /// builder's bytes, with the payer's signature written into the slot.
-    fn send_built(&mut self, reg: &SignedRegistration, payer: &Keypair) -> Result<(), TransactionError> {
+    fn send_built(
+        &mut self,
+        reg: &SignedRegistration,
+        payer: &Keypair,
+    ) -> Result<(), TransactionError> {
         self.top_up(&reg.operation.owner_key);
         let bh = self.svm.latest_blockhash().to_bytes();
         let fee_payer = payer.pubkey().to_bytes();
@@ -194,7 +198,9 @@ impl Env {
 }
 
 fn solana_sdk_ids_upgradeable() -> Address {
-    "BPFLoaderUpgradeab1e11111111111111111111111".parse().unwrap()
+    "BPFLoaderUpgradeab1e11111111111111111111111"
+        .parse()
+        .unwrap()
 }
 
 fn signing_key(seed: u8) -> SigningKey {
@@ -262,7 +268,10 @@ fn hardware_data(reg: &SignedRegistration) -> Vec<u8> {
 fn refused(result: Result<(), TransactionError>, code: u32) {
     assert_eq!(
         result,
-        Err(TransactionError::InstructionError(1, InstructionError::Custom(code))),
+        Err(TransactionError::InstructionError(
+            1,
+            InstructionError::Custom(code)
+        )),
     );
 }
 
@@ -290,7 +299,11 @@ fn a_hardware_key_registers_an_agent_paid_from_its_vault_and_the_sender_is_paid_
 
     let asset_acc = env.svm.get_account(&asset).expect("asset created");
     assert_eq!(asset_acc.owner, addr(registrar::MPL_CORE_PROGRAM_ID));
-    assert_eq!(&asset_acc.data[1..33], owner.as_ref(), "the owner address owns the asset");
+    assert_eq!(
+        &asset_acc.data[1..33],
+        owner.as_ref(),
+        "the owner address owns the asset"
+    );
 
     let agent_acc = env.svm.get_account(&agent).expect("agent account created");
     assert_eq!(agent_acc.owner, env.registry);
@@ -370,7 +383,10 @@ fn another_owners_vault_is_refused() {
     let digest = reg.operation.digest().unwrap();
     let mut ix = register_ix(&reg, &payer, hardware_data(&reg));
     ix.accounts[3] = AccountMeta::new(Env::vault(&owner_key(&other)), false);
-    let ixs = [secp_ix(&reg.signature, &reg.operation.owner_key, &digest), ix];
+    let ixs = [
+        secp_ix(&reg.signature, &reg.operation.owner_key, &digest),
+        ix,
+    ];
     refused(env.send(&payer, &ixs), WRONG_VAULT);
 }
 
@@ -492,7 +508,11 @@ fn a_signature_over_a_different_registration_is_refused() {
     elsewhere.collection = [0x42; 32];
     let e = sign(&key, elsewhere);
     let ixs = [
-        secp_ix(&e.signature, &e.operation.owner_key, &e.operation.digest().unwrap()),
+        secp_ix(
+            &e.signature,
+            &e.operation.owner_key,
+            &e.operation.digest().unwrap(),
+        ),
         register_ix(&signed, &payer, hardware_data(&signed)),
     ];
     refused(env.send(&payer, &ixs), MESSAGE_MISMATCH);
@@ -520,7 +540,9 @@ fn lamports_sent_to_the_nonce_address_do_not_block_the_first_registration() {
     let payer = env.payer();
     let kid = key_id(&owner_key(&key));
     let exempt = env.svm.minimum_balance_for_rent_exemption(0);
-    env.svm.airdrop(&addr(nonce_address(&kid).0), exempt).unwrap();
+    env.svm
+        .airdrop(&addr(nonce_address(&kid).0), exempt)
+        .unwrap();
     env.send_built(&sign(&key, env.operation(&key, 0, "did:prefunded")), &payer)
         .expect("registers");
 }
@@ -553,7 +575,8 @@ fn lamports_sent_to_the_asset_address_do_not_block_the_registration() {
     env.svm.airdrop(&asset, stray).unwrap();
 
     let before = env.svm.get_balance(&payer.pubkey()).unwrap();
-    env.send_built(&reg, &payer).expect("registers despite the pre-funded asset address");
+    env.send_built(&reg, &payer)
+        .expect("registers despite the pre-funded asset address");
 
     let asset_acc = env.svm.get_account(&asset).expect("asset created");
     assert_eq!(asset_acc.owner, addr(registrar::MPL_CORE_PROGRAM_ID));
@@ -619,7 +642,11 @@ fn send_passkey(
     };
     let ixs = [
         secp_ix(&signature, &reg.operation.owner_key, &message),
-        register_ix(&reg, payer, passkey_data(&reg.operation, &auth_data, &client)),
+        register_ix(
+            &reg,
+            payer,
+            passkey_data(&reg.operation, &auth_data, &client),
+        ),
     ];
     env.send(payer, &ixs)
 }

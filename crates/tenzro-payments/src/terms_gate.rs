@@ -25,6 +25,11 @@ pub struct PaymentIntent<'a> {
     pub counterparty: Option<&'a str>,
 }
 
+/// How long after untrusted input last reached an agent the actions it
+/// proposes count as deriving from it, in milliseconds. Every gate that
+/// marks an agent's actions as tainted holds the mark this long.
+pub const TAINT_HOLD_MS: u64 = 3_600_000;
+
 /// Decides a payment from the payer's consensus Terms. A payer with no Terms
 /// is not a delegated agent and pays under its own key; a delegated agent is
 /// held to its Terms and to its kill-switch state.

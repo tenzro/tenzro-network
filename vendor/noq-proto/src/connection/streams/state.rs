@@ -1,10 +1,6 @@
-use std::{
-    collections::{VecDeque, hash_map},
-    convert::TryFrom,
-    mem,
-};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use core::{convert::TryFrom, mem};
 
-use rustc_hash::FxHashMap;
 use tracing::{debug, trace};
 
 use super::{
@@ -12,9 +8,10 @@ use super::{
     StreamHalf,
 };
 use crate::{
-    Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
+    Dir, FxHashMap, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
     connection::{PacketBuilder, stats::FrameStats},
     frame::{self, FrameStruct},
+    hash_map,
     transport_parameters::TransportParameters,
 };
 
@@ -283,14 +280,16 @@ impl StreamsState {
             return Ok(ShouldTransmit(false));
         }
 
+        // We don't buffer data on stopped streams, so issue flow control credit immediately
+        let credit = rs.take_unread_credit();
+
         // Stopped streams become closed instantly on FIN, so check whether we need to clean up
         if closed {
             let rs = self.recv.remove(&id).flatten().unwrap();
             self.stream_recv_freed(id, rs);
         }
 
-        // We don't buffer data on stopped streams, so issue flow control credit immediately
-        Ok(self.add_read_credits(new_bytes))
+        Ok(self.add_read_credits(credit))
     }
 
     /// Process incoming RESET_STREAM frame
@@ -332,7 +331,7 @@ impl StreamsState {
             // Redundant reset
             return Ok(ShouldTransmit(false));
         }
-        let bytes_read = rs.assembler.bytes_read();
+        let credit = rs.take_unread_credit();
         let stopped = rs.stopped;
         let end = rs.end;
         if stopped {
@@ -345,15 +344,13 @@ impl StreamsState {
             self.events.push_back(StreamEvent::Readable { id });
         }
 
-        // Update connection-level flow control
-        Ok(if bytes_read != final_offset.into_inner() {
-            // bytes_read is always <= end, so this won't underflow.
-            self.data_recvd = self
-                .data_recvd
-                .saturating_add(u64::from(final_offset) - end);
-            self.add_read_credits(u64::from(final_offset) - bytes_read)
-        } else {
-            ShouldTransmit(false)
+        // Update connection-level flow control. `reset` checked that end <= final_offset.
+        self.data_recvd = self
+            .data_recvd
+            .saturating_add(u64::from(final_offset) - end);
+        Ok(match credit {
+            0 => ShouldTransmit(false),
+            _ => self.add_read_credits(credit),
         })
     }
 
@@ -580,7 +577,8 @@ impl StreamsState {
     #[cfg(test)]
     fn write_frames_for_test(&mut self, capacity: usize, fair: bool) -> frame::StreamMetaVec {
         let buf = &mut Vec::with_capacity(capacity);
-        let mut tbuf = crate::connection::TransmitBuf::new(buf, std::num::NonZeroUsize::MIN, 1_200);
+        let mut tbuf =
+            crate::connection::TransmitBuf::new(buf, core::num::NonZeroUsize::MIN, 1_200);
         tbuf.start_new_datagram_with_size(capacity);
         let builder = &mut PacketBuilder::simple_data_buf(&mut tbuf);
         let stats = &mut FrameStats::default();
@@ -966,6 +964,8 @@ pub(super) fn get_or_insert_recv(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use crate::{
         ReadableError, RecvStream, SendStream, TransportErrorCode, WriteError,
@@ -1287,6 +1287,81 @@ mod tests {
         );
         assert!(!client.recv.contains_key(&id), "stream state is freed");
         assert_eq!(client.max_remote[Dir::Uni as usize], prev_max + 1);
+    }
+
+    /// Connection-level credit for a stream that is both stopped and reset must be issued once
+    #[test]
+    fn stopped_reset_flow_control() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let initial_max = client.local_max_data;
+        let _ = client
+            .received(
+                frame::Stream {
+                    id,
+                    offset: 0,
+                    fin: false,
+                    data: Bytes::from_static(&[0; 32]),
+                },
+                32,
+            )
+            .unwrap();
+
+        let mut pending = Retransmits::default();
+        let mut recv = RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        };
+        recv.stop(0u32.into()).unwrap();
+        assert_eq!(client.local_max_data - initial_max, 32);
+
+        let _ = client
+            .received_reset(frame::ResetStream {
+                id,
+                error_code: 0u32.into(),
+                final_offset: 64u32.into(),
+            })
+            .unwrap();
+        assert_eq!(client.data_recvd, 64);
+        assert_eq!(client.local_max_data - initial_max, 64);
+    }
+
+    /// Connection-level credit for a stream that is both reset and stopped must be issued once
+    #[test]
+    fn reset_stopped_flow_control() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let initial_max = client.local_max_data;
+        let _ = client
+            .received(
+                frame::Stream {
+                    id,
+                    offset: 0,
+                    fin: false,
+                    data: Bytes::from_static(&[0; 32]),
+                },
+                32,
+            )
+            .unwrap();
+        let _ = client
+            .received_reset(frame::ResetStream {
+                id,
+                error_code: 0u32.into(),
+                final_offset: 64u32.into(),
+            })
+            .unwrap();
+        assert_eq!(client.local_max_data - initial_max, 64);
+
+        let mut pending = Retransmits::default();
+        let mut recv = RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        };
+        recv.stop(0u32.into()).unwrap();
+        assert_eq!(client.data_recvd, 64);
+        assert_eq!(client.local_max_data - initial_max, 64);
     }
 
     #[test]

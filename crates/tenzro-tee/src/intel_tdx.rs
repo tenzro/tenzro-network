@@ -114,8 +114,13 @@ impl IntelTdxProvider {
     }
 }
 
-/// Fetch the DCAP collateral for `quote` from Intel PCS.
-async fn fetch_collateral(quote: &[u8]) -> Result<dcap_qvl::QuoteCollateralV3> {
+/// The DCAP collateral for `quote`: Intel's, for the quote's platform family
+/// and PCK CA, fetched from Intel PCS unless what was fetched before is still
+/// current, with the quote's own PCK certificate chain.
+async fn collateral_for(quote: &[u8]) -> Result<dcap_qvl::QuoteCollateralV3> {
+    static FETCHED: std::sync::LazyLock<
+        crate::collateral_cache::CollateralCache<(String, String), dcap_qvl::QuoteCollateralV3>,
+    > = std::sync::LazyLock::new(crate::collateral_cache::CollateralCache::new);
     let err = |m: String| TeeError::AttestationGenerationFailed(m);
     let parsed = dcap_qvl::quote::Quote::parse(quote).map_err(|e| err(format!("quote: {e}")))?;
     let fmspc = hex::encode_upper(
@@ -125,6 +130,26 @@ async fn fetch_collateral(quote: &[u8]) -> Result<dcap_qvl::QuoteCollateralV3> {
         .map_err(|e| err(format!("PCK CA: {e}")))?
         .as_id_str();
     let pck_chain = String::from_utf8_lossy(parsed.inner_cert_data()).to_string();
+    let key = (fmspc, ca.to_string());
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let mut collateral = match FETCHED.get(&key, now) {
+        Some(kept) => kept,
+        None => {
+            let fetched = fetch_collateral(&key.0, &key.1).await?;
+            if let Some(not_after) = crate::collateral_cache::tdx_not_after(&fetched) {
+                FETCHED.put(key, fetched.clone(), Some(not_after));
+            }
+            fetched
+        }
+    };
+    collateral.pck_certificate_chain = Some(pck_chain);
+    Ok(collateral)
+}
+
+/// Fetch Intel's collateral for platform family `fmspc` under PCK CA `ca`
+/// from Intel PCS.
+async fn fetch_collateral(fmspc: &str, ca: &str) -> Result<dcap_qvl::QuoteCollateralV3> {
+    let err = |m: String| TeeError::AttestationGenerationFailed(m);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -202,7 +227,7 @@ async fn fetch_collateral(quote: &[u8]) -> Result<dcap_qvl::QuoteCollateralV3> {
             .map(|v| v.to_string())
             .unwrap_or_default(),
         qe_identity_signature: signature(&qe)?,
-        pck_certificate_chain: Some(pck_chain),
+        pck_certificate_chain: None,
     })
 }
 
@@ -258,7 +283,7 @@ impl TeeProvider for IntelTdxProvider {
 
         let mut metadata = HashMap::new();
         if matches!(self.source, QuoteSource::Hardware) {
-            let collateral = fetch_collateral(&attestation_data).await?;
+            let collateral = collateral_for(&attestation_data).await?;
             metadata.insert(
                 crate::verify::tdx::COLLATERAL_KEY.to_string(),
                 serde_json::to_string(&collateral)

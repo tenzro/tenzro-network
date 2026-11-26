@@ -14,7 +14,7 @@
 //!
 //! The responder holds the hardware key:
 //!
-//! ```ignore
+//! ```text
 //! let (initiator, offer) = session::Initiator::new()?;           // peer
 //! let (reply, key_r) = session::respond(&*signer, &offer, "rpc", expires_at)?; // hardware holder
 //! let key_i = initiator.complete(&reply, &expected_hardware_key, "rpc", now)?; // peer

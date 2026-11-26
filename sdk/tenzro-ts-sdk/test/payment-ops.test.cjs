@@ -38,6 +38,7 @@ test("send, refund and split submit signed Bridge and Payment transactions", asy
       if (method === "tenzro_getNonce") return "0x0";
       if (method === "eth_chainId") return "0x539";
       if (method === "eth_gasPrice") return "0x3b9aca00";
+      if (method === "tenzro_estimateGas") return "0x7a120";
       if (method === "tenzro_getSigningPayload") throw new Error("stop before signing");
       return null;
     },

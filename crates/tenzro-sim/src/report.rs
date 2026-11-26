@@ -47,6 +47,19 @@ pub struct FaultCounts {
     pub delay_spikes: u64,
     /// Disk stalls.
     pub disk_stalls: u64,
+    /// Simultaneous stops that left no quorum up.
+    pub threshold_halts: u64,
+    /// Of those, the ones that stopped every validator.
+    pub cold_starts: u64,
+    /// Messages a misbehaving validator sent with a field changed.
+    pub mutated_messages: u64,
+    /// Earlier messages a misbehaving validator sent again.
+    pub replayed_messages: u64,
+    /// Valid votes and certificates a validator with a disagreeing second
+    /// signature implementation refused.
+    pub refused_signed_messages: u64,
+    /// Single connections that closed and were dialled again.
+    pub link_drops: u64,
 }
 
 /// Governance the clients ran.
@@ -136,6 +149,11 @@ pub struct Report {
     pub ledger_index_bytes: u64,
     /// Ledger totals.
     pub ledger: LedgerStats,
+    /// The ledger's root at `height`, hex: a digest chained over every
+    /// executed block's content, supply, held value and fees. Two builds
+    /// given one seed and one trace agree on it unless ordering or
+    /// execution changed between them.
+    pub state_root: String,
     /// Recorded total supply.
     pub total_supply: String,
     /// Total supply genesis allocated; `total_supply` never exceeds it.
@@ -224,6 +242,7 @@ impl Report {
             journal_by_epoch: Vec::new(),
             ledger_index_bytes: 0,
             ledger: LedgerStats::default(),
+            state_root: String::new(),
             total_supply: String::new(),
             genesis_supply: String::new(),
             governance: GovernanceCounts::default(),

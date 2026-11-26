@@ -69,7 +69,7 @@ impl EventClient {
     }
 
     /// A page of the events `filter` selects after `from_cursor` (from the
-    /// first held height when `None`) up to `to_cursor`, each with its proof.
+    /// oldest held height when `None`) up to `to_cursor`, each with its proof.
     /// With `completeness`, also the proof that the page left nothing out
     /// (check it with [`verify_completeness`]), every proof anchored at
     /// `anchor_index` or at the latest certified checkpoint.
@@ -87,11 +87,34 @@ impl EventClient {
         if let Some(a) = anchor_index {
             params["anchor_index"] = Value::from(a);
         }
-        if let Some(c) = from_cursor {
-            params["from_cursor"] = Value::from(c);
+        match from_cursor {
+            Some(c) => params["from_cursor"] = Value::from(c),
+            None => params["from_height"] = Value::from(0),
         }
         if let Some(c) = to_cursor {
             params["to_cursor"] = Value::from(c);
+        }
+        self.rpc.call("tenzro_queryEvents", params).await
+    }
+
+    /// The newest events `filter` selects before `before_cursor` (from the
+    /// tip when `None`), newest first, each with its proof anchored at
+    /// `anchor_index` or at the latest certified checkpoint. Pass the page's
+    /// `before_cursor` back for the older page; it is `None` once the oldest
+    /// height the node holds was read.
+    pub async fn newest(
+        &self,
+        filter: &Value,
+        before_cursor: Option<&str>,
+        limit: u32,
+        anchor_index: Option<u64>,
+    ) -> SdkResult<EventPage> {
+        let mut params = serde_json::json!({ "filter": filter, "limit": limit });
+        if let Some(c) = before_cursor {
+            params["before_cursor"] = Value::from(c);
+        }
+        if let Some(a) = anchor_index {
+            params["anchor_index"] = Value::from(a);
         }
         self.rpc.call("tenzro_queryEvents", params).await
     }
@@ -114,13 +137,40 @@ impl EventClient {
 pub struct EventPage {
     /// Each entry holds `event`, and `proof` when proofs were asked for.
     pub events: Vec<Value>,
-    /// The cursor to resume after.
+    /// On a page read forward, the cursor to resume after.
+    #[serde(default)]
     pub cursor: Option<String>,
+    /// On a newest-first page, the cursor that reads the older page.
+    #[serde(default)]
+    pub before_cursor: Option<String>,
     /// The highest height whose events the node holds.
     pub tip: Option<u64>,
     /// The proof that the page left nothing out, when asked for.
     #[serde(default)]
     pub completeness: Option<Value>,
+    /// On the newest page of `tenzro_queryEvents`, for a caller that may
+    /// read the node's conditions: their changes, newest first.
+    #[serde(default)]
+    pub node_events: Option<Vec<NodeEvent>>,
+}
+
+/// A condition on the node opening, clearing or being answered: the node's
+/// own account of itself, with no proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEvent {
+    /// The event's sequence on the node's event stream.
+    pub sequence: u64,
+    /// `condition_opened`, `condition_cleared` or `condition_answered`.
+    pub kind: String,
+    pub summary: String,
+    /// When the node saw it, RFC 3339 in UTC.
+    pub at: String,
+    /// The node's height when it saw it.
+    pub block: u64,
+    /// The condition's id.
+    pub condition: String,
+    /// `info`, `warning` or `critical`.
+    pub severity: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -756,5 +806,43 @@ impl EventClient {
                 serde_json::json!({ "proof": proof, "certified_proof": certified_proof }),
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_newest_page_reads_the_node_events_and_a_later_page_has_none() {
+        let first: EventPage = serde_json::from_value(serde_json::json!({
+            "events": [],
+            "before_cursor": "11:0:0",
+            "tip": 12,
+            "node_events": [{
+                "sequence": 7,
+                "kind": "condition_answered",
+                "summary": "Acknowledged: The data disk is filling",
+                "at": "2027-01-15T08:00:01Z",
+                "block": 12,
+                "condition": "requirement:disk",
+                "severity": "warning",
+            }],
+        }))
+        .unwrap();
+        assert_eq!(first.before_cursor.as_deref(), Some("11:0:0"));
+        assert_eq!(first.cursor, None);
+        let events = first.node_events.expect("the newest page carries them");
+        assert_eq!(events[0].kind, "condition_answered");
+        assert_eq!(events[0].condition, "requirement:disk");
+
+        let later: EventPage = serde_json::from_value(serde_json::json!({
+            "events": [],
+            "cursor": "12:0:0",
+            "tip": 12,
+        }))
+        .unwrap();
+        assert_eq!(later.node_events, None);
+        assert_eq!(later.before_cursor, None);
     }
 }

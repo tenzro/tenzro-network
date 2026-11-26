@@ -29,6 +29,36 @@ impl NetworkMessage {
         }
     }
 
+    /// The message carrying `block`, the same bytes on every node that
+    /// holds the block: its id is the block's hash and its time the block's
+    /// own. Every validator publishes each block it executes, and gossip
+    /// passes a message on once only when the copies are identical.
+    ///
+    /// A block whose own time receivers would refuse as a message time (see
+    /// [`validate_message`]) goes out under a message id and time of this
+    /// publication instead, as any other message does: several copies of it
+    /// reach a node, which is better than none.
+    pub fn block(block: tenzro_types::block::Block) -> Self {
+        Self::block_at(block, chrono::Utc::now().timestamp_millis())
+    }
+
+    /// [`Self::block`] published at `now_ms`.
+    pub fn block_at(block: tenzro_types::block::Block, now_ms: i64) -> Self {
+        let time = block.header.timestamp.as_millis();
+        let ahead = time.saturating_sub(now_ms);
+        let behind = now_ms.saturating_sub(time);
+        if ahead > MAX_MESSAGE_AHEAD_MS - BLOCK_TIME_MARGIN_MS
+            || behind > MAX_MESSAGE_AGE_MS - BLOCK_TIME_MARGIN_MS
+        {
+            return Self::new(MessagePayload::Block(block));
+        }
+        Self {
+            message_id: hex::encode(block.hash().as_bytes()),
+            timestamp: time,
+            payload: MessagePayload::Block(block),
+        }
+    }
+
     /// Serializes the message to bytes using bincode.
     ///
     /// Wire format: bincode (length-prefixed varint sequences). Bincode is used
@@ -56,16 +86,8 @@ impl NetworkMessage {
     /// refused, so one message decodes in time linear in its length and
     /// cannot be padded into distinct encodings.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        use bincode::Options;
-        let limit = tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE;
-        if bytes.len() > limit {
-            return Err(Box::new(bincode::ErrorKind::SizeLimit));
-        }
-        let mut msg: NetworkMessage = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(limit as u64)
-            .reject_trailing_bytes()
-            .deserialize(bytes)?;
+        let mut msg: NetworkMessage =
+            crate::wire::decode_bounded(bytes, tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE)?;
         msg.payload = msg.payload.into_native().map_err(|e| {
             Box::new(bincode::ErrorKind::Custom(format!(
                 "batched announcement: {e}"
@@ -145,7 +167,7 @@ pub enum MessagePayload {
     Certificate(Vec<u8>),
 
     /// A compact checkpoint certificate: the bincode-encoded
-    /// `tenzro_consensus::compact::CompactCertificate`, which one STARK
+    /// `tenzro_light::compact::CompactCertificate`, which one STARK
     /// proves the quorum's ML-DSA-65 signatures in. Opaque here for the same
     /// reason as `Certificate`; light clients and followers verify it against
     /// the committee and session-certificate bundle of its epoch.
@@ -391,6 +413,7 @@ const ANNOUNCE_KEY_BINDING_DOMAIN: &[u8] = b"tenzro/announce/endpoint-binding";
 
 const BLOB_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/blobs";
 const SHARD_REPLICATION_DOMAIN: &[u8] = b"tenzro/announce/shard-replication";
+const CONSTRAINED_REPLICATION_DOMAIN: &[u8] = b"tenzro/announce/constrained-shard-replication";
 
 /// Builds the canonical signing preimage for an announcement: the domain
 /// tag followed by the JSON serialization of the message. The message must
@@ -433,6 +456,14 @@ pub trait SignedAnnouncement: Clone + Serialize {
     /// The announcement's creation time (ms).
     fn made_at_ms(&self) -> u64;
 
+    /// The bytes a signature of this message covers: the domain tag and the
+    /// message with its signature cleared.
+    fn signing_preimage(&self) -> Result<Vec<u8>, String> {
+        let mut unsigned = self.clone();
+        *unsigned.signer_fields().1 = None;
+        announce_preimage(Self::DOMAIN, &unsigned)
+    }
+
     /// Sign as `machine_did` with `signer`. Call after every other field is
     /// set: the signature covers the whole message.
     fn sign(
@@ -464,9 +495,7 @@ pub trait SignedAnnouncement: Clone + Serialize {
         let signature = self
             .signature()
             .ok_or_else(|| "unsigned announcement".to_string())?;
-        let mut unsigned = self.clone();
-        *unsigned.signer_fields().1 = None;
-        let preimage = announce_preimage(Self::DOMAIN, &unsigned)?;
+        let preimage = self.signing_preimage()?;
         signature
             .verify_record_at(identity, &preimage, self.made_at_ms())
             .map_err(|e| e.to_string())
@@ -872,6 +901,76 @@ impl SignedAnnouncement for ShardReplicationMessage {
     }
 }
 
+/// The gossip topic constrained shard replication travels on, as
+/// [`MessagePayload::Custom`]. A node that predates it never subscribes, so
+/// it never receives one, and an old holder never takes a shard whose
+/// constraint it cannot honour.
+pub const STORAGE_PLACEMENT_TOPIC: &str = "tenzro/storage-placement";
+
+/// A shard replication request for an object whose buyer constrained where
+/// it may be held: only a holder inside the constraint ranks for its
+/// shards. Signed as a whole by the origin, so no relay can drop or loosen
+/// the constraint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstrainedShardReplicationMessage {
+    /// The replication request, with its own signature slot empty.
+    pub replication: ShardReplicationMessage,
+    /// Upper-case country codes, any of which a holder's declared region
+    /// must be; empty for no country rule.
+    pub jurisdiction: Vec<String>,
+    /// Lower-case hex provider accounts, one of which must run a holder;
+    /// empty for no operator rule.
+    pub operators: Vec<String>,
+    /// Machine identity of the origin, `did:tenzro:machine:...`.
+    pub machine_did: String,
+    /// The origin's hardware-batch signature over everything above.
+    pub signature: Option<tenzro_crypto::batch::RecordSignature>,
+}
+
+impl SignedAnnouncement for ConstrainedShardReplicationMessage {
+    const DOMAIN: &'static [u8] = CONSTRAINED_REPLICATION_DOMAIN;
+    fn machine_did(&self) -> &str {
+        &self.machine_did
+    }
+    fn signer_fields(
+        &mut self,
+    ) -> (
+        &mut String,
+        &mut Option<tenzro_crypto::batch::RecordSignature>,
+    ) {
+        (&mut self.machine_did, &mut self.signature)
+    }
+    fn signature(&self) -> Option<&tenzro_crypto::batch::RecordSignature> {
+        self.signature.as_ref()
+    }
+    fn made_at_ms(&self) -> u64 {
+        self.replication.made_at_ms()
+    }
+}
+
+impl ConstrainedShardReplicationMessage {
+    /// The gossip message that carries it on [`STORAGE_PLACEMENT_TOPIC`].
+    pub fn to_network_message(&self) -> Result<NetworkMessage, String> {
+        let data = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        Ok(NetworkMessage::new(MessagePayload::Custom {
+            topic: STORAGE_PLACEMENT_TOPIC.to_string(),
+            data,
+        }))
+    }
+
+    /// The request a gossip payload carries: `None` for any payload other
+    /// than a custom one on [`STORAGE_PLACEMENT_TOPIC`], an error for one
+    /// that does not decode.
+    pub fn from_payload(payload: &MessagePayload) -> Option<Result<Self, String>> {
+        match payload {
+            MessagePayload::Custom { topic, data } if topic == STORAGE_PLACEMENT_TOPIC => {
+                Some(serde_json::from_slice(data).map_err(|e| e.to_string()))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Schedule for when a model is available for serving
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSchedule {
@@ -942,11 +1041,22 @@ pub struct StatusMessage {
     pub tee_vendor: Option<tenzro_types::tee::TeeVendor>,
 }
 
+/// How far ahead of a receiver's clock a message's time may read.
+pub const MAX_MESSAGE_AHEAD_MS: i64 = 300_000;
+
+/// How old a message may be by a receiver's clock.
+pub const MAX_MESSAGE_AGE_MS: i64 = 3_600_000;
+
+/// How far inside those two bounds a block's own time must be, by the
+/// publisher's clock, to be used as its message's time: receivers' clocks
+/// differ from the publisher's, and the message takes time to arrive.
+const BLOCK_TIME_MARGIN_MS: i64 = 60_000;
+
 /// Message validation
 pub fn validate_message(msg: &NetworkMessage) -> crate::error::Result<()> {
     // Check timestamp is not too far in the future (allow 5 minute clock skew)
     let now = chrono::Utc::now().timestamp_millis();
-    if msg.timestamp > now.saturating_add(300_000) {
+    if msg.timestamp > now.saturating_add(MAX_MESSAGE_AHEAD_MS) {
         return Err(crate::error::NetworkError::InvalidMessage(
             "Message timestamp is too far in the future".to_string(),
         ));
@@ -956,7 +1066,7 @@ pub fn validate_message(msg: &NetworkMessage) -> crate::error::Result<()> {
     // timestamp so far back that the age does not fit is too old as well.
     if now
         .checked_sub(msg.timestamp)
-        .is_none_or(|age| age > 3_600_000)
+        .is_none_or(|age| age > MAX_MESSAGE_AGE_MS)
     {
         return Err(crate::error::NetworkError::InvalidMessage(
             "Message is too old".to_string(),
@@ -1196,6 +1306,102 @@ mod tests {
             shard.sign(DID, &signer).unwrap();
             shard.verify(&key).unwrap();
         }
+    }
+
+    fn constrained(signer: &ImmediateRecordSigner) -> ConstrainedShardReplicationMessage {
+        let mut m = ConstrainedShardReplicationMessage {
+            replication: ShardReplicationMessage {
+                object_id: "o".into(),
+                origin_endpoint_id: "e".into(),
+                shards: vec![ShardReplicationEntry {
+                    index: 0,
+                    blob_hash: "b".into(),
+                    commitment: "c".into(),
+                }],
+                replicas: 2,
+                timestamp: 1,
+                ttl_secs: 180,
+                machine_did: String::new(),
+                signature: None,
+            },
+            jurisdiction: vec!["DE".into()],
+            operators: Vec::new(),
+            machine_did: String::new(),
+            signature: None,
+        };
+        m.sign(DID, signer).unwrap();
+        m
+    }
+
+    /// The constraint is covered by the origin's signature: a relay that
+    /// loosens or drops it, or changes the request, breaks the signature.
+    #[test]
+    fn a_constrained_replication_is_signed_with_its_constraint() {
+        let (signer, key) = identity(5, true);
+        let m = constrained(&signer);
+        m.verify(&key).unwrap();
+        let tampers: [fn(&mut ConstrainedShardReplicationMessage); 4] = [
+            |m| m.jurisdiction.clear(),
+            |m| m.jurisdiction = vec!["US".into()],
+            |m| m.operators = vec!["ab".repeat(32)],
+            |m| m.replication.replicas = 9,
+        ];
+        for tamper in tampers {
+            let mut t = m.clone();
+            tamper(&mut t);
+            assert!(t.verify(&key).is_err());
+        }
+    }
+
+    /// It travels as a custom payload on its own topic, decodes back to the
+    /// signed request, and passes the gossip checks every node already runs.
+    #[test]
+    fn a_constrained_replication_travels_as_a_custom_payload_on_its_own_topic() {
+        let (signer, key) = identity(6, false);
+        let msg = constrained(&signer).to_network_message().unwrap();
+        assert_eq!(msg.topic(), STORAGE_PLACEMENT_TOPIC);
+        let bytes = msg.to_bytes().unwrap();
+        assert_eq!(
+            crate::gossip_validation::validate_gossip_message(&bytes),
+            tenzro_iroh::gossip::Verdict::Accept
+        );
+        let back = NetworkMessage::from_bytes(&bytes).unwrap();
+        let decoded = ConstrainedShardReplicationMessage::from_payload(&back.payload)
+            .unwrap()
+            .unwrap();
+        decoded.verify(&key).unwrap();
+        assert_eq!(decoded.jurisdiction, vec!["DE".to_string()]);
+        assert!(ConstrainedShardReplicationMessage::from_payload(&MessagePayload::Ping).is_none());
+        let other_topic = MessagePayload::Custom {
+            topic: "tenzro/sla".into(),
+            data: Vec::new(),
+        };
+        assert!(ConstrainedShardReplicationMessage::from_payload(&other_topic).is_none());
+    }
+
+    /// Why new gossip content must not be a new payload variant: a message
+    /// whose variant a node does not know fails its gossip check, and a
+    /// failed check penalises the sender until it is banned. The variant
+    /// index one past the last stands for a variant a newer node added.
+    #[test]
+    fn a_payload_variant_a_node_does_not_know_fails_its_gossip_check() {
+        let custom = bincode::serialize(&MessagePayload::Custom {
+            topic: String::new(),
+            data: Vec::new(),
+        })
+        .unwrap();
+        // BatchedAnnouncement, the last variant, follows Custom.
+        let unknown = u32::from_le_bytes(custom[..4].try_into().unwrap()) + 2;
+        let mut bytes = NetworkMessage::new(MessagePayload::Ping)
+            .to_bytes()
+            .unwrap()
+            .to_vec();
+        bytes[..4].copy_from_slice(&unknown.to_le_bytes());
+        assert!(NetworkMessage::from_bytes(&bytes).is_err());
+        assert_eq!(
+            crate::gossip_validation::validate_gossip_message(&bytes),
+            tenzro_iroh::gossip::Verdict::Reject
+        );
     }
 
     /// A signature certified by any identity other than the one registered

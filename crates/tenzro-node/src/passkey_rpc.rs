@@ -679,6 +679,15 @@ pub enum CustodyOperation {
     /// account and `target` is
     /// `tenzro_types::identity::revocation_target(did, reason)`.
     RevokeIdentity,
+    /// Change an identity's keys on its root's authority: record its next
+    /// key, declare one compromised or revoke a delegation. `account` is the
+    /// approving root's account and `target` is
+    /// `tenzro_native_ops::identity_keys::IdentityKeyOp::target`.
+    IdentityKeys,
+    /// Revoke a root in favour of a successor. `account` is the root's own
+    /// account and `target` is
+    /// `tenzro_native_ops::identity_succession::IdentitySuccessionOp::target`.
+    RevokeIdentityTo,
 }
 
 impl CustodyOperation {
@@ -694,6 +703,8 @@ impl CustodyOperation {
             Self::DelegateAgent => b"delegate_agent",
             Self::UpdateAgentTerms => b"update_agent_terms",
             Self::RevokeIdentity => tenzro_types::identity::OP_REVOKE_IDENTITY,
+            Self::IdentityKeys => tenzro_native_ops::identity_keys::OP_IDENTITY_KEYS,
+            Self::RevokeIdentityTo => tenzro_native_ops::identity_succession::OP_REVOKE_IDENTITY_TO,
         }
     }
 }
@@ -961,24 +972,7 @@ pub(crate) async fn require_key_possession(
 
     let expected_challenge = custody_webauthn_challenge(&digest);
     require_user_verified(&auth.assertion.authenticator_data)?;
-    tenzro_crypto::webauthn::verify_webauthn_assertion_require_uv(
-        &auth.assertion,
-        p256_xy,
-        &expected_challenge,
-        &tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
-            rp_id: rp_id.to_string(),
-            related_origins: Vec::new(),
-        },
-        tenzro_crypto::webauthn::WebAuthnCeremonyType::Get,
-    )
-    .map_err(|e| JsonRpcError {
-        code: -32001,
-        message: format!(
-            "enrolment authorization failed: the assertion did not verify against the \
-             passkey being enrolled: {e}"
-        ),
-        data: None,
-    })?;
+    verify_possession(rp_id, p256_xy, &expected_challenge, &auth.assertion)?;
 
     let pq_sig = auth
         .ml_dsa_signature_hex
@@ -1892,6 +1886,36 @@ fn build_completion_params(
     }
 }
 
+/// Refuses unless `assertion` is the user-verified answer of the passkey
+/// `p256_xy` to `challenge`, made on `rp_id` or a subdomain of it. No related
+/// origin applies, so an app origin a node lists for sign-in proves nothing
+/// here.
+fn verify_possession(
+    rp_id: &str,
+    p256_xy: &[u8; 64],
+    challenge: &str,
+    assertion: &WebAuthnAssertion,
+) -> Result<(), JsonRpcError> {
+    tenzro_crypto::webauthn::verify_webauthn_assertion_require_uv(
+        assertion,
+        p256_xy,
+        challenge,
+        &tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
+            rp_id: rp_id.to_string(),
+            related_origins: Vec::new(),
+        },
+        tenzro_crypto::webauthn::WebAuthnCeremonyType::Get,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32001,
+        message: format!(
+            "enrolment authorization failed: the assertion did not verify against the \
+             passkey being enrolled: {e}"
+        ),
+        data: None,
+    })
+}
+
 #[cfg(test)]
 mod custody_challenge_tests {
     use super::require_user_verified;
@@ -1930,6 +1954,45 @@ mod custody_challenge_tests {
     fn rp_hash(rp_id: &str) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         Sha256::digest(rp_id.as_bytes()).into()
+    }
+
+    /// A passkey's user-verified assertion over `challenge` for [`RP_ID`] as
+    /// a client at `origin` reports it, and the passkey's public key.
+    fn possession(origin: &str, challenge: &str) -> (super::WebAuthnAssertion, [u8; 64]) {
+        use tenzro_crypto::p256::{P256KeyPair, P256Signer};
+        let keypair = P256KeyPair::generate();
+        let client_data_json = serde_json::json!({
+            "type": "webauthn.get",
+            "challenge": challenge,
+            "origin": origin,
+        })
+        .to_string()
+        .into_bytes();
+        let mut authenticator_data = rp_hash(RP_ID).to_vec();
+        authenticator_data.extend_from_slice(&[0x05, 0, 0, 0, 1]);
+        let signed =
+            tenzro_crypto::webauthn::webauthn_signed_hash(&authenticator_data, &client_data_json);
+        let signature = P256Signer::from_keypair(&keypair)
+            .sign_prehash(&signed)
+            .as_bytes()
+            .to_vec();
+        let assertion = super::WebAuthnAssertion {
+            authenticator_data,
+            client_data_json,
+            signature,
+            user_handle: None,
+        };
+        (assertion, keypair.public_key_bytes())
+    }
+
+    #[test]
+    fn possession_is_proven_on_the_relying_party_and_in_no_android_app() {
+        let challenge = "Y2hhbGxlbmdlLTAx";
+        let (on_site, xy) = possession("https://tenzro.com", challenge);
+        assert!(super::verify_possession(RP_ID, &xy, challenge, &on_site).is_ok());
+        let app = format!("android:apk-key-hash:{}", "A".repeat(43));
+        let (in_app, xy) = possession(&app, challenge);
+        assert!(super::verify_possession(RP_ID, &xy, challenge, &in_app).is_err());
     }
 
     /// A registration `authenticatorData` for `rp_id` carrying `credential_id`
@@ -2033,7 +2096,7 @@ mod custody_challenge_tests {
 
     /// Every operation this enum can name, so a new one cannot be added
     /// without appearing here.
-    const ALL: [CustodyOperation; 9] = [
+    const ALL: [CustodyOperation; 11] = [
         CustodyOperation::EnrollPasskey,
         CustodyOperation::MachineAccess,
         CustodyOperation::BindDevice,
@@ -2043,6 +2106,8 @@ mod custody_challenge_tests {
         CustodyOperation::DelegateAgent,
         CustodyOperation::UpdateAgentTerms,
         CustodyOperation::RevokeIdentity,
+        CustodyOperation::IdentityKeys,
+        CustodyOperation::RevokeIdentityTo,
     ];
 
     /// **Two operations sharing a tag would be interchangeable.** A challenge

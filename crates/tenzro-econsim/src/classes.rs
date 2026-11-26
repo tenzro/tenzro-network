@@ -19,9 +19,9 @@ pub const MONTH_HOURS: f64 = 730.0;
 /// Cost and split inputs of the class accounts.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClassInputs {
-    /// Treasury leg of a service payment, share. 10%: the public validating
-    /// node's treasury share (`EconomicPolicy::validating.treasury_bps`, the
-    /// rate `HTTP_402_NETWORK_SHARE_BPS` in tenzro-types fees.rs repeats).
+    /// Treasury leg of a service payment, share. 10%: the genesis HTTP-402
+    /// network share (`fees.http402_network_share_bps`), taken here as the
+    /// treasury's part of a service payment.
     pub treasury_leg: f64,
     /// Cost of one GPU for one hour of the month, used or idle, USD.
     /// $1.20 for an H100: $30,000 over four years is $0.86, 0.7 kW at PUE

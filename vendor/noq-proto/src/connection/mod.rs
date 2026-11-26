@@ -1,26 +1,32 @@
-use std::{
-    cmp,
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
     collections::{BTreeMap, VecDeque, btree_map},
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
+use core::{
+    cmp,
     convert::TryFrom,
-    fmt, io, mem,
+    fmt, mem,
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
 };
+use std::io;
 
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
 
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-    Dir, Duration, EndpointConfig, FourTuple, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE,
+    Dir, Duration, EndpointConfig, FourTuple, Frame, FxHashMap, INITIAL_MTU, Instant, MAX_CID_SIZE,
     MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit,
     TransportError, TransportErrorCode, VarInt,
-    cid_generator::ConnectionIdGenerator,
     cid_queue::CidQueue,
     config::{ServerConfig, TransportConfig},
     congestion::Controller,
@@ -103,7 +109,7 @@ pub use streams::{
     ShouldTransmit, StreamEvent, Streams, WriteError,
 };
 
-mod timer;
+pub(crate) mod timer;
 use timer::{Timer, TimerTable};
 
 mod transmit_buf;
@@ -316,7 +322,8 @@ impl Connection {
         remote_cid: ConnectionId,
         network_path: FourTuple,
         crypto: Box<dyn crypto::Session>,
-        cid_gen: &dyn ConnectionIdGenerator,
+        local_cid_len: usize,
+        local_cid_lifetime: Option<Duration>,
         now: Instant,
         version: u32,
         allow_mtud: bool,
@@ -353,16 +360,20 @@ impl Connection {
         let local_cid_state = FxHashMap::from_iter([(
             PathId::ZERO,
             CidState::new(
-                cid_gen.cid_len(),
-                cid_gen.cid_lifetime(),
+                local_cid_len,
+                local_cid_lifetime,
                 now,
                 if pref_addr_cid.is_some() { 2 } else { 1 },
             ),
         )]);
 
+        let crypto_state = CryptoState::new(crypto, init_cid, side, &mut rng);
+        #[cfg(test)]
+        let crypto_state = crypto_state.with_key_phase_size(config.initial_key_phase_size);
+
         let mut this = Self {
             endpoint_config,
-            crypto_state: CryptoState::new(crypto, init_cid, side, &mut rng),
+            crypto_state,
             handshake_cid: local_cid,
             remote_handshake_cid: remote_cid,
             local_cid_state,
@@ -453,6 +464,15 @@ impl Connection {
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
         self.timers.peek()
+    }
+
+    /// Returns the instant at which `timer` is armed to fire, or `None` if it is not.
+    ///
+    /// `None` covers the timer never having been armed, having fired, and having been
+    /// cancelled.
+    #[cfg(test)]
+    pub(crate) fn timer_pending(&self, timer: Timer) -> Option<Instant> {
+        self.timers.get(timer)
     }
 
     /// Returns application-facing events
@@ -1158,6 +1178,15 @@ impl Connection {
                 && !self.abandoned_paths.contains(path_id)
                 && path.data.validated
                 && path.data.local_status() == PathStatus::Available
+                && path.data.is_responsive()
+        });
+
+        // Such a space still gets what is sent on it acknowledged.
+        let have_validated_responsive_space = self.paths.iter().any(|(path_id, path)| {
+            self.remote_cids.contains_key(path_id)
+                && !self.abandoned_paths.contains(path_id)
+                && path.data.validated
+                && path.data.is_responsive()
         });
 
         // Such a space is able to send SpaceKind::Data frames.
@@ -1173,6 +1202,7 @@ impl Connection {
         let path_data = self.path_data(path_id);
         let validated = path_data.validated;
         let status = path_data.local_status();
+        let responsive = path_data.is_responsive();
 
         // This is the core packet scheduling, whether this space ID may send
         // SpaceKind::Data frames.
@@ -1194,11 +1224,12 @@ impl Connection {
             } else {
                 match status {
                     PathStatus::Available => {
-                        // Best possible space to send data on.
-                        true
+                        // Best possible space to send data on, unless it stopped
+                        // answering and another space still answers.
+                        responsive || !have_validated_responsive_space
                     }
                     PathStatus::Backup => {
-                        // If there is a status-available path we prefer that.
+                        // If there is a responsive status-available path we prefer that.
                         !have_validated_status_available_space
                     }
                 }
@@ -1472,7 +1503,7 @@ impl Connection {
         // - If coalescing, finish packet without padding to leave space in the datagram.
         // - If not coalescing, complete the datagram:
         //   - Finish packet with padding.
-        //   - Set the transmit segment size if this is the first datagram.
+        //   - Finish the datagram, which sets the segment size if this is the first datagram.
         // - Loop: next iteration will exit the loop if nothing more to send in this space. The
         //   TransmitBuf will contain a started datagram with space if coalescing, or completely
         //   filled datagram if not coalescing.
@@ -1576,6 +1607,11 @@ impl Connection {
                         request_immediate_ack,
                         &self.streams,
                     );
+                    if !scheduling_info.may_send_data {
+                        // The data the probe queued goes out on a path that may send it;
+                        // this path's probe still needs a frame its peer acknowledges.
+                        self.spaces[space_id].for_path(path_id).pending_ping = true;
+                    }
 
                     self.spaces[space_id].for_path(path_id).loss_probes -= 1; // needs_loss_probe ensures loss_probes > 0
 
@@ -1710,15 +1746,18 @@ impl Connection {
                 // Send a close frame in every possible space for robustness, per
                 // RFC9000 "Immediate Close during the Handshake". Don't bother trying
                 // to send anything else.
-                // TODO(flub): This breaks during the handshake if we can not coalesce
-                //    packets due to space reasons: the next space would either fail a
-                //    debug_assert checking for enough packet space or produce an invalid
-                //    packet. We need to keep track of per-space pending CONNECTION_CLOSE to
-                //    be able to send these across multiple calls to poll_transmit. Then
-                //    check for coalescing space here because initial packets need to be in
-                //    padded datagrams. And also add space checks for CONNECTION_CLOSE in
-                //    space_can_send so it would stop a GSO batch if the datagram is too
-                //    small for another CONNECTION_CLOSE packet.
+                // TODO(flub): We need to keep track of per-space pending CONNECTION_CLOSE to
+                //    be able to send these across multiple calls to poll_transmit. And also
+                //    add space checks for CONNECTION_CLOSE in space_can_send so it would
+                //    stop a GSO batch if the datagram is too small for another
+                //    CONNECTION_CLOSE packet.
+
+                // If what is left of this datagram is too small for another packet, finish
+                // it so the next space starts a fresh datagram rather than a packet being
+                // coalesced past its end.
+                if transmit.datagram_remaining_mut() < MIN_PACKET_SPACE {
+                    transmit.finish_datagram();
+                }
                 return PollPathSpaceStatus::WrotePacket {
                     last_packet_number: last_pn,
                     pad_datagram,
@@ -1824,11 +1863,7 @@ impl Connection {
                     builder.finish_and_track(now, self, path_id, pad_datagram);
                 }
 
-                // If this is the first datagram we set the segment size to the size of the
-                // first datagram.
-                if transmit.num_datagrams() == 1 {
-                    transmit.clip_segment_size();
-                }
+                transmit.finish_datagram();
             }
         }
     }
@@ -1861,8 +1896,6 @@ impl Connection {
         }
 
         builder.finish_and_track(now, self, path_id, PadDatagram::ToSize(probe_size));
-
-        self.path_stats.get_mut(path_id).sent_plpmtud_probes += 1;
 
         Some(self.build_transmit(path_id, transmit))
     }
@@ -1965,7 +1998,7 @@ impl Connection {
 
         if can_send.other && !need_loss_probe && !can_send.close {
             let path = self.path_data(path_id);
-            if path.in_flight.bytes + bytes_to_send >= path.congestion.window() {
+            if path.in_flight.bytes + bytes_to_send > path.congestion.window() {
                 trace!(
                     ?space_id,
                     %path_id,
@@ -2687,6 +2720,7 @@ impl Connection {
         let mut stats = self.path_stats.get(path_id).unwrap_or_default();
         stats.rtt = path.data.rtt.get();
         stats.cwnd = path.data.congestion.window();
+        stats.bandwidth_estimate = path.data.congestion.metrics().bandwidth_estimate;
         stats.current_mtu = path.data.mtud.current_mtu();
         Some(stats)
     }
@@ -3274,7 +3308,22 @@ impl Connection {
         let pns = self.spaces[space].for_path(path_id);
         pns.loss_probes = pns.loss_probes.saturating_add(count);
         let path_data = self.path_data_mut(path_id);
+        let was_responsive = path_data.is_responsive();
         path_data.pto_count = path_data.pto_count.saturating_add(1);
+        let stopped_answering = was_responsive && !path_data.is_responsive();
+        // The data waiting on a path that stopped answering moves to a path that answers,
+        // if there is one.
+        if stopped_answering
+            && self.paths.iter().any(|(other, path)| {
+                *other != path_id
+                    && self.remote_cids.contains_key(other)
+                    && !self.abandoned_paths.contains(other)
+                    && path.data.validated
+                    && path.data.is_responsive()
+            })
+        {
+            self.spaces[space].requeue_in_flight(path_id, &mut self.streams);
+        }
         self.set_loss_detection_timer(now, path_id);
     }
 
@@ -3347,8 +3396,10 @@ impl Connection {
             if packet_too_old || largest_acked_packet_pn >= packet + packet_threshold {
                 // The packet should be declared lost.
                 if Some(packet) == in_flight_mtu_probe {
-                    // Lost MTU probes are not included in `lost_packets`, because they
-                    // should not trigger a congestion control response
+                    // MTU probes are handled separately: they should not trigger
+                    // retransmission or a congestion control response. They are still
+                    // counted in the `lost_packets`/`lost_bytes` stats (in
+                    // `handle_lost_packets`), consistent with `sent_packets`.
                     lost_mtu_probe = in_flight_mtu_probe;
                 } else {
                     lost_packets.push(packet);
@@ -3552,7 +3603,12 @@ impl Connection {
                 .unwrap()
                 .remove_in_flight(&info);
             self.path_data_mut(path_id).mtud.on_probe_lost();
-            self.path_stats.get_mut(path_id).lost_plpmtud_probes += 1;
+            let path_stats = self.path_stats.get_mut(path_id);
+            path_stats.lost_plpmtud_probes += 1;
+            // MTUD probes are also counted in the general lost_packets/lost_bytes
+            // counters, consistent with sent_packets/sent_bytes counting all packets.
+            path_stats.lost_packets += 1;
+            path_stats.lost_bytes += info.size as u64;
         }
     }
 
@@ -4489,7 +4545,9 @@ impl Connection {
             if self
                 .paths
                 .get(&path_id)
-                .map(|p| p.data.validated && p.data.network_path == network_path)
+                .map(|p| {
+                    p.data.validated && p.data.network_path.is_probably_same_path(&network_path)
+                })
                 .unwrap_or(false)
             {
                 self.connection_close_pending = true;
@@ -4877,7 +4935,10 @@ impl Connection {
                         .map(|span| span.record("path", tracing::field::display(&ack.path_id)));
                     self.on_path_ack_received(now, packet.header.space().into(), ack)?;
                 }
-                Frame::Close(reason) => {
+                // Per RFC 9000 §12.4 Table 3, only a CONNECTION_CLOSE frame of type 0x1c may appear
+                // in Initial or Handshake packets. An application close (0x1d) falls through to the
+                // catch-all arm below.
+                Frame::Close(reason @ Close::Connection(_)) => {
                     self.state
                         .move_to_draining(Some(reason.into()), &mut self.endpoint_events);
                     return Ok(());
@@ -4948,9 +5009,12 @@ impl Connection {
             }
 
             let _guard = span.enter();
+            // RFC 9000 §12.5: CRYPTO frames cannot be sent in 0-RTT packets. Both CONNECTION_CLOSE
+            // types are permitted there, as 0-RTT belongs to the application data packet number
+            // space; see §12.4 Table 3.
             if packet.header.is_0rtt() {
                 match frame {
-                    Frame::Crypto(_) | Frame::Close(Close::Application(_)) => {
+                    Frame::Crypto(_) => {
                         return Err(TransportError::PROTOCOL_VIOLATION(
                             "illegal frame type in 0-RTT",
                         ));
@@ -6807,6 +6871,12 @@ impl Connection {
         Some(packet.payload.to_vec())
     }
 
+    /// How many 1-RTT packets may still be sent before the keys are updated
+    #[cfg(test)]
+    pub(crate) fn key_phase_size(&self) -> u64 {
+        self.crypto_state.key_phase_size
+    }
+
     /// The number of bytes of packets containing retransmittable frames that have not been
     /// acknowledged or declared lost.
     #[cfg(test)]
@@ -6947,12 +7017,8 @@ impl Connection {
                 .is_some_and(|pns| pns.pending_path_responses.has_pending_on_path(network_path));
 
         // Stream control frames are checked in PacketSpace::can_send, only check data here.
-        let other = self.streams.can_send_stream_data()
-            || self
-                .datagrams
-                .outgoing
-                .front()
-                .is_some_and(|x| x.size(true) <= max_size);
+        let other =
+            self.streams.can_send_stream_data() || self.datagrams.outgoing.can_send_1rtt(max_size);
 
         // All `false` fields are set in PacketSpace::can_send.
         SendableFrames {

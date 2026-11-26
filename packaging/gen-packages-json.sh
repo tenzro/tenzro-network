@@ -19,7 +19,10 @@ src() { # archive-name -> {file, sha256}; refuses an archive that SHA256SUMS doe
     jq -nc --arg f "$1" --arg s "$s" '{file: $f, sha256: $s}'
 }
 release_commit=$(jq -r .commit "$dist/matrix.json")
-public_commit=${PUBLIC_COMMIT:-$(jq -r '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit // empty' "$dist"/provenance-*.intoto.json 2>/dev/null | head -1)}
+# A release carries its provenance beside the archive; a local build has none, and the
+# commit is then unknown.
+provs=("$dist"/provenance-*.intoto.json); [ -f "${provs[0]}" ] || provs=()
+public_commit=${PUBLIC_COMMIT:-$([ ${#provs[@]} -eq 0 ] || jq -r '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit // empty' "${provs[@]}" | head -1)}
 records='[]'
 shopt -s nullglob
 for f in "$pkgs"/tenzro-*.deb "$pkgs"/tenzro-*.rpm "$pkgs"/tenzro-*.msi "$pkgs"/tenzro-*.pkg; do
@@ -27,12 +30,15 @@ for f in "$pkgs"/tenzro-*.deb "$pkgs"/tenzro-*.rpm "$pkgs"/tenzro-*.msi "$pkgs"/
     case "$kind" in
         deb) flavour=$(echo "$b" | sed 's/^tenzro-\([a-z]*\)_.*/\1/'); version=$(echo "$b" | sed 's/^tenzro-[a-z]*_\(.*\)_[a-z0-9]*\.deb/\1/')
              a=$(echo "$b" | sed 's/.*_\([a-z0-9]*\)\.deb/\1/'); arch=$([ "$a" = amd64 ] && echo x86_64 || echo aarch64)
-             platform=linux; sources=$(src "tenzro-node-linux-$arch-$flavour.tar.gz" | jq -s .)
-             inner=$(dpkg-deb --fsys-tarfile "$f" | tar -xO ./usr/lib/tenzro/PACKAGE-INFO | sed -n 's/^source_archive_sha256=//p')
+             # tenzro-control comes from the control/ folder of the cpu archive.
+             from=$flavour info=./usr/lib/tenzro/PACKAGE-INFO
+             [ "$flavour" = control ] && from=cpu info=./usr/lib/tenzro-control/PACKAGE-INFO
+             platform=linux; sources=$(src "tenzro-node-linux-$arch-$from.tar.gz" | jq -s .)
+             inner=$(dpkg-deb --fsys-tarfile "$f" | tar -xO "$info" | sed -n 's/^source_archive_sha256=//p')
              [ "$inner" = "$(jq -r '.[0].sha256' <<<"$sources")" ] || { echo "REFUSING: $b carries archive digest $inner, SHA256SUMS lists another" >&2; exit 1; } ;;
         rpm) flavour=$(echo "$b" | sed 's/^tenzro-\([a-z]*\)-.*/\1/'); version=$(echo "$b" | sed 's/^tenzro-[a-z]*-\([0-9.]*-[0-9]*\)\..*/\1/')
              arch=$(echo "$b" | sed 's/.*\.\([a-z0-9_]*\)\.rpm/\1/'); platform=linux
-             sources=$(src "tenzro-node-linux-$arch-$flavour.tar.gz" | jq -s .) ;;
+             sources=$(src "tenzro-node-linux-$arch-$([ "$flavour" = control ] && echo cpu || echo "$flavour").tar.gz" | jq -s .) ;;
         msi) version=$(echo "$b" | sed 's/^tenzro-\([0-9.]*\)-windows.*/\1/'); platform=windows; arch=x86_64; flavour=cuda
              sources=$(src tenzro-node-windows-x86_64-cuda.zip | jq -s .) ;;
         pkg) version=$(echo "$b" | sed 's/^tenzro-\([0-9.]*\)-macos\.pkg/\1/'); platform=macos; arch=universal; flavour="metal+cpu"

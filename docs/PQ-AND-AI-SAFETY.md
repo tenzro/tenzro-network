@@ -63,7 +63,7 @@ a shared secret is derived from every exchange.
 |---|---|---|
 | Validator votes, session certificates, registration, epoch handover | Composite signature, both legs mandatory | `tenzro-finality/src/key.rs` (verify requires both), `tenzro-consensus/src/validator_key.rs`, `tenzro-consensus/src/core.rs` |
 | Consensus channels between validators | X25519 + ML-KEM-768 into HKDF, handshake signed by composite session keys | `tenzro-consensus/src/channel.rs` |
-| Account transactions and every other message an account signs (payment authorizations, escrow vouchers, payer signatures, settlement preferences, owner-signed RPC actions, smart-account validators, root approvals of agent terms) | P-256 and ML-DSA-65 both required; an account with no ML-DSA-65 key enrolled signs nothing until it enrols one (the first transaction of a new sender is its enrolment; `tenzro pq-hybrid enroll`) | `tenzro-vm/src/account_keys.rs` (`pq_key_for`, `account_pq_policy`), `tenzro-vm/src/runtime.rs`, `tenzro-node/src/event_loop.rs` (`verify_transaction_pq_leg`) |
+| Account transactions and every other message an account signs (payment authorizations, escrow vouchers, payer signatures, settlement preferences, owner-signed RPC actions, smart-account validators, root approvals of agent terms) | P-256 and ML-DSA-65 both required; an account with no ML-DSA-65 key enrolled signs nothing until it enrols one (the first transaction of a new sender is its enrolment; `tenzro pq-hybrid enroll`) | `tenzro-vm/src/account_keys.rs` (`pq_key_for`), `tenzro-vm/src/runtime.rs`, `tenzro-node/src/event_loop.rs` (`verify_transaction_pq_leg`) |
 | Bridge deliveries (inbound to Tenzro) | Each committee member counts only with a valid secp256k1 and ML-DSA-65 signature; a member without an ML-DSA-65 key cannot be seated | `tenzro-bridge/src/route/attestation.rs` (`verify_committee`, `dual_signers`), `tenzro-types/src/bridge_route.rs` |
 | Bridge equivocation evidence | Needs both legs of the member on both deliveries | `tenzro-vm/src/native/bridge_committee.rs` (`report_equivocation`) |
 | Node-to-node RPC authentication (A2A, MCP, MoE) | Both hardware keys (P-256 and ML-DSA-65) sign the TLS exporter on every connection; a peer without a verified ML-DSA-65 binding is refused both ways | `tenzro-iroh/src/pq_endpoint.rs`, `tenzro-iroh/src/resolver.rs` |
@@ -319,3 +319,34 @@ The limits that bound an agent's damage are therefore in three layers: the
 terms (what the agent may do), the bonds (what a provider or attestor loses),
 and the breakers (what a route or the network stops doing when a finding
 lands).
+
+### 6.6 Against the OWASP agentic and MCP risk lists
+
+One line per risk of the OWASP Top 10 for Agentic Applications (December 2025)
+and the OWASP MCP Top 10 (beta): what stops it on a Tenzro node, or that
+nothing here does. Identifiers are given where the list's own numbering was
+checked; the others are named by their risk. Application-side parts (agent
+memory, task runners) live in the harness, outside the node.
+
+| Risk | What stops it here |
+|---|---|
+| ASI01 agent goal hijack | Nothing stops a model from being steered; what it may do is the terms. Untrusted input labels the agent (6.3) and holds its actions to the untrusted-input step-up and value limit; the lethal trifecta is refused at the terms. |
+| Tool misuse | A delegated agent calls only the tools its terms pin, each by the digest of its name, description and input schema (`tenzro-types/src/agent_terms.rs` `check_tool`, enforced on every MCP call in `tenzro-node/src/agent_delegation.rs` `check_agent_tool`); value moves only within the spend caps. |
+| Identity and privilege abuse | No API keys or shared secrets: access tokens are DPoP-bound to the caller's hardware key and the policy is re-evaluated per request (docs/ACCESS.md); an agent's key lives in each serving machine's TPM (6.2); a terms change never loosens a term the controller's bounds do not name (`within_bounds`). |
+| Supply chain of agent components | Tools are pinned by digest (above); model files are parsed first in a confined child process (`tenzro-model/src/parse_jail.rs`); dependency gates are in docs/SUPPLY-CHAIN.md. |
+| Unexpected code execution | The node's MCP tools are typed calls onto its JSON-RPC methods; none runs a shell or evaluates model output. Code an agent runs belongs in an OpenShell sandbox under Terms (docs/OPENSHELL.md). |
+| Memory and context poisoning | Not a node concern: the node keeps no agent memory. Content from outside is labelled as untrusted input (6.3); a harness that keeps memory must treat recalled entries as data. |
+| ASI07 insecure inter-agent communication | A2A mutations carry the caller's signed DID envelope and the Agent Card is a detached JWS by the machine identity key (`tenzro-node/src/a2a/`); MCP-over-iroh and A2A-over-iroh run on authenticated QUIC. |
+| ASI08 cascading failures | Per-agent daily ceilings and bonds bound one agent; bridge routes carry rate limits and circuit breakers (6.5); quarantine and revocation stop an agent on every node at once. |
+| ASI09 human-agent trust exploitation | A step-up is the root's passkey or TPM signature over the digest of exactly the held action, so an approval cannot be reused for another action. What a wallet or app shows the person before they approve is outside the node. |
+| ASI10 rogue agents | Controller revocation, kill switch (pause, quarantine, terminate), validator quarantine on audit findings, and the agent bond (6.5); revoking a root revokes every agent it delegated. |
+| MCP01 token mismanagement and secret exposure | Tokens are short-lived and DPoP-bound; third-party credentials are sealed to the serving node and attached by its egress guard, so an agent never holds the secret (6.2). |
+| Privilege escalation by scope creep | Terms changes are bounded by `within_bounds`; admin-class methods admit only the operator DID and the policy's admins (docs/ACCESS.md). |
+| Tool poisoning | A pinned tool whose description or schema changed since approval is refused (above). |
+| Software supply chain and dependency tampering | docs/SUPPLY-CHAIN.md: locked builds, cargo-vet and cargo-deny gates, advisory gate. |
+| Command injection and execution | As for unexpected code execution: typed tool arguments, no shell. |
+| Prompt injection through contextual payloads | As for ASI01: untrusted input is labelled and the terms, not the prompt, decide. |
+| Insufficient authentication and authorization | Default-deny RPC classification (`tenzro-node/src/rpc_gates.rs`) and one access policy over every surface, MCP included (docs/ACCESS.md). |
+| Lack of audit and telemetry | Every administrative call, admitted or refused, is recorded write-ahead in a hash-chained log whose head the node signs with its hardware key (docs/ACCESS.md); agent audit-trail commitments are on chain (docs/AGENT_TRUST.md). |
+| Shadow MCP servers | A tool pin names the server it was approved for, so a tool of the same name on another server is refused. |
+| MCP10 context injection and over-sharing | The node's MCP server is stateless (no session carries one caller's context to another) and every call is checked against the caller's own access and terms. |

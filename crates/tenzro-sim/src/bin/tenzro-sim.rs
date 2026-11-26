@@ -1,7 +1,7 @@
 //! Runs the network simulator.
 //!
 //! ```text
-//! tenzro-sim run    --profile <name> [--seed N] [--days D] [--validators N] [--out DIR]
+//! tenzro-sim run    --profile <name> [--seed N] [--days D] [--validators N] [--tps T] [--out DIR]
 //! tenzro-sim gate   [--seeds K] [--base-seed N] [--out DIR]      every gate profile, K seeds each
 //! tenzro-sim ladder [--counts 4,21,50,100,200] [--seed N] [--budget-s S] [--out DIR]
 //! tenzro-sim explore [--budget-s S] [--base-seed N] [--profile swarm] [--out DIR]
@@ -35,6 +35,7 @@ struct Args {
     budget_given: bool,
     trace: Option<PathBuf>,
     users: Option<u32>,
+    tps: Option<f64>,
 }
 
 fn parse() -> Args {
@@ -54,6 +55,7 @@ fn parse() -> Args {
         budget_given: false,
         trace: None,
         users: None,
+        tps: None,
     };
     while let Some(k) = a.next() {
         let v = a.next().unwrap_or_default();
@@ -73,6 +75,7 @@ fn parse() -> Args {
             }
             "--trace" => args.trace = Some(PathBuf::from(v)),
             "--users" => args.users = v.parse().ok(),
+            "--tps" => args.tps = v.parse().ok(),
             other => {
                 eprintln!("unknown option {other}");
                 std::process::exit(2);
@@ -121,6 +124,9 @@ fn run_one(mut cfg: SimConfig, a: &Args) -> Report {
     }
     if let Some(u) = a.users {
         cfg.workload.users = u;
+    }
+    if let Some(t) = a.tps {
+        cfg.workload.transfers_per_s = t;
     }
     let mut drivers: Vec<Box<dyn tenzro_sim::world::ClientDriver>> = Vec::new();
     let mut trace_stats = None;
@@ -198,6 +204,12 @@ fn seed_or_random(s: Option<u64>) -> u64 {
 }
 
 fn main() {
+    // Every TLS connection in this process uses aws-lc-rs, the provider with
+    // the X25519MLKEM768 hybrid key exchange, never one another dependency
+    // compiled in.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("no TLS provider is installed before main");
     let a = parse();
     let ok = match a.cmd.as_str() {
         "run" => {

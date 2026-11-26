@@ -415,8 +415,8 @@ pub fn enter_if_requested_with(parser: Parser) {
 }
 
 /// Address space this process has mapped, in bytes: the first field of
-/// `/proc/self/statm`, in pages. Zero where there is no procfs, which leaves
-/// the cap as the allowance alone.
+/// `/proc/self/statm`, in pages, on Linux; the committed bytes on Windows.
+/// Zero elsewhere, which leaves the cap as the allowance alone.
 fn mapped_bytes() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -431,10 +431,12 @@ fn mapped_bytes() -> u64 {
     }
     #[cfg(windows)]
     {
-        return windows_jail::committed_bytes();
+        windows_jail::committed_bytes()
     }
     #[cfg(not(windows))]
-    0
+    {
+        0
+    }
 }
 
 /// Exits without running exit handlers: they belong to the libraries

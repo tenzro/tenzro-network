@@ -112,3 +112,26 @@ fn the_shipped_active_set_floor_is_the_launch_minimum() {
         );
     }
 }
+
+/// The production genesis carries the long governance values: three days of
+/// voting, two days of timelock and a loosening grace of 2160 epochs (ninety
+/// days at one-hour epochs). A shorter value here would let a guard loosen
+/// before a holder could react.
+#[test]
+fn the_production_genesis_carries_the_long_governance_values() {
+    let text = std::fs::read_to_string(config_dir().join("genesis-prod.toml")).unwrap();
+    let g: GenesisConfig = toml::from_str(&text).unwrap();
+    let params = g.network_params().unwrap();
+    for (key, want) in [
+        ("governance.voting_period_ms", 259_200_000_u64),
+        ("governance.timelock_ms", 172_800_000),
+        ("governance.guard_loosening_grace_epochs", 2160),
+    ] {
+        let got = params
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or_else(|| panic!("genesis-prod.toml does not set {key}"));
+        assert_eq!(got, want, "genesis-prod.toml: {key}");
+    }
+}

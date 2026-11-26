@@ -5,7 +5,7 @@ Part of the TenzroClaw OpenClaw skill for interacting with the Tenzro Network.
 Wraps Tenzro JSON-RPC, Web API, and ecosystem MCP server calls into simple
 functions.
 
-Requires: pip install requests
+Requires the Tenzro Python SDK: pip install git+https://github.com/tenzro/tenzro-sdk-python
 
 Ecosystem MCP servers (Solana, Ethereum, Chainlink) are
 called via the MCP Streamable HTTP protocol. Each ecosystem function uses
@@ -21,10 +21,6 @@ Usage:
     python tenzro_rpc.py get_block 0
     python tenzro_rpc.py chain_id
     python tenzro_rpc.py chat gemma4-9b "What is Tenzro?"
-    python tenzro_rpc.py route_intent reasoning 1000000000000000000 0.7 strong
-    python tenzro_rpc.py chat_by_intent code "Explain this trait bound"
-    python tenzro_rpc.py record_route_outcome qwen3-4b 3 escalated
-    python tenzro_rpc.py route_difficulty_stats qwen3-4b
     python tenzro_rpc.py list_model_endpoints
     python tenzro_rpc.py create_payment x402 /inference 100 USDC 0xrecipient
     python tenzro_rpc.py verify_payment <challenge_id> x402 <payer_did> 0xpayer 100 USDC 0xsig
@@ -95,7 +91,6 @@ Usage:
     python tenzro_rpc.py get_economic_policy
     python tenzro_rpc.py get_burn_rate_config
     python tenzro_rpc.py get_supply_metrics
-    python tenzro_rpc.py get_burn_rate_recommendation
 
     # Mempool / hot-state
     python tenzro_rpc.py get_mempool_stats
@@ -109,9 +104,10 @@ import sys
 from typing import Any
 
 try:
-    import requests
+    import httpx
+    from tenzro.rpc import RpcClient, RpcError
 except ImportError:
-    print(json.dumps({"error": "requests library required: pip install requests"}))
+    print(json.dumps({"error": "Tenzro Python SDK required: pip install git+https://github.com/tenzro/tenzro-sdk-python"}))
     sys.exit(1)
 
 # Default endpoints — override with environment variables
@@ -125,10 +121,32 @@ RPC_TIMEOUT = int(os.environ.get("TENZRO_RPC_TIMEOUT", "120"))
 CHAINLINK_MCP_URL = os.environ.get(
     "CHAINLINK_MCP_URL", "https://chainlink-mcp.tenzro.com/mcp")
 
-_request_id = 0
+# JSON-RPC goes through the Tenzro Python SDK's client; the Web API, the
+# ecosystem MCP servers and the realtime transport use plain HTTP.
+_sdk = RpcClient(RPC_URL, timeout=RPC_TIMEOUT)
+_http = httpx.Client(timeout=RPC_TIMEOUT)
+
+
+class _GivenProof:
+    """A DPoP proof the caller already made, handed to the SDK as its prover."""
+
+    def __init__(self, proof: str):
+        self._proof = proof
+
+    def proof(self, htm: str, htu: str, access_token: str) -> str:
+        return self._proof
+
+
+def _error(e: RpcError) -> dict:
+    """The JSON-RPC error object of `e`, as the node sent it."""
+    error = {"code": e.code, "message": e.message}
+    if e.data is not None:
+        error["data"] = e.data
+    return {"error": error}
+
 
 def _rpc(method: str, params: Any = None) -> dict:
-    """Send a JSON-RPC 2.0 request to Tenzro.
+    """Send a JSON-RPC 2.0 request to Tenzro through the SDK client.
 
     Auth-sensitive RPCs (signing, escrow, settlement) require an OAuth/DPoP
     bearer JWT. Set the TENZRO_BEARER_JWT environment variable to your
@@ -142,39 +160,21 @@ def _rpc(method: str, params: Any = None) -> dict:
     on-chain governance.
 
     """
-    global _request_id
-    _request_id += 1
-    call_params = params if params is not None else {}
-    payload = {
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": call_params,
-        "id": _request_id,
-    }
-    headers = {"Content-Type": "application/json"}
-    bearer = os.environ.get("TENZRO_BEARER_JWT")
-    if bearer:
-        headers["Authorization"] = f"DPoP {bearer}"
-    dpop = os.environ.get("TENZRO_DPOP_PROOF")
-    if dpop:
-        headers["DPoP"] = dpop
-    resp = requests.post(RPC_URL, json=payload, headers=headers,
-                         timeout=RPC_TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    if "error" in data:
-        return {"error": data["error"]}
-    return data.get("result", {})
+    try:
+        result = _sdk.call(method, params if params is not None else {})
+    except RpcError as e:
+        return _error(e)
+    return {} if result is None else result
 
 def _api_get(path: str) -> dict:
     """GET request to Web API."""
-    resp = requests.get(f"{API_URL}{path}", timeout=30)
+    resp = _http.get(f"{API_URL}{path}", timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 def _api_post(path: str, body: dict) -> dict:
     """POST request to Web API."""
-    resp = requests.post(f"{API_URL}{path}", json=body, timeout=30)
+    resp = _http.post(f"{API_URL}{path}", json=body, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -200,8 +200,7 @@ def _mcp_tool_call(mcp_url: str, tool_name: str,
             "clientInfo": {"name": "tenzroclaw", "version": "0.1.0"},
         },
     }
-    resp = requests.post(mcp_url, json=init_payload,
-                         headers=headers, timeout=RPC_TIMEOUT)
+    resp = _http.post(mcp_url, json=init_payload, headers=headers)
     resp.raise_for_status()
     session_id = resp.headers.get("mcp-session-id", "")
 
@@ -214,8 +213,7 @@ def _mcp_tool_call(mcp_url: str, tool_name: str,
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id
-    resp = requests.post(mcp_url, json=tool_payload,
-                         headers=headers, timeout=RPC_TIMEOUT)
+    resp = _http.post(mcp_url, json=tool_payload, headers=headers)
     resp.raise_for_status()
 
     # Parse SSE or direct JSON response
@@ -615,108 +613,6 @@ def list_model_endpoints() -> dict:
     """List running model service endpoints."""
     return _rpc("tenzro_listModelEndpoints")
 
-def _intent_params(use_case: str, budget: int | None = None, optimize: float | None = None,
-                   quality_floor: str | None = None, est_input_tokens: int | None = None,
-                   est_output_tokens: int | None = None, payer_did: str | None = None,
-                   payer_address: str | None = None) -> dict:
-    """Assemble the intent fields shared by route_intent and chat_by_intent."""
-    params = {"use_case": use_case}
-    for key, value in (
-        ("budget", str(budget) if budget is not None else None),
-        ("optimize", optimize),
-        ("quality_floor", quality_floor),
-        ("est_input_tokens", est_input_tokens),
-        ("est_output_tokens", est_output_tokens),
-        ("payer_did", payer_did),
-        ("payer_address", payer_address),
-    ):
-        if value is not None:
-            params[key] = value
-    return params
-
-def route_intent(use_case: str, budget: int | None = None, optimize: float | None = None,
-                 quality_floor: str | None = None, est_input_tokens: int | None = None,
-                 est_output_tokens: int | None = None, payer_did: str | None = None,
-                 payer_address: str | None = None, prompt: str | None = None) -> dict:
-    """Select the best model for an intent without naming one.
-
-    use_case: chat | code | reasoning | research | summarize | extract | embed
-    budget: per-request cost cap in the smallest TNZO unit
-    optimize: cost-quality knob in [0.0, 1.0]
-    quality_floor: cheap | strong — rejects anything below the tier
-    payer_did: enables the per-DID rolling-window budget gate
-    payer_address: makes the payer's on-chain TNZO balance a hard ceiling
-    prompt: the text the model would answer, used only to place the request in
-        a difficulty cluster so selection accounts for how hard it is; it is
-        not sent to any provider
-
-    Returns the model, tier, estimated cost, fallback chain, the cluster the
-    prompt landed in, that model's error rate there, and the winning provider's
-    address and endpoint when the offer came from another operator. Discovery
-    only — nothing is dispatched and no spend is recorded, though the budget
-    gate and the wallet-balance ceiling still apply.
-    """
-    params = _intent_params(use_case, budget, optimize, quality_floor,
-                            est_input_tokens, est_output_tokens,
-                            payer_did, payer_address)
-    if prompt is not None:
-        params["prompt"] = prompt
-    return _rpc("tenzro_routeIntent", params)
-
-def chat_by_intent(use_case: str, message: str, budget: int | None = None,
-                   optimize: float | None = None, quality_floor: str | None = None,
-                   est_input_tokens: int | None = None, est_output_tokens: int | None = None,
-                   payer_did: str | None = None, payer_address: str | None = None,
-                   temperature: float | None = None, max_tokens: int | None = None) -> dict:
-    """Resolve an intent to a model and run the chat in one call.
-
-    Selection walks the cross-model fallback chain, so the intent resolves as
-    long as any model that satisfies it has a live offer, and dispatch is
-    pinned to the offer that was scored — the price quoted is the price settled
-    and the provider share goes to the address that offer named. The decision
-    is attached to the response under `route`. Difficulty feedback for resolved
-    and failed calls is recorded from the dispatch itself; report an escalation
-    with `record_route_outcome`.
-    """
-    params = _intent_params(use_case, budget, optimize, quality_floor,
-                            est_input_tokens, est_output_tokens,
-                            payer_did, payer_address)
-    params["message"] = message
-    if temperature is not None:
-        params["temperature"] = temperature
-    if max_tokens is not None:
-        params["max_tokens"] = max_tokens
-    return _rpc("tenzro_chatByIntent", params)
-
-def record_route_outcome(model_id: str, cluster: int, outcome: str) -> dict:
-    """Report how a routed call turned out.
-
-    outcome: resolved | escalated | failed. In practice this carries
-    `escalated` — the outcome only the caller knows, because it means the
-    caller took the answer to a stronger model; the other two are recorded by
-    `chat_by_intent` from the dispatch itself. Reporting is advisory:
-    `retained` false means the node has no difficulty index wired, so the
-    feedback was accepted and discarded.
-    """
-    return _rpc("tenzro_recordRouteOutcome", {
-        "model_id": model_id,
-        "cluster": cluster,
-        "outcome": outcome,
-    })
-
-def route_difficulty_stats(model_id: str | None = None) -> dict:
-    """Read the node's difficulty index: cluster count and prompts per cluster.
-
-    With `model_id`, also returns that model's per-cluster outcome counters and
-    error rate. An operator diagnostic — routing does not depend on it.
-    `enabled` false means the node has no embedding model loaded and routes on
-    declared metadata alone.
-    """
-    params = {}
-    if model_id:
-        params["model_id"] = model_id
-    return _rpc("tenzro_routeDifficultyStats", params)
-
 # ── Payments ──────────────────────────────────────────────────────
 
 def create_payment_challenge(protocol: str, resource: str, amount: int,
@@ -956,8 +852,9 @@ def list_snapshots() -> dict:
     their data from. The data itself (anchor chain and state buckets) is
     fetched over the node's iroh state-sync protocol, not over JSON-RPC.
 
-    Returns: { "snapshots": [ {height, state_root, manifest_blob, buckets} ],
-    "endpoint_id" }
+    Returns: { "snapshots": [ {height, checkpoint_height, checkpoint_hash,
+    state_root, manifest_blob, buckets} ], "endpoint_id" }. checkpoint_height
+    and checkpoint_hash are the join checkpoint that restores each snapshot.
     """
     return _rpc("tenzro_listSnapshots")
 
@@ -1150,10 +1047,8 @@ def _release_conditions_payload(kind: str) -> Any:
         return "ConsumerSignature"
     if k in ("both", "both_signatures"):
         return "BothSignatures"
-    if k == "custom":
-        return {"Custom": {"condition": ""}}
     raise ValueError(
-        f"unsupported release condition '{kind}': use timeout|provider|consumer|both|custom"
+        f"unsupported release condition '{kind}': use timeout|provider|consumer|both"
     )
 
 def _read_quantity(what: str, method: str, params: Any) -> int:
@@ -1694,21 +1589,13 @@ def refresh_token(refresh_token_value, dpop_proof):
     refresh token is good for one exchange: keep the ``refresh_token`` the
     answer carries for the next one.
     """
-    global _request_id
-    _request_id += 1
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "tenzro_refreshToken",
-        "params": {"refresh_token": refresh_token_value},
-        "id": _request_id,
-    }
-    headers = {"Content-Type": "application/json", "DPoP": dpop_proof}
-    resp = requests.post(RPC_URL, json=payload, headers=headers, timeout=RPC_TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    if "error" in data:
-        return {"error": data["error"]}
-    return data.get("result", {})
+    try:
+        result = _sdk.call_with_proof(
+            "tenzro_refreshToken", {"refresh_token": refresh_token_value},
+            _GivenProof(dpop_proof))
+    except RpcError as e:
+        return _error(e)
+    return {} if result is None else result
 
 def revoke_jwt(jti, did_envelope, reason="revoked"):
     """Revoke a single JWT by its `jti` claim.
@@ -1921,7 +1808,7 @@ def iroh_publish_blob(data: bytes) -> dict:
     """Publish raw bytes as a tenzro://blob/<blake3-hex> URI.
 
     `data` is base64-encoded on the wire; the response includes
-    `tenzro_uri`, `blake3_hex`, and `size_bytes`.
+    `tenzro_uri` and `size_bytes`.
     """
     import base64
     b64 = base64.b64encode(data).decode("ascii")
@@ -1940,41 +1827,6 @@ def iroh_fetch_blob(tenzro_uri: str) -> bytes:
 def iroh_resolve(tenzro_uri: str) -> bytes:
     """Alias for iroh_fetch_blob for code that thinks of the URI as a name."""
     return iroh_fetch_blob(tenzro_uri)
-
-# ── App hosting (sites / functions / machines) ────────────────────
-#
-# Wraps the tenzro_site* / tenzro_function* / tenzro_machine* / lease
-# JSON-RPC surface. Deploy a static site, a wasi:http function, or a
-# Firecracker microVM and serve it under a public hostname
-# (myapp.apps.tenzro.com) routed from the operator's ingress edge to any
-# serving node over the tenzro/http ALPN. Content is uploaded as
-# content-addressed blobs first (iroh_publish_blob); deploy calls
-# reference each blob by hash.
-#
-# Mutations (publish / remove / set-alias / claim-domain …) are
-# DID-owner authenticated: pass did_envelope=<signed envelope value>.
-# The node verifies the envelope's did equals the owner_did.
-
-def _with_env(params: dict, did_envelope: str | None) -> dict:
-    """Attach the signed DID envelope to a mutation's params when supplied."""
-    if did_envelope is not None:
-        params = dict(params)
-        params["did_envelope"] = did_envelope
-    return params
-
-# Static sites ---------------------------------------------------------
-
-# Hostname aliases -----------------------------------------------------
-
-# Ingress placement ----------------------------------------------------
-
-# Custom domains -------------------------------------------------------
-
-# Functions (wasi:http components) -------------------------------------
-
-# Machines (Firecracker microVMs) --------------------------------------
-
-# Placement leases -----------------------------------------------------
 
 # ── Multi-modal inference ─────────────────────────────────────────
 #
@@ -2206,7 +2058,8 @@ def list_video_catalog() -> dict:
 
 def transcribe_stream(model_id: str, pcm_chunks, sample_rate: int = 16000,
                       language: str | None = None,
-                      verification: str | None = None):
+                      verification: str | None = None,
+                      dpop_proof: str | None = None):
     """Transcribe live audio as it is captured.
 
     `pcm_chunks` yields mono 16-bit little-endian PCM byte chunks (from a
@@ -2215,6 +2068,11 @@ def transcribe_stream(model_id: str, pcm_chunks, sample_rate: int = 16000,
     `final` segments committed at pauses (each billed by the second of
     audio and receipted), then `done`. Yields `{"event", "data"}` dicts.
     The node must serve the model.
+
+    A DPoP proof is bound to the URL it was made for, so the proof in
+    TENZRO_DPOP_PROOF (made for the RPC endpoint) is never sent here. With
+    TENZRO_BEARER_JWT set, pass `dpop_proof` made for this transport:
+    `tenzro auth dpop-proof --url <TENZRO_RPC_URL>/tenzro/realtime/transcribe`.
     """
     import base64
 
@@ -2226,19 +2084,20 @@ def transcribe_stream(model_id: str, pcm_chunks, sample_rate: int = 16000,
             line = {"pcm_s16le_base64": base64.b64encode(chunk).decode()}
             yield (json.dumps(line) + "\n").encode()
 
+    url = RPC_URL.rstrip("/") + "/tenzro/realtime/transcribe"
     headers = {"Content-Type": "application/x-ndjson"}
     bearer = os.environ.get("TENZRO_BEARER_JWT")
     if bearer:
+        if not dpop_proof:
+            raise ValueError(
+                "transcribe_stream needs a DPoP proof made for its own URL: "
+                f"tenzro auth dpop-proof --url {url}")
         headers["Authorization"] = f"DPoP {bearer}"
-    dpop = os.environ.get("TENZRO_DPOP_PROOF")
-    if dpop:
-        headers["DPoP"] = dpop
-    url = RPC_URL.rstrip("/") + "/tenzro/realtime/transcribe"
-    with requests.post(url, data=lines(), headers=headers, stream=True,
-                       timeout=RPC_TIMEOUT) as resp:
+        headers["DPoP"] = dpop_proof
+    with _http.stream("POST", url, content=lines(), headers=headers) as resp:
         resp.raise_for_status()
         event = None
-        for raw in resp.iter_lines(decode_unicode=True):
+        for raw in resp.iter_lines():
             if raw.startswith("event:"):
                 event = raw[len("event:"):].strip()
             elif raw.startswith("data:"):
@@ -2547,22 +2406,13 @@ def transfer_machine_ownership(
 # ── Economics ─────────────────────────────────────────────────────
 
 def get_economic_policy() -> dict:
-    """Read the economic policy this node applies to every settlement.
+    """Read the economic policy governance last set.
 
-    Returns the live `EconomicPolicy` — the validating split (operator /
-    treasury), the delegated split (operator / rpc-provider / treasury), the
-    network's default settlement asset, and the
-    micro-settlement floor beneath which a charge settles through a payment
-    channel rather than its own transaction.
-
-    Also reports, per capability, which economic mode this node is in. A
-    **private** capability keeps the whole payment — nobody discovered it and
-    no validator was engaged on the caller's behalf. A **public validating**
-    one shares with the treasury. A **public delegated** one also pays the RPC
-    provider validating on its behalf.
-
-    Read this before paying rather than inferring the split from a receipt
-    afterwards. Every rate is governance-set, never a constant.
+    Returns the live `EconomicPolicy`: the network's default settlement asset
+    and the micro-settlement floor beneath which a charge settles through a
+    payment channel rather than its own transaction. What a settlement pays
+    (the governed fee, the class treasury leg, the HTTP-402 share and the
+    RPC-provider leg) is in the governed network parameters.
     """
     return _rpc("tenzro_getEconomicPolicy", {})
 
@@ -2585,16 +2435,6 @@ def get_supply_metrics() -> dict:
     BurnBreakdown (per-rail), and EmissionBreakdown.
     """
     return _rpc("tenzro_getSupplyMetrics", {})
-
-def get_burn_rate_recommendation() -> dict:
-    """Read the latest BurnRateRecommendation.
-
-    Returns `{ action, is_alarm, magnitude_bps, above_proposal_floor,
-    deviation_bps, basis }` where `action` is one of Disabled / NoChange /
-    IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation / AlarmHighDeflation.
-    `magnitude_bps` is capped by `magnitude_cap_normal_bps` (or alarm cap).
-    """
-    return _rpc("tenzro_getBurnRateRecommendation", {})
 
 def list_adaptive_burn_proposals() -> list:
     """List burn-dial governance proposals, newest first: the policy updates
@@ -2832,10 +2672,14 @@ def quote_bridge_fee_in_tnzo(adapter: str, dest_chain: str,
 
 def storage_store_object(object_id: str, data: str, owner: str = "",
                          data_shards: int = 4,
-                         parity_shards: int = 2) -> dict:
+                         parity_shards: int = 2,
+                         jurisdiction: str = "",
+                         operators: str = "") -> dict:
     """Store an erasure-coded object on this node's storage provider.
 
-    `data` is the base64-encoded payload.
+    `data` is the base64-encoded payload. `jurisdiction` (comma-separated
+    country codes) and `operators` (comma-separated provider accounts) limit
+    which holders may take its shards; this node must itself be inside them.
     """
     params = {
         "object_id": object_id,
@@ -2845,6 +2689,10 @@ def storage_store_object(object_id: str, data: str, owner: str = "",
     }
     if owner:
         params["owner"] = owner
+    countries = [c.strip() for c in jurisdiction.split(",") if c.strip()]
+    accounts = [o.strip() for o in operators.split(",") if o.strip()]
+    if countries or accounts:
+        params["placement"] = {"jurisdiction": countries, "operators": accounts}
     return _rpc("tenzro_storageStoreObject", params)
 
 # ── Universal RPC gateway ─────────────────────────────────────────
@@ -2905,6 +2753,15 @@ def storage_set_pricing(mode: str = "dynamic", capacity: str = "0",
 def storage_status() -> dict:
     """Summary of this node's storage-provider state."""
     return _rpc("tenzro_storageStatus", [])
+
+def get_storage_holding_receipt(object_id: str) -> dict:
+    """This node's signed receipt for the shards of an object it holds under a
+    placement constraint, or None when it holds none."""
+    return _rpc("tenzro_getStorageHoldingReceipt", [{"object_id": object_id}])
+
+def list_storage_providers() -> dict:
+    """The storage providers the node has heard announce, best record first."""
+    return _rpc("tenzro_listStorageProviders", {})
 
 # ── Managed Databases ─────────────────────────────────────────────
 
@@ -3063,19 +2920,6 @@ COMMANDS = {
     "list_models": lambda args: list_models(len(args) > 0 and args[0].lower() == "true"),
     "chat": lambda args: chat(args[0], " ".join(args[1:]) if len(args) > 1 else args[1]),
     "list_model_endpoints": lambda args: list_model_endpoints(),
-    "route_intent": lambda args: route_intent(
-        args[0],
-        int(args[1]) if len(args) > 1 else None,
-        float(args[2]) if len(args) > 2 else None,
-        args[3] if len(args) > 3 else None,
-    ),
-    "chat_by_intent": lambda args: chat_by_intent(args[0], " ".join(args[1:])),
-    "record_route_outcome": lambda args: record_route_outcome(
-        args[0], int(args[1]), args[2]
-    ),
-    "route_difficulty_stats": lambda args: route_difficulty_stats(
-        args[0] if args else None
-    ),
     # Payments
     "create_payment": lambda args: create_payment_challenge(
         args[0], args[1], int(args[2]),
@@ -3393,7 +3237,6 @@ COMMANDS = {
     "get_economic_policy": lambda args: get_economic_policy(),
     "get_burn_rate_config": lambda args: get_burn_rate_config(),
     "get_supply_metrics": lambda args: get_supply_metrics(),
-    "get_burn_rate_recommendation": lambda args: get_burn_rate_recommendation(),
     "list_adaptive_burn_proposals": lambda args: list_adaptive_burn_proposals(),
     # ── Escrow listing ──
     "list_escrows_by_payer": lambda args: list_escrows_by_payer(args[0]),
@@ -3429,6 +3272,8 @@ COMMANDS = {
         args[2] if len(args) > 2 and args[2] else "",
         int(args[3]) if len(args) > 3 else 4,
         int(args[4]) if len(args) > 4 else 2,
+        args[5] if len(args) > 5 else "",
+        args[6] if len(args) > 6 else "",
     ),
     "storage_set_pricing": lambda args: storage_set_pricing(
         args[0] if len(args) > 0 and args[0] else "dynamic",
@@ -3437,6 +3282,8 @@ COMMANDS = {
         args[3] if len(args) > 3 and args[3] else None,
     ),
     "storage_status": lambda args: storage_status(),
+    "get_storage_holding_receipt": lambda args: get_storage_holding_receipt(args[0]),
+    "list_storage_providers": lambda args: list_storage_providers(),
     # ── Managed Databases ──
     # ── MoE Expert Sharding ──
     "moe_shard_map": lambda args: moe_shard_map(args[0]),
@@ -3485,7 +3332,7 @@ def main():
     try:
         result = COMMANDS[cmd](args)
         print(json.dumps(result, indent=2, default=str))
-    except requests.exceptions.ConnectionError:
+    except httpx.ConnectError:
         print(json.dumps({"error": f"Cannot connect to Tenzro node at {RPC_URL}"}))
         sys.exit(1)
     except IndexError:

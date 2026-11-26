@@ -6,10 +6,11 @@
 //!
 //! The catalog is data, not code. Each model is a [`CatalogEntry`] that a
 //! publisher signs and publishes on the network; a node serves the entries
-//! its operator's trusted publishers have published and installs them in the
-//! process-wide [`store`]. The accessors below read that store, so a newly
-//! published model is served without a rebuild or a restart. Every file an
-//! entry downloads carries the SHA-256 its bytes must have.
+//! its operator's trusted publishers have published and installs them in its
+//! own [`CatalogCell`]. The accessors below are methods of the [`Catalog`]
+//! that cell holds, so a newly published model is served without a rebuild or
+//! a restart. Every file an entry downloads carries the SHA-256 its bytes
+//! must have.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +21,7 @@ pub use entry::{
     CatalogEntry, Component, ComponentLicence, EntryDependency, EntryError, Licence, LicencePart,
     Loader, ModelSpec, Source, SourceCheckpoint, ViewFile,
 };
-pub use store::Catalog;
+pub use store::{Catalog, CatalogCell};
 
 /// License tier for catalog entries. Defined in `tenzro-types` so it can be
 /// carried on `ModelInfo` and enforced in `ModelRegistry::register_model()`.
@@ -551,62 +552,70 @@ impl EffortPolicy {
     }
 }
 
-/// Resolve a caller-supplied reasoning budget for `model_id` into the
-/// template variable and value to render with, or `None` to leave the
-/// template's own default in place.
-///
-/// Validation happens here because a template that checks its input *raises*
-/// on an unrecognised value, which would turn a bad client string into a hard
-/// generation failure; and a template that does not check will happily
-/// interpolate a typo into the model's system prompt. Either way the caller's
-/// value must be screened before it reaches the prompt. Anything unrecognised
-/// falls back to the template default rather than failing the request.
-///
-/// Operators can pin a default without a rebuild via `TENZRO_REASONING_EFFORT`,
-/// validated against the same policy — an unsupported pin is ignored rather
-/// than breaking every request.
-pub fn resolve_reasoning_effort(model_id: &str, effort: Option<&str>) -> Option<(String, String)> {
-    let family = get_model_by_id(model_id).map(|e| e.family.clone())?;
-    let policy = EffortPolicy::for_family(&family);
-    if policy.kwarg.is_empty() {
-        return None;
+impl Catalog {
+    /// Resolve a caller-supplied reasoning budget for `model_id` into the
+    /// template variable and value to render with, or `None` to leave the
+    /// template's own default in place.
+    ///
+    /// Validation happens here because a template that checks its input *raises*
+    /// on an unrecognised value, which would turn a bad client string into a hard
+    /// generation failure; and a template that does not check will happily
+    /// interpolate a typo into the model's system prompt. Either way the caller's
+    /// value must be screened before it reaches the prompt. Anything unrecognised
+    /// falls back to the template default rather than failing the request.
+    ///
+    /// Operators can pin a default without a rebuild via `TENZRO_REASONING_EFFORT`,
+    /// validated against the same policy — an unsupported pin is ignored rather
+    /// than breaking every request.
+    pub fn resolve_reasoning_effort(
+        &self,
+        model_id: &str,
+        effort: Option<&str>,
+    ) -> Option<(String, String)> {
+        let family = self.get_model_by_id(model_id).map(|e| e.family.clone())?;
+        let policy = EffortPolicy::for_family(&family);
+        if policy.kwarg.is_empty() {
+            return None;
+        }
+        let requested = match effort {
+            Some(e) => e.to_string(),
+            None => std::env::var("TENZRO_REASONING_EFFORT").ok()?,
+        };
+        policy
+            .normalize(&requested)
+            .map(|v| (policy.kwarg.clone(), v))
     }
-    let requested = match effort {
-        Some(e) => e.to_string(),
-        None => std::env::var("TENZRO_REASONING_EFFORT").ok()?,
-    };
-    policy
-        .normalize(&requested)
-        .map(|v| (policy.kwarg.clone(), v))
 }
 
-pub fn resolve_enable_thinking(model_id: &str, budget_tokens: Option<u32>) -> bool {
-    // Operator escape hatch first: a comma-separated id list forces those
-    // models onto the non-thinking path with no rebuild. Empty/whitespace
-    // entries are ignored so a trailing comma is harmless.
-    if let Ok(list) = std::env::var("TENZRO_NOTHINK_MODELS")
-        && list
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .any(|id| id == model_id)
-    {
-        return false;
-    }
-    let Some(entry) = get_model_by_id(model_id) else {
-        return true;
-    };
-    let p = entry.reasoning;
-    if !p.supports_thinking {
-        return true;
-    }
-    match p.default_mode {
-        ReasoningMode::Never => false,
-        ReasoningMode::Always => true,
-        ReasoningMode::Auto => {
-            let big_enough = parse_params_total_b(&entry.parameters) >= p.thinking_safe_min_b;
-            let budget_ok = budget_tokens.is_none_or(|b| b >= p.thinking_min_budget_tokens);
-            big_enough && budget_ok
+impl Catalog {
+    pub fn resolve_enable_thinking(&self, model_id: &str, budget_tokens: Option<u32>) -> bool {
+        // Operator escape hatch first: a comma-separated id list forces those
+        // models onto the non-thinking path with no rebuild. Empty/whitespace
+        // entries are ignored so a trailing comma is harmless.
+        if let Ok(list) = std::env::var("TENZRO_NOTHINK_MODELS")
+            && list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .any(|id| id == model_id)
+        {
+            return false;
+        }
+        let Some(entry) = self.get_model_by_id(model_id) else {
+            return true;
+        };
+        let p = entry.reasoning;
+        if !p.supports_thinking {
+            return true;
+        }
+        match p.default_mode {
+            ReasoningMode::Never => false,
+            ReasoningMode::Always => true,
+            ReasoningMode::Auto => {
+                let big_enough = parse_params_total_b(&entry.parameters) >= p.thinking_safe_min_b;
+                let budget_ok = budget_tokens.is_none_or(|b| b >= p.thinking_min_budget_tokens);
+                big_enough && budget_ok
+            }
         }
     }
 }
@@ -1784,35 +1793,19 @@ impl HfModelEntry {
     }
 }
 
-/// The entries of one engine family, in id order.
-fn of_engine<T: Clone>(pick: impl Fn(&ModelSpec) -> Option<&T>) -> Vec<T> {
-    store::current()
-        .entries()
-        .iter()
-        .filter_map(|e| pick(&e.model).cloned())
-        .collect()
-}
-
-/// One entry of one engine family, by id.
-fn one_of_engine<T: Clone>(id: &str, pick: impl Fn(&ModelSpec) -> Option<&T>) -> Option<T> {
-    store::current()
-        .entry(id)
-        .and_then(|e| pick(&e.model).cloned())
-}
-
 macro_rules! engine_accessors {
     ($variant:ident, $ty:ty, $all:ident, $by_id:ident, $what:literal) => {
         #[doc = concat!("Every ", $what, " in the catalog.")]
-        pub fn $all() -> Vec<$ty> {
-            of_engine(|m| match m {
+        pub fn $all(&self) -> Vec<$ty> {
+            self.of_engine(|m| match m {
                 ModelSpec::$variant(e) => Some(e),
                 _ => None,
             })
         }
 
         #[doc = concat!("A ", $what, " in the catalog, by id.")]
-        pub fn $by_id(id: &str) -> Option<$ty> {
-            one_of_engine(id, |m| match m {
+        pub fn $by_id(&self, id: &str) -> Option<$ty> {
+            self.one_of_engine(id, |m| match m {
                 ModelSpec::$variant(e) => Some(e),
                 _ => None,
             })
@@ -1820,198 +1813,208 @@ macro_rules! engine_accessors {
     };
 }
 
-engine_accessors!(
-    Gguf,
-    HfModelEntry,
-    get_model_catalog,
-    get_model_by_id,
-    "GGUF language model"
-);
-engine_accessors!(
-    Rerank,
-    HfModelEntry,
-    get_rerank_catalog,
-    get_rerank_model_by_id,
-    "GGUF reranker"
-);
-engine_accessors!(
-    Decision,
-    HfModelEntry,
-    get_decision_catalog,
-    get_decision_model_by_id,
-    "GGUF decision model"
-);
-engine_accessors!(
-    OnnxVision,
-    OnnxVisionEntry,
-    get_vision_catalog,
-    get_vision_model_by_id,
-    "ONNX vision encoder"
-);
-engine_accessors!(
-    OnnxForecast,
-    OnnxForecastEntry,
-    get_forecast_catalog,
-    get_forecast_model_by_id,
-    "ONNX timeseries forecaster"
-);
-engine_accessors!(
-    OnnxTextEmbedding,
-    OnnxTextEmbeddingEntry,
-    get_text_embedding_catalog,
-    get_text_embedding_model_by_id,
-    "ONNX text-embedding model"
-);
-engine_accessors!(
-    Embed,
-    EmbedModelEntry,
-    get_embed_catalog,
-    get_embed_model_by_id,
-    "GGUF pooled embedder"
-);
-engine_accessors!(
-    OnnxSegmentation,
-    OnnxSegmentationEntry,
-    get_segmentation_catalog,
-    get_segmentation_model_by_id,
-    "ONNX segmentation model"
-);
-engine_accessors!(
-    OnnxTextSegmentation,
-    OnnxTextSegmentationEntry,
-    get_text_segmentation_catalog,
-    get_text_segmentation_model_by_id,
-    "ONNX text-promptable segmentation model"
-);
-engine_accessors!(
-    OnnxDetection,
-    OnnxDetectionEntry,
-    get_detection_catalog,
-    get_detection_model_by_id,
-    "ONNX object detector"
-);
-engine_accessors!(
-    OnnxAudio,
-    OnnxAudioEntry,
-    get_audio_catalog,
-    get_audio_model_by_id,
-    "ONNX speech-recognition model"
-);
-engine_accessors!(
-    Tts,
-    TtsModelEntry,
-    get_tts_catalog,
-    get_tts_model_by_id,
-    "speech-synthesis model"
-);
-engine_accessors!(
-    Omni,
-    OmniModelEntry,
-    get_omni_catalog,
-    get_omni_model_by_id,
-    "omni model (spoken replies)"
-);
-engine_accessors!(
-    OnnxVideo,
-    OnnxVideoEntry,
-    get_video_catalog,
-    get_video_model_by_id,
-    "ONNX video encoder"
-);
-engine_accessors!(
-    MediaGen,
-    MediaGenModelEntry,
-    get_media_gen_catalog,
-    get_media_gen_model_by_id,
-    "generative-media pipeline"
-);
-
-/// Whether jobs for this model split their denoising schedule across two
-/// experts, and so must be posted as a split job.
-///
-/// Splitting is a property of the model, not of the request: a spec carries no
-/// role list, so the node admitting a job and every node mirroring it off the
-/// gossip topic have to reach the same answer from the model id alone or they
-/// end up holding different jobs under the same id. An unknown model is treated
-/// as whole — nothing can be split into halves that are not described anywhere.
-pub fn media_gen_model_splits(model_id: &str) -> bool {
-    get_media_gen_model_by_id(model_id)
-        .map(|m| m.expert_pair.is_some())
-        .unwrap_or(false)
-}
-
-/// The catalog entry for `model_id` when it runs on this release: an unknown
-/// model, and a planned one with [`MEDIA_PLANNED_REFUSAL`], are refused.
-pub fn runnable_media_gen_model(model_id: &str) -> Result<MediaGenModelEntry, String> {
-    let entry = get_media_gen_model_by_id(model_id)
-        .ok_or_else(|| format!("unknown media model '{model_id}'"))?;
-    match entry.status {
-        MediaGenStatus::Native => Ok(entry),
-        MediaGenStatus::Planned => Err(format!("{model_id}: {MEDIA_PLANNED_REFUSAL}")),
+impl Catalog {
+    /// The entries of one engine family, in id order.
+    fn of_engine<T: Clone>(&self, pick: impl Fn(&ModelSpec) -> Option<&T>) -> Vec<T> {
+        self.entries()
+            .iter()
+            .filter_map(|e| pick(&e.model).cloned())
+            .collect()
     }
-}
 
-/// Generative-media pipelines serving a given job kind.
-pub fn get_media_gen_models_for_kind(kind: tenzro_types::MediaGenKind) -> Vec<MediaGenModelEntry> {
-    get_media_gen_catalog()
-        .into_iter()
-        .filter(|m| m.kinds.contains(&kind))
-        .collect()
-}
+    /// One entry of one engine family, by id.
+    fn one_of_engine<T: Clone>(
+        &self,
+        id: &str,
+        pick: impl Fn(&ModelSpec) -> Option<&T>,
+    ) -> Option<T> {
+        self.entry(id).and_then(|e| pick(&e.model).cloned())
+    }
 
-/// The full entry for `id`, of any engine family.
-pub fn entry(id: &str) -> Option<CatalogEntry> {
-    store::current().entry(id).cloned()
-}
+    engine_accessors!(
+        Gguf,
+        HfModelEntry,
+        get_model_catalog,
+        get_model_by_id,
+        "GGUF language model"
+    );
+    engine_accessors!(
+        Rerank,
+        HfModelEntry,
+        get_rerank_catalog,
+        get_rerank_model_by_id,
+        "GGUF reranker"
+    );
+    engine_accessors!(
+        Decision,
+        HfModelEntry,
+        get_decision_catalog,
+        get_decision_model_by_id,
+        "GGUF decision model"
+    );
+    engine_accessors!(
+        OnnxVision,
+        OnnxVisionEntry,
+        get_vision_catalog,
+        get_vision_model_by_id,
+        "ONNX vision encoder"
+    );
+    engine_accessors!(
+        OnnxForecast,
+        OnnxForecastEntry,
+        get_forecast_catalog,
+        get_forecast_model_by_id,
+        "ONNX timeseries forecaster"
+    );
+    engine_accessors!(
+        OnnxTextEmbedding,
+        OnnxTextEmbeddingEntry,
+        get_text_embedding_catalog,
+        get_text_embedding_model_by_id,
+        "ONNX text-embedding model"
+    );
+    engine_accessors!(
+        Embed,
+        EmbedModelEntry,
+        get_embed_catalog,
+        get_embed_model_by_id,
+        "GGUF pooled embedder"
+    );
+    engine_accessors!(
+        OnnxSegmentation,
+        OnnxSegmentationEntry,
+        get_segmentation_catalog,
+        get_segmentation_model_by_id,
+        "ONNX segmentation model"
+    );
+    engine_accessors!(
+        OnnxTextSegmentation,
+        OnnxTextSegmentationEntry,
+        get_text_segmentation_catalog,
+        get_text_segmentation_model_by_id,
+        "ONNX text-promptable segmentation model"
+    );
+    engine_accessors!(
+        OnnxDetection,
+        OnnxDetectionEntry,
+        get_detection_catalog,
+        get_detection_model_by_id,
+        "ONNX object detector"
+    );
+    engine_accessors!(
+        OnnxAudio,
+        OnnxAudioEntry,
+        get_audio_catalog,
+        get_audio_model_by_id,
+        "ONNX speech-recognition model"
+    );
+    engine_accessors!(
+        Tts,
+        TtsModelEntry,
+        get_tts_catalog,
+        get_tts_model_by_id,
+        "speech-synthesis model"
+    );
+    engine_accessors!(
+        Omni,
+        OmniModelEntry,
+        get_omni_catalog,
+        get_omni_model_by_id,
+        "omni model (spoken replies)"
+    );
+    engine_accessors!(
+        OnnxVideo,
+        OnnxVideoEntry,
+        get_video_catalog,
+        get_video_model_by_id,
+        "ONNX video encoder"
+    );
+    engine_accessors!(
+        MediaGen,
+        MediaGenModelEntry,
+        get_media_gen_catalog,
+        get_media_gen_model_by_id,
+        "generative-media pipeline"
+    );
 
-/// The licence tier of the catalogued model `id`, of any engine family.
-/// `None` for an id the catalog does not list.
-pub fn license_tier_of(id: &str) -> Option<LicenseTier> {
-    store::current()
-        .entry(id)
-        .map(|e| e.licence.effective_tier())
-}
+    /// Whether jobs for this model split their denoising schedule across two
+    /// experts, and so must be posted as a split job.
+    ///
+    /// Splitting is a property of the model, not of the request: a spec carries no
+    /// role list, so the node admitting a job and every node mirroring it off the
+    /// gossip topic have to reach the same answer from the model id alone or they
+    /// end up holding different jobs under the same id. An unknown model is treated
+    /// as whole — nothing can be split into halves that are not described anywhere.
+    pub fn media_gen_model_splits(&self, model_id: &str) -> bool {
+        self.get_media_gen_model_by_id(model_id)
+            .map(|m| m.expert_pair.is_some())
+            .unwrap_or(false)
+    }
 
-/// Whether the catalogued model `id` may be charged for or served to a paying
-/// caller. An uncatalogued id carries no licence restriction this node knows
-/// of.
-pub fn permits_paid_use(id: &str) -> bool {
-    license_tier_of(id).is_none_or(LicenseTier::permits_paid_use)
-}
+    /// The catalog entry for `model_id` when it runs on this release: an unknown
+    /// model, and a planned one with [`MEDIA_PLANNED_REFUSAL`], are refused.
+    pub fn runnable_media_gen_model(&self, model_id: &str) -> Result<MediaGenModelEntry, String> {
+        let entry = self
+            .get_media_gen_model_by_id(model_id)
+            .ok_or_else(|| format!("unknown media model '{model_id}'"))?;
+        match entry.status {
+            MediaGenStatus::Native => Ok(entry),
+            MediaGenStatus::Planned => Err(format!("{model_id}: {MEDIA_PLANNED_REFUSAL}")),
+        }
+    }
 
-/// The entry that lists `repo`/`path`, and its component for that file.
-pub fn file(repo: &str, path: &str) -> Option<(CatalogEntry, Component)> {
-    let catalog = store::current();
-    catalog
-        .file(repo, path)
-        .map(|(e, c)| (e.clone(), c.clone()))
-}
+    /// Generative-media pipelines serving a given job kind.
+    pub fn get_media_gen_models_for_kind(
+        &self,
+        kind: tenzro_types::MediaGenKind,
+    ) -> Vec<MediaGenModelEntry> {
+        self.get_media_gen_catalog()
+            .into_iter()
+            .filter(|m| m.kinds.contains(&kind))
+            .collect()
+    }
 
-/// Published-benchmark capability prior for a model, in `[0.0, 1.0]`, used to
-/// bootstrap model selection at cold start — before the measured per-cluster
-/// difficulty path has any observations for a prompt. `None` when the entry
-/// states no prior for the use case, in which case cost (then measurement)
-/// decides, so an unknown model is never penalised.
-pub fn capability_prior(model_id: &str, use_case: &str) -> Option<f32> {
-    let bps = *store::current()
-        .entry(model_id)?
-        .capability_priors
-        .get(use_case)?;
-    Some(bps as f32 / 10_000.0)
-}
+    /// The licence tier of the catalogued model `id`, of any engine family.
+    /// `None` for an id the catalog does not list.
+    pub fn license_tier_of(&self, id: &str) -> Option<LicenseTier> {
+        self.entry(id).map(|e| e.licence.effective_tier())
+    }
 
-/// The unquantised checkpoint a Mixture-of-Experts entry's experts are
-/// extracted from. `None` when expert extraction is not available for it.
-pub fn moe_source(model_id: &str) -> Option<SourceCheckpoint> {
-    store::current().entry(model_id)?.moe_source.clone()
-}
+    /// Whether the catalogued model `id` may be charged for or served to a paying
+    /// caller. An uncatalogued id carries no licence restriction this node knows
+    /// of.
+    pub fn permits_paid_use(&self, id: &str) -> bool {
+        self.license_tier_of(id)
+            .is_none_or(LicenseTier::permits_paid_use)
+    }
 
-/// Every GGUF model family in the catalog.
-pub fn get_model_families() -> Vec<String> {
-    let mut families: Vec<String> = get_model_catalog().into_iter().map(|m| m.family).collect();
-    families.sort();
-    families.dedup();
-    families
+    /// Published-benchmark capability prior for a model, in `[0.0, 1.0]`, used to
+    /// bootstrap model selection at cold start — before the measured per-cluster
+    /// difficulty path has any observations for a prompt. `None` when the entry
+    /// states no prior for the use case, in which case cost (then measurement)
+    /// decides, so an unknown model is never penalised.
+    pub fn capability_prior(&self, model_id: &str, use_case: &str) -> Option<f32> {
+        let bps = *self.entry(model_id)?.capability_priors.get(use_case)?;
+        Some(bps as f32 / 10_000.0)
+    }
+
+    /// The unquantised checkpoint a Mixture-of-Experts entry's experts are
+    /// extracted from. `None` when expert extraction is not available for it.
+    pub fn moe_source(&self, model_id: &str) -> Option<SourceCheckpoint> {
+        self.entry(model_id)?.moe_source.clone()
+    }
+
+    /// Every GGUF model family in the catalog.
+    pub fn get_model_families(&self) -> Vec<String> {
+        let mut families: Vec<String> = self
+            .get_model_catalog()
+            .into_iter()
+            .map(|m| m.family)
+            .collect();
+        families.sort();
+        families.dedup();
+        families
+    }
 }
 
 /// Read catalog entries from a JSON file (one entry or an array of them) or
@@ -2047,24 +2050,21 @@ pub fn read_entries(path: &std::path::Path) -> Result<Vec<CatalogEntry>, String>
 }
 
 /// Install the seed entries (this crate's `seed/`) as the process catalog.
-/// For the tests of crates that read the catalog; a node installs only what
-/// its trusted publishers signed. The catalog is process-wide and a node a
-/// test starts installs its own over it, so the seed goes back whenever it is
-/// not the catalog in place.
 #[cfg(feature = "test-seed")]
-pub fn install_test_seed() {
-    static SEED: std::sync::OnceLock<Vec<CatalogEntry>> = std::sync::OnceLock::new();
-    let entries = SEED.get_or_init(|| {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("seed");
-        read_entries(&dir).expect("the seed parses")
-    });
-    let current = store::current();
-    if current.len() == entries.len() && entries.iter().all(|e| current.entry(e.id()).is_some()) {
-        return;
+impl Catalog {
+    /// The seed catalog, for the tests of crates that read the catalog. Each
+    /// call builds a catalog the caller owns; a node installs only what its
+    /// trusted publishers signed.
+    pub fn test_seed() -> Catalog {
+        static SEED: std::sync::OnceLock<Vec<CatalogEntry>> = std::sync::OnceLock::new();
+        let entries = SEED.get_or_init(|| {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("seed");
+            read_entries(&dir).expect("the seed parses")
+        });
+        let (catalog, errors) = Catalog::build(entries.clone());
+        assert!(errors.is_empty(), "seed entries refused: {errors:?}");
+        catalog
     }
-    let (catalog, errors) = Catalog::build(entries.clone());
-    assert!(errors.is_empty(), "seed entries refused: {errors:?}");
-    store::install(catalog);
 }
 
 #[cfg(test)]

@@ -34,15 +34,6 @@ pub enum StorageProviderError {
     #[error("integrity check failed for {0}: served bytes do not match committed hash")]
     IntegrityMismatch(String),
 
-    /// A retrievability challenge response was wrong or missing.
-    #[error("retrievability challenge failed for object {object_id}: {reason}")]
-    ChallengeFailed {
-        /// Object under challenge.
-        object_id: String,
-        /// Why the challenge failed.
-        reason: String,
-    },
-
     /// Too few shards survived to reconstruct the object.
     #[error("insufficient shards to reconstruct {object_id}: have {have}, need {need}")]
     InsufficientShards {
@@ -87,23 +78,17 @@ pub enum StorageProviderError {
     #[error("transport error: {0}")]
     Transport(String),
 
-    /// Settlement/metering error.
-    #[error("settlement error: {0}")]
-    Settlement(String),
-
     /// Invalid request parameters.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+
+    /// A volume could not be measured.
+    #[error("volume measurement failed: {0}")]
+    Volume(String),
 }
 
 impl From<tenzro_iroh::IrohError> for StorageProviderError {
     fn from(err: tenzro_iroh::IrohError) -> Self {
         Self::Transport(err.to_string())
-    }
-}
-
-impl From<tenzro_settlement::SettlementError> for StorageProviderError {
-    fn from(err: tenzro_settlement::SettlementError) -> Self {
-        Self::Settlement(err.to_string())
     }
 }

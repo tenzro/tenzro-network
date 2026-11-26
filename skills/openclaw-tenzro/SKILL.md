@@ -2,7 +2,7 @@
 name: tenzroclaw
 version: 0.1.0
 author: Tenzro Network
-description: TenzroClaw — OpenClaw skill for the Tenzro Network. Create wallets, send transactions, check balances, register identities, manage credentials and services, set delegation scopes, exercise GDPR Article 17 right-to-erasure (forget_identity), make payments via AP2 v0.2 (sign + verify + validate-pair), MPP, x402 v1, Stripe SPT (SharedPaymentToken), ERC-8004 (Jan 2026 revision) Trustless Agents Registry (22 surfaces across IdentityRegistry, ReputationRegistry, ValidationRegistry), run AI inference, manage model endpoints, bridge tokens cross-chain, verify proofs, read network duties, look up tokens across VMs, deploy smart contracts, transfer tokens across VMs, manage settlement and escrow, participate in governance, resolve a node's DID Document to every address it answers on, and discover and invoke any JSON-RPC method the node serves through the universal gateway.
+description: TenzroClaw — OpenClaw skill for the Tenzro Network. Create wallets, send transactions, check balances, register identities, manage credentials and services, set delegation scopes, exercise GDPR Article 17 right-to-erasure (forget_identity), make payments via AP2 v0.2 (sign + verify + validate-pair), MPP, x402 v1, Stripe SPT (SharedPaymentToken), ERC-8004 (Jan 2026 revision) Trustless Agents Registry (22 surfaces across IdentityRegistry, ReputationRegistry, ValidationRegistry), run AI inference, manage model endpoints, store content-addressed objects, bridge tokens cross-chain, verify proofs, read network duties, look up tokens across VMs, deploy smart contracts, transfer tokens across VMs, manage settlement and escrow, participate in governance, resolve a node's DID Document to every address it answers on, and discover and invoke any JSON-RPC method the node serves through the universal gateway.
 tags:
   - blockchain
   - ai
@@ -31,7 +31,7 @@ tags:
 
 # TenzroClaw
 
-You can interact with the Tenzro blockchain network using its JSON-RPC, Web API, and MCP endpoints. Tenzro is a settlement layer designed for the AI age, providing identity, settlement, TEE security, and ZK proof verification.
+You can interact with the Tenzro blockchain network using its JSON-RPC, Web API, and MCP endpoints. Tenzro is a network of compute of every kind for the machine economy, with AI inference, rentable compute and storage as roles of one network, and identity, settlement, TEE security, and ZK proof verification underneath.
 
 ## Endpoints
 
@@ -392,8 +392,8 @@ curl -X POST https://rpc.tenzro.com \
 
 ### Join as MicroNode
 
-Join the Tenzro Network as a full participant — zero-install. Auto-provisions a TDIP DID,
-hardware-bound wallet, and all 10 network capabilities in a single RPC call.
+Provisions a TDIP DID and a hardware-bound wallet in a single RPC call, so the identity
+can pay for and call the network's services. It runs no node and takes no part in consensus.
 
 ```bash
 curl -X POST https://rpc.tenzro.com \
@@ -1235,9 +1235,6 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 **AI Models & Inference:**
 
 - `list_models` — List available AI models, filter by category or name
-- `chat_by_intent` — Select and run in one call. Dispatch is pinned to the offer that was scored, so the price quoted is the price settled and the provider share goes to the address that offer named; the decision comes back under `route`
-- `record_route_outcome` — Report how a routed call turned out (`resolved` / `escalated` / `failed`) so per-cluster error rates reflect what happened. In practice this carries `escalated`; the other two are recorded from the dispatch itself
-- `route_difficulty_stats` — Read the cluster map and a model's per-cluster outcome counters. An operator diagnostic; `enabled` false means the node routes on declared metadata alone
 - `list_model_endpoints` — List running model service endpoints with URLs and status
 - `get_model_provenance` — Get a model's provenance by name (Hub repository or model id) or manifest root: its content-addressed manifests, the origins that observed each, and whether they agree (`verified`); optional `file` adds that file's Merkle inclusion proof
 - `stop_model` — Stop serving a model

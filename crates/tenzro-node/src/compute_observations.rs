@@ -1,11 +1,14 @@
 //! What this validator's router observed providers charge and deliver: the
-//! readings a validator submits to the chain's compute index, and the public
-//! feed agents discover providers through.
+//! readings a validator submits to the chain's compute price index, and the
+//! public feed agents discover providers through.
 //!
-//! This is not a market. The compute index that compute claims settle against
-//! lives in chain state (`tenzro_vm::native::compute_claim`), frozen per epoch
-//! once two thirds of bonded stake submitted readings; this window only holds
-//! the evidence one validator reads its submission from.
+//! This is not a market. The compute price index lives in chain state as one
+//! rate symbol per hardware class in the validators' rate oracle
+//! (`tenzro_vm::native::economy`, reported by
+//! [`crate::compute_index_reporter`]): frozen per epoch as the stake-weighted
+//! median once enough bonded stake opened its readings. This window only
+//! holds the evidence one validator reads its submission from. Nothing
+//! settles against the index: compute claims settle on SLA verdicts.
 //!
 //! # Why observations and not announcements
 //!
@@ -516,22 +519,6 @@ impl ObservationWindow {
             computed_at_ms: now_ms,
         }
     }
-
-    /// Indexes for every (hardware class, region) bucket that has data.
-    pub fn all_indexes(&self, now_ms: i64) -> Vec<IndexSnapshot> {
-        let cutoff = now_ms - OBSERVATION_WINDOW_MS;
-        let mut buckets: BTreeSet<(HardwareClass, String)> = BTreeSet::new();
-        for e in self.entries.iter() {
-            if let Some(row) = Self::summarize(e.value(), cutoff) {
-                buckets.insert((row.hardware_class, row.region));
-            }
-        }
-        buckets
-            .into_iter()
-            .map(|(h, r)| self.index(h, Some(&r), now_ms))
-            .filter(|s| s.price_per_compute_second_wei.is_some())
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -656,7 +643,6 @@ mod tests {
         let feed = m.feed(&FeedQuery::default(), NOW);
         assert_eq!(feed[0].price_per_compute_second_wei, Some(2000));
         assert_eq!(feed[0].price_per_1k_output_tokens_wei, Some(5000));
-        assert_eq!(m.all_indexes(NOW).len(), 1);
     }
 
     #[test]

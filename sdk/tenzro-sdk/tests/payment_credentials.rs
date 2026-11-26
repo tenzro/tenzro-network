@@ -48,6 +48,9 @@ impl HybridSigner for P256Only {
         let sig: Signature = self.0.sign_prehash(&Sha256::digest(m_prime)).unwrap();
         Ok((sig.to_bytes().into(), None))
     }
+    async fn sign_ml_dsa_leg(&self, _m_prime: &[u8]) -> SdkResult<Vec<u8>> {
+        unreachable!("this signer holds no ML-DSA-65 key")
+    }
     async fn sign_p256(&self, _message: &[u8]) -> SdkResult<[u8; 64]> {
         unreachable!("a payment authorization is a composite signature")
     }

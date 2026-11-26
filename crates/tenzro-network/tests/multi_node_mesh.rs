@@ -55,11 +55,12 @@ struct Peer {
 
 async fn peer(lookup: &MemoryLookup) -> Peer {
     let gate = GossipGate::default();
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .hooks(gate.clone())
-        .bind()
-        .await
-        .unwrap();
+    let endpoint =
+        tenzro_iroh::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .hooks(gate.clone())
+            .bind()
+            .await
+            .unwrap();
     endpoint.address_lookup().unwrap().add(lookup.clone());
     lookup.add_endpoint_info(endpoint.addr());
     let gossip = GossipTransport::spawn(&endpoint, gate);

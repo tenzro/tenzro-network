@@ -57,7 +57,9 @@ one-fifth refund cap); one that cannot apply (another chain id, a stale nonce,
 a signature that does not recover, an authority with contract code) is
 skipped and the transaction still runs. Delegations stand even when the call
 after them reverts. A gas limit below the intrinsic gas (Prague rules,
-including the EIP-7623 calldata floor) is refused at admission.
+including the EIP-7623 calldata floor) is refused at admission. From the
+epoch the Osaka rule set is live (`feature.evm_osaka`), a gas limit above
+16,777,216 (EIP-7825) is refused at admission too.
 
 Block parameters (EIP-1898): `eth_getBalance`, `eth_getTransactionCount`,
 `eth_getCode`, `eth_getStorageAt`, `eth_call`, `eth_estimateGas` and

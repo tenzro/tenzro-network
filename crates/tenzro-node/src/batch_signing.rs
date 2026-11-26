@@ -376,16 +376,54 @@ mod tests {
         assert!(started.elapsed() < params.receipt_wait());
     }
 
+    /// A hardware that answers no signature.
+    struct DeadHardware(TestHybridSigner);
+    impl HybridSigner for DeadHardware {
+        fn sign(
+            &self,
+            _: tenzro_crypto::SignatureContext,
+            _: &[u8],
+        ) -> tenzro_crypto::Result<tenzro_crypto::CompositeSignature> {
+            Err(tenzro_crypto::CryptoError::InvalidSignature(
+                "the hardware does not answer".into(),
+            ))
+        }
+        fn public_key(&self) -> &CompositePublicKey {
+            self.0.public_key()
+        }
+        fn sign_external(&self, d: &[u8]) -> tenzro_crypto::Result<Vec<u8>> {
+            self.0.sign_external(d)
+        }
+    }
+
     #[test]
     fn a_hardware_that_never_signs_fails_the_record_loudly() {
         let params = BatchSigningParams {
             flush_interval_ms: 100,
             ..P
         };
-        let svc = slow_service(5_000, params);
+        let opener: IdentityOpener = Box::new(|_| {
+            Ok(Arc::new(DeadHardware(TestHybridSigner::hybrid(64))) as Arc<dyn HybridSigner>)
+        });
+        let svc = build_batch_service("l", params, true, false, vec![opener]).unwrap();
         let signer = tenzro_crypto::batch::BatchRecordSigner::new(svc, Duration::from_millis(300));
         let err = signer.sign_record(b"x").unwrap_err();
         assert!(err.to_string().contains("not signed in time"), "{err}");
+    }
+
+    #[test]
+    fn a_record_whose_batch_is_at_a_slow_hardware_is_signed_late() {
+        let params = BatchSigningParams {
+            flush_interval_ms: 100,
+            ..P
+        };
+        // The hardware takes longer than the signer waits: the record is
+        // signed when the hardware answers, not refused while it works.
+        let svc = slow_service(900, params);
+        let signer =
+            tenzro_crypto::batch::BatchRecordSigner::new(svc.clone(), Duration::from_millis(300));
+        let sig = signer.sign_record(b"x").expect("signed late");
+        sig.verify_record_at(svc.identity(), b"x", 0).unwrap();
     }
 
     #[test]

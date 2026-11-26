@@ -40,6 +40,13 @@ pub trait HybridSigner: Send + Sync {
     /// [`COMPOSITE_LABEL_MLDSA65_P256`].
     async fn sign_composite(&self, m_prime: &[u8]) -> SdkResult<([u8; 64], Option<Vec<u8>>)>;
 
+    /// Sign `m_prime` with the ML-DSA-65 key alone, under the same FIPS 204
+    /// context string as [`HybridSigner::sign_composite`]. For statements
+    /// whose P-256 leg is made some other way, so the hardware does not
+    /// prompt for a P-256 signature that would be thrown away. Only called
+    /// when [`HybridSigner::ml_dsa_public_key`] is `Some`.
+    async fn sign_ml_dsa_leg(&self, m_prime: &[u8]) -> SdkResult<Vec<u8>>;
+
     /// Sign `message` with the P-256 key alone: `r || s` over
     /// `SHA-256(message)`. Statements the node verifies as a plain P-256
     /// signature (a post-quantum rotation's authority leg, a TEE measurement
@@ -67,6 +74,10 @@ pub const COMPOSITE_LABEL_MLDSA65_P256: &[u8] = b"COMPSIG-MLDSA65-ECDSA-P256-SHA
 
 /// Signature context of a ledger transaction.
 pub const TRANSACTION_SIGNATURE_CONTEXT: &[u8] = b"tenzro/tx";
+
+/// Signature context of a fee payer's consent to pay one ledger
+/// transaction's fee.
+pub const FEE_PAYER_SIGNATURE_CONTEXT: &[u8] = b"tenzro/tx/fee-payer";
 
 /// The 32-byte ledger account slot of a hardware P-256 key, identical to
 /// `tenzro_crypto::account_slot`:
@@ -487,6 +498,9 @@ mod tests {
         async fn sign_composite(&self, _m_prime: &[u8]) -> SdkResult<([u8; 64], Option<Vec<u8>>)> {
             self.signed.store(true, Ordering::SeqCst);
             Ok(([9; 64], None))
+        }
+        async fn sign_ml_dsa_leg(&self, _m_prime: &[u8]) -> SdkResult<Vec<u8>> {
+            unreachable!("this signer holds no ML-DSA-65 key")
         }
         async fn sign_p256(&self, _message: &[u8]) -> SdkResult<[u8; 64]> {
             unreachable!()

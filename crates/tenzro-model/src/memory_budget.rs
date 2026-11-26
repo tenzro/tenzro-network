@@ -498,6 +498,21 @@ impl MemoryBudget {
     }
 
     pub fn admit(&self, key: &str, tier: Tier, bytes: u64) -> Result<(), AdmissionDenied> {
+        self.admit_with_resident(key, tier, bytes, 0)
+    }
+
+    /// Admit `bytes` under `key` when `resident` of them are already in
+    /// memory: a model whose weights are loaded and whose engine is about to
+    /// take the rest. The ledger is asked for the whole figure (it replaces
+    /// what `key` held), the machine only for what is not yet taken, since
+    /// the weights already count against what it reports free.
+    pub fn admit_with_resident(
+        &self,
+        key: &str,
+        tier: Tier,
+        bytes: u64,
+        resident: u64,
+    ) -> Result<(), AdmissionDenied> {
         let mut state = self.state.lock();
         let ceiling = state.ceiling_of(tier);
 
@@ -537,7 +552,7 @@ impl MemoryBudget {
         // including the ones used to reach and manage it.
         let free = self.machine.available_bytes();
         let usable = free.saturating_sub(state.config.reserve_bytes);
-        if bytes > usable {
+        if bytes.saturating_sub(resident) > usable {
             return Err(AdmissionDenied {
                 denied_by: DeniedBy::Machine,
                 machine_available_bytes: free,

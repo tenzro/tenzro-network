@@ -56,6 +56,8 @@
 /// proof; then it moves to [`OWNER_METHODS`].
 pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_acceptClusterMembership",
+    "tenzro_acknowledgeCondition",
+    "tenzro_approveDeviceCode",
     "tenzro_bindDevice",
     "tenzro_buildModelManifest",
     "tenzro_cleanupIdleLocalModelServices",
@@ -64,16 +66,23 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_daChallenge",
     "tenzro_deleteModel",
     "tenzro_exportConfig",
+    "tenzro_fileChallengeFault",
     "tenzro_flagAgentAudit",
+    "tenzro_fleetHostEvidence",
     "tenzro_forgetIdentity",
     "tenzro_getAccessPolicy",
     "tenzro_gossipStats",
     "tenzro_gracefulExit",
     "tenzro_hostModel",
     "tenzro_installSealedModel",
+    "tenzro_installUpdate",
+    "tenzro_iroh_publishBlob",
     "tenzro_layerPipelineStatus",
     "tenzro_listAccessTokens",
     "tenzro_listAdminAudit",
+    "tenzro_listConditions",
+    "tenzro_listPairedDevices",
+    "tenzro_listSeatDuties",
     "tenzro_loadAudioModel",
     "tenzro_loadDecisionModel",
     "tenzro_loadDetectionModel",
@@ -101,8 +110,9 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_pruneModelRegistry",
     "tenzro_publishTeeMeasurement",
     "tenzro_recordAgentAuditSession",
-    "tenzro_recordRouteOutcome",
+    "tenzro_reexecuteChallenge",
     "tenzro_registerModelEndpoint",
+    "tenzro_restartNode",
     "tenzro_retryNetworkLeg",
     "tenzro_revealChallengeVote",
     "tenzro_revokeAccessToken",
@@ -124,6 +134,7 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_storageRetrieveObject",
     "tenzro_storageSetPricing",
     "tenzro_storageStoreObject",
+    "tenzro_submitApproval",
     "tenzro_trainRound",
     "tenzro_trainedModelProvenance",
     "tenzro_transferMachineOwnership",
@@ -140,6 +151,7 @@ pub const ADMIN_METHODS: &[&str] = &[
     "tenzro_unloadTrainingModel",
     "tenzro_unloadVideoModel",
     "tenzro_unloadVisionModel",
+    "tenzro_unpairDevice",
     "tenzro_unpinModel",
     "tenzro_unregisterModelEndpoint",
     "tenzro_updateIdentity",
@@ -169,6 +181,8 @@ pub const OWNER_METHODS: &[&str] = &[
     "tenzro_moeDisputeReceipt",
     "tenzro_onboardDelegatedAgent",
     "tenzro_onboardHuman",
+    "tenzro_pairDevice",
+    "tenzro_recordExecutionReceipt",
     "tenzro_registerIdentity",
     "tenzro_registerKeyRelease",
     "tenzro_registerMachineIdentity",
@@ -251,7 +265,6 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_buildReserveAttestationFromPor",
     "tenzro_canTransfer",
     "tenzro_chat",
-    "tenzro_chatByIntent",
     "tenzro_checkDelegateTarget",
     "tenzro_clusterMembers",
     "tenzro_computeBondParams",
@@ -275,6 +288,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_detect",
     "tenzro_detectTee",
     "tenzro_discoverModels",
+    "tenzro_estimateGas",
     "tenzro_eventStatus",
     "tenzro_exportEvidencePack",
     "tenzro_fabricProfile",
@@ -284,11 +298,15 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_get7702Delegation",
     "tenzro_getAccountContention",
     "tenzro_getAccountOutflow",
+    "tenzro_getAccountSigningKey",
     "tenzro_getAgentAuditCommit",
     "tenzro_getAgentBond",
     "tenzro_getAgentGrantProof",
     "tenzro_getAgentQuarantine",
     "tenzro_getAgentTerms",
+    "tenzro_getAgentTermsCredential",
+    "tenzro_getAppTransportInfo",
+    "tenzro_getAppTransportUsage",
     "tenzro_getAttestationLog",
     "tenzro_getBalance",
     "tenzro_getBeacon",
@@ -300,8 +318,8 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_getBridgeOutflow",
     "tenzro_getBridgeRoute",
     "tenzro_getBurnRateConfig",
-    "tenzro_getBurnRateRecommendation",
     "tenzro_getCatalogEntry",
+    "tenzro_getChallengeInputs",
     "tenzro_getCheckpointCertificate",
     "tenzro_getCommittee",
     "tenzro_getCompactCertificate",
@@ -372,6 +390,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_getRole",
     "tenzro_getRoleStakes",
     "tenzro_getRouterMetrics",
+    "tenzro_getRpcProviderLeg",
     "tenzro_getSealedModel",
     "tenzro_getSettlementPreference",
     "tenzro_getSigningPayload",
@@ -380,6 +399,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_getStateProof",
     "tenzro_getStateRoot",
     "tenzro_getStatusList",
+    "tenzro_getStorageHoldingReceipt",
     "tenzro_getSupplyMetrics",
     "tenzro_getTeeAttestation",
     "tenzro_getTerritoryPolicy",
@@ -406,7 +426,6 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_iroh_getEndpointId",
     "tenzro_iroh_getInfo",
     "tenzro_iroh_listAlpns",
-    "tenzro_iroh_publishBlob",
     "tenzro_iroh_resolveTenzroUri",
     "tenzro_issueAccessToken",
     "tenzro_issueKyaCredential",
@@ -451,6 +470,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_listSegmentationCatalog",
     "tenzro_listSettlements",
     "tenzro_listSnapshots",
+    "tenzro_listStorageProviders",
     "tenzro_listTeeProviders",
     "tenzro_listTextEmbeddingCatalog",
     "tenzro_listTextSegmentationCatalog",
@@ -484,6 +504,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_peerCount",
     "tenzro_permit2NonceUsed",
     "tenzro_permit2VerifyAndConsume",
+    "tenzro_pollDeviceCode",
     "tenzro_prefixProbe",
     "tenzro_previewServe",
     "tenzro_previewSplit",
@@ -495,17 +516,19 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_readPorReserve",
     "tenzro_redeemSealedDelivery",
     "tenzro_refreshToken",
+    "tenzro_requestDeviceCode",
     "tenzro_rerank",
     "tenzro_resolveAgentKey",
     "tenzro_resolveCredential",
     "tenzro_resolveDidDocument",
     "tenzro_resolveIdentity",
+    "tenzro_resolvePaymentIntent",
     "tenzro_rotateIdentityToPq",
-    "tenzro_routeDifficultyStats",
-    "tenzro_routeIntent",
     "tenzro_segment",
     "tenzro_sendRawTransaction",
+    "tenzro_sendZkProof",
     "tenzro_settlementNetworks",
+    "tenzro_slaGetEnergy",
     "tenzro_slaGetParams",
     "tenzro_slaListOutstandingProbes",
     "tenzro_slaVerdict",
@@ -534,6 +557,7 @@ pub const OPEN_METHODS: &[&str] = &[
     "tenzro_verifyEvidence",
     "tenzro_verifyInferenceCommitment",
     "tenzro_verifyInferenceReceipt",
+    "tenzro_verifyJurisdictionReceipt",
     "tenzro_verifyKyaCredential",
     "tenzro_verifyNodeDidDocument",
     "tenzro_verifyPayment",
@@ -554,6 +578,10 @@ pub const OPEN_METHODS: &[&str] = &[
 /// open. Every entry must be in [`OPEN_METHODS`]; every open method whose name
 /// reads as a write must be here.
 pub const OPEN_WRITES: &[(&str, &str)] = &[
+    (
+        "tenzro_sendZkProof",
+        "hands a proof envelope to the committee's validators over their open zk-proof protocol, which each paces and verifies itself; writes no state on this node, and a proof is recorded only by bonded validators' verdicts",
+    ),
     (
         "tenzro_agentNodePqKey",
         "returns this node's ML-DSA-65 key for an agent and its proof of possession: the key derives in memory from the hardware root, the only signature is that fixed proof, and nothing is written",
@@ -577,6 +605,14 @@ pub const OPEN_WRITES: &[(&str, &str)] = &[
     (
         "tenzro_issueAccessToken",
         "issues a token only to a caller that answered its challenge with its own passkey or hardware key",
+    ),
+    (
+        "tenzro_requestDeviceCode",
+        "issues an in-memory device code, two per address and sixteen in all, that signs nothing in until the operator approves it with a passkey; writes no state",
+    ),
+    (
+        "tenzro_pollDeviceCode",
+        "answers whether a device code was approved and, for a device still paired, issues a token for the open reads only; writes no state",
     ),
     (
         "tenzro_exportEvidencePack",
@@ -641,10 +677,6 @@ pub const OPEN_WRITES: &[(&str, &str)] = &[
     (
         "tenzro_finalizeChallenge",
         "tallies votes the committee already cast; the verdict is theirs, and finalizing twice returns the same verdict",
-    ),
-    (
-        "tenzro_iroh_publishBlob",
-        "stores a content-addressed blob; nothing serves it until an owner-signed deploy names its hash",
     ),
     (
         "tenzro_issueKyaCredential",
@@ -767,9 +799,45 @@ pub enum IdentityCover {
     /// The actor proves who it is in the call (a signature by the owner or
     /// payer), and the effect is bounded by what that proof authorizes.
     ActorProof,
+    /// The edge admits it only for a registered identity, or one the node's
+    /// operator or access policy exempts (`crate::identity_gate::edge_admits`),
+    /// in the node's onboarding mode.
+    RegisteredCaller(EdgeSubject),
     /// An anonymous durable write the identity rule does not cover yet. Each
-    /// is a decision still to take, with the reason it is open.
+    /// is a decision still to take, with the reason it is open, and is named
+    /// in [`NOT_YET_COVERED`].
     NotYet(&'static str),
+}
+
+/// Whose identity the edge asks about for a [`IdentityCover::RegisteredCaller`]
+/// write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeSubject {
+    /// The caller its access token names. `crate::access::admit`, which every
+    /// surface passes through, asks before the handler runs.
+    Caller,
+    /// The identity the call itself proves, which no token names yet: the
+    /// handler asks once it has verified the proof.
+    Proven,
+    /// The identity that authored the signed record the call carries. The
+    /// one path a record takes into the ledger, from this call or from
+    /// gossip, asks (`crate::trust_hooks::apply`).
+    Author,
+}
+
+/// The open writes the identity rule does not cover yet. A method may be
+/// [`IdentityCover::NotYet`] only while it is named here.
+pub const NOT_YET_COVERED: &[&str] = &["tenzro_iroh_publishBlob"];
+
+/// Whose registered identity the edge requires for `method`, if the identity
+/// rule covers it that way.
+pub fn edge_subject(method: &str) -> Option<EdgeSubject> {
+    OPEN_WRITE_IDENTITY
+        .iter()
+        .find_map(|(m, cover)| match cover {
+            IdentityCover::RegisteredCaller(subject) if *m == method => Some(*subject),
+            _ => None,
+        })
 }
 
 /// For each of [`OPEN_WRITES`], how the identity rule covers it. A method
@@ -800,28 +868,16 @@ pub const OPEN_WRITE_IDENTITY: &[(&str, IdentityCover)] = &[
     ("tenzro_exportEvidencePack", IdentityCover::Stateless),
     (
         "tenzro_fileInferenceChallenge",
-        IdentityCover::NotYet(
-            "opens a dispute on a stored commitment; the challenger is not named by the call, so gating it needs the challenger's identity added to its params",
-        ),
+        IdentityCover::RegisteredCaller(EdgeSubject::Caller),
     ),
     ("tenzro_finalizeChallenge", IdentityCover::Stateless),
     (
-        "tenzro_iroh_publishBlob",
-        IdentityCover::NotYet(
-            "stores caller bytes on this node's disk; gating it needs a caller identity the call does not carry (a token), and the SDK publishes without one",
-        ),
-    ),
-    (
         "tenzro_issueAccessToken",
-        IdentityCover::NotYet(
-            "a hardware-key proof for a DID the key derives is accepted whether or not the DID is registered; gating it must exempt the operator DID, the access policy's admins and delegated agents' serving keys",
-        ),
+        IdentityCover::RegisteredCaller(EdgeSubject::Proven),
     ),
     (
         "tenzro_issueKyaCredential",
-        IdentityCover::NotYet(
-            "issues a credential for a DID the presented key derives; as for access tokens, the registered-or-exempt rule is still to be written",
-        ),
+        IdentityCover::RegisteredCaller(EdgeSubject::Proven),
     ),
     ("tenzro_joinAsMicroNode", IdentityCover::RegistrationPath),
     (
@@ -829,19 +885,20 @@ pub const OPEN_WRITE_IDENTITY: &[(&str, IdentityCover)] = &[
         IdentityCover::RegistrationPath,
     ),
     ("tenzro_openPaymentChannel", IdentityCover::ActorProof),
+    ("tenzro_pollDeviceCode", IdentityCover::Stateless),
     ("tenzro_queryEvents", IdentityCover::Stateless),
     ("tenzro_redeemSealedDelivery", IdentityCover::ActorProof),
     ("tenzro_refreshToken", IdentityCover::ActorProof),
+    ("tenzro_requestDeviceCode", IdentityCover::Stateless),
     ("tenzro_rotateIdentityToPq", IdentityCover::ActorProof),
     ("tenzro_sendRawTransaction", IdentityCover::Mempool),
+    ("tenzro_sendZkProof", IdentityCover::Stateless),
     ("tenzro_sponsoredInference", IdentityCover::ActorProof),
     ("tenzro_standbyQuote", IdentityCover::Stateless),
     ("tenzro_submitReconciliation", IdentityCover::Stateless),
     (
         "tenzro_submitTrustRecord",
-        IdentityCover::NotYet(
-            "records are signed by their author, who need not be registered; whether an unregistered author may add to the trust ledger is a decision for the trust design",
-        ),
+        IdentityCover::RegisteredCaller(EdgeSubject::Author),
     ),
     ("tenzro_subscribe", IdentityCover::Stateless),
 ];
@@ -860,6 +917,17 @@ mod tests {
         ] {
             assert_eq!(gate_class(m), None, "{m} must carry no gate");
         }
+    }
+
+    /// A published blob is written to the node's disk, stays until released
+    /// and is served to anyone who asks for its hash. Open would let any
+    /// caller fill the volume and have the node host what it chose.
+    #[test]
+    fn publishing_a_blob_into_the_node_store_is_admin_only() {
+        assert_eq!(
+            gate_class("tenzro_iroh_publishBlob"),
+            Some(GateClass::Admin)
+        );
     }
 
     /// Signing with the node's own sealed validator keyset is an operator
@@ -1057,6 +1125,8 @@ mod tests {
         assert_eq!(gate_class("tenzro_setAccessPolicy"), Some(GateClass::Admin));
         assert_eq!(gate_class("eth_blockNumber"), Some(GateClass::Open));
         assert_ne!(gate_class("tenzro_enrollPasskey"), Some(GateClass::Admin));
+        assert_eq!(gate_class("tenzro_pairDevice"), Some(GateClass::Owner));
+        assert_eq!(gate_class("tenzro_unpairDevice"), Some(GateClass::Admin));
         assert!(is_classified("eth_blockNumber"));
     }
 
@@ -1386,6 +1456,7 @@ mod tests {
     /// Calls that, found in a handler, show it checks a proof from the owner
     /// of what it changes. `approve_withdrawal` and `update_channel` hand the
     /// signature to the treasury and the channel ledger, which verify it.
+    /// `redeem_secret` checks a one-time pairing code an administrator issued.
     const PROOF_MARKERS: &[&str] = &[
         "require_did_owner",
         "require_address_owner",
@@ -1421,6 +1492,7 @@ mod tests {
         "PaymentExpectation::Resource",
         "identity_revocation::authorize(",
         "verify_release(",
+        "redeem_secret(",
     ];
 
     /// Sources holding the handlers the dispatcher calls.
@@ -1439,6 +1511,7 @@ mod tests {
             include_str!("agent_delegation.rs"),
             include_str!("agent_accounts.rs"),
             include_str!("key_release_rpc.rs"),
+            include_str!("pairing_rpc.rs"),
         ]
         .concat()
     }
@@ -1532,6 +1605,57 @@ mod tests {
         );
     }
 
+    /// A write the edge covers is asked about where its table entry says: a
+    /// caller's token at the one place every surface passes, a proven
+    /// identity in the handler that verifies the proof.
+    #[test]
+    fn every_registered_caller_write_reaches_the_edge() {
+        let challenge = edge_subject("tenzro_fileInferenceChallenge");
+        assert_eq!(challenge, Some(EdgeSubject::Caller));
+        assert_eq!(edge_subject("tenzro_sendRawTransaction"), None);
+        assert_eq!(edge_subject("tenzro_notAMethod"), None);
+        let admit = include_str!("access.rs");
+        assert!(
+            admit.contains("edge_subject(method) == Some(EdgeSubject::Caller)"),
+            "access::admit must ask the edge about a caller-covered write"
+        );
+        let handlers = [
+            ("tenzro_issueAccessToken", include_str!("access.rs")),
+            (
+                "tenzro_issueKyaCredential",
+                include_str!("kya_credential.rs"),
+            ),
+        ];
+        let proven: Vec<&str> = OPEN_WRITE_IDENTITY
+            .iter()
+            .filter(|(_, c)| *c == IdentityCover::RegisteredCaller(EdgeSubject::Proven))
+            .map(|(m, _)| *m)
+            .collect();
+        for method in proven {
+            let (_, source) = handlers
+                .iter()
+                .find(|(m, _)| *m == method)
+                .unwrap_or_else(|| panic!("{method}: name the file whose handler asks the edge"));
+            assert!(
+                source.contains(&format!("edge_admits(node, \"{method}\"")),
+                "{method}: its handler must ask the edge once the identity is proven"
+            );
+        }
+        // A record's author is asked about where every record enters the ledger.
+        let records = include_str!("trust_hooks.rs");
+        assert!(
+            records.contains("tenzro_trust::ledger::author(record)?")
+                && records.contains("admit(&author)"),
+            "trust_hooks::apply must ask the edge about a record's author"
+        );
+        let authored: Vec<&str> = OPEN_WRITE_IDENTITY
+            .iter()
+            .filter(|(_, c)| *c == IdentityCover::RegisteredCaller(EdgeSubject::Author))
+            .map(|(m, _)| *m)
+            .collect();
+        assert_eq!(authored, ["tenzro_submitTrustRecord"]);
+    }
+
     /// No anonymous write call is added without deciding what the identity
     /// rule does about it, and the ones it does not cover yet are named.
     #[test]
@@ -1547,6 +1671,18 @@ mod tests {
             covered.len(),
             OPEN_WRITE_IDENTITY.len(),
             "a method is classified once"
+        );
+        // An uncovered write is one that was argued for by name.
+        let not_yet: BTreeSet<&str> = OPEN_WRITE_IDENTITY
+            .iter()
+            .filter(|(_, cover)| matches!(cover, IdentityCover::NotYet(_)))
+            .map(|(m, _)| *m)
+            .collect();
+        let named: BTreeSet<&str> = NOT_YET_COVERED.iter().copied().collect();
+        assert!(
+            not_yet.is_subset(&named),
+            "an open write the identity rule does not cover must be named in NOT_YET_COVERED: {:?}",
+            not_yet.difference(&named).collect::<Vec<_>>()
         );
         // The methods that put a transaction in the pool are exactly the ones
         // the mempool gate covers.

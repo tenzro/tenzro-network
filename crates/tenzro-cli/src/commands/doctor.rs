@@ -10,6 +10,7 @@ use anyhow::Result;
 use clap::Parser;
 use serde_json::json;
 
+use crate::commands::fixes;
 use crate::commands::preflight::{self, Check, Facts, Level};
 use crate::commands::stake_options::{LineKind, StakeNeed};
 use crate::commands::update::manifest::Version;
@@ -24,6 +25,14 @@ pub struct DoctorCmd {
     /// Print one JSON object for support instead of the checklist.
     #[arg(long)]
     json: bool,
+    /// Run the fixes this machine can make for itself, after showing them:
+    /// everything that needs the operating system's permission is asked for
+    /// once.
+    #[arg(long)]
+    fix: bool,
+    /// With --fix, run the fixes without asking first.
+    #[arg(long, requires = "fix")]
+    yes: bool,
 }
 
 /// What `gather` read about software updates.
@@ -99,6 +108,7 @@ fn c(label: &'static str, level: Level, detail: impl Into<String>, fix: &[&str])
         level,
         detail: detail.into(),
         fix: fix.iter().map(|s| s.to_string()).collect(),
+        run: None,
     }
 }
 
@@ -331,8 +341,8 @@ pub fn update_checks(o: &Observed) -> Vec<Check> {
     update_checks_for_os(o, std::env::consts::OS)
 }
 
-/// [`update_checks`] for the operating system named `os`: where the running
-/// program cannot be replaced, the advice is the MSI, not `tenzro update`.
+/// [`update_checks`] for the operating system named `os`: on Windows the
+/// advice also names the MSI, which updates an MSI install.
 pub fn update_checks_for_os(o: &Observed, os: &str) -> Vec<Check> {
     let hint = |lead: &str| tenzro_update_notice::banner::install_hint(os, lead);
     let lower_first = |t: &str| {
@@ -387,6 +397,7 @@ pub fn update_checks_for_os(o: &Observed, os: &str) -> Vec<Check> {
             level: Level::Warn,
             detail: line,
             fix,
+            run: None,
         });
     }
     if let Some(p) = &u.staged {
@@ -421,7 +432,41 @@ pub fn update_checks_for_os(o: &Observed, os: &str) -> Vec<Check> {
     if let Some(detail) = advert {
         v.push(c("Software advert", Level::Pass, detail, &[]));
     }
+    if let Some(detail) = u.live_advert.as_ref().and_then(network_versions) {
+        v.push(c("Network versions", Level::Pass, detail, &[]));
+    }
     v
+}
+
+/// The share of validator stake behind each version the validators' machines
+/// state, from the `network` object of the node's `update` status.
+fn network_versions(update: &serde_json::Value) -> Option<String> {
+    let network = update.get("network")?;
+    let share = |v: &serde_json::Value| {
+        let bps = v["stake_bps"].as_u64().unwrap_or(0);
+        format!("{}.{:02}%", bps / 100, bps % 100)
+    };
+    let mut parts: Vec<String> = network["versions"]
+        .as_array()?
+        .iter()
+        .map(|v| {
+            format!(
+                "{} {} of stake (validators: {})",
+                v["binary_version"].as_str().unwrap_or("unknown"),
+                share(v),
+                v["validators"]
+            )
+        })
+        .collect();
+    let unreported = &network["unreported"];
+    if unreported["validators"].as_u64().unwrap_or(0) > 0 {
+        parts.push(format!(
+            "no version stated {} (validators: {})",
+            share(unreported),
+            unreported["validators"]
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 fn short(digest: &str) -> String {
@@ -470,6 +515,7 @@ pub fn stake_check(sc: &StakeCheck) -> Check {
         level: Level::Warn,
         detail,
         fix,
+        run: None,
     }
 }
 
@@ -573,6 +619,11 @@ pub fn to_json(o: &Observed, checks: &[Check]) -> serde_json::Value {
             "status": match c.level { Level::Pass => "ok", Level::Warn => "note", Level::Fail => "fail", Level::Todo => "todo" },
             "detail": c.detail,
             "fix": c.fix,
+            "run": c.run.as_ref().map(|f| json!({
+                "argv": f.argv,
+                "elevated": f.elevated,
+                "does": f.does,
+            })),
         })).collect::<Vec<_>>(),
     })
 }
@@ -717,34 +768,83 @@ async fn gather() -> (Observed, Facts) {
     (obs, facts)
 }
 
+/// The checklist, one line per check with the fix lines of those not met.
+fn print_checks(checks: &[Check]) {
+    for ch in checks {
+        let (word, col) = match ch.level {
+            Level::Pass => ("ok", colors::ok()),
+            Level::Warn | Level::Todo => ("note", colors::warn()),
+            Level::Fail => ("FAIL", colors::bad()),
+        };
+        println!(
+            "  {col}{word:<5}{}  {:<20} {}",
+            colors::reset(),
+            ch.label,
+            ch.detail
+        );
+        if ch.level != Level::Pass {
+            for l in &ch.fix {
+                println!("         fix: {l}");
+            }
+        }
+    }
+}
+
+/// Show the fixes the machine can run, ask once, run them. `Ok(true)` when
+/// any ran.
+fn run_fixes(checks: &[Check], yes: bool) -> Result<bool> {
+    let steps = fixes::pending(checks);
+    if steps.is_empty() {
+        println!("\nNothing here is a fix doctor can run; the lines above say what to do.");
+        return Ok(false);
+    }
+    let root = fixes::is_root();
+    println!(
+        "\nDoctor can run these fixes:\n{}",
+        fixes::plan_text(&steps, root)
+    );
+    if !yes
+        && !dialoguer::Confirm::new()
+            .with_prompt("Run them now?")
+            .default(false)
+            .interact()?
+    {
+        println!("Nothing was changed.");
+        return Ok(false);
+    }
+    for outcome in fixes::apply(&steps)? {
+        let (word, col) = if outcome.ok {
+            ("done", colors::ok())
+        } else {
+            ("FAIL", colors::bad())
+        };
+        println!(
+            "  {col}{word:<5}{}  {:<20} {}",
+            colors::reset(),
+            outcome.label,
+            outcome.detail
+        );
+    }
+    Ok(true)
+}
+
 impl DoctorCmd {
     pub async fn execute(self) -> Result<()> {
         let (obs, facts) = gather().await;
-        let checks = evaluate(&obs, &facts);
-        let failed = checks.iter().filter(|c| c.level == Level::Fail).count();
+        let mut checks = evaluate(&obs, &facts);
         if self.json {
             println!("{}", serde_json::to_string_pretty(&to_json(&obs, &checks))?);
         } else {
             println!("Tenzro doctor\n");
-            for ch in &checks {
-                let (word, col) = match ch.level {
-                    Level::Pass => ("ok", colors::ok()),
-                    Level::Warn | Level::Todo => ("note", colors::warn()),
-                    Level::Fail => ("FAIL", colors::bad()),
-                };
-                println!(
-                    "  {col}{word:<5}{}  {:<20} {}",
-                    colors::reset(),
-                    ch.label,
-                    ch.detail
-                );
-                if ch.level != Level::Pass {
-                    for l in &ch.fix {
-                        println!("         fix: {l}");
-                    }
-                }
+            print_checks(&checks);
+            if self.fix && run_fixes(&checks, self.yes)? {
+                let (obs, facts) = gather().await;
+                checks = evaluate(&obs, &facts);
+                println!("\nChecked again:\n");
+                print_checks(&checks);
             }
             println!();
+            let failed = checks.iter().filter(|c| c.level == Level::Fail).count();
             if failed == 0 {
                 println!("Nothing here blocks Tenzro.");
             } else {
@@ -758,7 +858,7 @@ impl DoctorCmd {
                 }
             }
         }
-        if failed > 0 {
+        if checks.iter().any(|c| c.level == Level::Fail) {
             std::process::exit(1);
         }
         Ok(())
@@ -781,6 +881,9 @@ mod tests {
             missing_tools: vec![],
             node_binary: None,
             keys_provisioned: None,
+            package_managers: vec![],
+            clock_synced: None,
+            service: None,
         }
     }
 
@@ -1012,22 +1115,16 @@ mod tests {
     }
 
     #[test]
-    fn doctor_never_tells_a_windows_operator_to_run_tenzro_update() {
+    fn doctor_names_the_msi_beside_the_command_for_a_windows_operator() {
         let mut o = obs();
         for last in ["0.2.4", "0.2.2"] {
             o.update = checked(last);
-            let rows = update_checks_for_os(&o, "windows");
-            for row in rows {
-                assert!(
-                    !row.detail.contains("tenzro update")
-                        || row.detail.contains("tenzro update check"),
-                    "{}",
-                    row.detail
-                );
-                for f in &row.fix {
+            for row in update_checks_for_os(&o, "windows") {
+                let says = format!("{} {}", row.detail, row.fix.join(" "));
+                if says.contains("tenzro update") && !says.contains("tenzro update check") {
                     assert!(
-                        !f.contains("tenzro update") || f.contains("tenzro update check"),
-                        "{f}"
+                        says.contains(tenzro_update_notice::banner::MSI_HINT),
+                        "{says}"
                     );
                 }
             }
@@ -1039,7 +1136,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             u.fix,
-            vec!["Install the new release with its MSI".to_string()]
+            vec![format!(
+                "Run: tenzro update ({})",
+                tenzro_update_notice::banner::MSI_HINT
+            )]
         );
     }
 
@@ -1073,6 +1173,35 @@ mod tests {
         let u = update_row(&o, "Update check").unwrap();
         assert_eq!(u.level, Level::Pass);
         assert!(u.detail.contains("one release behind 0.2.2"));
+    }
+
+    #[test]
+    fn doctor_shows_the_stake_behind_each_version_the_network_runs() {
+        let mut o = obs();
+        o.update.live_advert = Some(serde_json::json!({
+            "binary_version": "0.2.2",
+            "platform_digest": "ab".repeat(32),
+            "state": "running",
+        }));
+        assert!(
+            update_row(&o, "Network versions").is_none(),
+            "a node that reports no shares adds no row"
+        );
+        o.update.live_advert.as_mut().unwrap()["network"] = serde_json::json!({
+            "total_stake": "100",
+            "versions": [
+                { "binary_version": "0.2.2", "validators": 2, "stake": "65", "stake_bps": 6500 },
+                { "binary_version": "0.2.1", "validators": 1, "stake": "30", "stake_bps": 3005 },
+            ],
+            "unreported": { "validators": 1, "stake": "5", "stake_bps": 495 },
+        });
+        let row = update_row(&o, "Network versions").unwrap();
+        assert_eq!(row.level, Level::Pass);
+        assert_eq!(
+            row.detail,
+            "0.2.2 65.00% of stake (validators: 2); 0.2.1 30.05% of stake (validators: 1); \
+             no version stated 4.95% (validators: 1)"
+        );
     }
 
     #[test]
@@ -1120,6 +1249,7 @@ mod tests {
             volume: VolumeStats::of(100 * GIB, 11 * GIB),
             host: Default::default(),
             bytes_per_block: Some(230_000.0),
+            bytes_per_hour: Some(2_000_000_000.0),
         };
         o.disk = Some(Ladder::new(LadderConfig::default()).assess(&reading));
         let checks = disk_checks(&o);

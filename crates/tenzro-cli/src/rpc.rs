@@ -58,14 +58,55 @@ struct JsonRpcError {
 /// below the mempool lane's fee floor. Its `data.required` names the floor.
 pub const RPC_ERR_FEE_FLOOR: i64 = -32012;
 
+/// JSON-RPC error code the node returns while it cannot take a request yet:
+/// a served model that is still loading (`data.status` is `"warming"`) or a
+/// request refused for load.
+pub const RPC_ERR_BUSY: i64 = -32005;
+
+/// A served model the node is still loading, for example after it was
+/// unloaded for being idle.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ModelLoading {
+    pub model: String,
+    /// The node's estimate of when the model is ready.
+    pub ready_ms: u64,
+}
+
+impl std::fmt::Display for ModelLoading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the model {} is loading; ask again in about {} s",
+            self.model,
+            self.ready_ms.div_ceil(1000).max(1)
+        )
+    }
+}
+
+impl std::error::Error for ModelLoading {}
+
+impl ModelLoading {
+    fn of(err: &JsonRpcError) -> Option<Self> {
+        let data = err.data.as_ref()?;
+        (err.code == RPC_ERR_BUSY && data["status"] == "warming").then(|| Self {
+            model: data["model"].as_str().unwrap_or_default().to_string(),
+            ready_ms: data["estimated_ready_ms"].as_u64().unwrap_or_default(),
+        })
+    }
+}
+
 impl RpcClient {
     /// Create a new RPC client
     pub fn new(rpc_url: &str) -> Self {
         // A command that left its flag at the local default takes the
         // endpoint chosen for the process (--rpc, TENZRO_RPC, or the one
         // `tenzro setup` saved).
-        let resolved = crate::endpoint::for_command(rpc_url);
-        let rpc_url = resolved.as_str();
+        Self::at(&crate::endpoint::for_command(rpc_url))
+    }
+
+    /// A client for the node at exactly `rpc_url`, whatever endpoint the
+    /// process was given.
+    pub fn at(rpc_url: &str) -> Self {
         // Derive API URL from RPC URL
         // localhost:8545 → localhost:8080
         // localhost:9944 → localhost:8080
@@ -103,22 +144,80 @@ impl RpcClient {
             rpc_url.replace("rpc.", "api.")
         };
 
-        // The node records the client of every administrative call.
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("tenzro-cli/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_default();
         Self {
-            http,
+            http: Self::http(reqwest::redirect::Policy::default()),
             rpc_url: rpc_url.to_string(),
             api_url,
             request_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
+    /// A client for the node at exactly `rpc_url` that follows no redirect,
+    /// so what it carries, a signed-in session among it, reaches no other
+    /// origin.
+    pub fn only_at(rpc_url: &str) -> Self {
+        Self {
+            http: Self::http(reqwest::redirect::Policy::none()),
+            ..Self::at(rpc_url)
+        }
+    }
+
+    fn http(redirect: reqwest::redirect::Policy) -> reqwest::Client {
+        // The node records the client of every administrative call.
+        reqwest::Client::builder()
+            .user_agent(concat!("tenzro-cli/", env!("CARGO_PKG_VERSION")))
+            .redirect(redirect)
+            .build()
+            .unwrap_or_default()
+    }
+
     /// Get the RPC URL
     pub fn url(&self) -> &str {
         &self.rpc_url
+    }
+
+    /// Longest answer [`forward`](Self::forward) reads: the reads it passes
+    /// on answer in kilobytes, and a node or remote target that streams more
+    /// is refused rather than buffered.
+    const FORWARD_BODY_LIMIT: usize = 4 << 20;
+
+    /// Sends `method` to the node and returns what it answered: its result, or
+    /// its error object exactly as it sent it. `Err` means no answer came, or
+    /// one longer than [`FORWARD_BODY_LIMIT`](Self::FORWARD_BODY_LIMIT).
+    pub async fn forward(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<std::result::Result<Value, Value>> {
+        let id = self
+            .request_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            method,
+            params,
+            id,
+        };
+        let mut response = self
+            .authorized(self.http.post(&self.rpc_url).json(&request), &self.rpc_url)
+            .send()
+            .await
+            .map_err(|e| crate::friendly::from_reqwest(&self.rpc_url, e))?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len() + chunk.len() > Self::FORWARD_BODY_LIMIT {
+                anyhow::bail!("{method}: the node's answer is longer than the helper reads");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let mut body: Value = serde_json::from_slice(&bytes)?;
+        Ok(match body.get_mut("error").map(Value::take) {
+            Some(error) if !error.is_null() => Err(error),
+            _ => Ok(body
+                .get_mut("result")
+                .map(Value::take)
+                .unwrap_or(Value::Null)),
+        })
     }
 
     /// Make a JSON-RPC call.
@@ -168,6 +267,9 @@ impl RpcClient {
                     required
                 );
             }
+            if let Some(loading) = ModelLoading::of(&err) {
+                return Err(loading.into());
+            }
             // Whatever else the node attached (a custody signing request, a
             // refused field) stays with the error rather than being dropped.
             match err.data.filter(|d| !d.is_null()) {
@@ -198,7 +300,7 @@ impl RpcClient {
             params,
             id,
         };
-        let proof = crate::dpop::DpopKey::load_or_create()?.proof("POST", &self.rpc_url, None)?;
+        let proof = crate::dpop::load_or_create()?.proof("POST", &self.rpc_url, None)?;
         let response = self
             .http
             .post(&self.rpc_url)
@@ -249,18 +351,16 @@ impl RpcClient {
         }
     }
 
-    /// Make a GET request to the Web API
-    /// `req` with the caller's bearer and a fresh DPoP proof for a POST to
-    /// `url`, when this machine holds them.
-    fn authorized(&self, mut req: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+    /// `req` with the caller's bearer and a fresh DPoP proof bound to it for
+    /// a POST to `url`, when this machine holds both.
+    fn authorized(&self, req: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
         // Resolve the bearer: the env var wins (override / debugging), otherwise
         // fall back to the session token persisted by `tenzro auth`, so
         // privileged commands work after login without manually exporting
         // TENZRO_BEARER_JWT.
-        let bearer_token = session_token_for(&self.rpc_url);
-        if let Some(ref bearer) = bearer_token {
-            req = req.header("Authorization", format!("DPoP {}", bearer));
-        }
+        let Some(bearer) = session_token_for(&self.rpc_url) else {
+            return req;
+        };
         // A DPoP proof is per-request: it commits to this method and URL,
         // carries a `jti` the node caches against replay, and is valid for
         // ±60s. So it is minted here rather than exported — an env var can
@@ -268,24 +368,31 @@ impl RpcClient {
         //
         // `TENZRO_DPOP_PROOF` still wins when set, for debugging and for
         // callers holding their key somewhere this process cannot reach.
-        if let Ok(dpop) = std::env::var("TENZRO_DPOP_PROOF")
-            && !dpop.is_empty()
-        {
-            req = req.header("DPoP", dpop);
-        } else if crate::dpop::DpopKey::exists() {
-            // Only when a bearer token is present: the proof binds to it via
-            // `ath`, and an unbound proof authorises nothing on its own.
-            if let Some(ref token) = bearer_token {
-                match crate::dpop::DpopKey::load().and_then(|k| k.proof("POST", url, Some(token))) {
-                    Ok(proof) => req = req.header("DPoP", proof),
-                    // A key that will not load or sign is worth saying so
-                    // about: the request would otherwise fail at the node
-                    // with a bare "missing DPoP proof".
-                    Err(e) => eprintln!("warning: could not mint a DPoP proof: {e}"),
-                }
+        let override_proof = std::env::var("TENZRO_DPOP_PROOF")
+            .ok()
+            .filter(|p| !p.is_empty());
+        let mint = |token: &str| -> Result<(String, String)> {
+            if !crate::dpop::exists() {
+                anyhow::bail!("this machine holds no DPoP key");
+            }
+            let key = crate::dpop::load_or_create()?;
+            Ok((key.proof("POST", url, Some(token))?, key.jkt()?))
+        };
+        match bound_credentials(bearer, override_proof, mint) {
+            Ok((token, proof)) => req
+                .header("Authorization", format!("DPoP {token}"))
+                .header("DPoP", proof),
+            Err(reason) => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    eprintln!(
+                        "warning: the access token was not sent ({reason}); \
+                     run `tenzro access sign-in` again for methods that need it"
+                    )
+                });
+                req
             }
         }
-        req
     }
 
     /// POST `body` to a route on the node's RPC listener and hand back the
@@ -455,6 +562,34 @@ mod tests {
     }
 
     #[test]
+    fn a_model_still_loading_is_told_apart_from_a_refusal() {
+        let error = |body: &str| response(body).error.expect("an error");
+        let loading = error(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32005,
+                "message":"model 'm' is loading; retry in about 1500 ms",
+                "data":{"status":"warming","model":"m","estimated_ready_ms":1500,
+                        "retry_after_ms":500,"waiters":1}}}"#,
+        );
+        let said = ModelLoading::of(&loading).expect("a loading model");
+        assert_eq!(
+            said,
+            ModelLoading {
+                model: "m".into(),
+                ready_ms: 1500
+            }
+        );
+        assert_eq!(
+            anyhow::Error::from(said).to_string(),
+            "the model m is loading; ask again in about 2 s"
+        );
+        let refused = error(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"busy",
+                "data":{"status":"refused","retry_after_ms":500}}}"#,
+        );
+        assert_eq!(ModelLoading::of(&refused), None);
+    }
+
+    #[test]
     fn format_tnzo_is_exact_for_large_whole_amounts() {
         let one = 1_000_000_000_000_000_000u128;
         assert_eq!(format_tnzo(100_000 * one), "100000 TNZO");
@@ -604,6 +739,87 @@ fn bearer(rpc_url: Option<&str>) -> Option<String> {
         })
 }
 
+/// The access token and the DPoP proof bound to it, or why the token cannot
+/// be presented. The node refuses a request whose token comes without a
+/// valid proof, including calls that need no token, so a token that cannot
+/// be proven is left off rather than sent alone. A proof from
+/// `override_proof` is taken as given; otherwise `mint` signs one and
+/// reports its key's thumbprint, which must be the one the token is bound to
+/// (`cnf.jkt`).
+fn bound_credentials(
+    token: String,
+    override_proof: Option<String>,
+    mint: impl FnOnce(&str) -> Result<(String, String)>,
+) -> std::result::Result<(String, String), String> {
+    if let Some(proof) = override_proof {
+        return Ok((token, proof));
+    }
+    let (proof, jkt) = mint(&token).map_err(|e| format!("no DPoP proof: {e}"))?;
+    match token_jkt(&token) {
+        Some(bound) if bound == jkt => Ok((token, proof)),
+        Some(_) => Err("it is bound to a different DPoP key than this machine's".into()),
+        None => Err("it names no DPoP key".into()),
+    }
+}
+
+/// The `cnf.jkt` claim of a JWT, read without checking its signature: the
+/// node checks the token, this only decides whether to present it.
+fn token_jkt(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let mut parts = token.split('.');
+    let (Some(_), Some(payload), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("cnf")?.get("jkt")?.as_str().map(str::to_string)
+}
+
+#[cfg(test)]
+mod bound_credentials_tests {
+    use super::{bound_credentials, token_jkt};
+    use base64::Engine as _;
+
+    fn token_bound_to(jkt: &str) -> String {
+        let enc = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        format!(
+            "{}.{}.sig",
+            enc(r#"{"alg":"ES256"}"#),
+            enc(&format!(r#"{{"sub":"did:x","cnf":{{"jkt":"{jkt}"}}}}"#))
+        )
+    }
+
+    #[test]
+    fn a_token_goes_out_with_a_proof_from_the_key_it_is_bound_to() {
+        let t = token_bound_to("K1");
+        assert_eq!(token_jkt(&t).as_deref(), Some("K1"));
+        let got = bound_credentials(t.clone(), None, |_| Ok(("P".into(), "K1".into())));
+        assert_eq!(got, Ok((t, "P".into())));
+    }
+
+    #[test]
+    fn a_token_that_cannot_be_proven_is_not_sent() {
+        let t = token_bound_to("K1");
+        assert!(bound_credentials(t.clone(), None, |_| anyhow::bail!("no key")).is_err());
+        assert!(bound_credentials(t, None, |_| Ok(("P".into(), "K2".into()))).is_err());
+        assert!(
+            bound_credentials("opaque".into(), None, |_| Ok(("P".into(), "K1".into()))).is_err()
+        );
+    }
+
+    #[test]
+    fn a_proof_given_in_the_environment_is_used_as_given() {
+        let got = bound_credentials("opaque".into(), Some("E".into()), |_| {
+            panic!("no proof is minted when one is given")
+        });
+        assert_eq!(got, Ok(("opaque".into(), "E".into())));
+    }
+}
+
 /// The persisted token, unless it has expired or another endpoint issued it.
 /// Each node signs with its own key, so another node's token fails the
 /// signature check and the node refuses the whole request, including calls
@@ -678,13 +894,14 @@ mod session_token_tests {
 
 /// The nonce and chain id a transaction is signed over.
 #[cfg(test)]
-mod nonce_and_chain_id_tests {
+pub(crate) mod nonce_and_chain_id_tests {
     use super::*;
 
     /// A node at a loopback port that answers each JSON-RPC method from
-    /// `answers` (a method with no entry gets a JSON-RPC error). Returns the
-    /// URL it serves.
-    async fn node_answering(answers: &'static [(&'static str, &'static str)]) -> String {
+    /// `answers`: an answer that starts with `{"code"` is sent as the error,
+    /// any other as the result, and a method with no entry gets a JSON-RPC
+    /// error. Returns the URL it serves.
+    pub(crate) async fn node_answering(answers: &'static [(&'static str, &'static str)]) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -721,6 +938,9 @@ mod nonce_and_chain_id_tests {
                     let req: Value = serde_json::from_slice(&body).unwrap_or_default();
                     let method = req["method"].as_str().unwrap_or_default();
                     let reply = match answers.iter().find(|(m, _)| *m == method) {
+                        Some((_, error)) if error.starts_with(r#"{"code""#) => {
+                            format!(r#"{{"jsonrpc":"2.0","id":1,"error":{error}}}"#)
+                        }
                         Some((_, result)) => {
                             format!(r#"{{"jsonrpc":"2.0","id":1,"result":{result}}}"#)
                         }
@@ -845,6 +1065,36 @@ mod nonce_and_chain_id_tests {
                 .await
                 .unwrap(),
             (2, 1337)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_only_at_its_node_follows_no_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let elsewhere = node_answering(&[("tenzro_syncing", "false")]).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock.read(&mut [0u8; 4096]).await;
+                let moved = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nlocation: {elsewhere}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(moved.as_bytes()).await;
+            }
+        });
+        // A client that follows is answered from the other origin.
+        let followed = RpcClient::at(&url)
+            .forward("tenzro_syncing", serde_json::json!([]))
+            .await;
+        assert_eq!(followed.unwrap(), Ok(serde_json::json!(false)));
+        // One only at its node is not.
+        let stayed = RpcClient::only_at(&url)
+            .forward("tenzro_syncing", serde_json::json!([]))
+            .await;
+        assert!(
+            stayed.is_err(),
+            "answered from where it was sent: {stayed:?}"
         );
     }
 }

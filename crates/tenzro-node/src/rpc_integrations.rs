@@ -711,6 +711,7 @@ pub(crate) async fn handle_moe_replication_policy() -> std::result::Result<Value
 /// `model_id` (num_experts, experts_per_token, shared_experts,
 /// params_per_expert_x10). `null` for dense models.
 pub(crate) async fn handle_moe_catalog_shape(
+    node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let model_id = params
@@ -722,11 +723,14 @@ pub(crate) async fn handle_moe_catalog_shape(
             message: "missing model_id".into(),
             data: None,
         })?;
-    let entry = tenzro_model::catalog::get_model_by_id(model_id).ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: format!("unknown model_id: {}", model_id),
-        data: None,
-    })?;
+    let entry = node
+        .catalog()
+        .get_model_by_id(model_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("unknown model_id: {}", model_id),
+            data: None,
+        })?;
     let shape = entry.moe.map(|s| {
         json!({
             "num_experts": s.num_experts,
@@ -751,6 +755,7 @@ pub(crate) async fn handle_moe_catalog_shape(
 /// render or apply the catalog's recommended serving config. The catalog
 /// is the single source of truth; this RPC is its read API.
 pub(crate) async fn handle_model_metadata(
+    node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let model_id = params
@@ -762,11 +767,14 @@ pub(crate) async fn handle_model_metadata(
             message: "missing model_id".into(),
             data: None,
         })?;
-    let entry = tenzro_model::catalog::get_model_by_id(model_id).ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: format!("unknown model_id: {}", model_id),
-        data: None,
-    })?;
+    let entry = node
+        .catalog()
+        .get_model_by_id(model_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("unknown model_id: {}", model_id),
+            data: None,
+        })?;
     let moe = entry.moe.map(|s| {
         json!({
             "num_experts": s.num_experts,

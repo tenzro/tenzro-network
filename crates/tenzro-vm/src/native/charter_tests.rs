@@ -3,6 +3,12 @@
 //! volume or for signing up, and no path mints TNZO: its supply is fixed and
 //! rewards are released from the pool funded at genesis.
 //!
+//! Put as a principle: the network never pays for energy spent without
+//! useful output. The availability reward is its one bounded exception: it
+//! pays for verified readiness, under hardware binding, a decaying cap and
+//! the treasury's outflow period, and the challenge energy behind it is held
+//! to a governed budget.
+//!
 //! The paths are enumerated from the source: every function outside tests
 //! that moves value out of the treasury, the rewards pool, the insurance
 //! pool, the running-cost reserve or the validator cover reserve is listed
@@ -52,6 +58,7 @@ fn inventory() -> BTreeMap<(&'static str, &'static str), Tie> {
             Tie::Inflow,
         ),
         (("native/registry.rs", "governance_retire"), Tie::Inflow),
+        (("native/rewards.rs", "claw_back_rewards"), Tie::Inflow),
         (("native/staking.rs", "credit_pool"), Tie::Inflow),
         (
             ("native/availability_reward.rs", "pay_if_available"),
@@ -72,6 +79,7 @@ fn inventory() -> BTreeMap<(&'static str, &'static str), Tie> {
             Tie::PaidWork("the reconciliation duty over paid settlements, per verified report"),
         ),
         (("native/payout_swap.rs", "fill_epoch"), Tie::Exchange),
+        (("native/bond_onramp.rs", "apply"), Tie::Exchange),
         (("native/payout_swap.rs", "pay_out"), Tie::Exchange),
         (
             ("native/rewards.rs", "claim_rewards"),

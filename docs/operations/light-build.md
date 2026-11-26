@@ -81,8 +81,9 @@ History retention is a network parameter (governance), not a preset: every
 non-archival node keeps the governed window, prunes to it and compacts when
 the data volume runs low (under 20 GiB and 12 percent free by default), and
 refuses non-essential data when it runs lower still (under 8 GiB and 6
-percent). A level also trips when the measured growth leaves too few blocks
-of room. The levels are set in `[storage.ladder]`. On a small SD card or
+percent). A level also trips when the growth measured over the last hours leaves
+too little time before the volume is full (under 20 days for the first
+level, 20 hours for refusing). The levels are set in `[storage.ladder]`. On a small SD card or
 eMMC they are what keep the node inside its disk.
 
 The background tasks a node starts are already gated by role: audit
@@ -107,12 +108,37 @@ session continuity or the MoE repair loop.
 - **Identity.** A Pi has no TPM. It keeps its identity key in another
   machine's TPM through `tenzro-node tpm serve` on that machine. The provider
   listens on loopback only unless its file names the addresses to serve on,
-  such as `listen = ["100.64.0.7:7400"]` for its private-network (VPN) address. On the Pi,
+  such as `listen = ["100.64.0.7:7400"]` for its private-network (VPN) address. The
+  operator passkeys that may grant each key label are enrolled with
+  `tenzro-node tpm clients add --config <file> --label <label> --rp-id <rp id>
+  --registration <phone.json> --registration <laptop.json>`, from the JSON each
+  passkey's creation returned: two devices for a new label, so losing one does
+  not lock the machine out (`--one-device` accepts one knowingly).
+  `tpm clients list` shows them, `tpm clients remove` takes one out, and a
+  running provider reads the change within seconds. On the Pi,
   `tenzro-node tpm key-holder` runs as its own service: it makes this boot's
   transport key in memory (never on disk) and the operator approves it with
-  a passkey grant (`tpm grant-request`, then `tpm grant-install`); the node
+  a passkey grant: `tenzro-node tpm enrol --socket <socket> --label <label>
+  --rp-id <rp id>` prints a line to run in the browser on the relying party's
+  page, takes the assertion it prints, installs the grant, signs a test
+  message with the machine's key at the provider and prints the node's flags
+  (`tpm grant-request` and `tpm grant-install` are the same steps by hand); the node
   starts with `--tpm-key-holder <socket> --tpm-label <label>`. The node can
-  restart without a new grant; a reboot needs one.
+  restart without a new grant; a reboot needs one. A node started before its
+  key holder waits up to `--tpm-key-holder-wait` seconds (120 by default) for
+  one to answer, then refuses naming the socket; once a holder answers, the
+  node waits for the grant and starts by itself when it is installed.
+
+  **Providers.** A Raspberry Pi 5 serves as a provider on the public testnet
+  this way. `tenzro join --provider` signs with the machine's own TPM or
+  Secure Enclave, so on a Pi it stops at "this machine has no TPM 2.0 or
+  Secure Enclave". The Pi takes the provider path one command at a time,
+  each naming the key holder: `tenzro access sign-in --tpm-key-holder
+  <socket> --tpm-label <label>` signs in as the node's operator (model loads
+  need it), and `tenzro provider bond post --node-account --tpm-key-holder
+  <socket> --tpm-label <label> --did <machine did> --amount <TNZO>` posts the
+  compute bond from the node account. Without `--node-account` the bond is
+  refused: the key holder holds the node's key, not a client account's.
 
   **Validators.** The same delegation can hold a validator's consensus key.
   The P-256 leg is a key in the provider's TPM and the ML-DSA-65 leg is
@@ -127,6 +153,11 @@ session continuity or the MoE repair loop.
   TPM in the validator's own machine that implements ML-DSA and P-384. A
   passkey never holds a consensus key: the operator's passkey grants and
   approves, and the key stays in a TPM or Secure Enclave.
+  A machine whose keys are in another machine's TPM cannot be a genesis
+  validator: `tenzro-node validator-entry` reads only the machine's own TPM
+  or Secure Enclave. Such a validator joins after genesis with
+  `tenzro validator register --tpm-key-holder` (`docs/operations/VALIDATOR-EXIT.md`,
+  "Joining").
 
   **Batch signing.** A TPM command takes seconds, so the identity key does
   not sign every message on its own. It signs, in hardware, one statement per
@@ -149,6 +180,16 @@ session continuity or the MoE repair loop.
   request that finds the line full, or that waits its limit, is refused with
   `tpm busy: ... retry in N ms`, and the key holder waits that long and asks
   again (`--busy-retries`, `--request-timeout-secs`).
+
+  A machine whose keys the provider holds has no TPM of its own to attest
+  with. The provider's TPM is the hardware its identity rests on, and a TPM
+  is admitted on chain under one identity, so the provider file names the
+  one client it answers for: `attests_for = "<that client's label>"`. For
+  that client the provider's TPM attests the machine root at registration
+  and quotes each reward epoch's possession challenge, which is what
+  hardware level 1 needs. A provider whose TPM backs its own machine's
+  identity leaves `attests_for` out; its clients register without a TPM
+  attestation and stay at level 0.
 - **Memory.** The light node's resident memory measured 130 to 210 MiB idle
   and up to about 230 MiB under RPC load (below), within a 2 GB board's
   budget beside the operating system (about 200 to 250 MiB idle on Raspberry

@@ -14,7 +14,7 @@ import { FundingClient } from "@tenzro/payments";
 import { IdentityClient } from "@tenzro/core";
 import { PaymentClient } from "@tenzro/payments";
 import { ProviderClient, RegistryClient } from "@tenzro/inference";
-import { StorageClient } from "@tenzro/chain";
+import { ComputeClient, DaClient, StorageClient } from "@tenzro/chain";
 import { TrustClient } from "@tenzro/chain";
 import { CatalogClient } from "@tenzro/inference";
 
@@ -100,6 +100,10 @@ export class TenzroClient {
   /** The generic registry: units, service types, price cards, apps. */
   public readonly registry: RegistryClient;
   public readonly storage: StorageClient;
+  /** Compute rental: provider bonds, compute claims, the observed price feed and renting capacity. */
+  public readonly compute: ComputeClient;
+  /** The data-availability committee, its blobs and possession challenges. */
+  public readonly da: DaClient;
   /** Certifications, operator policies and model provenance. */
   public readonly trust: TrustClient;
   /** The model catalog the node serves. */
@@ -150,6 +154,8 @@ export class TenzroClient {
     this.provider = new ProviderClient(this.rpc);
     this.registry = new RegistryClient(this.rpc);
     this.storage = new StorageClient(this.rpc);
+    this.compute = new ComputeClient(this.rpc);
+    this.da = new DaClient(this.rpc);
     this.trust = new TrustClient(this.rpc);
     this.catalog = new CatalogClient(this.rpc);
     this.gateway = new GatewayClient(this.rpc);
@@ -467,6 +473,11 @@ export class TenzroClient {
     return this.rpc.call<NodeStatusReport>("tenzro_getNodeStatus");
   }
 
+  /** The node software's name and version (`web3_clientVersion`). */
+  async clientVersion(): Promise<string> {
+    return this.rpc.call<string>("web3_clientVersion");
+  }
+
   async getStatus(): Promise<NodeStatus> {
     return this.rpc.get<NodeStatus>("/status");
   }
@@ -491,13 +502,13 @@ export class TenzroClient {
   }
 
   /**
-   * Whether the node is behind the network tip. The node answers `false`, or
-   * `{syncing: true, startingBlock, currentBlock, highestBlock}` while it
-   * catches up.
+   * Whether the node is not following the network. The node answers with
+   * its state (`starting`, `catching_up`, `following` or `stalled`); any
+   * state but `following` counts.
    */
   async isSyncing(): Promise<boolean> {
-    const r = await this.rpc.call<false | { syncing: boolean }>("tenzro_syncing");
-    return r !== false && r !== null && typeof r === "object" && r.syncing === true;
+    const r = await this.rpc.call<{ state: string }>("tenzro_syncing");
+    return r.state !== "following";
   }
 
   async isConnected(): Promise<boolean> {
@@ -584,10 +595,12 @@ export class TenzroClient {
   }
 
   /**
-   * A provider's standing on chain, its announced price cards, and its
-   * settled count, value and p50/p95 latency over 24 hours and 7 days.
+   * A provider's standing on chain, the work consensus verified for it, its
+   * settled revenue, its announced price cards, the models its latest
+   * heartbeat reports warm, and its settled count, value and p50/p95 latency
+   * over 24 hours and 7 days as this node recorded them.
    * @param provider - The provider's account address
-   * @returns `{ provider, standing, reputation, price_cards, settled }`
+   * @returns `{ provider, standing, verified_work, reputation, price_cards, revenue, warm_models, settled }`
    */
   async getProviderScorecard(provider: string): Promise<any> {
     return this.rpc.call("tenzro_getProviderScorecard", [{ provider }]);

@@ -53,9 +53,6 @@ fuzz_target!(|data: &[u8]| {
         }
         3 => {
             if let Ok(scope) = serde_json::from_slice::<DelegationScope>(rest) {
-                let child = scope.attenuate(&DelegationScope::unrestricted());
-                let _ = DelegationScope::unrestricted().attenuate(&scope);
-                let _ = scope.attenuate(&child);
                 let _ = scope.is_active();
                 let _ = scope.is_value_allowed(u128::MAX);
                 let _ = scope.is_operation_allowed("transfer");

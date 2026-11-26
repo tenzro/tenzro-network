@@ -43,6 +43,17 @@ pub fn now_ms() -> u64 {
     at(CALENDAR.get(), chrono::Utc::now().timestamp_millis()).max(0) as u64
 }
 
+/// Wall-clock milliseconds from `wall_ms` until the genesis timestamp: 0 once
+/// it has passed, and 0 when no genesis was installed.
+fn before_anchor(calendar: Option<&Calendar>, wall_ms: i64) -> u64 {
+    calendar.map_or(0, |c| c.anchor_ms.saturating_sub(wall_ms).max(0) as u64)
+}
+
+/// Wall-clock milliseconds until the genesis timestamp, 0 once it has passed.
+pub fn until_genesis_ms() -> u64 {
+    before_anchor(CALENDAR.get(), chrono::Utc::now().timestamp_millis())
+}
+
 /// A span of wall-clock time, in calendar milliseconds: how a window that
 /// exists for real-world latency (a client answering a challenge, clocks
 /// drifting apart) is measured against calendar timestamps.
@@ -54,6 +65,18 @@ pub fn wall_span_ms(ms: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_time_until_genesis_is_zero_from_the_genesis_time_on() {
+        let c = Calendar {
+            anchor_ms: 10_000,
+            scale: 1,
+        };
+        assert_eq!(before_anchor(Some(&c), 4_000), 6_000);
+        assert_eq!(before_anchor(Some(&c), 10_000), 0);
+        assert_eq!(before_anchor(Some(&c), 25_000), 0);
+        assert_eq!(before_anchor(None, 4_000), 0);
+    }
 
     #[test]
     fn calendar_time_runs_scale_times_faster_from_genesis() {

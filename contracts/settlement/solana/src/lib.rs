@@ -66,15 +66,19 @@ use solana_program::pubkey::Pubkey;
 use solana_program::rent::Rent;
 use solana_program::sysvar::Sysvar;
 use tenzro_finality_solana::{State, STATE_LEN};
-use tenzro_finality_verifier::settlement::{self, LegError, LegState, DECISION_LEN, LEG_RECEIPT_LEN};
+use tenzro_finality_verifier::settlement::{
+    self, LegError, LegState, DECISION_LEN, LEG_RECEIPT_LEN,
+};
 
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process_instruction);
 
 /// The SPL Token program.
-pub const TOKEN_PROGRAM: Pubkey = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+pub const TOKEN_PROGRAM: Pubkey =
+    solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 /// The SPL Token-2022 program.
-pub const TOKEN_2022_PROGRAM: Pubkey = solana_program::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+pub const TOKEN_2022_PROGRAM: Pubkey =
+    solana_program::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const SYSTEM_PROGRAM: Pubkey = Pubkey::new_from_array([0; 32]);
 
 const KIND_CONFIG: u8 = 1;
@@ -222,7 +226,11 @@ fn plan_index(data: &[u8]) -> Result<([u8; 32], u8, &[u8]), ProgramError> {
 }
 
 fn system_ix(accounts: Vec<AccountMeta>, data: Vec<u8>) -> Instruction {
-    Instruction { program_id: SYSTEM_PROGRAM, accounts, data }
+    Instruction {
+        program_id: SYSTEM_PROGRAM,
+        accounts,
+        data,
+    }
 }
 
 /// Create the leg account at its PDA, funded with `lamports` by `payer`,
@@ -241,25 +249,51 @@ fn create_leg<'a>(
         d.extend_from_slice(&lamports.to_le_bytes());
         d.extend_from_slice(&(LEG_LEN as u64).to_le_bytes());
         d.extend_from_slice(program_id.as_ref());
-        let ix = system_ix(vec![AccountMeta::new(*payer.key, true), AccountMeta::new(*leg.key, true)], d);
+        let ix = system_ix(
+            vec![
+                AccountMeta::new(*payer.key, true),
+                AccountMeta::new(*leg.key, true),
+            ],
+            d,
+        );
         return invoke_signed(&ix, &accounts, &[seeds]);
     }
     let short = lamports.saturating_sub(leg.lamports());
     if short > 0 {
         let mut d = vec![2, 0, 0, 0];
         d.extend_from_slice(&short.to_le_bytes());
-        invoke(&system_ix(vec![AccountMeta::new(*payer.key, true), AccountMeta::new(*leg.key, false)], d), &accounts)?;
+        invoke(
+            &system_ix(
+                vec![
+                    AccountMeta::new(*payer.key, true),
+                    AccountMeta::new(*leg.key, false),
+                ],
+                d,
+            ),
+            &accounts,
+        )?;
     }
     let mut d = vec![8, 0, 0, 0];
     d.extend_from_slice(&(LEG_LEN as u64).to_le_bytes());
-    invoke_signed(&system_ix(vec![AccountMeta::new(*leg.key, true)], d), &accounts, &[seeds])?;
+    invoke_signed(
+        &system_ix(vec![AccountMeta::new(*leg.key, true)], d),
+        &accounts,
+        &[seeds],
+    )?;
     let mut d = vec![1, 0, 0, 0];
     d.extend_from_slice(program_id.as_ref());
-    invoke_signed(&system_ix(vec![AccountMeta::new(*leg.key, true)], d), &accounts, &[seeds])
+    invoke_signed(
+        &system_ix(vec![AccountMeta::new(*leg.key, true)], d),
+        &accounts,
+        &[seeds],
+    )
 }
 
 /// A token account's mint, owner and amount.
-fn token_account(a: &AccountInfo, token_program: &Pubkey) -> Result<(Pubkey, Pubkey, u64), ProgramError> {
+fn token_account(
+    a: &AccountInfo,
+    token_program: &Pubkey,
+) -> Result<(Pubkey, Pubkey, u64), ProgramError> {
     if a.owner != token_program {
         return Err(fail(E_WRONG_ACCOUNT));
     }
@@ -267,7 +301,11 @@ fn token_account(a: &AccountInfo, token_program: &Pubkey) -> Result<(Pubkey, Pub
     if d.len() < 165 {
         return Err(fail(E_WRONG_ACCOUNT));
     }
-    Ok((Pubkey::new_from_array(b32(&d, 0)), Pubkey::new_from_array(b32(&d, 32)), u64_at(&d, 64)))
+    Ok((
+        Pubkey::new_from_array(b32(&d, 0)),
+        Pubkey::new_from_array(b32(&d, 32)),
+        u64_at(&d, 64),
+    ))
 }
 
 fn transfer_checked<'a>(
@@ -279,7 +317,10 @@ fn transfer_checked<'a>(
     amount: u64,
     seeds: &[&[&[u8]]],
 ) -> ProgramResult {
-    let decimals = *mint.try_borrow_data()?.get(44).ok_or(fail(E_WRONG_ACCOUNT))?;
+    let decimals = *mint
+        .try_borrow_data()?
+        .get(44)
+        .ok_or(fail(E_WRONG_ACCOUNT))?;
     let mut data = vec![12];
     data.extend_from_slice(&amount.to_le_bytes());
     data.push(decimals);
@@ -293,11 +334,27 @@ fn transfer_checked<'a>(
         ],
         data,
     };
-    invoke_signed(&ix, &[from.clone(), mint.clone(), to.clone(), authority.clone(), token_program.clone()], seeds)
+    invoke_signed(
+        &ix,
+        &[
+            from.clone(),
+            mint.clone(),
+            to.clone(),
+            authority.clone(),
+            token_program.clone(),
+        ],
+        seeds,
+    )
 }
 
-pub fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    let (&tag, rest) = data.split_first().ok_or(ProgramError::InvalidInstructionData)?;
+pub fn process_instruction(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    let (&tag, rest) = data
+        .split_first()
+        .ok_or(ProgramError::InvalidInstructionData)?;
     match tag {
         0 => initialize(program_id, accounts, rest),
         1 => lock(program_id, accounts, rest),
@@ -312,7 +369,9 @@ pub fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], data: 
 }
 
 fn initialize(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramResult {
-    let [cfg, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [cfg, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     if rest.len() != 72 {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -335,7 +394,9 @@ fn initialize(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> Pro
 }
 
 fn lock(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramResult {
-    let [cfg_a, leg_a, payer, funder, system, token @ ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [cfg_a, leg_a, payer, funder, system, token @ ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     let cfg = config(program_id, cfg_a)?;
     let (plan_id, index, rest) = plan_index(rest)?;
     if rest.len() != 40 {
@@ -367,7 +428,13 @@ fn lock(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramRe
             create_leg(program_id, funder, leg_a, system, rent, seeds)?;
             let mut d = vec![2, 0, 0, 0];
             d.extend_from_slice(&amount.to_le_bytes());
-            let ix = system_ix(vec![AccountMeta::new(*payer.key, true), AccountMeta::new(*leg_a.key, false)], d);
+            let ix = system_ix(
+                vec![
+                    AccountMeta::new(*payer.key, true),
+                    AccountMeta::new(*leg_a.key, false),
+                ],
+                d,
+            );
             invoke(&ix, &[payer.clone(), leg_a.clone(), system.clone()])?;
             (Pubkey::default(), Pubkey::default())
         }
@@ -420,14 +487,23 @@ fn lock(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramRe
 }
 
 /// The leg at `leg_a`, checked to be leg `index` of `plan_id` under `cfg_a`.
-fn load_leg(program_id: &Pubkey, cfg_a: &AccountInfo, leg_a: &AccountInfo, plan_id: &[u8; 32], index: u8) -> Result<([u8; 32], Leg), ProgramError> {
+fn load_leg(
+    program_id: &Pubkey,
+    cfg_a: &AccountInfo,
+    leg_a: &AccountInfo,
+    plan_id: &[u8; 32],
+    index: u8,
+) -> Result<([u8; 32], Leg), ProgramError> {
     if leg_a.owner != program_id || !leg_a.is_writable {
         return Err(fail(E_NOT_LOCKED));
     }
     let leg = Leg::decode(&leg_a.try_borrow_data()?).ok_or(fail(E_NOT_LOCKED))?;
     let leg_id = settlement::leg_id(plan_id, index);
-    let address = Pubkey::create_program_address(&[b"leg", cfg_a.key.as_ref(), &leg_id, &[leg.bump]], program_id)
-        .map_err(|_| fail(E_WRONG_ACCOUNT))?;
+    let address = Pubkey::create_program_address(
+        &[b"leg", cfg_a.key.as_ref(), &leg_id, &[leg.bump]],
+        program_id,
+    )
+    .map_err(|_| fail(E_WRONG_ACCOUNT))?;
     if address != *leg_a.key {
         return Err(fail(E_WRONG_ACCOUNT));
     }
@@ -435,7 +511,9 @@ fn load_leg(program_id: &Pubkey, cfg_a: &AccountInfo, leg_a: &AccountInfo, plan_
 }
 
 fn settle(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramResult {
-    let [cfg_a, leg_a, finality, buffer, to, token @ ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [cfg_a, leg_a, finality, buffer, to, token @ ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     let cfg = config(program_id, cfg_a)?;
     let (plan_id, index, rest) = plan_index(rest)?;
     if rest.len() != 8 {
@@ -450,18 +528,27 @@ fn settle(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> Program
         return Err(fail(E_UNPROVEN));
     }
     let (decision, proof) = payload.split_at(DECISION_LEN);
-    let next = settlement::settle_leg(leg.state(), &root, &plan_id, decision, proof).map_err(leg_err)?;
+    let next =
+        settlement::settle_leg(leg.state(), &root, &plan_id, decision, proof).map_err(leg_err)?;
     drop(b);
     pay(cfg_a, leg_a, to, token, plan_id, leg_id, leg, next, false)
 }
 
 /// The state root of final checkpoint `checkpoint` held by the configured
 /// finality client.
-fn final_root(cfg: &Config, finality: &AccountInfo, checkpoint: u64) -> Result<[u8; 32], ProgramError> {
+fn final_root(
+    cfg: &Config,
+    finality: &AccountInfo,
+    checkpoint: u64,
+) -> Result<[u8; 32], ProgramError> {
     if *finality.key != cfg.finality_state || *finality.owner != cfg.finality_program {
         return Err(fail(E_WRONG_ACCOUNT));
     }
-    let mut state = finality.try_borrow_data()?.get(..STATE_LEN).ok_or(fail(E_WRONG_ACCOUNT))?.to_vec();
+    let mut state = finality
+        .try_borrow_data()?
+        .get(..STATE_LEN)
+        .ok_or(fail(E_WRONG_ACCOUNT))?
+        .to_vec();
     match State(&mut state).latest() {
         Some((latest, _, root, _)) if latest == checkpoint => Ok(root),
         _ => Err(fail(E_UNKNOWN_CHECKPOINT)),
@@ -469,16 +556,23 @@ fn final_root(cfg: &Config, finality: &AccountInfo, checkpoint: u64) -> Result<[
 }
 
 /// The bytes staged in a buffer this program owns.
-fn staged<'b>(program_id: &Pubkey, buffer: &AccountInfo, b: &'b [u8]) -> Result<&'b [u8], ProgramError> {
+fn staged<'b>(
+    program_id: &Pubkey,
+    buffer: &AccountInfo,
+    b: &'b [u8],
+) -> Result<&'b [u8], ProgramError> {
     if buffer.owner != program_id || b.len() < BUFFER_HEADER || b[0] != KIND_BUFFER {
         return Err(fail(E_BAD_BUFFER));
     }
     let n = u32::from_le_bytes(b[33..37].try_into().expect("4 bytes")) as usize;
-    b.get(BUFFER_HEADER..BUFFER_HEADER + n).ok_or(fail(E_BAD_BUFFER))
+    b.get(BUFFER_HEADER..BUFFER_HEADER + n)
+        .ok_or(fail(E_BAD_BUFFER))
 }
 
 fn receipt(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramResult {
-    let [cfg_a, finality, buffer, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [cfg_a, finality, buffer, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     let cfg = config(program_id, cfg_a)?;
     if rest.len() != 40 {
         return Err(ProgramError::InvalidInstructionData);
@@ -497,7 +591,9 @@ fn receipt(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> Progra
 }
 
 fn escape(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramResult {
-    let [cfg_a, leg_a, to, token @ ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [cfg_a, leg_a, to, token @ ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     config(program_id, cfg_a)?;
     let (plan_id, index, rest) = plan_index(rest)?;
     if !rest.is_empty() {
@@ -521,7 +617,12 @@ fn pay<'a>(
     escaped: bool,
 ) -> ProgramResult {
     let (wallet, stage, kind, recon): (Pubkey, u8, &[u8], u8) = match next {
-        LegState::Released => (leg.recipient, RELEASED, b"released", settlement::RECON_RELEASED),
+        LegState::Released => (
+            leg.recipient,
+            RELEASED,
+            b"released",
+            settlement::RECON_RELEASED,
+        ),
         LegState::Refunded => (leg.payer, REFUNDED, b"refunded", settlement::RECON_REFUNDED),
         LegState::Locked => return Err(fail(E_NOT_LOCKED)),
     };
@@ -535,7 +636,9 @@ fn pay<'a>(
         **leg_a.try_borrow_mut_lamports()? -= leg.amount;
         **to.try_borrow_mut_lamports()? += leg.amount;
     } else {
-        let [mint, vault, token_program, ..] = token else { return Err(ProgramError::NotEnoughAccountKeys) };
+        let [mint, vault, token_program, ..] = token else {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        };
         if *mint.key != leg.mint || *vault.key != leg.vault || vault.owner != token_program.key {
             return Err(fail(E_WRONG_ACCOUNT));
         }
@@ -546,25 +649,46 @@ fn pay<'a>(
         let seeds: &[&[u8]] = &[b"leg", cfg_a.key.as_ref(), &leg_id, &[leg.bump]];
         transfer_checked(token_program, vault, mint, to, leg_a, leg.amount, &[seeds])?;
     }
-    sol_log_data(&[kind, &plan_id, &leg_id, wallet.as_ref(), &leg.amount.to_le_bytes(), &[escaped as u8]]);
+    sol_log_data(&[
+        kind,
+        &plan_id,
+        &leg_id,
+        wallet.as_ref(),
+        &leg.amount.to_le_bytes(),
+        &[escaped as u8],
+    ]);
     Ok(())
 }
 
 /// Fold an entry into the config's running reconciliation hash.
-fn record(cfg_a: &AccountInfo, plan_id: &[u8; 32], leg_id: &[u8; 32], kind: u8, amount: u64) -> ProgramResult {
+fn record(
+    cfg_a: &AccountInfo,
+    plan_id: &[u8; 32],
+    leg_id: &[u8; 32],
+    kind: u8,
+    amount: u64,
+) -> ProgramResult {
     if !cfg_a.is_writable {
         return Err(fail(E_WRONG_ACCOUNT));
     }
     let mut d = cfg_a.try_borrow_mut_data()?;
     let count = u64_at(&d, RECON_AT);
-    let acc = settlement::recon_step(&b32(&d, RECON_AT + 8), plan_id, leg_id, kind, amount as u128);
+    let acc = settlement::recon_step(
+        &b32(&d, RECON_AT + 8),
+        plan_id,
+        leg_id,
+        kind,
+        amount as u128,
+    );
     d[RECON_AT..RECON_AT + 8].copy_from_slice(&(count + 1).to_le_bytes());
     d[RECON_AT + 8..CONFIG_LEN].copy_from_slice(&acc);
     Ok(())
 }
 
 fn checkpoint(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
-    let [cfg_a, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [cfg_a, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     config(program_id, cfg_a)?;
     let d = cfg_a.try_borrow_data()?;
     let body = settlement::recon_checkpoint(u64_at(&d, RECON_AT), &b32(&d, RECON_AT + 8));
@@ -574,7 +698,9 @@ fn checkpoint(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
 }
 
 fn write(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramResult {
-    let [buffer, authority, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [buffer, authority, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     if buffer.owner != program_id || !buffer.is_writable {
         return Err(fail(E_BAD_BUFFER));
     }
@@ -599,7 +725,9 @@ fn write(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramR
         _ => return Err(fail(E_BAD_BUFFER)),
     }
     let end = offset.checked_add(bytes.len()).ok_or(fail(E_BAD_BUFFER))?;
-    let slot = d.get_mut(BUFFER_HEADER + offset..BUFFER_HEADER + end).ok_or(fail(E_BAD_BUFFER))?;
+    let slot = d
+        .get_mut(BUFFER_HEADER + offset..BUFFER_HEADER + end)
+        .ok_or(fail(E_BAD_BUFFER))?;
     slot.copy_from_slice(bytes);
     let len = (u32::from_le_bytes(d[33..37].try_into().expect("4 bytes")) as usize).max(end);
     d[33..37].copy_from_slice(&(len as u32).to_le_bytes());
@@ -607,7 +735,9 @@ fn write(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8]) -> ProgramR
 }
 
 fn close(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
-    let [buffer, authority, ..] = accounts else { return Err(ProgramError::NotEnoughAccountKeys) };
+    let [buffer, authority, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
     if buffer.owner != program_id || !buffer.is_writable {
         return Err(fail(E_BAD_BUFFER));
     }

@@ -20,11 +20,11 @@ use tenzro_token::adaptive_burn::{AutoProposalGenerator, BurnRateConfigManager, 
 use tenzro_types::TransactionType;
 use tenzro_types::token::PolicyUpdate;
 use tenzro_vm::governance::{
-    PolicyEnactedLog, PolicyTrack, ProposalAction, UpgradeActivation, policy_kind,
+    PolicyEnactedLog, PolicyTrack, ProposalAction, UpgradeActivation, UpgradePlatforms, policy_kind,
 };
 use tenzro_vm::native::{
-    POLICY_ENACTED_TOPIC, PROTOCOL_VERSION_TOPIC, ProtocolVersionRecord, UPGRADE_SCHEDULED_TOPIC,
-    read_policy, read_protocol_version, read_upgrade_activation,
+    POLICY_ENACTED_TOPIC, PROTOCOL_VERSION_TOPIC, ProtocolVersionRecord, UPGRADE_PLATFORMS_TOPIC,
+    UPGRADE_SCHEDULED_TOPIC, read_policy, read_protocol_version, read_upgrade_activation,
 };
 use tenzro_vm::protocol_range::{ProtocolMismatch, ProtocolRange};
 use tenzro_vm::traits::VmState;
@@ -39,6 +39,8 @@ pub struct PolicyApplier {
     burn_rate: Option<Arc<BurnRateConfigManager>>,
     /// The protocol upgrade consensus scheduled last.
     upgrade: std::sync::RwLock<Option<UpgradeActivation>>,
+    /// The binaries of the last upgrade built for several platforms.
+    platforms: std::sync::RwLock<Option<UpgradePlatforms>>,
     /// The chain's protocol version as consensus state holds it; `None` for
     /// a chain whose genesis recorded none, which is not range-checked.
     protocol: std::sync::RwLock<Option<ProtocolVersionRecord>>,
@@ -58,6 +60,7 @@ impl PolicyApplier {
             economic_policy,
             burn_rate,
             upgrade: std::sync::RwLock::new(None),
+            platforms: std::sync::RwLock::new(None),
             protocol: std::sync::RwLock::new(None),
             own_code_hash,
             supported: ProtocolRange::this_binary(),
@@ -119,13 +122,33 @@ impl PolicyApplier {
         self.own_code_hash.as_deref() == Some(code_hash)
     }
 
+    /// The binaries of `upgrade`, when it was built for several platforms.
+    fn platforms_of(&self, upgrade: &UpgradeActivation) -> Option<UpgradePlatforms> {
+        self.platforms
+            .read()
+            .ok()
+            .and_then(|p| p.clone())
+            .filter(|p| p.proposal_id == upgrade.proposal_id)
+    }
+
+    /// Whether this node runs a binary `upgrade` names: its one binary, or
+    /// any of those its platforms record lists.
+    fn runs_upgrade(&self, upgrade: &UpgradeActivation) -> bool {
+        let Some(own) = self.own_code_hash.as_deref() else {
+            return false;
+        };
+        own == upgrade.code_hash
+            || self
+                .platforms_of(upgrade)
+                .is_some_and(|p| p.names_binary(own))
+    }
+
     /// The upgrade that retires this binary at `height`: one scheduled to
-    /// activate at or below it whose code hash is not this binary's. A node
-    /// that cannot hash its own binary is retired by any activation.
+    /// activate at or below it that does not name this binary. A node that
+    /// cannot hash its own binary is retired by any activation.
     pub fn superseded_at(&self, height: u64) -> Option<UpgradeActivation> {
         let upgrade = self.scheduled_upgrade()?;
-        let current = self.own_code_hash.as_deref() == Some(upgrade.code_hash.as_str());
-        (height >= upgrade.activation_height && !current).then_some(upgrade)
+        (height >= upgrade.activation_height && !self.runs_upgrade(&upgrade)).then_some(upgrade)
     }
 
     fn note_upgrade(&self, activation: UpgradeActivation) {
@@ -134,11 +157,26 @@ impl PolicyApplier {
             version = %activation.version,
             code_hash = %activation.code_hash,
             activation_height = activation.activation_height,
-            runs_it = self.own_code_hash.as_deref() == Some(activation.code_hash.as_str()),
+            runs_it = self.runs_upgrade(&activation),
             "Protocol upgrade scheduled"
         );
         if let Ok(mut slot) = self.upgrade.write() {
             *slot = Some(activation);
+        }
+    }
+
+    fn note_platforms(&self, platforms: UpgradePlatforms) {
+        info!(
+            proposal_id = %platforms.proposal_id,
+            platforms = platforms.digests.len(),
+            runs_one = self
+                .own_code_hash
+                .as_deref()
+                .is_some_and(|own| platforms.names_binary(own)),
+            "Protocol upgrade names a binary per platform"
+        );
+        if let Ok(mut slot) = self.platforms.write() {
+            *slot = Some(platforms);
         }
     }
 
@@ -150,6 +188,13 @@ impl PolicyApplier {
                 match serde_json::from_slice::<UpgradeActivation>(&log.data) {
                     Ok(activation) => self.note_upgrade(activation),
                     Err(e) => warn!("Malformed upgrade activation log, skipping: {e}"),
+                }
+                continue;
+            }
+            if topic == Some(UPGRADE_PLATFORMS_TOPIC) {
+                match serde_json::from_slice::<UpgradePlatforms>(&log.data) {
+                    Ok(platforms) => self.note_platforms(platforms),
+                    Err(e) => warn!("Malformed upgrade platforms log, skipping: {e}"),
                 }
                 continue;
             }
@@ -197,6 +242,9 @@ impl PolicyApplier {
         }
         if let Ok(mut slot) = self.protocol.write() {
             *slot = read_protocol_version(state);
+        }
+        if let Some(platforms) = tenzro_vm::native::read_upgrade_platforms(state) {
+            self.note_platforms(platforms);
         }
         if let Some(activation) = read_upgrade_activation(state) {
             self.note_upgrade(activation);
@@ -299,6 +347,44 @@ impl PolicyApplier {
             PolicyUpdate::HandoverProgramSet { image_id } => {
                 info!(proposal_id = %id, image_id = %hex::encode(image_id),
                     "Governance set the handover program");
+            }
+            PolicyUpdate::WebauthnRootsSet { roots_pem } => {
+                info!(
+                    proposal_id = %id,
+                    roots = roots_pem.len(),
+                    "Governance replaced the WebAuthn attestation roots"
+                );
+            }
+            PolicyUpdate::NrasJwksSet { jwks_json } => {
+                tenzro_tee::replace_nvidia_jwks(Some(jwks_json.clone()).filter(|s| !s.is_empty()));
+                info!(
+                    proposal_id = %id,
+                    bytes = jwks_json.len(),
+                    "Governance replaced the NVIDIA attestation key set"
+                );
+            }
+            PolicyUpdate::BootNodesSet { identities } => {
+                info!(
+                    proposal_id = %id,
+                    nodes = identities.len(),
+                    "Governance replaced the boot nodes"
+                );
+            }
+            PolicyUpdate::UpdateNoticeKeysSet { keys_hex } => {
+                crate::update_notice::set_governed_keys(keys_hex);
+                info!(
+                    proposal_id = %id,
+                    keys = keys_hex.len(),
+                    "Governance replaced the update notice keys"
+                );
+            }
+            PolicyUpdate::ProtocolUpgradePlatforms { version, digests } => {
+                info!(
+                    proposal_id = %id,
+                    version = %version,
+                    platforms = digests.len(),
+                    "Governance enacted a protocol upgrade for several platforms"
+                );
             }
         }
         Ok(())
@@ -439,6 +525,69 @@ mod tests {
             applier.superseded_at(500).is_none(),
             "this node runs the upgraded binary"
         );
+    }
+
+    #[test]
+    fn an_upgrade_for_several_platforms_keeps_each_named_binary_and_retires_others() {
+        let scheduled_for = |applier: &PolicyApplier| {
+            let platforms = UpgradePlatforms {
+                proposal_id: "ab".repeat(32),
+                digests: vec![
+                    tenzro_vm::governance::ActivationDigest {
+                        platform: "x86_64-unknown-linux-gnu".into(),
+                        code_hash: "bb".repeat(32),
+                    },
+                    tenzro_vm::governance::ActivationDigest {
+                        platform: "aarch64-unknown-linux-gnu".into(),
+                        code_hash: "aa".repeat(32),
+                    },
+                ],
+            };
+            applier.reflect_logs(&[
+                Log::new(
+                    vec![0; 20],
+                    vec![UPGRADE_PLATFORMS_TOPIC.to_vec()],
+                    serde_json::to_vec(&platforms).unwrap(),
+                ),
+                // The activation names the first binary.
+                scheduled(&"bb".repeat(32), 100),
+            ]);
+        };
+        let running = |own: &str| {
+            PolicyApplier::new(
+                Arc::new(EconomicPolicyManager::new()),
+                None,
+                Some(own.repeat(32)),
+            )
+        };
+        // The second platform's binary, which the activation does not name.
+        let second = running("aa");
+        scheduled_for(&second);
+        assert!(second.superseded_at(100).is_none());
+        let first = running("bb");
+        scheduled_for(&first);
+        assert!(first.superseded_at(100).is_none());
+        // A binary the upgrade names for no platform stops at the height.
+        let third = running("cc");
+        scheduled_for(&third);
+        assert!(third.superseded_at(99).is_none());
+        assert!(third.stop_reason(100).is_some());
+
+        // A later single-binary upgrade is not read against the platforms of
+        // the one before it.
+        let later = UpgradeActivation {
+            proposal_id: "cd".repeat(32),
+            version: "3".into(),
+            code_hash: "bb".repeat(32),
+            readiness_met_height: 190,
+            activation_height: 200,
+        };
+        second.reflect_logs(&[Log::new(
+            vec![0; 20],
+            vec![UPGRADE_SCHEDULED_TOPIC.to_vec()],
+            serde_json::to_vec(&later).unwrap(),
+        )]);
+        assert!(second.superseded_at(200).is_some());
     }
 
     // ---- The protocol version range ----

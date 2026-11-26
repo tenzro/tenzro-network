@@ -853,7 +853,7 @@ mod tests {
             signature: vec![],
         };
         let prehash = Keccak256::digest(canonical_preimage(&env));
-        let (sig, rid) = sk.sign_prehash_recoverable(&prehash).unwrap();
+        let (sig, rid) = sk.sign_prehash_recoverable(&prehash);
         let mut s = sig.to_bytes().to_vec();
         s.push(rid.to_byte());
         env.signature = s;
@@ -868,7 +868,7 @@ mod tests {
         let mut bad = env.clone();
         bad.did = "did:ethr:0x0000000000000000000000000000000000000001".to_string();
         let ph = Keccak256::digest(canonical_preimage(&bad));
-        let (sig2, rid2) = sk.sign_prehash_recoverable(&ph).unwrap();
+        let (sig2, rid2) = sk.sign_prehash_recoverable(&ph);
         let mut s2 = sig2.to_bytes().to_vec();
         s2.push(rid2.to_byte());
         bad.signature = s2;

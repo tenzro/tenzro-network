@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use tenzro_bridge::route::RouteFramework;
 use tenzro_consensus::{EpochManager, ValidatorInfo};
@@ -61,6 +61,19 @@ pub struct EquivocationJailer {
     validator_registry: Option<Arc<tenzro_token::validator_registry::ValidatorRegistry>>,
 }
 
+/// The validators the certified participation record counts as having
+/// missed the last epoch: not live when a remaining set is judged.
+pub(crate) fn absent_validators(
+    chain: &dyn tenzro_vm::traits::VmState,
+) -> std::collections::HashSet<Address> {
+    tenzro_vm::native::read_missed_epochs(chain)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, missed)| *missed > 0)
+        .map(|(validator, _)| validator)
+        .collect()
+}
+
 impl EquivocationJailer {
     pub fn new(epoch_manager: Arc<EpochManager>) -> Self {
         Self {
@@ -83,23 +96,31 @@ impl EquivocationJailer {
 impl EquivocationJailer {
     /// Drops `validator`, which signed two checkpoints with index `index` in
     /// epoch `epoch`, from the next epoch's pending queue and jails it in the
-    /// registry.
+    /// registry. With `deferred` (the deferred-removal rule is live), a
+    /// validator the active set cannot lose yet keeps its seat until an
+    /// epoch boundary finds a set that holds without it.
     pub fn report_checkpoint_equivocation(
         &self,
         validator: &Address,
         epoch: u64,
         index: u64,
         current_epoch: u64,
+        deferred: Option<&tenzro_token::DeferredRemoval>,
     ) {
         self.epoch_manager.remove_pending_validator(validator);
         let Some(registry) = self.validator_registry.as_ref() else {
             return;
         };
-        match registry.jail(validator, current_epoch) {
-            Ok(()) => tracing::warn!(
+        let jailed = match deferred {
+            Some(policy) => registry.jail_deferred(validator, current_epoch, policy),
+            None => registry.jail(validator, current_epoch).map(|()| false),
+        };
+        match jailed {
+            Ok(seat_kept) => tracing::warn!(
                 validator = %validator,
                 epoch,
                 index,
+                seat_kept,
                 "Jailed validator for signing two checkpoints with one index"
             ),
             Err(e) => tracing::debug!(
@@ -247,10 +268,8 @@ impl ResourceWindow {
     /// An unparseable zone falls back to UTC rather than erroring: a typo in
     /// one window must not take the scheduler down, and UTC is the value the
     /// field defaults to anyway.
-    pub fn tz(&self) -> chrono_tz::Tz {
-        self.timezone
-            .parse::<chrono_tz::Tz>()
-            .unwrap_or(chrono_tz::UTC)
+    pub fn tz(&self) -> jiff::tz::TimeZone {
+        jiff::tz::TimeZone::get(&self.timezone).unwrap_or(jiff::tz::TimeZone::UTC)
     }
 
     /// Whether `instant` falls in this window, evaluated in the window's OWN
@@ -259,9 +278,11 @@ impl ResourceWindow {
     /// `timezone` is applied here: a fixed UTC offset cannot express a zone
     /// such as `Europe/Berlin`, whose offset changes with the season.
     pub fn contains_at(&self, instant: chrono::DateTime<chrono::Utc>) -> bool {
-        use chrono::{Datelike, Timelike};
-        let local = instant.with_timezone(&self.tz());
-        let weekday = local.weekday().num_days_from_monday() as usize;
+        let Ok(at) = jiff::Timestamp::from_second(instant.timestamp()) else {
+            return false;
+        };
+        let local = at.to_zoned(self.tz());
+        let weekday = local.weekday().to_monday_zero_offset() as usize;
         self.contains(weekday, local.hour() as u8)
     }
 
@@ -357,17 +378,17 @@ pub struct ProviderSchedule {
 /// Returns `None` for an id no catalog knows, which the caller reports rather
 /// than treating as zero — a typo that silently contributed nothing would make
 /// an over-committed window look like it fits.
-fn declared_min_ram_gb(id: &str) -> Option<u32> {
-    if let Some(e) = tenzro_model::catalog::get_model_by_id(id) {
+fn declared_min_ram_gb(catalog: &tenzro_model::Catalog, id: &str) -> Option<u32> {
+    if let Some(e) = catalog.get_model_by_id(id) {
         return Some(e.min_ram_gb);
     }
-    if let Some(e) = tenzro_model::catalog::get_vision_model_by_id(id) {
+    if let Some(e) = catalog.get_vision_model_by_id(id) {
         return Some(e.min_ram_gb);
     }
-    if let Some(e) = tenzro_model::catalog::get_embed_model_by_id(id) {
+    if let Some(e) = catalog.get_embed_model_by_id(id) {
         return Some(e.min_ram_gb);
     }
-    if let Some(e) = tenzro_model::catalog::get_segmentation_model_by_id(id) {
+    if let Some(e) = catalog.get_segmentation_model_by_id(id) {
         return Some(e.min_ram_gb);
     }
     // The embedding and forecast catalogs declare no RAM figure. They are
@@ -376,8 +397,8 @@ fn declared_min_ram_gb(id: &str) -> Option<u32> {
     // exists to protect. Both are sub-gigabyte ONNX models, so the error is
     // small and in the safe direction — it can only make a window look
     // slightly emptier than it is, never fuller.
-    if tenzro_model::catalog::get_text_embedding_model_by_id(id).is_some()
-        || tenzro_model::catalog::get_forecast_model_by_id(id).is_some()
+    if catalog.get_text_embedding_model_by_id(id).is_some()
+        || catalog.get_forecast_model_by_id(id).is_some()
     {
         return Some(0);
     }
@@ -435,7 +456,7 @@ impl ProviderSchedule {
     /// the configuration and true or false regardless of what the machine is
     /// doing right now. Whether the machine can honour it *at this moment* is a
     /// different question, asked at load time against measured ground.
-    pub fn overcommitted_windows(&self) -> Vec<WindowOvercommit> {
+    pub fn overcommitted_windows(&self, catalog: &tenzro_model::Catalog) -> Vec<WindowOvercommit> {
         self.windows
             .iter()
             .filter(|w| w.resident_ceiling_gb > 0 && !w.models.is_empty())
@@ -447,7 +468,7 @@ impl ProviderSchedule {
                     // model, a vision-language model, an embedding model and a
                     // forecaster together — so every catalog is consulted
                     // rather than only the text one.
-                    match declared_min_ram_gb(id) {
+                    match declared_min_ram_gb(catalog, id) {
                         Some(gb) => members.push((id.clone(), gb)),
                         None => unknown.push(id.clone()),
                     }
@@ -467,6 +488,25 @@ impl ProviderSchedule {
             })
             .collect()
     }
+}
+
+/// Refuses a schedule whose windows name models that cannot fit their
+/// resident ceiling, naming each such window.
+pub fn schedule_fits(
+    schedule: &ProviderSchedule,
+    catalog: &tenzro_model::Catalog,
+) -> std::result::Result<(), String> {
+    let over = schedule.overcommitted_windows(catalog);
+    if over.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[provider_schedule]: {}",
+        over.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
 }
 
 impl Default for ProviderSchedule {
@@ -543,6 +583,9 @@ pub const BILLING_EPOCH_INTERVAL_SECS: u64 = 3_600;
 /// object is one shard, and the union of every node's self-selected set covers
 /// all shards under a converged membership view.
 pub const DEFAULT_STORAGE_REPLICAS: usize = 6;
+
+/// The capability a node configured as a validator announces.
+pub(crate) const CONSENSUS_CAPABILITY: &str = "consensus";
 
 /// Minimum verified free disk (GB) a node must have to advertise the
 /// StorageProvider role. Below this there is no point accepting deals — the
@@ -676,6 +719,85 @@ pub struct NetworkModelEntry {
     pub last_seen: std::time::Instant,
 }
 
+/// The stored form of a network model endpoint: the announcement as a gossip
+/// message, which carries its signature (the announcement's own JSON does
+/// not), so it can be verified again when restored.
+pub(crate) fn stored_model_endpoint(
+    reg: &tenzro_network::ModelRegistrationMessage,
+) -> std::result::Result<bytes::Bytes, String> {
+    tenzro_network::NetworkMessage::new(tenzro_network::MessagePayload::ModelRegistration(
+        reg.clone(),
+    ))
+    .to_bytes()
+    .map_err(|e| e.to_string())
+}
+
+/// Restores into `into` the network model endpoints persisted under
+/// `net_model:` in `storage`, each held to what a fresh announcement must
+/// pass: a signature by the key `registry` holds for its machine identity,
+/// and an account that is that identity's registered wallet. One that fails
+/// is deleted rather than restored, so an entry kept before a node checked
+/// these cannot outlive the upgrade and keep its signer pinned to the key.
+/// Withdrawn entries are skipped. Returns `(restored, dropped)`.
+pub(crate) fn restore_network_models(
+    storage: &dyn KvStore,
+    registry: Option<&IdentityRegistry>,
+    into: &DashMap<String, NetworkModelEntry>,
+) -> (usize, usize) {
+    let keys = match storage.get_keys_with_prefix(CF_MODEL_SERVICES, b"net_model:") {
+        Ok(keys) => keys,
+        Err(e) => {
+            warn!("Network model endpoints not restored from storage: {e}");
+            return (0, 0);
+        }
+    };
+    let (mut restored, mut dropped) = (0, 0);
+    for key in keys {
+        let Ok(key_str) = std::str::from_utf8(&key) else {
+            continue;
+        };
+        let Ok(Some(data)) = storage.get(CF_MODEL_SERVICES, &key) else {
+            continue;
+        };
+        let parsed = tenzro_network::NetworkMessage::from_bytes(&data)
+            .map_err(|e| e.to_string())
+            .and_then(|m| match m.payload {
+                tenzro_network::MessagePayload::ModelRegistration(reg) => Ok(reg),
+                _ => Err("not a model announcement".to_string()),
+            });
+        let verdict = parsed.and_then(|reg| {
+            crate::event_loop::verify_announcement_in(registry, &reg).map_err(|e| e.to_string())?;
+            crate::announced_account::check(registry, &reg.machine_did, &reg.provider)
+                .map_err(|e| e.to_string())?;
+            Ok(reg)
+        });
+        match verdict {
+            Ok(reg) if reg.withdrawn => {}
+            Ok(reg) => {
+                into.insert(
+                    key_str.trim_start_matches("net_model:").to_string(),
+                    NetworkModelEntry {
+                        registration: reg,
+                        last_seen: std::time::Instant::now(),
+                    },
+                );
+                restored += 1;
+            }
+            Err(reason) => {
+                warn!(key = key_str, %reason, "Deleting a stored network model endpoint that fails the announcement checks");
+                if let Err(e) = storage.delete(CF_MODEL_SERVICES, &key) {
+                    warn!(
+                        key = key_str,
+                        "Stored network model endpoint not deleted: {e}"
+                    );
+                }
+                dropped += 1;
+            }
+        }
+    }
+    (restored, dropped)
+}
+
 /// A provider discovered via gossip from a remote node.
 /// Entries expire if not refreshed within `ttl_secs`.
 #[derive(Debug, Clone)]
@@ -707,7 +829,7 @@ pub(crate) const SESSION_KEY_LABEL: &str = tenzro_types::did_derivation::MACHINE
 /// no identity names another; naming the machine DID as `operator_did` names
 /// that account.
 #[derive(Clone)]
-struct MachineOperator {
+pub(crate) struct MachineOperator {
     did: Option<String>,
     account: Address,
 }
@@ -732,7 +854,7 @@ fn resolve_operator_identity(
     machine: Option<&MachineOperator>,
     configured: Option<&str>,
 ) -> Option<(String, Address)> {
-    use tenzro_identity::{IdentityData, IdentityStatus};
+    use tenzro_identity::IdentityStatus;
 
     let configured = configured.map(str::trim).filter(|d| !d.is_empty());
     // The machine itself, named as its own operator: its wallet is the
@@ -743,81 +865,306 @@ fn resolve_operator_identity(
         return Some((did.to_string(), m.account));
     }
 
-    let registry = identity_registry?;
-    let all = registry.list_all();
+    let all = identity_registry.map(|r| r.list_all()).unwrap_or_default();
     let usable = |identity: &tenzro_identity::TenzroIdentity| {
         identity.status == IdentityStatus::Active && identity.wallet_address != Address::default()
     };
 
-    // Named by the operator — no inference to do. Honoured ahead of the
-    // wallet match so that naming an identity is decisive rather than advisory.
+    // Named by the operator: that identity or none. A node whose named
+    // identity is not in its registry (not registered, or not mirrored yet)
+    // has no operator identity until it is, and never another one in its
+    // place.
     if let Some(did) = configured {
-        match all.iter().find(|(d, id)| d.as_str() == did && usable(id)) {
-            Some((d, id)) => return Some((d.clone(), id.wallet_address)),
-            None => warn!(
+        let named = all.iter().find(|(d, id)| d.as_str() == did && usable(id));
+        if named.is_none() && missing_operator_log_due() {
+            warn!(
                 "config names operator_did={did}, but this node's registry has no active \
-                 identity by that DID with a wallet — falling back to inference"
-            ),
+                 identity by that DID with a wallet; the node has no operator identity until \
+                 it does"
+            );
+        }
+        return named.map(|(d, id)| (d.clone(), id.wallet_address));
+    }
+
+    // A machine whose hardware key names it operates the node as that DID,
+    // as it administers it: paid at the wallet it registered, or at the
+    // account its key signs for until it has registered. Another identity on
+    // the same wallet operates the node only when `operator_did` names it.
+    if let Some(m) = machine
+        && let Some(own) = m.did.as_deref()
+    {
+        return match all.iter().find(|(d, _)| d.as_str() == own) {
+            Some((_, id)) if usable(id) => Some((own.to_string(), id.wallet_address)),
+            Some(_) => None,
+            None => Some((own.to_string(), m.account)),
+        };
+    }
+
+    // A hardware wallet with no machine DID: the identity registered with
+    // that wallet, when only one is. Several are a choice nobody made, and
+    // the operator names one with `operator_did`. The registry mirrors every
+    // identity on the chain, so nothing else is inferred: a node with no
+    // hardware key is operated by whoever its config names, or by no one.
+    let wallet = machine?.account;
+    let matched: Vec<&String> = all
+        .iter()
+        .filter(|(_, id)| usable(id) && id.wallet_address == wallet)
+        .map(|(did, _)| did)
+        .collect();
+    match matched.as_slice() {
+        [did] => Some(((*did).clone(), wallet)),
+        [] => None,
+        several => {
+            warn!(
+                candidates = ?several,
+                "several identities are registered with this machine's wallet; \
+                 set operator_did to name the operator"
+            );
+            None
         }
     }
+}
 
-    if let Some(wallet) = machine.map(|m| m.account)
-        && let Some((did, _)) = all
-            .iter()
-            .filter(|(_, id)| usable(id) && id.wallet_address == wallet)
-            .min_by(|a, b| a.0.cmp(&b.0))
-    {
-        return Some((did.clone(), wallet));
+/// The provider type and capabilities `roles` put in a node's announcement.
+/// A multi-role node advertises every capability it serves; the provider
+/// type is a coarse routing hint, the most specific service role the node
+/// fills, "general" for a validator-only node.
+fn announced_services(
+    roles: &tenzro_types::network::RoleSet,
+    agent_serving: bool,
+) -> (&'static str, Vec<String>) {
+    let mut capabilities: Vec<String> = Vec::new();
+    if roles.serves_ai() {
+        capabilities.push("inference".to_string());
+    }
+    if roles.serves_tee() {
+        capabilities.push("tee-attestation".to_string());
+        capabilities.push("confidential-compute".to_string());
+    }
+    if roles.serves_compute() {
+        // The renter brings their own work, so this says only that the
+        // accelerator is for hire — not what runs on it.
+        capabilities.push("accelerator-rental".to_string());
+    }
+    if roles.serves_storage() {
+        capabilities.push("storage".to_string());
+    }
+    if roles.is_validator() {
+        capabilities.push(CONSENSUS_CAPABILITY.to_string());
+    }
+    if roles.serves_edge() {
+        // Serving nodes read this to discover which peers can terminate
+        // public TLS and front them over the `tenzro/http` ALPN.
+        capabilities.push("edge-ingress".to_string());
+    }
+    if agent_serving {
+        capabilities.push(crate::agent_delegation::AGENT_SERVING_CAPABILITY.to_string());
+    }
+    let provider_type = if roles.serves_ai() {
+        // Not "llm": this node may serve multimodal, image, video or
+        // audio models, and usually serves several classes at once.
+        tenzro_network::message::PROVIDER_TYPE_AI
+    } else if roles.serves_tee() {
+        "tee"
+    } else if roles.serves_compute() {
+        "compute"
+    } else if roles.serves_storage() {
+        "storage"
+    } else if roles.serves_edge() {
+        "edge"
+    } else {
+        "general"
+    };
+    (provider_type, capabilities)
+}
+
+/// Whether `roles` make a node announce itself: service providers,
+/// validators and edge nodes do, light clients stay anonymous.
+fn announces_services(roles: &tenzro_types::network::RoleSet) -> bool {
+    roles.is_provider() || roles.is_validator() || roles.serves_edge()
+}
+
+/// The services a node with `roles` announces, or `None` for one that does
+/// not announce itself.
+pub(crate) fn own_announced_services(
+    roles: &tenzro_types::network::RoleSet,
+    agent_serving: bool,
+) -> Option<(&'static str, Vec<String>)> {
+    announces_services(roles).then(|| announced_services(roles, agent_serving))
+}
+
+#[cfg(test)]
+mod announced_services_tests {
+    use super::{CONSENSUS_CAPABILITY, own_announced_services};
+    use tenzro_types::network::RoleSet;
+
+    #[test]
+    fn a_light_node_announces_nothing_and_a_validator_announces_consensus() {
+        assert_eq!(own_announced_services(&RoleSet::client(), false), None);
+        assert_eq!(
+            own_announced_services(&RoleSet::validator_only(), false),
+            Some(("general", vec![CONSENSUS_CAPABILITY.to_string()]))
+        );
     }
 
-    // Lower rank wins; ties break on the DID string.
-    //
-    // Machines outrank humans because a node *is* a machine. TDIP models a
-    // node as `did:tenzro:machine:<controller>:<uuid>` when a human operator
-    // delegates it, or `did:tenzro:machine:<device-key-id>` when it acts on its own;
-    // a `did:tenzro:human:` identity denotes the person operating it, not the
-    // hardware. Ranking humans first — as this did — meant a node whose
-    // operator had registered themselves published its DID document under
-    // *their* identity, and attributed every file, database and site it holds
-    // to a person rather than to the machine.
-    //
-    // A delegated machine outranks an autonomous one: if a controller exists
-    // there is an accountable human behind the node, which is the more
-    // informative of the two identities to present.
-    //
-    // This is still inference — see `NodeConfig::operator_did` for naming it
-    // outright, which is what a node with several enrolled machines needs.
-    let rank = |data: &IdentityData| match data {
-        IdentityData::Machine {
-            controller_did: Some(_),
-            ..
-        } => 0u8,
-        IdentityData::Machine {
-            controller_did: None,
-            ..
-        } => 1,
-        IdentityData::Human { .. } | IdentityData::Institution { .. } => 2,
-    };
+    #[test]
+    fn a_provider_that_does_not_validate_announces_no_consensus() {
+        let (provider_type, capabilities) =
+            own_announced_services(&RoleSet::storage_only(), true).unwrap();
+        assert_eq!(provider_type, "storage");
+        assert_eq!(
+            capabilities,
+            ["storage", crate::agent_delegation::AGENT_SERVING_CAPABILITY]
+        );
+    }
+}
 
-    // A node with a hardware wallet accepts an inferred identity only when it
-    // is its own: the registry mirrors every identity on the chain, so ranking
-    // all of them would hand an unregistered node the best-ranked stranger's
-    // DID and account. Otherwise the caller falls back to the machine's
-    // own account.
-    let own_did = machine.map(|m| m.did.as_deref());
-    all.iter()
-        .filter(|(d, id)| usable(id) && own_did.is_none_or(|own| own == Some(d.as_str())))
-        .min_by(|a, b| {
-            rank(&a.1.identity_data)
-                .cmp(&rank(&b.1.identity_data))
-                .then_with(|| a.0.cmp(&b.0))
-        })
-        .map(|(did, id)| (did.clone(), id.wallet_address))
+/// How a node's event loop ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventLoopEnd {
+    /// It was asked to stop (`tenzro_gracefulExit`, a signal, an embedding
+    /// handle's shutdown).
+    Shutdown,
+    /// It failed: it returned an error, or panicked.
+    Failed(String),
+}
+
+/// Runs an event loop (`run`, its run future) on its own task and records in
+/// `stopped` how it ended: asked to stop, failed, or panicked. The record is
+/// written by a guard the task drops, so a panic unwinding the task is
+/// recorded too.
+pub(crate) fn spawn_event_loop(
+    run: impl std::future::Future<Output = Result<()>> + Send + 'static,
+    stopped: tokio::sync::watch::Sender<Option<EventLoopEnd>>,
+) -> tokio::task::JoinHandle<()> {
+    struct RecordOnDrop {
+        stopped: tokio::sync::watch::Sender<Option<EventLoopEnd>>,
+        end: Option<EventLoopEnd>,
+    }
+    impl Drop for RecordOnDrop {
+        fn drop(&mut self) {
+            let end = self
+                .end
+                .take()
+                .unwrap_or_else(|| EventLoopEnd::Failed("the event loop panicked".to_string()));
+            self.stopped.send_replace(Some(end));
+        }
+    }
+    tokio::spawn(async move {
+        let mut record = RecordOnDrop { stopped, end: None };
+        record.end = Some(match run.await {
+            Ok(()) => EventLoopEnd::Shutdown,
+            Err(e) => {
+                tracing::error!(error = %e, "Event loop error");
+                EventLoopEnd::Failed(e.to_string())
+            }
+        });
+    })
+}
+
+/// A model's lifecycle lock, held. When the last holder lets go the lock
+/// leaves the node's map, so the map holds only models a serve or a stop is
+/// working on.
+pub(crate) struct ModelLifecycle<'a> {
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    locks: &'a DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    model_id: String,
+}
+
+impl Drop for ModelLifecycle<'_> {
+    fn drop(&mut self) {
+        // Unlocked first; a holder still waiting keeps its own reference, so
+        // the lock goes only when the map's is the last.
+        self.guard.take();
+        self.locks
+            .remove_if(&self.model_id, |_, lock| Arc::strong_count(lock) == 1);
+    }
+}
+
+#[cfg(test)]
+mod model_lifecycle_tests {
+    use crate::config::NodeConfig;
+    use crate::node::TenzroNode;
+
+    /// Serving and stopping one model take turns: a second holder of a
+    /// model's lock waits for the first, another model's lock is free, and
+    /// once nobody holds a model's lock it is gone from the node's map.
+    #[tokio::test]
+    async fn serve_and_stop_of_one_model_take_turns() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NodeConfig::default()
+        };
+        let node = TenzroNode::new(config).await.unwrap();
+        let wait = std::time::Duration::from_millis(100);
+        let serving = node.model_lifecycle("a").await;
+        assert!(
+            tokio::time::timeout(wait, node.model_lifecycle("a"))
+                .await
+                .is_err()
+        );
+        let other = tokio::time::timeout(wait, node.model_lifecycle("b"))
+            .await
+            .expect("another model's lock is free");
+        drop(other);
+        assert!(!node.model_lifecycle.contains_key("b"));
+        drop(serving);
+        let again = tokio::time::timeout(wait, node.model_lifecycle("a"))
+            .await
+            .expect("free once released");
+        drop(again);
+        assert!(node.model_lifecycle.is_empty());
+    }
+
+    /// A caller that gives up waiting for a model's lock leaves nothing
+    /// behind, whether the holder lets go before it gives up or after.
+    #[tokio::test]
+    async fn a_waiter_that_gives_up_leaves_no_lock_behind() {
+        use futures::FutureExt;
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..NodeConfig::default()
+        };
+        let node = TenzroNode::new(config).await.unwrap();
+
+        let serving = node.model_lifecycle("a").await;
+        let mut waiting = Box::pin(node.model_lifecycle("a"));
+        assert!((&mut waiting).now_or_never().is_none());
+        drop(serving);
+        drop(waiting);
+        assert!(node.model_lifecycle.is_empty(), "holder first");
+
+        let serving = node.model_lifecycle("a").await;
+        let mut waiting = Box::pin(node.model_lifecycle("a"));
+        assert!((&mut waiting).now_or_never().is_none());
+        drop(waiting);
+        drop(serving);
+        assert!(node.model_lifecycle.is_empty(), "waiter first");
+    }
+}
+
+/// How often the warning that the configured operator identity is not in
+/// the registry is repeated: the payee is resolved for every announcement,
+/// and the operator is told once, then at this interval.
+const MISSING_OPERATOR_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Whether the missing-operator warning is due now, and if so marks it given.
+fn missing_operator_log_due() -> bool {
+    static LAST: parking_lot::Mutex<Option<std::time::Instant>> = parking_lot::Mutex::new(None);
+    let mut last = LAST.lock();
+    let now = std::time::Instant::now();
+    let due = last.is_none_or(|at| now.duration_since(at) >= MISSING_OPERATOR_LOG_EVERY);
+    if due {
+        *last = Some(now);
+    }
+    due
 }
 
 /// The wallet this node is paid at. See [`TenzroNode::operator_payee`] for
 /// the resolution order.
-fn resolve_operator_payee(
+pub(crate) fn resolve_operator_payee(
     identity_registry: Option<&Arc<IdentityRegistry>>,
     machine: Option<&MachineOperator>,
     configured: Option<&str>,
@@ -825,6 +1172,20 @@ fn resolve_operator_payee(
     match resolve_operator_identity(identity_registry, machine, configured) {
         Some((_, wallet)) => Some(wallet),
         None => machine.map(|m| m.account),
+    }
+}
+
+/// The DID that administers a node: the configured `operator_did` when it
+/// names one, otherwise the machine's own DID. A node signs in with its
+/// machine key, so until the configuration names someone else that machine
+/// operates the node.
+fn resolve_administrator(
+    configured: Option<&str>,
+    machine: Option<&MachineOperator>,
+) -> Option<String> {
+    match configured.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(did) => Some(did.to_string()),
+        None => machine.and_then(|m| m.did.clone()),
     }
 }
 
@@ -840,6 +1201,8 @@ pub(crate) struct RegistryEpochPlanStager {
     /// admits candidates at, with its USD floor at the safety rate, and the
     /// governed exit churn.
     pub(crate) store: Option<Arc<dyn KvStore>>,
+    /// The committee's seat budget, which the operator cap is counted in.
+    pub(crate) seat_budget: u64,
 }
 
 impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
@@ -902,11 +1265,30 @@ impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
                 cfg.jail_term_epochs = jail_term;
                 self.registry.set_config(cfg);
             }
+            // Every node reads the gate from the chain, so every node holds
+            // the same exits at the same boundary.
+            self.registry
+                .set_hold_unsafe_exits(tenzro_vm::feature_gate::is_live(
+                    &chain,
+                    tenzro_vm::governance::EXIT_HOLD_GATE,
+                    self.epoch_manager.current_epoch().number + 1,
+                ));
         }
         let chain = self
             .store
             .as_ref()
             .map(|store| tenzro_vm::StateAdapter::with_storage(store.clone()));
+        // Slashed validators still seated leave at the first boundary where
+        // the set holds without them, or when their cap has run out.
+        if let Some(chain) = chain.as_ref() {
+            let epoch = self.epoch_manager.current_epoch().number.saturating_add(1);
+            let jailed = self
+                .registry
+                .settle_pending_jails(epoch, &absent_validators(chain));
+            if !jailed.is_empty() {
+                info!(count = jailed.len(), "Slashed validators left their seats");
+            }
+        }
         // Jailed validators whose term has run out, or that governance
         // reinstated, return to candidacy before the plan admits candidates.
         if let Some(chain) = chain.as_ref() {
@@ -937,7 +1319,11 @@ impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
             if policy.max_missed_epochs > 0
                 && let Ok(counts) = tenzro_vm::native::read_missed_epochs(chain)
             {
-                let ejected = self.registry.eject_inactive(&policy, &counts);
+                let ejected = self.registry.eject_inactive(
+                    &policy,
+                    &counts,
+                    self.epoch_manager.current_epoch().number + 1,
+                );
                 if !ejected.is_empty() {
                     info!(count = ejected.len(), "Inactive validators moved to exit");
                 }
@@ -953,10 +1339,38 @@ impl crate::consensus_driver::EpochPlanner for RegistryEpochPlanStager {
                 .as_ref()
                 .is_none_or(|c| tenzro_vm::native::scheme_admitted(c, scheme))
         };
+        let max_active = chain
+            .as_ref()
+            .and_then(|c| tenzro_vm::native::active_set_cap(c));
+        let root = |account: &[u8]| {
+            chain
+                .as_ref()
+                .and_then(|c| tenzro_vm::native::operator_cap::operator_root(c, account))
+        };
+        let region = |account: &[u8]| {
+            chain
+                .as_ref()
+                .and_then(|c| tenzro_vm::native::operator_cap::declared_region(c, account))
+        };
+        let mut caps: Vec<(u32, &dyn Fn(&[u8]) -> Option<String>)> = Vec::new();
+        if let Some(c) = chain.as_ref() {
+            if let Some(cap) = tenzro_vm::native::operator_cap::cap_in_force(c) {
+                caps.push((cap, &root));
+            }
+            if let Some(cap) = tenzro_vm::native::operator_cap::region_cap_in_force(c) {
+                caps.push((cap, &region));
+            }
+        }
+        let group_caps = (!caps.is_empty()).then_some(crate::event_loop::GroupCaps {
+            seat_budget: self.seat_budget,
+            caps,
+        });
         crate::event_loop::EventLoop::stage_registry_epoch_plan(
             &self.epoch_manager,
             &self.registry,
             &admitted,
+            max_active,
+            group_caps,
         );
         // While validator admission is closed no account that is not
         // admitted reaches the next committee, bonded or not.
@@ -1025,6 +1439,10 @@ pub struct TenzroNode {
     /// where a trait object is needed. `None` on non-validator roles or when
     /// committee-DA init fails.
     da_committee_backend: Option<Arc<crate::da_committee::DaCommitteeBackend>>,
+
+    /// The committee DA transport, through which this member locates the
+    /// history segments other members wrote.
+    da_committee_locator: Option<Arc<crate::da_committee_surface::IrohDaCommitteeSurface>>,
 
     /// The objects this node certifies, until `da_retention::spawn` takes
     /// them to record each in consensus state.
@@ -1110,6 +1528,11 @@ pub struct TenzroNode {
     /// that scores no-shows as `SlaResult::Missed` past `deadline_ms`.
     /// Empty on non-validator nodes.
     sla_outstanding_probes: Arc<DashMap<String, tenzro_model::SlaProbe>>,
+    /// Ledger payments admitted to pay for a call, held until they settle.
+    admitted_payments: Arc<crate::ledger_payment::AdmittedPayments>,
+    /// Answers providers gave over the `tenzro/sla-probe` ALPN, handed to
+    /// the response loop that scores the gossip ones. Validators only.
+    sla_direct_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     /// This validator's per-(provider, epoch) probe results, attested on chain
     /// as each epoch closes (`crate::sla_attest`).
     sla_tally: Arc<crate::sla_attest::SlaTally>,
@@ -1135,9 +1558,9 @@ pub struct TenzroNode {
     passkey_sessions: Option<Arc<crate::passkey_rpc::PasskeySessionStore>>,
     /// Adaptive burn governance dial. Holds the
     /// current `BurnRateConfig`, the `SupplyTargets` thresholds, and the
-    /// most recent `SupplyMetricsSnapshot`. Read-only RPCs surface the
-    /// recommendation produced by `compute_recommendation`; validators
-    /// put the generator's drafts to on-chain governance and every node
+    /// most recent `SupplyMetricsSnapshot`. Validators put the drafts the
+    /// generator makes from `compute_recommendation` to on-chain
+    /// governance and every node
     /// applies the enacted change here. Persists to CF_TOKENS via
     /// `BurnRateConfigManager::with_storage`.
     burn_rate_manager: Option<Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>>,
@@ -1159,6 +1582,10 @@ pub struct TenzroNode {
     /// The shared handle this node is held through, bound once it exists,
     /// for components built before it (the overlay's MoE surface).
     self_ref: Arc<std::sync::OnceLock<std::sync::Weak<TenzroNode>>>,
+
+    /// The app transport listener, when `[app_transport]` is configured.
+    #[cfg(feature = "app-transport")]
+    app_transport: Option<Arc<crate::app_transport::AppTransport>>,
 
     /// Payee settlement preferences — what asset each payee wants to be paid
     /// in. Held so the RPC surface can read and mutate them.
@@ -1354,6 +1781,10 @@ pub struct TenzroNode {
     /// Written once alongside `identity_registry`. Read through
     /// `identity_registry_now()`.
     identity_registry_slot: Arc<parking_lot::RwLock<Option<Arc<IdentityRegistry>>>>,
+    /// Holds this node's announcements back while the account it would
+    /// announce is not its machine identity's registered wallet. Made on
+    /// first use, once the machine identity is known.
+    announce_gate: std::sync::OnceLock<Arc<crate::announced_account::SenderGate>>,
     payment_gateway: Option<Arc<TenzroPaymentGateway>>,
     x402_server: Option<Arc<X402PaymentServer>>,
 
@@ -1485,6 +1916,12 @@ pub struct TenzroNode {
     /// Producer and index of this node's state snapshots, served over the
     /// iroh state-sync ALPN. Created once the iroh endpoint is bound.
     snapshot_store: Option<Arc<crate::snapshot::SnapshotStore>>,
+    /// Set once the event loop has stopped, for whatever reason: the process
+    /// and an embedding handle end on it ([`TenzroNode::event_loop_stopped`]).
+    event_loop_stopped: tokio::sync::watch::Sender<Option<EventLoopEnd>>,
+    /// One lock per model id that serving and stopping the model take, so
+    /// the two run one after the other ([`TenzroNode::model_lifecycle`]).
+    model_lifecycle: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
 
     /// Peers, by iroh `EndpointId`, to restore state from at start. Set via
     /// [`TenzroNode::set_state_sync_peers`] before [`TenzroNode::start`].
@@ -1529,6 +1966,11 @@ pub struct TenzroNode {
     /// queried by RPC handlers via `network_tip()`.
     pub(crate) peer_status: Arc<tenzro_network::PeerStatusTracker>,
 
+    /// The model catalog this node serves: installed by its catalog sync
+    /// from the trust ledger, read by its runtimes, registry, downloader and
+    /// RPC surfaces. No other node shares it.
+    catalog: tenzro_model::CatalogCell,
+
     // Provider state
     pub provider_schedule: Arc<RwLock<ProviderSchedule>>,
     /// Territorial licence enforcement. Consulted only for models whose licence
@@ -1562,10 +2004,22 @@ pub struct TenzroNode {
     /// reaches only the readers its visibility allows.
     /// Cheap-to-clone (`Arc` inside) — used by RPC handlers to publish.
     pub event_bus: Arc<tenzro_events::EventBus>,
+    /// What on this node is open and needs its operator's attention, with
+    /// the changes between readings.
+    pub conditions: Arc<crate::conditions::ConditionBook>,
+    /// Raised when the operator asks for a restart: the process stands down,
+    /// drains and ends with the status its service starts it again on.
+    pub restart: Arc<tokio::sync::Notify>,
     pub hardware_profile: Arc<RwLock<Option<HardwareProfile>>>,
     pub user_resources: Arc<DashMap<String, UserResource>>,
     pub transaction_history: Arc<RwLock<Vec<TransactionHistoryEntry>>>,
     pub runtime_roles: Arc<RwLock<RoleSet>>,
+    /// Configured roles this node started without for want of a bond; the
+    /// operator is told when each bond lands (`role_bonds::spawn_watch`).
+    pub(crate) roles_awaiting_bond: parking_lot::Mutex<Vec<tenzro_types::NetworkRole>>,
+    /// Configured roles this machine cannot back, each with why; startup
+    /// drops them (`prune_unsupported_roles`).
+    pub(crate) roles_unsupported: Vec<(tenzro_types::NetworkRole, String)>,
     /// The live economic policy — every rate the network charges, in one
     /// governance-settable block.
     ///
@@ -1658,11 +2112,6 @@ pub(crate) enum NodeState {
 /// explicitly serving the model again — which is the one event that genuinely
 /// supersedes it.
 pub const OFFLOAD_PREFIX: &str = "offloaded:";
-
-/// The `CF_MODELS` key holding the operator's provider schedule, model stacks
-/// included, so the stacks an operator defined are applied again after a
-/// restart instead of reverting to an empty schedule.
-pub const PROVIDER_SCHEDULE_KEY: &[u8] = b"schedule:provider";
 
 /// The `CF_MODELS` key holding the price card the operator last set, which
 /// replaces the configured one at startup.
@@ -1787,12 +2236,21 @@ impl TenzroNode {
         // Sized from the machine's core count. Two concurrent requests per
         // core: inference alternates compute and memory stalls, so a little
         // oversubscription lifts utilisation while more only deepens queues.
-        let traffic = Arc::new(tenzro_model::traffic::TrafficManager::default());
+        let traffic = Arc::new(tenzro_model::traffic::TrafficManager::new(
+            tenzro_model::traffic::TrafficConfig {
+                spot_fill_idle: config.spot.fill_idle,
+                ..Default::default()
+            },
+        ));
+        traffic.set_energy(&config.energy);
         #[cfg(feature = "inference")]
         let model_host = Arc::new(
             tenzro_model::ModelHost::with_engines((*traffic).clone(), &config.engines)
                 .map_err(|e| crate::error::NodeError::Config(format!("engines: {e}")))?,
         );
+        // Empty until the catalog sync installs what the trusted publishers
+        // signed.
+        let catalog = tenzro_model::CatalogCell::default();
 
         let node = Self {
             config,
@@ -1807,6 +2265,7 @@ impl TenzroNode {
             identity_signer: None,
             sealed_offers: Arc::new(crate::sealed_delivery::SealedOffers::default()),
             da_committee_backend: None,
+            da_committee_locator: None,
             da_recorder_rx: parking_lot::Mutex::new(None),
             da_possession_challenger: None,
             disk_guard: Arc::new(crate::storage_maintenance::DiskGuard::default()),
@@ -1828,6 +2287,8 @@ impl TenzroNode {
             challenge_manager: None,
             sla_manager: None,
             sla_outstanding_probes: Arc::new(DashMap::new()),
+            admitted_payments: Arc::default(),
+            sla_direct_tx: None,
             sla_tally: Arc::new(crate::sla_attest::SlaTally::default()),
             validator_registry: None,
             webauthn_validator: None,
@@ -1839,6 +2300,8 @@ impl TenzroNode {
             access,
             admin_audit,
             self_ref: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(feature = "app-transport")]
+            app_transport: None,
             settlement_preferences: None,
             model_registry: None,
             provider_manager: None,
@@ -1898,7 +2361,10 @@ impl TenzroNode {
             #[cfg(feature = "inference")]
             video_runtime: Arc::new(VideoRuntime::with_host(model_host.clone())),
             #[cfg(feature = "inference")]
-            media_models: crate::media_models::MediaModels::with_host(model_host.clone()),
+            media_models: crate::media_models::MediaModels::with_host(
+                model_host.clone(),
+                catalog.clone(),
+            ),
             #[cfg(feature = "inference")]
             model_host,
             #[cfg(feature = "inference")]
@@ -1915,6 +2381,7 @@ impl TenzroNode {
             iroh_infer_dispatcher: None,
             identity_registry: None,
             identity_registry_slot: Arc::new(parking_lot::RwLock::new(None)),
+            announce_gate: std::sync::OnceLock::new(),
             payment_gateway: None,
             x402_server: None,
             x402_facilitator: None,
@@ -1945,12 +2412,15 @@ impl TenzroNode {
             #[cfg(test)]
             test_ordered_segments: None,
             snapshot_store: None,
+            event_loop_stopped: tokio::sync::watch::channel(None).0,
+            model_lifecycle: DashMap::new(),
             state_sync_peers: Vec::new(),
             state_sync_addrs: Vec::new(),
             weak_subjectivity_anchor: None,
             recovery: None,
             chain_tip: Arc::new(AtomicU64::new(0)),
             peer_status,
+            catalog,
             provider_schedule: Arc::new(RwLock::new(ProviderSchedule::default())),
             territory: Arc::new(RwLock::new(crate::territory::TerritoryEnforcer::default())),
             provider_pricing: Arc::new(RwLock::new(provider_pricing)),
@@ -1965,10 +2435,14 @@ impl TenzroNode {
             event_bus: Arc::new(tenzro_events::EventBus::new(
                 tenzro_events::EventBusConfig::default(),
             )),
+            conditions: Arc::default(),
+            restart: Arc::default(),
             hardware_profile: Arc::new(RwLock::new(None)),
             user_resources: Arc::new(DashMap::new()),
             transaction_history: Arc::new(RwLock::new(Vec::new())),
             runtime_roles: Arc::new(RwLock::new(initial_roles)),
+            roles_awaiting_bond: parking_lot::Mutex::new(Vec::new()),
+            roles_unsupported: Vec::new(),
             storage_runtime: None,
             custody_challenges: Arc::new(crate::passkey_rpc::CustodyChallengeStore::new(chain_id)),
             node_visibility: Arc::new(RwLock::new(initial_visibility)),
@@ -2055,6 +2529,41 @@ impl TenzroNode {
             .collect()
     }
 
+    /// Resolves once the event loop has stopped, with how: after a Shutdown
+    /// event (`tenzro_gracefulExit`, a signal, an embedding handle's
+    /// shutdown), or on an error or a panic. A node without its event loop
+    /// serves nothing worth staying up for, so whoever runs the node ends
+    /// with it, and fails when the loop failed.
+    pub async fn event_loop_stopped(&self) -> EventLoopEnd {
+        let mut stopped = self.event_loop_stopped.subscribe();
+        match stopped.wait_for(Option::is_some).await {
+            Ok(end) => end.clone().unwrap_or(EventLoopEnd::Shutdown),
+            Err(_) => EventLoopEnd::Failed("the event loop's record was dropped".to_string()),
+        }
+    }
+
+    /// The lifecycle lock of `model_id`: serving and stopping that model hold
+    /// it, so a stop issued while a serve is in flight runs after it,
+    /// announcement included, and withdraws what the serve announced; and a
+    /// serve after a stop starts from a model that is fully stopped. Models
+    /// do not wait on one another.
+    pub(crate) async fn model_lifecycle(&self, model_id: &str) -> ModelLifecycle<'_> {
+        // Made before the wait, so a caller that gives up waiting drops it
+        // too and takes the lock out of the map when nobody else has it.
+        let mut held = ModelLifecycle {
+            guard: None,
+            locks: &self.model_lifecycle,
+            model_id: model_id.to_string(),
+        };
+        let lock = self
+            .model_lifecycle
+            .entry(model_id.to_string())
+            .or_default()
+            .clone();
+        held.guard = Some(lock.lock_owned().await);
+        held
+    }
+
     /// Returns a snapshot of all non-expired network-discovered providers.
     pub fn network_providers_snapshot(&self) -> Vec<NetworkProviderEntry> {
         let now = std::time::Instant::now();
@@ -2066,6 +2575,22 @@ impl TenzroNode {
             })
             .map(|entry| entry.value().clone())
             .collect()
+    }
+
+    /// The machine and operator identities this node announces when it serves
+    /// delegated agents, so controllers can assign them.
+    fn agent_serving(&self) -> Option<(String, String)> {
+        if self.config.serves_agents() {
+            crate::identity_bootstrap::machine_did().zip(self.operator_did())
+        } else {
+            None
+        }
+    }
+
+    /// The services this node's roles announce now, or `None` for a node
+    /// that does not announce itself.
+    pub(crate) fn own_announced_services(&self) -> Option<(&'static str, Vec<String>)> {
+        own_announced_services(&self.runtime_roles.read(), self.agent_serving().is_some())
     }
 
     /// Start all subsystems
@@ -2107,36 +2632,78 @@ impl TenzroNode {
             .chain_state()
             .map(|chain| crate::identity_bootstrap::staked_relays(&chain))
             .unwrap_or_default();
-        self.identity_transport =
-            Some(crate::identity_bootstrap::start(&self.config, &staked_relays).await?);
+        if let Some(chain) = self.chain_state() {
+            crate::update_notice::apply_governed_keys(&chain);
+        }
+        let governed_boot = self
+            .chain_state()
+            .map(|chain| crate::identity_bootstrap::governed_boot(&chain))
+            .unwrap_or_default();
+        self.identity_transport = Some(
+            crate::identity_bootstrap::start(&self.config, &staked_relays, &governed_boot).await?,
+        );
 
-        // 1b. State sync (optional). With peers and a weak-subjectivity
-        //     checkpoint configured, restore the committed state the
-        //     checkpoint block commits, verified bucket by bucket, before
-        //     consensus and the validator registry come up and hydrate from
-        //     it. Block-sync then imports from the restored height on.
+        // 1b. State sync (optional). Restore the committed state a trusted
+        //     block commits, verified bucket by bucket, before consensus and
+        //     the validator registry come up and hydrate from it. The block
+        //     is the weak-subjectivity checkpoint when one is pinned, and
+        //     otherwise a snapshot anchor a peer certifies, verified from
+        //     the genesis committee. Block-sync then imports from the
+        //     restored height on. A planned snapshot join that no peer can
+        //     serve stops the start, except from unpinned boot peers, which
+        //     falls back to replay.
         match self.join_plan().await {
-            crate::state_sync_policy::JoinPlan::Replay(reason) => info!(
-                ?reason,
-                "Catching up by block replay from the local tip, not by snapshot"
-            ),
+            crate::state_sync_policy::JoinPlan::Replay(reason) => {
+                if reason == crate::state_sync_policy::ReplayReason::HasChain
+                    && !self.state_sync_peers.is_empty()
+                {
+                    warn!(
+                        "State-sync peers ignored: this store already holds chain state, so the \
+                         node continues from its tip. To replace the store with a snapshot, \
+                         stop the node and start it once with --replace-store (the old store is \
+                         moved aside, not deleted)"
+                    );
+                }
+                info!(
+                    ?reason,
+                    "Catching up by block replay from the local tip, not by snapshot"
+                );
+            }
             crate::state_sync_policy::JoinPlan::Snapshot(source) => {
                 if source == crate::state_sync_policy::PeerSource::Boot {
                     self.adopt_boot_peers_for_state_sync().await;
                 }
+                // A checkpoint join restores from a snapshot or the node does
+                // not start: replaying from the local tip instead would take
+                // hours on a long chain while the operator believes the node
+                // joined at the checkpoint they gave it.
+                let remedy = "use a checkpoint a peer lists (`tenzro node snapshots --rpc <peer>`: \
+                              checkpoint_height, checkpoint_hash), name a peer that holds its \
+                              snapshot with --state-sync-from, or replay the chain instead \
+                              (without --state-sync-from, with --no-state-sync)";
+                // Boot peers with no pinned checkpoint join from a certified
+                // anchor if one serves it, and otherwise replay as a node
+                // with no peer does.
+                let unpinned_boot = source == crate::state_sync_policy::PeerSource::Boot
+                    && self.weak_subjectivity_anchor.is_none();
                 if self.state_sync_peers.is_empty() {
-                    warn!(
-                        "Snapshot join planned but no peer resolved; continuing with block replay \
-                         from the local tip"
+                    if !unpinned_boot {
+                        return Err(NodeError::Config(format!(
+                            "snapshot join from the weak-subjectivity checkpoint planned, but no \
+                             state-sync peer resolved; {remedy}"
+                        )));
+                    }
+                    info!(
+                        "Catching up by block replay from the local tip: no boot peer resolved \
+                         to ask for a certified snapshot anchor"
                     );
                 } else {
                     info!(peers = self.state_sync_peers.len(), "Starting state sync");
-                    match self.restore_state_from_peers().await {
-                        Ok(s) => info!(
-                            height = s.height,
-                            state_root = %s.state_root,
-                            buckets_fetched = s.buckets_fetched,
-                            "State sync complete: restored state reproduces the checkpoint's root"
+                    match self.restore_state_from_peers(source).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => info!(
+                            "Catching up by block replay from the local tip: no boot peer \
+                             serves a certified snapshot anchor"
                         ),
                         Err(e) => {
                             let interrupted = match &self.storage {
@@ -2144,19 +2711,17 @@ impl TenzroNode {
                                 None => false,
                             };
                             if interrupted {
-                                // The restore had begun: genesis state is cleared and some
-                                // buckets are written. Replaying blocks on top of that
-                                // cannot reproduce the chain's state, so do not.
+                                // The restore had begun: genesis state is cleared and
+                                // some buckets are written. Replaying blocks on top of
+                                // that cannot reproduce the chain's state, so do not.
                                 return Err(NodeError::Other(format!(
                                     "state sync stopped part-way ({e}); restart to resume it \
                                      from the buckets already written, or wipe the data \
                                      directory to start over"
                                 )));
                             }
-                            warn!(
-                                error = %e,
-                                "State sync failed; continuing with block replay from the local tip"
-                            );
+                            error!(error = %e, "State sync failed; the node does not start");
+                            return Err(NodeError::Other(format!("{e}; {remedy}")));
                         }
                     }
                 }
@@ -2338,11 +2903,41 @@ impl TenzroNode {
                 .mark_unhealthy("identity", e.to_string());
         })?;
 
-        // 10a. Every bonded role this node is configured for must be bonded in
-        // chain state, from the operator account (the validator role by its
-        // validator bond). A node does not serve a role it has not bonded.
-        crate::role_bonds::check(self, &self.config.roles)
+        // 10a. Network model endpoints this node kept from gossip, held to
+        // the checks a fresh announcement passes, now that the identity
+        // registry they are checked against is loaded.
+        if let Some(storage) = &self.storage {
+            let (restored, dropped) = restore_network_models(
+                storage.as_ref(),
+                self.identity_registry.as_deref(),
+                &self.network_models,
+            );
+            if restored + dropped > 0 {
+                info!(
+                    restored,
+                    dropped,
+                    "Restored network model endpoints from storage; dropped and deleted those \
+                     that no longer pass the announcement checks"
+                );
+            }
+        }
+
+        // 10b. Every bonded role this node serves is bonded in chain state,
+        // from the operator account (the validator role by its validator
+        // bond). An unbonded role other than the validator is set aside here,
+        // before anything announces or serves it: the configured roles stay
+        // in `config.roles`, so what each needs is built, and the roles served
+        // (`runtime_roles`) leave it out until its bond lands
+        // (`role_bonds::spawn_watch`). The storage runtime that
+        // `init_ai_infrastructure` built serves nothing meanwhile.
+        let roles = crate::role_bonds::at_start(self, &self.config.roles)
             .map_err(crate::error::NodeError::Config)?;
+        if roles != self.config.roles {
+            *self.roles_awaiting_bond.lock() =
+                crate::role_bonds::set_aside(&self.config.roles, &roles);
+            *self.runtime_roles.write() = roles;
+        }
+        self.follow_served_roles(&self.runtime_roles.read().clone());
 
         // Serving delegated agents: answer for the key this machine holds
         // for each agent it is assigned to. Opt-in; a node that has not
@@ -2363,7 +2958,7 @@ impl TenzroNode {
         }
         crate::machine_access::reconcile_owner(self);
 
-        // 10b. Wire per-DID admission controller into the consensus
+        // 10c. Wire per-DID admission controller into the consensus
         //      mempool. Has to happen AFTER both consensus and identity
         //      are up — `NodeLaneResolver` reads from the
         //      `IdentityRegistry`, which does not exist at `init_consensus`
@@ -2411,7 +3006,7 @@ impl TenzroNode {
             }
         }
 
-        // 10c. Wire the live account state reader into the consensus mempool
+        // 10d. Wire the live account state reader into the consensus mempool
         //      for stateful admission (nonce ordering + balance coverage).
         //      Reads the same VM execution state (CF_STATE) that block
         //      execution writes, via a fresh StateAdapter per lookup.
@@ -2435,7 +3030,7 @@ impl TenzroNode {
             }
         }
 
-        // 10d. The identity gate at the mempool: a transaction from an
+        // 10e. The identity gate at the mempool: a transaction from an
         //      account with no registered identity is not pooled (audit mode
         //      logs it instead). Node-local; the VM's rules are unchanged.
         if let (Some(consensus), Some(storage)) = (self.consensus.clone(), self.storage.clone()) {
@@ -2504,6 +3099,7 @@ impl TenzroNode {
         // Mark as running
         *self.state.write() = NodeState::Running;
         self.start_load_protection();
+        self.start_app_transport()?;
         info!("Tenzro Network node started successfully");
 
         Ok(())
@@ -2971,6 +3567,7 @@ impl TenzroNode {
         }
         self.history_archive = None;
         self.da_committee_backend = None;
+        self.da_committee_locator = None;
 
         self.payment_gateway = None;
         self.x402_server = None;
@@ -3014,17 +3611,7 @@ impl TenzroNode {
 
         let (iroh_enabled, iroh_endpoint_id, iroh_alpns) = match &self.iroh_resolver {
             Some(resolver) => {
-                let mut alpns = vec!["iroh-blobs".to_string()];
-                if self.iroh_a2a_dispatcher.is_some() {
-                    alpns.push("tenzro/a2a".to_string());
-                }
-                if self.iroh_mcp_handler.is_some() {
-                    alpns.push("tenzro/mcp".to_string());
-                }
-                alpns.push("tenzro/moe".to_string());
-                if self.iroh_infer_dispatcher.is_some() {
-                    alpns.push("tenzro/infer".to_string());
-                }
+                let alpns = self.iroh_alpns();
                 (true, Some(resolver.endpoint().id().to_string()), alpns)
             }
             None => (false, None, Vec::new()),
@@ -3032,7 +3619,7 @@ impl TenzroNode {
 
         NodeStatus {
             state: format!("{:?}", state),
-            roles: self.config.roles.clone(),
+            roles: self.runtime_roles.read().clone(),
             health_status: health.overall,
             uptime_secs: metrics.uptime_secs,
             block_height: self.chain_tip_height(),
@@ -3086,16 +3673,20 @@ impl TenzroNode {
     }
 
     /// Restores the committed state from the configured state-sync peers,
-    /// verified against the weak-subjectivity checkpoint. Runs before the
+    /// verified against the weak-subjectivity checkpoint when the operator
+    /// or the genesis pins one, and otherwise against a snapshot anchor a
+    /// peer certifies, verified from the genesis committee. Runs before the
     /// consensus engine and the validator registry are built, so both
     /// hydrate from the restored records. Binds the node's iroh endpoint for
     /// the duration and releases it before the long-lived one is bound.
-    async fn restore_state_from_peers(&self) -> Result<crate::snapshot::SyncedState> {
-        let (height, hash) = self.weak_subjectivity_anchor.ok_or_else(|| {
-            NodeError::Config(
-                "state sync needs a weak-subjectivity checkpoint to verify against".to_string(),
-            )
-        })?;
+    ///
+    /// `None` when there is no pin, no boot peer serves a certified anchor
+    /// and the peers came from the boot list: the node then replays, as it
+    /// does with no peer at all. Peers the operator named must serve one.
+    async fn restore_state_from_peers(
+        &self,
+        source: crate::state_sync_policy::PeerSource,
+    ) -> Result<Option<crate::snapshot::SyncedState>> {
         let storage = self
             .storage
             .clone()
@@ -3114,38 +3705,89 @@ impl TenzroNode {
                 warn!(peer = %addr.id, error = %e, "State-sync peer address not recorded");
             }
         }
-        let mut last_error = None;
-        let mut synced = None;
-        for peer in &self.state_sync_peers {
-            let transport =
-                crate::snapshot::IrohSnapshotTransport::new(resolver.clone(), Some(*peer));
-            match crate::snapshot::state_sync(
-                &storage,
-                &transport,
-                &transport,
-                height,
-                tenzro_types::Hash::new(hash),
-                EPOCH_DURATION_BLOCKS,
-            )
-            .await
-            {
-                Ok(s) => {
-                    synced = Some(s);
-                    break;
+        let anchor = match self.weak_subjectivity_anchor {
+            Some((height, hash)) => Ok((height, tenzro_types::Hash::new(hash))),
+            None => match self.genesis_anchor().await {
+                Ok(genesis) => {
+                    crate::snapshot::certified_anchor_from_peers(
+                        resolver.endpoint(),
+                        &self.state_sync_peers,
+                        &genesis,
+                        self.handover_program(),
+                    )
+                    .await
                 }
-                Err(e) => {
-                    warn!(%peer, error = %e, "State sync from peer failed; trying the next");
-                    last_error = Some(e);
+                Err(e) => Err(e),
+            },
+        };
+        let (height, hash) = match anchor {
+            Ok(anchor) => anchor,
+            Err(e) => {
+                if let Err(e) = resolver.shutdown().await {
+                    warn!(error = %e, "Releasing the state-sync iroh endpoint failed");
                 }
+                drop(resolver);
+                let _ = std::fs::remove_dir_all(self.iroh_config().dial_only().data_dir);
+                if source == crate::state_sync_policy::PeerSource::Boot {
+                    warn!(error = %e, "No certified snapshot anchor from the boot peers");
+                    return Ok(None);
+                }
+                return Err(NodeError::Other(format!(
+                    "{e}; state sync needs a weak-subjectivity checkpoint: pass \
+                     --checkpoint-height and --checkpoint-hash, or use a genesis with a \
+                     [weak_subjectivity] block"
+                )));
             }
-        }
+        };
+        let peers: Vec<_> = self
+            .state_sync_peers
+            .iter()
+            .map(|peer| {
+                (
+                    *peer,
+                    crate::snapshot::IrohSnapshotTransport::new(resolver.clone(), Some(*peer)),
+                )
+            })
+            .collect();
+        let synced = crate::snapshot::state_sync_from_peers(
+            &storage,
+            &peers,
+            height,
+            hash,
+            EPOCH_DURATION_BLOCKS,
+        )
+        .await;
+        drop(peers);
         if let Err(e) = resolver.shutdown().await {
             warn!(error = %e, "Releasing the state-sync iroh endpoint failed");
         }
         drop(resolver);
         let _ = std::fs::remove_dir_all(self.iroh_config().dial_only().data_dir);
-        synced.ok_or_else(|| {
-            last_error.unwrap_or_else(|| NodeError::Config("no state-sync peers configured".into()))
+        synced.map(Some)
+    }
+
+    /// The genesis a certification is verified from: the chain id and
+    /// committee of this node's genesis file and its stored genesis block.
+    async fn genesis_anchor(&self) -> Result<tenzro_light::TrustAnchor> {
+        use tenzro_storage::BlockStore;
+        let genesis = self.config.genesis.as_ref().ok_or_else(|| {
+            NodeError::Config("a certified anchor needs the network's genesis".to_string())
+        })?;
+        let storage = self
+            .storage
+            .clone()
+            .ok_or_else(|| NodeError::Internal("storage is not initialised".to_string()))?;
+        let genesis_hash = tenzro_storage::block_store::BlockStoreImpl::new(storage)?
+            .get_block_by_height(tenzro_types::BlockHeight(0))
+            .await?
+            .ok_or_else(|| NodeError::Config("no genesis block is stored".to_string()))?
+            .hash()
+            .0;
+        Ok(tenzro_light::TrustAnchor {
+            epoch: 0,
+            chain_id: genesis.chain_id,
+            genesis_hash,
+            committee_root: genesis.committee_root()?,
         })
     }
 
@@ -3169,7 +3811,8 @@ impl TenzroNode {
             mode: self.config.state_sync,
             is_validator: self.config.roles.is_validator(),
             named_peers: !self.state_sync_peers.is_empty(),
-            has_checkpoint: self.weak_subjectivity_anchor.is_some(),
+            has_boot_identities: crate::identity_bootstrap::boot_entries(&self.config)
+                .is_ok_and(|boot| !boot.is_empty()),
             has_chain,
         })
     }
@@ -3220,8 +3863,14 @@ impl TenzroNode {
         // Initialize genesis block if configured
         if let Some(genesis_config) = &self.config.genesis {
             info!("Initializing genesis block...");
-            let _genesis_block = crate::genesis::initialize_genesis(&store, genesis_config).await?;
-            info!("Genesis block initialized successfully");
+            let genesis_block = crate::genesis::initialize_genesis(&store, genesis_config).await?;
+            // The genesis block names the network: a node on the wrong genesis
+            // is visible here before it syncs anything.
+            info!(
+                chain_id = genesis_config.chain_id,
+                genesis_hash = %hex::encode(genesis_block.hash().as_bytes()),
+                "Genesis block initialized"
+            );
         } else {
             // Without a genesis this node runs a local chain under the chain
             // id `chain_id` reports. Genesis is what records the chain id in
@@ -3396,6 +4045,14 @@ impl TenzroNode {
             }
         }
 
+        // The key set governance put on chain replaces the operator's own.
+        if let Some(chain) = self.chain_state()
+            && let Some(set) = tenzro_vm::native::gateway_sets::nras_jwks_for_block(&chain)
+        {
+            tenzro_tee::replace_nvidia_jwks(set);
+            info!("NVIDIA attestation key set read from chain state");
+        }
+
         match detect_tee().await {
             Some(provider) => {
                 let vendor = provider.vendor();
@@ -3525,13 +4182,34 @@ impl TenzroNode {
         self.fee_processor = Some(fee_processor);
 
         // Trust ledger, persisted in CF_CREDENTIALS and re-verified on load.
+        // Receipts signed with an identity key in violation evidence are
+        // checked against this node's chain state.
         self.trust_ledger = Some(Arc::new(match &self.storage {
             Some(storage) => {
-                tenzro_trust::TrustLedger::with_storage(storage.clone() as Arc<dyn KvStore>)
-                    .unwrap_or_else(|e| {
-                        warn!("trust ledger could not be loaded ({}); starting empty", e);
-                        tenzro_trust::TrustLedger::new()
-                    })
+                let chain_storage = storage.clone();
+                let identity_keys: tenzro_trust::policy::IdentityKeyReceipts =
+                    Arc::new(move |receipt: &tenzro_types::JurisdictionReceipt| {
+                        let (resolver, params) =
+                            crate::root_signatures::chain_keys(Some(&chain_storage))
+                                .ok_or("no chain state")?;
+                        tenzro_model::verify_receipt(
+                            receipt,
+                            Some(tenzro_model::IdentityKeyCheck {
+                                resolver: resolver.as_ref(),
+                                now_ms: tenzro_crypto::session::now_ms(),
+                                params,
+                            }),
+                        )
+                        .map_err(|e| e.to_string())
+                    });
+                tenzro_trust::TrustLedger::with_storage(
+                    storage.clone() as Arc<dyn KvStore>,
+                    Some(identity_keys),
+                )
+                .unwrap_or_else(|e| {
+                    warn!("trust ledger could not be loaded ({}); starting empty", e);
+                    tenzro_trust::TrustLedger::new()
+                })
             }
             None => tenzro_trust::TrustLedger::new(),
         }));
@@ -3591,10 +4269,9 @@ impl TenzroNode {
                 storage.clone() as Arc<dyn KvStore>,
             ));
             info!(
-                "Economic policy hydrated: operator {} bps validating / {} bps delegated, RPC provider {} bps",
-                self.economic_policy.current().validating.operator_bps,
-                self.economic_policy.current().delegated.operator_bps,
-                self.economic_policy.current().delegated.rpc_provider_bps,
+                "Economic policy hydrated: default conversion {}, micro-settlement floor {}",
+                self.economic_policy.current().default_conversion,
+                self.economic_policy.current().micro_settlement_floor,
             );
         }
 
@@ -3966,6 +4643,7 @@ impl TenzroNode {
                 epoch_manager,
                 registry,
                 store: Some(kv.clone()),
+                seat_budget: consensus.seat_budget(),
             }));
         } else {
             warn!(
@@ -4094,6 +4772,21 @@ impl TenzroNode {
             .as_ref()
             .map(|g| g.chain_id)
             .unwrap_or_default();
+        // Proofs too large for a block reach this validator over the
+        // zk-proof protocol; it verifies them and states its verdicts.
+        if let (Some(signer), Some(resolver)) = (self.identity_signer.clone(), self.iroh_resolver())
+        {
+            resolver
+                .zk_proof_sink()
+                .set(Arc::new(crate::zk_proofs::ProofVerifier::new(
+                    publisher.clone(),
+                    signer,
+                    storage.clone(),
+                    record_chain,
+                    self.validator_nonces.clone(),
+                    self.validator_tx_gossip.clone(),
+                )));
+        }
         let recorder = self.identity_signer.clone().map(|signer| {
             crate::checkpoint_recorder::CheckpointRecorder::new(
                 publisher.clone(),
@@ -4175,7 +4868,7 @@ impl TenzroNode {
         // Compact certificates this validator proves go to every follower and
         // light client.
         let (compact_tx, mut compact_rx) =
-            mpsc::unbounded_channel::<tenzro_consensus::compact::CompactCertificate>();
+            mpsc::unbounded_channel::<tenzro_light::compact::CompactCertificate>();
         let compact_network = self.network.clone();
         tokio::spawn(async move {
             while let Some(cc) = compact_rx.recv().await {
@@ -4200,16 +4893,15 @@ impl TenzroNode {
         // This validator's signed endpoint announcements go to every peer,
         // its endpoint only sealed to committee members.
         let (announce_tx, mut announce_rx) =
-            mpsc::unbounded_channel::<tenzro_consensus::announce::PublishedAnnouncement>();
+            mpsc::unbounded_channel::<tenzro_consensus::announce::Publication>();
         let announce_network = self.network.clone();
         tokio::spawn(async move {
-            while let Some(announcement) = announce_rx.recv().await {
+            while let Some(publication) = announce_rx.recv().await {
                 let Some(net) = announce_network.as_ref() else {
                     continue;
                 };
-                let payload = tenzro_network::MessagePayload::ValidatorEndpoint(
-                    bincode::serialize(&announcement).expect("announcement encodes"),
-                );
+                let payload =
+                    tenzro_network::MessagePayload::ValidatorEndpoint(publication.encode());
                 if let Err(e) = net
                     .broadcast(
                         "tenzro/validators",
@@ -4308,7 +5000,7 @@ impl TenzroNode {
         consensus: Arc<ConsensusHandle>,
         storage: Arc<dyn KvStore>,
     ) -> Result<()> {
-        use crate::da_committee::{DaCommitteeBackend, DaCommitteeStore, committee_address};
+        use crate::da_committee::{DaCommitteeBackend, DaCommitteeStore};
         use crate::da_committee_surface::{
             DaCommitteeServer, EpochManagerCommitteeView, IrohDaCommitteeSurface,
         };
@@ -4323,7 +5015,6 @@ impl TenzroNode {
                 )
             })?),
         );
-        let local_address = committee_address(signer.identity());
 
         // Durable custody store, hydrated from CF_DA_COMMITTEE.
         let store = Arc::new(
@@ -4340,13 +5031,13 @@ impl TenzroNode {
 
         // Outbound surface: members are dialed at the endpoint their verified
         // consensus endpoint announcement names.
-        let surface: Arc<dyn crate::da_committee::DaCommitteeSurface> =
-            Arc::new(IrohDaCommitteeSurface::new(
-                resolver.endpoint().clone(),
-                committee.clone(),
-                crate::da_committee_surface::announced_member_endpoints(consensus.clone()),
-                local_address,
-            ));
+        let surface = Arc::new(IrohDaCommitteeSurface::new(
+            resolver.endpoint().clone(),
+            committee.clone(),
+            crate::da_committee_surface::announced_member_endpoints(consensus.clone()),
+            signer.identity().clone(),
+        ));
+        self.da_committee_locator = Some(surface.clone());
 
         // Writer-side backend and inbound server share the one signer.
         let (recorder, recorded) = tokio::sync::mpsc::unbounded_channel();
@@ -4431,7 +5122,10 @@ impl TenzroNode {
     /// operator's machines.
     #[cfg(feature = "inference")]
     fn init_model_runtime(&mut self) -> Result<()> {
-        let model_runtime = Arc::new(ModelRuntime::with_host(self.model_host.clone())?);
+        let model_runtime = Arc::new(ModelRuntime::with_host(
+            self.model_host.clone(),
+            self.catalog.clone(),
+        )?);
         model_runtime.set_session_checkpoint_interval(std::time::Duration::from_secs(
             self.config.session_checkpoint_interval_secs,
         ));
@@ -4463,11 +5157,14 @@ impl TenzroNode {
         let acceptance = self.config.model_licensing.clone();
         let registry = if let Some(ref storage) = self.storage {
             Arc::new(
-                ModelRegistry::with_storage(storage.clone() as Arc<dyn tenzro_storage::KvStore>)
-                    .with_acceptance_policy(acceptance),
+                ModelRegistry::with_storage(
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                    self.catalog.clone(),
+                )
+                .with_acceptance_policy(acceptance),
             )
         } else {
-            Arc::new(ModelRegistry::new().with_acceptance_policy(acceptance))
+            Arc::new(ModelRegistry::new(self.catalog.clone()).with_acceptance_policy(acceptance))
         };
         self.model_registry = Some(registry);
 
@@ -4671,6 +5368,12 @@ impl TenzroNode {
         router_builder = router_builder.with_identity_keys(Arc::new(move |did: &str| {
             crate::identity_bootstrap::registered_identity_key(&identity_slot, did)
         }));
+        // Receipts signed with a provider's identity key verify against the
+        // chain's record of that machine's keys, read at check time.
+        let chain_storage = self.storage.clone();
+        router_builder = router_builder.with_chain_keys(Arc::new(move || {
+            crate::root_signatures::chain_keys(chain_storage.as_ref())
+        }));
         // On a validator, every routed call is signed with the node key and
         // fed to the compute market. Only validators' observations are
         // admitted anywhere, so other nodes make none; without a network or a
@@ -4795,6 +5498,7 @@ impl TenzroNode {
             Some(mcp_handler),
             moe_dispatcher,
             Some(infer_dispatcher),
+            self.app_stream_handler(),
         )
         .await
         {
@@ -4829,7 +5533,11 @@ impl TenzroNode {
                                 .clone()
                                 .resolved(self.config.roles.is_validator()),
                         )
-                        .with_data_dir(self.config.data_dir.clone()),
+                        .with_data_dir(self.config.data_dir.clone())
+                        .with_served_blobs({
+                            let served = resolver.snapshot_blobs().clone();
+                            Arc::new(move |hashes| served.set(hashes))
+                        }),
                     );
                     resolver.snapshot_directory().set(snapshot_store.clone());
                     // Snapshots past the retention (or whose lease ran out
@@ -4867,6 +5575,7 @@ impl TenzroNode {
                                         consensus: self.consensus.clone(),
                                         registry: self.chain_registry(),
                                         gate: Some(resolver.identity_gate().clone()),
+                                        chain: self.storage.clone().map(|s| s as Arc<dyn KvStore>),
                                     },
                                 ));
                                 crate::identity_bootstrap::seed_gossip(
@@ -4943,9 +5652,11 @@ impl TenzroNode {
 
         // The storage-provider runtime. Renters pay for kept objects through
         // storage compute claims in consensus state.
-        if (self.config.roles.serves_storage() || self.config.roles.serves_ai())
-            && self.storage.is_some()
-        {
+        // Built whenever state storage is open, whichever roles are
+        // configured: what is served follows the roles served now, so a role
+        // taken up while the node runs (its bond landing, or a hand-set role
+        // list) finds its runtime in place.
+        if self.storage.is_some() {
             // A resolver, not a value. The payee cannot be captured here:
             // this runs before the identity registry finishes loading, so
             // `operator_payee()` would answer with the machine-account fallback
@@ -4973,8 +5684,8 @@ impl TenzroNode {
                 )
             });
             // Storage-provider runtime. Needs the iroh data plane for shard
-            // transport.
-            if self.config.roles.serves_storage() {
+            // transport. It serves only while the storage role is served.
+            {
                 match &self.iroh_resolver {
                     Some(resolver) => {
                         let resolver: Arc<dyn tenzro_iroh::IrohResolver> = resolver.clone();
@@ -4993,6 +5704,7 @@ impl TenzroNode {
                                 policy,
                             ),
                         };
+                        runtime.set_serving(self.config.roles.serves_storage());
                         self.storage_runtime = Some(Arc::new(runtime));
                         info!(
                             provider = ?provider_address(),
@@ -5000,18 +5712,11 @@ impl TenzroNode {
                             "Storage-provider runtime spawned (payee resolved per use)"
                         );
                     }
-                    None => warn!(
+                    None if self.config.roles.serves_storage() => warn!(
                         "StorageProvider role set but iroh resolver unavailable; storage runtime not spawned"
                     ),
+                    None => {}
                 }
-            }
-
-            // LAN discovery of the verified members of this node's cluster.
-            if self.config.roles.serves_ai()
-                && let Some(ref resolver) = self.iroh_resolver
-            {
-                self.cluster_identity
-                    .spawn_lan_discovery(resolver.endpoint().clone());
             }
         } else if self.config.roles.serves_storage()
             || self.config.roles.serves_ai()
@@ -5019,113 +5724,6 @@ impl TenzroNode {
         {
             warn!(
                 "Provider role set but state storage unavailable; storage/compute runtimes not spawned"
-            );
-        }
-
-        // Intent routing (the inference router's model selection tier), with
-        // the per-DID budget gate read from consensus Terms so intent-routed dispatch enforces the same
-        // rolling-window ceiling as direct payments.
-        if let Some(router) = self.inference_router.clone() {
-            let mut meta = tenzro_model::routing::IntentPolicy::new()
-                .with_local_jurisdiction(self.jurisdiction_claim.clone());
-            if let Some(ref storage) = self.storage {
-                meta = meta.with_budget_gate(Arc::new(crate::terms_gate::ChainTermsGate::new(
-                    storage.clone() as Arc<dyn KvStore>,
-                )));
-            }
-            // Wallet-balance ceiling: read the payer's on-chain TNZO balance so
-            // no intent is ever routed to a model the payer cannot pay for.
-            if let Some(ref token) = self.token {
-                let balance = Arc::new(crate::router_inputs::TnzoBalanceProvider::new(
-                    token.clone(),
-                ));
-                meta = meta.with_balance_provider(balance);
-            }
-            // Per-query difficulty: cluster prompts by embedding and score
-            // candidates on the error rate each has actually shown in that
-            // neighbourhood, instead of on declared parameter counts alone.
-            // Observations persist so the index survives restarts.
-            let difficulty = match self.storage.clone() {
-                Some(storage) => tenzro_model::difficulty::DifficultyIndex::with_storage(
-                    tenzro_model::difficulty::DEFAULT_CLUSTER_CAPACITY,
-                    storage as Arc<dyn tenzro_storage::KvStore>,
-                )
-                .unwrap_or_else(|e| {
-                    warn!("route difficulty index starting empty (hydrate failed): {e}");
-                    tenzro_model::difficulty::DifficultyIndex::new(
-                        tenzro_model::difficulty::DEFAULT_CLUSTER_CAPACITY,
-                    )
-                }),
-                None => tenzro_model::difficulty::DifficultyIndex::new(
-                    tenzro_model::difficulty::DEFAULT_CLUSTER_CAPACITY,
-                ),
-            };
-            let clusters = difficulty.cluster_count();
-            meta = meta.with_difficulty_index(Arc::new(difficulty));
-            // Prompt embedding reuses the text-embedding runtime shared with the
-            // agent memory tier. With no embedding model loaded, and in the
-            // light build, which has no runtime, routing scores declared
-            // metadata only.
-            #[cfg(feature = "inference")]
-            {
-                meta = meta.with_prompt_embedder(Arc::new(
-                    crate::router_inputs::RuntimePromptEmbedder::new(
-                        self.text_embedding_runtime.clone(),
-                    ),
-                ));
-            }
-            // The offers other providers are announcing on `tenzro/models` right
-            // now, scored alongside this node's own catalog. Without this the
-            // intent tier only ever sees what this operator registered locally,
-            // so what the network can serve would depend on per-node curation.
-            // Each offer also names the address that serves it, so the provider
-            // share follows from the winning offer.
-            // The provider map is joined on so an offer arrives at selection
-            // carrying the warm-prefix summary and concurrency its provider
-            // signed, not just `{model, endpoint}` — that is what lets a
-            // follow-up turn return to the provider already holding the
-            // conversation's prefix instead of paying the prefill twice.
-            meta = meta.with_network_catalog(Arc::new(
-                crate::network_catalog::GossipNetworkCatalog::new(self.network_models.clone())
-                    .with_providers(self.network_providers.clone())
-                    .with_chain(self.storage.clone().map(|s| s as Arc<dyn KvStore>)),
-            ));
-            // Operator task→model overrides: the operator pins which served
-            // model handles which kind of task; unpinned use cases keep
-            // benchmark and measured selection. Two channels, both optional:
-            // the `task_models` config table,
-            // and the `TENZRO_TASK_MODELS` env var (a JSON object, e.g.
-            // `{"code":"qwen3.8-27b","reasoning":"muse-glimmer-30b"}`) for
-            // env-configured deployments that pass no config file. The env
-            // entries are merged over the config table.
-            let mut task_models = self.config.task_models.clone();
-            if let Ok(raw) = std::env::var("TENZRO_TASK_MODELS") {
-                let raw = raw.trim();
-                if !raw.is_empty() {
-                    match serde_json::from_str::<std::collections::HashMap<String, String>>(raw) {
-                        Ok(env_map) => task_models.extend(env_map),
-                        Err(e) => warn!(
-                            "TENZRO_TASK_MODELS is not a valid JSON object of use_case->model_id; ignoring: {e}"
-                        ),
-                    }
-                }
-            }
-            if !task_models.is_empty() {
-                let mut pairs: Vec<String> = task_models
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect();
-                pairs.sort();
-                info!("Task-model overrides active: {}", pairs.join(", "));
-            }
-            meta = meta.with_routing_preferences(task_models);
-            if let Err(e) = meta.install(router) {
-                return Err(crate::error::NodeError::Config(format!(
-                    "intent routing: {e}"
-                )));
-            }
-            info!(
-                "Intent routing (intent → model) installed with {clusters} difficulty cluster(s)"
             );
         }
 
@@ -5155,14 +5753,17 @@ impl TenzroNode {
                     crate::model_blob_fetcher_bridge::IrohBlobFetcher::arc(Arc::clone(resolver));
                 info!("HuggingFace downloader wired with iroh peer-first blob fetcher");
                 Arc::new(
-                    HfDownloader::new(models_dir)
+                    HfDownloader::new(models_dir, self.catalog.clone())
                         .with_blob_fetcher(fetcher)
                         .with_accepted_licences(accepted),
                 )
             }
             None => {
                 info!("HuggingFace downloader initialized (no iroh resolver — HF CDN only)");
-                Arc::new(HfDownloader::new(models_dir).with_accepted_licences(accepted))
+                Arc::new(
+                    HfDownloader::new(models_dir, self.catalog.clone())
+                        .with_accepted_licences(accepted),
+                )
             }
         };
         self.hf_downloader = Some(hf_downloader);
@@ -5176,9 +5777,9 @@ impl TenzroNode {
         // Quote honest cold-start times from the first request onward.
         self.seed_lifecycle_sizes();
 
-        // The operator's model stacks, applied by the residency loop spawned
-        // at the end of this function.
-        self.restore_provider_schedule();
+        // The operator's model stacks, from the configuration, applied by the
+        // residency loop spawned at the end of this function.
+        self.apply_provider_schedule()?;
         self.restore_provider_pricing();
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -5223,16 +5824,17 @@ impl TenzroNode {
                             let Some(model_id) = key_str.strip_prefix("served:") else {
                                 continue;
                             };
-                            let visibility = storage
-                                .get(CF_MODELS, key_bytes)
-                                .ok()
-                                .flatten()
-                                .and_then(|data| {
-                                    serde_json::from_slice::<serde_json::Value>(&data).ok()
-                                })
-                                .and_then(|record| {
-                                    crate::visibility_rpc::persisted_visibility(&record)
-                                });
+                            let record =
+                                storage
+                                    .get(CF_MODELS, key_bytes)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|data| {
+                                        serde_json::from_slice::<serde_json::Value>(&data).ok()
+                                    });
+                            let visibility = record
+                                .as_ref()
+                                .and_then(crate::visibility_rpc::persisted_visibility);
                             if offloaded.contains(model_id) {
                                 // The operator stopped this one. Restoring it
                                 // here is how a deliberate offload came back
@@ -5245,6 +5847,11 @@ impl TenzroNode {
                                 continue;
                             }
                             self.served_models.insert(model_id.to_string(), visibility);
+                            if let Some(limit) =
+                                record.as_ref().and_then(crate::rpc::persisted_idle_limit)
+                            {
+                                self.lifecycle.set_idle_limit(model_id, Some(limit));
+                            }
                             restored += 1;
                         }
                     }
@@ -5289,38 +5896,6 @@ impl TenzroNode {
                             restored
                         );
                     }
-
-                    // Also restore network-discovered model endpoints (from gossip, persisted)
-                    let mut net_restored = 0usize;
-                    for key_bytes in &keys {
-                        if let Ok(key_str) = std::str::from_utf8(key_bytes)
-                            && key_str.starts_with("net_model:")
-                            && let Ok(Some(data)) = storage.get(CF_MODEL_SERVICES, key_bytes)
-                            && let Ok(reg) = serde_json::from_slice::<
-                                tenzro_network::ModelRegistrationMessage,
-                            >(&data)
-                        {
-                            // Only restore non-withdrawn, non-expired entries
-                            if !reg.withdrawn {
-                                let model_key =
-                                    key_str.trim_start_matches("net_model:").to_string();
-                                self.network_models.insert(
-                                    model_key,
-                                    NetworkModelEntry {
-                                        registration: reg,
-                                        last_seen: std::time::Instant::now(), // reset TTL
-                                    },
-                                );
-                                net_restored += 1;
-                            }
-                        }
-                    }
-                    if net_restored > 0 {
-                        info!(
-                            "Restored {} network model endpoint(s) from RocksDB on startup",
-                            net_restored
-                        );
-                    }
                 }
                 Err(e) => {
                     warn!(
@@ -5352,7 +5927,7 @@ impl TenzroNode {
         // that this node cannot show it serves.
         if let Some(connector) = self.connector.clone() {
             connector
-                .register(&self.served_models)
+                .register(&self.catalog.current(), &self.served_models)
                 .map_err(|e| NodeError::Config(format!("connector: {e}")))?;
         }
 
@@ -5377,6 +5952,8 @@ impl TenzroNode {
             // tenzro-network). Outstanding probes are correlated by their
             // 32-byte challenge_nonce (hex-encoded for DashMap key).
             if let Some(network) = self.network.clone() {
+                let (direct_tx, mut direct_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+                self.sla_direct_tx = Some(direct_tx);
                 let outstanding = self.sla_outstanding_probes.clone();
                 let tally = self.sla_tally.clone();
                 let state_store = self
@@ -5388,13 +5965,25 @@ impl TenzroNode {
                     match network.subscribe("tenzro/sla").await {
                         Ok(mut rx) => {
                             info!("SLA: subscribed to tenzro/sla");
-                            while let Some(msg) = rx.recv().await {
-                                let data = match msg.payload {
-                                    tenzro_network::MessagePayload::Custom { data, .. } => data,
-                                    _ => continue,
+                            loop {
+                                // A direct answer and a gossip one are the
+                                // same envelope and take the same path; the
+                                // first for a probe is scored, the other
+                                // finds it no longer outstanding.
+                                let data = tokio::select! {
+                                    msg = rx.recv() => match msg {
+                                        Some(msg) => match msg.payload {
+                                            tenzro_network::MessagePayload::Custom { data, .. } => data,
+                                            _ => continue,
+                                        },
+                                        None => break,
+                                    },
+                                    Some(data) = direct_rx.recv() => data,
                                 };
-                                let any = match bincode::deserialize::<tenzro_model::SlaEnvelope>(
-                                    &data,
+                                let any = match tenzro_network::wire::decode_bounded::<
+                                    tenzro_model::SlaEnvelope,
+                                >(
+                                    &data, tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE
                                 ) {
                                     Ok(env) => match env.into_response() {
                                         Some(r) => r,
@@ -5474,6 +6063,17 @@ impl TenzroNode {
                                             &tenzro_storage::StateTrie::new(store.clone()),
                                             commitments.as_deref(),
                                         )
+                                        .or_else(|| {
+                                            crate::capacity_probe::possession_rate(
+                                                &tenzro_vm::StateAdapter::with_storage(
+                                                    store.clone(),
+                                                ),
+                                                &probe,
+                                                &response,
+                                                issued_at,
+                                                received_at_ms,
+                                            )
+                                        })
                                     });
                                 let kept = state_store.as_ref().is_some_and(|store| {
                                     crate::capacity_probe::capacity_kept(
@@ -5481,6 +6081,7 @@ impl TenzroNode {
                                         &probe,
                                         &response,
                                         received_at_ms,
+                                        issued_at.map(|issued_at| received_at_ms - issued_at),
                                         capacity,
                                     )
                                 });
@@ -5568,17 +6169,30 @@ impl TenzroNode {
             // Re-derived per probe rather than captured once: an identity
             // provisioned after startup has to start answering without a
             // restart.
-            let identity_registry = self.identity_registry.clone();
-            let machine_operator = machine_operator_of(self.identity_signer.as_ref());
-            let configured_operator_did = self.config.operator_did.clone();
-            // What a capacity probe's work runs on.
-            #[cfg(feature = "inference")]
-            let runtime = self.model_runtime.clone();
-            let storage_runtime = self.storage_runtime.clone();
-            let state_store = self
-                .storage
-                .clone()
-                .map(|s| s as Arc<dyn tenzro_storage::KvStore>);
+            let responder = crate::sla_responder::SlaResponder {
+                identity_registry: self.identity_registry.clone(),
+                machine_operator: machine_operator_of(self.identity_signer.as_ref()),
+                configured_operator_did: self.config.operator_did.clone(),
+                // What a capacity probe's work runs on.
+                #[cfg(feature = "inference")]
+                runtime: self.model_runtime.clone(),
+                storage_runtime: self.storage_runtime.clone(),
+                state_store: self
+                    .storage
+                    .clone()
+                    .map(|s| s as Arc<dyn tenzro_storage::KvStore>),
+                service,
+                taken: Arc::default(),
+            };
+            // Validators may also send a probe straight to this node over
+            // the `tenzro/sla` ALPN; it is answered the same way.
+            if let Some(resolver) = self.iroh_resolver.as_ref() {
+                resolver
+                    .sla_handler()
+                    .set(Arc::new(crate::sla_responder::SlaRequestHandler(
+                        responder.clone(),
+                    )));
+            }
             tokio::spawn(async move {
                 let mut rx = match network.subscribe("tenzro/sla").await {
                     Ok(rx) => rx,
@@ -5587,114 +6201,74 @@ impl TenzroNode {
                         return;
                     }
                 };
-                while let Some(msg) = rx.recv().await {
-                    let MessagePayload::Custom { data, .. } = msg.payload else {
-                        continue;
-                    };
-                    let probe = match bincode::deserialize(&data) {
-                        Ok(tenzro_model::SlaEnvelope::Probe(p)) => p,
-                        Ok(tenzro_model::SlaEnvelope::Response(_)) => continue,
-                        Err(_) => continue,
-                    };
+                // Probes drawn under the beacon travel on their own topic.
+                let mut beacon_rx = match network.subscribe(tenzro_model::SLA_BEACON_TOPIC).await {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        warn!(error = %e, "SLA responder could not subscribe to the beacon probe topic");
+                        return;
+                    }
+                };
+                // Probes naming a beacon round this chain has not reached
+                // wait for it and come back here.
+                let (park, mut parked) = tokio::sync::mpsc::channel::<tenzro_model::SlaProbe>(
+                    crate::sla_attest::PROBE_MEMORY,
+                );
+                let waiting =
+                    Arc::new(tokio::sync::Semaphore::new(crate::sla_attest::PROBE_MEMORY));
 
-                    // The bond or role stake is the authority on which
-                    // subject this node answers for: its owner is the wallet
-                    // that funded it, so one funded by another wallet is
-                    // another operator's to answer.
-                    let payee = resolve_operator_payee(
-                        identity_registry.as_ref(),
-                        machine_operator.as_ref(),
-                        configured_operator_did.as_deref(),
-                    );
-                    let subject = crate::sla_attest::chain_sla_subject(
-                        state_store.as_ref(),
-                        &probe.provider_did,
-                    );
-                    let (subject, payee) = match (subject, payee) {
-                        (Some(subject), Some(payee)) if subject.owner == payee.as_bytes() => {
-                            (subject, payee)
+                loop {
+                    let probe = tokio::select! {
+                        msg = rx.recv() => {
+                            let Some(msg) = msg else {
+                                break;
+                            };
+                            let MessagePayload::Custom { data, .. } = msg.payload else {
+                                continue;
+                            };
+                            let Some(probe) = tenzro_network::wire::decode_bounded::<
+                                tenzro_model::SlaEnvelope,
+                            >(
+                                &data, tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE
+                            )
+                            .ok()
+                            .and_then(tenzro_model::SlaEnvelope::into_probe)
+                            else {
+                                continue;
+                            };
+                            probe
                         }
-                        _ => continue,
+                        Some(msg) = beacon_rx.recv() => {
+                            let MessagePayload::Custom { data, .. } = msg.payload else {
+                                continue;
+                            };
+                            let Ok(drawn) = bincode::deserialize::<tenzro_model::BeaconProbe>(&data)
+                            else {
+                                continue;
+                            };
+                            drawn.into_probe()
+                        }
+                        Some(probe) = parked.recv() => probe,
                     };
-                    // Validators only count answers signed by the identity
-                    // registered for the subject; answering as any other
-                    // identity is a miss.
-                    if subject.identity.as_ref() != Some(service.identity()) {
-                        warn!(
-                            provider = %probe.provider_did,
-                            "SLA probe for a bond this node runs, but the identity registered \
-                             for it is not this machine's hardware identity"
-                        );
-                        continue;
-                    }
 
-                    // Verify before signing: the nonce is the issuer's VRF
-                    // output, so an unverified probe is one an issuer could
-                    // have ground to land an unmeetable deadline.
-                    if let Err(e) = tenzro_model::SlaManager::verify_probe(&probe) {
-                        warn!(
-                            issuer = %hex::encode(probe.issuer.to_bytes()),
-                            error = %e,
-                            "Rejecting SLA probe with an invalid VRF proof"
-                        );
-                        continue;
-                    }
-
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    if now_ms > probe.deadline_ms {
-                        debug!(
-                            deadline_ms = probe.deadline_ms,
-                            now_ms, "SLA probe arrived past its deadline — not answering"
-                        );
-                        continue;
-                    }
-
-                    #[cfg(feature = "inference")]
-                    let result = crate::capacity_probe::perform(
-                        runtime.as_ref(),
-                        state_store.as_ref(),
-                        storage_runtime.as_ref(),
-                        &probe,
-                    )
-                    .await;
-                    #[cfg(not(feature = "inference"))]
-                    let result = crate::capacity_probe::perform(
-                        state_store.as_ref(),
-                        storage_runtime.as_ref(),
-                        &probe,
-                    )
-                    .await;
-                    // The answer waits for its batch signature, but never
-                    // past the probe's deadline.
-                    let remaining =
-                        (probe.deadline_ms - chrono::Utc::now().timestamp_millis()).max(0) as u64;
-                    let wait = crate::batch_signing::BatchSigningParams::default()
-                        .receipt_wait()
-                        .min(std::time::Duration::from_millis(remaining));
-                    let probe_for_sign = probe.clone();
-                    let service_for_sign = service.clone();
-                    let signed = tokio::task::spawn_blocking(move || {
-                        tenzro_model::SlaManager::start_response(
-                            &probe_for_sign,
-                            payee,
-                            service_for_sign.as_ref(),
-                            chrono::Utc::now().timestamp_millis(),
-                            result,
-                            tenzro_crypto::session::now_ms(),
-                        )
-                        .and_then(|pending| pending.finish(wait))
-                    })
-                    .await;
-                    let response = match signed {
-                        Ok(Ok(r)) => r,
-                        Ok(Err(e)) => {
-                            warn!(error = %e, "SLA response signing failed");
+                    let response = match responder.answer(probe.clone()).await {
+                        crate::sla_responder::Answer::Signed(response) => response,
+                        // Probes naming a beacon round this chain has not
+                        // reached wait for it and come back here.
+                        crate::sla_responder::Answer::AwaitBeacon => {
+                            if let (Ok(slot), Some(store)) = (
+                                waiting.clone().try_acquire_owned(),
+                                responder.state_store.clone(),
+                            ) {
+                                let again = park.clone();
+                                tokio::spawn(async move {
+                                    crate::sla_attest::park_probe(store, probe, again).await;
+                                    drop(slot);
+                                });
+                            }
                             continue;
                         }
-                        Err(e) => {
-                            warn!(error = %e, "SLA response signing task failed");
-                            continue;
-                        }
+                        crate::sla_responder::Answer::Declined => continue,
                     };
                     let payload =
                         match bincode::serialize(&tenzro_model::SlaEnvelope::Response(response)) {
@@ -5918,10 +6492,13 @@ impl TenzroNode {
                 );
             }
             (_, None) => {
-                warn!(
+                // `init_storage()` has already run here; the signer is absent only when no
+                // erc8004-system hardware signer is configured (or it failed to open, which
+                // init_storage() logged as a warning), so this is a configured-off state.
+                info!(
                     target: "tenzro::erc8004",
-                    "ERC-8004 auto-mirror NOT wired: erc8004-system signer \
-                     unavailable (init_storage must run before init_identity)"
+                    "ERC-8004 auto-mirror not wired: no erc8004-system signer (see the signer \
+                     line logged at init_storage)"
                 );
             }
         }
@@ -6003,6 +6580,7 @@ impl TenzroNode {
                 self.config.catalog_publishers.clone(),
                 admits,
                 did_revoked,
+                self.catalog.clone(),
             ));
             sync.refresh();
             sync.spawn_periodic();
@@ -6110,12 +6688,29 @@ impl TenzroNode {
         // consumption, so it issues `session` challenges (capped streaming
         // over the payer's on-chain escrow); a fixed-price node issues
         // one-shot `charge` challenges.
+        // Each receipt records who stands behind its payer, read from the
+        // identity registry at the height the payment settles at.
+        let principal_chains: Arc<dyn tenzro_payments::principal_chains::PrincipalChains> =
+            match &self.identity_registry {
+                Some(registry) => {
+                    let tip = self.chain_tip.clone();
+                    Arc::new(tenzro_payments::principal_chains::RegistryChains::new(
+                        registry.clone(),
+                        Arc::new(move || tip.load(Ordering::Acquire)),
+                    ))
+                }
+                None => Arc::new(tenzro_payments::principal_chains::Unresolved),
+            };
+
         let mut mpp_server = MppPaymentServer::new(enrolled_keys.clone())
             .with_default_chain("tenzro")
-            .with_challenge_store(challenge_store.clone());
-        if self.config.roles.serves_ai() {
-            mpp_server = mpp_server.with_session_intent();
-        }
+            .with_challenge_store(challenge_store.clone())
+            .with_principal_chains(principal_chains.clone());
+        // Session challenges while the node serves models: a role taken up or
+        // put down while it runs changes what the challenges offer.
+        let roles = self.runtime_roles.clone();
+        mpp_server =
+            mpp_server.with_session_intent_while(Arc::new(move || roles.read().serves_ai()));
         gateway.register_protocol(Arc::new(mpp_server));
 
         // Register the x402 protocol server. With a node signer the node signs
@@ -6140,7 +6735,8 @@ impl TenzroNode {
             ],
             enrolled_keys.clone(),
         )
-        .with_challenge_store(challenge_store.clone());
+        .with_challenge_store(challenge_store.clone())
+        .with_principal_chains(principal_chains);
 
         // A node serving models bills by consumption, and a buyer cannot know
         // the token count — or the audio seconds, or the pixel-steps — before
@@ -6148,16 +6744,21 @@ impl TenzroNode {
         // ceiling the buyer authorizes, and the metered actual settles beneath
         // it. A node serving only fixed-price resources keeps the exact-amount
         // default, because there the price *is* known up front.
-        if self.config.roles.serves_ai() {
+        // The challenges follow the roles the node serves, so a model-serving
+        // role taken up or put down while it runs changes them.
+        {
             // Beside the signed ceiling, the same challenge takes a voucher on
             // a channel the payer funded, which is how a payer with no key of
             // its own (a delegated agent) pays per call.
-            x402_builder = x402_builder
-                .with_scheme(tenzro_payments::x402::UPTO_SCHEME)
-                .with_also_offered(tenzro_payments::x402::BATCH_SETTLEMENT_SCHEME);
+            let roles = self.runtime_roles.clone();
+            x402_builder = x402_builder.with_scheme_while(
+                tenzro_payments::x402::UPTO_SCHEME,
+                vec![tenzro_payments::x402::BATCH_SETTLEMENT_SCHEME.to_string()],
+                Arc::new(move || roles.read().serves_ai()),
+            );
             info!(
-                "x402 challenges issued under the `{}` scheme — metered resources authorize a \
-                 ceiling and settle the actual",
+                "x402 challenges are issued under the `{}` scheme while models are served — \
+                 metered resources authorize a ceiling and settle the actual",
                 tenzro_payments::x402::UPTO_SCHEME
             );
         }
@@ -6173,11 +6774,9 @@ impl TenzroNode {
                 // Under `upto` the node's key is also its meter: every `upto`
                 // challenge names it, and every charge beneath the ceiling
                 // comes with a usage record it signed, which the buyer can
-                // dispute on chain against the meter's bond.
-                if self.config.roles.serves_ai() {
-                    x402_builder = x402_builder.with_meter_signer(signer);
-                    info!("x402 `upto` charges are metered by the node key");
-                }
+                // dispute on chain against the meter's bond. It signs only
+                // under `upto`, which is issued while models are served.
+                x402_builder = x402_builder.with_meter_signer(signer);
             }
             None => warn!("No node signer; x402 offers will be unsigned"),
         }
@@ -6399,10 +6998,14 @@ impl TenzroNode {
         // node configured otherwise.
         //
         // `TENZRO_WEBAUTHN_RELATED_ORIGINS` is a comma-separated list of
-        // exact origins outside the RP ID that may use it for the hosted
-        // ceremonies. Each one must also appear in the RP ID's
-        // `/.well-known/webauthn`, or browsers will not offer the
-        // credential there.
+        // exact origins outside the RP ID. Sign-in on this node, and the
+        // operator's passkey approvals of conditions, restarts, installs and
+        // device codes, accept a passkey of the RP ID from a listed Android
+        // app origin (`android:apk-key-hash:` and the base64url SHA-256 of a
+        // signing certificate), which every app signed with that certificate
+        // reports; Android offers the passkey only to the apps the RP ID's
+        // `/.well-known/assetlinks.json` names. Any other entry admits
+        // nothing, and nothing a block executes reads the list.
         let related_origins: Vec<String> = std::env::var("TENZRO_WEBAUTHN_RELATED_ORIGINS")
             .map(|v| {
                 v.split(',')
@@ -6411,6 +7014,27 @@ impl TenzroNode {
                     .collect()
             })
             .unwrap_or_default();
+        for origin in &related_origins {
+            match origin.strip_prefix(tenzro_crypto::webauthn::ANDROID_APP_ORIGIN_PREFIX) {
+                None => tracing::warn!(
+                    %origin,
+                    "TENZRO_WEBAUTHN_RELATED_ORIGINS: not an Android app origin, so it admits nothing"
+                ),
+                // Android reports the 32-byte hash as 43 base64url
+                // characters without padding; anything else matches no app.
+                Some(hash)
+                    if base64::Engine::decode(
+                        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                        hash,
+                    )
+                    .is_ok_and(|bytes| bytes.len() == 32) => {}
+                Some(_) => tracing::warn!(
+                    %origin,
+                    "TENZRO_WEBAUTHN_RELATED_ORIGINS: not the base64url SHA-256 of a signing \
+                     certificate, so no app reports it"
+                ),
+            }
+        }
         let webauthn_relying_party =
             tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
                 rp_id: self.http_surface.webauthn_rp_id().to_string(),
@@ -6542,7 +7166,12 @@ impl TenzroNode {
         // against the key registered for the DID. A machine without a hardware
         // identity does not announce.
         match self.announce_identity() {
-            Some(identity) => event_loop = event_loop.with_announce_identity(identity),
+            Some(identity) => {
+                event_loop = event_loop.with_announce_identity(identity);
+                if let Some(gate) = self.announce_gate() {
+                    event_loop = event_loop.with_announce_gate(gate);
+                }
+            }
             None => {
                 warn!("No hardware identity: this node will not sign or broadcast announcements")
             }
@@ -6553,89 +7182,40 @@ impl TenzroNode {
         // anonymous on this topic. Hardware is detected once at startup; the
         // served-models snapshot is re-read from the live `Arc<DashMap>` at
         // each tick.
-        if self.config.roles.is_provider()
-            || self.config.roles.is_validator()
-            || self.config.roles.serves_edge()
+        // Built whatever roles are configured: what it announces follows the
+        // roles served now, and a node serving none that announce sends
+        // nothing.
         {
             // The probe shells out to vendor tools (nvidia-smi / rocm-smi /
             // sysctl) synchronously — keep it off the async executor.
-            let mut hardware =
-                tokio::task::spawn_blocking(tenzro_types::HardwareCapabilities::detect)
-                    .await
-                    .unwrap_or_default();
             // `config.tee_enabled` is the operator's intent; presence of an
             // initialized `tee_provider` means the runtime probe at startup
             // succeeded. Both must hold before we advertise TEE availability
             // to peers.
-            hardware.tee_available = self.config.tee_enabled && self.tee_provider.is_some();
+            let tee_available = self.config.tee_enabled && self.tee_provider.is_some();
+            // The vendor probes run now only on a node configured to announce;
+            // any other runs them the first time it announces.
+            let hardware = Arc::new(std::sync::OnceLock::new());
+            if announces_services(&self.config.roles) {
+                let mut found =
+                    tokio::task::spawn_blocking(tenzro_types::HardwareCapabilities::detect)
+                        .await
+                        .unwrap_or_default();
+                found.tee_available = tee_available;
+                let _ = hardware.set(found);
+            }
 
             let provider_address = self
                 .operator_payee()
                 .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
                 .unwrap_or_default();
 
-            // A multi-role node advertises every capability it serves. The
-            // `provider_type` string is a coarse routing hint; we pick the
-            // most specific service role the node fills, falling back to
-            // "general" for a validator-only node.
-            let mut capabilities: Vec<String> = Vec::new();
-            if self.config.roles.serves_ai() {
-                capabilities.push("inference".to_string());
-            }
-            if self.config.roles.serves_tee() {
-                capabilities.push("tee-attestation".to_string());
-                capabilities.push("confidential-compute".to_string());
-            }
-            if self.config.roles.serves_compute() {
-                // The renter brings their own work, so this says only that the
-                // accelerator is for hire — not what runs on it.
-                capabilities.push("accelerator-rental".to_string());
-            }
-            if self.config.roles.serves_storage() {
-                capabilities.push("storage".to_string());
-            }
-            if self.config.roles.is_validator() {
-                capabilities.push("consensus".to_string());
-            }
-            if self.config.roles.serves_edge() {
-                // Serving nodes read this to discover which peers can terminate
-                // public TLS and front them over the `tenzro/http` ALPN.
-                capabilities.push("edge-ingress".to_string());
-            }
-            // Nodes that serve delegated agents announce their machine and
-            // operator identities so controllers can assign them.
-            let agent_serving = if self.config.serves_agents() {
-                crate::identity_bootstrap::machine_did().zip(self.operator_did())
-            } else {
-                None
-            };
-            if agent_serving.is_some() {
-                capabilities.push(crate::agent_delegation::AGENT_SERVING_CAPABILITY.to_string());
-            }
-            let provider_type: &str = if self.config.roles.serves_ai() {
-                // Not "llm": this node may serve multimodal, image, video or
-                // audio models, and usually serves several classes at once.
-                tenzro_network::message::PROVIDER_TYPE_AI
-            } else if self.config.roles.serves_tee() {
-                "tee"
-            } else if self.config.roles.serves_compute() {
-                "compute"
-            } else if self.config.roles.serves_storage() {
-                "storage"
-            } else if self.config.roles.serves_edge() {
-                "edge"
-            } else {
-                "general"
-            };
+            let agent_serving = self.agent_serving();
 
-            // Cluster-serving profile: only an AI-serving node that is a
-            // member of a verified cluster announces it, built fresh on each
+            // Cluster-serving profile: a member of a verified cluster
+            // announces it while it serves models, built fresh on each
             // announcement from the membership lists it holds.
-            let cluster_identity = self
-                .config
-                .roles
-                .serves_ai()
-                .then(|| self.cluster_identity.clone());
+            let cluster_identity = Some(self.cluster_identity.clone());
 
             // Advertised serving capacity: read the node's own registered
             // provider entry if it has one, else fall back to the default
@@ -6655,10 +7235,6 @@ impl TenzroNode {
                 })
                 .map(|p| p.capacity.advertised())
                 .unwrap_or_else(|| tenzro_types::ProviderCapacity::default().advertised());
-            // The built-in llama.cpp runtime reads raw logits in-process, so
-            // any AI-serving node can produce TOPLOC commitments without
-            // configuration.
-            capacity.verifiable_inference = self.config.roles.serves_ai();
             // Operator-declared jurisdiction rides the announcement so remote
             // routers can hard-filter on it. Absent claim = this node never
             // satisfies a jurisdiction pin (fail-closed).
@@ -6679,14 +7255,15 @@ impl TenzroNode {
 
             let ctx = crate::event_loop::ProviderAnnouncementContext {
                 hardware,
+                tee_available,
                 region: self
                     .config
                     .region
                     .as_deref()
                     .and_then(|r| tenzro_types::provider_listing::coarse_region(r).ok()),
                 provider_address,
-                provider_type: provider_type.to_string(),
-                capabilities,
+                roles: self.runtime_roles.clone(),
+                tee_vendor: self.tee_provider.as_ref().map(|p| p.vendor()),
                 ttl_secs: 120,
                 cluster_identity,
                 capacity,
@@ -6702,10 +7279,10 @@ impl TenzroNode {
         // from the caller's own LAN segment before spilling onto the wider
         // network — the local-machine → LAN-cluster → network progression the
         // model-serving tier uses, applied to shard placement.
-        if self.config.roles.serves_storage() {
-            event_loop = event_loop.with_storage_replicas(DEFAULT_STORAGE_REPLICAS);
-            event_loop = event_loop.with_disk_guard(self.disk_guard.clone());
-        }
+        // Shard replication runs while the storage role is served.
+        event_loop =
+            event_loop.with_storage_replicas(DEFAULT_STORAGE_REPLICAS, self.runtime_roles.clone());
+        event_loop = event_loop.with_disk_guard(self.disk_guard.clone());
 
         // Wire the snapshot ABCI store so the finality hook produces a
         // state-sync snapshot at the configured interval on producer nodes.
@@ -6772,9 +7349,12 @@ impl TenzroNode {
                 .collect(),
         );
         let event_loop = event_loop
+            .with_boot_peers(self.identity_transport.clone())
+            .with_sync_addrs(self.state_sync_addrs.clone())
             .with_block_sync(self.config.block_sync.clone())
             .with_held_transactions(self.config.held_transactions.clone())
-            .with_gpu_revocation(self.config.gpu_revocation.clone());
+            .with_gpu_revocation(self.config.gpu_revocation.clone())
+            .with_evm_pool_guard(self.config.evm_pool_guard.clone());
 
         // Recorded checkpoint equivocations: consensus state slashes the
         // bond; every node drops the validator from the next committee and
@@ -6876,8 +7456,10 @@ impl TenzroNode {
 
             // Wire transaction gossip: subscribe to tenzro/transactions and
             // forward each inbound `MessagePayload::Transaction(tx)` into
-            // `NodeEvent::NewTransaction`, which runs signature verification
-            // and admits the tx to the local consensus mempool.
+            // `NodeEvent::NewTransaction`. Every node checks what needs no
+            // state, the signature included; a node that proposes blocks also
+            // checks the tx against its state and admits it to the local
+            // consensus mempool, and a node that does not keeps nothing of it.
             //
             // Without this subscriber, RPC nodes publish transactions to the
             // gossip topic but no validator's mempool ever receives them,
@@ -7082,10 +7664,11 @@ impl TenzroNode {
                                     continue;
                                 };
                                 tokio::task::spawn_blocking(move || {
-                                    match bincode::deserialize::<
-                                        tenzro_consensus::compact::CompactCertificate,
-                                    >(&bytes)
-                                    {
+                                    match tenzro_network::wire::decode_bounded::<
+                                        tenzro_light::compact::CompactCertificate,
+                                    >(
+                                        &bytes, tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE
+                                    ) {
                                         Ok(cc) => {
                                             if let Err(e) = c.accept_compact_certificate(&cc) {
                                                 tracing::debug!(error = %e, "compact certificate from the network refused");
@@ -7100,8 +7683,11 @@ impl TenzroNode {
                             }
                             _ => continue,
                         };
-                        match bincode::deserialize::<tenzro_consensus::PublishedCertificate>(&bytes)
-                        {
+                        match tenzro_network::wire::decode_bounded::<
+                            tenzro_consensus::PublishedCertificate,
+                        >(
+                            &bytes, tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE
+                        ) {
                             Ok(cert) => {
                                 if events
                                     .send(NodeEvent::NetworkCertificate(Box::new(cert)))
@@ -7139,11 +7725,8 @@ impl TenzroNode {
                         else {
                             continue;
                         };
-                        match bincode::deserialize::<
-                            tenzro_consensus::announce::PublishedAnnouncement,
-                        >(&bytes)
-                        {
-                            Ok(a) => {
+                        match tenzro_consensus::announce::Publication::decode(&bytes) {
+                            Some(a) => {
                                 // Closed validator admission: a key that is
                                 // not an admitted account's gets no further.
                                 let chain = admission_store.as_ref().map(|s| {
@@ -7153,7 +7736,7 @@ impl TenzroNode {
                                 });
                                 if !gate.allows(
                                     chain.as_ref().map(|c| c as &dyn tenzro_vm::traits::VmState),
-                                    &a.announcement.validator,
+                                    &a.published.announcement.validator,
                                 ) {
                                     continue;
                                 }
@@ -7161,14 +7744,14 @@ impl TenzroNode {
                                 // node, as a committee member, becomes a
                                 // gossip peer of it.
                                 if let Some(endpoint) =
-                                    book.as_ref().and_then(|c| c.offer_announcement(a))
+                                    book.as_ref().and_then(|c| c.offer_publication(a))
                                     && let Ok(id) = tenzro_iroh::EndpointId::from_bytes(&endpoint)
                                 {
                                     net_endpoints.add_gossip_peers(&[id]).await;
                                 }
                             }
-                            Err(e) => {
-                                tracing::debug!(error = %e, "malformed endpoint announcement from the network")
+                            None => {
+                                tracing::debug!("malformed endpoint announcement from the network")
                             }
                         }
                     }
@@ -7286,23 +7869,79 @@ impl TenzroNode {
             });
             info!("Blob discovery wired to gossip (tenzro/blobs)");
 
+            // Constrained shard replication: a signed request on its own
+            // topic. Passed on only once its signature verifies and it is
+            // fresh; a bad signature counts against the sender.
+            let event_tx_placement = event_loop.event_sender();
+            let registry_placement = self.identity_registry().cloned();
+            let net_placement = network.clone();
+            tokio::spawn(async move {
+                match net_placement
+                    .subscribe_validated(tenzro_network::STORAGE_PLACEMENT_TOPIC)
+                    .await
+                {
+                    Ok(mut rx) => {
+                        while let Some(validated) = rx.recv().await {
+                            let Some(decoded) =
+                                tenzro_network::ConstrainedShardReplicationMessage::from_payload(
+                                    &validated.message.payload,
+                                )
+                            else {
+                                continue;
+                            };
+                            let checked = decoded.and_then(|msg| {
+                                crate::event_loop::verify_announcement_in(
+                                    registry_placement.as_deref(),
+                                    &msg,
+                                )
+                                .map(|()| msg)
+                                .map_err(|e| e.to_string())
+                            });
+                            let msg = match checked {
+                                Ok(msg) => msg,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Rejecting constrained shard replication");
+                                    validated.ticket.reject();
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = crate::event_loop::check_announcement_freshness(
+                                msg.replication.timestamp,
+                                msg.replication.ttl_secs,
+                            ) {
+                                tracing::debug!(error = %e, "Dropping constrained shard replication");
+                                continue;
+                            }
+                            validated.ticket.accept();
+                            if event_tx_placement
+                                .send(NodeEvent::ConstrainedShardReplication(msg))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to subscribe to the storage placement topic: {}", e);
+                    }
+                }
+            });
+
             // Trust records ride `tenzro/trust`; each is re-verified on arrival.
             if let Some(ledger) = self.trust_ledger.clone() {
                 crate::trust_hooks::spawn_subscriber(
                     ledger,
                     self.catalog_sync.clone(),
                     self.finding_sink(),
+                    crate::trust_hooks::author_gate(crate::identity_gate::Edge::of(self)),
                     network.clone(),
                 );
             }
         }
 
         // Spawn the event loop in the background
-        tokio::spawn(async move {
-            if let Err(e) = event_loop.run().await {
-                tracing::error!(error = %e, "Event loop error");
-            }
-        });
+        spawn_event_loop(event_loop.run(), self.event_loop_stopped.clone());
 
         self.health_monitor.mark_healthy("event_loop");
         info!("Event loop started");
@@ -7314,59 +7953,27 @@ impl TenzroNode {
     pub fn identity_registry(&self) -> Option<&Arc<IdentityRegistry>> {
         self.identity_registry.as_ref()
     }
-    /// Vendor attestation roots this node pins, decoded to DER.
-    ///
-    /// An entry that is not valid base64 is dropped rather than failing the
-    /// call: one malformed root in a list must not make every other root
-    /// unusable, and a dropped root simply means fewer chains verify — which
-    /// fails closed.
+
+    /// Gives a node that was built without starting its subsystems the
+    /// identity registry its request checks resolve senders in.
+    #[cfg(test)]
+    pub(crate) fn set_identity_registry(&mut self, registry: Arc<IdentityRegistry>) {
+        self.identity_registry = Some(registry);
+    }
+    /// The WebAuthn attestation roots in force on the chain, as DER: the set
+    /// governance put there (`WebauthnRootsSet`), the same list registration
+    /// checks against. With none in force, or no chain state, a device still
+    /// binds but none grades as hardware-bound.
     pub fn webauthn_trusted_roots(&self) -> Vec<Vec<u8>> {
-        use base64::Engine;
-        self.config
-            .webauthn_trusted_roots
-            .iter()
-            .filter_map(|b| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(b.trim())
-                    .ok()
-            })
-            .collect()
+        self.chain_state()
+            .map(|state| tenzro_vm::native::registration_attestation::attestation_root_ders(&state))
+            .unwrap_or_default()
     }
 
-    /// The live economic policy — the rates every settlement on this node
-    /// applies.
+    /// The live economic policy: the default conversion of an inbound asset and
+    /// the micro-settlement floor.
     pub fn economic_policy(&self) -> tenzro_types::economics::EconomicPolicy {
         self.economic_policy.current()
-    }
-
-    /// The RPC provider that validates on this node's behalf, and is therefore
-    /// owed a share of what this node earns.
-    ///
-    /// Only consulted in [`tenzro_types::economics::NodeEconomicMode::PublicDelegated`]
-    /// — a node that validates for itself owes no such leg. Returns `None` when
-    /// the operator has not named one, which is refused at settlement rather
-    /// than defaulted: paying that share to the treasury because nobody was
-    /// configured would pay the wrong party without saying so.
-    pub fn rpc_provider_payee(&self) -> Option<Address> {
-        let configured = self.config.economics.rpc_provider_payee.as_deref()?;
-        match Address::from_hex(configured) {
-            Ok(addr) => Some(addr),
-            Err(e) => {
-                // Do not fail silently here. Returning `None` for an
-                // unparseable address makes settlement refuse with "name them
-                // in `[economics] rpc_provider_payee`" — to an operator who
-                // did name one, and is now being told to do the thing they
-                // already did. A mis-cased EIP-55 checksum is enough to
-                // trigger it, so the log line has to say which value failed
-                // and why.
-                tracing::error!(
-                    configured,
-                    error = %e,
-                    "[economics] rpc_provider_payee is not a valid address, so this node                      cannot name the RPC provider it owes a share to and settlement will                      refuse. Note that a 20-byte address is EIP-55 checksummed: mixed-case                      hex must carry the correct casing, or be all-lowercase."
-                );
-                None
-            }
-        }
     }
 
     /// The account a call to `model` settles to: the wallet of the operator
@@ -7395,23 +8002,14 @@ impl TenzroNode {
     /// Both the advertised payee (model / provider gossip announcements) and
     /// the settled payee (inference, hosting, rental, storage) resolve through
     /// here, so the address a consumer sees in an offer is the address the
-    /// transfer lands at. Resolution is total-ordered rather than
-    /// registry-iteration-ordered, which means it is stable across restarts and
-    /// identical for every caller on the node:
+    /// transfer lands at. Every caller on the node resolves the same way:
     ///
-    /// 1. the identity whose wallet is this machine's hardware wallet account
-    ///    (the account slot of its TPM or Secure Enclave P-256 key) — an
-    ///    exact key ↔ wallet binding;
-    /// 2. the lowest-DID active human or institution — the owner classes;
-    /// 3. the lowest-DID active autonomous agent (no controller) — a node run by
-    ///    an agent on its own behalf earns into that agent's wallet;
-    /// 4. the lowest-DID active delegated agent — earns into the agent's own
-    ///    wallet, with the controller retaining oversight through its
-    ///    delegation scope;
-    /// 5. the machine's hardware wallet account with no registry entry at
-    ///    all, so a node that never provisioned an identity still has a
-    ///    self-custodial payee, and its role bonds are staked from the account
-    ///    its own hardware key signs for.
+    /// 1. the identity `operator_did` names, at its registered wallet;
+    /// 2. this machine's DID, at the wallet it registered, or before it has
+    ///    registered at the account its TPM or Secure Enclave P-256 key signs
+    ///    for, which also stakes its role bonds;
+    /// 3. with a hardware wallet and no machine DID, the one identity
+    ///    registered with that wallet, else the wallet account itself.
     pub fn operator_payee(&self) -> Option<Address> {
         resolve_operator_payee(
             self.identity_registry.as_ref(),
@@ -7430,8 +8028,9 @@ impl TenzroNode {
         self.identity_registry_slot.clone()
     }
 
-    /// The DID that owns [`TenzroNode::operator_payee`]. `None` when this node
-    /// has no provisioned identity and is falling back to its machine account, so
+    /// The DID that owns [`TenzroNode::operator_payee`]. `None` when no DID
+    /// stands behind that account (no machine DID, and none configured or
+    /// registered with the machine's wallet), so
     /// a caller that needs an attributable DID (transparency-log recorder,
     /// provider announcement) can tell the difference instead of recording an
     /// empty string against a real wallet.
@@ -7442,6 +8041,15 @@ impl TenzroNode {
             self.config.operator_did.as_deref(),
         )
         .map(|(did, _)| did)
+    }
+
+    /// The DID that administers this node: `operator_did` when the
+    /// configuration names one, otherwise this machine's own DID.
+    pub fn administrator_did(&self) -> Option<String> {
+        resolve_administrator(
+            self.config.operator_did.as_deref(),
+            machine_operator_of(self.identity_signer.as_ref()).as_ref(),
+        )
     }
 
     /// The machine's hardware identity key, if it has one.
@@ -7560,6 +8168,16 @@ impl TenzroNode {
         if ig::install_peer_gate(&cfg, &gate, registry, protected).is_none() {
             return;
         }
+        // The relay this node serves, if any, admits by the same gate:
+        // registered machines, machines inside their onboarding window, and
+        // the app devices signed in to this node.
+        if let Some(identity) = &self.identity_transport {
+            identity.relay_admission().install(
+                gate.clone(),
+                identity.store().clone(),
+                self.relay_devices(),
+            );
+        }
         // Validators come and go with the epoch: keep the protected set
         // current.
         {
@@ -7577,7 +8195,19 @@ impl TenzroNode {
                 }
             });
         }
-        if cfg.policy.mode == tenzro_onboarding_types::onboarding::GateMode::Enforce
+        // A validator in enforce mode reaches out to no one but its boot list
+        // and the validators' machines: discovery sync, record fetches, relay
+        // forwarders, gossip neighbours, and the block sync that asks them.
+        // Inbound connections still pass the identity gate as before.
+        let settings = ig::gate_settings(cfg.policy.mode, self.config.roles.is_validator());
+        ig::hold_dials(
+            settings,
+            &gate,
+            self.identity_transport
+                .as_deref()
+                .map(|t| t as &dyn ig::DialHolder),
+        );
+        if settings.gossip_registered_only
             && let Some(network) = &self.network
         {
             network.set_gossip_registered_only(true);
@@ -7641,6 +8271,18 @@ impl TenzroNode {
     #[cfg(feature = "inference")]
     pub fn kv_continuity(&self) -> Option<&Arc<crate::kv_continuity::KvContinuity>> {
         self.kv_continuity.get()
+    }
+
+    /// The catalog this node serves, as it is now. Holding the returned value
+    /// keeps one consistent view while the catalog sync installs a new one.
+    pub fn catalog(&self) -> Arc<tenzro_model::Catalog> {
+        self.catalog.current()
+    }
+
+    /// The cell this node's catalog lives in, for a component that reads the
+    /// catalog after it is built.
+    pub fn catalog_cell(&self) -> &tenzro_model::CatalogCell {
+        &self.catalog
     }
 
     /// Returns the model registry if initialized
@@ -7744,6 +8386,12 @@ impl TenzroNode {
         }
         #[cfg(feature = "inference")]
         if let Some(runtime) = self.model_runtime.clone() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(crate::memory_guard::unload_past_idle_limits(
+                    runtime.clone(),
+                    self.lifecycle.clone(),
+                ));
+            }
             monitor.register(crate::memory_guard::IdleModels::reclaimer(
                 runtime,
                 self.lifecycle.clone(),
@@ -7763,8 +8411,9 @@ impl TenzroNode {
         &self.lifecycle
     }
 
-    /// Starts storage maintenance over the node's store. A committee member
-    /// writes pruned history into the committee DA layer; a node outside the
+    /// Starts storage maintenance over the node's store. Committee members
+    /// write pruned history into the committee DA layer, one member per
+    /// segment with the others taking its verified copy; a node outside the
     /// committee prunes only what a member archived and it verified, and
     /// reads it back from the same layer. A node with no DA layer to reach
     /// keeps the same window and deletes older history. A node that follows
@@ -7774,12 +8423,16 @@ impl TenzroNode {
         let Some(storage) = self.storage.clone() else {
             return;
         };
-        self.history_archive = match (&self.da_committee_backend, &self.consensus) {
-            (Some(da), Some(consensus)) => HistoryArchive::new(
+        let member = self
+            .da_committee_backend
+            .clone()
+            .zip(self.da_committee_locator.clone());
+        self.history_archive = match (member, &self.consensus) {
+            (Some((da, locator)), Some(consensus)) => HistoryArchive::new(
                 storage.clone(),
                 da.clone() as Arc<dyn tenzro_storage::da::DaBackend>,
                 consensus.clone() as Arc<dyn CertifiedCheckpoints>,
-                Handoff::Submit,
+                Handoff::Committee { seat: da, locator },
             )
             .inspect_err(
                 |e| warn!(error = %e, "History archive unavailable: block history is kept in full"),
@@ -7846,10 +8499,7 @@ impl TenzroNode {
     /// The certification of checkpoint `index`: from genesis while the
     /// consensus records hold every handover before it, otherwise from the
     /// proof log, so a node that pruned them still certifies.
-    pub fn certification(
-        &self,
-        index: u64,
-    ) -> Option<tenzro_consensus::light_client::Certification> {
+    pub fn certification(&self, index: u64) -> Option<tenzro_light::light_client::Certification> {
         crate::proof_log::certification(self.consensus()?, self.proof_log.as_deref(), index)
     }
 
@@ -7884,7 +8534,10 @@ impl TenzroNode {
     /// memory rather than refusing to start: an operator typo in one field
     /// should not take a validator offline.
     fn install_memory_budget(&self) {
-        let config = self.config.memory.to_budget_config();
+        let config = self
+            .config
+            .memory
+            .to_budget_config(self.config.roles.is_validator());
         let total_gib = config.total_bytes as f64 / 1_073_741_824.0;
         let reserve_gib = config.reserve_bytes as f64 / 1_073_741_824.0;
 
@@ -7915,34 +8568,35 @@ impl TenzroNode {
     /// reasonable before the model has ever been loaded; measured load times
     /// replace it after the first real load.
     fn seed_lifecycle_sizes(&self) {
-        for entry in tenzro_model::get_model_catalog() {
+        let catalog = self.catalog.current();
+        for entry in catalog.get_model_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_text_embedding_catalog() {
+        for entry in catalog.get_text_embedding_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_embed_catalog() {
+        for entry in catalog.get_embed_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_forecast_catalog() {
+        for entry in catalog.get_forecast_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_audio_catalog() {
+        for entry in catalog.get_audio_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_vision_catalog() {
+        for entry in catalog.get_vision_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_detection_catalog() {
+        for entry in catalog.get_detection_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_segmentation_catalog() {
+        for entry in catalog.get_segmentation_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_media_gen_catalog() {
+        for entry in catalog.get_media_gen_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
-        for entry in tenzro_model::get_tts_catalog() {
+        for entry in catalog.get_tts_catalog() {
             self.lifecycle.declare_size(&entry.id, entry.size_bytes);
         }
     }
@@ -8040,6 +8694,7 @@ impl TenzroNode {
                 Ok(()) => kept.push(role),
                 Err(reason) => {
                     warn!("Dropping role '{role}' at startup: {reason}");
+                    self.roles_unsupported.push((role, reason));
                     dropped = true;
                 }
             }
@@ -8225,6 +8880,24 @@ impl TenzroNode {
         self.consensus.as_ref()
     }
 
+    /// Whether this node follows the network. A node that heard from nobody
+    /// is never following.
+    pub async fn follow_state(&self) -> crate::follow_state::FollowState {
+        let status = self.status().await;
+        match self.consensus() {
+            Some(c) => c.follow().state(status.block_height, c.validates_alone()),
+            None => crate::follow_state::judge(crate::follow_state::Seen {
+                local_height: status.block_height,
+                alone: false,
+                up: std::time::Duration::from_secs(status.uptime_secs),
+                head: None,
+                last_import: None,
+                behind_before: None,
+                fruitless: None,
+            }),
+        }
+    }
+
     /// Returns the network treasury if initialized
     pub fn treasury(&self) -> Option<&Arc<NetworkTreasury>> {
         self.treasury.as_ref()
@@ -8232,6 +8905,25 @@ impl TenzroNode {
 
     /// Returns the storage-provider runtime if this node serves the
     /// StorageProvider role and the runtime was spawned at startup.
+    /// Brings what the roles served need in line with them: the storage
+    /// runtime takes new objects only while storage is served, and local
+    /// cluster discovery starts once models are. Called at startup and
+    /// whenever the roles served change, under their lock.
+    pub(crate) fn follow_served_roles(&self, served: &RoleSet) {
+        if let Some(runtime) = &self.storage_runtime {
+            runtime.set_serving(served.serves_storage());
+        }
+        if served.serves_ai()
+            && let Some(resolver) = &self.iroh_resolver
+        {
+            self.cluster_identity
+                .spawn_lan_discovery(resolver.endpoint().clone());
+        }
+    }
+
+    /// The storage runtime, while it holds data: it answers for objects it
+    /// already holds whether or not the storage role is served now, and takes
+    /// new objects only while it is ([`crate::storage_provider_runtime::StorageProviderRuntime::serving`]).
     pub fn storage_runtime(
         &self,
     ) -> Option<&Arc<crate::storage_provider_runtime::StorageProviderRuntime>> {
@@ -8294,12 +8986,22 @@ impl TenzroNode {
         self.sla_manager.as_ref()
     }
 
+    /// Where a probe answered over the direct ALPN is handed to be scored.
+    pub(crate) fn sla_direct_tx(&self) -> Option<&tokio::sync::mpsc::Sender<Vec<u8>>> {
+        self.sla_direct_tx.as_ref()
+    }
+
     /// Returns the in-flight SLA probe correlator. Always present; empty on
     /// non-validator nodes. Probes inserted here by `tenzro_slaIssueProbe`
     /// are removed by the `tenzro/sla` gossip subscriber when a matching
     /// `SlaResponse` arrives.
     pub fn sla_outstanding_probes(&self) -> &Arc<DashMap<String, tenzro_model::SlaProbe>> {
         &self.sla_outstanding_probes
+    }
+
+    /// Ledger payments admitted to pay for a call.
+    pub(crate) fn admitted_payments(&self) -> &crate::ledger_payment::AdmittedPayments {
+        &self.admitted_payments
     }
 
     /// This validator's per-epoch SLA probe results, pending attestation.
@@ -8342,12 +9044,77 @@ impl TenzroNode {
         &self.admin_audit
     }
 
+    /// Starts the app transport listener when `[app_transport]` is
+    /// configured.
+    #[cfg(feature = "app-transport")]
+    fn start_app_transport(&mut self) -> Result<()> {
+        let Some(config) = self.config.app_transport.as_ref() else {
+            return Ok(());
+        };
+        let sign_in = Arc::new(crate::app_transport::NodeSignIn::new(Arc::clone(
+            &self.self_ref,
+        )));
+        let peers = Arc::new(crate::app_transport::NodePeers::new(Arc::clone(
+            &self.self_ref,
+        )));
+        let payments = Arc::new(crate::app_transport::NodePayments::new(
+            Arc::clone(&self.self_ref),
+            config.paid_mebibytes,
+        ));
+        let listener = crate::app_transport::AppTransport::start(config, sign_in, peers, payments)
+            .map_err(NodeError::Config)?;
+        let pinned: Vec<String> = listener
+            .pinned_hashes()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| h.sha256)
+            .collect();
+        info!(
+            addr = %listener.local_addr(),
+            url = listener.url(),
+            pinned = ?pinned,
+            "app transport listening (preview)"
+        );
+        self.app_transport = Some(Arc::new(listener));
+        Ok(())
+    }
+
+    /// Refuses `[app_transport]` on a node built without the listener.
+    #[cfg(not(feature = "app-transport"))]
+    fn start_app_transport(&mut self) -> Result<()> {
+        if self.config.app_transport.is_some() {
+            return Err(NodeError::Config(
+                "[app_transport] is configured, but this node was built without the \
+                 app-transport feature"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The app transport listener, when it runs.
+    #[cfg(feature = "app-transport")]
+    pub fn app_transport(&self) -> Option<&Arc<crate::app_transport::AppTransport>> {
+        self.app_transport.as_ref()
+    }
+
     /// Bind the shared handle this node is held through, so components built
     /// before it existed can reach it, and start watching the access policy
     /// file. Call once, right after wrapping the node in its `Arc`.
     pub fn bind_self(self: &Arc<Self>) {
         if self.self_ref.set(Arc::downgrade(self)).is_ok() {
             self.access.store().spawn_watcher();
+            if let (Some(resolver), Some(snapshots), Some(consensus)) =
+                (&self.iroh_resolver, &self.snapshot_store, &self.consensus)
+            {
+                resolver
+                    .anchor_source()
+                    .set(Arc::new(crate::snapshot::SnapshotAnchors::new(
+                        snapshots.clone(),
+                        consensus.clone(),
+                        self.proof_log.clone(),
+                    )));
+            }
         }
     }
 
@@ -8373,11 +9140,85 @@ impl TenzroNode {
         self.network.as_ref()
     }
 
+    /// The ALPNs this node's iroh endpoint serves callers: the blob
+    /// transport and the RPC ALPNs its router registered, so nothing is
+    /// advertised that a caller would be refused on.
+    pub fn iroh_alpns(&self) -> Vec<String> {
+        let Some(resolver) = &self.iroh_resolver else {
+            return Vec::new();
+        };
+        let mut alpns: Vec<String> = std::iter::once("iroh-blobs".to_string())
+            .chain(
+                resolver
+                    .rpc_alpns()
+                    .iter()
+                    .map(|alpn| String::from_utf8_lossy(alpn).into_owned()),
+            )
+            .collect();
+        let mut serves = vec!["tenzro/moe"];
+        if self.iroh_infer_dispatcher.is_some() {
+            serves.push("tenzro/infer");
+        }
+        if self.carries_app_streams() {
+            serves.push("tenzro/app-stream/1");
+        }
+        for alpn in serves {
+            if !alpns.iter().any(|a| a == alpn) {
+                alpns.push(alpn.to_string());
+            }
+        }
+        alpns
+    }
+
     /// Node iroh resolver (single content-addressed endpoint). `None` until
     /// startup binds it. Used by storage-provider producers to read the local
     /// `EndpointId` when broadcasting shard-replication requests.
     pub fn iroh_resolver(&self) -> Option<&Arc<tenzro_iroh::IrohBackedResolver>> {
         self.iroh_resolver.as_ref()
+    }
+
+    /// The gate every announcement this node sends passes: `None` on a
+    /// machine without a hardware identity, which announces nothing.
+    pub fn announce_gate(&self) -> Option<Arc<crate::announced_account::SenderGate>> {
+        if let Some(gate) = self.announce_gate.get() {
+            return Some(gate.clone());
+        }
+        let machine_did = crate::identity_bootstrap::machine_did()?;
+        Some(
+            self.announce_gate
+                .get_or_init(|| {
+                    // The payee is resolved again for every announcement,
+                    // with the machine identity as it is known then: an
+                    // identity record that arrives after start must not
+                    // leave the node announcing what it resolved before.
+                    let registry = self.identity_registry_slot();
+                    let signer = self.identity_signer.clone();
+                    let configured = self.config.operator_did.clone();
+                    let payee: crate::announced_account::PayeeSource = Arc::new(move || {
+                        let guard = registry.read();
+                        resolve_operator_payee(
+                            guard.as_ref(),
+                            machine_operator_of(signer.as_ref()).as_ref(),
+                            configured.as_deref(),
+                        )
+                    });
+                    Arc::new(crate::announced_account::SenderGate::new(
+                        self.identity_registry_slot(),
+                        machine_did,
+                        payee,
+                        self.config.operator_did.clone(),
+                        self.health_monitor.clone(),
+                    ))
+                })
+                .clone(),
+        )
+    }
+
+    /// Whether this node announces `account` now (see
+    /// [`crate::announced_account::SenderGate::may_announce`]).
+    pub fn may_announce_as(&self, account: &str) -> bool {
+        self.announce_gate()
+            .is_none_or(|gate| gate.may_announce(account))
     }
 
     /// The identity this node signs gossip announcements as: its batched
@@ -8463,17 +9304,7 @@ impl TenzroNode {
     pub async fn self_addressing(&self) -> crate::node_did_document::NodeAddressing {
         let (iroh_endpoint_id, iroh_alpns) = match &self.iroh_resolver {
             Some(resolver) => {
-                let mut alpns = vec!["iroh-blobs".to_string()];
-                if self.iroh_a2a_dispatcher.is_some() {
-                    alpns.push("tenzro/a2a".to_string());
-                }
-                if self.iroh_mcp_handler.is_some() {
-                    alpns.push("tenzro/mcp".to_string());
-                }
-                alpns.push("tenzro/moe".to_string());
-                if self.iroh_infer_dispatcher.is_some() {
-                    alpns.push("tenzro/infer".to_string());
-                }
+                let alpns = self.iroh_alpns();
                 (Some(resolver.endpoint().id().to_string()), alpns)
             }
             None => (None, Vec::new()),
@@ -8492,7 +9323,77 @@ impl TenzroNode {
                 .collect(),
             rpc_url: crate::exposure::rpc_url(&self.config),
             mcp_url: crate::exposure::mcp_endpoint(&self.config),
+            app_transport: self.app_transport_address(),
         }
+    }
+
+    /// The app devices the relay this node serves lets in on their access
+    /// tokens, and how many connections one identity may hold.
+    #[cfg(feature = "app-transport")]
+    fn relay_devices(&self) -> Option<(Arc<dyn tenzro_iroh::relay::RelayDevices>, u32)> {
+        let per_identity = self
+            .config
+            .app_transport
+            .as_ref()?
+            .relay_connections_per_identity?;
+        let relay = self.config.iroh.relay.as_ref()?;
+        let sign_in = crate::app_transport::NodeSignIn::new(Arc::clone(&self.self_ref));
+        let devices = crate::app_transport::NodeRelayDevices::new(
+            sign_in,
+            tenzro_iroh::relay::client_url(&relay.public_url).to_string(),
+        );
+        Some((Arc::new(devices), per_identity))
+    }
+
+    #[cfg(not(feature = "app-transport"))]
+    fn relay_devices(&self) -> Option<(Arc<dyn tenzro_iroh::relay::RelayDevices>, u32)> {
+        None
+    }
+
+    /// Whether this node carries app streams between nodes.
+    pub(crate) fn carries_app_streams(&self) -> bool {
+        cfg!(feature = "app-transport")
+            && self
+                .config
+                .app_transport
+                .as_ref()
+                .is_some_and(|config| config.peer_streams.is_some())
+    }
+
+    /// What serves `tenzro/app-stream/1`, when the node carries app streams
+    /// between nodes.
+    #[cfg(feature = "app-transport")]
+    fn app_stream_handler(&self) -> Option<Arc<dyn tenzro_iroh::app_stream::PeerStreams>> {
+        if !self.carries_app_streams() {
+            return None;
+        }
+        Some(Arc::new(crate::app_transport::NodePeerStreams::new(
+            Arc::clone(&self.self_ref),
+        )))
+    }
+
+    #[cfg(not(feature = "app-transport"))]
+    fn app_stream_handler(&self) -> Option<Arc<dyn tenzro_iroh::app_stream::PeerStreams>> {
+        None
+    }
+
+    #[cfg(feature = "app-transport")]
+    fn app_transport_address(&self) -> Option<crate::node_did_document::AppTransportAddress> {
+        let listener = self.app_transport.as_ref()?;
+        Some(crate::node_did_document::AppTransportAddress {
+            url: listener.url().to_string(),
+            pinned_sha256: listener
+                .pinned_hashes()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| h.sha256)
+                .collect(),
+        })
+    }
+
+    #[cfg(not(feature = "app-transport"))]
+    fn app_transport_address(&self) -> Option<crate::node_did_document::AppTransportAddress> {
+        None
     }
 
     pub fn config(&self) -> &NodeConfig {
@@ -8547,8 +9448,10 @@ impl TenzroNode {
         &self,
         model_id: &str,
     ) -> std::result::Result<tenzro_model::catalog::Licence, String> {
-        tenzro_model::catalog::entry(model_id)
-            .map(|e| e.licence)
+        self.catalog
+            .current()
+            .entry(model_id)
+            .map(|e| e.licence.clone())
             .ok_or_else(|| format!("model '{model_id}' is not in this node's catalog"))
     }
 
@@ -8737,10 +9640,13 @@ impl TenzroNode {
         use sha2::Digest;
         use std::io::Read;
 
-        let entry = tenzro_model::get_model_by_id(model_id)
+        let catalog = self.catalog.current();
+        let entry = catalog
+            .get_model_by_id(model_id)
             .ok_or_else(|| format!("{model_id} is not in the catalog"))?;
-        let pins: Vec<_> = tenzro_model::catalog::entry(model_id)
-            .map(|e| e.components)
+        let pins: Vec<_> = catalog
+            .entry(model_id)
+            .map(|e| e.components.clone())
             .unwrap_or_default()
             .into_iter()
             .filter(|p| p.repo == entry.hf_repo)
@@ -8816,7 +9722,7 @@ impl TenzroNode {
         if runtime.has_drafter(target_model_id) {
             return "drafter_loaded";
         }
-        let Some(drafter_entry) = tenzro_model::get_model_by_id(drafter_id) else {
+        let Some(drafter_entry) = self.catalog.current().get_model_by_id(drafter_id) else {
             warn!(
                 target = %target_model_id,
                 drafter = %drafter_id,
@@ -9119,12 +10025,17 @@ impl TenzroNode {
         if !self.served_models.contains_key(model_id) {
             return Ok(false);
         }
-        let Some(entry) = tenzro_model::get_model_by_id(model_id) else {
+        let Some(entry) = self.catalog.current().get_model_by_id(model_id) else {
             return Ok(false);
         };
         let Some(path) = self.resolve_gguf_path(model_id) else {
             return Ok(false);
         };
+        // A model restored at boot was registered then, before any load: its
+        // engine opens the slots that registration admits.
+        if let Some(load) = self.load_tracker.snapshot(model_id) {
+            runtime.set_slots(model_id, load.max_concurrent as usize);
+        }
         // Refused, or discarded on install, when the operator stops the model
         // while this request waits on the load: the stop wins.
         runtime
@@ -9142,45 +10053,21 @@ impl TenzroNode {
         Ok(true)
     }
 
-    /// Save the provider schedule so its model stacks survive a restart.
-    ///
-    /// Returns `Ok(false)` when this node has no storage to save into, and an
-    /// error when the write failed, so the caller can tell the operator the
-    /// schedule would not outlive the process.
-    pub fn persist_provider_schedule(
-        &self,
-        schedule: &ProviderSchedule,
-    ) -> std::result::Result<bool, String> {
-        let Some(storage) = self.storage.as_ref() else {
-            return Ok(false);
+    /// Puts the configured provider schedule (`[provider_schedule]`) in
+    /// force before the residency loop first runs, so the active window's
+    /// stack is loaded at startup. A schedule whose windows name models that
+    /// cannot fit their resident ceiling stops the start, naming each.
+    fn apply_provider_schedule(&self) -> Result<()> {
+        let Some(schedule) = self.config.provider_schedule.clone() else {
+            return Ok(());
         };
-        let bytes = serde_json::to_vec(schedule).map_err(|e| e.to_string())?;
-        storage
-            .put(CF_MODELS, PROVIDER_SCHEDULE_KEY, &bytes)
-            .map_err(|e| e.to_string())?;
-        Ok(true)
-    }
-
-    /// Load the saved provider schedule into the node, before the residency
-    /// loop first runs, so the active window's stack is loaded at startup.
-    fn restore_provider_schedule(&self) {
-        let Some(storage) = self.storage.as_ref() else {
-            return;
-        };
-        match storage.get(CF_MODELS, PROVIDER_SCHEDULE_KEY) {
-            Ok(Some(bytes)) => match serde_json::from_slice::<ProviderSchedule>(&bytes) {
-                Ok(schedule) => {
-                    info!(
-                        stacks = schedule.windows.len(),
-                        "Restored the provider schedule and its model stacks"
-                    );
-                    *self.provider_schedule.write() = schedule;
-                }
-                Err(e) => warn!(error = %e, "Saved provider schedule is unreadable; not applied"),
-            },
-            Ok(None) => {}
-            Err(e) => warn!(error = %e, "Could not read the saved provider schedule"),
-        }
+        schedule_fits(&schedule, &self.catalog()).map_err(NodeError::Config)?;
+        info!(
+            stacks = schedule.windows.len(),
+            "The configured provider schedule and its model stacks are in force"
+        );
+        *self.provider_schedule.write() = schedule;
+        Ok(())
     }
 
     /// Save the operator's price card so it outlives a restart. `Ok(false)`
@@ -9295,8 +10182,6 @@ impl TenzroNode {
     }
 
     pub async fn reconcile_model_registry(&self) -> (usize, usize, usize) {
-        use tenzro_model::get_model_by_id;
-
         let mut reloaded: usize = 0;
         let mut cleared_models: usize = 0;
         let mut cleared_services: usize = 0;
@@ -9342,7 +10227,7 @@ impl TenzroNode {
                 continue;
             }
 
-            let catalog = get_model_by_id(model_id);
+            let catalog = self.catalog.current().get_model_by_id(model_id);
 
             let gguf_path = self.resolve_gguf_path(model_id);
 
@@ -9467,9 +10352,8 @@ impl TenzroNode {
         }
 
         // Register THIS node as a provider for its locally-served models in the
-        // inference router, so intent-based competition dispatch
-        // (tenzro_chatByIntent / `inference route --message`) can route to the
-        // local models — not just direct tenzro_chat. Without this a
+        // inference router, so requests the router dispatches (the web /chat
+        // path) can reach the local models — not just direct tenzro_chat. Without this a
         // local/single-node deploy resolves the model (discovery) but hits
         // "no healthy provider" at dispatch. One provider entry (this node's
         // address) carries every served model; upserted so repeat reconciles
@@ -10029,7 +10913,7 @@ mod schedule_tests {
     #[test]
     fn an_unknown_timezone_falls_back_to_utc() {
         let w = tz_window("typo", 10, 22, "Not/AZone", &[]);
-        assert_eq!(w.tz(), chrono_tz::UTC);
+        assert_eq!(w.tz().iana_name(), Some("UTC"));
         assert!(w.contains_at(utc("2026-08-27T10:00:00Z")));
     }
 
@@ -10212,9 +11096,8 @@ mod schedule_capacity_tests {
     }
 
     /// A schedule judged against the shipped catalogue: a node installs the
-    /// catalogue its publishers signed, so a test installs the seed first.
+    /// catalogue its publishers signed, so a test reads the seed.
     fn schedule(windows: Vec<ResourceWindow>) -> ProviderSchedule {
-        tenzro_catalog::install_test_seed();
         ProviderSchedule {
             enabled: true,
             windows,
@@ -10226,24 +11109,67 @@ mod schedule_capacity_tests {
     fn a_window_that_fits_is_accepted() {
         // granite4-1b declares 2 GiB; 8 is ample.
         let s = schedule(vec![window("small", 8, &["granite4-1b"])]);
-        assert!(s.overcommitted_windows().is_empty());
+        assert!(
+            s.overcommitted_windows(&tenzro_model::Catalog::test_seed())
+                .is_empty()
+        );
     }
 
     #[test]
     fn a_window_that_cannot_fit_is_reported() {
         // The real shape of the bug: a ceiling far below what the members need.
         let s = schedule(vec![window("tight", 1, &["granite4-1b"])]);
-        let over = s.overcommitted_windows();
+        let over = s.overcommitted_windows(&tenzro_model::Catalog::test_seed());
         assert_eq!(over.len(), 1);
         assert_eq!(over[0].window, "tight");
         assert!(over[0].required_gb > over[0].ceiling_gb as u64);
+    }
+
+    /// The configured schedule an operator writes in the node's
+    /// configuration is the one put in force; one that cannot fit stops the
+    /// start, naming the window.
+    #[test]
+    fn a_configured_schedule_is_read_from_the_config_and_refused_when_it_cannot_fit() {
+        let config: crate::config::NodeConfig = toml::from_str(
+            r#"
+            [provider_schedule]
+            enabled = true
+            start_hour = 18
+            end_hour = 8
+            timezone = "Europe/London"
+            days_of_week = [true, true, true, true, true, false, false]
+
+            [[provider_schedule.windows]]
+            name = "evenings"
+            start_hour = 18
+            end_hour = 23
+            timezone = "Europe/London"
+            days_of_week = [true, true, true, true, true, true, true]
+            resident_ceiling_gb = 8
+            models = ["granite4-1b"]
+            "#,
+        )
+        .unwrap();
+        let schedule = config.provider_schedule.unwrap();
+        assert_eq!(schedule.windows[0].name, "evenings");
+        assert_eq!(
+            super::schedule_fits(&schedule, &tenzro_model::Catalog::test_seed()),
+            Ok(())
+        );
+
+        let tight = self::schedule(vec![window("tight", 1, &["granite4-1b"])]);
+        let err = super::schedule_fits(&tight, &tenzro_model::Catalog::test_seed()).unwrap_err();
+        assert!(
+            err.contains("[provider_schedule]") && err.contains("tight"),
+            "{err}"
+        );
     }
 
     #[test]
     fn an_unknown_id_is_reported_not_silently_counted_as_zero() {
         // A typo must not make an over-committed window look like it fits.
         let s = schedule(vec![window("typo", 1, &["granite4-1b", "granite4-1bb"])]);
-        let over = s.overcommitted_windows();
+        let over = s.overcommitted_windows(&tenzro_model::Catalog::test_seed());
         assert_eq!(over.len(), 1);
         assert_eq!(over[0].unknown, vec!["granite4-1bb".to_string()]);
     }
@@ -10253,13 +11179,19 @@ mod schedule_capacity_tests {
         // 0 means "unset", not "no room" — judging it would refuse every
         // schedule written before ceilings existed.
         let s = schedule(vec![window("unset", 0, &["granite4-1b"])]);
-        assert!(s.overcommitted_windows().is_empty());
+        assert!(
+            s.overcommitted_windows(&tenzro_model::Catalog::test_seed())
+                .is_empty()
+        );
     }
 
     #[test]
     fn an_empty_window_is_not_judged() {
         let s = schedule(vec![window("empty", 4, &[])]);
-        assert!(s.overcommitted_windows().is_empty());
+        assert!(
+            s.overcommitted_windows(&tenzro_model::Catalog::test_seed())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -10271,7 +11203,7 @@ mod schedule_capacity_tests {
             window("b", 8, &["granite4-1b"]),
             window("c", 1, &["granite4-1b"]),
         ]);
-        let over = s.overcommitted_windows();
+        let over = s.overcommitted_windows(&tenzro_model::Catalog::test_seed());
         assert_eq!(over.len(), 2);
         assert_eq!(over[0].window, "a");
         assert_eq!(over[1].window, "c");
@@ -10280,7 +11212,7 @@ mod schedule_capacity_tests {
     #[test]
     fn the_message_names_the_window_and_both_numbers() {
         let s = schedule(vec![window("tight", 1, &["granite4-1b"])]);
-        let msg = s.overcommitted_windows()[0].to_string();
+        let msg = s.overcommitted_windows(&tenzro_model::Catalog::test_seed())[0].to_string();
         assert!(msg.contains("tight"), "{msg}");
         assert!(msg.contains("ceiling"), "{msg}");
     }
@@ -10288,7 +11220,11 @@ mod schedule_capacity_tests {
     #[test]
     fn a_schedule_with_no_windows_is_accepted() {
         // Availability-only schedules predate windows and must keep working.
-        assert!(schedule(vec![]).overcommitted_windows().is_empty());
+        assert!(
+            schedule(vec![])
+                .overcommitted_windows(&tenzro_model::Catalog::test_seed())
+                .is_empty()
+        );
     }
 }
 
@@ -10369,7 +11305,9 @@ mod offload_record_tests {
 /// unregistered some other machine's identity.
 #[cfg(test)]
 mod operator_account_tests {
-    use super::{MachineOperator, resolve_operator_identity, resolve_operator_payee};
+    use super::{
+        MachineOperator, resolve_administrator, resolve_operator_identity, resolve_operator_payee,
+    };
     use tenzro_identity::{
         IdentityData, IdentityRegistry, IdentityStatus, TenzroDid, TenzroIdentity,
     };
@@ -10442,7 +11380,8 @@ mod operator_account_tests {
         );
         assert_eq!(
             resolve_operator_identity(Some(&registry), Some(&pi()), None),
-            None
+            Some((did(2), account(2))),
+            "before it registers, the machine operates as its DID at its own account"
         );
     }
 
@@ -10490,11 +11429,125 @@ mod operator_account_tests {
     }
 
     #[test]
-    fn a_node_with_no_hardware_wallet_still_infers_its_operator() {
+    fn a_named_operator_missing_from_the_registry_is_not_replaced_by_another() {
         let registry = std::sync::Arc::new(registry_with_gpu_host());
+        registry.upsert_identity_for_test(machine_identity(&did(2), account(2), None));
+        let owner = format!("did:tenzro:human:{}", hex::encode([7u8; 32]));
         assert_eq!(
-            resolve_operator_identity(Some(&registry), None, None),
+            resolve_operator_identity(Some(&registry), Some(&pi()), Some(&owner)),
+            None,
+            "the node's own machine identity does not stand in for the named operator"
+        );
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), None, Some(&owner)),
+            None,
+            "nor does the only other identity in the registry"
+        );
+        // The payee falls back to the machine's own account, never to a
+        // stranger's wallet.
+        assert_eq!(
+            resolve_operator_payee(Some(&registry), Some(&pi()), Some(&owner)),
+            Some(account(2))
+        );
+    }
+
+    #[test]
+    fn a_node_that_names_no_operator_is_administered_by_its_own_machine() {
+        assert_eq!(resolve_administrator(None, Some(&pi())), Some(did(2)));
+        assert_eq!(resolve_administrator(Some("  "), Some(&pi())), Some(did(2)));
+    }
+
+    #[test]
+    fn a_named_operator_replaces_the_machine_as_administrator() {
+        let owner = format!("did:tenzro:human:{}", hex::encode([7u8; 32]));
+        assert_eq!(
+            resolve_administrator(Some(&owner), Some(&pi())),
+            Some(owner.clone())
+        );
+        assert_eq!(resolve_administrator(Some(&owner), None), Some(owner));
+    }
+
+    #[test]
+    fn a_node_without_a_machine_key_or_operator_has_no_administrator() {
+        assert_eq!(resolve_administrator(None, None), None);
+    }
+
+    /// A node with no hardware key has no identity of its own to infer: it
+    /// takes no stranger's identity and wallet from the registry, and is
+    /// operated by the identity its config names.
+    #[test]
+    fn a_node_with_no_hardware_wallet_infers_no_operator() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        assert_eq!(resolve_operator_identity(Some(&registry), None, None), None);
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), None, Some(did(1).as_str())),
             Some((did(1), account(1)))
+        );
+        assert_eq!(resolve_operator_payee(Some(&registry), None, None), None);
+    }
+
+    /// A machine that names itself operates the node as its machine DID,
+    /// as it administers it: an owner registered with the same wallet does
+    /// not displace it unless `operator_did` names the owner.
+    #[test]
+    fn the_machine_did_is_the_operator_until_the_config_names_another() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        registry.upsert_identity_for_test(human_identity(7, account(2)));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&pi()), None),
+            Some((did(2), account(2)))
+        );
+        assert_eq!(
+            resolve_operator_identity(None, Some(&pi()), None),
+            Some((did(2), account(2)))
+        );
+        assert_eq!(
+            resolve_administrator(None, Some(&pi())),
+            resolve_operator_identity(Some(&registry), Some(&pi()), None).map(|(d, _)| d)
+        );
+        let owner = format!("did:tenzro:human:{}", hex::encode([7u8; 32]));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&pi()), Some(&owner)),
+            Some((owner, account(2)))
+        );
+        let mut revoked = machine_identity(&did(2), account(2), None);
+        revoked.status = IdentityStatus::Revoked;
+        registry.upsert_identity_for_test(revoked);
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&pi()), None),
+            None
+        );
+    }
+
+    /// With a hardware wallet but no machine DID, two identities registered
+    /// with that wallet are not settled by picking one: none is inferred
+    /// until the config names it.
+    #[test]
+    fn several_identities_on_the_machines_wallet_name_no_operator() {
+        let registry = std::sync::Arc::new(registry_with_gpu_host());
+        let wallet_only = MachineOperator {
+            did: None,
+            account: account(2),
+        };
+        registry.upsert_identity_for_test(human_identity(7, account(2)));
+        let first = format!("did:tenzro:human:{}", hex::encode([7u8; 32]));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&wallet_only), None),
+            Some((first, account(2)))
+        );
+        registry.upsert_identity_for_test(human_identity(8, account(2)));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&wallet_only), None),
+            None
+        );
+        assert_eq!(
+            resolve_operator_payee(Some(&registry), Some(&wallet_only), None),
+            Some(account(2))
+        );
+        let owner = format!("did:tenzro:human:{}", hex::encode([8u8; 32]));
+        assert_eq!(
+            resolve_operator_identity(Some(&registry), Some(&wallet_only), Some(&owner)),
+            Some((owner, account(2)))
         );
     }
 }

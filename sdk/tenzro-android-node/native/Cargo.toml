@@ -1,0 +1,21 @@
+[package]
+name = "tenzro-android-node"
+version = "0.2.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The light node as a native library for an Android app: run and stop it from the app's foreground service, with its keys in the Android Keystore."
+publish = false
+
+[lib]
+name = "tenzro_android_node"
+crate-type = ["cdylib"]
+
+# Android only: on every other target this library is empty.
+[target.'cfg(target_os = "android")'.dependencies]
+tenzro-node = { path = "../../../crates/tenzro-node", default-features = false }
+jni = "0.21"
+
+[lints]
+workspace = true

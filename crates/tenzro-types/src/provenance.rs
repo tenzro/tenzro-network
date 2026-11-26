@@ -40,7 +40,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::access_tier::{AccessTier, PayerKind};
-use crate::economics::{NodeEconomicMode, PayeeRole};
 use crate::model::BillableUnits;
 use crate::primitives::{Address, Hash, Timestamp};
 
@@ -175,19 +174,14 @@ impl InboundRail {
     }
 }
 
-/// One party's share of a charge, as it actually settled.
+/// One party a charge was paid to, as it actually settled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayeeRecord {
-    /// Which role this party was paid in.
-    pub role: PayeeRole,
     /// The account the value landed in.
     pub address: Address,
     /// How much landed, in the settled asset's smallest unit.
     #[serde(with = "crate::primitives::u128_serde")]
     pub amount: u128,
-    /// The share in basis points, carried so a receipt can be audited without
-    /// re-deriving it from a policy that may since have changed.
-    pub bps: u32,
 }
 
 /// A ledger other than Tenzro that this charge was additionally recorded on.
@@ -212,7 +206,7 @@ pub struct SecondarySettlement {
 /// Domain separator for the attestation digest. Prefixed to every preimage so a
 /// signature over an interaction record can never be replayed as a signature
 /// over some other Tenzro structure that happens to serialize to the same bytes.
-pub const ATTESTATION_DOMAIN: &[u8] = b"tenzro/interaction-attestation/v1";
+pub const ATTESTATION_DOMAIN: &[u8] = b"tenzro/interaction-attestation/v2";
 
 /// What permitted the interaction.
 ///
@@ -384,9 +378,6 @@ pub struct InteractionProvenance {
     /// Digest of the credential presented, never the credential. `None` for an
     /// on-demand user, who presents payment rather than a key.
     pub credential_digest: Option<String>,
-    /// The economic mode the serving node was in, so a receipt explains its own
-    /// split without a lookup against a policy that may since have changed.
-    pub mode: NodeEconomicMode,
     /// Which rail the value arrived on.
     pub inbound_rail: InboundRail,
 
@@ -439,15 +430,6 @@ impl InteractionProvenance {
     pub fn is_conserved(&self) -> bool {
         self.paid_out() == self.amount_charged
     }
-
-    /// The amount that reached `role`, or zero if that role was not paid.
-    pub fn amount_for(&self, role: PayeeRole) -> u128 {
-        self.payees
-            .iter()
-            .filter(|p| p.role == role)
-            .map(|p| p.amount)
-            .sum()
-    }
 }
 
 #[cfg(test)]
@@ -474,7 +456,6 @@ mod tests {
             },
             tier: AccessTier::User,
             credential_digest: None,
-            mode: NodeEconomicMode::PublicDelegated,
             inbound_rail: InboundRail::Tenzro,
             amount_charged: amount,
             settled_asset: "tenzro:1337/native:tnzo".into(),
@@ -484,12 +465,10 @@ mod tests {
         }
     }
 
-    fn payee(role: PayeeRole, amount: u128, bps: u32) -> PayeeRecord {
+    fn payee(amount: u128) -> PayeeRecord {
         PayeeRecord {
-            role,
             address: Address::default(),
             amount,
-            bps,
         }
     }
 
@@ -497,36 +476,16 @@ mod tests {
     /// the other.
     #[test]
     fn conservation_holds_only_when_the_legs_equal_the_charge() {
-        let exact = provenance(
-            1_000,
-            vec![
-                payee(PayeeRole::Operator, 800, 8_000),
-                payee(PayeeRole::RpcProvider, 100, 1_000),
-                payee(PayeeRole::Treasury, 100, 1_000),
-            ],
-        );
+        let exact = provenance(1_000, vec![payee(800), payee(100), payee(100)]);
         assert!(exact.is_conserved());
         assert_eq!(exact.paid_out(), 1_000);
 
         // Legs sum low — value stranded with no owner.
-        let leak = provenance(
-            1_000,
-            vec![
-                payee(PayeeRole::Operator, 800, 8_000),
-                payee(PayeeRole::Treasury, 100, 1_000),
-            ],
-        );
+        let leak = provenance(1_000, vec![payee(800), payee(100)]);
         assert!(!leak.is_conserved());
 
         // Legs sum high — someone was paid out of another party's share.
-        let overpay = provenance(
-            1_000,
-            vec![
-                payee(PayeeRole::Operator, 900, 8_000),
-                payee(PayeeRole::RpcProvider, 100, 1_000),
-                payee(PayeeRole::Treasury, 100, 1_000),
-            ],
-        );
+        let overpay = provenance(1_000, vec![payee(900), payee(100), payee(100)]);
         assert!(!overpay.is_conserved());
     }
 
@@ -541,19 +500,6 @@ mod tests {
         // Conservation is trivially true, and the units are still recorded.
         assert!(p.is_conserved());
         assert_eq!(p.units.total_tokens(), 1_250);
-    }
-
-    #[test]
-    fn a_role_that_was_not_paid_reads_as_zero() {
-        let p = provenance(
-            1_000,
-            vec![
-                payee(PayeeRole::Operator, 900, 9_000),
-                payee(PayeeRole::Treasury, 100, 1_000),
-            ],
-        );
-        assert_eq!(p.amount_for(PayeeRole::Operator), 900);
-        assert_eq!(p.amount_for(PayeeRole::RpcProvider), 0);
     }
 
     /// Tenzro is the settlement layer; another chain is only where a payment
@@ -578,7 +524,7 @@ mod tests {
     /// must not change what was charged or what the legs total.
     #[test]
     fn secondary_layers_mirror_a_settlement_they_do_not_add_one() {
-        let mut p = provenance(1_000, vec![payee(PayeeRole::Operator, 1_000, 10_000)]);
+        let mut p = provenance(1_000, vec![payee(1_000)]);
         p.settlement_tx = Some(Hash::default());
         p.secondary_settlements = vec![
             SecondarySettlement {
@@ -600,7 +546,7 @@ mod tests {
 
     #[test]
     fn the_record_survives_serialization() {
-        let p = provenance(1_000, vec![payee(PayeeRole::Operator, 1_000, 10_000)]);
+        let p = provenance(1_000, vec![payee(1_000)]);
         let json = serde_json::to_string(&p).expect("serializes");
         let back: InteractionProvenance = serde_json::from_str(&json).expect("parses");
         assert_eq!(back, p);
@@ -648,6 +594,19 @@ mod tests {
         assert_ne!(a.attestation_digest(), b.attestation_digest());
     }
 
+    /// The preimage is versioned: a digest made under the previous version
+    /// does not verify against the current one.
+    #[test]
+    fn a_digest_made_under_the_previous_version_does_not_verify() {
+        let p = provenance(1_000, vec![]);
+        let current = p.attestation_preimage();
+        assert!(current.starts_with(b"tenzro/interaction-attestation/v2"));
+        let mut old = b"tenzro/interaction-attestation/v1".to_vec();
+        old.extend_from_slice(&current[ATTESTATION_DOMAIN.len()..]);
+        let old_digest: [u8; 32] = Sha256::digest(&old).into();
+        assert_ne!(old_digest, p.attestation_digest());
+    }
+
     #[test]
     fn the_domain_separator_is_present() {
         assert!(
@@ -663,15 +622,7 @@ mod tests {
         // Binding it would make the digest unstable for facts the consuming
         // party never agreed to.
         let a = provenance(1_000, vec![]);
-        let b = provenance(
-            1_000,
-            vec![PayeeRecord {
-                role: PayeeRole::Operator,
-                address: Address::default(),
-                amount: 1_000,
-                bps: 10_000,
-            }],
-        );
+        let b = provenance(1_000, vec![payee(1_000)]);
         assert_eq!(a.attestation_digest(), b.attestation_digest());
     }
 

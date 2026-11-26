@@ -61,6 +61,9 @@ TasksMax=16384
 TimeoutStopSec=90
 Restart=on-failure
 RestartSec=10s
+# A restart the operator asks for ends with 75: a clean end that starts the node again.
+SuccessExitStatus=75
+RestartForceExitStatus=75
 StandardOutput=journal+console
 StandardError=journal+console
 SyslogIdentifier=tenzro-node

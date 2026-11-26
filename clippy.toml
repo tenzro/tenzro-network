@@ -1,2 +1,13 @@
 too-many-arguments-threshold = 12
 type-complexity-threshold = 500
+
+# Awaits on a peer or a permit that have no bound of their own. Use the
+# functions of `tenzro_iroh::bounded`, which take the time they may wait.
+disallowed-methods = [
+    { path = "iroh::endpoint::Endpoint::connect", reason = "a dial with no bound: use tenzro_iroh::bounded::connect" },
+    { path = "iroh::endpoint::Connection::open_bi", reason = "a stream open with no bound: use tenzro_iroh::bounded::open_bi" },
+    { path = "tokio::sync::Semaphore::acquire", reason = "a wait for a permit with no bound: use tenzro_iroh::bounded::acquire_many" },
+    { path = "tokio::sync::Semaphore::acquire_owned", reason = "a wait for a permit with no bound: use tenzro_iroh::bounded::acquire_many" },
+    { path = "tokio::sync::Semaphore::acquire_many", reason = "a wait for permits with no bound: use tenzro_iroh::bounded::acquire_many" },
+    { path = "tokio::sync::Semaphore::acquire_many_owned", reason = "a wait for permits with no bound: use tenzro_iroh::bounded::acquire_many" },
+]

@@ -34,7 +34,8 @@ fn transfer(
         nonce,
         VmType::Tenzro,
         VmConfig::default().chain_id,
-    );
+    )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
     tx.signature = Some(sig);
     tx.public_key = Some(p256.to_vec());
     tx.signing_digest = Some(digest(nonce).to_vec());

@@ -1,7 +1,7 @@
 //! Tenzro Network Rust SDK
 //!
 //! The official Rust SDK for building applications on Tenzro Network,
-//! an AI-Native, Agentic, Tokenized Settlement Layer blockchain.
+//! a network of compute of every kind, settled in TNZO on the Tenzro Ledger.
 //!
 //! # Overview
 //!
@@ -60,7 +60,7 @@
 //! | `agents` | `agent`, `agent_payments` |
 //! | `bridge` | `bridge`, `bridge_fee`, `eip7702`, `agent_accounts` |
 //! | `inference` | `inference`, `chat`, `streaming`, `multimodal`, `media_gen`, `provider`, `catalog` |
-//! | `chain` | `governance`, `token`, `staking`, `validator`, `contract`, `tee`, `zk`, `storage`, `events`, and the other registries |
+//! | `chain` | `governance`, `token`, `staking`, `validator`, `contract`, `tee`, `zk`, `storage`, `compute`, `events`, and the other registries |
 //!
 //! `full`, the default, enables all of them. A thin build names what it uses:
 //!
@@ -71,9 +71,11 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 // The core.
+pub mod a2a_envelope;
 pub mod access;
 pub mod account_keys;
 pub mod account_outflow;
+pub mod agent_card;
 pub mod auth;
 pub mod client;
 pub mod config;
@@ -85,6 +87,9 @@ pub mod error;
 pub mod gateway;
 pub mod identity;
 pub mod keystore;
+#[cfg(feature = "light")]
+pub mod light;
+pub mod mcp_tools;
 pub mod network;
 pub mod node;
 pub mod passkey_client;
@@ -112,6 +117,10 @@ pub mod web;
 pub mod settle;
 #[cfg(feature = "settlement")]
 pub mod settlement;
+
+/// A device's session with a node's app transport (preview).
+#[cfg(feature = "app-transport")]
+pub mod app_transport;
 
 // agents
 #[cfg(feature = "agents")]
@@ -153,6 +162,8 @@ pub mod streaming;
 // chain
 #[cfg(feature = "chain")]
 pub mod adaptive_burn;
+#[cfg(feature = "chain")]
+pub mod compute;
 #[cfg(feature = "chain")]
 pub mod consensus;
 #[cfg(feature = "chain")]
@@ -222,6 +233,11 @@ pub use chat::{
     ProviderPreferences, ReasoningEffort, StreamOptions, ToolCall, Usage,
 };
 pub use client::{BlockInfo, BlockRange, NodeInfo, NodeStatus, TenzroClient};
+#[cfg(feature = "chain")]
+pub use compute::{
+    ClaimState, ComputeBond, ComputeBondParams, ComputeClaim, ComputeClaimList, ComputeClient,
+    PriceFeed, PriceFeedEntry, PriceFeedQuery, RentRequest, SLA_EPOCH_MS,
+};
 pub use config::SdkConfig;
 #[cfg(feature = "chain")]
 pub use contract::{CallResult, CallVm, ContractClient, DeployResult, VmCall};
@@ -231,14 +247,15 @@ pub use error::ApiError;
 pub use error::{NodeError, SdkError, SdkResult};
 #[cfg(feature = "chain")]
 pub use events::{
-    EventClient, EventPage, checkpoint_digest, filter_index_keys, filter_selects,
+    EventClient, EventPage, NodeEvent, checkpoint_digest, filter_index_keys, filter_selects,
     verify_completeness, verify_event_proof, verify_index_answer,
 };
-#[cfg(feature = "chain")]
+#[cfg(feature = "payments")]
 pub use funding::{
     GrantReleaseOption, GrantRequest, release_milestone, request_grant, request_tranche,
     verify_milestone,
 };
+#[cfg(feature = "chain")]
 pub use governance::{
     GovernanceClient, GovernanceReceiptReport, PayoutAddress, PayoutCaps, PayoutRecord,
     ProposalPage, ProposalView, SponsoredBond, Tally, TreasuryAccount, TreasuryAccounts,
@@ -253,9 +270,8 @@ pub use identity::{
 };
 #[cfg(feature = "inference")]
 pub use inference::{
-    BillableUnits, GenerationStats, GlobalUsageStats, InferenceClient, InferenceUsage,
-    IntentParams, LoadedModel, LoadedModels, ModelUsageStats, ProviderUsageStats, RouteDecision,
-    RouteOutcome, UsageRecord,
+    BillableUnits, GenerationStats, GlobalUsageStats, InferenceClient, InferenceUsage, LoadedModel,
+    LoadedModels, ModelUsageStats, ProviderUsageStats, UsageRecord,
 };
 #[cfg(feature = "chain")]
 pub use iroh::{
@@ -267,8 +283,8 @@ pub use media_gen::{MediaGenCatalog, MediaGenClient, MediaGenInput, MediaGenInpu
 pub use payment::{PaymentChallenge, PaymentClient, PaymentCredential, PaymentReceipt};
 #[cfg(feature = "inference")]
 pub use provider::{
-    ChatMessage, ChatOptions, ChatResponse, ComputeBond, ComputeBondParams, GpuDevice, GpuVendor,
-    HardwareProfile, MicroNodeIdentity, ModelEndpoint, ModelLoad, ProviderClient,
+    ChatMessage, ChatOptions, ChatResponse, GpuDevice, GpuVendor, HardwareProfile,
+    MicroNodeIdentity, ModelEndpoint, ModelLoad, ProviderClient, ProviderListing,
     ProviderModelLoad, ProviderStats, ServeOptions, Visibility,
 };
 pub use rpc::RpcClient;
@@ -280,7 +296,10 @@ pub use settlement::{
     owner_request_message,
 };
 #[cfg(feature = "chain")]
-pub use sla::{SlaClient, SlaOutstandingProbe, SlaOutstandingProbes, SlaParams, SlaProbeIssued};
+pub use sla::{
+    SlaClient, SlaEnergyReport, SlaOutstandingProbe, SlaOutstandingProbes, SlaParams,
+    SlaProbeIssued, SlaTierEnergy,
+};
 #[cfg(feature = "chain")]
 pub use snapshot::{SnapshotClient, SnapshotList, SnapshotManifest, SnapshotSummary};
 pub use sse::{SseDecoder, SseEvent};
@@ -303,7 +322,7 @@ pub use types::{
 };
 #[cfg(feature = "chain")]
 pub use validator::{
-    ListValidatorsResult, ValidatorClient, ValidatorRegistryEntry, ValidatorStatus,
+    ListValidatorsResult, OperatorCounts, ValidatorClient, ValidatorRegistryEntry, ValidatorStatus,
 };
 pub use wallet::{AssetBalance, HybridSigner, WalletBalance, WalletClient};
 #[cfg(feature = "chain")]

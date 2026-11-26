@@ -382,6 +382,12 @@ impl Component {
 pub struct SourceCheckpoint {
     pub repo: String,
     pub revision: String,
+    /// BLAKE3 (hex) of the manifest listing a BLAKE3 digest for every tensor
+    /// of the checkpoint at `revision`, one `<tensor name> <hex digest>` line
+    /// each. Extraction verifies each ranged read against it; `None` keeps
+    /// the commit pin as the only check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tensor_digests_blake3: Option<String>,
 }
 
 /// Parts of another catalog entry this entry loads alongside its own files.

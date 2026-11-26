@@ -8,7 +8,8 @@
 )]
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{Level, error, info, warn};
@@ -45,6 +46,17 @@ struct Cli {
     /// key in memory and the operator passkey's grant for it.
     #[arg(long, value_name = "SOCKET", env = "TENZRO_TPM_KEY_HOLDER")]
     tpm_key_holder: Option<PathBuf>,
+
+    /// How long a node started before its key holder waits for one to answer
+    /// at `--tpm-key-holder` before it refuses to start. A holder that
+    /// answers without a grant is waited on until the grant is installed.
+    #[arg(
+        long,
+        value_name = "SECS",
+        env = "TENZRO_TPM_KEY_HOLDER_WAIT",
+        default_value_t = 120
+    )]
+    tpm_key_holder_wait: u64,
 
     /// The key label the provider enrolled for this machine.
     #[arg(long, value_name = "LABEL", env = "TENZRO_TPM_LABEL")]
@@ -91,7 +103,8 @@ struct Cli {
     worker_threads: Option<usize>,
 
     /// Node roles, comma-separated (e.g. "validator,storage,ai"). A node may
-    /// serve any combination of roles under a single stake. Aliases accepted:
+    /// serve any combination of roles; each role is bonded separately from the
+    /// same account. Aliases accepted:
     /// validator, model-provider/ai, tee-provider/tee, storage, edge/ingress,
     /// user/light.
     #[arg(short, long, value_name = "ROLES")]
@@ -117,11 +130,19 @@ struct Cli {
     /// refused. Also read, and appended, from `TENZRO_BOOT_NODES`.
     ///
     /// Omitting this joins the public network through its genesis
-    /// validators' identities.
+    /// validators' identities. A genesis validator does not omit it: it
+    /// names every other genesis validator's machine identity with its relay
+    /// URL, or a fresh network does not bootstrap.
     ///
     /// Pass an explicitly empty value — `--boot-nodes ""` — to stay **isolated**:
     /// no dialling out. That is what a local or solo node wants, and it is
-    /// distinct from omitting the flag.
+    /// distinct from omitting the flag. A validator in the `enforce`
+    /// onboarding mode dials only these identities, the validators' machines
+    /// and the peers named with `--state-sync-from`, and keeps gossip
+    /// neighbours only among these identities and the validators; inbound
+    /// connections that pass the identity gate are still admitted, so other
+    /// nodes can sync from it. Every validator's list names the relay and RPC
+    /// entry points.
     #[arg(short, long, value_name = "IDENTITIES")]
     boot_nodes: Option<String>,
 
@@ -141,6 +162,12 @@ struct Cli {
     /// test cluster; one process per host can hold a port.
     #[arg(long, value_name = "PORT", requires = "relay_listen")]
     relay_udp_port: Option<u16>,
+
+    /// UDP port this node's iroh endpoint binds (default 9001, or the
+    /// port of `bind_addr` in the config file's iroh section). One process
+    /// per host can hold a port, so a second node on a machine names its own.
+    #[arg(long, value_name = "PORT")]
+    iroh_bind_port: Option<u16>,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, value_name = "LEVEL", default_value = "info")]
@@ -224,20 +251,40 @@ struct Cli {
     /// config file.
     /// The snapshot is fetched as BLAKE3-verified blobs from any peer that
     /// has them and checked bucket by bucket against the state root that the
-    /// `--checkpoint-hash` block commits. The recovery after a corrupt store
+    /// `--checkpoint-hash` block commits or, with no checkpoint pinned, the
+    /// block of the snapshot anchor a peer certifies, verified from the
+    /// genesis committee. The recovery after a corrupt store
     /// (`scripts/repair-validator-store.sh`, then restart with this flag)
     /// works on a fixed `bind_addr` too: the state-sync endpoint is released
-    /// before the node's own endpoint binds.
+    /// before the node's own endpoint binds. Each peer is asked in turn; if
+    /// none holds the snapshot the checkpoint commits, the node refuses to
+    /// start. A node whose store already holds chain state continues from its
+    /// tip and ignores this flag.
     ///
-    /// Requires `--checkpoint-height` and `--checkpoint-hash`.
+    /// Requires `--checkpoint-height` and `--checkpoint-hash`: take them from
+    /// a snapshot the peer lists (`tenzro node snapshots`, fields
+    /// `checkpoint_height` and `checkpoint_hash`).
     #[arg(long = "state-sync-from", value_name = "ENDPOINT_ID[@IP:PORT]")]
     state_sync_from: Vec<String>,
 
+    /// Join by snapshot over a store that already holds chain state: the
+    /// store is moved aside to `db.replaced-<unix seconds>` in the data
+    /// directory (nothing is deleted; move it back to undo) and the node
+    /// starts fresh, restoring from the peers named with `--state-sync-from`
+    /// or the boot peers. Without this flag a node whose store holds chain
+    /// state continues from its tip and says why it ignores the peers.
+    #[arg(long = "replace-store")]
+    replace_store: bool,
+
     /// Replay the chain from the local tip even on a role that would join by
     /// snapshot. A node without the validator role restores the committed
-    /// state from a peer's snapshot by default when a weak-subjectivity
-    /// checkpoint is configured (`--checkpoint-height`/`--checkpoint-hash`
-    /// or genesis `[weak_subjectivity]`); a validator always replays.
+    /// state from a boot peer's snapshot by default, verified against the
+    /// weak-subjectivity checkpoint when one is pinned
+    /// (`--checkpoint-height`/`--checkpoint-hash` or genesis
+    /// `[weak_subjectivity]`) and otherwise against the anchor the peer
+    /// certifies, checked from the genesis committee; a validator always
+    /// replays. A planned snapshot join that no peer can serve stops the
+    /// start, except an unpinned join from boot peers, which replays.
     /// Also settable as `state_sync = "off"` in the config file.
     #[arg(long = "no-state-sync")]
     no_state_sync: bool,
@@ -407,6 +454,27 @@ enum Command {
         format: String,
     },
 
+    /// Print the identity key change that records this machine's identity
+    /// key at VERSION, committing to the key at the version after it.
+    ///
+    /// Each version is its own key, derived on demand from this machine's
+    /// TPM or Secure Enclave; nothing is written. The machine's root approves
+    /// the change with `tenzro identity keys --did <machine DID> --change
+    /// <file>`. Once the chain records it and root signatures are live, the
+    /// node signs its jurisdiction receipts with this key.
+    #[command(name = "identity-key")]
+    IdentityKey {
+        /// The node's data directory. Also settable via
+        /// `$TENZRO_DATA_DIR`.
+        #[arg(long, value_name = "DIR", env = "TENZRO_DATA_DIR")]
+        data_dir: Option<PathBuf>,
+
+        /// The key version: 1 for the first, one above the version the
+        /// chain records for a rotation.
+        #[arg(long, default_value_t = 1)]
+        version: u64,
+    },
+
     /// Print this machine's `[[validators]]` genesis entry, signed by its
     /// hardware consensus key. Refuses on a machine without one.
     #[command(name = "validator-entry")]
@@ -433,6 +501,14 @@ enum Command {
     /// ahead over, then triggers its existing shutdown path (the
     /// in-process `NodeEvent::Shutdown` plus the 5-second drain in
     /// `main()`).
+    ///
+    /// The method is the operator's: the command first signs in as this
+    /// machine with its hardware identity key, the operator of a node whose
+    /// config names no other `operator_did`, so it runs on the node's machine
+    /// as the user whose keys the node uses. When `operator_did` names
+    /// someone else it refuses: that operator signs in with
+    /// `tenzro access sign-in` and calls the method, or the service is
+    /// stopped, which sends SIGTERM.
     ///
     /// Intended for K8s `preStop` hooks and systemd `ExecStop=` units —
     /// a 0 exit means the node accepted the request, not that the
@@ -484,11 +560,16 @@ enum Command {
     /// A node that stops between a registry change and its commit puts the
     /// registry back from these records at its next start. If a record
     /// cannot be read the start fails and keeps them. This command, with the
-    /// node stopped, shows the chain tip and the records. `--discard --yes`
-    /// removes the unreadable ones; the readable ones too only with
-    /// `--force`. Nothing is put back: the registry stays as the last run
-    /// left it, which may include the changes of a block that never
-    /// committed. Prefer restoring from a snapshot.
+    /// node stopped, shows the chain tip and the records. `--discard`
+    /// removes the unreadable ones, the readable ones too only with
+    /// `--force`, after stating what follows and asking for a word to be
+    /// typed (`--yes` goes on without asking, for scripts). Nothing is put back: the registry stays as the last run left
+    /// it. When a discarded record covers a block or epoch boundary that
+    /// never committed, the node then starts only if the registry equals what
+    /// the chain holds: the rows committed at the epoch's first block, with
+    /// the validator logs since replayed from the node's event log; where the
+    /// event log does not reach back that far it must be restored from a
+    /// snapshot.
     #[command(name = "registry-undo")]
     RegistryUndo {
         /// The node's data directory.
@@ -503,7 +584,8 @@ enum Command {
         #[arg(long, default_value_t = false)]
         force: bool,
 
-        /// Confirm the removal.
+        /// With --discard, go on without asking for the word to be typed, for
+        /// scripts; what follows is still printed.
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
@@ -577,9 +659,10 @@ enum Command {
         #[arg(long, value_name = "HEX")]
         genesis_hash: String,
 
-        /// Root of the genesis committee (hex), from the genesis file.
-        #[arg(long, value_name = "HEX")]
-        genesis_committee_root: String,
+        /// Genesis file of the chain: the first committee is read from its
+        /// validators.
+        #[arg(long, value_name = "FILE")]
+        genesis: PathBuf,
 
         /// Fetch the checkpoint proof from this peer's RPC endpoint.
         #[arg(long, value_name = "URL", conflicts_with = "proof")]
@@ -632,10 +715,20 @@ enum Command {
         action: TpmAction,
     },
 
+    /// A volume this machine offers for storage.
+    #[command(name = "volume")]
+    Volume {
+        #[command(subcommand)]
+        action: VolumeAction,
+    },
+
     /// Report what this binary was built for and whether it can use this
     /// machine's accelerators, then exit: the same check the node runs at
     /// startup, without starting a node. Exits non-zero when the node would
-    /// refuse to start here.
+    /// refuse to start here. An ONNX Runtime that cannot use this machine's
+    /// GPU stops only a node that serves models: with `--roles` (or a config
+    /// file) it counts as for those roles; without them it counts against a
+    /// GPU build and not against the CPU build.
     #[command(name = "hardware")]
     Hardware,
 
@@ -651,13 +744,14 @@ enum Command {
         json: bool,
 
         /// Also let peers reach this node directly through the host
-        /// firewall, with a rule scoped to this binary and its UDP port: on
-        /// Windows an inbound rule for the private and public profiles (and
-        /// removal of block rules a dismissed prompt left for this binary),
-        /// on macOS an entry in the application firewall. Optional: the node
-        /// works without it, through relays and hole punching. Needs an
-        /// administrator PowerShell on Windows and sudo on macOS. On Linux
-        /// it prints the command for your firewall.
+        /// firewall: on Windows one inbound rule for the UDP port the node
+        /// binds, keyed to the port so an update needs no new rule, on the
+        /// private profile only (and removal of block rules a dismissed
+        /// prompt left for the install's binaries); on macOS an
+        /// entry in the application firewall for this binary. Optional: the
+        /// node works without it, through relays and hole punching. Needs an
+        /// administrator PowerShell on Windows and sudo on macOS. On Linux it
+        /// prints the command for your firewall.
         #[arg(long)]
         allow_inbound: bool,
     },
@@ -721,6 +815,91 @@ enum CredentialsAction {
 }
 
 #[derive(Debug, Subcommand)]
+enum ClientsAction {
+    /// The clients enrolled, with what each field means.
+    #[command(name = "list")]
+    List {
+        /// The provider file `serve` runs with.
+        #[arg(long, value_name = "FILE")]
+        config: PathBuf,
+    },
+    /// Enrol operator passkeys for a key label, from the registrations the
+    /// passkeys gave when they were created. A label enrolled for the first
+    /// time takes two, from two of the operator's devices, so losing one
+    /// device does not lock the machine out.
+    #[command(name = "add")]
+    Add {
+        /// The provider file `serve` runs with.
+        #[arg(long, value_name = "FILE")]
+        config: PathBuf,
+        /// The key label a grant from this passkey opens: the key the client
+        /// machine signs with.
+        #[arg(long)]
+        label: String,
+        /// The passkey's relying party id (the site it was created on).
+        #[arg(long)]
+        rp_id: String,
+        /// A file holding a passkey's registration: the JSON of the
+        /// `PublicKeyCredential` the browser returned when the passkey was
+        /// created (`toJSON()`). Give it once per device.
+        #[arg(long = "registration", value_name = "FILE", required = true)]
+        registrations: Vec<PathBuf>,
+        /// Accept a single passkey for a new label: losing that device locks
+        /// the machine out until the operator enrols again.
+        #[arg(long)]
+        one_device: bool,
+        /// Also let the client use keys derived from this machine's root
+        /// (validator, VRF, sealing and access-token keys). Only for a
+        /// client that validates; a running provider started without any
+        /// such client needs a restart to take one.
+        #[arg(long)]
+        derived: bool,
+    },
+    /// Remove the passkeys of a key label, or one of them.
+    #[command(name = "remove")]
+    Remove {
+        /// The provider file `serve` runs with.
+        #[arg(long, value_name = "FILE")]
+        config: PathBuf,
+        /// The key label.
+        #[arg(long)]
+        label: String,
+        /// Only this passkey (hex x || y); without it, every passkey of the label.
+        #[arg(long)]
+        passkey_public_key: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum VolumeAction {
+    /// Measure the volume holding a directory (random and sequential reads,
+    /// free space) and propose the storage classes it qualifies for: per
+    /// class, how many objects it can answer a possession probe for inside
+    /// the class's governed deadline, read from the running node. The
+    /// measurement only proposes; the network believes what its probes
+    /// measure. Prints JSON.
+    #[command(name = "measure")]
+    Measure {
+        /// A directory on the volume to measure; a scratch file is written
+        /// there and removed.
+        #[arg(long, value_name = "DIR")]
+        dir: std::path::PathBuf,
+        /// Size of the scratch file, MiB.
+        #[arg(long, default_value_t = 256)]
+        sample_mib: u64,
+        /// Random chunk reads to time.
+        #[arg(long, default_value_t = 512)]
+        reads: usize,
+        /// This machine's uplink, megabits per second: proofs travel over it.
+        #[arg(long)]
+        uplink_mbps: u64,
+        /// JSON-RPC endpoint of the running node, for the class deadlines.
+        #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:8545")]
+        rpc_url: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum TpmAction {
     /// Create this node's persistent TPM keys, once per machine: the storage
     /// root, the machine attestation key and the node identity key (under
@@ -729,12 +908,70 @@ enum TpmAction {
     /// Run as a user that can open /dev/tpmrm0, with the node stopped.
     #[command(name = "provision")]
     Provision,
+    /// List the persistent TPM handles this node made: the storage root, the
+    /// attestation key and each namespace's identity key, marking the one
+    /// this process runs under. Reads only.
+    #[command(name = "handles")]
+    Handles,
+    /// Delete one stale identity key this node made, a namespace's that no
+    /// longer runs here. Asks you to type the handle to confirm; the storage
+    /// root, the attestation key, this process's identity key and anything
+    /// the node did not make are refused. Run with the node stopped.
+    #[command(name = "delete-handle")]
+    DeleteHandle {
+        /// The handle to delete, as listed by `tpm handles` (hex, `0x81018105`).
+        handle: String,
+    },
+    /// Check whether this machine can be admitted as an autonomous identity:
+    /// attest its TPM as admission does (credential activation and a quote
+    /// over the admission challenge, verified here), grade its endorsement
+    /// against the given manufacturer roots and list its identifier sources.
+    /// One line per requirement of docs/standards/machine-identity-onboarding.md;
+    /// exits non-zero when a required one is not met. Run after `provision`.
+    #[command(name = "check")]
+    Check {
+        /// A PEM file of TPM manufacturer roots to grade the endorsement
+        /// against; repeat for several.
+        #[arg(long = "roots", value_name = "PEM")]
+        roots: Vec<PathBuf>,
+        /// Write the evidence and the report as JSON to this file.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
     /// Sign, with this machine's TPM, for the machines listed in the file:
     /// machines with no TPM of their own, enrolled by the operator.
     #[command(name = "serve")]
     Serve {
         #[arg(long, value_name = "FILE")]
         config: PathBuf,
+    },
+    /// Enrol one more machine's operator passkey with the provider file, and
+    /// tell the running provider to take it, with no restart.
+    #[command(name = "enrol-client")]
+    EnrolClient {
+        #[arg(long, value_name = "FILE")]
+        config: PathBuf,
+        /// The passkey's P-256 public key, hex `x || y`.
+        #[arg(long, value_name = "HEX")]
+        passkey_public_key: String,
+        /// The passkey's WebAuthn relying party id.
+        #[arg(long, value_name = "ID")]
+        rp_id: String,
+        /// The key label a grant from this passkey opens.
+        #[arg(long)]
+        label: String,
+        /// Also allow the keys derived from the provider's root.
+        #[arg(long)]
+        derived: bool,
+    },
+    /// The machines `serve` signs for: list, add or remove an operator
+    /// passkey and the key label its grants open. The command writes the
+    /// provider file (every other line and comment stays); a running
+    /// provider reads the change within seconds.
+    #[command(name = "clients")]
+    Clients {
+        #[command(subcommand)]
+        action: ClientsAction,
     },
     /// Run this machine's TPM key holder: make this boot's transport key,
     /// keep it in memory only, and carry the node's signing requests to the
@@ -776,6 +1013,17 @@ enum TpmAction {
         /// How long the grant lasts.
         #[arg(long, default_value_t = 24 * 30)]
         valid_hours: u64,
+        /// Print the request as one JSON object for the grant page
+        /// (`tools/grant-page/grant.html`) instead of lines.
+        #[arg(long, requires = "credential_id")]
+        json: bool,
+        /// The enrolled operator passkey's credential id, base64url: the
+        /// page asks the browser for that passkey and no other.
+        #[arg(long, requires = "json", value_name = "ID")]
+        credential_id: Option<String>,
+        /// The WebAuthn relying party the passkey belongs to.
+        #[arg(long, requires = "json", default_value = "localhost")]
+        rp_id: String,
     },
     /// Give the key holder the grant: the passkey assertion over the
     /// challenge `grant-request` printed, each field base64url.
@@ -797,6 +1045,32 @@ enum TpmAction {
         #[arg(long)]
         signature: String,
     },
+    /// Take this machine onto its provider in one step: print what the
+    /// operator's passkey signs, take the assertion the browser returns,
+    /// install the grant in the key holder, sign a test message with the
+    /// machine's key at the provider, and print the flags the node starts
+    /// with. Run it with the key holder running, after the operator enrolled
+    /// their passkeys at the provider (`tpm clients add`).
+    #[command(name = "enrol")]
+    Enrol {
+        /// The key holder's socket.
+        #[arg(long, value_name = "SOCKET")]
+        socket: PathBuf,
+        /// The key label enrolled for this machine at the provider.
+        #[arg(long)]
+        label: String,
+        /// The relying party the operator's passkey belongs to, whose page
+        /// the operator signs on.
+        #[arg(long)]
+        rp_id: String,
+        /// How long the grant lasts.
+        #[arg(long, default_value_t = 24 * 30)]
+        valid_hours: u64,
+        /// A file holding the assertion; without it the command waits for
+        /// the assertion pasted on its input.
+        #[arg(long, value_name = "FILE")]
+        assertion: Option<PathBuf>,
+    },
     /// Open this machine's identity key at its provider through the key
     /// holder and sign a test message with it.
     #[command(name = "remote-check")]
@@ -806,6 +1080,145 @@ enum TpmAction {
         #[arg(long)]
         label: String,
     },
+    /// Write every key blob of this machine's device-key directory into one
+    /// backup file, then read the file back and compare it with the
+    /// directory. The blobs open only inside this machine's TPM or Secure
+    /// Enclave, so the file is ciphertext anywhere else: it guards against
+    /// losing the disk, not the hardware. Make a new one after any key or
+    /// grant is created.
+    #[command(name = "keys-backup")]
+    KeysBackup {
+        /// The backup file to write; it must not exist.
+        file: PathBuf,
+        /// The device-key directory (defaults to this machine's).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Compare a backup file with the device-key directory and list what is
+    /// missing, changed or new since it was made. Exits non-zero when they
+    /// differ.
+    #[command(name = "keys-verify")]
+    KeysVerify {
+        file: PathBuf,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Put back the key blobs of a backup file that the device-key directory
+    /// lacks. A blob already there with other content stops the restore
+    /// before anything is written. Run with the node and the key holder
+    /// stopped.
+    #[command(name = "keys-restore")]
+    KeysRestore {
+        file: PathBuf,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+/// The device-key directory a `tpm keys-*` command works on.
+fn device_key_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
+    dir.or_else(tenzro_device_key::device_key_dir)
+        .ok_or_else(|| {
+            error::NodeError::Config(
+                "this machine has no device-key directory; name one with --dir".to_string(),
+            )
+        })
+}
+
+fn read_keys_backup(file: &std::path::Path) -> Result<tenzro_device_key::dir_backup::Backup> {
+    let bytes = std::fs::read(file)
+        .map_err(|e| error::NodeError::Config(format!("reading {}: {e}", file.display())))?;
+    tenzro_device_key::dir_backup::Backup::from_bytes(&bytes)
+        .map_err(|e| error::NodeError::Config(format!("{}: {e}", file.display())))
+}
+
+fn run_keys_backup(file: PathBuf, dir: Option<PathBuf>) -> Result<()> {
+    use std::io::Write as _;
+    use tenzro_device_key::dir_backup::Backup;
+    let dir = device_key_dir(dir)?;
+    let failed = |e: &dyn std::fmt::Display| error::NodeError::Config(e.to_string());
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let backup = Backup::of_dir(&dir, now_ms).map_err(|e| failed(&e))?;
+    if backup.is_empty() {
+        return Err(error::NodeError::Config(format!(
+            "{} holds no key file; there is nothing to back up",
+            dir.display()
+        )));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut out = options
+        .open(&file)
+        .map_err(|e| failed(&format!("creating {}: {e}", file.display())))?;
+    out.write_all(&backup.to_bytes())
+        .and_then(|()| out.sync_all())
+        .map_err(|e| failed(&format!("writing {}: {e}", file.display())))?;
+    // The file as it is on disk, against the directory as it is now.
+    let differences = read_keys_backup(&file)?
+        .differences(&dir)
+        .map_err(|e| failed(&e))?;
+    if !differences.none() {
+        return Err(error::NodeError::Config(format!(
+            "the directory changed while it was backed up; delete {} and run the backup again",
+            file.display()
+        )));
+    }
+    println!(
+        "Backed up {} key files from {} to {}\nDigest: {}\nThe file opens only with this machine's own TPM or Secure Enclave. Keep a copy off this disk.",
+        backup.len(),
+        dir.display(),
+        file.display(),
+        hex::encode(backup.digest())
+    );
+    Ok(())
+}
+
+fn run_keys_verify(file: PathBuf, dir: Option<PathBuf>) -> Result<()> {
+    let dir = device_key_dir(dir)?;
+    let backup = read_keys_backup(&file)?;
+    let d = backup
+        .differences(&dir)
+        .map_err(|e| error::NodeError::Config(e.to_string()))?;
+    println!("Backup digest: {}", hex::encode(backup.digest()));
+    if d.none() {
+        println!(
+            "{} holds exactly the {} key files of the backup",
+            dir.display(),
+            backup.len()
+        );
+        return Ok(());
+    }
+    for (what, paths) in [
+        ("missing from the directory", &d.missing),
+        ("changed since the backup", &d.changed),
+        ("not in the backup", &d.extra),
+    ] {
+        for path in paths {
+            println!("{what}: {path}");
+        }
+    }
+    Err(error::NodeError::Config(format!(
+        "{} differs from the backup",
+        dir.display()
+    )))
+}
+
+fn run_keys_restore(file: PathBuf, dir: Option<PathBuf>) -> Result<()> {
+    let dir = device_key_dir(dir)?;
+    let backup = read_keys_backup(&file)?;
+    let written = backup
+        .restore_into(&dir)
+        .map_err(|e| error::NodeError::Config(e.to_string()))?;
+    println!(
+        "Restored {written} of {} key files into {}; the rest were already there",
+        backup.len(),
+        dir.display()
+    );
+    Ok(())
 }
 
 /// Runs the key holder until the process ends.
@@ -854,10 +1267,18 @@ async fn run_key_holder(
     ))
 }
 
-/// Prints what the operator passkey signs to grant the key holder `label`.
+/// Prints what the operator passkey signs to grant the key holder `label`:
+/// lines, or with `credential_id` one JSON object the grant page reads.
 #[cfg(unix)]
-fn run_grant_request(socket: PathBuf, label: &str, valid_hours: u64) -> Result<()> {
+fn run_grant_request(
+    socket: PathBuf,
+    label: &str,
+    valid_hours: u64,
+    credential_id: Option<String>,
+    rp_id: &str,
+) -> Result<()> {
     use base64::Engine as _;
+    use sha2::Digest as _;
     let (endpoint, _) =
         tenzro_node::tpm_key_holder::holder_id(&socket).map_err(error::NodeError::Config)?;
     let now = std::time::SystemTime::now()
@@ -866,18 +1287,106 @@ fn run_grant_request(socket: PathBuf, label: &str, valid_hours: u64) -> Result<(
         .as_millis() as u64;
     let not_after_ms = now + valid_hours.saturating_mul(3_600_000);
     let challenge = tenzro_node::remote_tpm::grant_challenge(&endpoint, label, not_after_ms);
-    println!("endpoint_id {}", hex::encode(endpoint));
-    println!("label {label}");
-    println!("not_after_ms {not_after_ms}");
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge);
+    let Some(credential_id) = credential_id else {
+        println!("endpoint_id {}", hex::encode(endpoint));
+        println!("label {label}");
+        println!("not_after_ms {not_after_ms}");
+        println!("webauthn_challenge {challenge}");
+        return Ok(());
+    };
+    let id = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(credential_id.trim_end_matches('='))
+        .map_err(|_| error::NodeError::Config("--credential-id is not base64url".into()))?;
+    let fingerprint = hex::encode(&sha2::Sha256::digest(&id)[..8]);
     println!(
-        "webauthn_challenge {}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge)
+        "{}",
+        serde_json::json!({
+            "socket": socket,
+            "endpoint_id": hex::encode(endpoint),
+            "label": label,
+            "not_after_ms": not_after_ms,
+            "webauthn_challenge": challenge,
+            "credential_id": credential_id,
+            "rp_id": rp_id,
+            "fingerprint": fingerprint,
+        })
     );
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn run_grant_request(_socket: PathBuf, _label: &str, _valid_hours: u64) -> Result<()> {
+fn run_grant_request(
+    _socket: PathBuf,
+    _label: &str,
+    _valid_hours: u64,
+    _credential_id: Option<String>,
+    _rp_id: &str,
+) -> Result<()> {
+    Err(error::NodeError::Config(
+        "the TPM key holder needs a Unix socket, which this platform does not have".into(),
+    ))
+}
+
+/// `tenzro-node tpm enrol`: the grant request, the operator's assertion,
+/// the grant installed, the key checked at the provider, in one step.
+#[cfg(unix)]
+async fn run_enrol(
+    socket: PathBuf,
+    label: String,
+    rp_id: String,
+    valid_hours: u64,
+    assertion: Option<PathBuf>,
+) -> Result<()> {
+    let (endpoint, _) =
+        tenzro_node::tpm_key_holder::holder_id(&socket).map_err(error::NodeError::Config)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| error::NodeError::Other(e.to_string()))?
+        .as_millis() as u64;
+    let not_after_ms = now + valid_hours.saturating_mul(3_600_000);
+    let challenge = tenzro_node::remote_tpm::grant_challenge(&endpoint, &label, not_after_ms);
+    println!(
+        "1. On a device whose passkey is enrolled for {label:?} at the provider, open \
+         https://{rp_id} and run in its browser console:\n\n   {}\n",
+        tenzro_node::remote_tpm::assertion_snippet(&challenge, &rp_id)
+    );
+    let text = match &assertion {
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|e| error::NodeError::Config(format!("{}: {e}", path.display())))?,
+        None => {
+            println!("2. Paste the line it prints here, then Enter:");
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map_err(|e| error::NodeError::Other(format!("reading the assertion: {e}")))?;
+            line
+        }
+    };
+    let grant =
+        tenzro_node::remote_tpm::grant_from_assertion(text.trim(), &endpoint, &label, not_after_ms)
+            .map_err(error::NodeError::Config)?;
+    let bytes = serde_json::to_vec(&grant).map_err(|e| error::NodeError::Other(e.to_string()))?;
+    tenzro_node::tpm_key_holder::request(&socket, tenzro_node::tpm_key_holder::OP_GRANT, &bytes)
+        .map_err(error::NodeError::Config)?;
+    println!("grant installed until {not_after_ms} (unix ms)");
+    run_remote_check(socket.clone(), label.clone()).await?;
+    println!(
+        "\nThis machine's key answers through the provider. Start the node with:\n  \
+         --tpm-key-holder {} --tpm-label {label}",
+        socket.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn run_enrol(
+    _socket: PathBuf,
+    _label: String,
+    _rp_id: String,
+    _valid_hours: u64,
+    _assertion: Option<PathBuf>,
+) -> Result<()> {
     Err(error::NodeError::Config(
         "the TPM key holder needs a Unix socket, which this platform does not have".into(),
     ))
@@ -966,7 +1475,10 @@ async fn run_remote_check(key_holder: PathBuf, label: String) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
+    // First, so a panic anywhere in start-up is reported: before logging is
+    // set up it goes to stderr. It starts no thread.
+    log_panics();
     // A runtime host is started by re-running this executable as its
     // confinement launcher, which must confine itself while it is still
     // single-threaded: before the async runtime starts any thread.
@@ -977,20 +1489,94 @@ fn main() -> Result<()> {
     // locked-down child, which must lock itself down before any thread.
     #[cfg(feature = "inference")]
     tenzro_model::parse_jail::enter_if_requested();
+    // Every TLS client and server in this process uses aws-lc-rs, the provider
+    // with the X25519MLKEM768 hybrid key exchange, never one another dependency
+    // compiled in. Subcommands connect too, so this comes before any of them.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        return Err(error::NodeError::Internal(
+            "a TLS provider was installed before main".into(),
+        ));
+    }
     let cli = Cli::parse();
+    // Every path the node uses hangs off the Tenzro root; a process that cannot
+    // name it refuses here, with the variable to set, rather than at the first
+    // path it asks for.
+    tenzro_types::paths::try_tenzro_home().map_err(|e| error::NodeError::Config(e.to_string()))?;
+    let config = startup_config(&cli)?;
+    set_engine_budgets(&config);
     tenzro_node::malloc_tuning::spawn_trimmer();
-    let tuning = runtime_tuning(&cli)?;
-    tokio::runtime::Builder::new_multi_thread()
+    run_on_runtime(cli, &config)
+}
+
+/// The node inside an Android app's process (the light build): `args` are
+/// the command line after the program name. It runs the node only, never a
+/// subcommand, and returns when [`tenzro_node::embedded::request_stop`] has
+/// stopped it. The process is the app's, so nothing here re-runs this
+/// executable or sets the environment.
+#[cfg(all(target_os = "android", not(feature = "inference")))]
+pub(crate) fn run_embedded(args: Vec<String>) -> Result<()> {
+    let cli = embedded_cli(args)?;
+    let config = startup_config(&cli)?;
+    run_on_runtime(cli, &config).map(|_| ())
+}
+
+/// The command line of an embedded node: the node itself, with a data
+/// directory of the app's own.
+#[cfg(any(all(target_os = "android", not(feature = "inference")), test))]
+fn embedded_cli(args: Vec<String>) -> Result<Cli> {
+    let cli = Cli::try_parse_from(std::iter::once("tenzro-node".to_string()).chain(args))
+        .map_err(|e| error::NodeError::Config(e.to_string()))?;
+    if cli.command.is_some() {
+        return Err(error::NodeError::Config(
+            "an embedded node runs the node, not a subcommand".into(),
+        ));
+    }
+    if cli.data_dir.is_none() {
+        return Err(error::NodeError::Config(
+            "an embedded node needs --data-dir: the app's own files directory".into(),
+        ));
+    }
+    Ok(cli)
+}
+
+/// The async runtime sized for this node's tier, running the node to its end.
+fn run_on_runtime(cli: Cli, config: &NodeConfig) -> Result<ExitCode> {
+    let tuning = config
+        .resolved_tier()
+        .tuning(tenzro_node::tier::machine_cores());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(cli.worker_threads.unwrap_or(tuning.worker_threads).max(1))
         .max_blocking_threads(tuning.max_blocking_threads)
         .enable_all()
-        .build()?
-        .block_on(run(cli))
+        .build()?;
+    run_to_end(runtime, run(cli), RUNTIME_END_GRACE)
 }
 
-/// The tier's defaults for the async runtime, fixed before it starts: the
-/// tier and roles from the flags, or else the configuration file.
-fn runtime_tuning(cli: &Cli) -> Result<tenzro_node::tier::Tuning> {
+/// How long the process waits, after the node has drained and said it is
+/// done, for work still running on the blocking pool (a model's generation or
+/// load cannot be cancelled) before it ends regardless.
+const RUNTIME_END_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Runs `fut` to its end on `runtime`, then drops the runtime without waiting
+/// longer than `grace` for blocking tasks. Dropping a runtime waits for every
+/// blocking task, so a node stopped while a model was generating stayed alive
+/// until the generation finished, minutes after it logged that it was done.
+fn run_to_end<T>(
+    runtime: tokio::runtime::Runtime,
+    fut: impl std::future::Future<Output = T>,
+    grace: std::time::Duration,
+) -> T {
+    let out = runtime.block_on(fut);
+    runtime.shutdown_timeout(grace);
+    out
+}
+
+/// What has to be known before the async runtime starts: the tier, roles
+/// and memory reserve from the flags, or else the configuration file.
+fn startup_config(cli: &Cli) -> Result<NodeConfig> {
     let mut config = load_config(cli)?;
     if let Some(roles) = &cli.roles {
         config.roles = parse_roles(roles)?;
@@ -998,12 +1584,83 @@ fn runtime_tuning(cli: &Cli) -> Result<tenzro_node::tier::Tuning> {
     if let Some(tier) = &cli.tier {
         config.tier = tier.parse().map_err(error::NodeError::Config)?;
     }
-    Ok(config
-        .resolved_tier()
-        .tuning(tenzro_node::tier::machine_cores()))
+    if let Some(gb) = cli.reserve_gb {
+        config.memory.reserve_gb = gb;
+    }
+    Ok(config)
 }
 
-async fn run(mut cli: Cli) -> Result<()> {
+/// The batching engine reads its KV and checkpoint budgets from the
+/// environment when a model loads, and without them takes half of whatever
+/// memory is free for KV and most of the rest for checkpoints. Sets them out
+/// of this node's resident tier, so a serve stays inside the memory budget
+/// and the reserve; a budget the operator set in the environment is kept.
+fn set_engine_budgets(config: &NodeConfig) {
+    let ceiling = config
+        .memory
+        .to_budget_config(config.roles.is_validator())
+        .resident_ceiling();
+    let (kv, checkpoints) = tenzro_model::serve_memory::node_engine_budgets(ceiling);
+    for (name, bytes) in [
+        ("BATCH_KV_MEMORY", kv),
+        ("BATCH_CHECKPOINT_MEMORY", checkpoints),
+    ] {
+        if std::env::var_os(name).is_none() {
+            // SAFETY: called from `main` before any other thread is started,
+            // so nothing reads the environment concurrently.
+            unsafe { std::env::set_var(name, bytes.to_string()) };
+        }
+    }
+}
+
+/// How often a node waiting for its key holder's grant looks again.
+#[cfg(unix)]
+const KEY_GRANT_LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a node waiting for the grant says so again.
+#[cfg(unix)]
+const KEY_GRANT_REMIND_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Routes this process's hardware keys through the key holder named by
+/// `--tpm-key-holder` / `--tpm-label`, when given. True when it did.
+fn use_key_holder(cli: &Cli) -> Result<bool> {
+    let Some(socket) = &cli.tpm_key_holder else {
+        return Ok(false);
+    };
+    let label = cli
+        .tpm_label
+        .clone()
+        .ok_or_else(|| error::NodeError::Config("--tpm-key-holder needs --tpm-label".into()))?;
+    #[cfg(unix)]
+    {
+        tenzro_node::identity_bootstrap::use_remote_tpm(tenzro_node::remote_tpm::RemoteConfig {
+            label,
+            key_holder: socket.clone(),
+        })
+        .map_err(error::NodeError::Config)?;
+        Ok(true)
+    }
+    // Refused here, naming the socket, rather than at the first key use.
+    #[cfg(not(unix))]
+    Err(error::NodeError::Config(format!(
+        "--tpm-key-holder {} for '{label}': the TPM key holder needs a Unix socket, which this \
+         platform does not have",
+        socket.display()
+    )))
+}
+
+/// A subcommand that opens the machine's keys (validator-entry, doctor,
+/// ...) opens them through the key holder the node uses. The `tpm`
+/// subcommands run or address a key holder themselves. True when the key
+/// holder was installed.
+fn subcommand_key_holder(cli: &Cli, cmd: &Command) -> Result<bool> {
+    if matches!(cmd, Command::Tpm { .. } | Command::Volume { .. }) {
+        return Ok(false);
+    }
+    use_key_holder(cli)
+}
+
+async fn run(mut cli: Cli) -> Result<ExitCode> {
     // Initialize logging
     init_logging(&cli.log_level, &cli.log_format)?;
 
@@ -1018,27 +1675,14 @@ async fn run(mut cli: Cli) -> Result<()> {
                 .map_err(|e| error::NodeError::Config(format!("hardware_key_namespace: {e}")))?;
         }
         configure_tpm(&config)?;
-        return run_subcommand(cmd, &config).await;
-    }
-
-    // Install aws-lc-rs as the process-wide rustls CryptoProvider before any
-    // TLS-using subsystem (reqwest, axum-rustls, iroh QUIC, hyper-rustls)
-    // touches rustls. aws-lc-rs is the only mainstream rustls provider that
-    // offers X25519MLKEM768 hybrid post-quantum key exchange (per the FIPS 203
-    // ML-KEM-768 / IETF hybrid named-group spec).
-    //
-    // `install_default` returns `Err(_)` if a provider was already installed
-    // earlier in the process. That is harmless for us — it means another
-    // crate raced ahead and installed the same `aws-lc-rs` provider via its
-    // own static init (we pin the same backend everywhere via
-    // `default-features = false, features = ["aws-lc-rs"]`). We log the
-    // outcome but do not fail node startup on it.
-    match rustls::crypto::aws_lc_rs::default_provider().install_default() {
-        Ok(()) => info!("Installed aws-lc-rs as rustls CryptoProvider (PQ-hybrid TLS enabled)"),
-        Err(_) => tracing::debug!(
-            "aws-lc-rs CryptoProvider was already installed by an earlier static init; \
-             continuing"
-        ),
+        let delegated = subcommand_key_holder(&cli, &cmd)?;
+        let key_holder = cli.tpm_key_holder.clone().filter(|_| delegated);
+        // Roles the operator named, on the command line or in a config file;
+        // without either the subcommand has only the defaults to go by.
+        let roles_named = cli.roles.is_some() || cli.config.is_some();
+        return run_subcommand(cmd, &config, key_holder.as_deref(), roles_named)
+            .await
+            .map(|()| ExitCode::SUCCESS);
     }
 
     // Print startup banner (skip in JSON log mode to avoid polluting structured output)
@@ -1064,19 +1708,28 @@ async fn run(mut cli: Cli) -> Result<()> {
 
     // A machine with no TPM of its own may hold its identity key in another
     // machine's TPM, through a provider the operator enrolled it with.
-    if let Some(socket) = &cli.tpm_key_holder {
-        let label = cli
-            .tpm_label
-            .clone()
-            .ok_or_else(|| error::NodeError::Config("--tpm-key-holder needs --tpm-label".into()))?;
-        tenzro_node::identity_bootstrap::use_remote_tpm(tenzro_node::remote_tpm::RemoteConfig {
-            label,
-            key_holder: socket.clone(),
-        })
-        .map_err(error::NodeError::Config)?;
+    if use_key_holder(&cli)? {
         tenzro_network::service::declare_identity_root(
             tenzro_network::service::IdentityRoot::TpmDelegated,
         );
+        // The keys open only under the operator's grant: without one the
+        // node waits for it instead of ending, and for a key holder that
+        // starts after it up to `--tpm-key-holder-wait`.
+        #[cfg(unix)]
+        if let Some(socket) = &cli.tpm_key_holder {
+            let wait = tenzro_node::tpm_key_holder::GrantWait {
+                step: KEY_GRANT_LOOK_EVERY,
+                remind: KEY_GRANT_REMIND_EVERY,
+                holder: std::time::Duration::from_secs(cli.tpm_key_holder_wait),
+            };
+            if let Err(reason) = tenzro_node::tpm_key_holder::await_grant(socket, wait).await {
+                eprintln!("\n{reason}\n");
+                return Err(error::NodeError::Config(reason));
+            }
+            // A grant that runs out later leaves the node running and
+            // waiting for a new one, which its status names.
+            tenzro_node::tpm_key_holder::watch_running_grant(socket.clone(), wait);
+        }
     }
 
     // A machine with no TPM 2.0 or Secure Enclave refuses before anything
@@ -1128,7 +1781,9 @@ async fn run(mut cli: Cli) -> Result<()> {
     }
 
     // ONNX session limits, fixed before any model can load. Then refuse to
-    // start on an NVIDIA machine this binary's ONNX Runtime cannot use.
+    // start on an NVIDIA machine this binary's ONNX Runtime cannot use, when
+    // the node serves models; a node that serves none starts, and every ONNX
+    // session it is asked to build is refused with the same cause.
     // Detection shells out to the GPU vendor tools, so it runs off the
     // async workers.
     #[cfg(feature = "inference")]
@@ -1139,9 +1794,18 @@ async fn run(mut cli: Cli) -> Result<()> {
                 .map(|n| n.get())
                 .unwrap_or(1),
         ));
-        tokio::task::spawn_blocking(tenzro_model::onnx_session::verify_accelerators)
+        let checked = tokio::task::spawn_blocking(tenzro_model::onnx_session::verify_accelerators)
             .await
-            .map_err(|e| error::NodeError::Config(format!("ONNX accelerator check: {e}")))??;
+            .map_err(|e| error::NodeError::Config(format!("ONNX accelerator check: {e}")))?;
+        if let Err(e) = checked {
+            if onnx_refusal_stops_start(&config.roles) {
+                return Err(e.into());
+            }
+            warn!(
+                roles = %config.roles,
+                "ONNX models are refused on this machine ({e}); this node serves no models, so it starts"
+            );
+        }
     }
 
     // Print node info
@@ -1223,6 +1887,23 @@ async fn run(mut cli: Cli) -> Result<()> {
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
     // Create and start the node
+    if cli.replace_store {
+        if config.state_sync_from.is_empty() && cli.state_sync_from.is_empty() {
+            return Err(error::NodeError::Config(
+                "--replace-store restores the store from a snapshot: name the peer that holds it \
+                 with --state-sync-from (and the checkpoint with --checkpoint-height and \
+                 --checkpoint-hash), or the store would be moved aside with nothing to restore it"
+                    .to_string(),
+            ));
+        }
+        if let Some((db, aside)) = move_store_aside(&config.data_dir)? {
+            info!(
+                from = %db.display(),
+                to = %aside.display(),
+                "--replace-store: the old store is moved aside; move it back to undo"
+            );
+        }
+    }
     let mut node = TenzroNode::new(config.clone()).await?;
 
     // Weak-subjectivity checkpoint and state sync. The checkpoint comes from
@@ -1232,43 +1913,26 @@ async fn run(mut cli: Cli) -> Result<()> {
     // State-sync peers come from `--state-sync-from`. Endpoint keys are per
     // boot, so no file can name them in advance; what a peer serves is checked
     // against the checkpoint's state root, not trusted for who it is.
-    let checkpoint: Option<(u64, [u8; 32])> = match (&cli.checkpoint_hash, cli.checkpoint_height) {
-        (Some(hash_hex), Some(height)) => {
-            Some((height, parse_hash32(hash_hex, "--checkpoint-hash")?))
-        }
-        _ => match config
+    let checkpoint = weak_subjectivity_checkpoint(
+        cli.checkpoint_hash.as_deref(),
+        cli.checkpoint_height,
+        config
             .genesis
             .as_ref()
-            .and_then(|g| g.weak_subjectivity.as_ref())
-        {
-            Some(ws) => Some((
-                ws.height,
-                parse_hash32(
-                    &ws.block_hash_hex,
-                    "genesis weak_subjectivity.block_hash_hex",
-                )?,
-            )),
-            None => None,
-        },
-    };
-    if let Some((height, hash)) = checkpoint {
+            .and_then(|g| g.weak_subjectivity.as_ref()),
+    )?;
+    if let Some((height, hash, source)) = checkpoint {
         node.set_weak_subjectivity_anchor(height, hash);
         info!(
             height,
             block_hash = %format!("0x{}", hex::encode(hash)),
+            source,
             "Weak-subjectivity checkpoint installed"
         );
     }
 
     let peers = parse_state_sync_peers(config.state_sync_from.iter().chain(&cli.state_sync_from))?;
     if !peers.is_empty() {
-        if checkpoint.is_none() {
-            return Err(error::NodeError::Other(
-                "state sync needs a weak-subjectivity checkpoint: pass --checkpoint-height and \
-                 --checkpoint-hash, or use a genesis with a [weak_subjectivity] block"
-                    .to_string(),
-            ));
-        }
         info!(peers = peers.len(), "State sync configured");
         node.set_state_sync_peers(peers);
     }
@@ -1277,12 +1941,12 @@ async fn run(mut cli: Cli) -> Result<()> {
             path,
             digest,
             cli.recovery_confirm.as_deref(),
-            checkpoint,
+            checkpoint.map(|(height, hash, _)| (height, hash)),
             cli.recovery_check,
         )?);
     }
     match node.start().await {
-        Err(error::NodeError::RecoveryChecked(_)) => return Ok(()),
+        Err(error::NodeError::RecoveryChecked(_)) => return Ok(ExitCode::SUCCESS),
         other => other?,
     }
 
@@ -1503,6 +2167,14 @@ async fn run(mut cli: Cli) -> Result<()> {
         }
     });
 
+    // The listener paired devices reach the node on; it binds nothing until a
+    // pairing starts or a device is paired.
+    #[cfg(feature = "paired-devices")]
+    tokio::spawn(tenzro_node::paired_listener::run(
+        node_arc.clone(),
+        shutdown_tx.subscribe(),
+    ));
+
     // Start Web Verification API
     let mut web_state = web::handlers::WebState::new()
         .with_node(node_arc.clone())
@@ -1513,6 +2185,10 @@ async fn run(mut cli: Cli) -> Result<()> {
     // peer counts, connection totals) are served from the same `/metrics`
     // endpoint as the node-level counters.
     if let Some(network) = node_arc.network() {
+        if let Some(resolver) = node_arc.iroh_resolver() {
+            let resolver = resolver.clone();
+            network.report_paths(move || resolver.path_report());
+        }
         web_state = web_state.with_network_metrics_registry(network.metrics_registry());
     }
 
@@ -1562,6 +2238,16 @@ async fn run(mut cli: Cli) -> Result<()> {
                 tenzro_node::inference_admission::NodeInferenceAdmission::for_node(&node_arc),
             );
             middleware = middleware.with_inference_admission(admission);
+            if !config.payments.trusted_agent_keys.is_empty() {
+                // Checked when the configuration was loaded.
+                let tap = tenzro_payments::rfc9421::tap::TapVerifier::from_jwks(
+                    &config.payments.trusted_agent_keys,
+                )
+                .map_err(|e| {
+                    error::NodeError::Config(format!("payments.trusted_agent_keys: {e}"))
+                })?;
+                middleware = middleware.with_trusted_agents(Arc::new(tap));
+            }
             let setup = web::server::PaymentGateSetup::new(
                 middleware,
                 tenzro_node::access::web_pricing(node_arc.clone()),
@@ -1600,6 +2286,7 @@ async fn run(mut cli: Cli) -> Result<()> {
             mcp_node,
             mcp_web_state,
             mcp_shutdown_rx,
+            None,
         )
         .await
         {
@@ -1612,7 +2299,11 @@ async fn run(mut cli: Cli) -> Result<()> {
     // `TaskManager` — tasks created over either transport land in the same
     // table.
     let a2a_addr = config.a2a_addr.clone();
-    let a2a_state = a2a::server::build_a2a_state(node_arc.clone(), web_state);
+    let a2a_state = a2a::server::build_a2a_state(
+        node_arc.clone(),
+        web_state,
+        tenzro_node::identity_bootstrap::machine_did(),
+    );
 
     // Install the iroh-side A2A dispatcher. The iroh
     // router registered the `tenzro/a2a` ALPN at bind time backed by a
@@ -1674,29 +2365,44 @@ async fn run(mut cli: Cli) -> Result<()> {
     // return immediately, so this is spawned unconditionally.
     #[cfg(feature = "inference")]
     moe::spawn_moe_repair_loop(node_arc.clone());
+    tenzro_node::storage_placement::spawn_storage_repair_loop(node_arc.clone());
     tenzro_node::compute_index_reporter::spawn_fee_rate_reporter(node_arc.clone());
+    tenzro_node::challenge_notice::spawn(node_arc.clone());
     tenzro_node::sla_attest::spawn_probe_scheduler(node_arc.clone());
     tenzro_node::sla_attest::spawn_attestation_submitter(node_arc.clone());
     tenzro_node::sla_attest::spawn_burst_challenge_scheduler(node_arc.clone());
     tenzro_node::optimistic::spawn_reviewer(node_arc.clone());
     tenzro_node::da_retention::spawn(node_arc.clone());
     tenzro_node::beacon::spawn_contributor(node_arc.clone());
+    tenzro_node::role_bonds::spawn_watch(node_arc.clone());
     tenzro_node::hardware_possession::spawn(node_arc.clone());
+    tenzro_node::operator_alert::spawn(node_arc.clone());
     tenzro_node::identity_bootstrap::keep_chain_policies(node_arc.clone());
 
     let a2a_shutdown_rx = shutdown_tx.subscribe();
     let a2a_addr_https = a2a_addr.clone();
     let mut a2a_handle = tokio::spawn(async move {
-        if let Err(e) =
-            a2a::server::start_a2a_server_with_shutdown(a2a_addr_https, a2a_state, a2a_shutdown_rx)
-                .await
+        if let Err(e) = a2a::server::start_a2a_server_with_shutdown(
+            a2a_addr_https,
+            a2a_state,
+            a2a_shutdown_rx,
+            None,
+        )
+        .await
         {
             error!("A2A server error: {}", e);
         }
     });
 
-    // Wait for shutdown signal (Ctrl+C or SIGTERM)
+    // Wait for shutdown signal (Ctrl+C or SIGTERM, or the app that runs the
+    // node in its own process asking it to stop)
     info!("Node is running. Press Ctrl+C to stop.");
+    let app_stop = async {
+        #[cfg(all(target_os = "android", not(feature = "inference")))]
+        tenzro_node::embedded::stop_requested().await;
+        #[cfg(not(all(target_os = "android", not(feature = "inference"))))]
+        std::future::pending::<()>().await;
+    };
     let shutdown_signal = async {
         let ctrl_c = tokio::signal::ctrl_c();
 
@@ -1711,32 +2417,77 @@ async fn run(mut cli: Cli) -> Result<()> {
             }
         }
 
-        #[cfg(not(unix))]
+        // Ctrl+Break, a closing console and a logoff or shutdown end the
+        // node the way SIGTERM does on Unix: the node drains instead of
+        // being cut off.
+        #[cfg(windows)]
+        {
+            use tokio::signal::windows;
+            let mut brk = windows::ctrl_break().expect("Failed to install Ctrl+Break handler");
+            let mut close = windows::ctrl_close().expect("Failed to install console close handler");
+            let mut shutdown =
+                windows::ctrl_shutdown().expect("Failed to install shutdown handler");
+            tokio::select! {
+                _ = ctrl_c => info!("Received Ctrl+C"),
+                _ = brk.recv() => info!("Received Ctrl+Break"),
+                _ = close.recv() => info!("Received console close"),
+                _ = shutdown.recv() => info!("Received system shutdown"),
+            }
+        }
+
+        #[cfg(not(any(unix, windows)))]
         {
             ctrl_c.await.ok();
             info!("Received shutdown signal");
         }
     };
 
-    tokio::select! {
-        _ = shutdown_signal => {},
+    // Only a requested stop ends the process with success: a failed event
+    // loop or a server that stopped on its own ends it with an error, so a
+    // service manager restarts it.
+    let mut restart = false;
+    let failure: Option<String> = tokio::select! {
+        _ = shutdown_signal => None,
+        _ = node_arc.restart.notified() => {
+            info!("Restart requested: ending for the service to start the node again");
+            restart = true;
+            None
+        },
+        _ = app_stop => {
+            info!("Stop requested by the app the node runs in");
+            None
+        }
+        end = node_arc.event_loop_stopped() => match end {
+            tenzro_node::node::EventLoopEnd::Shutdown => {
+                info!("Event loop stopped");
+                None
+            }
+            tenzro_node::node::EventLoopEnd::Failed(why) => {
+                error!(reason = %why, "Event loop failed");
+                Some(format!("the event loop failed: {why}"))
+            }
+        },
         result = &mut rpc_handle => {
             if let Err(e) = result { error!(error = %e, "RPC server task panicked"); }
             else { error!("RPC server terminated unexpectedly"); }
+            Some("the RPC server stopped".to_string())
         },
         result = &mut web_handle => {
             if let Err(e) = result { error!(error = %e, "Web server task panicked"); }
             else { error!("Web server terminated unexpectedly"); }
+            Some("the web server stopped".to_string())
         },
         result = &mut mcp_handle => {
             if let Err(e) = result { error!(error = %e, "MCP server task panicked"); }
             else { error!("MCP server terminated unexpectedly"); }
+            Some("the MCP server stopped".to_string())
         },
         result = &mut a2a_handle => {
             if let Err(e) = result { error!(error = %e, "A2A server task panicked"); }
             else { error!("A2A server terminated unexpectedly"); }
+            Some("the A2A server stopped".to_string())
         },
-    }
+    };
 
     info!("Initiating graceful shutdown...");
 
@@ -1758,24 +2509,35 @@ async fn run(mut cli: Cli) -> Result<()> {
 
     info!("Shutdown complete");
 
-    Ok(())
+    match failure {
+        Some(why) => Err(error::NodeError::Other(why)),
+        None if restart => Ok(ExitCode::from(tenzro_node::restart::STATUS)),
+        None => Ok(ExitCode::SUCCESS),
+    }
 }
 
 /// Dispatch an administrative subcommand. Each variant is a one-shot
 /// JSON-RPC call against a running node; the function returns the exit
 /// status for the process.
-async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
+async fn run_subcommand(
+    cmd: Command,
+    config: &NodeConfig,
+    key_holder: Option<&std::path::Path>,
+    roles_named: bool,
+) -> Result<()> {
+    let delegated = key_holder.is_some();
     match cmd {
         Command::Init {
             data_dir,
             stake,
             format,
         } => run_init(data_dir, stake, format),
+        Command::IdentityKey { data_dir, version } => run_identity_key(data_dir, version),
         Command::GracefulExit {
             rpc_url,
             max_wait_secs,
             force,
-        } => run_graceful_exit(rpc_url, max_wait_secs, force).await,
+        } => run_graceful_exit(rpc_url, max_wait_secs, force, config, delegated).await,
         Command::ValidatorEntry {
             data_dir,
             stake,
@@ -1812,12 +2574,54 @@ async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
             yes,
         } => run_registry_undo(data_dir, discard, force, yes).await,
         Command::Credentials { action } => run_credentials(action, config),
+        Command::Volume {
+            action:
+                VolumeAction::Measure {
+                    dir,
+                    sample_mib,
+                    reads,
+                    uplink_mbps,
+                    rpc_url,
+                },
+        } => run_volume_measure(dir, sample_mib, reads, uplink_mbps, rpc_url).await,
         Command::Tpm {
             action: TpmAction::Provision,
         } => run_tpm_provision(),
         Command::Tpm {
+            action: TpmAction::Handles,
+        } => run_tpm_handles(),
+        Command::Tpm {
+            action: TpmAction::DeleteHandle { handle },
+        } => run_tpm_delete_handle(&handle),
+        Command::Tpm {
+            action: TpmAction::Check { roots, out },
+        } => run_tpm_check(&roots, out.as_deref()),
+        Command::Tpm {
             action: TpmAction::Serve { config },
         } => tenzro_node::remote_tpm::serve(&config).await,
+        Command::Tpm {
+            action: TpmAction::Clients { action },
+        } => run_tpm_clients(action),
+        Command::Tpm {
+            action:
+                TpmAction::EnrolClient {
+                    config,
+                    passkey_public_key,
+                    rp_id,
+                    label,
+                    derived,
+                },
+        } => run_enrol_client(&config, &passkey_public_key, &rp_id, &label, derived),
+        Command::Tpm {
+            action:
+                TpmAction::Enrol {
+                    socket,
+                    label,
+                    rp_id,
+                    valid_hours,
+                    assertion,
+                },
+        } => run_enrol(socket, label, rp_id, valid_hours, assertion).await,
         Command::Tpm {
             action:
                 TpmAction::KeyHolder {
@@ -1843,8 +2647,17 @@ async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
                     socket,
                     label,
                     valid_hours,
+                    json,
+                    credential_id,
+                    rp_id,
                 },
-        } => run_grant_request(socket, &label, valid_hours),
+        } => run_grant_request(
+            socket,
+            &label,
+            valid_hours,
+            credential_id.filter(|_| json),
+            &rp_id,
+        ),
         Command::Tpm {
             action:
                 TpmAction::GrantInstall {
@@ -1868,20 +2681,34 @@ async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
         Command::Tpm {
             action: TpmAction::RemoteCheck { key_holder, label },
         } => run_remote_check(key_holder, label).await,
-        Command::Hardware => run_hardware(config),
+        Command::Hardware => run_hardware(config, roles_named),
+        Command::Tpm {
+            action: TpmAction::KeysBackup { file, dir },
+        } => run_keys_backup(file, dir),
+        Command::Tpm {
+            action: TpmAction::KeysVerify { file, dir },
+        } => run_keys_verify(file, dir),
+        Command::Tpm {
+            action: TpmAction::KeysRestore { file, dir },
+        } => run_keys_restore(file, dir),
         Command::Doctor {
             json,
             allow_inbound,
         } => {
             let binary = tenzro_node::doctor::current_binary();
             if allow_inbound {
-                let port = config.iroh.bind_addr.port();
-                match tenzro_node::host_firewall::allow(&binary, port) {
-                    Ok(done) => println!("{done}\n"),
-                    Err(e) => return Err(error::NodeError::Config(e)),
+                match tenzro_node::host_firewall::node_udp_port(&config.iroh) {
+                    Some(port) => match tenzro_node::host_firewall::allow(&binary, port) {
+                        Ok(done) => println!("{done}\n"),
+                        Err(e) => return Err(error::NodeError::Config(e)),
+                    },
+                    None => println!(
+                        "this node binds no fixed UDP port (a private node, or a port the system picks), so no \
+                         inbound rule applies\n"
+                    ),
                 }
             }
-            let report = tenzro_node::doctor::report(config, &binary).await;
+            let report = tenzro_node::doctor::report(config, &binary, key_holder).await;
             if json {
                 println!(
                     "{}",
@@ -1897,7 +2724,7 @@ async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
             snapshot,
             chain_id,
             genesis_hash,
-            genesis_committee_root,
+            genesis,
             proof_from,
             proof,
             handover_program,
@@ -1905,10 +2732,11 @@ async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
             let handover_program = handover_program
                 .map(|h| hex32(&h, "--handover-program"))
                 .transpose()?;
-            let anchor = tenzro_consensus::light_client::GenesisAnchor {
+            let anchor = tenzro_light::TrustAnchor {
+                epoch: 0,
                 chain_id,
                 genesis_hash: hex32(&genesis_hash, "--genesis-hash")?,
-                committee_root: hex32(&genesis_committee_root, "--genesis-committee-root")?,
+                committee_root: read_genesis(&genesis)?.committee_root()?,
             };
             run_restore(
                 data_dir,
@@ -1938,11 +2766,118 @@ async fn run_subcommand(cmd: Command, config: &NodeConfig) -> Result<()> {
     }
 }
 
+/// `tenzro-node tpm clients`: reads, and for add and remove rewrites, the
+/// provider file.
+fn run_tpm_clients(action: ClientsAction) -> Result<()> {
+    use tenzro_node::tpm_clients;
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .map_err(|e| error::NodeError::Config(format!("{}: {e}", path.display())))
+    };
+    match action {
+        ClientsAction::List { config } => {
+            let clients = tpm_clients::list(&read(&config)?)?;
+            if clients.is_empty() {
+                println!("no clients enrolled in {}", config.display());
+            }
+            for c in &clients {
+                let key = c.passkey_public_key.trim_start_matches("0x");
+                println!(
+                    "label {}  rp_id {}  passkey {}…  derived {}",
+                    c.label,
+                    c.rp_id,
+                    &key[..16.min(key.len())],
+                    if c.derived { "yes" } else { "no" }
+                );
+            }
+            println!("\n{}", tpm_clients::FIELD_NOTES);
+            Ok(())
+        }
+        ClientsAction::Add {
+            config,
+            label,
+            rp_id,
+            registrations,
+            one_device,
+            derived,
+        } => {
+            let clients = registrations
+                .iter()
+                .map(|path| {
+                    Ok(tenzro_node::remote_tpm::ClientEntry {
+                        passkey_public_key: tpm_clients::passkey_from_registration(
+                            &read(path)?,
+                            &rp_id,
+                        )
+                        .map_err(|e| {
+                            error::NodeError::Config(format!("{}: {e}", path.display()))
+                        })?,
+                        rp_id: rp_id.clone(),
+                        label: label.clone(),
+                        derived,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            tpm_clients::write(
+                &config,
+                &tpm_clients::add(&read(&config)?, &clients, one_device)?,
+            )?;
+            println!(
+                "enrolled {} passkey(s) for {label:?} in {}; a running provider takes them within \
+                 seconds",
+                clients.len(),
+                config.display()
+            );
+            Ok(())
+        }
+        ClientsAction::Remove {
+            config,
+            label,
+            passkey_public_key,
+        } => {
+            let out = tpm_clients::remove(&read(&config)?, &label, passkey_public_key.as_deref())?;
+            tpm_clients::write(&config, &out)?;
+            println!(
+                "removed from {}; a running provider refuses the removed passkey within seconds",
+                config.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Whether an ONNX Runtime that cannot use this machine's accelerator stops
+/// a node with `roles` from starting: only when it serves models. Any other
+/// node starts and refuses each ONNX model with the cause, so nothing runs
+/// on the CPU in place of the GPU it found.
+fn onnx_refusal_stops_start(roles: &tenzro_types::RoleSet) -> bool {
+    roles.has(tenzro_types::NetworkRole::ModelProvider)
+}
+
+/// Whether `tenzro-node hardware` counts an ONNX refusal against starting.
+/// With the operator's roles (`--roles` or a config file) it decides as the
+/// node does at startup. Without them it cannot know the roles, and decides
+/// by the build: a GPU build whose ONNX Runtime cannot use the GPU is broken
+/// for the purpose it was taken for, while the CPU build on a GPU machine is
+/// the one taken for roles that serve no models (and installs and updates
+/// run this check without roles).
+#[cfg(feature = "inference")]
+fn onnx_refusal_counts(
+    flavour: tenzro_model::hardware_policy::BuildFlavour,
+    named_roles: Option<&tenzro_types::RoleSet>,
+) -> bool {
+    match named_roles {
+        Some(roles) => onnx_refusal_stops_start(roles),
+        None => flavour != tenzro_model::hardware_policy::BuildFlavour::Cpu,
+    }
+}
+
 /// `tenzro-node hardware`: the build flavour, the GPUs it can drive, the
 /// ONNX Runtime execution providers it will use, and the startup verdict.
-/// One `key: value` line each, so install scripts can read them.
+/// One `key: value` line each, so install scripts can read them. An ONNX
+/// refusal decides the verdict as [`onnx_refusal_counts`] says.
 #[cfg(not(feature = "inference"))]
-fn run_hardware(_config: &NodeConfig) -> Result<()> {
+fn run_hardware(_config: &NodeConfig, _roles_named: bool) -> Result<()> {
     // The light build drives no GPU and links no ONNX Runtime, so there is no
     // accelerator to check.
     println!("build: light");
@@ -1954,7 +2889,7 @@ fn run_hardware(_config: &NodeConfig) -> Result<()> {
 
 /// `tenzro-node hardware` for a build with the model engines.
 #[cfg(feature = "inference")]
-fn run_hardware(config: &NodeConfig) -> Result<()> {
+fn run_hardware(config: &NodeConfig, roles_named: bool) -> Result<()> {
     use tenzro_model::hardware_policy::{BuildFlavour, usable_accelerators};
     use tenzro_model::onnx_session;
     let flavour = BuildFlavour::current();
@@ -1991,6 +2926,15 @@ fn run_hardware(config: &NodeConfig) -> Result<()> {
         onnx.map(|_| ())
     } else {
         Ok(())
+    };
+    let onnx = match onnx {
+        Err(_) if !onnx_refusal_counts(flavour, roles_named.then_some(&config.roles)) => {
+            println!(
+                "onnx refusal: stops only a node that serves models; ONNX models are refused on this machine"
+            );
+            Ok(())
+        }
+        onnx => onnx,
     };
     let verdict = tenzro_model::hardware_policy::check_startup(flavour, gpus)
         .map_err(error::NodeError::Config)
@@ -2036,7 +2980,7 @@ fn run_access(args: AccessArgs) -> Result<()> {
         .data_dir
         .map(tenzro_types::paths::expand_tilde)
         .unwrap_or_else(tenzro_types::paths::default_data_dir);
-    std::fs::create_dir_all(&data_dir)?;
+    tenzro_node::single_instance::create_data_dir(&data_dir)?;
     let config_err = |e: String| error::NodeError::Config(e);
     let store = AccessPolicyStore::open(&data_dir).map_err(config_err)?;
     if args.page {
@@ -2127,6 +3071,41 @@ fn configure_tpm(config: &NodeConfig) -> Result<()> {
     Ok(())
 }
 
+fn run_enrol_client(
+    config: &std::path::Path,
+    passkey_public_key: &str,
+    rp_id: &str,
+    label: &str,
+    derived: bool,
+) -> Result<()> {
+    use tenzro_node::remote_tpm::{NewClient, Reload, enrol_client, reload_running};
+    let clients = enrol_client(
+        config,
+        &NewClient {
+            passkey_public_key,
+            rp_id,
+            label,
+            derived,
+        },
+    )?;
+    println!(
+        "Enrolled {label} in {} ({clients} client(s)).",
+        config.display()
+    );
+    match reload_running(config)? {
+        Reload::Signalled(pid) => println!(
+            "The provider running from this file (process {pid}) was told to take the new \
+             client; it needs no restart."
+        ),
+        Reload::NotRunning => println!(
+            "No provider is running from this file; the client is used when `tenzro-node tpm \
+             serve --config {}` starts.",
+            config.display()
+        ),
+    }
+    Ok(())
+}
+
 #[cfg(any(target_os = "linux", windows))]
 fn run_tpm_provision() -> Result<()> {
     use tenzro_device_key::tpm_provision::Slot;
@@ -2175,6 +3154,119 @@ fn run_tpm_provision() -> Result<()> {
     let account = tenzro_crypto::composite::HybridSigner::public_key(&wallet).account_slot();
     println!("{:<18} 0x{}", "node account", hex::encode(account));
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn run_tpm_handles() -> Result<()> {
+    use tenzro_device_key::tpm_provision::HandleOwner;
+    let handles = tenzro_device_key::tpm_provision::list_node_handles()
+        .map_err(|e| error::NodeError::Other(e.to_string()))?;
+    for h in &handles {
+        let owner = match h.owner {
+            HandleOwner::StorageRoot => "storage root",
+            HandleOwner::Attestation => "attestation key",
+            HandleOwner::ThisIdentity => "identity key of this process",
+            HandleOwner::OtherIdentity => "identity key of another namespace (deletable)",
+        };
+        println!("0x{:08x}  {owner}", h.handle);
+    }
+    if handles.is_empty() {
+        println!("no persistent handle made by this node");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn run_tpm_delete_handle(handle: &str) -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    let value = u32::from_str_radix(handle.trim_start_matches("0x"), 16)
+        .map_err(|_| error::NodeError::Config(format!("`{handle}` is not a hex TPM handle")))?;
+    if !std::io::stdin().is_terminal() {
+        return Err(error::NodeError::Config(
+            "deleting a TPM handle needs an operator at a terminal to confirm".into(),
+        ));
+    }
+    println!("This permanently deletes the key at 0x{value:08x} from the TPM.");
+    println!("Type the handle to confirm:");
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| error::NodeError::Other(e.to_string()))?;
+    let typed = line.trim().trim_start_matches("0x");
+    if u32::from_str_radix(typed, 16) != Ok(value) {
+        return Err(error::NodeError::Config(
+            "not confirmed; nothing deleted".into(),
+        ));
+    }
+    tenzro_device_key::tpm_provision::delete_node_handle(value)
+        .map_err(|e| error::NodeError::Other(e.to_string()))?;
+    println!("deleted 0x{value:08x}");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn run_tpm_handles() -> Result<()> {
+    run_tpm_provision()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn run_tpm_delete_handle(_handle: &str) -> Result<()> {
+    run_tpm_provision()
+}
+
+fn run_tpm_check(roots: &[PathBuf], out: Option<&std::path::Path>) -> Result<()> {
+    use tenzro_node::machine_conformance::{admissible, requirements};
+    let other = |e: String| error::NodeError::Other(e);
+    let pem = roots
+        .iter()
+        .map(|p| std::fs::read_to_string(p).map_err(|e| other(format!("{}: {e}", p.display()))))
+        .collect::<Result<Vec<String>>>()?;
+    let roots = tenzro_tee::tpm_attest::parse_roots(&pem).map_err(|e| other(e.to_string()))?;
+    let (did, attestation) =
+        tenzro_tee::tpm_attest::attest_local_machine(&[]).map_err(|e| other(e.to_string()))?;
+    let identity = tenzro_tee::hardware_identity::HardwareIdentity::collect();
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let grade = tenzro_tee::tpm_attest::endorsement_grade(&attestation, &roots, now);
+    let report = requirements(&did, &attestation, identity.sources(), &grade);
+    println!("{:<18} {did}", "machine DID");
+    for r in &report {
+        let state = match (r.met, r.required) {
+            (true, _) => "met",
+            (false, true) => "NOT MET",
+            (false, false) => "not met (reputation only)",
+        };
+        println!("{:<26} {state:<26} {}", r.id, r.detail);
+    }
+    if let Some(path) = out {
+        let json = serde_json::json!({
+            "did": did,
+            "evidence": attestation.evidence,
+            "nonce": hex::encode(&attestation.nonce),
+            "identifier_sources": identity.sources(),
+            "endorsement": grade.as_str(),
+            "requirements": report,
+        });
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&json).map_err(|e| other(e.to_string()))?,
+        )
+        .map_err(|e| other(format!("{}: {e}", path.display())))?;
+    }
+    if admissible(&report) {
+        Ok(())
+    } else {
+        Err(other(
+            "this machine does not meet every required requirement".into(),
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn run_tpm_check(_roots: &[PathBuf], _out: Option<&std::path::Path>) -> Result<()> {
+    Err(error::NodeError::Config(
+        "the TPM check needs a TPM 2.0 (Linux /dev/tpmrm0 or Windows TPM Base Services)".into(),
+    ))
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -2262,27 +3354,104 @@ async fn run_registry_undo(
     if !discard {
         return Ok(());
     }
-    if !yes {
-        return Err(error::NodeError::Config(
-            "--discard removes records and needs --yes".to_string(),
-        ));
-    }
     let tags: Vec<String> = if force {
         records.iter().map(|(t, _)| t.clone()).collect()
     } else {
         registry.unreadable_undo_tags()
     };
-    eprintln!(
-        "WARNING: discarding {} undo record(s) puts nothing back. The validator registry stays as the \
-         last run left it, which may include the changes of a block that never committed. \
-         Restoring from a snapshot is safer.",
-        tags.len()
-    );
+    let uncommitted = tags
+        .iter()
+        .filter(|t| {
+            event_loop::EventLoop::registry_tag_uncommitted(
+                t,
+                tip.map_or(0, |h| h.0),
+                None,
+                tip_epoch.unwrap_or(0),
+            )
+        })
+        .count();
+    eprintln!("{}", discard_consequence(tags.len(), uncommitted));
+    if !yes {
+        eprintln!("Type `{DISCARD_WORD}` to go on, or pass --yes:");
+        confirm_typed(DISCARD_WORD, &mut std::io::stdin().lock())?;
+    }
+    // The mark goes in first: a stop between the two steps leaves a node that
+    // refuses to start, never one that runs on an unmarked registry.
+    if uncommitted > 0 {
+        registry
+            .mark_unverified()
+            .map_err(error::NodeError::Other)?;
+    }
     let n = registry
         .discard_undo_tags(&tags)
         .map_err(error::NodeError::Other)?;
     println!("discarded {n} undo records");
     Ok(())
+}
+
+/// The word `registry-undo --discard` asks for.
+const DISCARD_WORD: &str = "discard";
+
+/// What discarding `count` undo records, `uncommitted` of them of a change
+/// that never committed, leads to.
+fn discard_consequence(count: usize, uncommitted: usize) -> String {
+    let mut text = format!(
+        "Discarding {count} undo record(s) puts nothing back: the validator registry stays as the \
+         last run left it."
+    );
+    if uncommitted > 0 {
+        text.push_str(&format!(
+            " {uncommitted} of them cover a block or epoch boundary that never committed, so the \
+             registry may keep that change. The node will then refuse to start unless the registry \
+             equals what the chain holds, replayed from its event log since the epoch's first block; \
+             where the event log does not reach back that far it must be restored from a snapshot \
+             (`tenzro-node restore`). A node that ran on such a \
+             registry would stop following the chain, or as a validator sign for another committee \
+             than the quorum, at the next epoch boundary."
+        ));
+    }
+    text
+}
+
+/// Reads one line from `input` and refuses unless it is `word`.
+fn confirm_typed(word: &str, input: &mut impl std::io::BufRead) -> Result<()> {
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    if line.trim() == word {
+        Ok(())
+    } else {
+        Err(error::NodeError::Config(format!(
+            "`{word}` was not typed: nothing was discarded"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod registry_undo_tests {
+    use super::{confirm_typed, discard_consequence};
+
+    #[test]
+    fn a_discard_goes_on_only_when_the_word_is_typed() {
+        confirm_typed("discard", &mut "discard\n".as_bytes()).unwrap();
+        assert!(confirm_typed("discard", &mut "yes\n".as_bytes()).is_err());
+        assert!(confirm_typed("discard", &mut "".as_bytes()).is_err());
+    }
+
+    #[test]
+    fn the_consequence_names_the_refusal_only_for_an_uncommitted_change() {
+        let harmless = discard_consequence(2, 0);
+        assert!(!harmless.contains("refuse to start"), "{harmless}");
+        let risky = discard_consequence(2, 1);
+        assert!(risky.contains("refuse to start"), "{risky}");
+        assert!(risky.contains("tenzro-node restore"), "{risky}");
+    }
+}
+
+fn read_genesis(path: &std::path::Path) -> Result<GenesisConfig> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| error::NodeError::Config(format!("Failed to read genesis file: {}", e)))?;
+    toml::from_str(&contents)
+        .map_err(|e| error::NodeError::Config(format!("Failed to parse genesis config: {}", e)))
 }
 
 fn hex32(s: &str, what: &str) -> Result<[u8; 32]> {
@@ -2296,7 +3465,7 @@ fn hex32(s: &str, what: &str) -> Result<[u8; 32]> {
 async fn run_restore(
     data_dir: Option<PathBuf>,
     snapshot: PathBuf,
-    anchor: tenzro_consensus::light_client::GenesisAnchor,
+    anchor: tenzro_light::TrustAnchor,
     proof_from: Option<String>,
     proof: Option<PathBuf>,
     handover_program: Option<[u8; 32]>,
@@ -2447,13 +3616,88 @@ fn run_init(data_dir: Option<PathBuf>, stake: u64, format: String) -> Result<()>
     Ok(())
 }
 
+fn run_identity_key(data_dir: Option<PathBuf>, version: u64) -> Result<()> {
+    if version == 0 {
+        return Err(error::NodeError::Other(
+            "key versions start at 1".to_string(),
+        ));
+    }
+    let data_dir = data_dir
+        .map(tenzro_types::paths::expand_tilde)
+        .unwrap_or_else(tenzro_types::paths::default_data_dir);
+    let keys = tenzro_keygen::NodeKeys::open(&data_dir)?;
+    let change = tenzro_node::root_signatures::identity_key_update(&keys, version)?;
+    println!("{}", serde_json::to_string_pretty(&change)?);
+    Ok(())
+}
+
 /// `tenzro-node graceful-exit` — call `tenzro_gracefulExit` on the
 /// running node's JSON-RPC. The RPC handler waits until this replica
 /// leads none of the rounds its schedule looks ahead over, then triggers
 /// the in-process `NodeEvent::Shutdown`. We print the JSON response and
 /// exit 0 if the call succeeded — actual process termination on the
 /// server is asynchronous (5s drain in `main()`).
-async fn run_graceful_exit(rpc_url: String, max_wait_secs: u64, force: bool) -> Result<()> {
+///
+/// The method is for the node's operator, so the command first signs in as
+/// this machine with its hardware identity key, the operator of a node whose
+/// config names no other, and presents the DPoP-bound token it is issued.
+/// A node whose `operator_did` names someone else is stopped by them: they
+/// sign in with `tenzro access sign-in` and call the method, or stop the
+/// service, which sends SIGTERM.
+async fn run_graceful_exit(
+    rpc_url: String,
+    max_wait_secs: u64,
+    force: bool,
+    config: &NodeConfig,
+    delegated: bool,
+) -> Result<()> {
+    use tenzro_auth::client::{DPOP_KEY_LABEL, DpopKey, KeyHolderDpopKey};
+    let other = |e: String| error::NodeError::Other(e);
+    // Opened, never created: a machine without its identity key is not the
+    // machine the node runs as, and a new key would sign in as nobody.
+    let identity = tenzro_device_key::signer::open(tenzro_types::did_derivation::MACHINE_KEY_LABEL)
+        .map_err(|e| other(format!("this machine's identity key: {e}")))?;
+    let did = tenzro_types::did_derivation::machine_did(
+        &identity
+            .public_key_sec1()
+            .map_err(|e| other(format!("this machine's identity key: {e}")))?,
+    );
+    if let Some(operator) = config
+        .operator_did
+        .as_deref()
+        .map(str::trim)
+        .filter(|o| !o.is_empty() && *o != did)
+    {
+        return Err(error::NodeError::Config(format!(
+            "this node's operator is {operator}, not this machine ({did}); graceful-exit signs in \
+             as the machine. The operator signs in with `tenzro access sign-in` and calls \
+             tenzro_gracefulExit, or the service is stopped, which sends SIGTERM"
+        )));
+    }
+    // A machine whose keys are in another machine's TPM proves with the key
+    // its key holder derives for DPoP: the holder signs with a TPM-resident
+    // key only messages in a Tenzro domain, which a DPoP proof never is.
+    let dpop_signer: Box<dyn tenzro_device_key::HardwareSigner> = if delegated {
+        Box::new(KeyHolderDpopKey::open().map_err(|e| other(e.to_string()))?)
+    } else {
+        tenzro_device_key::signer::open_or_create(DPOP_KEY_LABEL)
+            .map_err(|e| other(format!("no hardware key for DPoP: {e}")))?
+    };
+    let dpop = DpopKey::new(dpop_signer);
+    let http = tenzro_node::http_client::shared();
+    let signed = tenzro_auth::client::sign_in(
+        |method, params| {
+            let url = rpc_url.clone();
+            async move { json_rpc(http, &url, method, params).await }
+        },
+        identity.as_ref(),
+        &dpop,
+    )
+    .await
+    .map_err(|e| other(format!("signing in to {rpc_url} as {did}: {e}")))?;
+    let headers = tenzro_auth::client::authorization(&signed.access_token, &dpop, &rpc_url)
+        .map_err(|e| other(e.to_string()))?;
+
     let req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -2473,12 +3717,16 @@ async fn run_graceful_exit(rpc_url: String, max_wait_secs: u64, force: bool) -> 
 
     // The RPC handler blocks for up to `max_wait_secs` waiting for
     // leader rotation, so the HTTP timeout must comfortably exceed it.
-    let resp = tenzro_node::http_client::shared()
+    let mut request = http
         .post(&rpc_url)
         .timeout(std::time::Duration::from_secs(
             max_wait_secs.saturating_add(30),
         ))
-        .json(&req)
+        .json(&req);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| error::NodeError::Other(format!("RPC POST {}: {}", rpc_url, e)))?;
@@ -2514,6 +3762,91 @@ async fn run_graceful_exit(rpc_url: String, max_wait_secs: u64, force: bool) -> 
     );
     info!("graceful-exit accepted by node; process will exit after server drain");
     Ok(())
+}
+
+/// `tenzro-node volume measure`: measures the volume and prints, as JSON,
+/// the measurement and the classes it qualifies for under the deadlines the
+/// node's chain governs.
+async fn run_volume_measure(
+    dir: std::path::PathBuf,
+    sample_mib: u64,
+    reads: usize,
+    uplink_mbps: u64,
+    rpc_url: String,
+) -> Result<()> {
+    use tenzro_storage_provider::volume_probe;
+    let other = |e: String| error::NodeError::Other(e);
+    let http = reqwest::Client::new();
+    let mut classes = Vec::new();
+    for class in ["hot", "warm", "cold"] {
+        let key = format!("feature.storage_classes.{class}_deadline_ms");
+        let param = json_rpc(
+            &http,
+            &rpc_url,
+            "tenzro_getNetworkParams",
+            serde_json::json!({ "key": key }),
+        )
+        .await
+        .map_err(other)?;
+        let deadline = param["value"]
+            .as_str()
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(|| other(format!("{key}: the node answered no value")))?;
+        classes.push((class.to_string(), deadline));
+    }
+    let measured =
+        tokio::task::spawn_blocking(move || volume_probe::measure(&dir, sample_mib << 20, reads))
+            .await
+            .map_err(|e| other(e.to_string()))?
+            .map_err(|e| other(e.to_string()))?;
+    let uplink_bytes_per_s = uplink_mbps.saturating_mul(1_000_000) / 8;
+    let samples_param = json_rpc(
+        &http,
+        &rpc_url,
+        "tenzro_getNetworkParams",
+        serde_json::json!({ "key": tenzro_vm::native::compute_claim::POSSESSION_PROBE_SAMPLES_PARAM }),
+    )
+    .await
+    .map_err(other)?;
+    let samples = samples_param["value"]
+        .as_str()
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or_else(|| other("the node answered no possession sample count".to_string()))?;
+    let fits = volume_probe::propose(&measured, uplink_bytes_per_s, samples, &classes);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "volume": measured,
+            "uplink_bytes_per_s": uplink_bytes_per_s,
+            "probe_samples_per_object": samples,
+            "margin": volume_probe::PROPOSAL_MARGIN,
+            "classes": fits,
+        }))
+        .unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// One JSON-RPC call to `url`: its result, or the error the node answered.
+async fn json_rpc(
+    http: &reqwest::Client,
+    url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let body: serde_json::Value = http
+        .post(url)
+        .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
+        .send()
+        .await
+        .map_err(|e| format!("{method}: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("{method}: {e}"))?;
+    match body.get("error") {
+        Some(error) => Err(format!("{method}: {error}")),
+        None => Ok(body.get("result").cloned().unwrap_or_default()),
+    }
 }
 
 /// Initialize logging with the specified level and format
@@ -2567,6 +3900,179 @@ fn init_logging(log_level: &str, log_format: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Sends every panic to the log, at error, with what it said, where it was
+/// raised and the stack it was raised on. The stack is captured whether or
+/// not `RUST_BACKTRACE` is set, so a crash in a service started without it
+/// still names the functions it went through.
+fn log_panics() {
+    let last_stack = std::sync::atomic::AtomicI64::new(i64::MIN);
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "an unknown location".to_string());
+        let thread = std::thread::current();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        report_panic(
+            thread.name().unwrap_or("unnamed"),
+            &location,
+            panic_message(info.payload()),
+            &last_stack,
+            now_ms,
+        );
+    }));
+}
+
+/// Reports one panic: to the log at error once a log subscriber is in
+/// effect, to stderr before. The stack goes with it when [`stack_due`] says.
+fn report_panic(
+    thread: &str,
+    location: &str,
+    message: &str,
+    last_stack: &std::sync::atomic::AtomicI64,
+    now_ms: i64,
+) {
+    let stack = stack_due(last_stack, now_ms).then(std::backtrace::Backtrace::force_capture);
+    if !logging_is_set() {
+        eprintln!("panic in thread {thread} at {location}: {message}");
+        match &stack {
+            Some(stack) => eprintln!("{stack}"),
+            None => eprintln!(
+                "(stack omitted: one is captured at most every {}s)",
+                PANIC_STACK_SPACING_MS / 1000
+            ),
+        }
+        return;
+    }
+    match &stack {
+        Some(stack) => tracing::error!(
+            thread,
+            %location,
+            backtrace = %stack,
+            "panic: {message}"
+        ),
+        None => tracing::error!(
+            thread,
+            %location,
+            "panic: {message} (stack omitted: one is captured at most every {}s)",
+            PANIC_STACK_SPACING_MS / 1000
+        ),
+    }
+}
+
+/// Whether a log subscriber is in effect on this thread, the process-wide one
+/// or a scoped one: until there is, a log event goes nowhere.
+fn logging_is_set() -> bool {
+    tracing::dispatcher::get_default(|d| !d.is::<tracing::subscriber::NoSubscriber>())
+}
+
+/// Least time between two panics logged with their stack, ms. Some panics
+/// are raised on input from peers and caught, so a peer could otherwise make
+/// the node walk and log its stack once per message.
+const PANIC_STACK_SPACING_MS: i64 = 60_000;
+
+/// Whether a panic at `now_ms` is logged with its stack: the first one is,
+/// and then one per [`PANIC_STACK_SPACING_MS`]. `last` holds when the last
+/// stack was taken and is moved on by the panic that takes the next.
+fn stack_due(last: &std::sync::atomic::AtomicI64, now_ms: i64) -> bool {
+    use std::sync::atomic::Ordering;
+    let prev = last.load(Ordering::Relaxed);
+    if prev != i64::MIN && now_ms.saturating_sub(prev) < PANIC_STACK_SPACING_MS {
+        return false;
+    }
+    last.compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// What a panic said: the text of a `panic!`, or a note that its payload is
+/// not text.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a payload that is not text")
+}
+
+#[cfg(test)]
+mod panic_log_tests {
+    use super::{PANIC_STACK_SPACING_MS, panic_message, report_panic, stack_due};
+    use std::sync::atomic::AtomicI64;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A panic goes to the log with its message, and one within the spacing
+    /// of the last stack without its stack. The subscriber is scoped to this
+    /// thread and no hook is installed, so no other test sees either.
+    #[test]
+    fn a_panic_is_logged_and_stacks_are_rationed() {
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let last = AtomicI64::new(i64::MIN);
+        tracing::subscriber::with_default(subscriber, || {
+            report_panic("t", "here.rs:1:1", "first", &last, 1_000);
+            report_panic("t", "here.rs:2:1", "second", &last, 2_000);
+        });
+        let out = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(out.contains("panic: first"), "{out}");
+        assert!(out.contains("backtrace="), "{out}");
+        assert!(out.contains("panic: second"), "{out}");
+        assert!(out.contains("stack omitted"), "{out}");
+    }
+
+    /// Without a log subscriber in effect a panic is written to stderr; with
+    /// one, to the log. Both are scoped to this thread, so whatever another
+    /// test sets process-wide does not change the answer.
+    #[test]
+    fn a_panic_before_logging_is_set_goes_to_stderr() {
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            assert!(!super::logging_is_set())
+        });
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || assert!(super::logging_is_set()));
+    }
+
+    #[test]
+    fn a_stack_is_taken_at_most_once_per_spacing() {
+        let last = AtomicI64::new(i64::MIN);
+        assert!(stack_due(&last, 1_000));
+        assert!(!stack_due(&last, 1_000 + PANIC_STACK_SPACING_MS - 1));
+        assert!(stack_due(&last, 1_000 + PANIC_STACK_SPACING_MS));
+        assert!(!stack_due(&last, 1_001 + PANIC_STACK_SPACING_MS));
+    }
+
+    #[test]
+    fn a_panic_message_is_read_from_both_text_payloads() {
+        let literal = std::panic::catch_unwind(|| panic!("literal")).unwrap_err();
+        assert_eq!(panic_message(literal.as_ref()), "literal");
+        let n = 7;
+        let formatted = std::panic::catch_unwind(|| panic!("formatted {n}")).unwrap_err();
+        assert_eq!(panic_message(formatted.as_ref()), "formatted 7");
+        let other = std::panic::catch_unwind(|| std::panic::panic_any(7u8)).unwrap_err();
+        assert_eq!(panic_message(other.as_ref()), "a payload that is not text");
+    }
 }
 
 /// The node config file as a raw TOML table, when one is given and parses.
@@ -2840,12 +4346,7 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     }
 
     if let Some(genesis_path) = &cli.genesis {
-        let contents = std::fs::read_to_string(genesis_path)
-            .map_err(|e| error::NodeError::Config(format!("Failed to read genesis file: {}", e)))?;
-        let genesis: GenesisConfig = toml::from_str(&contents).map_err(|e| {
-            error::NodeError::Config(format!("Failed to parse genesis config: {}", e))
-        })?;
-        config.genesis = Some(genesis);
+        config.genesis = Some(read_genesis(genesis_path)?);
     }
 
     // A node given no `--boot-nodes` joins through the network profile the
@@ -2957,6 +4458,31 @@ fn apply_listen_overrides(config: &mut NodeConfig, cli: &Cli) {
             *addr = a.clone();
         }
     }
+    if let Some(port) = cli.iroh_bind_port {
+        config.iroh.bind_addr.set_port(port);
+    }
+}
+
+/// Moves the data directory's chain store to `db.replaced-<unix seconds>`
+/// beside it, so a snapshot join starts on an empty store and the old one can
+/// be moved back. Returns where it went, or `None` when there was no store.
+fn move_store_aside(data_dir: &Path) -> Result<Option<(PathBuf, PathBuf)>> {
+    let db = data_dir.join("db");
+    if !db.exists() {
+        return Ok(None);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let aside = data_dir.join(format!("db.replaced-{stamp}"));
+    std::fs::rename(&db, &aside).map_err(|e| {
+        error::NodeError::Other(format!(
+            "--replace-store: moving {} to {}: {e}",
+            db.display(),
+            aside.display()
+        ))
+    })?;
+    Ok(Some((db, aside)))
 }
 
 /// Parse a comma-separated roles string into a `RoleSet`.
@@ -2977,6 +4503,30 @@ fn parse_state_sync_peers<'a>(
 
 #[cfg(test)]
 mod state_sync_peer_tests {
+    #[test]
+    fn replace_store_moves_the_store_aside_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            move_store_aside(dir.path()).unwrap().is_none(),
+            "no store, nothing moved"
+        );
+        std::fs::create_dir(dir.path().join("db")).unwrap();
+        std::fs::write(dir.path().join("db").join("CURRENT"), b"chain").unwrap();
+        let (db, aside) = move_store_aside(dir.path()).unwrap().expect("store moved");
+        assert!(
+            !db.exists(),
+            "the live store path is free for the fresh store"
+        );
+        assert_eq!(std::fs::read(aside.join("CURRENT")).unwrap(), b"chain");
+        assert!(
+            aside
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("db.replaced-")
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -2994,6 +4544,87 @@ mod state_sync_peer_tests {
         ed25519_dalek::SigningKey::from_bytes(&seed)
             .verifying_key()
             .to_bytes()
+    }
+}
+
+/// The weak-subjectivity checkpoint this node starts from, as height, block
+/// hash and where the pair was read: the command line when it gives both, or
+/// else the genesis `[weak_subjectivity]` block. The source is named in the
+/// start log, so an operator sees which of the two the node trusts. Half a
+/// pair is refused: falling back to the genesis checkpoint would trust one
+/// the operator did not name.
+fn weak_subjectivity_checkpoint(
+    cli_hash: Option<&str>,
+    cli_height: Option<u64>,
+    genesis: Option<&tenzro_node::config::WeakSubjectivityAnchor>,
+) -> Result<Option<(u64, [u8; 32], &'static str)>> {
+    match (cli_hash, cli_height, genesis) {
+        (Some(hash_hex), Some(height), _) => Ok(Some((
+            height,
+            parse_hash32(hash_hex, "--checkpoint-hash")?,
+            "--checkpoint-height and --checkpoint-hash",
+        ))),
+        (Some(_), None, _) => Err(error::NodeError::Config(
+            "--checkpoint-hash needs --checkpoint-height".to_string(),
+        )),
+        (None, Some(_), _) => Err(error::NodeError::Config(
+            "--checkpoint-height needs --checkpoint-hash".to_string(),
+        )),
+        (None, None, Some(ws)) => Ok(Some((
+            ws.height,
+            parse_hash32(
+                &ws.block_hash_hex,
+                "genesis weak_subjectivity.block_hash_hex",
+            )?,
+            "genesis [weak_subjectivity]",
+        ))),
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod weak_subjectivity_checkpoint_tests {
+    use super::*;
+
+    /// The command line's pair stands over the genesis block's, and each is
+    /// reported with where it was read.
+    #[test]
+    fn the_checkpoint_names_its_source() {
+        let genesis = tenzro_node::config::WeakSubjectivityAnchor {
+            height: 7,
+            block_hash_hex: hex::encode([7u8; 32]),
+        };
+        let cli_hash = format!("0x{}", hex::encode([9u8; 32]));
+        assert_eq!(
+            weak_subjectivity_checkpoint(Some(&cli_hash), Some(9), Some(&genesis)).unwrap(),
+            Some((9, [9; 32], "--checkpoint-height and --checkpoint-hash"))
+        );
+        assert_eq!(
+            weak_subjectivity_checkpoint(None, None, Some(&genesis)).unwrap(),
+            Some((7, [7; 32], "genesis [weak_subjectivity]"))
+        );
+        // Half a pair is refused, never filled in from the genesis.
+        let refused = |r: Result<Option<(u64, [u8; 32], &str)>>| {
+            r.expect_err("half a checkpoint was accepted").to_string()
+        };
+        assert!(
+            refused(weak_subjectivity_checkpoint(
+                Some(&cli_hash),
+                None,
+                Some(&genesis)
+            ))
+            .contains("--checkpoint-hash needs --checkpoint-height")
+        );
+        assert!(
+            refused(weak_subjectivity_checkpoint(None, Some(9), Some(&genesis)))
+                .contains("--checkpoint-height needs --checkpoint-hash")
+        );
+        assert!(weak_subjectivity_checkpoint(None, Some(9), None).is_err());
+        assert_eq!(
+            weak_subjectivity_checkpoint(None, None, None).unwrap(),
+            None
+        );
+        assert!(weak_subjectivity_checkpoint(Some("zz"), Some(1), None).is_err());
     }
 }
 
@@ -3034,7 +4665,7 @@ fn print_banner() {
 ║      ██║   ███████╗██║ ╚████║███████╗██║  ██║╚██████╔╝   ║
 ║      ╚═╝   ╚══════╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝    ║
 ║                                                            ║
-║        AI-Native Agentic Tokenized Settlement Layer       ║
+║          Compute of every kind, settled in TNZO           ║
 "#
     );
     println!("║{}{}{}║", " ".repeat(pad_l), version, " ".repeat(pad_r));
@@ -3109,6 +4740,52 @@ mod listen_override_tests {
         );
     }
 
+    /// `--iroh-bind-port` names the port the iroh endpoint binds and leaves
+    /// the rest of its address alone; without it the configured one stays.
+    #[test]
+    fn the_iroh_bind_port_flag_sets_only_the_port() {
+        let mut config = config_with_own_listeners();
+        let ip = config.iroh.bind_addr.ip();
+        let before = config.iroh.bind_addr.port();
+        let cli = Cli::try_parse_from(["tenzro-node"]).unwrap();
+        apply_listen_overrides(&mut config, &cli);
+        assert_eq!(config.iroh.bind_addr.port(), before);
+        let cli = Cli::try_parse_from(["tenzro-node", "--iroh-bind-port", "9101"]).unwrap();
+        apply_listen_overrides(&mut config, &cli);
+        assert_eq!(
+            (config.iroh.bind_addr.ip(), config.iroh.bind_addr.port()),
+            (ip, 9101)
+        );
+    }
+
+    /// A blocking task still running when the node is done does not hold the
+    /// process: the runtime ends within the grace, not when the task does.
+    #[test]
+    fn a_blocking_task_does_not_hold_the_process_past_the_grace() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let out = run_to_end(
+            runtime,
+            async {
+                tokio::task::spawn_blocking(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(30))
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                7
+            },
+            std::time::Duration::from_millis(300),
+        );
+        assert_eq!(out, 7);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "ended after {:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn a_listen_flag_replaces_only_its_own_address() {
         let cli = Cli::try_parse_from(["tenzro-node", "--mcp-addr", "127.0.0.1:4001"]).unwrap();
@@ -3179,5 +4856,145 @@ mod dev_genesis_namespace_tests {
             hex::encode(account),
             "the dev genesis bonds another account than this node's machine account under namespace {namespace}"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod key_holder_tests {
+    //! The key holder listens on a Unix socket, so these run on Unix only.
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> (Cli, Command) {
+        let mut cli = Cli::try_parse_from(args).unwrap();
+        let cmd = cli.command.take().expect("a subcommand");
+        (cli, cmd)
+    }
+
+    /// A one-off subcommand on a machine whose key is held elsewhere opens
+    /// its keys through the key holder, before it runs.
+    #[test]
+    fn a_one_off_subcommand_opens_its_keys_through_the_key_holder() {
+        let (cli, cmd) = parse(&[
+            "tenzro-node",
+            "--tpm-key-holder",
+            "/nonexistent/holder.sock",
+            "--tpm-label",
+            "edge",
+            "validator-entry",
+            "--stake",
+            "1",
+        ]);
+        assert!(subcommand_key_holder(&cli, &cmd).unwrap());
+        assert!(tenzro_node::identity_bootstrap::remote_tpm_configured());
+    }
+
+    /// A key holder named without its label is refused, not ignored.
+    #[test]
+    fn a_key_holder_without_a_label_is_refused() {
+        let (cli, cmd) = parse(&[
+            "tenzro-node",
+            "--tpm-key-holder",
+            "/nonexistent/holder.sock",
+            "validator-entry",
+            "--stake",
+            "1",
+        ]);
+        assert!(subcommand_key_holder(&cli, &cmd).is_err());
+    }
+
+    /// The `tpm` subcommands address a key holder themselves; the global
+    /// flags do not install one under them.
+    #[test]
+    fn tpm_subcommands_leave_the_key_holder_to_themselves() {
+        let (cli, cmd) = parse(&[
+            "tenzro-node",
+            "--tpm-key-holder",
+            "/nonexistent/holder.sock",
+            "--tpm-label",
+            "edge",
+            "tpm",
+            "remote-check",
+            "--key-holder",
+            "/nonexistent/holder.sock",
+            "--label",
+            "edge",
+        ]);
+        assert!(!subcommand_key_holder(&cli, &cmd).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod onnx_refusal_tests {
+    use super::*;
+    use tenzro_types::{NetworkRole, RoleSet};
+
+    #[test]
+    fn only_a_node_that_serves_models_is_stopped_by_an_onnx_runtime_that_cannot_use_the_gpu() {
+        for r in NetworkRole::ALL {
+            let alone = RoleSet::from_roles([r]);
+            assert_eq!(
+                onnx_refusal_stops_start(&alone),
+                r == NetworkRole::ModelProvider,
+                "{r:?}"
+            );
+            let with_models = RoleSet::from_roles([r, NetworkRole::ModelProvider]);
+            assert!(
+                onnx_refusal_stops_start(&with_models),
+                "{r:?} with ModelProvider"
+            );
+        }
+        // A CPU build on an NVIDIA machine runs the validator, rpc and light roles.
+        let roles = RoleSet::from_roles([
+            NetworkRole::Validator,
+            NetworkRole::Rpc,
+            NetworkRole::LightClient,
+        ]);
+        assert!(!onnx_refusal_stops_start(&roles));
+    }
+
+    #[cfg(feature = "inference")]
+    #[test]
+    fn the_hardware_check_without_roles_holds_a_gpu_build_to_its_gpu_and_not_the_cpu_build() {
+        use tenzro_model::hardware_policy::BuildFlavour;
+        assert!(!onnx_refusal_counts(BuildFlavour::Cpu, None));
+        assert!(onnx_refusal_counts(BuildFlavour::Cuda, None));
+        let models = RoleSet::from_roles([NetworkRole::ModelProvider]);
+        let validator = RoleSet::from_roles([NetworkRole::Validator]);
+        for flavour in [BuildFlavour::Cpu, BuildFlavour::Cuda] {
+            assert!(onnx_refusal_counts(flavour, Some(&models)), "{flavour:?}");
+            assert!(
+                !onnx_refusal_counts(flavour, Some(&validator)),
+                "{flavour:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod embedded_cli_tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_embedded_node_runs_the_node_in_the_apps_own_directory() {
+        let cli = embedded_cli(args(&[
+            "--data-dir",
+            "/data/user/0/app/files/node",
+            "--roles",
+            "light",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cli.data_dir.as_deref(),
+            Some(std::path::Path::new("/data/user/0/app/files/node"))
+        );
+        // A subcommand, a missing data directory or an unknown flag is refused.
+        assert!(embedded_cli(args(&["--data-dir", "/d", "hardware"])).is_err());
+        assert!(embedded_cli(args(&["--roles", "light"])).is_err());
+        assert!(embedded_cli(args(&["--data-dir", "/d", "--no-such-flag"])).is_err());
     }
 }

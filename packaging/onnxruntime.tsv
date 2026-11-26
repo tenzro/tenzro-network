@@ -1,0 +1,24 @@
+# The ONNX Runtime the builds link, pinned by hash: version 1.31.0, the archives ort-sys 2.0.0-rc.15 itself selects
+# Checked 24 Nov 2026: the newest ONNX Runtime is 1.32.0 (16-17 Nov; 1.31.1 on 26 Oct is a patch for an OpenVINO Python build and WASM tests, no effect here). It is not pinned: the newest ort crate is 2.0.0-rc.15 (19 Oct 2026, github.com/pykeio/ort), which selects 1.31.0 and has not been built against 1.32.0; a bump needs an ort release that selects it.
+# (its build/download/dist.tsv). Per target, the first row is the build with no execution provider asked for: the
+# plain build on Linux, DirectML on Windows, CoreML on Apple silicon. A ROCm build (praecise-onnx/rocm asks for
+# MIGraphX) takes the migraphx row, a CUDA build (Dockerfile.cuda, Windows CUDA) its cuda13 row. Each archive is a
+# raw LZMA2 tar of flat files:
+# the static library, and the provider and DirectML libraries it loads at run time from the binary's folder.
+# scripts/release/fetch-onnxruntime.py fetches one, refuses any other hash, and unpacks it to the directory
+# ORT_LIB_LOCATION names. Intel macOS has no prebuilt runtime and loads one at run time. scripts/build-cuda-native.sh
+# links a runtime the operator built for the host.
+# The cuda13 CUDA provider carries SASS only (no PTX): aarch64 for sm_87, sm_90, sm_100, sm_110, sm_121; x86_64 for
+# sm_75, sm_80 (also runs on sm_86 and sm_89), sm_90, sm_120. An x86_64 GPU of another architecture (B200, sm_100)
+# has no CUDA provider from it. Both link TensorRT 10 (libnvinfer.so.10), cuDNN 9 and CUDA 13.
+# Upstream (github.com/microsoft/onnxruntime) no longer exists, so there is no upstream release to hash: these are the
+# archives ort-sys 2.0.0-rc.15 downloads, with the SHA-256 ort-sys itself pins, checked again here.
+version	1.31.0
+x86_64-unknown-linux-gnu	none	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-unknown-linux-gnu.tar.lzma2	02aac0d3b4927026292088986d7a377c657c88761b1c068be217a67b35447678
+x86_64-unknown-linux-gnu	migraphx	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-unknown-linux-gnu+migraphx.tar.lzma2	c48b89b76646c4ff15df9e75428cffaf9a990f8c1f6b164f2a3e6fb94c6b7abd
+x86_64-unknown-linux-gnu	cuda13,tensorrt,nvrtx	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-unknown-linux-gnu+cuda13,tensorrt,nvrtx.tar.lzma2	535872087d5a5921aad090fdb46c65bb11c4c50b900dfcf6657ad3d5c465986f
+aarch64-unknown-linux-gnu	none	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/aarch64-unknown-linux-gnu.tar.lzma2	380c1b63eedf5671e7b39e4aa0f6c377ecc351c3a7b01ae708a707e73fb54709
+aarch64-unknown-linux-gnu	cuda13,tensorrt,nvrtx	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/aarch64-unknown-linux-gnu+cuda13,tensorrt,nvrtx.tar.lzma2	40c6f87b145b1fbe7df73f92c5ef3cbb886c6a45133ac1a3bd5177987ef72c75
+aarch64-apple-darwin	coreml	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/aarch64-apple-darwin+coreml.tar.lzma2	4033efca0e6c1606bd2ec3870d4cb19d0dba0ad0160dbfb616e66cae969ed68c
+x86_64-pc-windows-msvc	directml	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-pc-windows-msvc+directml.tar.lzma2	f99aaef23f12986abb05924c944d8433521263ad756b462df762a5a982c98405
+x86_64-pc-windows-msvc	cuda13,tensorrt,nvrtx,directml	https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-pc-windows-msvc+cuda13,tensorrt,nvrtx,directml.tar.lzma2	3a0095001aa415a0cb7a56f847bd85764fccd8f20147abedc18994893a49776d

@@ -11,7 +11,8 @@ use tenzro_types::training_verification::{TrainingReceipt, training_receipt_slot
 
 use crate::eu_ai_act::{RegisteredKeyFields, registered_key};
 use crate::evidence_pack::check_record;
-use crate::light_client::{Certification, GenesisAnchor};
+use tenzro_light::TrustAnchor;
+use tenzro_light::light_client::Certification;
 
 /// The part of a round's record the check reads.
 #[derive(Deserialize)]
@@ -53,7 +54,7 @@ pub struct ProvenanceReport {
 /// [`verify_provenance_under_root`] holds for it.
 pub fn verify_provenance<F>(
     pack: &TrainingProvenancePack,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     handover_program: Option<[u8; 32]>,
     verify_receipt: F,
 ) -> Result<ProvenanceReport, String>

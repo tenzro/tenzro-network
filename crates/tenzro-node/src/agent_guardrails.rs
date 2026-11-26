@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tenzro_identity::DelegationEntry;
+use tenzro_payments::terms_gate::TAINT_HOLD_MS;
 use tenzro_types::agent_terms::{AgentAction, Exposure, check_scope, check_trifecta};
 
 use crate::node::TenzroNode;
@@ -32,7 +33,6 @@ pub(crate) const MODEL_METHODS: &[&str] = &[
     "tenzro_inference",
     "tenzro_generate",
     "tenzro_textEmbed",
-    "tenzro_chatByIntent",
 ];
 
 /// What a delegated agent's keyed request proposes.
@@ -129,14 +129,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// How long after the last untrusted input reached an agent its actions
-/// count as deriving from it.
-pub(crate) const TAINT_HOLD_MS: u64 = 3_600_000;
-
 /// Where untrusted input last reached an agent on this node.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TaintLabel {
-    /// What brought it in: an operation, or the sender of a message.
+    /// The operation that brought it in.
     pub source: String,
     /// When it last arrived, unix ms.
     pub at_ms: u64,
@@ -226,6 +222,188 @@ impl TaintBook {
     }
 }
 
+/// A request refused to a delegated agent: the rule that stopped it, for
+/// the node's metrics, and the reason given to the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refused {
+    /// One of `status` (revoked, quarantined or paused), `expiry`,
+    /// `serving_node`, `intent`, `event_filter`, `exposure`, `step_up` or
+    /// `terms`.
+    pub(crate) reason: &'static str,
+    pub(crate) why: String,
+}
+
+/// A refusal under `reason` with the message it came with.
+pub(crate) fn refused(reason: &'static str) -> impl Fn(String) -> Refused {
+    move |why| Refused { reason, why }
+}
+
+/// Most delegated agents whose spend the node reports; past it the agent
+/// served longest ago gives way.
+const MAX_REPORTED_AGENTS: usize = 4096;
+
+/// Counts of what the node refused its delegated agents and of the untrusted
+/// input that reached them, since the node started.
+#[derive(Default)]
+pub(crate) struct GuardrailCounters {
+    refusals: parking_lot::Mutex<std::collections::BTreeMap<&'static str, u64>>,
+    taints: parking_lot::Mutex<std::collections::BTreeMap<String, u64>>,
+    /// Delegated agents whose requests this node has checked, at most
+    /// [`MAX_REPORTED_AGENTS`].
+    agents: parking_lot::Mutex<ServedAgents>,
+}
+
+/// Agents in the order they were last served: each agent's latest serve
+/// number, and the agents by that number, so serving one again and letting
+/// the longest-unserved go both cost a map update, not a scan.
+#[derive(Default)]
+struct ServedAgents {
+    next: u64,
+    by_did: std::collections::HashMap<String, u64>,
+    by_order: std::collections::BTreeMap<u64, String>,
+}
+
+impl ServedAgents {
+    fn serve(&mut self, did: &str) {
+        let order = self.next;
+        self.next += 1;
+        if let Some(previous) = self.by_did.get_mut(did) {
+            let name = self.by_order.remove(previous).expect("indexed both ways");
+            *previous = order;
+            self.by_order.insert(order, name);
+            return;
+        }
+        if self.by_did.len() == MAX_REPORTED_AGENTS
+            && let Some((_, oldest)) = self.by_order.pop_first()
+        {
+            self.by_did.remove(&oldest);
+        }
+        self.by_did.insert(did.to_string(), order);
+        self.by_order.insert(order, did.to_string());
+    }
+
+    /// The agents, longest-unserved first.
+    fn iter(&self) -> impl Iterator<Item = &String> {
+        self.by_order.values()
+    }
+}
+
+/// The share of its daily spend limit an agent has used, as a band; agents
+/// are counted by band and never named.
+fn spend_band(spent: u128, cap: Option<u128>) -> &'static str {
+    let Some(cap) = cap else {
+        return "uncapped";
+    };
+    if spent >= cap {
+        "at_limit"
+    } else if spent >= cap - cap / 5 {
+        "from_80_percent"
+    } else if spent >= cap / 2 {
+        "from_50_percent"
+    } else {
+        "under_50_percent"
+    }
+}
+
+impl GuardrailCounters {
+    fn refused(&self, reason: &'static str) {
+        *self.refusals.lock().entry(reason).or_default() += 1;
+    }
+
+    fn tainted(&self, source: &str) {
+        *self
+            .taints
+            .lock()
+            .entry(source.to_ascii_lowercase())
+            .or_default() += 1;
+    }
+
+    fn served(&self, did: &str) {
+        self.agents.lock().serve(did);
+    }
+
+    /// Both counters in Prometheus text format.
+    fn encode_prometheus(&self, out: &mut String) {
+        out.push_str(
+            "# HELP tenzro_agent_refusals_total Requests refused to delegated agents, by the \
+             rule that stopped them\n",
+        );
+        out.push_str("# TYPE tenzro_agent_refusals_total counter\n");
+        for (reason, n) in self.refusals.lock().iter() {
+            out.push_str(&format!(
+                "tenzro_agent_refusals_total{{reason=\"{reason}\"}} {n}\n"
+            ));
+        }
+        out.push('\n');
+        out.push_str(
+            "# HELP tenzro_agent_taint_events_total Times untrusted input reached a delegated \
+             agent, by the operation that brought it in\n",
+        );
+        out.push_str("# TYPE tenzro_agent_taint_events_total counter\n");
+        for (source, n) in self.taints.lock().iter() {
+            out.push_str(&format!(
+                "tenzro_agent_taint_events_total{{source=\"{source}\"}} {n}\n"
+            ));
+        }
+        out.push('\n');
+    }
+}
+
+fn counters() -> &'static GuardrailCounters {
+    static COUNTERS: std::sync::OnceLock<GuardrailCounters> = std::sync::OnceLock::new();
+    COUNTERS.get_or_init(Default::default)
+}
+
+/// Counts `checked` under its rule when it is a refusal, and hands back the
+/// reason given to the caller.
+pub(crate) fn counted(checked: Result<(), Refused>) -> Result<(), String> {
+    checked.map_err(|r| {
+        counters().refused(r.reason);
+        r.why
+    })
+}
+
+/// The agent refusal and taint counters in Prometheus text format.
+pub(crate) fn encode_prometheus(out: &mut String) {
+    counters().encode_prometheus(out);
+}
+
+/// How many of the delegated agents this node has served since it started
+/// sit in each band of their daily spend limit, in Prometheus text format.
+/// Spend and limit are read from chain state at the time of the call.
+pub(crate) fn encode_spend_prometheus(node: &TenzroNode, out: &mut String) {
+    let Some(chain) = crate::rpc::chain_state_of(node) else {
+        return;
+    };
+    let now = now_ms();
+    let mut bands = std::collections::BTreeMap::new();
+    let served: Vec<String> = counters().agents.lock().iter().cloned().collect();
+    for did in &served {
+        let Some(stored) = tenzro_vm::native::read_agent_terms(&chain, did) else {
+            continue;
+        };
+        let cap = stored
+            .terms
+            .delegation_scope
+            .max_daily_spend
+            .as_deref()
+            .and_then(|v| v.parse::<u128>().ok());
+        let spent = tenzro_vm::native::read_agent_spent(&chain, did, now);
+        *bands.entry(spend_band(spent, cap)).or_insert(0u64) += 1;
+    }
+    out.push_str(
+        "# HELP tenzro_agent_daily_spend_agents Delegated agents served since start, by the \
+         share of their daily spend limit used\n",
+    );
+    out.push_str("# TYPE tenzro_agent_daily_spend_agents gauge\n");
+    for (band, n) in bands {
+        out.push_str(&format!(
+            "tenzro_agent_daily_spend_agents{{used=\"{band}\"}} {n}\n"
+        ));
+    }
+    out.push('\n');
+}
+
 fn taint() -> &'static TaintBook {
     static LABELS: std::sync::OnceLock<TaintBook> = std::sync::OnceLock::new();
     LABELS.get_or_init(Default::default)
@@ -239,6 +417,7 @@ pub(crate) fn attach_taint_store(store: Arc<dyn tenzro_storage::KvStore>) {
 
 fn label(did: &str, source: String, at_ms: u64) {
     tracing::info!(target: "agent_guardrails", agent = %did, %source, "untrusted input reached the agent");
+    counters().tainted(&source);
     taint().set(did, source, at_ms);
 }
 
@@ -260,11 +439,12 @@ pub(crate) fn check_operation(
     did: &str,
     operation: &str,
     model: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), Refused> {
     let Some(stored) = chain_terms(node, did) else {
         return Ok(());
     };
-    let refused = crate::rpc::chain_state_of(node)
+    counters().served(did);
+    let refusal = crate::rpc::chain_state_of(node)
         .and_then(|chain| {
             tenzro_vm::native::check_agent_status(
                 &chain,
@@ -273,14 +453,22 @@ pub(crate) fn check_operation(
             )
             .err()
         })
+        .map(refused("status"))
         .or_else(|| check_agent(node, did).err())
         .or_else(|| {
             check_scope(&stored.terms, &proposal(did, operation, model), now_ms())
                 .err()
-                .map(|d| format!("outside the agent's approved terms: {d}"))
+                .map(|d| Refused {
+                    reason: if d.starts_with("step-up required") {
+                        "step_up"
+                    } else {
+                        "terms"
+                    },
+                    why: format!("outside the agent's approved terms: {d}"),
+                })
         });
-    match refused {
-        Some(why) => Err(why),
+    match refusal {
+        Some(r) => Err(r),
         None => {
             if Exposure::of_operation(operation).untrusted_input {
                 label(did, operation.to_string(), now_ms());
@@ -299,11 +487,11 @@ pub(crate) fn check_bearer_intent(
     node: &TenzroNode,
     did: &str,
     intent: Option<&tenzro_auth::AuthorityRequest>,
-) -> Result<(), String> {
+) -> Result<(), Refused> {
     if chain_terms(node, did).is_none() {
         return Ok(());
     }
-    match bearer_proposal(intent)? {
+    match bearer_proposal(intent).map_err(refused("intent"))? {
         Proposal::Operation { operation, model } => check_operation(node, did, operation, model),
         _ => check_agent(node, did),
     }
@@ -372,7 +560,7 @@ fn grant_entries(node: &TenzroNode) -> Vec<DelegationEntry> {
 /// Refuse a delegated agent whose terms and grants together hold all three
 /// exposures without the controller's exception. Agents with no terms on
 /// chain pass.
-pub(crate) fn check_agent(node: &TenzroNode, did: &str) -> Result<(), String> {
+pub(crate) fn check_agent(node: &TenzroNode, did: &str) -> Result<(), Refused> {
     let Some(stored) = chain_terms(node, did) else {
         return Ok(());
     };
@@ -380,7 +568,8 @@ pub(crate) fn check_agent(node: &TenzroNode, did: &str) -> Result<(), String> {
         .terms
         .exposure()
         .with(grants_exposure(&grant_entries(node), did));
-    check_trifecta(exposure, stored.terms.trifecta_exception).map_err(str::to_string)
+    check_trifecta(exposure, stored.terms.trifecta_exception)
+        .map_err(|why| refused("exposure")(why.to_string()))
 }
 
 /// Refuse a machine-access grant to `grantee` with `resources` that would give
@@ -532,6 +721,106 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn an_agent_is_placed_by_the_share_of_its_daily_limit_it_has_used() {
+        assert_eq!(spend_band(0, None), "uncapped");
+        assert_eq!(spend_band(u128::MAX, None), "uncapped");
+        assert_eq!(spend_band(0, Some(100)), "under_50_percent");
+        assert_eq!(spend_band(49, Some(100)), "under_50_percent");
+        assert_eq!(spend_band(50, Some(100)), "from_50_percent");
+        assert_eq!(spend_band(79, Some(100)), "from_50_percent");
+        assert_eq!(spend_band(80, Some(100)), "from_80_percent");
+        assert_eq!(spend_band(99, Some(100)), "from_80_percent");
+        assert_eq!(spend_band(100, Some(100)), "at_limit");
+        assert_eq!(spend_band(101, Some(100)), "at_limit");
+        assert_eq!(spend_band(0, Some(0)), "at_limit");
+        let big = u128::MAX;
+        assert_eq!(spend_band(big - 1, Some(big)), "from_80_percent");
+        assert_eq!(spend_band(big / 2 - 1, Some(big)), "under_50_percent");
+    }
+
+    #[test]
+    fn refusals_and_taint_events_are_counted_by_the_rule_and_the_source() {
+        let c = GuardrailCounters::default();
+        for reason in ["status", "expiry", "terms", "terms", "step_up", "exposure"] {
+            c.refused(reason);
+        }
+        c.tainted("fetch");
+        c.tainted("Fetch");
+        c.tainted("browse");
+
+        let mut out = String::new();
+        c.encode_prometheus(&mut out);
+        for line in [
+            "# TYPE tenzro_agent_refusals_total counter",
+            "tenzro_agent_refusals_total{reason=\"status\"} 1",
+            "tenzro_agent_refusals_total{reason=\"expiry\"} 1",
+            "tenzro_agent_refusals_total{reason=\"terms\"} 2",
+            "tenzro_agent_refusals_total{reason=\"step_up\"} 1",
+            "tenzro_agent_refusals_total{reason=\"exposure\"} 1",
+            "# TYPE tenzro_agent_taint_events_total counter",
+            "tenzro_agent_taint_events_total{source=\"fetch\"} 2",
+            "tenzro_agent_taint_events_total{source=\"browse\"} 1",
+        ] {
+            assert!(out.lines().any(|l| l == line), "missing {line} in\n{out}");
+        }
+    }
+
+    /// The count follows the rule that refused, whatever the message says:
+    /// a message that reads like another rule is counted under its own.
+    #[test]
+    fn a_refusal_is_counted_under_its_rule_and_its_message_handed_back() {
+        let read = |name: &str| {
+            let mut out = String::new();
+            encode_prometheus(&mut out);
+            out.lines()
+                .find_map(|l| l.strip_prefix(name))
+                .map_or(0, |n| n.trim().parse::<u64>().unwrap())
+        };
+        let intent = "tenzro_agent_refusals_total{reason=\"intent\"}";
+        let status = "tenzro_agent_refusals_total{reason=\"status\"}";
+        let tainted = "tenzro_agent_taint_events_total{source=\"web_search\"}";
+        let (i0, s0, t0) = (read(intent), read(status), read(tainted));
+
+        assert_eq!(counted(Ok(())), Ok(()));
+        let why = "did:tenzro:machine:counted is quarantined".to_string();
+        assert_eq!(counted(Err(refused("intent")(why.clone()))), Err(why));
+        label("did:tenzro:machine:counted", "web_search".into(), 1_000);
+
+        assert_eq!(read(intent), i0 + 1);
+        assert_eq!(read(status), s0, "not counted by what the message says");
+        assert_eq!(read(tainted), t0 + 1);
+    }
+
+    #[test]
+    fn the_agents_reported_are_bounded_and_the_most_recent_kept() {
+        let c = GuardrailCounters::default();
+        for n in 0..MAX_REPORTED_AGENTS + 10 {
+            c.served(&format!("did:tenzro:machine:{n}"));
+        }
+        // Serving an agent again moves it to the back rather than adding it.
+        c.served("did:tenzro:machine:20");
+        let agents = c.agents.lock();
+        assert_eq!(agents.by_did.len(), MAX_REPORTED_AGENTS);
+        assert_eq!(
+            agents.iter().next().map(String::as_str),
+            Some("did:tenzro:machine:10")
+        );
+        assert_eq!(
+            agents.iter().last().map(String::as_str),
+            Some("did:tenzro:machine:20")
+        );
+        assert_eq!(agents.by_order.len(), MAX_REPORTED_AGENTS);
+        assert_eq!(
+            agents
+                .iter()
+                .filter(|d| *d == "did:tenzro:machine:20")
+                .count(),
+            1
+        );
+        assert!(!agents.iter().any(|d| d == "did:tenzro:machine:9"));
     }
 
     #[test]

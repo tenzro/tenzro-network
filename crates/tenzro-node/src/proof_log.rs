@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tenzro_consensus::committee::Committee;
-use tenzro_consensus::light_client::{
-    Certification, EpochHandover, GenesisAnchor, HandoverChainJournal,
-};
 use tenzro_consensus::{Certificate, Checkpoint, Member, SessionCertificate};
+use tenzro_light::TrustAnchor;
+use tenzro_light::light_client::{Certification, EpochHandover, HandoverChainJournal};
 
 use crate::consensus_driver::ConsensusHandle;
 use crate::error::{NodeError, Result};
@@ -26,7 +25,7 @@ const INDEX: &str = "handovers.len";
 const CHAIN: &str = "chain.bin";
 
 /// The bytes a proof written from an installed chain proof starts with: a
-/// [`tenzro_consensus::light_client::ChainedCheckpointProof`] follows. A
+/// [`tenzro_light::light_client::ChainedCheckpointProof`] follows. A
 /// proof from genesis never starts with them (its first eight bytes count
 /// the genesis members).
 pub const CHAINED_PROOF_TAG: [u8; 8] = *b"TZCHAIN1";
@@ -354,7 +353,7 @@ impl ProofLog {
     }
 }
 
-pub use tenzro_consensus::light_client::ChainSegment;
+pub use tenzro_light::light_client::ChainSegment;
 
 /// Writes what a prover needs to extend the chain proof by `segment`'s
 /// handovers, as `tenzro-finality-prover handover` reads it: `genesis-root`
@@ -399,6 +398,21 @@ pub fn write_prover_inputs(segment: &ChainSegment, out: &Path) -> Result<Vec<u64
     Ok(epochs)
 }
 
+/// `certification` as the proof log writes a proof, the bytes
+/// [`crate::storage_maintenance::decode_proof`] reads back.
+pub fn encode_proof(certification: &Certification) -> Vec<u8> {
+    match certification {
+        Certification::FromGenesis(proof) => {
+            bincode::serialize(proof).expect("a checkpoint proof serialises")
+        }
+        Certification::Chained(proof) => {
+            let mut out = CHAINED_PROOF_TAG.to_vec();
+            out.extend(bincode::serialize(proof).expect("a chained proof serialises"));
+            out
+        }
+    }
+}
+
 /// The certification of checkpoint `index`: from genesis while consensus
 /// still holds every handover before it, otherwise from the proof log's
 /// chain proof and the handovers since. `None` when neither holds it.
@@ -425,7 +439,7 @@ pub fn certification(
 /// by the zkVM receipt verifier.
 pub fn verify_certification(
     certification: &Certification,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     program: Option<[u8; 32]>,
 ) -> std::result::Result<Checkpoint, String> {
     certification
@@ -437,7 +451,7 @@ pub fn verify_certification(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_consensus::light_client::{ChainedCheckpointProof, CheckpointProof};
+    use tenzro_light::light_client::{ChainedCheckpointProof, CheckpointProof};
 
     fn certificate(epoch: u64, index: u64) -> Certificate {
         Certificate {

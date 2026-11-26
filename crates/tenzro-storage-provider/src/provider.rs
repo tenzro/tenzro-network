@@ -18,12 +18,14 @@
 //! # Source of truth
 //!
 //! Like the iroh stores it wraps, [`StorageProvider`] is a node-local actor.
-//! The on-chain settlement state (per-byte metering, payment) is owned by
-//! [`crate::metering`]; durable cross-node placement is owned by
+//! Payment is a compute claim in consensus state, priced per hour by the
+//! provider who writes it and settled hour by hour on retrievability
+//! verdicts; durable cross-node placement is owned by
 //! [`crate::redundancy`] descriptors anchored on-chain. This type only handles
 //! the local accept/serve loop and an in-memory descriptor index.
 
 use crate::error::{Result, StorageProviderError};
+use crate::pdp::ShardRef;
 use crate::redundancy::{self, RedundancyScheme, Shard};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -68,22 +70,6 @@ impl ObjectDescriptor {
     pub fn shard_count(&self) -> usize {
         self.shards.len()
     }
-}
-
-/// A reference to one stored shard: where to fetch it and how to verify it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShardRef {
-    /// Index in `0..n` (matches [`Shard::index`]).
-    pub index: usize,
-    /// Content-addressed URI the shard bytes were published under.
-    pub uri: String,
-    /// Hex SHA-256 commitment of the shard bytes.
-    pub commitment: String,
-    /// Hex Merkle root over the shard's [`crate::pdp::CHUNK_SIZE`] chunks;
-    /// possession challenges are checked against it.
-    pub chunk_root: String,
-    /// Number of chunks under `chunk_root`.
-    pub chunk_count: u64,
 }
 
 /// Node-local storage provider over an iroh transport.

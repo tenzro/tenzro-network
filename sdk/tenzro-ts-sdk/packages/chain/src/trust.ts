@@ -111,14 +111,19 @@ export class TrustClient {
     return this.rpc.call<T>("tenzro_commitChallengeVote", params);
   }
 
-  /** `tenzro_fileInferenceChallenge`. */
-  fileInferenceChallenge<T = unknown>(params: { challenger?: unknown; commitment_hash?: unknown; reason?: unknown } = {}): Promise<T> {
+  /** `tenzro_fileInferenceChallenge`: files a challenge with the provider's signed receipt and the inputs it commits to (`{kind: "prompt", prompt}` or `{kind: "chat", messages, render: {tools, enable_thinking, reasoning_effort}, media}`); `commitment` when the node did not serve the response. */
+  fileInferenceChallenge<T = unknown>(params: { challenger?: unknown; commitment_hash?: unknown; reason?: unknown; receipt?: unknown; inputs?: unknown; commitment?: unknown } = {}): Promise<T> {
     return this.rpc.call<T>("tenzro_fileInferenceChallenge", params);
   }
 
   /** `tenzro_finalizeChallenge`. */
   finalizeChallenge<T = unknown>(params: { challenge_id?: unknown } = {}): Promise<T> {
     return this.rpc.call<T>("tenzro_finalizeChallenge", params);
+  }
+
+  /** `tenzro_fileChallengeFault` (operator only): take a challenge its committee upheld to the chain; `dispute` is `{ receipt, request, output }`. */
+  fileChallengeFault<T = unknown>(params: { challenge_id?: unknown; dispute?: unknown } = {}): Promise<T> {
+    return this.rpc.call<T>("tenzro_fileChallengeFault", params);
   }
 
   /** `tenzro_registerKeyRelease`: register a model's key-release policy: a KeyRelease transaction signed by the account that owns the policy. */
@@ -215,13 +220,28 @@ export class TrustClient {
     return this.rpc.call<T>("tenzro_scanModelFiles", params);
   }
 
-  /** `tenzro_signChallengeVote` (operator only). */
-  signChallengeVote<T = unknown>(params: { challenge_id?: unknown; commit_hash?: unknown; salt?: unknown; verdict?: unknown } = {}): Promise<T> {
+  /** `tenzro_signChallengeVote` (operator only): signs a commit or a reveal of the verdict this node's own re-execution found. */
+  signChallengeVote<T = unknown>(params: { phase?: "commit" | "reveal"; challenge_id?: unknown; salt?: unknown; verdict?: unknown } = {}): Promise<T> {
     return this.rpc.call<T>("tenzro_signChallengeVote", params);
   }
 
+  /** `tenzro_reexecuteChallenge` (operator only): on a seat's own node, re-executes the challenged inputs and records the verdict it may then sign. */
+  reexecuteChallenge<T = unknown>(params: { challenge_id?: unknown; inputs?: unknown } = {}): Promise<T> {
+    return this.rpc.call<T>("tenzro_reexecuteChallenge", params);
+  }
+
+  /** `tenzro_listSeatDuties` (operator only): the open challenges this node holds a seat on. */
+  listSeatDuties<T = unknown>(): Promise<T> {
+    return this.rpc.call<T>("tenzro_listSeatDuties", {});
+  }
+
+  /** `tenzro_getChallengeInputs`: the challenged inputs, served to a drawn seat that signed for them. */
+  getChallengeInputs<T = unknown>(params: { challenge_id?: unknown; voter?: unknown; requested_at?: unknown; signature?: unknown } = {}): Promise<T> {
+    return this.rpc.call<T>("tenzro_getChallengeInputs", params);
+  }
+
   /** `tenzro_verifyInferenceCommitment`. */
-  verifyInferenceCommitment<T = unknown>(params: { commitment_hash?: unknown; prompt?: unknown; receipt?: unknown } = {}): Promise<T> {
+  verifyInferenceCommitment<T = unknown>(params: { commitment_hash?: unknown; prompt?: unknown; request?: unknown; receipt?: unknown; commitment?: unknown; receipt_nonce?: unknown } = {}): Promise<T> {
     return this.rpc.call<T>("tenzro_verifyInferenceCommitment", params);
   }
 

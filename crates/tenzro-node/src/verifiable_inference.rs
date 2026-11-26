@@ -104,7 +104,7 @@ pub(crate) fn admit(
     if crate::identity_bootstrap::machine_did().is_none() {
         return Err(unavailable("its machine has no hardware identity"));
     }
-    if catalog_identity(model_id).is_none() {
+    if catalog_identity(&node.catalog(), model_id).is_none() {
         return Err(unavailable("the catalog states no identity for the model"));
     }
     if level == VerificationLevel::Tee && node.tee_provider().is_none() {
@@ -160,6 +160,39 @@ pub fn offered_levels(node: &TenzroNode) -> Vec<VerificationLevel> {
         levels.push(VerificationLevel::Tee);
     }
     levels
+}
+
+/// The name an announcement gives confidential-compute hardware of `vendor`.
+/// `nvidia-gpu` is a GPU in confidential mode attested together with the
+/// confidential VM it is attached to; every other name is the processor
+/// alone, whose report says nothing about an accelerator's memory.
+pub fn tee_vendor_name(vendor: tenzro_types::tee::TeeVendor) -> &'static str {
+    use tenzro_types::tee::TeeVendor as V;
+    match vendor {
+        V::IntelSGX => "intel-sgx",
+        V::IntelTdx => "intel-tdx",
+        V::AMDSEV => "amd-sev",
+        V::AmdSevSnp => "amd-sev-snp",
+        V::ARMTrustZone => "arm-trustzone",
+        V::AWSNitro | V::AwsNitro => "aws-nitro",
+        V::NvidiaGpu => "nvidia-gpu",
+        V::Generic => "generic",
+    }
+}
+
+/// The trust profile a provider announcement carries: what roots the node's
+/// identity, and the confidential-compute hardware its `tee`-level answers
+/// are attested by. A consumer routes `tee` only to an announcement that
+/// names that hardware ([`routable_levels`]), so a node that has it names it.
+pub fn announced_trust_profile(
+    identity_root: String,
+    tee: Option<tenzro_types::tee::TeeVendor>,
+) -> tenzro_types::TrustProfile {
+    tenzro_types::TrustProfile {
+        identity_root,
+        tee_vendor: tee.map(tee_vendor_name).unwrap_or_default().to_string(),
+        ..Default::default()
+    }
 }
 
 /// The levels a consumer routes to a provider at: those it announced that the
@@ -237,19 +270,6 @@ pub fn surcharge_bps(node: &TenzroNode, level: VerificationLevel) -> u64 {
         .unwrap_or_else(|| tenzro_vm::governance::genesis_param(key))
 }
 
-/// Carry the intent's `verification` into routing: the level, its governed
-/// surcharge, and the levels this node itself serves at for candidates from
-/// its own catalog.
-pub(crate) fn apply_to_intent(
-    node: &TenzroNode,
-    intent: tenzro_model::routing::intent::RouteIntent,
-    params: &Value,
-) -> Result<tenzro_model::routing::intent::RouteIntent, JsonRpcError> {
-    let level = level_param(params.get("verification"))?;
-    governed_open(node, level)?;
-    Ok(intent.with_verification(level, surcharge_bps(node, level), offered_levels(node)))
-}
-
 /// `cost` with the surcharge for `level` added.
 pub fn priced(cost: u128, surcharge_bps: u64) -> u128 {
     cost.saturating_add(cost.saturating_mul(surcharge_bps as u128) / 10_000)
@@ -297,8 +317,8 @@ pub(crate) fn check_answer(
         .filter(|v| !v.is_null())
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .ok_or("the provider returned no receipt")?;
-    let identity =
-        expected_identity(model_id).ok_or("the catalog states no identity for the model")?;
+    let identity = expected_identity(&node.catalog(), model_id)
+        .ok_or("the catalog states no identity for the model")?;
     receipt
         .verify_signature(pinned)
         .map_err(|e| e.to_string())?;
@@ -356,8 +376,19 @@ pub(crate) fn handle_verify_receipt(
         .and_then(|v| {
             serde_json::from_value(v).map_err(|e| bad(format!("receipt does not parse: {e}")))
         })?;
-    if let Err(e) = receipt.verify_against_catalog() {
+    if let Err(e) = receipt.verify_against_catalog(&node.catalog()) {
         return Ok(json!({ "valid": false, "error": e.to_string() }));
+    }
+    // What the chain holds against the signature: the signer's own
+    // revocation of the batch the receipt was signed in.
+    if let Some(state) = crate::rpc::chain_state_of(node)
+        && let Err(e @ ReceiptError::SignatureRevoked(at)) = receipt.check_not_revoked(&state)
+    {
+        return Ok(json!({
+            "valid": false,
+            "error": e.to_string(),
+            "signature_revoked_at_ms": at,
+        }));
     }
     let tee = match (&receipt.tee, level) {
         (None, VerificationLevel::Tee) => {
@@ -415,6 +446,31 @@ mod tests {
         assert!(routable_levels(&all, "", true, 1).contains(&L::Optimistic));
         // Nothing announced, nothing but none.
         assert_eq!(routable_levels(&[], "intel-tdx", true, 1), vec![L::None]);
+    }
+
+    #[test]
+    fn a_node_with_confidential_hardware_announces_it_and_is_routed_tee() {
+        use VerificationLevel as L;
+        use tenzro_types::tee::TeeVendor as V;
+        let offered = [L::None, L::Receipt, L::Tee];
+        for (vendor, name) in [
+            (V::IntelTdx, "intel-tdx"),
+            (V::AmdSevSnp, "amd-sev-snp"),
+            (V::AwsNitro, "aws-nitro"),
+            (V::NvidiaGpu, "nvidia-gpu"),
+        ] {
+            let profile = announced_trust_profile("tpm".to_string(), Some(vendor));
+            assert_eq!(profile.tee_vendor, name);
+            assert_eq!(profile.identity_root, "tpm");
+            assert!(
+                routable_levels(&offered, &profile.tee_vendor, false, 0).contains(&L::Tee),
+                "{name}"
+            );
+        }
+        // No such hardware: nothing is named and `tee` is not routed.
+        let none = announced_trust_profile("tpm".to_string(), None);
+        assert!(none.tee_vendor.is_empty());
+        assert!(!routable_levels(&offered, &none.tee_vendor, false, 0).contains(&L::Tee));
     }
 
     #[test]

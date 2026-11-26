@@ -57,10 +57,7 @@ impl fmt::Display for VmType {
 pub enum EventType {
     NewBlock,
     BlockFinalized,
-    BlockReorged,
-    NewPendingTransaction,
     TransactionIncluded,
-    TransactionFinalized,
     Log,
     Transfer,
     NftTransfer,
@@ -78,14 +75,14 @@ pub enum EventType {
     AgentMessage,
     SettlementCompleted,
     PaymentChannelUpdate,
-    StakeDeposited,
-    StakeWithdrawn,
-    ValidatorSlashed,
     ProposalCreated,
     VoteCast,
     BridgeTransferInitiated,
     BridgeTransferCompleted,
     SyncProgress,
+    ConditionOpened,
+    ConditionCleared,
+    ConditionAnswered,
 }
 
 impl fmt::Display for EventType {
@@ -99,10 +96,7 @@ pub fn event_type_static_name(et: EventType) -> &'static str {
     match et {
         EventType::NewBlock => "NewBlock",
         EventType::BlockFinalized => "BlockFinalized",
-        EventType::BlockReorged => "BlockReorged",
-        EventType::NewPendingTransaction => "NewPendingTransaction",
         EventType::TransactionIncluded => "TransactionIncluded",
-        EventType::TransactionFinalized => "TransactionFinalized",
         EventType::Log => "Log",
         EventType::Transfer => "Transfer",
         EventType::NftTransfer => "NftTransfer",
@@ -120,14 +114,14 @@ pub fn event_type_static_name(et: EventType) -> &'static str {
         EventType::AgentMessage => "AgentMessage",
         EventType::SettlementCompleted => "SettlementCompleted",
         EventType::PaymentChannelUpdate => "PaymentChannelUpdate",
-        EventType::StakeDeposited => "StakeDeposited",
-        EventType::StakeWithdrawn => "StakeWithdrawn",
-        EventType::ValidatorSlashed => "ValidatorSlashed",
         EventType::ProposalCreated => "ProposalCreated",
         EventType::VoteCast => "VoteCast",
         EventType::BridgeTransferInitiated => "BridgeTransferInitiated",
         EventType::BridgeTransferCompleted => "BridgeTransferCompleted",
         EventType::SyncProgress => "SyncProgress",
+        EventType::ConditionOpened => "ConditionOpened",
+        EventType::ConditionCleared => "ConditionCleared",
+        EventType::ConditionAnswered => "ConditionAnswered",
     }
 }
 
@@ -160,25 +154,7 @@ pub enum TenzroEvent {
     /// A block has reached finality.
     BlockFinalized { block_hash: [u8; 32], height: u64 },
 
-    /// A previously-included block was removed during a chain reorganization.
-    BlockReorged {
-        block_hash: [u8; 32],
-        height: u64,
-        /// New canonical block hash that replaced the reorged block.
-        new_block_hash: [u8; 32],
-    },
-
     // -- Transaction lifecycle -----------------------------------------------
-    /// A transaction entered the mempool.
-    NewPendingTransaction {
-        tx_hash: [u8; 32],
-        from: [u8; 20],
-        to: Option<[u8; 20]>,
-        #[serde(with = "u128_str")]
-        value: u128,
-        nonce: u64,
-    },
-
     /// A transaction was included in a block.
     TransactionIncluded {
         tx_hash: [u8; 32],
@@ -187,13 +163,6 @@ pub enum TenzroEvent {
         index: u32,
         gas_used: u64,
         success: bool,
-    },
-
-    /// A transaction's block reached finality.
-    TransactionFinalized {
-        tx_hash: [u8; 32],
-        block_hash: [u8; 32],
-        block_height: u64,
     },
 
     // -- EVM Logs (EIP-7708 compliant) ---------------------------------------
@@ -371,33 +340,6 @@ pub enum TenzroEvent {
         status: String,
     },
 
-    // -- Staking -------------------------------------------------------------
-    /// TNZO tokens were staked by a validator or provider.
-    StakeDeposited {
-        staker: [u8; 20],
-        #[serde(with = "u128_str")]
-        amount: u128,
-        role: String,
-        tx_hash: [u8; 32],
-    },
-
-    /// TNZO tokens were unstaked (unbonding initiated).
-    StakeWithdrawn {
-        staker: [u8; 20],
-        #[serde(with = "u128_str")]
-        amount: u128,
-        tx_hash: [u8; 32],
-    },
-
-    /// A validator was slashed for equivocation or misbehaviour.
-    ValidatorSlashed {
-        validator: [u8; 20],
-        #[serde(with = "u128_str")]
-        amount: u128,
-        reason: String,
-        evidence_hash: [u8; 32],
-    },
-
     // -- Governance ----------------------------------------------------------
     /// A governance proposal was created.
     ProposalCreated {
@@ -447,6 +389,47 @@ pub enum TenzroEvent {
         /// Progress percentage 0..100
         percent: u8,
     },
+
+    // -- Node conditions -----------------------------------------------------
+    /// Something on this node began to need its operator's attention.
+    ConditionOpened {
+        /// The condition's id, the same for as long as it stays open.
+        id: String,
+        /// What the condition is about.
+        kind: String,
+        /// Which finding of that kind.
+        code: String,
+        /// `info`, `warning` or `critical`.
+        severity: String,
+        /// One line for a person.
+        summary: String,
+    },
+    /// A condition that was open no longer holds.
+    ConditionCleared {
+        /// The id the condition had while it was open.
+        id: String,
+        /// What the condition was about.
+        kind: String,
+        /// Which finding of that kind.
+        code: String,
+        /// `info`, `warning` or `critical`.
+        severity: String,
+        /// One line for a person.
+        summary: String,
+    },
+    /// The operator answered an open condition.
+    ConditionAnswered {
+        /// The condition's id.
+        id: String,
+        /// What the condition is about.
+        kind: String,
+        /// `approved`, `declined` or `acknowledged`.
+        answer: String,
+        /// The DID of the caller that answered, when it signed in.
+        by: Option<String>,
+        /// One line for a person.
+        summary: String,
+    },
 }
 
 impl TenzroEvent {
@@ -455,10 +438,7 @@ impl TenzroEvent {
         match self {
             TenzroEvent::NewBlock { .. } => EventType::NewBlock,
             TenzroEvent::BlockFinalized { .. } => EventType::BlockFinalized,
-            TenzroEvent::BlockReorged { .. } => EventType::BlockReorged,
-            TenzroEvent::NewPendingTransaction { .. } => EventType::NewPendingTransaction,
             TenzroEvent::TransactionIncluded { .. } => EventType::TransactionIncluded,
-            TenzroEvent::TransactionFinalized { .. } => EventType::TransactionFinalized,
             TenzroEvent::Log { .. } => EventType::Log,
             TenzroEvent::Transfer { .. } => EventType::Transfer,
             TenzroEvent::NftTransfer { .. } => EventType::NftTransfer,
@@ -476,14 +456,14 @@ impl TenzroEvent {
             TenzroEvent::AgentMessage { .. } => EventType::AgentMessage,
             TenzroEvent::SettlementCompleted { .. } => EventType::SettlementCompleted,
             TenzroEvent::PaymentChannelUpdate { .. } => EventType::PaymentChannelUpdate,
-            TenzroEvent::StakeDeposited { .. } => EventType::StakeDeposited,
-            TenzroEvent::StakeWithdrawn { .. } => EventType::StakeWithdrawn,
-            TenzroEvent::ValidatorSlashed { .. } => EventType::ValidatorSlashed,
             TenzroEvent::ProposalCreated { .. } => EventType::ProposalCreated,
             TenzroEvent::VoteCast { .. } => EventType::VoteCast,
             TenzroEvent::BridgeTransferInitiated { .. } => EventType::BridgeTransferInitiated,
             TenzroEvent::BridgeTransferCompleted { .. } => EventType::BridgeTransferCompleted,
             TenzroEvent::SyncProgress { .. } => EventType::SyncProgress,
+            TenzroEvent::ConditionOpened { .. } => EventType::ConditionOpened,
+            TenzroEvent::ConditionCleared { .. } => EventType::ConditionCleared,
+            TenzroEvent::ConditionAnswered { .. } => EventType::ConditionAnswered,
         }
     }
 
@@ -549,12 +529,6 @@ impl fmt::Display for TenzroEvent {
             TenzroEvent::BlockFinalized { height, .. } => {
                 write!(f, "BlockFinalized height={}", height)
             }
-            TenzroEvent::BlockReorged { height, .. } => {
-                write!(f, "BlockReorged height={}", height)
-            }
-            TenzroEvent::NewPendingTransaction { nonce, value, .. } => {
-                write!(f, "NewPendingTx nonce={} value={}", nonce, value)
-            }
             TenzroEvent::TransactionIncluded {
                 block_height,
                 index,
@@ -566,9 +540,6 @@ impl fmt::Display for TenzroEvent {
                     "TxIncluded block={} idx={} ok={}",
                     block_height, index, success
                 )
-            }
-            TenzroEvent::TransactionFinalized { block_height, .. } => {
-                write!(f, "TxFinalized block={}", block_height)
             }
             TenzroEvent::Log {
                 address,
@@ -736,15 +707,6 @@ impl fmt::Display for TenzroEvent {
                     channel_id, status
                 )
             }
-            TenzroEvent::StakeDeposited { amount, role, .. } => {
-                write!(f, "StakeDeposited amount={} role={}", amount, role)
-            }
-            TenzroEvent::StakeWithdrawn { amount, .. } => {
-                write!(f, "StakeWithdrawn amount={}", amount)
-            }
-            TenzroEvent::ValidatorSlashed { amount, reason, .. } => {
-                write!(f, "ValidatorSlashed amount={} reason={}", amount, reason)
-            }
             TenzroEvent::ProposalCreated {
                 proposal_id, title, ..
             } => {
@@ -796,6 +758,29 @@ impl fmt::Display for TenzroEvent {
                     "SyncProgress {}/{} ({}%)",
                     current_block, highest_block, percent
                 )
+            }
+            TenzroEvent::ConditionOpened {
+                id,
+                severity,
+                summary,
+                ..
+            } => {
+                write!(
+                    f,
+                    "ConditionOpened id={} severity={}: {}",
+                    id, severity, summary
+                )
+            }
+            TenzroEvent::ConditionCleared { id, summary, .. } => {
+                write!(f, "ConditionCleared id={}: {}", id, summary)
+            }
+            TenzroEvent::ConditionAnswered {
+                id,
+                answer,
+                summary,
+                ..
+            } => {
+                write!(f, "ConditionAnswered id={} {}: {}", id, answer, summary)
             }
         }
     }
@@ -987,13 +972,6 @@ impl EventFilter {
     fn event_addresses(&self, event: &TenzroEvent) -> Vec<[u8; 20]> {
         match event {
             TenzroEvent::NewBlock { proposer, .. } => vec![*proposer],
-            TenzroEvent::NewPendingTransaction { from, to, .. } => {
-                let mut v = vec![*from];
-                if let Some(t) = to {
-                    v.push(*t);
-                }
-                v
-            }
             TenzroEvent::Log { address, .. } => vec![*address],
             TenzroEvent::Transfer { from, to, .. } => vec![*from, *to],
             TenzroEvent::NftTransfer { from, to, .. } => vec![*from, *to],
@@ -1007,9 +985,6 @@ impl EventFilter {
             } => {
                 vec![*sender, *receiver]
             }
-            TenzroEvent::StakeDeposited { staker, .. } => vec![*staker],
-            TenzroEvent::StakeWithdrawn { staker, .. } => vec![*staker],
-            TenzroEvent::ValidatorSlashed { validator, .. } => vec![*validator],
             TenzroEvent::ProposalCreated { proposer, .. } => vec![*proposer],
             TenzroEvent::VoteCast { voter, .. } => vec![*voter],
             TenzroEvent::BridgeTransferInitiated { sender, .. } => vec![*sender],
@@ -1273,10 +1248,7 @@ mod tests {
         let all = vec![
             EventType::NewBlock,
             EventType::BlockFinalized,
-            EventType::BlockReorged,
-            EventType::NewPendingTransaction,
             EventType::TransactionIncluded,
-            EventType::TransactionFinalized,
             EventType::Log,
             EventType::Transfer,
             EventType::NftTransfer,
@@ -1294,20 +1266,20 @@ mod tests {
             EventType::AgentMessage,
             EventType::SettlementCompleted,
             EventType::PaymentChannelUpdate,
-            EventType::StakeDeposited,
-            EventType::StakeWithdrawn,
-            EventType::ValidatorSlashed,
             EventType::ProposalCreated,
             EventType::VoteCast,
             EventType::BridgeTransferInitiated,
             EventType::BridgeTransferCompleted,
             EventType::SyncProgress,
+            EventType::ConditionOpened,
+            EventType::ConditionCleared,
+            EventType::ConditionAnswered,
         ];
         for et in &all {
             let name = event_type_static_name(*et);
             assert!(!name.is_empty(), "Empty name for {:?}", et);
         }
-        assert_eq!(all.len(), 31);
+        assert_eq!(all.len(), 28);
     }
 
     struct Reader {
@@ -1683,5 +1655,55 @@ mod tests {
     fn test_event_type_display() {
         assert_eq!(format!("{}", EventType::NewBlock), "NewBlock");
         assert_eq!(format!("{}", EventType::SyncProgress), "SyncProgress");
+    }
+
+    #[test]
+    fn a_condition_event_names_its_change_and_carries_its_summary() {
+        let opened = TenzroEvent::ConditionOpened {
+            id: "follow".into(),
+            kind: "follow".into(),
+            code: "no_progress".into(),
+            severity: "critical".into(),
+            summary: "This node is not following the network".into(),
+        };
+        assert_eq!(opened.event_type(), EventType::ConditionOpened);
+        assert_eq!(opened.resource(), None);
+        let json = serde_json::to_value(&opened).unwrap();
+        assert_eq!(json["type"], "condition_opened");
+        assert_eq!(json["summary"], "This node is not following the network");
+        assert_eq!(
+            opened.to_string(),
+            "ConditionOpened id=follow severity=critical: This node is not following the network"
+        );
+
+        let cleared = TenzroEvent::ConditionCleared {
+            id: "follow".into(),
+            kind: "follow".into(),
+            code: "no_progress".into(),
+            severity: "critical".into(),
+            summary: "Cleared: This node is not following the network".into(),
+        };
+        assert_eq!(cleared.event_type(), EventType::ConditionCleared);
+        assert_eq!(
+            serde_json::to_value(&cleared).unwrap()["type"],
+            "condition_cleared"
+        );
+
+        let answered = TenzroEvent::ConditionAnswered {
+            id: "update:0.2.9".into(),
+            kind: "update".into(),
+            answer: "declined".into(),
+            by: Some("did:tenzro:human:operator".into()),
+            summary: "Declined: Update 0.2.9 is ready".into(),
+        };
+        assert_eq!(answered.event_type(), EventType::ConditionAnswered);
+        assert_eq!(answered.resource(), None);
+        let json = serde_json::to_value(&answered).unwrap();
+        assert_eq!(json["type"], "condition_answered");
+        assert_eq!(json["by"], "did:tenzro:human:operator");
+        assert_eq!(
+            answered.to_string(),
+            "ConditionAnswered id=update:0.2.9 declined: Declined: Update 0.2.9 is ready"
+        );
     }
 }

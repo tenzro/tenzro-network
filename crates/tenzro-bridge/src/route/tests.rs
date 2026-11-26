@@ -1470,6 +1470,7 @@ mod ccip_lane_versions {
     use super::super::evm::{
         Field, abi_array, abi_bytes, abi_tuple, onramp_log_matches, read_onramp_message,
     };
+    use super::super::finality::WAIT_FOR_FINALITY;
     use super::*;
 
     const MAINNET: &str = include_str!("../../tests/fixtures/ccip/mainnet_onramp_logs.json");
@@ -1647,6 +1648,16 @@ mod ccip_lane_versions {
 
     /// A `2.0.0` event for a transfer of `amount` to [`RECIPIENT`] on `route`.
     fn body_2_0(route: &BridgeRoute, seq: u64, amount: u128) -> Vec<u8> {
+        body_2_0_at(route, seq, amount, WAIT_FOR_FINALITY)
+    }
+
+    /// [`body_2_0`] with the sender asking for `finality`.
+    fn body_2_0_at(
+        route: &BridgeRoute,
+        seq: u64,
+        amount: u128,
+        finality: super::super::finality::CcipFinality,
+    ) -> Vec<u8> {
         let short = |out: &mut Vec<u8>, b: &[u8]| {
             out.push(b.len() as u8);
             out.extend_from_slice(b);
@@ -1662,7 +1673,9 @@ mod ccip_lane_versions {
         m.extend_from_slice(&route.source_chain_id.to_be_bytes());
         m.extend_from_slice(&route.local_selector.to_be_bytes());
         m.extend_from_slice(&seq.to_be_bytes());
-        m.extend_from_slice(&[0u8; 4 + 4 + 4 + 32]);
+        m.extend_from_slice(&[0u8; 4 + 4]);
+        m.extend_from_slice(&finality);
+        m.extend_from_slice(&[0u8; 32]);
         short(&mut m, &route.ramp);
         short(&mut m, &[0x62; 32]);
         short(&mut m, &pad(&[0x99; 20]));
@@ -1803,6 +1816,124 @@ mod ccip_lane_versions {
                 }
             }
         }
+    }
+
+    /// A `2.0.0` transfer sent before its sending chain's finality. While
+    /// the gate is dormant it draws on the lane as any transfer does. Once
+    /// live, one that waited for finality still does; one that did not is
+    /// refused (with nothing written) unless the route's policy allows it,
+    /// and then draws on the policy's bucket and leaves the lane's alone.
+    #[test]
+    fn a_2_0_transfer_below_finality_draws_on_the_route_policy_once_the_gate_is_live() {
+        use super::super::finality::{self, CcipFinalityPolicy};
+        let mut route = evm_route("ethereum");
+        route.lane_limits = Some(CcipLane {
+            version: CcipLaneVersion::V2_0,
+            ..route.lane_limits.unwrap()
+        });
+        let f = RouteFramework::new();
+        let mut sending = route.clone();
+        sending.lane_limits = Some(CcipLane {
+            version: CcipLaneVersion::V1_6,
+            ..route.lane_limits.unwrap()
+        });
+        let mut s = MemState::with(std::slice::from_ref(&sending));
+        lock(&f, &mut s, &sending, 1_000, vec![0x12; 20]);
+        s.routes.insert(route.storage_key(), route.clone());
+        let lane = lane::lane_key(&route, lane::LaneDirection::Inbound);
+        let fast = finality::fast_lane_key(&route, None);
+        let twelve_blocks = [0, 0, 0, 12];
+        let admit = |s: &mut MemState, seq: u64, finality| {
+            let body = body_2_0_at(&route, seq, 250, finality);
+            let d = deliver(&route, &keys(), 3, seq, EXPIRY, &body, &[]);
+            f.admit_inbound(s, BridgeRouteAdapter::Ccip, "ethereum", &d)
+        };
+
+        // Dormant: the requested finality is not read.
+        admit(&mut s, 9, twelve_blocks).unwrap();
+        assert!(s.kv.contains_key(&lane));
+        assert!(!s.kv.contains_key(&fast));
+
+        // Live, no policy: refused, nothing written.
+        s.finality_policy_live = true;
+        let before = s.kv.clone();
+        assert!(admit(&mut s, 10, twelve_blocks).is_err());
+        assert_eq!(s.kv, before);
+
+        // Live, finality: the lane as before.
+        admit(&mut s, 10, WAIT_FOR_FINALITY).unwrap();
+        assert_ne!(s.kv.get(&lane), before.get(&lane));
+
+        // Live, a policy allowing twelve blocks.
+        let policy = CcipFinalityPolicy {
+            allowed: twelve_blocks,
+            fast_inbound: LaneRateLimit {
+                capacity: 400,
+                rate: 1,
+            },
+        };
+        policy.validate(&route).unwrap();
+        s.kv.insert(
+            finality::policy_key(&route, None),
+            serde_json::to_vec(&policy).unwrap(),
+        );
+        let lane_now = s.kv.get(&lane).cloned();
+        admit(&mut s, 11, twelve_blocks).unwrap();
+        assert_eq!(
+            s.kv.get(&lane).cloned(),
+            lane_now,
+            "the lane is not drawn on"
+        );
+        let drawn =
+            s.kv.get(&fast)
+                .cloned()
+                .expect("the policy bucket is drawn on");
+        assert_eq!(u128::from_be_bytes(drawn[..16].try_into().unwrap()), 150);
+
+        // Fewer blocks than the policy allows, or more than its bucket holds.
+        let before = s.kv.clone();
+        assert!(admit(&mut s, 12, [0, 0, 0, 11]).is_err());
+        assert!(admit(&mut s, 12, [0, 1, 0, 0]).is_err());
+        assert!(
+            admit(&mut s, 12, twelve_blocks).is_err(),
+            "150 left, 250 asked"
+        );
+        assert_eq!(s.kv, before);
+    }
+
+    /// A policy is refused on a route its messages cannot reach: one that is
+    /// not a `2.0.0` lane, or one with a light client.
+    #[test]
+    fn a_finality_policy_fits_only_an_attested_2_0_lane() {
+        use super::super::finality::CcipFinalityPolicy;
+        let policy = CcipFinalityPolicy {
+            allowed: [0, 0, 0, 12],
+            fast_inbound: LaneRateLimit {
+                capacity: 400,
+                rate: 1,
+            },
+        };
+        let mut route = evm_route("ethereum");
+        assert!(policy.validate(&route).is_err(), "a 1.6.0 lane");
+        route.lane_limits = Some(CcipLane {
+            version: CcipLaneVersion::V2_0,
+            ..route.lane_limits.unwrap()
+        });
+        policy.validate(&route).unwrap();
+        let nothing = CcipFinalityPolicy {
+            allowed: WAIT_FOR_FINALITY,
+            ..policy
+        };
+        assert!(nothing.validate(&route).is_err());
+        let mut proven = route.clone();
+        proven.light_client = Some(
+            tenzro_types::bridge_route::LightClientAnchor::EthereumSyncCommittee {
+                genesis_validators_root: [1; 32],
+                fork_version: [0; 4],
+                trusted_block_root: [2; 32],
+            },
+        );
+        assert!(policy.validate(&proven).is_err());
     }
 }
 

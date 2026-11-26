@@ -85,7 +85,7 @@ const MAX_BODY: usize = 256 * 1024;
 /// Largest request head (request line plus headers) the listener reads.
 const MAX_HEAD: usize = 16 * 1024;
 /// How long one connection may take to deliver its request.
-const CONN_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The random values that tie one callback to one ceremony.
 #[derive(Debug, Clone)]
@@ -135,7 +135,7 @@ pub fn origin_of(wallet_url: &str) -> Result<String> {
     Ok(format!("{scheme}://{host}"))
 }
 
-fn pct_encode(s: &str) -> String {
+pub(crate) fn pct_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -166,12 +166,30 @@ pub fn onboarding_url(
     )
 }
 
+fn qr_code(url: &str) -> Result<qrcode::QrCode> {
+    qrcode::QrCode::new(url.as_bytes())
+        .map_err(|e| anyhow!("cannot encode the onboarding URL as a QR code: {e}"))
+}
+
+/// The QR code for `url` as rows of `0` and `1`, a `1` for each dark module,
+/// with no margin around it.
+pub fn qr_rows(url: &str) -> Result<Vec<String>> {
+    let code = qr_code(url)?;
+    Ok(code
+        .to_colors()
+        .chunks(code.width())
+        .map(|row| {
+            row.iter()
+                .map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' })
+                .collect()
+        })
+        .collect())
+}
+
 /// A terminal QR code for `url`, two rows of modules per text row.
 pub fn qr_text(url: &str) -> Result<String> {
     use qrcode::render::unicode::Dense1x2;
-    let code = qrcode::QrCode::new(url.as_bytes())
-        .map_err(|e| anyhow!("cannot encode the onboarding URL as a QR code: {e}"))?;
-    Ok(code
+    Ok(qr_code(url)?
         .render::<Dense1x2>()
         .dark_color(Dense1x2::Light)
         .light_color(Dense1x2::Dark)
@@ -369,7 +387,7 @@ fn validate_payload(
     })
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -418,15 +436,15 @@ impl std::fmt::Display for CeremonyError {
 
 impl std::error::Error for CeremonyError {}
 
-struct HttpRequest {
-    method: String,
-    path: String,
+pub(crate) struct HttpRequest {
+    pub(crate) method: String,
+    pub(crate) path: String,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl HttpRequest {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -434,7 +452,7 @@ impl HttpRequest {
     }
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, (u16, String)> {
+pub(crate) async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, (u16, String)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -528,12 +546,16 @@ fn response(status: u16, cors_origin: Option<&str>, body: &Value) -> Vec<u8> {
 }
 
 /// What one request amounted to.
-enum Outcome {
+enum Outcome<T> {
     Reply(Vec<u8>),
-    Done(Vec<u8>, CeremonyResult),
+    Done(Vec<u8>, T),
 }
 
-fn handle(req: &HttpRequest, port: u16, session: &Session, expected_origin: &str) -> Outcome {
+/// What a page's callback body is checked by: the result it carries, or the
+/// HTTP status and reason it is refused with.
+pub(crate) type Check<'a, T> = &'a (dyn Fn(&[u8]) -> Result<T, (u16, String)> + Sync);
+
+fn handle<T>(req: &HttpRequest, port: u16, expected_origin: &str, check: Check<T>) -> Outcome<T> {
     let err =
         |status: u16, msg: &str| Outcome::Reply(response(status, None, &json!({ "error": msg })));
 
@@ -557,7 +579,7 @@ fn handle(req: &HttpRequest, port: u16, session: &Session, expected_origin: &str
     }
     match req.method.as_str() {
         "OPTIONS" => Outcome::Reply(response(204, origin, &Value::Null)),
-        "POST" => match validate_payload(&req.body, session, expected_origin) {
+        "POST" => match check(&req.body) {
             Ok(result) => Outcome::Done(response(200, origin, &json!({ "ok": true })), result),
             Err((status, msg)) => {
                 Outcome::Reply(response(status, origin, &json!({ "error": msg })))
@@ -588,6 +610,18 @@ pub async fn wait_for_callback(
     expected_origin: &str,
     timeout: Duration,
 ) -> Result<CeremonyResult, CeremonyError> {
+    let check = |body: &[u8]| validate_payload(body, session, expected_origin);
+    wait_for_page(listener, expected_origin, timeout, &check).await
+}
+
+/// Serve `listener` until a callback from a page on `expected_origin` passes
+/// `check` or `timeout` elapses, on the terms [`wait_for_callback`] gives.
+pub(crate) async fn wait_for_page<T>(
+    listener: TcpListener,
+    expected_origin: &str,
+    timeout: Duration,
+    check: Check<'_, T>,
+) -> Result<T, CeremonyError> {
     let port = listener.local_addr().map_err(CeremonyError::Io)?.port();
     let deadline = Instant::now() + timeout;
     loop {
@@ -598,7 +632,7 @@ pub async fn wait_for_callback(
         let (mut stream, _) = accepted.map_err(CeremonyError::Io)?;
         let outcome = tokio::time::timeout(CONN_TIMEOUT, async {
             match read_request(&mut stream).await {
-                Ok(req) => handle(&req, port, session, expected_origin),
+                Ok(req) => handle(&req, port, expected_origin, check),
                 Err((status, msg)) => {
                     Outcome::Reply(response(status, None, &json!({ "error": msg })))
                 }
@@ -675,12 +709,13 @@ pub async fn run(rpc_url: &str, display_name: &str, timeout: Duration) -> Result
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const ORIGIN: &str = "https://wallet.tenzro.com";
 
-    fn payload(session: &Session, state: &str) -> Value {
+    /// What the wallet page posts back for `session`, claiming `state`.
+    pub(crate) fn payload(session: &Session, state: &str) -> Value {
         let cdj = json!({
             "type": "webauthn.create",
             "challenge": session.challenge,
@@ -702,7 +737,9 @@ mod tests {
         })
     }
 
-    async fn post(port: u16, body: &str, host_port: Option<u16>) -> String {
+    /// Post `body` to the callback listener on `port` as the wallet page
+    /// does, and return the whole response.
+    pub(crate) async fn post(port: u16, body: &str, host_port: Option<u16>) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let req = format!(
             "POST /callback HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: {ORIGIN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -822,13 +859,14 @@ mod tests {
             ],
             body: vec![],
         };
-        let Outcome::Reply(ok) = handle(&req(ORIGIN), 9, &session, ORIGIN) else {
+        let check = |body: &[u8]| validate_payload(body, &session, ORIGIN);
+        let Outcome::Reply(ok) = handle(&req(ORIGIN), 9, ORIGIN, &check) else {
             panic!()
         };
         let ok = String::from_utf8(ok).unwrap();
         assert!(ok.starts_with("HTTP/1.1 204"));
         assert!(ok.contains("Access-Control-Allow-Private-Network: true"));
-        let Outcome::Reply(no) = handle(&req("https://evil.example"), 9, &session, ORIGIN) else {
+        let Outcome::Reply(no) = handle(&req("https://evil.example"), 9, ORIGIN, &check) else {
             panic!()
         };
         assert!(String::from_utf8(no).unwrap().starts_with("HTTP/1.1 403"));
@@ -902,5 +940,19 @@ mod tests {
                 .count()
                 > 10
         );
+    }
+
+    #[test]
+    fn qr_rows_are_a_square_of_modules_with_no_margin() {
+        let rows = qr_rows("https://wallet.tenzro.com/onboard?state=a").unwrap();
+        assert!(rows.len() >= 21 && (rows.len() - 21).is_multiple_of(4));
+        assert!(rows.iter().all(|r| r.len() == rows.len()));
+        assert!(rows.iter().all(|r| r.chars().all(|c| c == '0' || c == '1')));
+        // The finder pattern sits in the corner, so nothing surrounds the code.
+        assert!(rows[0].starts_with("11111110"));
+        assert!(rows[1].starts_with("10000010"));
+        assert!(rows[2].starts_with("10111010"));
+        assert!(rows[6].starts_with("11111110"));
+        assert!(rows[7].starts_with("00000000"));
     }
 }

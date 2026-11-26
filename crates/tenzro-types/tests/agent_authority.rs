@@ -55,12 +55,6 @@ const TERMS_PATHS: &[(&str, &str, &str)] = &[
         "fn check_payer_identity",
         "gate.authorize(",
     ),
-    // Intent-routed inference spends through the intent tier's budget gate.
-    (
-        "crates/tenzro-node/src/node.rs",
-        "with_budget_gate(",
-        "terms_gate::ChainTermsGate::new(",
-    ),
     // The one payment decision, over consensus state.
     (
         "crates/tenzro-node/src/terms_gate.rs",

@@ -13,6 +13,11 @@ export class NodeClient {
     return this.rpc.call<T>("tenzro_acceptClusterMembership", params);
   }
 
+  /** `tenzro_verifyJurisdictionReceipt`: whether a jurisdiction receipt's signature holds in either form and the key is registered. */
+  verifyJurisdictionReceipt<T = unknown>(params: { receipt?: unknown } = {}): Promise<T> {
+    return this.rpc.call<T>("tenzro_verifyJurisdictionReceipt", params);
+  }
+
   /** `tenzro_autotuneDecisions`. */
   autotuneDecisions<T = unknown>(): Promise<T> {
     return this.rpc.call<T>("tenzro_autotuneDecisions");
@@ -41,6 +46,35 @@ export class NodeClient {
   /** `tenzro_gracefulExit` (operator only). */
   gracefulExit<T = unknown>(params: { force?: unknown; max_wait_secs?: unknown } = {}): Promise<T> {
     return this.rpc.call<T>("tenzro_gracefulExit", params);
+  }
+
+  /** `tenzro_listConditions` (operator only): what on this node is open and needs its operator's attention, the most severe first. */
+  listConditions<T = unknown>(): Promise<T> {
+    return this.rpc.call<T>("tenzro_listConditions");
+  }
+
+  /** `tenzro_acknowledgeCondition` (operator only): acknowledge an open condition; `since` as the list gives it, `reason` 1 to 500 characters. */
+  acknowledgeCondition<T = unknown>(params: { id: string; since: unknown; reason: string }): Promise<T> {
+    return this.rpc.call<T>("tenzro_acknowledgeCondition", params);
+  }
+
+  /** `tenzro_submitApproval` (operator only): answer an open condition that asks; an approval carries the operator passkey's assertion over the condition's challenge. */
+  submitApproval<T = unknown>(params: {
+    condition_id: string;
+    approve: boolean;
+    assertion?: { credential_id: string; authenticator_data: string; client_data_json: string; signature: string };
+  }): Promise<T> {
+    return this.rpc.call<T>("tenzro_submitApproval", params);
+  }
+
+  /** `tenzro_installUpdate` (operator only): start the installed updater for the newest verified release this node knows of. */
+  installUpdate<T = unknown>(): Promise<T> {
+    return this.rpc.call<T>("tenzro_installUpdate");
+  }
+
+  /** `tenzro_restartNode` (operator only): restart this node through the service that runs it; refused when no service runs it. */
+  restartNode<T = unknown>(params: { max_wait_secs?: number; force?: boolean } = {}): Promise<T> {
+    return this.rpc.call<T>("tenzro_restartNode", params);
   }
 
   /** `tenzro_livenessStats`. */

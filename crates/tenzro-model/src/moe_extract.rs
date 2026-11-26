@@ -37,7 +37,7 @@ use reqwest::Client;
 use safetensors::Dtype;
 use safetensors::tensor::TensorView;
 use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::catalog::ModelArchitecture;
 use crate::error::{ModelError, Result};
@@ -226,11 +226,76 @@ fn parse_dtype(s: &str) -> Result<Dtype> {
     }
 }
 
+/// Per-tensor BLAKE3 digests of a checkpoint, from the manifest a catalog
+/// entry pins (`SourceCheckpoint::tensor_digests_blake3`).
+#[derive(Debug, Clone, Default)]
+pub struct TensorDigests {
+    by_name: HashMap<String, String>,
+}
+
+impl TensorDigests {
+    /// Parse a manifest of `<tensor name> <hex blake3>` lines after checking
+    /// the manifest itself against the BLAKE3 the catalog entry pins.
+    pub fn parse(manifest: &str, pinned_blake3: &str) -> Result<Self> {
+        let actual = blake3::hash(manifest.as_bytes()).to_hex().to_string();
+        if !actual.eq_ignore_ascii_case(pinned_blake3) {
+            return Err(ModelError::InvalidModel(format!(
+                "tensor digest manifest hashes to {actual}, the catalog pins {pinned_blake3}"
+            )));
+        }
+        let mut by_name = HashMap::new();
+        for (i, line) in manifest
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim().is_empty())
+        {
+            let mut parts = line.split_whitespace();
+            let (Some(name), Some(digest), None) = (parts.next(), parts.next(), parts.next())
+            else {
+                return Err(ModelError::InvalidModel(format!(
+                    "tensor digest manifest line {}: expected `<name> <blake3>`",
+                    i + 1
+                )));
+            };
+            if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(ModelError::InvalidModel(format!(
+                    "tensor digest manifest line {}: {digest} is not a BLAKE3 hex digest",
+                    i + 1
+                )));
+            }
+            if by_name
+                .insert(name.to_string(), digest.to_ascii_lowercase())
+                .is_some()
+            {
+                return Err(ModelError::InvalidModel(format!(
+                    "tensor digest manifest lists {name} twice"
+                )));
+            }
+        }
+        Ok(Self { by_name })
+    }
+
+    /// Check the bytes read for `name` against its manifest digest.
+    fn verify(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let want = self.by_name.get(name).ok_or_else(|| {
+            ModelError::InvalidModel(format!("tensor {name} has no digest in the manifest"))
+        })?;
+        let got = blake3::hash(bytes).to_hex().to_string();
+        if &got != want {
+            return Err(ModelError::DownloadError(format!(
+                "tensor {name}: digest mismatch (read {got}, manifest {want})"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Ranged-GET client for one HuggingFace checkpoint repository.
 pub struct HfShardClient {
     http: Client,
     repo: String,
     revision: String,
+    digests: Option<TensorDigests>,
 }
 
 impl HfShardClient {
@@ -241,13 +306,25 @@ impl HfShardClient {
             http: Client::new(),
             repo: repo.into(),
             revision: revision.into(),
+            digests: None,
         }
+    }
+
+    /// Verify every tensor read against `digests`; a mismatch or a tensor the
+    /// manifest does not list is an error and no bytes are returned.
+    #[must_use]
+    pub fn with_digests(mut self, digests: TensorDigests) -> Self {
+        self.digests = Some(digests);
+        self
     }
 
     fn url(&self, file: &str) -> String {
         format!(
-            "https://huggingface.co/{}/resolve/{}/{}",
-            self.repo, self.revision, file
+            "{}/{}/resolve/{}/{}",
+            crate::hf_download::hub_base(),
+            self.repo,
+            self.revision,
+            file
         )
     }
 
@@ -396,6 +473,9 @@ impl HfShardClient {
                 end - begin
             )));
         }
+        if let Some(digests) = &self.digests {
+            digests.verify(name, &bytes)?;
+        }
         Ok((dtype, meta.shape.clone(), bytes))
     }
 }
@@ -421,7 +501,25 @@ impl MoeExtractor {
         revision: impl Into<String>,
         naming: MoeTensorNaming,
     ) -> Result<Self> {
-        let client = HfShardClient::new(repo, revision);
+        Self::open_with_digests(repo, revision, naming, None).await
+    }
+
+    /// [`Self::open`] that verifies every tensor read against `digests`, the
+    /// manifest a catalog entry pins. With `None` the commit pin is the only
+    /// check and a warning says so.
+    pub async fn open_with_digests(
+        repo: impl Into<String>,
+        revision: impl Into<String>,
+        naming: MoeTensorNaming,
+        digests: Option<TensorDigests>,
+    ) -> Result<Self> {
+        let mut client = HfShardClient::new(repo, revision);
+        match digests {
+            Some(d) => client = client.with_digests(d),
+            None => warn!(
+                "MoE source read without a tensor digest manifest: tensors are trusted at the pinned commit only"
+            ),
+        }
         let index = client.weight_index().await?;
         // Nemotron-H inside the multimodal wrapper keeps its text model under
         // a prefix; the shard index says which layout this checkpoint has.
@@ -713,5 +811,48 @@ mod nemotron_h_naming_tests {
             serde_json::from_str(r#"{"routed_scaling_factor":5.0,"n_shared_experts":1}"#).unwrap();
         assert_eq!(cfg.first_k_dense_replace, 0);
         assert_eq!(cfg.n_shared_experts, 1);
+    }
+    fn manifest(name: &str, bytes: &[u8]) -> (String, String) {
+        let text = format!("{name} {}\n", blake3::hash(bytes).to_hex());
+        let pin = blake3::hash(text.as_bytes()).to_hex().to_string();
+        (text, pin)
+    }
+
+    #[test]
+    fn digests_accept_the_listed_bytes_and_refuse_others() {
+        let (text, pin) = manifest("w", b"abc");
+        let d = TensorDigests::parse(&text, &pin).unwrap();
+        d.verify("w", b"abc").unwrap();
+        assert!(
+            d.verify("w", b"abd")
+                .unwrap_err()
+                .to_string()
+                .contains("digest mismatch")
+        );
+        assert!(
+            d.verify("other", b"abc")
+                .unwrap_err()
+                .to_string()
+                .contains("no digest")
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_is_not_the_pinned_one_is_refused() {
+        let (text, _) = manifest("w", b"abc");
+        let wrong = "0".repeat(64);
+        assert!(TensorDigests::parse(&text, &wrong).is_err());
+    }
+
+    #[test]
+    fn malformed_manifest_lines_are_refused() {
+        for text in ["w\n", "w nothex\n", "w a b\n"] {
+            let pin = blake3::hash(text.as_bytes()).to_hex().to_string();
+            assert!(TensorDigests::parse(text, &pin).is_err(), "{text:?}");
+        }
+        let d = "a".repeat(64);
+        let dup = format!("w {d}\nw {d}\n");
+        let pin = blake3::hash(dup.as_bytes()).to_hex().to_string();
+        assert!(TensorDigests::parse(&dup, &pin).is_err());
     }
 }

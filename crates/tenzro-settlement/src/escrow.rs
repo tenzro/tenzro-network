@@ -27,10 +27,17 @@
 //!
 //! - `CreateEscrow.from` must match the signing payer (verified at mempool
 //!   admission). The payload has no separate `payer` field.
-//! - `ReleaseEscrow` requires `tx.from == escrow.payer`, status `Funded`,
-//!   not expired, and a proof that satisfies the recorded `release_conditions`.
-//! - `RefundEscrow` requires `tx.from == escrow.payer` AND (the escrow is
-//!   expired OR `release_conditions ∈ {Timeout, Custom}`).
+//! - `ReleaseEscrow` requires status `Funded`, not expired, a proof that
+//!   satisfies the recorded `release_conditions`, and a sender those
+//!   conditions name: the payee for `ProviderSignature`, the payer or the
+//!   payee for `BothSignatures` (both must send one), the payer or the named
+//!   executor for `Executor`, any account for `QuorumAttestation` (the
+//!   committee's signatures authorise it), the payer otherwise.
+//! - `RefundEscrow` requires status `Funded` and a sender that is the payer,
+//!   the payee of a `Stream`, or any account once the escrow is past its
+//!   expiry by the governed close grace. Nothing is refunded before expiry,
+//!   except the part of a `Stream` not yet due.
+
 //!
 //! The record lives only in VM state at `escrow:<id>` under the system
 //! address; readers load it from state, and list by payer or payee from the

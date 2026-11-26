@@ -17,11 +17,26 @@ use tenzro_vm::traits::VmState;
 /// The scale standing is expressed in: the router divides by it.
 pub const STANDING_MAX: u64 = 10_000;
 
+/// What consensus state records about a provider at a moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Record {
+    /// Its standing, `0..=STANDING_MAX`.
+    pub standing: u64,
+    /// Whether any verdict in the governed window judged it.
+    pub judged: bool,
+}
+
 /// The standing of the provider whose account is `account`, at `now_ms`:
 /// 0 without a live bond, otherwise the governed bonded standing plus the
 /// governed availability standing scaled by the share of judged hours in the
 /// governed window its verdicts found it available.
 pub fn standing(state: &dyn VmState, account: &[u8], now_ms: i64) -> u64 {
+    record(state, account, now_ms).standing
+}
+
+/// The standing of the provider whose account is `account`, at `now_ms`, and
+/// whether any verdict in the window judged it.
+pub fn record(state: &dyn VmState, account: &[u8], now_ms: i64) -> Record {
     let stake = native::read_role_stake(state, account, NetworkRole::ModelProvider)
         .filter(|s| s.bonded > 0)
         .map(|_| native::role_stake_subject(account, NetworkRole::ModelProvider));
@@ -31,7 +46,10 @@ pub fn standing(state: &dyn VmState, account: &[u8], now_ms: i64) -> u64 {
         .map(|b| b.provider_did);
     let subjects: Vec<String> = stake.into_iter().chain(bond).collect();
     if subjects.is_empty() {
-        return 0;
+        return Record {
+            standing: 0,
+            judged: false,
+        };
     }
     let bonded = network_param(state, g::STANDING_BONDED_PARAM);
     let availability_max = network_param(state, g::STANDING_AVAILABILITY_PARAM);
@@ -51,7 +69,10 @@ pub fn standing(state: &dyn VmState, account: &[u8], now_ms: i64) -> u64 {
         .saturating_mul(up)
         .checked_div(judged)
         .unwrap_or(availability_max.saturating_mul(unjudged_bps) / 10_000);
-    bonded.saturating_add(availability).min(STANDING_MAX)
+    Record {
+        standing: bonded.saturating_add(availability).min(STANDING_MAX),
+        judged: judged > 0,
+    }
 }
 
 #[cfg(test)]
@@ -102,10 +123,12 @@ mod tests {
             BONDED + AVAILABILITY / 2,
             "no verdict yet"
         );
+        assert!(!record(&state, &account, 30 * H).judged);
         let subject = native::role_stake_subject(&account, NetworkRole::ModelProvider);
         verdict(&mut state, &subject, 28, true);
         verdict(&mut state, &subject, 29, true);
         assert_eq!(standing(&state, &account, 30 * H), STANDING_MAX);
+        assert!(record(&state, &account, 30 * H).judged);
         verdict(&mut state, &subject, 27, false);
         verdict(&mut state, &subject, 26, false);
         assert_eq!(
@@ -113,6 +136,7 @@ mod tests {
             BONDED + AVAILABILITY / 2
         );
         // Verdicts outside the window no longer count.
+        assert!(!record(&state, &account, 60 * H).judged);
         assert_eq!(
             standing(&state, &account, 60 * H),
             BONDED + AVAILABILITY / 2

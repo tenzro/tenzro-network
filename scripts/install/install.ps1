@@ -9,7 +9,9 @@
 #      below, whose fingerprint is checked first, using .NET (no openssl needed)
 #   3. verifies the archive's SHA-256 against that signed list
 #   4. unpacks under PREFIX\install\versions\ and runs the binary's own hardware check
-#   5. points PREFIX\install\current at it and offers to put its bin folder on your PATH
+#   5. points PREFIX\install\current at it (the release it replaces becomes
+#      PREFIX\install\previous; older releases are removed) and offers to put its
+#      bin folder on your PATH
 # Nothing is installed unless 2 and 3 pass. No administrator rights needed.
 #
 # This script itself is covered by TLS only. Its SHA-256 is published beside it
@@ -39,6 +41,8 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
     if (-not $Prefix) { $Prefix = if ($env:TENZRO_HOME) { $env:TENZRO_HOME } else { Join-Path $HOME '.tenzro' } }
     $Inst = Join-Path $Prefix 'install'
     $Current = Join-Path $Inst 'current'
+    $Previous = Join-Path $Inst 'previous'
+    $Versions = Join-Path $Inst 'versions'
     $BinDir = Join-Path $Current 'bin'
     $t0 = Get-Date
 
@@ -64,8 +68,92 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
         }
     }
 
+    # `current` and `previous` are directory junctions to versions\<release>, the
+    # layout `tenzro update` uses. A junction is switched the way `tenzro update`
+    # switches it: its reparse data is rewritten in place (FSCTL_SET_REPARSE_POINT),
+    # one file-system operation, so `current` names one release or the other at
+    # every moment, never none. Removing it and creating it again would not be.
+    function Use-Junction {
+        if ('TenzroJunction' -as [type]) { return }
+        Add-Type -IgnoreWarnings -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class TenzroJunction {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle device, uint code, byte[] input, int inputSize, IntPtr output, int outputSize, out int returned, IntPtr overlapped);
+
+    const uint GENERIC_WRITE = 0x40000000;
+    const uint SHARE_ALL = 7;
+    const uint OPEN_EXISTING = 3;
+    const uint FLAG_BACKUP_SEMANTICS = 0x02000000;
+    const uint FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    const uint FSCTL_SET_REPARSE_POINT = 0x000900A4;
+    const uint IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003;
+
+    // The REPARSE_DATA_BUFFER of a mount point to an absolute local directory.
+    static byte[] ReparseData(string target) {
+        byte[] nt = Encoding.Unicode.GetBytes(@"\??\" + target);
+        byte[] print = Encoding.Unicode.GetBytes(target);
+        int dataLength = 8 + nt.Length + 2 + print.Length + 2;
+        byte[] buffer = new byte[8 + dataLength];
+        BitConverter.GetBytes(IO_REPARSE_TAG_MOUNT_POINT).CopyTo(buffer, 0);
+        BitConverter.GetBytes((ushort)dataLength).CopyTo(buffer, 4);
+        BitConverter.GetBytes((ushort)0).CopyTo(buffer, 8);
+        BitConverter.GetBytes((ushort)nt.Length).CopyTo(buffer, 10);
+        BitConverter.GetBytes((ushort)(nt.Length + 2)).CopyTo(buffer, 12);
+        BitConverter.GetBytes((ushort)print.Length).CopyTo(buffer, 14);
+        nt.CopyTo(buffer, 16);
+        print.CopyTo(buffer, 16 + nt.Length + 2);
+        return buffer;
+    }
+
+    // Points the junction `link` at the directory `target`: retargets it in
+    // place when it exists, creates it otherwise.
+    public static void Point(string link, string target) {
+        target = Path.GetFullPath(target).TrimEnd('\\');
+        if (!Directory.Exists(target)) throw new IOException(target + " is not a directory");
+        bool exists = true;
+        FileAttributes attributes = 0;
+        try { attributes = File.GetAttributes(link); }
+        catch (FileNotFoundException) { exists = false; }
+        catch (DirectoryNotFoundException) { exists = false; }
+        if (exists && (attributes & FileAttributes.ReparsePoint) == 0)
+            throw new IOException(link + " is a real directory or file, not a junction");
+        if (!exists) Directory.CreateDirectory(link);
+        byte[] data = ReparseData(target);
+        using (SafeFileHandle h = CreateFileW(link, GENERIC_WRITE, SHARE_ALL, IntPtr.Zero, OPEN_EXISTING, FLAG_BACKUP_SEMANTICS | FLAG_OPEN_REPARSE_POINT, IntPtr.Zero)) {
+            int error = 0;
+            int returned;
+            if (h.IsInvalid) error = Marshal.GetLastWin32Error();
+            else if (!DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, data, data.Length, IntPtr.Zero, 0, out returned, IntPtr.Zero)) error = Marshal.GetLastWin32Error();
+            if (error != 0) {
+                h.Dispose();
+                if (!exists) Directory.Delete(link);
+                throw new Win32Exception(error, "repoint " + link + ": " + new Win32Exception(error).Message);
+            }
+        }
+    }
+}
+'@
+    }
+    # The release directory name a junction points at, or $null.
+    function Get-Pointer($link) {
+        $i = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+        if (-not $i -or -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $null }
+        $t = @($i.Target)[0]
+        if (-not $t) { return $null }
+        return (Split-Path -Leaf $t)
+    }
+
     if ($Uninstall) {
-        if (Test-Path $Current) { (Get-Item $Current).Delete() 2>$null; if (Test-Path $Current) { cmd /c rmdir "$Current" } }
+        foreach ($j in $Current, $Previous) { if (Get-Pointer $j) { cmd /c rmdir "$j" | Out-Null } }
         $had = Test-Path $Inst
         if ($had) { Remove-Item -Recurse -Force $Inst; Row removed $Inst }
         Remove-FromUserPath $BinDir
@@ -79,16 +167,24 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
     $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { Fail 'this is not Windows' 'install.ps1 is for Windows' 'on Linux or macOS run: curl -fsSL https://downloads.tenzro.com/install.sh | sh' }
     if ($arch -ne 'AMD64') { Fail "unsupported CPU: $arch" 'Tenzro publishes a Windows x86_64 build only' 'use an x86_64 Windows machine, or build from source (README, Build from Source)' }
+    # gpu kind begin
+    # The GPU a build is chosen for, from the display adapters' names: 'nvidia', 'other' (AMD or Intel,
+    # integrated ones included, which take the Vulkan build) or 'none'. A server's management controller (ASPEED, Matrox G200), the basic display driver and
+    # virtual adapters are not GPUs a build can use, and never select one.
+    function Get-GpuKind([string[]]$Names) {
+        $real = @($Names | Where-Object { $_ -and $_ -notmatch 'ASPEED|Matrox|Microsoft Basic|Microsoft Remote Display|Hyper-V|VMware|VirtualBox|QXL|Bochs|Parsec|Citrix' })
+        if ($real -match 'NVIDIA') { 'nvidia' }
+        elseif ($real -match '\b(AMD|Radeon|Intel)\b') { 'other' }
+        else { 'none' }
+    }
+    # gpu kind end
     $gpu = 'none'
-    try {
-        $names = (Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { $_.Name }) -join ', '
-        if ($names -match 'NVIDIA') { $gpu = 'nvidia' }
-    } catch {}
+    try { $gpu = Get-GpuKind @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { $_.Name }) } catch {}
 
     Write-Host ''
     Write-Host 'Installing Tenzro'
     Write-Host ''
-    Row machine ("windows x86_64, " + $(if ($gpu -eq 'nvidia') { 'NVIDIA GPU' } else { 'no NVIDIA GPU' }))
+    Row machine ("windows x86_64, " + $(if ($gpu -eq 'nvidia') { 'NVIDIA GPU' } elseif ($gpu -eq 'other') { 'AMD or Intel GPU' } else { 'no GPU found' }))
 
     # ---- fetch
     $work = Join-Path ([IO.Path]::GetTempPath()) ('tenzro-install-' + [Guid]::NewGuid().ToString('N'))
@@ -155,11 +251,18 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
 
         # ---- pick the archive
         $listed = @{}
-        Get-Content $sums | Where-Object { $_.Trim() } | ForEach-Object { $p = $_ -split '\s+', 2; $listed[$p[1].TrimStart('*').Trim()] = $p[0].ToLower() }
+        # Debug archives (symbol files) are listed for crash reports, never installed.
+        Get-Content $sums | Where-Object { $_.Trim() } | ForEach-Object { $p = $_ -split '\s+', 2; $f = $p[1].TrimStart('*').Trim(); if ($f -notmatch '-debug\.(tar\.gz|zip)$') { $listed[$f] = $p[0].ToLower() } }
         if ($Target) { $name = $Target -replace '\.zip$', '' }
         else {
             $name = $null
-            foreach ($f in 'cuda', 'cpu') { if ($listed.ContainsKey("tenzro-node-windows-x86_64-$f.zip") -and (($f -eq 'cuda' -and $gpu -eq 'nvidia') -or $f -eq 'cpu')) { $name = "tenzro-node-windows-x86_64-$f"; break } }
+            # The archive for this machine's GPU (CUDA for NVIDIA, Vulkan for AMD and Intel), else the CPU archive.
+            $kind = @{ nvidia = 'cuda'; other = 'vulkan' }[$gpu]
+            if ($kind -and $listed.ContainsKey("tenzro-node-windows-x86_64-$kind.zip")) { $name = "tenzro-node-windows-x86_64-$kind" }
+            elseif ($listed.ContainsKey('tenzro-node-windows-x86_64-cpu.zip')) {
+                $name = 'tenzro-node-windows-x86_64-cpu'
+                if ($kind) { Write-Host "  note: this release has no Windows $kind build for this machine's GPU; the CPU build is installed, and the self-check below says whether the node starts here." }
+            }
             if (-not $name -and $listed.ContainsKey('tenzro-node-windows-x86_64-cuda.zip')) { $name = 'tenzro-node-windows-x86_64-cuda'; Write-Host "  note: this release's Windows build is the NVIDIA CUDA build and no NVIDIA GPU was found; the CLI is installed, GPU features will not work." }
             if (-not $name) { Fail 'this release has no Windows build' ('the signed list holds: ' + ($listed.Keys -join ' ')) 'build from source (README, Build from Source)' }
         }
@@ -167,7 +270,7 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
         $want = $listed["$name.zip"]
         $short = $want.Substring(0, 12)
         Row build $name
-        $vdir = Join-Path (Join-Path $Inst 'versions') "$name-$short"
+        $vdir = Join-Path $Versions "$name-$short"
 
         if ($DryRun) {
             Row install "would go to $vdir and add $BinDir to your PATH"
@@ -176,8 +279,9 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
         }
 
         # ---- the archive
-        if (Test-Path (Join-Path $vdir 'bin')) { Row archive 'already installed, nothing to download' }
-        else {
+        # A GPU build the node refuses on this machine is replaced by the CPU build and the loop runs once more.
+        while ($true) {
+            if (Test-Path (Join-Path $vdir 'bin')) { Row archive 'already installed, nothing to download'; break }
             Write-Host "  ${dim}downloading $name.zip${off}"
             $zip = Join-Path $work 'a.zip'
             Fetch "$name.zip" $zip
@@ -201,18 +305,47 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
             $hw = ''
             try { $hw = (& $node hardware 2>$null) -join "`n" } catch {}
             if ($hw -match 'startup: ok') { Row self-check ('build ' + ([regex]::Match($hw, 'build: (\S+)').Groups[1].Value) + ', ' + ([regex]::Match($hw, 'gpus: (\d+)').Groups[1].Value) + ' GPU(s), startup ok') }
+            elseif ($hw -match '(?m)^startup: refused \((.*)\)\s*$') {
+                # The node's own verdict: this build does not start here. A GPU build the script chose gives way to the CPU build.
+                $fallback = 'tenzro-node-windows-x86_64-cpu'
+                if (-not $Target -and $name -ne $fallback -and $listed.ContainsKey("$fallback.zip")) {
+                    Write-Host "  note: the $name build does not start on this machine: $($Matches[1]). Taking the CPU build instead."
+                    Remove-Item $x -Recurse -Force
+                    $name = $fallback; $want = $listed["$name.zip"]; $short = $want.Substring(0, 12); $vdir = Join-Path $Versions "$name-$short"
+                    Row build $name
+                    continue
+                }
+                Write-Host "  note: tenzro-node refuses to start on this machine with the $name build: $($Matches[1])"
+                Write-Host ('        The CLI is installed. To run a node here, install the archive that matches this machine with -Target; this release holds: ' + (($listed.Keys | Where-Object { $_ -like 'tenzro-node-windows-*.zip' } | Sort-Object | ForEach-Object { $_ -replace '\.zip$', '' }) -join ' '))
+            }
             else { Write-Host "  note: the hardware self-check did not finish ($($hw -replace "`n", ' ')); the CLI is installed anyway." }
-            New-Item -ItemType Directory -Force -Path (Join-Path $Inst 'versions') | Out-Null
+            New-Item -ItemType Directory -Force -Path $Versions | Out-Null
             Move-Item $root $vdir
             Row install $vdir
+            break
         }
         $cliv = if ($cliv) { $cliv } else { ((& (Join-Path $vdir 'bin\tenzro.exe') --version) -split '\s+')[-1] }
 
-        # ---- current (a junction: no administrator rights needed) and PATH
-        if (Test-Path $Current) { cmd /c rmdir "$Current" | Out-Null }
-        New-Item -ItemType Junction -Path $Current -Target $vdir | Out-Null
+        # The release's version, so `tenzro update` knows what is installed without running it.
+        $relFile = Join-Path $vdir 'RELEASE'
+        if (-not (Test-Path $relFile) -and $cliv -match '^\d+\.\d+\.\d+$') { [IO.File]::WriteAllText($relFile, "$cliv`n") }
+
+        # ---- current and previous (junctions: no administrator rights needed), and PATH
+        Use-Junction
+        $newRel = Split-Path -Leaf $vdir
+        $oldRel = Get-Pointer $Current
+        $prevRel = Get-Pointer $Previous
+        if ($oldRel -ne $newRel) {
+            if ($oldRel -and (Test-Path -LiteralPath (Join-Path $Versions $oldRel) -PathType Container)) {
+                [TenzroJunction]::Point($Previous, (Join-Path $Versions $oldRel))
+                $prevRel = $oldRel
+            }
+            [TenzroJunction]::Point($Current, $vdir)
+        }
         Row linked "$Current -> $vdir"
-        Get-ChildItem (Join-Path $Inst 'versions') -Directory | Sort-Object LastWriteTime -Descending | Select-Object -Skip 2 | Where-Object { $_.FullName -ne $vdir } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        if ($prevRel) { Row previous "$(Join-Path $Versions $prevRel) (tenzro update rollback restores it)" }
+        # Keep the current and the previous release only, whatever their dates.
+        Get-ChildItem -LiteralPath $Versions -Directory -Force | Where-Object { $_.Name -ne $newRel -and $_.Name -ne $prevRel -and -not $_.Name.StartsWith('.') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
         $up = Get-UserPath
         $onPath = $up -and (($up -split ';') | Where-Object { $_.TrimEnd('\') -eq $BinDir.TrimEnd('\') })
@@ -238,6 +371,7 @@ PAP5jhmCYs7mWBx/W6lVL7cgwsTRlzcNq8iMIyU2lPMsmGNC7nZkxpaTZA==
         Write-Host "    ${acc}tenzro${off}"
         Write-Host ''
         Write-Host "${dim}The first time, it takes you through setup; after that it opens the console. `tenzro --help` lists everything.${off}"
+        Write-Host "${dim}In the console, a opens the Assistant. It answers from the guides built into tenzro; /assistant there downloads and serves a model sized for this machine, after you agree.${off}"
         Write-Host "${dim}Update: run this installer again. Remove: -Uninstall${off}"
         Write-Host ''
     } finally {

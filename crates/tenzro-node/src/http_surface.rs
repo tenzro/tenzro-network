@@ -248,6 +248,21 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
         .allow_headers(AllowHeaders::mirror_request())
 }
 
+/// [`cors_layer`] that also admits each origin `extra` admits, asked per
+/// request.
+pub fn cors_layer_with(
+    origins: &[String],
+    extra: impl Fn(&str) -> bool + Send + Sync + 'static,
+) -> CorsLayer {
+    let listed: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+            listed.contains(origin) || origin.to_str().is_ok_and(&extra)
+        }))
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request())
+}
+
 /// Body ceilings for the JSON-RPC root: `(node, ordinary, operator)`.
 pub type RpcBodyCeiling = (std::sync::Arc<crate::node::TenzroNode>, usize, usize);
 

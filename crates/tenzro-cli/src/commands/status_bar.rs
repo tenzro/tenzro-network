@@ -177,6 +177,8 @@ pub struct NodeFacts {
     pub account: Option<String>,
     /// The validator registry status of the node's account, when registered.
     pub validator_status: Option<String>,
+    /// What the node says a jailed validator's operator can do.
+    pub validator_jailed_remedy: Option<String>,
     pub validator_self_stake: u128,
     pub bonds: Vec<RoleBond>,
     /// Whether governance has approved the account as an operator.
@@ -184,6 +186,9 @@ pub struct NodeFacts {
     pub pending_stake: Option<PendingStake>,
     /// The node's `disk` object: pressure, level and the last assessment.
     pub disk: Option<serde_json::Value>,
+    /// For a node whose key is held in another machine's TPM, why it waits
+    /// for the operator's approval of a new grant, when it waits.
+    pub key_grant_wanted: Option<String>,
 }
 
 impl NodeFacts {
@@ -201,6 +206,12 @@ pub fn next_action(f: &NodeFacts) -> String {
         return "The node is not answering. Start it with `tenzro setup --apply`, or check the \
                 service: `sudo systemctl status tenzro-node`."
             .to_string();
+    }
+    if let Some(reason) = &f.key_grant_wanted {
+        return format!(
+            "The node is waiting for the operator's approval and signs nothing until then: \
+             {reason}. It goes on by itself once the grant is installed."
+        );
     }
     if let Some(s) = &f.sample {
         if s.syncing {
@@ -236,9 +247,12 @@ pub fn next_action(f: &NodeFacts) -> String {
                     .to_string();
             }
             Some("Jailed") => {
-                return "The validator is jailed. It stays out of the active set until governance \
-                        reinstates it."
-                    .to_string();
+                return format!(
+                    "The validator is jailed and stays out of the active set. {}",
+                    f.validator_jailed_remedy.as_deref().unwrap_or_default()
+                )
+                .trim_end()
+                .to_string();
             }
             Some("PendingExit") | Some("Exited") => {
                 return "The validator has exited the set. Register again with \
@@ -579,6 +593,7 @@ async fn fetch_node(client: &RpcClient) -> NodeFacts {
             .and_then(Value::as_str)
             .map(str::to_string),
         disk: status.get("disk").cloned(),
+        key_grant_wanted: status["key_grant"]["reason"].as_str().map(str::to_string),
         account: account.clone(),
         pending_stake: crate::config::load_config().pending_stake,
         ..NodeFacts::default()
@@ -599,6 +614,10 @@ async fn fetch_node(client: &RpcClient) -> NodeFacts {
         && !v.is_null()
     {
         facts.validator_status = v.get("status").and_then(Value::as_str).map(str::to_string);
+        facts.validator_jailed_remedy = v
+            .get("jailed_remedy")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         facts.validator_self_stake = wei(&v, "self_stake");
     }
     if let Ok(v) = client
@@ -789,6 +808,18 @@ mod tests {
     }
 
     #[test]
+    fn a_node_waiting_for_its_key_grant_names_the_approval() {
+        let mut f = running();
+        f.key_grant_wanted =
+            Some("the key holder's grant has expired: run `tenzro-node tpm grant-request`".into());
+        let a = next_action(&f);
+        assert!(
+            a.contains("waiting for the operator's approval") && a.contains("grant-request"),
+            "{a}"
+        );
+    }
+
+    #[test]
     fn syncing_comes_before_everything_else() {
         let mut f = running();
         f.sample = Some(Sample {
@@ -834,7 +865,16 @@ mod tests {
         f.validator_status = Some("PendingActive".into());
         assert!(next_action(&f).contains("next epoch boundary"));
         f.validator_status = Some("Jailed".into());
-        assert!(next_action(&f).contains("jailed"));
+        assert_eq!(
+            next_action(&f),
+            "The validator is jailed and stays out of the active set."
+        );
+        f.validator_jailed_remedy = Some("Write to the contact.".into());
+        assert_eq!(
+            next_action(&f),
+            "The validator is jailed and stays out of the active set. Write to the contact."
+        );
+        f.validator_jailed_remedy = None;
         f.validator_status = Some("Active".into());
         assert_eq!(next_action(&f), "Running. Nothing to do.");
     }

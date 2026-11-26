@@ -45,9 +45,7 @@ pub fn network_treasury_address() -> Address {
 /// and fiat rails) paid to the network treasury, in basis points of the
 /// amount left after the developer margin.
 ///
-/// The same rate as the treasury leg of a public validating node's revenue
-/// split (`EconomicPolicy::validating.treasury_bps`). A payment settled on
-/// chain pays the governed settlement fee instead
+/// A payment settled on chain pays the governed settlement fee instead
 /// ([`DEFAULT_SETTLEMENT_FEE_BPS`] at genesis).
 pub const HTTP_402_NETWORK_SHARE_BPS: u32 = 1_000;
 

@@ -18,6 +18,7 @@ function node(skewNonce = 0) {
       if (method === "tenzro_getNonce") return "0x7";
       if (method === "eth_chainId") return "0x539";
       if (method === "eth_gasPrice") return "0x1";
+      if (method === "tenzro_estimateGas") return "0x7a120";
       if (method === "tenzro_getSigningPayload") {
         const preimage = JSON.stringify({
           chain_id: params.chain_id,
@@ -45,7 +46,7 @@ test("prepare checks the node's encoding and sends nothing", async () => {
   assert.equal(out.request.chain_id, 1337);
   assert.equal(out.request.signature, undefined);
   assert.match(out.digest, /^[0-9a-f]{64}$/);
-  assert.deepEqual(rpc.sent, ["tenzro_getNonce", "eth_chainId", "eth_gasPrice", "tenzro_getSigningPayload"]);
+  assert.deepEqual(rpc.sent, ["tenzro_getNonce", "eth_chainId", "eth_gasPrice", "tenzro_estimateGas", "tenzro_getSigningPayload"]);
 });
 
 test("prepare refuses a payload that is not the transaction", async () => {

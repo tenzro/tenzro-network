@@ -18,8 +18,8 @@
 use soroban_sdk::auth::{Context, CustomAccountInterface};
 use soroban_sdk::crypto::Hash;
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Vec, contract, contractclient, contracterror,
-    contractevent, contractimpl, contracttype, panic_with_error,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
+    panic_with_error, Address, Bytes, BytesN, Env, String, Symbol, TryFromVal, Vec,
 };
 use tenzro_finality_verifier::{agent, state_proof};
 
@@ -27,8 +27,8 @@ use tenzro_finality_verifier::{agent, state_proof};
 const ENTRY_TTL: u32 = 518_400;
 const MAX_PROOF: usize = 2 + 32 * 248 + 1 + 256;
 const P256_HALF_N: [u8; 32] = [
-    0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xde, 0x73, 0x7d, 0x56,
-    0xd3, 0x8b, 0xcf, 0x42, 0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8,
+    0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xde, 0x73, 0x7d, 0x56, 0xd3, 0x8b, 0xcf, 0x42, 0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8,
 ];
 
 #[contracterror]
@@ -142,7 +142,11 @@ fn asset_contract(env: &Env) -> Result<Address, Error> {
     let caip19: String = get(env, Key::Caip19).ok_or(Error::Malformed)?;
     let mut cb = [0u8; 128];
     let c = copy(env, &caip19.to_bytes(), &mut cb);
-    let strkey = core::str::from_utf8(c).ok().and_then(|s| s.rsplit_once(':')).map(|(_, k)| k).ok_or(Error::AssetMismatch)?;
+    let strkey = core::str::from_utf8(c)
+        .ok()
+        .and_then(|s| s.rsplit_once(':'))
+        .map(|(_, k)| k)
+        .ok_or(Error::AssetMismatch)?;
     Ok(Address::from_str(env, strkey))
 }
 
@@ -180,7 +184,9 @@ fn here(env: &Env) -> [u8; 32] {
 
 fn contract_id(a: &Address) -> Option<[u8; 32]> {
     match a.to_payload() {
-        Some(soroban_sdk::address_payload::AddressPayload::ContractIdHash(id)) => Some(id.to_array()),
+        Some(soroban_sdk::address_payload::AddressPayload::ContractIdHash(id)) => {
+            Some(id.to_array())
+        }
         _ => None,
     }
 }
@@ -210,7 +216,13 @@ fn decode_action(b: &[u8]) -> Option<Action<'_>> {
     let refund = u128::from_be_bytes(take(16)?.try_into().ok()?);
     let dl = u32::from_be_bytes(take(4)?.try_into().ok()?) as usize;
     let data = take(dl)?;
-    (at == b.len()).then_some(Action { target, selector, amount, refund, data })
+    (at == b.len()).then_some(Action {
+        target,
+        selector,
+        amount,
+        refund,
+        data,
+    })
 }
 
 #[contract]
@@ -227,7 +239,11 @@ impl AgentAccount {
         let caip2_s = copy(&env, &caip2, &mut c);
         put(&env, Key::Agent, &env.crypto().sha256(&did).to_bytes());
         put(&env, Key::Chain, &env.crypto().sha256(&caip2).to_bytes());
-        put(&env, Key::TreeKey, &BytesN::from_array(&env, &agent::grant_tree_key(did_s, caip2_s)));
+        put(
+            &env,
+            Key::TreeKey,
+            &BytesN::from_array(&env, &agent::grant_tree_key(did_s, caip2_s)),
+        );
         put(&env, Key::Client, &client);
         env.storage().instance().extend_ttl(ENTRY_TTL, ENTRY_TTL);
     }
@@ -236,9 +252,18 @@ impl AgentAccount {
     /// checkpoint `index`: a later grant, or the void of the current one.
     /// `caip19` names the grant's asset; `payee` is the Tenzro account a
     /// relay task pays for installing a void.
-    pub fn sync(env: Env, index: u64, grant: Bytes, proof: Bytes, caip19: String, payee: BytesN<32>) -> Result<(), Error> {
+    pub fn sync(
+        env: Env,
+        index: u64,
+        grant: Bytes,
+        proof: Bytes,
+        caip19: String,
+        payee: BytesN<32>,
+    ) -> Result<(), Error> {
         let client: Address = get(&env, Key::Client).ok_or(Error::Malformed)?;
-        let root = FinalityClient::new(&env, &client).state_root(&index).to_array();
+        let root = FinalityClient::new(&env, &client)
+            .state_root(&index)
+            .to_array();
         let tk: BytesN<32> = get(&env, Key::TreeKey).ok_or(Error::Malformed)?;
         let mut gb = [0u8; agent::GRANT_LEN];
         if grant.len() as usize != agent::GRANT_LEN {
@@ -253,7 +278,10 @@ impl AgentAccount {
         let g = agent::Grant::decode(&gb).ok_or(Error::MalformedGrant)?;
         let chain: BytesN<32> = get(&env, Key::Chain).ok_or(Error::Malformed)?;
         let agent_hash: BytesN<32> = get(&env, Key::Agent).ok_or(Error::Malformed)?;
-        if g.chain != chain.to_array() || g.agent != agent_hash.to_array() || g.account != here(&env) {
+        if g.chain != chain.to_array()
+            || g.agent != agent_hash.to_array()
+            || g.account != here(&env)
+        {
             return Err(Error::NotThisAccount);
         }
         let mut new_seq = true;
@@ -266,7 +294,11 @@ impl AgentAccount {
                 return Err(Error::StaleGrant);
             }
             if later {
-                GrantClosed { seq: cur.seq, spent: get(&env, Key::Spent).unwrap_or(0u128) }.publish(&env);
+                GrantClosed {
+                    seq: cur.seq,
+                    spent: get(&env, Key::Spent).unwrap_or(0u128),
+                }
+                .publish(&env);
             } else {
                 new_seq = false;
             }
@@ -274,7 +306,12 @@ impl AgentAccount {
         let mut ab = [0u8; 128];
         let caip19_b = caip19.to_bytes();
         let asset = copy(&env, &caip19_b, &mut ab);
-        if env.crypto().sha256(&Bytes::from_slice(&env, asset)).to_array() != g.asset {
+        if env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, asset))
+            .to_array()
+            != g.asset
+        {
             return Err(Error::AssetMismatch);
         }
         if new_seq {
@@ -284,7 +321,12 @@ impl AgentAccount {
         put(&env, Key::Grant, &grant);
         put(&env, Key::Caip19, &caip19);
         env.storage().instance().extend_ttl(ENTRY_TTL, ENTRY_TTL);
-        Synced { seq: g.seq, void: g.void, payee }.publish(&env);
+        Synced {
+            seq: g.seq,
+            void: g.void,
+            payee,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -304,8 +346,15 @@ impl AgentAccount {
         env.current_contract_address().require_auth();
         let g = live_grant(&env)?;
         let token = asset_contract(&env)?;
-        soroban_sdk::token::TokenClient::new(&env, &token).transfer(&env.current_contract_address(), &to, &amount);
-        let nonce = get::<u64>(&env, Key::Nonce).unwrap_or(0).checked_sub(1).ok_or(Error::Malformed)?;
+        soroban_sdk::token::TokenClient::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &to,
+            &amount,
+        );
+        let nonce = get::<u64>(&env, Key::Nonce)
+            .unwrap_or(0)
+            .checked_sub(1)
+            .ok_or(Error::Malformed)?;
         let mut data = [0u8; agent::PAY_DATA_LEN];
         data[..32].copy_from_slice(&payee.to_array());
         data[32..64].copy_from_slice(&request.to_array());
@@ -313,7 +362,10 @@ impl AgentAccount {
         data[96..].copy_from_slice(&usd_e6.to_be_bytes());
         let amount = u128::try_from(amount).map_err(|_| Error::AmountMismatch)?;
         let report = agent::paid_report(&g, nonce, &data, amount).ok_or(Error::Malformed)?;
-        Reported { report: Bytes::from_slice(&env, &report) }.publish(&env);
+        Reported {
+            report: Bytes::from_slice(&env, &report),
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -333,7 +385,12 @@ impl CustomAccountInterface for AgentAccount {
     type Signature = ActAuth;
     type Error = Error;
 
-    fn __check_auth(env: Env, payload: Hash<32>, auth: ActAuth, contexts: Vec<Context>) -> Result<(), Error> {
+    fn __check_auth(
+        env: Env,
+        payload: Hash<32>,
+        auth: ActAuth,
+        contexts: Vec<Context>,
+    ) -> Result<(), Error> {
         // One call, or one call plus the single nested transfer it makes of
         // this account's grant asset (a lock pulling exactly its amount).
         if contexts.is_empty() || contexts.len() > 2 {
@@ -383,18 +440,25 @@ impl CustomAccountInterface for AgentAccount {
                 if call.contract != env.current_contract_address() {
                     return Err(Error::TargetNotAllowed);
                 }
-                call.args.get(1).and_then(|v| i128::try_from_val(&env, &v).ok())
+                call.args
+                    .get(1)
+                    .and_then(|v| i128::try_from_val(&env, &v).ok())
             }
             "transfer" | "approve" | "burn" => {
                 if call.contract != asset_contract(&env)? {
                     return Err(Error::AssetMismatch);
                 }
                 let at = if fn_name == "burn" { 1 } else { 2 };
-                let from = call.args.get(0).and_then(|v| Address::try_from_val(&env, &v).ok());
+                let from = call
+                    .args
+                    .get(0)
+                    .and_then(|v| Address::try_from_val(&env, &v).ok());
                 if from != Some(env.current_contract_address()) {
                     return Err(Error::AmountMismatch);
                 }
-                call.args.get(at).and_then(|v| i128::try_from_val(&env, &v).ok())
+                call.args
+                    .get(at)
+                    .and_then(|v| i128::try_from_val(&env, &v).ok())
             }
             // Any other call moves value only through the one nested
             // transfer: this account to the called contract, of the grant's
@@ -408,12 +472,22 @@ impl CustomAccountInterface for AgentAccount {
                     if n.fn_name != Symbol::new(&env, "transfer") {
                         return Err(Error::OneCallAtATime);
                     }
-                    let from = n.args.get(0).and_then(|v| Address::try_from_val(&env, &v).ok());
-                    let to = n.args.get(1).and_then(|v| Address::try_from_val(&env, &v).ok());
-                    if from != Some(env.current_contract_address()) || to != Some(call.contract.clone()) {
+                    let from = n
+                        .args
+                        .get(0)
+                        .and_then(|v| Address::try_from_val(&env, &v).ok());
+                    let to = n
+                        .args
+                        .get(1)
+                        .and_then(|v| Address::try_from_val(&env, &v).ok());
+                    if from != Some(env.current_contract_address())
+                        || to != Some(call.contract.clone())
+                    {
                         return Err(Error::AmountMismatch);
                     }
-                    n.args.get(2).and_then(|v| i128::try_from_val(&env, &v).ok())
+                    n.args
+                        .get(2)
+                        .and_then(|v| i128::try_from_val(&env, &v).ok())
                 }
             },
         };
@@ -454,7 +528,11 @@ impl CustomAccountInterface for AgentAccount {
                 for (i, p) in auth.target_proof.iter().enumerate() {
                     proof[i] = p.to_array();
                 }
-                if !agent::merkle_verify(&g.targets_root, &agent::target_leaf(a.target, a.selector), &proof[..n]) {
+                if !agent::merkle_verify(
+                    &g.targets_root,
+                    &agent::target_leaf(a.target, a.selector),
+                    &proof[..n],
+                ) {
                     return Err(Error::TargetNotAllowed);
                 }
             }
@@ -488,7 +566,11 @@ impl CustomAccountInterface for AgentAccount {
                 for (j, p) in s.proof.iter().enumerate() {
                     proof[j] = p.to_array();
                 }
-                if !agent::merkle_verify(&g.keys_root, &agent::key_leaf(&s.key.to_array(), op), &proof[..n]) {
+                if !agent::merkle_verify(
+                    &g.keys_root,
+                    &agent::key_leaf(&s.key.to_array(), op),
+                    &proof[..n],
+                ) {
                     return Err(Error::KeyNotInRoot);
                 }
                 match &first {
@@ -500,7 +582,13 @@ impl CustomAccountInterface for AgentAccount {
         }
         put(&env, Key::Nonce, &(nonce + 1));
         put(&env, Key::Spent, &(spent + a.amount));
-        Acted { seq: g.seq, nonce, digest: BytesN::from_array(&env, &digest), amount: a.amount }.publish(&env);
+        Acted {
+            seq: g.seq,
+            nonce,
+            digest: BytesN::from_array(&env, &digest),
+            amount: a.amount,
+        }
+        .publish(&env);
         Ok(())
     }
 }

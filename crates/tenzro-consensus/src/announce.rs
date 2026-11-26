@@ -237,6 +237,59 @@ pub struct PublishedAnnouncement {
     pub sealed: Vec<SealedEndpoint>,
 }
 
+/// Most members one publication may ask for their sealed endpoints. A
+/// validator asks only members of the committees it holds, far fewer; the
+/// bound keeps a request a peer reads, and checks against, small.
+pub const MAX_WANTED: usize = 1_024;
+
+/// One publication on the wire: a published announcement and, when the
+/// validator asks for endpoints, the members it asks.
+///
+/// The bytes are the announcement's own encoding, followed by the encoded
+/// list only when there is one. A publication that asks nothing is byte for
+/// byte a [`PublishedAnnouncement`], and a reader of that alone reads the
+/// announcement of one that asks and ignores what follows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Publication {
+    /// The announcement and the sealed endpoints.
+    pub published: PublishedAnnouncement,
+    /// Key fingerprints of the members whose endpoint the validator holds
+    /// no opened copy of: each one named publishes its sealed endpoints
+    /// again. The announcement's signature does not cover the list; it
+    /// selects who answers, and a member answers a validator only so often.
+    pub wanted: Vec<[u8; 32]>,
+}
+
+impl Publication {
+    /// The wire bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = bincode::serialize(&self.published).expect("announcement encodes");
+        if !self.wanted.is_empty() {
+            bytes.extend(bincode::serialize(&self.wanted).expect("fingerprints encode"));
+        }
+        bytes
+    }
+
+    /// The publication `bytes` carry, if they start with an announcement.
+    /// Anything after it that is no list of fingerprints, or a list longer
+    /// than [`MAX_WANTED`], asks for nothing; a list's length is read before
+    /// the list, so a long one is never decoded.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let published: PublishedAnnouncement = bincode::deserialize(bytes).ok()?;
+        let read = usize::try_from(bincode::serialized_size(&published).ok()?).ok()?;
+        let wanted = bytes
+            .get(read..)
+            .filter(|rest| {
+                rest.get(..8)
+                    .and_then(|len| <[u8; 8]>::try_from(len).ok())
+                    .is_some_and(|len| u64::from_le_bytes(len) <= MAX_WANTED as u64)
+            })
+            .and_then(|rest| bincode::deserialize(rest).ok())
+            .unwrap_or_default();
+        Some(Self { published, wanted })
+    }
+}
+
 /// A validator's signed statement, for one boot, of how to reach it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAnnouncement {
@@ -377,6 +430,44 @@ impl EndpointAnnouncement {
     pub fn due_for_renewal(&self, now_ms: u64) -> bool {
         now_ms >= self.issued_ms + (self.not_after_ms - self.issued_ms) / 2
     }
+}
+
+/// The issue time a validator signs its next announcement with: its clock,
+/// or one past its last announcement's when its clock reads no later. Peers
+/// keep the announcement issued last, so a validator whose clock was set
+/// back (within a boot, or between a boot whose clock ran fast and the next)
+/// still replaces what its peers hold.
+///
+/// A last issue time more than half of [`MAX_CLOCK_SKEW_MS`] ahead of the
+/// clock is not followed: peers refuse an announcement issued further ahead
+/// of their clocks than the skew, so one issued past it would be refused by
+/// every peer for as long as the value stood, and a clock once set far
+/// forward would keep the validator unreachable after it was corrected. The
+/// announcement is issued at the clock's reading instead, and
+/// [`reissue_due`] has it issued again once the clock has passed the value.
+pub fn issue_time(now_ms: u64, last_issued_ms: Option<u64>) -> u64 {
+    last_issued_ms
+        .filter(|last| *last <= now_ms.saturating_add(MAX_CLOCK_SKEW_MS / 2))
+        .map_or(now_ms, |last| now_ms.max(last.saturating_add(1)))
+}
+
+/// The issue time a validator keeps after signing an announcement issued at
+/// `issued_ms`: the later of it and the one kept before, `previous`, unless
+/// that one is further ahead of the clock than any peer accepted an
+/// announcement, when it orders nothing and is dropped.
+pub fn kept_issue_time(previous: Option<u64>, issued_ms: u64, now_ms: u64) -> u64 {
+    previous
+        .filter(|p| *p <= now_ms.saturating_add(MAX_CLOCK_SKEW_MS))
+        .map_or(issued_ms, |p| p.max(issued_ms))
+}
+
+/// Whether the announcement a validator holds, issued at `held_issued_ms`,
+/// is signed again now: it was issued below the issue time `kept` (the
+/// clock read less than half the skew behind it then, so peers that hold
+/// the earlier announcement refuse this one as older) and the clock has
+/// passed that time, so the next one follows it.
+pub fn reissue_due(held_issued_ms: u64, kept: Option<u64>, now_ms: u64) -> bool {
+    kept.is_some_and(|k| held_issued_ms < k && k < now_ms)
 }
 
 /// The newest verified announcement of each validator, by key fingerprint,
@@ -599,6 +690,66 @@ mod tests {
                 .is_err(),
             "claimed for another validator"
         );
+    }
+
+    /// A publication that asks for nothing is the published announcement's
+    /// own bytes; one that asks still reads as its announcement to a reader
+    /// that knows of no request, and gives the request back to one that does.
+    #[test]
+    fn a_publication_reads_as_its_announcement_with_or_without_a_request() {
+        let a = boot(1, 0x5a, NOW);
+        let b = boot(2, 0x6b, NOW);
+        let published = PublishedAnnouncement {
+            announcement: a.announcement.clone(),
+            sealed: vec![seal(&a, &b)],
+        };
+        let plain = Publication {
+            published: published.clone(),
+            wanted: Vec::new(),
+        };
+        assert_eq!(plain.encode(), bincode::serialize(&published).unwrap());
+        assert_eq!(Publication::decode(&plain.encode()), Some(plain));
+
+        let asking = Publication {
+            published: published.clone(),
+            wanted: vec![[3; 32], [4; 32]],
+        };
+        let bytes = asking.encode();
+        assert_eq!(
+            bincode::deserialize::<PublishedAnnouncement>(&bytes).unwrap(),
+            published
+        );
+        assert_eq!(Publication::decode(&bytes), Some(asking));
+
+        // A list longer than the bound asks for nothing, and so does a
+        // length naming more entries than follow.
+        let mut long = bincode::serialize(&published).unwrap();
+        long.extend(bincode::serialize(&vec![[3u8; 32]; MAX_WANTED + 1]).unwrap());
+        assert_eq!(
+            Publication::decode(&long).map(|p| p.wanted),
+            Some(Vec::new())
+        );
+        let mut claimed = bincode::serialize(&published).unwrap();
+        claimed.extend((MAX_WANTED as u64).to_le_bytes());
+        assert_eq!(
+            Publication::decode(&claimed).map(|p| p.wanted),
+            Some(Vec::new())
+        );
+        let mut full = bincode::serialize(&published).unwrap();
+        full.extend(bincode::serialize(&vec![[3u8; 32]; MAX_WANTED]).unwrap());
+        assert_eq!(
+            Publication::decode(&full).map(|p| p.wanted.len()),
+            Some(MAX_WANTED)
+        );
+
+        // What follows the announcement and is no list asks for nothing.
+        let mut odd = bincode::serialize(&published).unwrap();
+        odd.push(0xff);
+        assert_eq!(
+            Publication::decode(&odd).map(|p| p.wanted),
+            Some(Vec::new())
+        );
+        assert_eq!(Publication::decode(&[1, 2, 3]), None);
     }
 
     #[test]
@@ -866,14 +1017,14 @@ mod tests {
 
     /// A validator whose clock ran fast is restarted with the clock set
     /// right, sooner after its last announcement than the clock was ahead.
-    /// Its new boot's announcement carries an earlier `issued_ms` than the
-    /// one its peers hold, yet the new boot's endpoint and session key are
-    /// the only ones it still runs: peers that keep the old announcement
-    /// dial an endpoint nobody serves and refuse every handshake the new
-    /// session key signs, until the old announcement expires or the new
-    /// boot renews at half its lifetime, hours later.
+    /// Its new boot's clock reads earlier than the `issued_ms` of the
+    /// announcement its peers hold, yet the new boot's endpoint and session
+    /// key are the only ones it still runs. The new boot issues one past its
+    /// last announcement, so its peers take it; were it issued at the
+    /// clock's reading, they would keep the old one, dial an endpoint nobody
+    /// serves and refuse every handshake the new session key signs, until
+    /// the old announcement expired.
     #[test]
-    #[ignore = "ordering across boots reads the signer's wall clock: a boot whose clock reads earlier than its last announcement is refused"]
     fn a_new_boot_signed_by_a_clock_set_back_replaces_the_last_one() {
         let mut book = EndpointBook::new();
         let fast = boot(1, 9, NOW + 30_000);
@@ -882,8 +1033,23 @@ mod tests {
             book.offer(fast.announcement.clone(), &key, CHAIN, &GENESIS, NOW)
                 .unwrap()
         );
-        // Restarted 5 s later with the clock corrected.
-        let corrected = boot(1, 10, NOW + 5_000);
+        // Restarted 5 s later with the clock corrected: issued at the
+        // clock's reading, the running boot is refused.
+        let by_the_clock = boot(1, 10, NOW + 5_000);
+        assert!(
+            !book
+                .offer(
+                    by_the_clock.announcement,
+                    &key,
+                    CHAIN,
+                    &GENESIS,
+                    NOW + 5_000
+                )
+                .unwrap()
+        );
+        let issued = issue_time(NOW + 5_000, Some(fast.announcement.issued_ms));
+        assert_eq!(issued, NOW + 30_001);
+        let corrected = boot(1, 10, issued);
         let taken = book
             .offer(
                 corrected.announcement.clone(),
@@ -897,6 +1063,79 @@ mod tests {
         assert_eq!(
             book.current(&key, NOW + 5_000).map(|a| &a.session_key),
             Some(&corrected.announcement.session_key)
+        );
+    }
+
+    /// A clock ahead of the last announcement issues at its own reading; with
+    /// no last announcement there is nothing to stay ahead of.
+    #[test]
+    fn the_issue_time_is_the_clock_unless_the_last_announcement_is_later() {
+        assert_eq!(issue_time(NOW, None), NOW);
+        assert_eq!(issue_time(NOW, Some(NOW - 1)), NOW);
+        assert_eq!(issue_time(NOW, Some(NOW)), NOW + 1);
+        let edge = NOW + MAX_CLOCK_SKEW_MS / 2;
+        assert_eq!(issue_time(NOW, Some(edge)), edge + 1);
+    }
+
+    /// A clock set a year forward once left a far-future issue time behind.
+    /// With the clock corrected the validator issues at the clock's reading,
+    /// which every peer accepts, and keeps nothing of the far value: it
+    /// does not stay a year ahead of its peers, refused by all of them.
+    #[test]
+    fn a_far_future_issue_time_left_behind_is_not_followed() {
+        let year = 365 * 24 * 3_600 * 1_000;
+        let stuck = NOW + year;
+        let issued = issue_time(NOW, Some(stuck));
+        assert_eq!(issued, NOW);
+        let a = boot(1, 9, issued);
+        let key = a.signer.public_key().clone();
+        a.announcement
+            .verify(&key, CHAIN, &GENESIS, NOW)
+            .expect("peers accept it");
+        let kept = kept_issue_time(Some(stuck), issued, NOW);
+        assert_eq!(kept, issued, "the far value was kept");
+        assert!(!reissue_due(issued, Some(kept), NOW + 1));
+        // u64::MAX left behind is no different.
+        assert_eq!(issue_time(NOW, Some(u64::MAX)), NOW);
+    }
+
+    /// The last boot's clock ran ahead by more than half the skew and less
+    /// than all of it, so peers hold its announcement. The new boot issues
+    /// at its clock (one issued past the held value could be refused as too
+    /// far ahead), keeps the held value, and issues again as soon as its
+    /// clock has passed it: from then on its peers take the new boot.
+    #[test]
+    fn an_issue_time_between_half_and_the_whole_skew_ahead_is_followed_once_passed() {
+        let ahead = NOW + MAX_CLOCK_SKEW_MS / 2 + 5_000;
+        let mut book = EndpointBook::new();
+        let fast = boot(1, 9, ahead);
+        let key = fast.signer.public_key().clone();
+        assert!(
+            book.offer(fast.announcement, &key, CHAIN, &GENESIS, NOW)
+                .unwrap()
+        );
+        let first = issue_time(NOW, Some(ahead));
+        assert_eq!(first, NOW);
+        let kept = kept_issue_time(Some(ahead), first, NOW);
+        assert_eq!(kept, ahead);
+        assert!(!reissue_due(first, Some(kept), ahead));
+        let later = ahead + 1;
+        assert!(reissue_due(first, Some(kept), later));
+        let second = issue_time(later, Some(kept));
+        assert_eq!(second, later);
+        let again = boot(1, 10, second);
+        assert!(
+            book.offer(again.announcement.clone(), &key, CHAIN, &GENESIS, later)
+                .unwrap()
+        );
+        assert_eq!(
+            book.current(&key, later).map(|a| &a.session_key),
+            Some(&again.announcement.session_key)
+        );
+        let kept = kept_issue_time(Some(kept), second, later);
+        assert!(
+            !reissue_due(second, Some(kept), later + 1),
+            "issued for ever"
         );
     }
 

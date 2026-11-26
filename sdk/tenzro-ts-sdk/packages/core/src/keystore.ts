@@ -116,6 +116,16 @@ export interface KeystoreUpdate {
   possession: CompositeSignatureJson | null;
 }
 
+/** `tenzro_getAccountSigningKey`: the public keys a P-256 key signs with for an account. */
+export interface AccountSigningKey {
+  /** The P-256 key (`x || y`), hex. */
+  p256: string;
+  /** The ML-DSA-65 key enrolled for it, hex, or `null` before it enrolls one. */
+  ml_dsa: string | null;
+  /** The relying party a passkey assertion by it must be for, when the account's keystore links it. */
+  rp_id: string | null;
+}
+
 /** `tenzro_getKeystore`. */
 export interface KeystoreView {
   account: string;
@@ -339,6 +349,14 @@ export class KeystoreClient {
   /** The keystore of `account`; with `anchor`, the genesis record of an account that has none on chain. */
   getKeystore(account: string, anchor?: KeystoreAnchor): Promise<KeystoreView> {
     return this.rpc.call("tenzro_getKeystore", anchor ? { account, anchor } : { account });
+  }
+
+  /**
+   * The public keys the P-256 key `publicKey` (hex `x || y`) signs with for `account` now, as a
+   * signature by it is judged in a block. Rejects when the key does not act for the account.
+   */
+  accountSigningKey(publicKey: string, account: string): Promise<AccountSigningKey> {
+    return this.rpc.call("tenzro_getAccountSigningKey", { public_key: publicKey, account });
   }
 
   /** The accounts whose keystore links the passkey with this credential id, registered on `rpId`. */

@@ -66,22 +66,6 @@ impl TermsGate for ChainTermsGate {
     }
 }
 
-/// The intent tier's spend check: an intent-routed call is a payment the
-/// payer's Terms must allow.
-impl tenzro_model::routing::intent::BudgetGate for ChainTermsGate {
-    fn check(&self, payer_did: &str, amount: u128) -> tenzro_model::Result<()> {
-        self.decide(&PaymentIntent {
-            payer_did,
-            amount,
-            operation: "inference",
-            protocol: None,
-            chain: None,
-            counterparty: None,
-        })
-        .map_err(tenzro_model::ModelError::InferenceError)
-    }
-}
-
 /// Install the Terms check on the node's payment gateway.
 pub fn install(node: &Arc<TenzroNode>) {
     // The agent key directory named in signed agent requests derives from

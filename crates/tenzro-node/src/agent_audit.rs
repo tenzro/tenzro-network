@@ -15,6 +15,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tenzro_storage::KvStore;
 use tenzro_types::agent_audit::parse_digest;
+use tenzro_vm::traits::VmState as _;
 use tracing::{info, warn};
 
 use crate::node::TenzroNode;
@@ -612,6 +613,37 @@ fn bad(message: impl Into<String>) -> JsonRpcError {
         code: -32602,
         message: message.into(),
         data: None,
+    }
+}
+
+/// The root that answers for `did` (a human or an autonomous machine): the
+/// controller its agent terms on chain name, else the root its DID is derived
+/// under (`did:tenzro:machine:{root}:{id}`), a machine when a machine of that
+/// id is registered and a human otherwise; an identity no one delegated
+/// answers for itself.
+pub(crate) fn controller_of(node: &TenzroNode, did: &str) -> String {
+    let chain = crate::rpc::chain_state_of(node);
+    if let Some(terms) = chain
+        .as_ref()
+        .and_then(|c| tenzro_vm::native::read_agent_terms(c, did))
+    {
+        return terms.terms.controller_did;
+    }
+    let Some(root) = tenzro_types::identity::delegated_root_id(did) else {
+        return did.to_string();
+    };
+    let machine = format!("did:tenzro:machine:{root}");
+    let registered = chain.as_ref().is_some_and(|c| {
+        c.get_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_types::identity::identity_slot(&machine).as_bytes(),
+        )
+        .is_some_and(|b| !b.is_empty())
+    });
+    if registered {
+        machine
+    } else {
+        format!("did:tenzro:human:{root}")
     }
 }
 

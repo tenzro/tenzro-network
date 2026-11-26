@@ -54,7 +54,10 @@ apply whichever VM a call targets.
 ## EVM view
 
 Tenzro precompiles run inside revm through `evm::precompile_host`, which
-replaces revm's call handler. A precompile sees the calling frame's real
+replaces revm's call handler on the engine the network started with; on the
+Osaka engine (`evm::osaka`, live from `feature.evm_osaka`) they are the
+second half of its precompile provider, after the rule set's own. A
+precompile sees the calling frame's real
 `msg.sender`, `msg.value` and static flag, and touches state only through
 revm's journal, so a reverted frame reverts its writes and a read-only
 `eth_call` (which never commits) can change nothing. State-changing selectors
@@ -160,7 +163,11 @@ decimals by truncation). `TransferChecked`
 mint: the wTNZO mint with 9 decimals, or a factory token whose id is the mint,
 in its own base units and with its own decimals. Source and authority must be
 the signer. `GetBalance` reads. `MintTo`, `Burn`, `Approve` and `Revoke` are
-refused. Any other stored program runs under `svm-full`.
+refused. Any other stored program runs only in a node built with the
+`svm-full` feature; no release build enables it, so a default node refuses
+the program. A node built with it executes the program where a default node
+refuses it, so the two compute different state for that block: every
+validator of one network runs the same build.
 
 ## Security properties
 

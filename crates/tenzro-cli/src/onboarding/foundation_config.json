@@ -1,5 +1,5 @@
 {
-  "_comment": "THE one place for the initial-phase onboarding values. Read by the CLI (onboarding/foundation_config.rs, compiled in) and imported by the wallet app (apps/tenzro-control/src/lib/onboarding.ts). Editing this file is the whole change.",
+  "_comment": "THE one place for the initial-phase onboarding values. Read by the CLI (onboarding/foundation_config.rs, compiled in). Editing this file is the whole change.",
   "foundation_contact_channels": [
     ["Email", "team@tenzro.com"],
     ["GitHub", "https://github.com/tenzro/tenzro-network/discussions"]

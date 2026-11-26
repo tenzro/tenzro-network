@@ -5,20 +5,31 @@ other document disagrees with this one, this one is right and the other is
 stale — the rates here are read from live code, not restated from memory.
 
 **Source of truth in code:** `crates/tenzro-types/src/economics.rs`
-(`EconomicPolicy`, `NodeEconomicMode`, `PayeeRole`),
-`crates/tenzro-payments/src/revenue_split.rs` (`split_revenue`),
+(`EconomicPolicy`, `ConversionPolicy`),
 `crates/tenzro-token/src/economic_policy.rs` (the live, governance-set policy).
 
 ---
 
 ## The economy in brief
 
-Tenzro is an open network for the machine economy. Its economy exists to make
-one loop turn by itself: demand from agents and apps pays providers; provider
+Tenzro is the demand and settlement layer for AI work: an open network that
+settles compute of every kind, with inference, compute, storage and data served
+as node roles, underneath the operators who already run the machines. It is not
+itself a GPU provider. Its economy exists to make one loop turn by itself: demand from agents and apps pays providers; provider
 income draws more machines; more machines improve price, quality and
 availability; and that draws more demand. Fees from real use carry the loop.
 Rewards help it start and are bounded so they can never pay more than the
 work behind them paid.
+
+**No pay for energy without output.** The network never pays for energy a
+machine spends without useful output: a payout out of a network-held fund
+is tied to a paid, verified unit of work, and the charter gate fails the
+build for a payout path that is not. The one bounded exception is the
+availability reward, which pays a provider for being verifiably ready to
+serve rather than for serving: it pays nothing until hardware binding is
+on, is capped per unit-hour and decays, is forfeited once the treasury's
+outflow period is spent, and the energy validators spend proving readiness
+is held to a governed budget of the fleet's own energy.
 
 **Who pays.** Most usage reaches the network through apps whose users do not
 care where the AI runs, so the network wins demand only by being cheaper or
@@ -36,7 +47,8 @@ payer. End users pay with what they already use; the app or platform pays the
 network.
 
 **Who is paid.** Providers of compute, models, agents and apps, each for its
-own part of a request. Provider work is recorded per class when a bonded
+own part of a request. Operators set their own rate cards per model and unit of
+work; the network sets no provider price. Provider work is recorded per class when a bonded
 provider is paid (`InferenceServed`, `TeeSession`, `RpcTraffic`,
 `ComputeLease`, `StorageServed`), and a payer can name the app, agent and tool
 behind a payment (`CallAttribution`, signed by the payer, each a registered
@@ -60,10 +72,24 @@ genesis values of the legs, like every other rate, are governed parameters:
 governance sets them within these bounds by enacted proposal. The full list is
 in [GOVERNANCE_PARAMS.md](GOVERNANCE_PARAMS.md).
 
-**Prices in USD terms, a fixed tariff.** Protocol fees are set in micro-USD
-and charged in TNZO at the rate in force (below), so they do not drift with
-the token. Day to day the tariff is fixed; governance is the lever, acting
-within hard bounds and after timelocks, not demand-driven repricing.
+**Prices in USD terms, a fixed tariff.** Protocol fees are priced in the
+governed unit of account, the US dollar at launch (`UnitOfAccount`, recorded
+on every payment; a fiat basket is built in behind
+`feature.unit_basket.activation_epoch`: the dollar, euro, renminbi, yen and
+pound at governed weights, `feature.unit_basket.weight_*`, proposed at their IMF SDR
+2022 weights 4,338 / 2,931 / 1,228 / 759 / 744 bps, each valued at its
+validator median and scaled so the unit is worth one dollar at the switch
+and its value carries through every reweight; a currency without a rate in
+force values the payment in the dollar), and paid in TNZO at the in-network TNZO/USD rate (below):
+during the preview the governance-set `fees.tnzo_usd_nano`
+(`fees.usd_rate_mode` 0); in validator mode (1) it moves only on validators'
+sealed reports, banded and change-capped. No outside price is read on chain. The
+TNZO paid in fees is burned, in full for posted fees and by the governed share
+for the settlement fee (half at genesis). Day to day the tariff is fixed;
+governance is the lever, acting within hard bounds and after timelocks, not
+demand-driven repricing. An app or harness can pay in a settlement asset
+governance has listed and never hold or price TNZO
+([Paying in a settlement asset](#paying-in-a-settlement-asset)).
 
 **Built against farming.** What one settlement may earn in rewards is bounded
 by what it paid outside the trade, its fee plus its treasury leg: provider,
@@ -72,7 +98,7 @@ so any group of parties acting together ends each settlement poorer. Payer and
 payee that share an identity root earn nothing from it; roots are followed
 through agent controllers. Usage a provider's own projects or related parties
 bring is real revenue at the normal tariff, earns no extra reward, and is
-reported apart from unrelated demand. Nothing pays for holding, volume, sign-ups or
+labelled and reported apart from unrelated demand. Nothing pays for holding, volume, sign-ups or
 engagement.
 
 **Bootstrapped, then decentralized by governance.** The first operators run the
@@ -82,11 +108,10 @@ evidence and an enacted proposal, never on a date. During the preview a new
 validator is admitted only by an enacted `ApproveValidators` proposal
 (`validator.admission_approval`).
 
-**The node revenue split is separate.** The rest of this document describes,
-among other things, how a node divides a service payment it collects between
-its operator, an RPC provider and the treasury (section 2). That division is
-the node's; the settlement fee and treasury legs above are charged by the chain
-on every on-chain settlement.
+**Node mode does not divide a payment.** The rest of this document describes,
+among other things, how a service payment settles (sections 1 and 2). The payee
+receives the payment; the settlement fee and treasury legs above are charged by
+the chain on every on-chain settlement. The economic policy holds no node-mode shares and a receipt carries no payee role.
 
 ---
 
@@ -133,22 +158,15 @@ amount before it was funded still cannot afterwards. Checking only the source
 cap would make the on-ramp a hole straight through every control the identity
 layer enforces.
 
-### The card networks are integrated at a different layer
+### Card, bank and processor rails enter as attested records
 
-Verified against Visa's own newsroom rather than secondary coverage: Visa's
-stablecoin settlement program settles with **issuers and acquirers — banks and
-fintechs — not with merchants directly**. A merchant sees the effect only
-through its acquirer. The program reached nine blockchains in April 2026 at a
-~$7B annualised run rate across USDC, EURC, USDG and PYUSD, with Circle's Arc
-and Base among the named partners.
-
-That is network settlement one layer *below* anything Tenzro touches — it is how
-a card authorisation Tenzro initiated through an issuer eventually settles
-between Visa and the acquiring bank. So Visa and Mastercard are integrated where
-they actually expose a surface to a party in Tenzro's position: as agent
-identity and mandate layers (Trusted Agent Protocol, Agent Pay), both of which
-authenticate over RFC 9421 HTTP Message Signatures, with which every Tenzro
-agent signs its requests.
+Card-network stablecoin settlement runs between the networks and their issuers
+and acquirers, one layer below anything Tenzro touches. A payment made on a
+card, bank or processor rail enters the ledger only as an attested record
+(`RecordClass::Attested`): stated by a named, bonded attestor, capped in USD,
+and never counted as proven. Tenzro agents sign their HTTP requests with RFC
+9421 HTTP Message Signatures (Web Bot Auth), the format the card networks'
+agent programmes authenticate over.
 
 
 ## The accounting layer: receipts a third party can check
@@ -156,9 +174,8 @@ agent signs its requests.
 Tenzro is not only the payment layer for agent activity — it is the **accounting
 layer**, and the two are different problems.
 
-An edge gateway can meter a request and take payment for it. Cloudflare, which
-ships exactly that over x402, states the limit plainly: *payment proves budget,
-not trust*, and audit trails are the developer's problem. So after the money has
+An edge gateway can meter a request and take payment for it, but payment
+proves budget, not trust, and the audit trail is left to the developer. So after the money has
 moved, nobody can answer — to anybody else — which party consumed what, under
 whose authority, and whether the payment that cleared corresponds to the work
 that happened. Each side keeps its own log, the logs disagree, and the
@@ -178,8 +195,8 @@ record binding four things that only mean something together:
 That last field matters more than it looks. A settlement transaction hash alone
 is ambiguous — absent means *either* nothing was charged *or* the charge accrued
 into a channel rather than settling on its own. Those are opposite facts to an
-auditor. **Accrued** is also precisely the state Cloudflare's proposed deferred
-x402 scheme describes and which x402 itself has nowhere to record.
+auditor. **Accrued** is also precisely the state a deferred x402 scheme needs and which
+x402 itself has nowhere to record.
 
 ### One record for every kind of interaction
 
@@ -268,20 +285,18 @@ and pays the gas of; the node's own account never sends one. CLI
 `mirror_settlement`; A2A `interaction-receipts`; TenzroClaw `mirror_settlement`.
 
 
-## Fee splits and mirroring: the division happens once
+## Mirroring: a payment settles once
 
 A settlement mirrored onto five chains is **five copies of one settlement, not
 five settlements**. This is worth stating because the payload makes it look
 otherwise: a self-contained mirror writes the whole record, `payees` and
 `amount_charged` included, onto each target chain.
 
-Those fields are a **record of a division that already happened on the Tenzro
-Ledger**, not a request for that chain to perform one. The revenue split runs
-exactly once, at settlement, before any mirror is dispatched. Nothing in the
-mirror path calls it, and three tests enforce that: the mirrored payload is
-byte-identical to the settled record, every target carries the same payload,
-and a structural guard fails the build if the split is ever called from the
-dispatch path.
+Those fields are a **record of a settlement that already happened on the Tenzro
+Ledger**, not a request for that chain to perform one. The payment settles
+exactly once, before any mirror is dispatched. Nothing in the mirror path
+divides it again, and tests enforce that: the mirrored payload is byte-identical
+to the settled record, and every target carries the same payload.
 
 So a reader of a mirrored record learns who was paid and how much. It does not
 learn that it owes anyone anything.
@@ -355,9 +370,8 @@ speaks x402 fluently and still cannot carry a one-cent charge without roughly
 metered call. So each rail carries an indicative fee floor, and the smallest
 worthwhile payment on it is that floor times a ratio — 100 by default, meaning
 settlement may cost at most 1% of the payment. The ratio is set against the
-split itself: the treasury leg of a public validating node is 10%, so a
-settlement cost above that order would dominate the economics the split
-describes.
+treasury leg of a payment, which is 10%, so a
+settlement cost above that order would dominate the economics of the payment.
 
 | Rail | CAIP-2 | Family | Carries natively | x402 |
 |---|---|---|---|---|
@@ -456,12 +470,12 @@ stake-backed bridge caps and the USD floor on bonds value TNZO at the **safety
 rate**, the lower of the rate in force and the lowest frozen median of the
 last `fees.safety_rate_window_epochs` (24) epochs. A crash shows in the
 medians at once, so no check trusts stake or collateral to be worth more than
-the market said within the last day, while the rate in force walks down at
+the validators' medians showed within the last day, while the rate in force walks down at
 its capped speed. `tenzro_getFeeRate` reports both.
 
 New bonds keep their USD value. A new or raised role bond, and a validator
 joining the set, must meet each `stake.*` amount raised in proportion when
-TNZO trades below `stake.bond_floor_rate_nano_usd` at the safety rate (0.10
+TNZO is valued below `stake.bond_floor_rate_nano_usd` at the safety rate (0.10
 USD at genesis): after a 95% fall entering costs twenty times the TNZO, so a
 crash does not make Sybil entry cheap. Bonds already in place keep serving
 at the TNZO amounts.
@@ -483,90 +497,154 @@ single provider's feeds reports nothing, and no single provider sets the rate on
 its own.
 
 
-## 1. One division, one place
+## 1. One settlement, one place
 
-A settled service payment is divided **exactly once**, by `split_revenue`, and
-nothing downstream takes a further cut.
+A settled service payment settles **exactly once**, and nothing downstream takes
+a further cut. The payee receives the payment. The settlement engine's network
+fee is **zero**; the chain's settlement fee and any treasury leg are charged by
+the consensus executors on the on-chain settlement, not by a node.
 
-The settlement engine's network fee is **zero**. The split is the fee.
+- **The settlement fee** (`fees.settlement_*`): a share of the value, with its
+  own burn and insurance parts and the rest to the treasury.
+- **The treasury leg of the payee's work class** (`fees.treasury_leg_*_bps`,
+  genesis 0): taken from what the fee leaves the payee when the payment is
+  provider work, and paid to the treasury beside the fee.
+- **The HTTP-402 network share** (`fees.http402_network_share_bps`): an
+  HTTP-402 payment settled off chain (delivery versus payment and fiat rails)
+  pays the network its share into a separate escrow, and its settlement then
+  pays no settlement fee, so one payment pays one network fee.
+- **The RPC-provider leg** (§2, ships off).
 
-**The invariant:** the shares sum to exactly the amount that was charged.
-`RevenueSplit::total()` equals the input, always, and
-`InteractionProvenance::is_conserved()` re-checks it on the receipt. A sum that
-comes up short strands value with no owner; one that comes up long means someone
-was paid out of another party's share. Both are caught.
+What is left is the payee's. Value is conserved: the payer's debit equals the
+payee's credit plus each part, and a block whose balance writes do not net to
+its recorded supply change is refused.
+
+**The invariant:** the payee legs recorded on a receipt sum to exactly the amount
+that was charged. `InteractionProvenance::is_conserved()` re-checks it. A sum
+that comes up short strands value with no owner; one that comes up long means
+someone was paid out of another party's share. Both are caught.
+
+---
+
+## 2. A node's mode does not divide a payment
+
+A node is not paid more or less for being private, public or validating, and the
+node divides no payment between its operator, an RPC provider and the treasury.
+The payee gets the payment. The policy holds no node-mode shares and no
+settlement applies one. Validating earns consensus rewards and an advertised
+capability is paid by whoever calls it; those are separate streams. Ledger gas
+is owed on any transaction a node settles; that is not a commission.
+
+An RPC provider brokering external networks bills its own tenants under
+`RpcServiceGrant` (section 3).
+
+A settlement plan pays the leg out of the line that takes the remainder, its
+primary payee.
 
 ---
 
-## 2. A node's economic mode is derived, never declared
+### Buying a validator bond with a stable asset (ships off)
 
-There is no setting an operator can change to be paid more. The mode follows
-from two facts the node already knows: whether its visibility announces it to
-the network (`public` or `gated`), and whether the node validates.
-
-| Mode                   | Condition                                        | Division                           |
-| ---------------------- | ------------------------------------------------ | ---------------------------------- |
-| **Private**            | The node's visibility is `private`               | Operator takes 100%                |
-| **Public, validating** | Advertised, and the node runs the validator role | Operator + treasury                |
-| **Public, delegated**  | Advertised, and the node does _not_ validate     | Operator + RPC provider + treasury |
-
-### Why private keeps the whole payment
-
-A private node is **connected to the network but not advertising itself**. Its
-resources are reached as the operator's access policy admits, and the network
-can still reach it — signed in, under that policy — but nobody
-_discovered_ it. No discovery was consumed and no validator was engaged on the
-caller's behalf, so there is no network share to take. Ledger gas is still owed
-on any transaction it settles; that is a separate stream and is not a
-commission.
-
-Note that a node which does not advertise is private **whether or not it
-validates**. Validating earns consensus rewards, which is a different stream,
-and does not entitle the network to a share of revenue from callers the network
-never introduced.
-
-### Why the delegated mode has a third leg
-
-A node that advertises but does not validate still needs its users' transactions
-validated. Some RPC provider does that work, and is owed for it. The difference
-between the two public schedules is exactly that leg — the operator is buying
-validation it does not perform. The treasury's cut is unchanged either way,
-because what the treasury does for the payment (discovery, settlement, the
-registry) is the same.
-
-A node in this mode that cannot name its RPC provider is **refused at
-settlement**, not defaulted. Paying that share to the treasury because nobody was
-configured would pay the wrong party and report nothing wrong. Set it in
-`[economics] rpc_provider_payee`, or enable the validator role.
-
-### Default rates
-
-|                    | Operator  | RPC provider | Treasury |
-| ------------------ | --------- | ------------ | -------- |
-| Private            | 10000 bps | —            | —        |
-| Public, validating | 9000 bps  | —            | 1000 bps |
-| Public, delegated  | 8000 bps  | 1000 bps     | 1000 bps |
-
-Every one of these is governance-settable (§6). The **operator must always hold
-a strict majority** — enforced at construction, not merely documented, and
-enforced against governance too. A schedule that gives the serving party half or
-less is rejected: at that point the operator is not being paid to serve, they are
-splitting with parties that did not do the work.
-
-Rounding dust goes to the operator, the party whose share is least distorted by
-it and the one already receiving the residual.
-
----
+Once governance sets `feature.bond_onramp.activation_epoch`, an account can
+pay a stable settlement asset to the treasury and receive TNZO straight into
+its validator bond, never into a free balance; the bond leaves only by the
+validator exit, after the governed unbonding period. The TNZO is the asset's
+value at the higher of the rate in force and the safety rate, less
+`fees.onramp_spread_bps`, and the buyer names the least it accepts. The
+treasury pays at most `treasury.onramp_max_tnzo_epoch` (genesis 0) an epoch
+and takes in no more of the asset than its exposure ceiling. Exchanging
+treasury TNZO for stable assets distributes TNZO, so switching it on is the
+owner's decision.
 
 ### Operator earnings: spot, standby and the availability reward
 
 Besides the price a provider sets for the work it serves, three legs pay an operator for capacity.
 
-- **Spot.** A chat buyer can ask for spot treatment with the `spot` request field. The request is admitted under the batch class, which is shed before it starts once the node's batch reservation is full, so full-price interactive work keeps its capacity; a spot job already admitted is never stopped. The served tokens are billed under the `@spot` tier, priced by the operator's own spot rate-card line, and the response names its tier (`spot` or `standard`). A routed call carries the choice to the remote provider.
+- **Spot.** A chat buyer can ask for spot treatment with the `spot` request field. The request is admitted under the batch class, which is shed before it starts once the node's batch reservation is full, so full-price interactive work keeps its capacity. An interactive request that finds the node full asks the most recently admitted spot request to yield: on the single-request engine its decode stops at the next token, the answer comes back with `preempted: true`, and the units, receipt and decode commitment cover exactly the tokens it produced, so the caller pays for those and may resend for the rest. On the batched, hosted and pipelined engines a spot job runs to its end. With `[spot] fill_idle = true` in its configuration, an operator lets spot requests take any free slot instead of only the batch share, since a yielding spot request gives the slot back. The served tokens are billed under the `@spot` tier, priced by the operator's own spot rate-card line, and the response names its tier (`spot` or `standard`). A routed call carries the choice to the remote provider.
+  The floor of a spot line is the operator's marginal cost of serving one more unit: the extra energy the machine draws under load over what it draws idle, plus wear. It is not the full cost. Hardware, hosting and idle power are spent whether or not the spot job runs, and the standard line, standby fees and the availability reward are what recover them. A spot line priced at full cost leaves the capacity idle; any price above marginal cost adds income that would otherwise be zero. The network sets no floor: the operator writes the `@spot` line.
 - **Standby.** An operator can hold a model warm on standby in a jurisdiction for an hourly fee it advertises. `tenzro_standbyQuote { model_id, jurisdiction }` (CLI `tenzro inference standby-quote`, MCP `standby_quote`, TypeScript SDK) returns the live operators holding that model there, cheapest first, with the account a reservation escrow must pay; the buyer funds a stream escrow to that operator before its session starts. The light build answers standby quotes too.
-- **Availability reward.** A provider whose SLA probe returns a verified-available verdict earns a bounded, treasury-funded payment, once per subject and epoch, for every serving role an SLA probe owes (TEE, model, compute, storage and RPC providers, plus wallet and edge stakes). It vests like every other earned reward, decays on a deterministic integer half-life once governance starts the clock, phases out as verified paid demand reaches a governed target, and scales by the readiness tier a subject declares (warm, cool or cold). It pays nothing while `reward.availability_require_hardware_binding` is zero, because nothing then ties a verdict to a real machine; an empty treasury forfeits that epoch's reward rather than refusing the verdict. Its parameters are the `reward.availability_*` entries in [GOVERNANCE_PARAMS.md](GOVERNANCE_PARAMS.md).
+- **Compute price index.** Validators report what the calls their routers served actually cost, per hardware class, through the same sealed-then-opened rate oracle as the TNZO rate: symbols `IDXCPU`, `IDXCGPU`, `IDXDCGPU` and `IDXMULTI`, in nano-USD per compute-hour, one quote per provider at least two validators observed. The chain freezes each symbol's stake-weighted median under the oracle's quorum, band and change limits. Spot calls are served calls and count; standby fees are paid by stream escrow and the availability reward by the treasury, so neither enters it. Nothing settles against the index; it is the reference a standby fee is quoted against.
+- **Availability reward.** A provider whose SLA probe returns a verified-available verdict earns a bounded, treasury-funded payment, once per subject and epoch, for every serving role an SLA probe owes (TEE, model, compute, storage and RPC providers, plus wallet and edge stakes). It vests like every other earned reward, decays on a deterministic integer half-life once governance starts the clock, phases out as verified paid demand reaches a governed target, and scales by the readiness tier a subject declares (warm, cool or cold). It pays nothing while `reward.availability_require_hardware_binding` is zero, because nothing then ties a verdict to a real machine; an empty treasury forfeits that epoch's reward rather than refusing the verdict. Its parameters are the `reward.availability_*` entries in [GOVERNANCE_PARAMS.md](GOVERNANCE_PARAMS.md). Once `feature.availability_paid_activity.activation_epoch` is live it pays only an operator whose owner account earned at least `feature.availability_paid_activity.min_work_wei` of provider work (settled payments from a registered party of another root identity) within the last `feature.availability_paid_activity.window_epochs` reward epochs, so being reachable while nobody pays earns nothing; governance may waive that until `feature.availability_paid_activity.bootstrap_until_epoch` while the network has no paid demand yet. A dormant rule caps a proven GPU's unit-hour at a share of the compute price index ([Indexed availability cap](GOVERNANCE_PARAMS.md#indexed-availability-cap)). The hourly SLA probe is a liveness check that wakes no model; the burst challenge that does (a matrix proof from every unit of an operator with several) comes every 36 probe rounds for a warm unit, every 144 for a cool one and every 1,008 for a cold one (six hours, a day and a week at the ten-minute interval), so a unit that declared itself cold is woken weekly. `tenzro_slaGetEnergy` reports what this costs. Its default figures charge every scheduled probe a cool-tier wake (4 kJ against 6.2 MJ a day), which puts the challenge share at about 9.3% at the ten-minute interval. From `feature.sla_wake_energy.activation_epoch` it charges a scheduled probe a 50 J liveness reply and each burst the tier's wake (warm 1 kJ, cool 4 kJ, cold 100 kJ) at the tier's cadence, against the tier's own energy (10.5 MJ, 6.2 MJ, 0.5 MJ a day). A warm fleet then spends about 0.1% and a fleet of two warm units and one cold unit about 0.2%. The governed challenge energy budget is checked against the same figures.
+
+#### Operator guide: pricing your lines
+
+An operator sets every price it charges; the network sets none. A node holds a default price card and one card per model. A card is a list of lines, each a unit of metered work with a price, written `unit[@tier]=price[/per_exp]`: the price is in billionths of a dollar (or in TNZO base units with `--denom wei`) per `10^per_exp` units.
+
+```
+tenzro provider pricing set --model <model> \
+    --line input_tokens=250000000/6 \
+    --line output_tokens=1000000000/6 \
+    --line output_tokens@spot=300000000/6
+tenzro provider pricing show
+tenzro provider pricing post --model <model>
+```
+
+That card charges $0.25 per million input tokens, $1.00 per million output tokens, and $0.30 per million output tokens for a spot request. A unit the card leaves out costs nothing, and a call none of whose work the card prices is refused. `post` publishes the card so buyers and receipts can name it. The full flag list is in [CLI.md](CLI.md).
+
+How to choose each line:
+
+| Line | What it pays for | Where its floor is |
+| --- | --- | --- |
+| Standard (`output_tokens`, `input_tokens`, and the units of other modalities) | Work served at once, ahead of spot work | Full cost: hardware, hosting, power and the operator's margin, spread over the hours the machine expects to sell |
+| Spot (`unit@spot`) | Work served only from capacity that would otherwise sit idle | Marginal cost: the extra power drawn under load over idle, plus wear |
+| Standby fee (per hour, advertised with the model) | Holding a model loaded in a jurisdiction for a buyer, used or not | The idle power of keeping it loaded, plus what the reserved capacity would have earned |
+
+To find a spot floor, measure the machine's power draw idle and under load and its serving rate. A machine that draws 300 W more under load than idle and serves 50 output tokens a second takes about 5.6 hours, and 1.7 kWh, to serve a million output tokens; at $0.15 per kWh that is about $0.25 of electricity, so any spot line above that adds income. The figures are an illustration: use the machine's own.
+
+The availability reward is not a line on the card and not a price the operator sets. It is bounded, decays, and phases out as paid demand grows, so it is not income to plan a machine's cost recovery on: the lines above are.
+
+In a flat market paid demand does not grow, so the demand offset never phases the reward out and only calendar decay binds. Size the reward for that case: with the hourly cap `c` per unit and a half-life of `h` days, calendar decay alone pays one unit at most about `36 × h × c` over all time (one and a half half-lives of the cap), so a vote that sets the cap and the half-life together keeps `36 × h × c × units` within what the treasury can pay inside its outflow cap. The cap is zero at genesis, so the reward pays nothing until such a vote.
 
 A provider's hardware security level adds a small, capped bonus to its provider reward share; it never admits or excludes anyone. The chain derives it at every reward epoch close from attestation evidence in state: level 0 is no hardware proof; level 1 a machine identity whose manufacturer-certified TPM proved this epoch it still holds it; level 2 the same TPM holding the identity's enrolled ML-DSA key; level 3 a restricted TPM ML-DSA attestation key, or an NVIDIA GPU proven beside the TPM in the same epoch. See [Hardware levels](GOVERNANCE_PARAMS.md#hardware-levels).
+
+### Pool release bound to the burn (ships off)
+
+The node carries a rule that is off and stays off until a governance vote
+sets its epoch (`feature.burn_bound_release.activation_epoch`). Once live,
+what a closed reward epoch releases from the rewards pool is at most a
+governed ratio of the TNZO that epoch burned, counting the burn-equivalent of
+fees collected in other assets. Burn and release are counted in TNZO at the
+same epoch's rate, so the bound holds in USD whatever the TNZO price does. The
+ratio is at most one (`feature.burn_bound_release.ratio_bps`).
+
+The gate reads the epoch of the block that closes an epoch, and epoch `E`
+closes once the chain is in `E + 1`. A gate of `G` therefore first binds the
+close of epoch `G - 1`.
+
+Around that ceiling the rule has governed limits, each a registry entry with
+bounds ([Network parameters](GOVERNANCE_PARAMS.md)): the burn budget can be
+smoothed over epochs; releases of one schedule year stay within a share of the
+pool left when the year began; the ratio steps down once the pool is under a
+share of its genesis size and release stops under a floor, while validators'
+running cost goes on being paid from the fees kept; a matched start may lift
+the epoch ceiling above the ratio for a bounded time and a bounded share of the
+pool, only on top of paid work, and it never lifts what a single settlement
+may earn; and no address takes more than a governed share of an epoch's
+release. Whatever these bounds cut is not paid to anyone: it stays in the pool.
+"The pool left" is the genesis pool less what earlier epochs took and did not
+give back (rights withheld, coupons claimed or still claimable); what lapsed
+is still in it. The share cap is per address: an earner who splits its work
+across several addresses is held to it once per address, so it limits a key,
+not an operator.
+
+What the rule is and is not:
+
+- **It makes rewards follow paid work. It is not supply protection.** TNZO's
+  supply is fixed and nothing is minted, so supply cannot grow with or without
+  the rule.
+- **It funds nothing.** Simulation over market-stress traces found that the
+  ceiling adds no revenue and does not close the gap between fee revenue and
+  validator running cost; it only removes pool release. What it does close is
+  a self-dealing exposure: with release at or under the burn, a party paying
+  itself to unlock release loses money at any share of validator cover.
+- **A burn-bound release is untested at network scale.** No network is known
+  to have launched on one; every comparable network started on a schedule. The
+  simulation is the only evidence, and it is a model.
+- **Two price links remain.** The pool's runway in USD is its TNZO balance
+  times the price, so a price fall shortens it, and a matched start sized in
+  TNZO is worth its USD only at the price.
+
+Switching the rule on, and every value it runs with, is a governance decision.
 
 ## 3. Three ways to use a node
 
@@ -603,8 +681,7 @@ Types: `crates/tenzro-types/src/access_tier.rs`.
 
 An RPC provider selling access to **external networks they broker** — chains
 beyond Tenzro — does so on their own terms, the way every other
-chain's RPC operators do. That revenue is theirs and never enters a node's
-revenue split (`RpcServiceGrant`).
+chain's RPC operators do. That revenue is theirs (`RpcServiceGrant`).
 
 This is a different thing from the RPC-provider leg in §2, which pays for
 _validation performed on a serving node's behalf_. Charging in both places for
@@ -630,11 +707,39 @@ drawn against a standing mandate an agent held.
 
 ### Asset
 
-The network takes **TNZO by default** (`ConversionPolicy::ConvertToTnzo`): it is
-the unit the ledger accounts in, and a treasury holding forty stablecoins is a
-treasury nobody can value. A payee may declare otherwise and keep the inbound
-asset rather than take conversion risk on every microtransaction. The default
-itself is governance-settable.
+A node's gateway settles a payment only in the asset the payee declared. A
+payee that declared nothing reads back the governed default, **TNZO**
+(`ConversionPolicy::ConvertToTnzo`), the unit the ledger accounts in; a payee
+may declare otherwise and keep the inbound asset rather than take conversion
+risk on every microtransaction. The gateway has no swap venue, so a payment in
+another asset is refused rather than credited in an asset the payee did not
+choose. The default itself is governance-settable.
+
+### Paying in a settlement asset
+
+Apps and harnesses can pay in a stablecoin and never hold or price TNZO. The
+chain keeps a registry of permitted settlement assets that only governance
+writes (`SetSettlementAsset`); a payment in any token other than TNZO settles
+only in an enabled entry whose validator rate sits inside its par band, and a
+peg breaker suspends an asset that leaves it (see Circuit breakers below).
+
+- **Fee in kind.** The settlement fee and any treasury leg are collected in the
+  payment's own asset. The treasury and insurance shares stay in that asset in
+  the treasury's stable holdings.
+- **Burn by netting.** The burn share goes to the treasury's stable holdings,
+  and its TNZO equivalent at the chain rate is booked for the epoch. When the
+  epoch closes, that amount is withheld from the epoch's reward issuance and
+  burned from the rewards pool, so supply falls as if the fee had been burned
+  in TNZO. What issuance cannot cover is carried as capped burn debt
+  (`fees.burn_debt_cap_epochs`), then burned by the treasury within
+  `fees.treasury_burn_max_tnzo_epoch` (`crates/tenzro-vm/src/native/burn_netting.rs`).
+- **Payout in a listed asset.** A payee lists the settlement assets it accepts
+  (`SetPayoutAssets`); a stable payment is paid out in the arrival asset or,
+  through a pro-rata epoch swap from the treasury's stable holdings, in another
+  listed stable asset. TNZO arrivals and TNZO payouts are not swapped
+  (`crates/tenzro-vm/src/native/payout_swap.rs`).
+
+TNZO stays underneath for gas, stake and security.
 
 ---
 
@@ -650,13 +755,14 @@ the ones that move no money on that call.
 It records what happened, not what was intended: `amount_charged` is what
 actually moved and `payees` is where it actually went, not the rate card that
 was quoted. A receipt that echoes intent rather than outcome is precisely how a
-split that double-charged went unnoticed.
+double charge goes unnoticed.
 
 ---
 
-## 6. Governance sets every rate
+## 6. Governance sets the economic policy
 
-`EconomicPolicy` is one block holding every rate the network charges. It is
+`EconomicPolicy` is one block holding the default conversion of an inbound asset
+and the micro-settlement floor. It is
 persisted (`CF_TOKENS / economic_policy:current`), hydrated on boot, and changed
 only by governance proposal.
 
@@ -664,12 +770,7 @@ only by governance proposal.
 - **Read:** `tenzro governance economic-policy`, or the `tenzro_getEconomicPolicy` RPC
 - **Executor:** `ProposalType::EconomicPolicyUpdate` → `EconomicPolicyManager::apply`
 
-The whole policy travels in one proposal rather than a field at a time: a change
-that moved one leg without the others would not sum to a whole payment.
-
-A proposal is validated **before** it is stored, and again before anyone votes on
-it. A rejected policy leaves the previous one live. Governance can move the
-numbers; it cannot make them incoherent.
+The whole policy travels in one proposal rather than a field at a time.
 
 No rate has a `const` twin anywhere in the workspace. A rate living in a constant
 has to be found and changed in a release, and every node that has not upgraded
@@ -857,7 +958,7 @@ from geometry, audio and video milliseconds, denoising pixel-steps, frames,
 characters spoken, audio produced, reranked pairs and forecast points.
 LLM tokens are one unit type among many; vision, image, video, world models,
 timeseries, embeddings, segmentation and detection all meter through the same
-structure and settle through the same split.
+structure and settle through the same settlement path.
 
 Frames are charged only when `pixel_steps` is zero, so a generative video call is
 not billed twice for the same work.

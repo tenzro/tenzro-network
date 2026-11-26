@@ -22,20 +22,6 @@ fn test_config() -> (NodeConfig, tempfile::TempDir) {
     let config = NodeConfig {
         data_dir: tmp.path().to_path_buf(),
         iroh: tenzro_iroh::TenzroIrohConfig::loopback(),
-        // This node advertises but does not validate, so an RPC provider
-        // validates on its behalf and is owed a leg of every split. Settlement
-        // refuses when that payee is unnamed — deliberately, because quietly
-        // redirecting their share to the treasury pays the wrong party and
-        // reports nothing wrong. Naming one here exercises the three-way
-        // delegated split rather than routing around it.
-        economics: tenzro_node::EconomicsConfig {
-            // All-numeric so EIP-55 mixed-case checksum validation is moot:
-            // `Address::from_hex` checksums the letters in a 20-byte address,
-            // so a mis-cased one is rejected. That rejection is now logged
-            // rather than swallowed, but an address with no letters cannot
-            // trip it at all.
-            rpc_provider_payee: Some("0x0000000000000000000000000000000000000011".to_string()),
-        },
         ..Default::default()
     };
     (config, tmp)
@@ -1057,6 +1043,60 @@ async fn test_rpc_multi_element_positional_array_preserved() {
         "balance should be hex: {}",
         result
     );
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+}
+
+/// An agent's receipt for work it ran outside the network is recorded once,
+/// under its signed envelope: the same receipt again returns the first record,
+/// and a request without the agent's envelope is refused.
+#[tokio::test]
+async fn test_rpc_an_execution_receipt_is_recorded_once_for_its_agent() {
+    let (base_url, shutdown_tx, handle, _tmp, node) = setup_test_server().await;
+    let client = reqwest::Client::new();
+    let agent = register_signing_human(&node, 0x61).await;
+    let method = "tenzro_recordExecutionReceipt";
+    let params = json!({
+        "agent_did": agent,
+        "platform": "render.example",
+        "receipt": "{\"job\":\"r-1\",\"gpu_seconds\":42}",
+        "units": { "gpu_seconds": 42 },
+    });
+
+    let unsigned = rpc_call(&client, &base_url, rpc_request(method, params.clone())).await;
+    assert!(unsigned["result"].is_null(), "{unsigned}");
+
+    let first = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(method, with_envelope(params.clone(), &agent, method, 0x61)),
+    )
+    .await;
+    assert_eq!(first["result"]["first"], true, "{first}");
+    let digest = first["result"]["receipt_digest"]
+        .as_str()
+        .expect("digest")
+        .to_string();
+    assert_eq!(digest.len(), 64);
+
+    let again = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(method, with_envelope(params.clone(), &agent, method, 0x61)),
+    )
+    .await;
+    assert_eq!(again["result"]["first"], false, "{again}");
+    assert_eq!(again["result"]["receipt_digest"], digest.as_str());
+
+    // Another key under the agent's name is refused.
+    let forged = rpc_call(
+        &client,
+        &base_url,
+        rpc_request(method, with_envelope(params, &agent, method, 0x62)),
+    )
+    .await;
+    assert!(forged["result"].is_null(), "{forged}");
 
     let _ = shutdown_tx.send(());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;

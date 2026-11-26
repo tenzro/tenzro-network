@@ -369,9 +369,16 @@ pub fn violation_evidence(policy: &Value, receipt: &JurisdictionReceipt, clause:
     })
 }
 
-/// The receipt's batch signature covers its canonical preimage and was made
-/// by the key it names (`signer_public_key`).
-fn verify_receipt(r: &JurisdictionReceipt) -> bool {
+/// Checks a jurisdiction receipt signed with an identity key against the
+/// chain's record of the signing machine's keys. This crate holds no chain
+/// view; the node supplies the check.
+pub type IdentityKeyReceipts =
+    std::sync::Arc<dyn Fn(&JurisdictionReceipt) -> std::result::Result<(), String> + Send + Sync>;
+
+/// The receipt's signature covers its canonical preimage: a batch signature
+/// made by the key it names (`signer_public_key`), or, when `identity_keys`
+/// is given, any other form that check accepts.
+fn verify_receipt(r: &JurisdictionReceipt, identity_keys: Option<&IdentityKeyReceipts>) -> bool {
     let Ok(at_ms) = u64::try_from(r.signed_at.as_millis()) else {
         return false;
     };
@@ -385,7 +392,7 @@ fn verify_receipt(r: &JurisdictionReceipt) -> bool {
         return false;
     };
     let Ok(sig) = serde_json::from_slice::<tenzro_crypto::batch::BatchedSignature>(raw) else {
-        return false;
+        return identity_keys.is_some_and(|check| check(r).is_ok());
     };
     tenzro_crypto::batch::RecordSignature::batched(sig)
         .verify_record_at(&identity, &r.canonical_preimage(), at_ms)
@@ -397,6 +404,16 @@ fn verify_receipt(r: &JurisdictionReceipt) -> bool {
 /// receipt was signed, so a policy the operator later replaced still binds
 /// the receipts signed under it, and a newer one cannot excuse them.
 pub fn verify_violation(evidence: &Value, history: &[OperatorPolicy]) -> Result<ProvenViolation> {
+    verify_violation_with(evidence, history, None)
+}
+
+/// [`verify_violation`], where a receipt signed with an identity key is
+/// checked with `identity_keys`.
+pub fn verify_violation_with(
+    evidence: &Value,
+    history: &[OperatorPolicy],
+    identity_keys: Option<&IdentityKeyReceipts>,
+) -> Result<ProvenViolation> {
     if evidence.get("type").and_then(Value::as_str) != Some(VIOLATION_TYPE) {
         return Err(invalid(format!("not a {VIOLATION_TYPE}")));
     }
@@ -416,7 +433,7 @@ pub fn verify_violation(evidence: &Value, history: &[OperatorPolicy]) -> Result<
         serde_json::from_value(evidence.get("clause").cloned().unwrap_or(Value::Null))
             .map_err(|e| invalid(format!("clause: {e}")))?;
 
-    if !verify_receipt(&receipt) {
+    if !verify_receipt(&receipt, identity_keys) {
         return Err(invalid("the receipt signature does not verify"));
     }
     let named = policy
@@ -578,6 +595,40 @@ pub(crate) mod tests {
             ),
             from,
         )
+    }
+
+    /// A receipt in a form other than the record signature proves a
+    /// violation only through the identity key check the holder supplies,
+    /// and only when that check accepts it.
+    #[test]
+    fn an_identity_key_receipt_proves_a_violation_only_through_the_check() {
+        let op = TestKey::new(1);
+        let rs = ReceiptSigner::new();
+        let doc = policy_doc(
+            &op,
+            1,
+            "2026-01-01T00:00:00Z",
+            &[&rs],
+            &["qwen3.5-0.8b"],
+            None,
+        );
+        let policy = OperatorPolicy::parse(&doc).unwrap();
+        let mut bad = rs.receipt("uncensored-70b", "DE", "2026-02-01T00:00:00Z");
+        bad.batched = Some(br#"{"root_member":"00"}"#.to_vec());
+        let evidence = violation_evidence(&doc, &bad, Clause::ServesModels);
+        let history = std::slice::from_ref(&policy);
+
+        assert!(verify_violation(&evidence, history).is_err());
+        let refuses: IdentityKeyReceipts =
+            std::sync::Arc::new(|_: &JurisdictionReceipt| Err("rotated".into()));
+        assert!(verify_violation_with(&evidence, history, Some(&refuses)).is_err());
+        let accepts: IdentityKeyReceipts = std::sync::Arc::new(|r: &JurisdictionReceipt| {
+            (r.model_id == "uncensored-70b")
+                .then_some(())
+                .ok_or_else(|| "another receipt".to_string())
+        });
+        let v = verify_violation_with(&evidence, history, Some(&accepts)).unwrap();
+        assert_eq!(v.operator, op.did());
     }
 
     #[test]

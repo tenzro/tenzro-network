@@ -48,11 +48,12 @@ fn now_ms() -> u64 {
 /// A node that runs 0.2.1 and trusts the test key.
 async fn node(lookup: &MemoryLookup) -> Node {
     let gate = GossipGate::default();
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .hooks(gate.clone())
-        .bind()
-        .await
-        .unwrap();
+    let endpoint =
+        tenzro_iroh::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .hooks(gate.clone())
+            .bind()
+            .await
+            .unwrap();
     endpoint.address_lookup().unwrap().add(lookup.clone());
     lookup.add_endpoint_info(endpoint.addr());
     let transport = GossipTransport::spawn(&endpoint, gate);

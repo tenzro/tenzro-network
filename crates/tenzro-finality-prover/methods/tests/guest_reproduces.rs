@@ -21,13 +21,29 @@ use risc0_build::{DockerOptionsBuilder, GuestOptionsBuilder};
 /// program `name` it builds is `elf` with image id `id`.
 fn rebuilt_matches(package: &str, name: &str, embedded: &str, elf: &[u8], id: &[u32; 8]) {
     let methods = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = methods.join("../../..").canonicalize().expect("the repository root");
-    let docker = DockerOptionsBuilder::default().root_dir(root).build().expect("docker options");
-    let options = GuestOptionsBuilder::default().use_docker(docker).build().expect("guest options");
+    let root = methods
+        .join("../../..")
+        .canonicalize()
+        .expect("the repository root");
+    let docker = DockerOptionsBuilder::default()
+        .root_dir(root)
+        .build()
+        .expect("docker options");
+    let options = GuestOptionsBuilder::default()
+        .use_docker(docker)
+        .build()
+        .expect("guest options");
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-rebuild"));
-    let built = risc0_build::build_package(&risc0_build::get_package(methods.join(package)), &out, options)
-        .expect("the guest builds");
-    let guest = built.iter().find(|g| g.name == name).expect("the guest program");
+    let built = risc0_build::build_package(
+        &risc0_build::get_package(methods.join(package)),
+        &out,
+        options,
+    )
+    .expect("the guest builds");
+    let guest = built
+        .iter()
+        .find(|g| g.name == name)
+        .expect("the guest program");
     assert!(
         guest.elf.as_ref() == elf,
         "methods/{embedded} is stale: copy {} over it",
@@ -37,7 +53,7 @@ fn rebuilt_matches(package: &str, name: &str, embedded: &str, elf: &[u8], id: &[
 }
 
 #[test]
-#[ignore]
+#[ignore = "rebuilds the guest with the risc0 docker toolchain and compares the program: run where docker is installed"]
 fn the_embedded_program_is_the_guest_builder_output() {
     rebuilt_matches(
         "guest",
@@ -49,7 +65,7 @@ fn the_embedded_program_is_the_guest_builder_output() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "rebuilds the handover guest with the risc0 docker toolchain and compares the program: run where docker is installed"]
 fn the_embedded_handover_program_is_the_guest_builder_output() {
     rebuilt_matches(
         "handover-guest",

@@ -8,6 +8,7 @@ repository's Cargo.lock holds today. Uses cargo-audit and its advisory database 
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -22,14 +23,16 @@ def lockfile(name, version):
     )
 
 
-@unittest.skipUnless(shutil.which("cargo-audit"), "cargo-audit is not installed on this host")
 class AdvisoryGate(unittest.TestCase):
     def gate(self, name, version):
         with tempfile.TemporaryDirectory() as d:
             lock = os.path.join(d, "Cargo.lock")
             with open(lock, "w") as f:
                 f.write(lockfile(name, version))
-            r = subprocess.run(["bash", GATE, "--no-fetch", lock], capture_output=True, text=True)
+            # A fixed day: these cases are about the lockfile, not about when they run.
+            r = subprocess.run(
+                ["bash", GATE, "--today", "2026-11-16", "--no-fetch", lock], capture_output=True, text=True
+            )
         return r.returncode, r.stdout + r.stderr
 
     def test_a_release_carrying_a_known_advisory_is_blocked(self):
@@ -55,4 +58,8 @@ class AdvisoryGate(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if not shutil.which("cargo-audit"):
+        # Exit code 77: nothing could be checked on this host (scripts/genesis-gate.sh, row T).
+        print("cargo-audit is not installed on this host")
+        sys.exit(77)
     unittest.main()

@@ -6,7 +6,6 @@
 *.profdata
 lcov.info
 coverage/
-apps/tenzro-control/src-tauri/target/
 
 # Node.js and SDK build output
 node_modules/

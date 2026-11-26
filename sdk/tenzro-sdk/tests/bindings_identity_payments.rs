@@ -57,6 +57,7 @@ fn answer(method: &str, params: &Value) -> Value {
         "tenzro_getBalance" | "tenzro_getNonce" => json!("0x5"),
         "eth_chainId" => json!("0x3444"),
         "eth_gasPrice" => json!("0x1"),
+        "tenzro_estimateGas" => json!("0x7a120"),
         "tenzro_getSigningPayload" => plain_payload(params),
         "tenzro_createCustodyChallenge" => json!({
             "challenge_id": "c1",
@@ -162,6 +163,9 @@ impl HybridSigner for Signer {
     }
     async fn sign_composite(&self, _m: &[u8]) -> SdkResult<([u8; 64], Option<Vec<u8>>)> {
         Ok(([9; 64], None))
+    }
+    async fn sign_ml_dsa_leg(&self, _m_prime: &[u8]) -> SdkResult<Vec<u8>> {
+        unreachable!("this signer holds no ML-DSA-65 key")
     }
     async fn sign_p256(&self, _m: &[u8]) -> SdkResult<[u8; 64]> {
         Ok([9; 64])
@@ -589,6 +593,11 @@ async fn every_binding_sends_the_params_the_node_reads() {
     // Keystore and machine access
     let _ = c.keystore().get_keystore("0x01", None).await;
     expect!("tenzro_getKeystore", json!({ "account": "0x01" }));
+    let _ = c.keystore().account_signing_key("ab", "0x01").await;
+    expect!(
+        "tenzro_getAccountSigningKey",
+        json!({ "public_key": "ab", "account": "0x01" })
+    );
     let _ = c.keystore().resolve_credential("cd", "tenzro.com").await;
     expect!(
         "tenzro_resolveCredential",
@@ -1045,7 +1054,7 @@ async fn every_binding_sends_the_params_the_node_reads() {
         json!({ "payer": null, "status": "open", "limit": 3 }),
     );
 
-    assert_eq!(covered.len(), 135, "covered: {covered:?}");
+    assert_eq!(covered.len(), 136, "covered: {covered:?}");
 }
 
 #[test]

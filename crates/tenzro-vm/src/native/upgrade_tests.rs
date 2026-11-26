@@ -656,3 +656,318 @@ async fn a_tpm_root_is_added_then_the_old_one_retired_by_governance_without_a_re
         }
     }
 }
+
+const OTHER: [u8; 32] = [0xc1; 32];
+const THIRD: [u8; 32] = [0xc2; 32];
+
+fn platform(code_hash: [u8; 32], platform: &str) -> tenzro_types::token::PlatformDigest {
+    tenzro_types::token::PlatformDigest {
+        platform: platform.into(),
+        code_hash: code_hash.to_vec(),
+    }
+}
+
+fn platforms_update() -> &'static PolicyUpdate {
+    static U: std::sync::OnceLock<PolicyUpdate> = std::sync::OnceLock::new();
+    U.get_or_init(|| match two_platform_upgrade() {
+        ProposalAction::PolicyUpdate { update, .. } => update,
+        _ => unreachable!("an upgrade proposal"),
+    })
+}
+
+fn single_update() -> &'static PolicyUpdate {
+    static U: std::sync::OnceLock<PolicyUpdate> = std::sync::OnceLock::new();
+    U.get_or_init(|| match upgrade(PolicyTrack::Standard) {
+        ProposalAction::PolicyUpdate { update, .. } => update,
+        _ => unreachable!("an upgrade proposal"),
+    })
+}
+
+/// An upgrade of a release built for x86_64 and aarch64 Linux.
+fn two_platform_upgrade() -> ProposalAction {
+    ProposalAction::PolicyUpdate {
+        update: PolicyUpdate::ProtocolUpgradePlatforms {
+            version: "2".into(),
+            digests: vec![
+                platform(CODE, "x86_64-unknown-linux-gnu"),
+                platform(OTHER, "aarch64-unknown-linux-gnu"),
+            ],
+        },
+        memo: "ship 2".into(),
+        track: PolicyTrack::Standard,
+    }
+}
+
+/// An upgrade built for two platforms enacts on the stake of validators
+/// running either binary, each counted once; a validator quoting a binary
+/// the upgrade does not name adds nothing.
+#[tokio::test]
+async fn validators_on_either_platforms_binary_count_towards_one_upgrade() {
+    let (ex, mut state, vs) = network();
+    set_governed_param_for_test(&mut state, upgrade::PLATFORMS_GATE, 0);
+    let id = [0xce; 32];
+    queued(&mut state, id, two_platform_upgrade());
+    let binaries: [&[u8]; 2] = [&CODE, &OTHER];
+
+    // 66% on the first platform, 33% on a binary the upgrade does not name.
+    ex.execute_transaction(
+        &tx(&vs[0].addr, ready_data(&vs[0], &CODE, &CODE), 1),
+        &mut state,
+    )
+    .await
+    .unwrap();
+    ex.execute_transaction(
+        &tx(&vs[2].addr, ready_data(&vs[2], &THIRD, &THIRD), 2),
+        &mut state,
+    )
+    .await
+    .unwrap();
+    assert_eq!(upgrade_readiness(&state, &binaries).ready_bps(), 6_600);
+    ex.execute_transaction(&tx(&vs[2].addr, execute_data(&id), 3), &mut state)
+        .await
+        .expect_err("the third binary is not this upgrade's");
+
+    // The same validator signalling for the other platform too is one
+    // validator.
+    ex.execute_transaction(
+        &tx(&vs[0].addr, ready_data(&vs[0], &OTHER, &OTHER), 4),
+        &mut state,
+    )
+    .await
+    .unwrap();
+    assert_eq!(upgrade_readiness(&state, &binaries).ready_bps(), 6_600);
+
+    // 1% on the second platform carries it.
+    ex.execute_transaction(
+        &tx(&vs[1].addr, ready_data(&vs[1], &OTHER, &OTHER), 5),
+        &mut state,
+    )
+    .await
+    .unwrap();
+    assert!(upgrade_readiness(&state, &binaries).met());
+    let r = ex
+        .execute_transaction(&tx(&vs[2].addr, execute_data(&id), 6), &mut state)
+        .await
+        .unwrap();
+    assert!(
+        r.logs
+            .iter()
+            .any(|l| l.topics[0] == upgrade::UPGRADE_PLATFORMS_TOPIC)
+    );
+    let a = read_upgrade_activation(&state).unwrap();
+    let p = read_upgrade_platforms(&state).unwrap();
+    assert_eq!(p.proposal_id, a.proposal_id);
+    assert_eq!(a.code_hash, hex::encode(CODE));
+    assert!(p.names_binary(&hex::encode(CODE)));
+    assert!(p.names_binary(&hex::encode(OTHER)));
+    assert!(!p.names_binary(&hex::encode(THIRD)));
+}
+
+/// Before the vote that puts them in force, an upgrade naming a binary per
+/// platform is refused when proposed and, had one been queued, when enacted;
+/// a single-binary upgrade enacts as it always did and records no platforms.
+#[tokio::test]
+async fn until_voted_in_an_upgrade_names_one_binary() {
+    let (ex, mut state, vs) = network();
+    let err = crate::feature_gate::refuse_dormant_policy(&state, platforms_update()).unwrap_err();
+    assert!(err.to_string().contains("not in force"), "{err}");
+    crate::feature_gate::refuse_dormant_policy(&state, single_update()).unwrap();
+
+    for (v, at) in [(&vs[0], 1), (&vs[1], 2)] {
+        ex.execute_transaction(&tx(&v.addr, ready_data(v, &CODE, &CODE), at), &mut state)
+            .await
+            .unwrap();
+    }
+    let platforms = [0xcf; 32];
+    queued(&mut state, platforms, two_platform_upgrade());
+    let err = ex
+        .execute_transaction(&tx(&vs[2].addr, execute_data(&platforms), 3), &mut state)
+        .await
+        .expect_err("dormant");
+    assert!(err.to_string().contains("not in force"), "{err}");
+    assert!(read_upgrade_activation(&state).is_none());
+
+    let single = [0xd0; 32];
+    queued(&mut state, single, upgrade(PolicyTrack::Standard));
+    ex.execute_transaction(&tx(&vs[2].addr, execute_data(&single), 4), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_upgrade_activation(&state).unwrap().code_hash,
+        hex::encode(CODE)
+    );
+    assert!(read_upgrade_platforms(&state).is_none());
+
+    // From the epoch of the vote the same proposal is admitted.
+    set_governed_param_for_test(&mut state, upgrade::PLATFORMS_GATE, 0);
+    crate::feature_gate::refuse_dormant_policy(&state, platforms_update()).unwrap();
+}
+
+#[test]
+fn an_upgrade_names_each_platform_and_each_binary_once() {
+    use crate::governance::validate_policy_update;
+    let digest = |name: &str, byte: u8| platform([byte; 32], name);
+    let upgrade = |digests| PolicyUpdate::ProtocolUpgradePlatforms {
+        version: "2".into(),
+        digests,
+    };
+    let (x86, arm) = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu");
+    assert!(validate_policy_update(&upgrade(vec![digest(x86, 1), digest(arm, 2)])).is_ok());
+    assert!(validate_policy_update(&upgrade(Vec::new())).is_err());
+    assert!(validate_policy_update(&upgrade(vec![digest(x86, 1), digest(x86, 2)])).is_err());
+    assert!(validate_policy_update(&upgrade(vec![digest(x86, 1), digest(arm, 1)])).is_err());
+    assert!(validate_policy_update(&upgrade(vec![digest("", 1)])).is_err());
+    assert!(validate_policy_update(&upgrade(vec![digest("Linux x86", 1)])).is_err());
+    let mut short = digest(x86, 1);
+    short.code_hash.pop();
+    assert!(validate_policy_update(&upgrade(vec![short])).is_err());
+    let many = (0..=tenzro_types::token::MAX_UPGRADE_PLATFORMS as u8)
+        .map(|i| digest(&format!("platform-{i}"), i))
+        .collect();
+    assert!(validate_policy_update(&upgrade(many)).is_err());
+}
+
+/// An account bonded in the attestor role with ample stake.
+fn builder(state: &mut StateAdapter, seed: u8) -> Vec<u8> {
+    let account = vec![seed; 32];
+    let stake = tenzro_types::token::RoleStake {
+        bonded: 1_000_000 * 1_000_000_000_000_000_000,
+        capacity: tenzro_types::token::StakeCapacity::None,
+        unbonding: 0,
+        release_at_ms: 0,
+        bonded_at_ms: 0,
+        endpoint: None,
+    };
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        format!("role_stake:{}:attestor", hex::encode(&account)).as_bytes(),
+        serde_json::to_vec(&stake).unwrap(),
+    );
+    state.set_balance(&account, GAS);
+    account
+}
+
+fn attest_data(code: &[u8; 32]) -> Vec<u8> {
+    let mut data = native_call::SELECTOR_NATIVE_CALL.to_vec();
+    data.extend(build_attestation::SELECTOR_BUILD_ATTESTATION);
+    data.extend_from_slice(
+        &serde_json::to_vec(&serde_json::json!({
+            "version": "2",
+            "platform": "x86_64-unknown-linux-gnu",
+            "code_hash": hex::encode(code),
+        }))
+        .unwrap(),
+    );
+    data
+}
+
+/// Once builder attestations are in force, an upgrade with its readiness met
+/// still waits for the governed number of bonded builders to have rebuilt
+/// its binary; a builder counts once, and an unbonded account not at all.
+#[tokio::test]
+async fn an_upgrade_waits_for_its_builders_once_they_are_in_force() {
+    let id = [0xd1; 32];
+    // A queued upgrade whose readiness is met, and one bonded builder.
+    async fn ready(id: [u8; 32]) -> (NativeExecutor, StateAdapter, Vec<Validator>, Vec<u8>) {
+        let (ex, mut state, vs) = network();
+        queued(&mut state, id, upgrade(PolicyTrack::Standard));
+        for (v, at) in [(&vs[0], 1), (&vs[1], 2)] {
+            ex.execute_transaction(&tx(&v.addr, ready_data(v, &CODE, &CODE), at), &mut state)
+                .await
+                .unwrap();
+        }
+        let first = builder(&mut state, 0xb1);
+        (ex, state, vs, first)
+    }
+
+    // Dormant: attestations are refused, and readiness alone enacts.
+    let (ex, mut dormant, vs, first) = ready(id).await;
+    assert!(
+        ex.execute_transaction(&tx(&first, attest_data(&CODE), 3), &mut dormant)
+            .await
+            .is_err()
+    );
+    ex.execute_transaction(&tx(&vs[2].addr, execute_data(&id), 4), &mut dormant)
+        .await
+        .expect("dormant: readiness is enough");
+
+    let (ex, mut state, vs, first) = ready(id).await;
+    set_governed_param_for_test(&mut state, build_attestation::GATE, 0);
+    set_governed_param_for_test(&mut state, native_call::GATE, 0);
+    let err = ex
+        .execute_transaction(&tx(&vs[2].addr, execute_data(&id), 4), &mut state)
+        .await
+        .expect_err("no builder has rebuilt it");
+    assert!(err.to_string().contains("bonded builders"), "{err}");
+
+    // One builder, attesting twice, and an account with no attestor bond.
+    ex.execute_transaction(&tx(&first, attest_data(&CODE), 5), &mut state)
+        .await
+        .unwrap();
+    assert!(
+        ex.execute_transaction(&tx(&first, attest_data(&CODE), 6), &mut state)
+            .await
+            .is_err()
+    );
+    let stranger = vec![0xb9; 32];
+    state.set_balance(&stranger, GAS);
+    assert!(
+        ex.execute_transaction(&tx(&stranger, attest_data(&CODE), 7), &mut state)
+            .await
+            .is_err()
+    );
+    // A builder of another binary does not count for this one.
+    let other = builder(&mut state, 0xb2);
+    ex.execute_transaction(&tx(&other, attest_data(&[0xc9; 32]), 8), &mut state)
+        .await
+        .unwrap();
+    assert!(
+        ex.execute_transaction(&tx(&vs[2].addr, execute_data(&id), 9), &mut state)
+            .await
+            .is_err()
+    );
+    assert_eq!(build_attestation::standing_builders(&state, &CODE), 1);
+
+    // The second builder of this binary: it enacts.
+    ex.execute_transaction(&tx(&other, attest_data(&CODE), 10), &mut state)
+        .await
+        .unwrap();
+    ex.execute_transaction(&tx(&vs[2].addr, execute_data(&id), 11), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_upgrade_activation(&state).unwrap().code_hash,
+        hex::encode(CODE)
+    );
+}
+
+/// A builder whose attestor bond is gone by enactment no longer counts.
+#[tokio::test]
+async fn a_builder_without_a_standing_bond_at_enactment_does_not_count() {
+    let (ex, mut state, vs) = network();
+    set_governed_param_for_test(&mut state, build_attestation::GATE, 0);
+    set_governed_param_for_test(&mut state, native_call::GATE, 0);
+    set_governed_param_for_test(&mut state, build_attestation::MIN_BUILDERS_PARAM, 1);
+    let id = [0xd2; 32];
+    queued(&mut state, id, upgrade(PolicyTrack::Standard));
+    for (v, at) in [(&vs[0], 1), (&vs[1], 2)] {
+        ex.execute_transaction(&tx(&v.addr, ready_data(v, &CODE, &CODE), at), &mut state)
+            .await
+            .unwrap();
+    }
+    let b = builder(&mut state, 0xb3);
+    ex.execute_transaction(&tx(&b, attest_data(&CODE), 3), &mut state)
+        .await
+        .unwrap();
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        format!("role_stake:{}:attestor", hex::encode(&b)).as_bytes(),
+        Vec::new(),
+    );
+    assert_eq!(build_attestation::standing_builders(&state, &CODE), 0);
+    assert!(
+        ex.execute_transaction(&tx(&vs[2].addr, execute_data(&id), 4), &mut state)
+            .await
+            .is_err()
+    );
+}

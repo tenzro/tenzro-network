@@ -9,7 +9,8 @@ use tenzro_types::evidence_pack::{
     EvidencePack, ProvenRecord, STATE_NAMESPACE, decode_decision, vm_storage_key,
 };
 
-use crate::light_client::{Certification, GenesisAnchor};
+use tenzro_light::TrustAnchor;
+use tenzro_light::light_client::Certification;
 
 /// System account of VM storage.
 const SYSTEM_ADDRESS: [u8; 20] = [0xFF; 20];
@@ -64,7 +65,7 @@ pub fn check_record(
 /// Verify `pack` against `anchor` alone, for a checkpoint certified from
 /// genesis. A pack certified from a handover chain proof needs
 /// [`verify_pack_with`].
-pub fn verify_pack(pack: &EvidencePack, anchor: &GenesisAnchor) -> Result<VerifyReport, String> {
+pub fn verify_pack(pack: &EvidencePack, anchor: &TrustAnchor) -> Result<VerifyReport, String> {
     verify_pack_with(pack, anchor, None, |_, _| {
         Err("no handover program verifier is given".to_string())
     })
@@ -76,7 +77,7 @@ pub fn verify_pack(pack: &EvidencePack, anchor: &GenesisAnchor) -> Result<Verify
 /// [`verify_under_root`] holds for that root.
 pub fn verify_pack_with<F>(
     pack: &EvidencePack,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     handover_program: Option<[u8; 32]>,
     verify_receipt: F,
 ) -> Result<VerifyReport, String>
@@ -187,6 +188,47 @@ pub fn verify_under_root(pack: &EvidencePack, root: &[u8; 32]) -> Result<(usize,
         }
         check_record(pack.state_trie_hash, root, r)?;
     }
+    let covered = |did: &str| did == pack.subject || pack.agents.iter().any(|a| a == did);
+    for r in &pack.service {
+        let value = check_record(pack.state_trie_hash, root, r)?;
+        match r.kind.as_str() {
+            "sla_verdict" => {
+                let (epoch, provider) = r
+                    .subject
+                    .split_once(':')
+                    .and_then(|(e, p)| Some((e.parse::<u64>().ok()?, p)))
+                    .ok_or_else(|| format!("an SLA verdict names {}", r.subject))?;
+                if r.slot != tenzro_types::evidence_pack::sla_verdict_slot(provider, epoch) {
+                    return Err(format!(
+                        "the verdict of {} is proven at {}",
+                        r.subject, r.slot
+                    ));
+                }
+                if !covered(provider) {
+                    return Err(format!("{provider} is not a machine the pack covers"));
+                }
+            }
+            "claim" => {
+                if r.slot != tenzro_types::evidence_pack::claim_slot(&r.subject) {
+                    return Err(format!("claim {} is proven at {}", r.subject, r.slot));
+                }
+                let bytes = value.ok_or_else(|| format!("no claim {} is recorded", r.subject))?;
+                let claim: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                let provider = claim
+                    .get("provider_did")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if !covered(provider) {
+                    return Err(format!(
+                        "claim {} is delivered by {provider}, which the pack does not cover",
+                        r.subject
+                    ));
+                }
+            }
+            other => return Err(format!("a service record is a {other}")),
+        }
+    }
     if pack.manifest != pack.build_manifest() {
         return Err("the manifest does not match the pack's sections".to_string());
     }
@@ -197,6 +239,7 @@ pub fn verify_under_root(pack: &EvidencePack, root: &[u8; 32]) -> Result<(usize,
             + pack.mandate.len()
             + pack.commerce.len()
             + pack.governance.len()
-            + pack.token_actions.len(),
+            + pack.token_actions.len()
+            + pack.service.len(),
     ))
 }

@@ -72,12 +72,15 @@ Audit entries are recorded and kept by whoever runs the agent, outside the node;
 | `commitments` | those on-chain commitments, each with a state proof under `state_root` |
 | `oversight` | the quarantine or revocation record of each agent, with state proofs, and the grant-use and approval entries of the audit log |
 | `mandate` | the terms each agent acts under (scope, limits, serving nodes, the controller's approval digest), with state proofs |
+| `service` | for the bonded machines named in `providers`, the SLA verdict of each hour in `epochs` (`[first, last]`, an hour with no verdict kept proven absent), and the compute or storage claims named in `claims` that a covered machine delivers, with state proofs; no control reference |
 | `receipts` | the signed closing receipts of the sessions covered |
 | `models` | the models the agents called, with the file hashes the catalog pins for each |
 | `jurisdiction` | the country and blocs the exporting node declares |
 | `manifest` | per section, the SHA-256 of its JSON and the control references below |
 
-`tenzro agent audit evidence verify --file pack.json --chain-id <id> --genesis-hash <hex> --genesis-committee-root <hex>` checks the pack offline with nothing but the chain's genesis anchor: the checkpoint certificate chain from the genesis committee, that the checkpoint commits the pack's state root, every chain record's state proof, every audit entry's path to the root committed on chain, and the manifest digests.
+`tenzro agent audit evidence verify --file pack.json --chain-id <id> --genesis-hash <hex> --genesis <genesis file>` checks the pack offline with nothing but the chain's genesis anchor: the checkpoint certificate chain from the genesis committee, that the checkpoint commits the pack's state root, every chain record's state proof, every audit entry's path to the root committed on chain, and the manifest digests.
+
+A provider's service section is its track record: verdicts and claims proven under a certified checkpoint check with the genesis anchor alone, so they stand after the chain they were made on is reset. Export it while the verdicts are kept (`sla.verdict_retention_epochs`); an older hour reads as no verdict.
 
 ### Control references
 
@@ -144,6 +147,6 @@ What it does not prove:
 | `eu-ai-act:14(4)(d)` | revocation | revocation records, or a proven absence of any |
 | `eu-ai-act:14(4)(e)` | halt | quarantines in force or proven absent, and governance decisions touching the subject |
 
-`tenzro agent audit evidence verify --file pack.json --profile profile.json --chain-id <id> --genesis-hash <hex> --genesis-committee-root <hex>` is the check an auditor runs, with nothing but the chain's genesis anchor: everything the pack check covers, every node-signed tool-call entry against the key its node registered on chain (proven under the same certified state root), and the profile rebuilt from the pack, so a profile that claims anything the pack does not hold is refused. The operator that produced the pack is not trusted for any of it.
+`tenzro agent audit evidence verify --file pack.json --profile profile.json --chain-id <id> --genesis-hash <hex> --genesis <genesis file>` is the check an auditor runs, with nothing but the chain's genesis anchor: everything the pack check covers, every node-signed tool-call entry against the key its node registered on chain (proven under the same certified state root), and the profile rebuilt from the pack, so a profile that claims anything the pack does not hold is refused. The operator that produced the pack is not trusted for any of it.
 
 A profile lists evidence. It is not a legal assessment: it does not decide whether a system is high-risk, whether its logging or oversight is adequate for its use, or whether its provider or deployer complies with the Regulation.

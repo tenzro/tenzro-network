@@ -60,6 +60,7 @@ use llama_cpp_2::token::LlamaToken;
 use praecise_runtime::{ChatFormat, ChatTemplateSource, ChatTurn, GenerationConfig};
 use tracing::{debug, warn};
 
+use crate::catalog::Catalog;
 use crate::error::{ModelError, Result};
 use crate::runtime::{ChatMessage, ToolDefinition};
 
@@ -131,13 +132,16 @@ pub(crate) struct Turn {
 /// # Errors
 /// A model without a chat template, or a template that will not render.
 pub(crate) fn render_turn(
+    catalog: &Catalog,
     source: Option<&ChatTemplateSource>,
     model_id: &str,
     messages: &[ChatMessage],
     tools: &[ToolDefinition],
     config: &GenerationConfig,
 ) -> Result<Turn> {
-    let format = Arc::new(render(source, model_id, messages, tools, config, true)?);
+    let format = Arc::new(render(
+        catalog, source, model_id, messages, tools, config, true,
+    )?);
     let mut config = config.clone();
     // Stop sequences the template asks for are additive to the caller's own.
     config
@@ -157,22 +161,54 @@ pub(crate) fn render_turn(
 }
 
 /// `messages` rendered as conversation history, without the prompt that
-/// opens a reply: what the next turn's prompt begins with.
+/// opens a reply: what the next turn's prompt begins with, up to where the
+/// next user message's own text starts.
+///
+/// A template may render the last assistant message differently from one a
+/// later user message follows (keeping its reasoning block only while it is
+/// the last, say), so the history is rendered as the next turn renders it:
+/// with a user message after it. Two renders that differ only in that
+/// message's text agree exactly up to it.
 ///
 /// # Errors
 /// As [`render_turn`].
 pub(crate) fn render_history(
+    catalog: &Catalog,
     source: Option<&ChatTemplateSource>,
     model_id: &str,
     messages: &[ChatMessage],
     config: &GenerationConfig,
 ) -> Result<String> {
-    Ok(render(source, model_id, messages, &[], config, false)?
-        .prompt()
-        .to_string())
+    let followed_by = |text: &str| -> Result<String> {
+        let mut next = messages.to_vec();
+        next.push(ChatMessage {
+            role: "user".into(),
+            content: text.into(),
+            ..Default::default()
+        });
+        Ok(
+            render(catalog, source, model_id, &next, &[], config, false)?
+                .prompt()
+                .to_string(),
+        )
+    };
+    let (a, b) = (followed_by("A")?, followed_by("B")?);
+    let shared = a
+        .bytes()
+        .zip(b.bytes())
+        .position(|(x, y)| x != y)
+        .unwrap_or(a.len().min(b.len()));
+    Ok(a[..shared].to_string())
+}
+
+/// Whether `template` is template source rather than the bare name of one:
+/// source text holds at least one expression or statement.
+fn is_template_text(template: &str) -> bool {
+    template.contains("{{") || template.contains("{%")
 }
 
 fn render(
+    catalog: &Catalog,
     source: Option<&ChatTemplateSource>,
     model_id: &str,
     messages: &[ChatMessage],
@@ -185,22 +221,32 @@ fn render(
             "model {model_id} carries no chat template, so it cannot serve a chat turn"
         ))
     })?;
+    // A model file may name one of the engine's built-in templates
+    // (`chatml`, `rwkv-world`) where the template text belongs. Rendered as a
+    // template the name is only its own letters: the model would be prompted
+    // with them and never see the conversation.
+    if !is_template_text(source.template()) {
+        return Err(ModelError::InferenceError(format!(
+            "model {model_id} names the chat template `{}` instead of carrying one, so it \
+             cannot serve a chat turn",
+            source.template().trim()
+        )));
+    }
     // The request's own switch wins; the catalog default is for a caller that
     // did not say.
-    let enable_thinking = config.enable_thinking.unwrap_or_else(|| {
-        crate::catalog::resolve_enable_thinking(model_id, Some(config.max_tokens))
-    });
+    let enable_thinking = config
+        .enable_thinking
+        .unwrap_or_else(|| catalog.resolve_enable_thinking(model_id, Some(config.max_tokens)));
     // The reasoning budget is a chat-template variable, named differently
     // across families; with thinking off the template never reads it.
     let kwargs = enable_thinking
-        .then(|| {
-            crate::catalog::resolve_reasoning_effort(model_id, config.reasoning_effort.as_deref())
-        })
+        .then(|| catalog.resolve_reasoning_effort(model_id, config.reasoning_effort.as_deref()))
         .flatten()
         .map(|(name, value)| serde_json::json!({ name: value }));
     // Data-driven: the catalog names the templates whose format `common_chat`
     // identifies wrongly, which are rendered as plain Jinja and read as text.
-    let force_pure_content = crate::catalog::get_model_by_id(model_id)
+    let force_pure_content = catalog
+        .get_model_by_id(model_id)
         .is_some_and(|e| e.template_fix == crate::catalog::TemplateFix::ForcePureContent);
     let tools = (!tools.is_empty()).then(|| openai_tool_array(tools));
     let turn = ChatTurn {
@@ -428,7 +474,70 @@ fn openai_tool_array(tools: &[ToolDefinition]) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    /// A weight file of the models directory (`TENZRO_MODELS_DIR`, else
+    /// `~/.tenzro/models`). The tests that read one run only where the
+    /// weights are placed, so a missing file fails the run.
+    fn model_file(name: &str) -> std::path::PathBuf {
+        let dir = std::env::var("TENZRO_MODELS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
+                    .join(".tenzro/models")
+            });
+        let path = dir.join(name);
+        assert!(path.exists(), "{} is missing", path.display());
+        path
+    }
+
     use super::*;
+
+    #[test]
+    fn a_template_name_is_told_from_template_text() {
+        for name in ["rwkv-world", "chatml", "llama2", "", "  mistral-v7  "] {
+            assert!(!is_template_text(name), "{name:?}");
+        }
+        for text in [
+            "{{ messages[0]['content'] }}",
+            "{%- for m in messages %}<|im_start|>{{ m.role }}{% endfor %}",
+            "plain prefix {{ bos_token }}",
+        ] {
+            assert!(is_template_text(text), "{text:?}");
+        }
+    }
+
+    /// A model whose file names a built-in template is refused a chat turn
+    /// and a history render alike, instead of being prompted with the name.
+    #[test]
+    fn a_model_that_only_names_its_chat_template_serves_no_chat_turn() {
+        let named = ChatTemplateSource::new("rwkv-world", "", "", false);
+        let messages = [ChatMessage::new("user", "Name a river.")];
+        let config = GenerationConfig::default();
+        let catalog = Catalog::test_seed();
+        let turn = render_turn(
+            &catalog,
+            Some(&named),
+            "rwkv7-0.1b",
+            &messages,
+            &[],
+            &config,
+        );
+        let why = match turn {
+            Err(ModelError::InferenceError(why)) => why,
+            other => panic!(
+                "rendered a turn from a template name: {:?}",
+                other.map(|t| t.prompt)
+            ),
+        };
+        assert!(
+            why.contains("names the chat template `rwkv-world`") && why.contains("rwkv7-0.1b"),
+            "{why}"
+        );
+        assert!(render_history(&catalog, Some(&named), "rwkv7-0.1b", &messages, &config).is_err());
+        let none = render_turn(&catalog, None, "mamba-130m", &messages, &[], &config);
+        assert!(
+            matches!(none, Err(ModelError::InferenceError(w)) if w.contains("no chat template"))
+        );
+    }
 
     /// End-to-end render proof for the thinking regression on the real
     /// qwen3.5-0.8b template. Loads the GGUF on CPU (no GPU contention with a
@@ -439,28 +548,18 @@ mod tests {
     /// * thinking-OFF (what the size-gate assigns qwen3.5-0.8b) emits a
     ///   pre-closed empty `<think></think>`, so the model answers directly.
     ///
-    /// Combined with `catalog::resolve_enable_thinking`, this is the served
+    /// Combined with `Catalog::resolve_enable_thinking`, this is the served
     /// batched render path (scheduler_loop -> render_prompt -> here).
     #[test]
-    #[ignore = "loads ~/.tenzro/models/qwen3.5-0.8b.gguf"]
+    #[ignore = "loads qwen3.5-0.8b.gguf from the models directory"]
     fn qwen35_08b_renders_thinking_off_but_open_when_asked() {
         use llama_cpp_2::llama_backend::LlamaBackend;
         use llama_cpp_2::model::params::LlamaModelParams;
-        use std::path::PathBuf;
-
-        let path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
-            .join(".tenzro/models/qwen3.5-0.8b.gguf");
-        if !path.exists() {
-            eprintln!("skip: {} missing", path.display());
-            return;
-        }
+        let path = model_file("qwen3.5-0.8b.gguf");
 
         // The size-gate assigns this model thinking-OFF (0.8B < the 4B floor).
-        tenzro_catalog::install_test_seed();
-        assert!(!crate::catalog::resolve_enable_thinking(
-            "qwen3.5-0.8b",
-            None
-        ));
+        let catalog = Catalog::test_seed();
+        assert!(!catalog.resolve_enable_thinking("qwen3.5-0.8b", None));
 
         let backend = LlamaBackend::init().expect("backend");
         let model = crate::parse_jail::load_llama(&backend, &path, &LlamaModelParams::default())
@@ -476,10 +575,24 @@ mod tests {
             enable_thinking: Some(thinking),
             ..Default::default()
         };
-        let on = render_turn(Some(&source), "qwen3.5-0.8b", &msgs, &[], &config(true))
-            .expect("render thinking-on");
-        let off = render_turn(Some(&source), "qwen3.5-0.8b", &msgs, &[], &config(false))
-            .expect("render thinking-off");
+        let on = render_turn(
+            &catalog,
+            Some(&source),
+            "qwen3.5-0.8b",
+            &msgs,
+            &[],
+            &config(true),
+        )
+        .expect("render thinking-on");
+        let off = render_turn(
+            &catalog,
+            Some(&source),
+            "qwen3.5-0.8b",
+            &msgs,
+            &[],
+            &config(false),
+        )
+        .expect("render thinking-off");
 
         let on_tail = &on.prompt[on.prompt.len().saturating_sub(48)..];
         let off_tail = &off.prompt[off.prompt.len().saturating_sub(48)..];
@@ -508,23 +621,11 @@ mod tests {
     /// reach the prompt. The file is read from `TENZRO_MODELS_DIR`
     /// (`nemotron-3.5-bolt-e4b.gguf`, fetched through the registry flow).
     #[test]
-    #[ignore = "loads $TENZRO_MODELS_DIR/nemotron-3.5-bolt-e4b.gguf"]
+    #[ignore = "loads nemotron-3.5-bolt-e4b.gguf from the models directory"]
     fn nemotron_bolt_e4b_renders_thinking_and_tools_through_its_template() {
         use llama_cpp_2::llama_backend::LlamaBackend;
         use llama_cpp_2::model::params::LlamaModelParams;
-        use std::path::PathBuf;
-
-        let dir = std::env::var("TENZRO_MODELS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
-                    .join(".tenzro/models")
-            });
-        let path = dir.join("nemotron-3.5-bolt-e4b.gguf");
-        if !path.exists() {
-            eprintln!("skip: {} missing", path.display());
-            return;
-        }
+        let path = model_file("nemotron-3.5-bolt-e4b.gguf");
         let backend = LlamaBackend::init().expect("backend");
         // The file was fetched and hash-checked by the registry downloader;
         // this test reads its template, so it loads in process.
@@ -544,7 +645,9 @@ mod tests {
             enable_thinking: Some(thinking),
             ..Default::default()
         };
+        let catalog = Catalog::test_seed();
         let on = render_turn(
+            &catalog,
             Some(&source),
             "nemotron-3.5-bolt-e4b",
             &msgs,
@@ -553,6 +656,7 @@ mod tests {
         )
         .expect("render thinking-on");
         let off = render_turn(
+            &catalog,
             Some(&source),
             "nemotron-3.5-bolt-e4b",
             &msgs,
@@ -586,18 +690,14 @@ mod tests {
     #[test]
     #[ignore = "loads and runs qwen3.5-0.8b end-to-end"]
     fn qwen35_08b_answers_without_thinking_end_to_end() {
-        use std::path::PathBuf;
-
-        let path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
-            .join(".tenzro/models/qwen3.5-0.8b.gguf");
-        if !path.exists() {
-            eprintln!("skip: {} missing", path.display());
-            return;
-        }
+        let path = model_file("qwen3.5-0.8b.gguf");
 
         let rt = tokio::runtime::Runtime::new().expect("tokio rt");
         rt.block_on(async {
-            let runtime = crate::runtime::ModelRuntime::new().expect("runtime");
+            let runtime = crate::runtime::ModelRuntime::new(crate::catalog::CatalogCell::new(
+                Catalog::test_seed(),
+            ))
+            .expect("runtime");
             runtime
                 .load_model("qwen3.5-0.8b", &path)
                 .await

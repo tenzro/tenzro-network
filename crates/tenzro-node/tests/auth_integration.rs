@@ -35,7 +35,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
@@ -69,19 +68,12 @@ fn test_config() -> (NodeConfig, tempfile::TempDir) {
         // A loopback endpoint on a port of its own, so the test does not
         // contend with a node already running on the host.
         iroh: tenzro_iroh::TenzroIrohConfig {
-            bind_addr: free_udp_port(),
+            bind_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
             ..Default::default()
         },
         ..Default::default()
     };
     (cfg, tmp)
-}
-
-/// A UDP port on loopback that was free a moment ago.
-fn free_udp_port() -> std::net::SocketAddr {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .expect("a free loopback port")
 }
 
 async fn setup_test_server() -> (
@@ -428,7 +420,7 @@ struct DpopHolder {
 
 impl DpopHolder {
     fn new() -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::from_bytes(&rand::random());
         let pubkey = signing_key.verifying_key();
         let x = URL_SAFE_NO_PAD.encode(pubkey.to_bytes());
         // RFC 7638 canonical form: sorted required members, no whitespace.
@@ -1229,6 +1221,7 @@ async fn test_revoke_did_cascades_to_act_chain() {
     let outcome = tenzro_node::identity_mirror::mirror_identity_logs(
         node.identity_registry().expect("identity registry"),
         Some(engine.as_ref()),
+        None,
         &logs,
     );
     assert_eq!(outcome.revoked, vec![agent_did.clone()]);

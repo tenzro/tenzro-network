@@ -1,11 +1,12 @@
 [package]
 name = "tenzro-cli"
-# The CLI is released on its own line: 0.2.1 changes the CLI (full-screen setup and console, doctor,
-# completions, one --rpc) and no wire format, so the node and the shared crates stay at 0.2.0.
-version = "0.2.1"
+# The CLI and the node carry the release's version; the shared crates keep the workspace version.
+version = "0.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Tenzro Network CLI — node operation, wallet management, provider tools"
 
 [[bin]]
@@ -13,11 +14,15 @@ name = "tenzro"
 path = "src/main.rs"
 
 [dependencies]
+# Signing in to a node and the DPoP proofs requests carry, shared with the node binary.
+tenzro-auth = { workspace = true }
 tenzro-types = { workspace = true }
+tenzro-native-ops = { workspace = true }
 tenzro-onboarding-types = { workspace = true }
 tenzro-update-notice = { workspace = true }
 tenzro-bridge = { workspace = true }
 tenzro-finality = { workspace = true }
+tenzro-fleet-proof = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-identity = { workspace = true }
 tenzro-trust = { workspace = true }
@@ -40,6 +45,7 @@ tenzro-catalog = { workspace = true }
 tenzro-model = { workspace = true, features = ["engine", "mtmd"] }
 tenzro-zk = { workspace = true }
 tenzro-consensus = { workspace = true }
+tenzro-light = { workspace = true }
 tenzro-events = { workspace = true }
 tenzro-storage = { workspace = true }
 bincode = { workspace = true }
@@ -58,9 +64,11 @@ console = { workspace = true }
 ratatui = { workspace = true }
 clap_complete = { workspace = true }
 hex = { workspace = true }
+toml = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
+rustls = { workspace = true }
 dirs = "5"
 sysinfo = "0.31"
 sha2 = { workspace = true }
@@ -90,15 +98,31 @@ default = []
 [lints]
 workspace = true
 
+# Retargeting the release junction of a versioned install (update/install.rs),
+# and the access list of the local helper's pipe (commands/control/server.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
-tenzro-update-notice = { workspace = true, features = ["fixture"] }
+# Tests only: dates a directory explicitly instead of waiting for the clock.
+filetime = "0.2.27"
+tenzro-update-notice = { workspace = true, features = ["test-keys"] }
 # Tests only: a software derivation root standing in for the key holder's provider.
 tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0", features = ["test-root"] }
 # Tests only: an in-memory hybrid signer for payment credentials.
 tenzro-crypto = { workspace = true, features = ["test-keys"] }
 # Tests only: keysets from the test identity root (release builds refuse them).
 tenzro-keygen = { workspace = true, features = ["test-keys"] }
-# The node's own DPoP verifier, so the client's proofs are checked against the
-# code that will actually receive them rather than against a fixture.
-tenzro-auth = { workspace = true }
+# Tests only: a software validator key to sign registration proofs.
+tenzro-consensus = { workspace = true, features = ["test-keys"] }
+# Tests only: a software TPM for the key holder's provider to attest with.
+tenzro-tee = { workspace = true, features = ["test-ca"] }
 tempfile = { workspace = true }

@@ -1,28 +1,33 @@
-//! Optimistic verification: sampled re-execution and inference faults.
+//! Optimistic verification: sampled checks and inference faults.
 //!
 //! An answer served at [`VerificationLevel::Optimistic`] is decoded greedily
-//! (temperature 0), so any provider serving the same weights computes the same
-//! output up to the engine's numeric tolerance ([`outputs_agree`]). The node
-//! that forwarded it re-executes a governed share of such answers
-//! ([`SAMPLE_BPS_PARAM`]) on another provider announcing the same model, and
-//! checks the second receipt names the same model hash, engine, input
-//! commitment and sampling. When the outputs disagree it files an inference
-//! fault on chain within the challenge window, carrying the dispute (the
-//! receipt, the request and the output) for validators to re-execute. Parts
-//! of the request or output too large to carry inline (an image, a mask, a
-//! long conversation) travel by BLAKE3 content hash: a modality receipt
-//! commits to its output in that form ([`content_committed`]), the filing node
-//! keeps the parts in its content store, and a validator fetches and checks
-//! them against their hashes before re-executing.
+//! (temperature 0). The node that forwarded it checks a governed share of
+//! such answers ([`SAMPLE_BPS_PARAM`]) on another provider announcing the
+//! same model. A completion is checked by its decode commitment
+//! ([`witness_verdict`]): the other provider scores the committed tokens in
+//! one prefill and finds whether they follow from the model, so a near tie
+//! that hardware breaks either way passes and a substituted answer does not.
+//! A completion that came without a commitment is not checked. A modality
+//! call is re-executed, and the second receipt must name the same model hash,
+//! engine, input commitment and sampling. When a check fails the node files
+//! an inference fault on chain within the challenge window, carrying the
+//! dispute (the receipt, the request, the output and the commitment) for
+//! validators to check. Parts of the dispute too large to carry inline (an
+//! image, a mask, a long conversation, a commitment) travel by BLAKE3 content
+//! hash: a modality receipt commits to its output in that form
+//! ([`content_committed`]), the filing node keeps the parts in its content
+//! store, and a validator fetches and checks them against their hashes before
+//! judging.
 //!
 //! Every validator reviews pending faults ([`spawn_reviewer`]): it checks the
 //! disputed receipt against its own catalog and the claimed digest and key,
-//! re-executes the request on two distinct providers other than the accused,
-//! and attests its verdict: upheld only when both witnesses reproduce an
-//! answer that differs from the accused one, so no single witness can frame a
-//! provider ([`verdict_of`]). Two thirds of bonded stake decides; an upheld fault refunds
-//! the requester from the provider's bond and pays a penalty to the insurance
-//! pool (see `tenzro_vm::native::inference_fault`).
+//! asks two distinct providers other than the accused, and attests its
+//! verdict: upheld only when both find a completion's commitment fails, or
+//! both reproduce a modality answer that differs from the accused one, so no
+//! single witness can frame a provider ([`verdict_of`]). Two thirds of bonded
+//! stake decides; an upheld fault refunds the requester from the provider's
+//! bond and pays a penalty to the insurance pool (see
+//! `tenzro_vm::native::inference_fault`).
 //!
 //! [`VerificationLevel::Optimistic`]: tenzro_types::inference_verification::VerificationLevel::Optimistic
 
@@ -40,13 +45,15 @@ use tenzro_vm::native::inference_fault::{
 };
 use tracing::{debug, info, warn};
 
+use tenzro_model::toploc::InferenceCommitment;
+
 use crate::forward_billing::{ProviderCredential, tool_calls_json};
 use crate::inference_receipt::{InferenceReceipt, fresh_nonce, output_hash, task_commitment};
 use crate::node::TenzroNode;
 
-/// How many leading words of a generated answer must match for two greedy
-/// decodes of the same weights to agree, for engines whose kernels may round
-/// differently across hardware.
+/// How many leading words of a text field of two modality answers must match
+/// for them to agree, for engines whose kernels may round differently across
+/// hardware.
 const GREEDY_PREFIX_WORDS: usize = 32;
 
 /// How often a validator looks for faults to review.
@@ -255,11 +262,12 @@ const SPEECH_PREFIX_WINDOWS: usize = 50;
 const SPEECH_WINDOW_TOLERANCE: f64 = 0.1;
 const SPEECH_WINDOW_FLOOR: f64 = 64.0;
 
-/// Whether two answers to the same request agree; see [`outputs_agree`] for
-/// completions and [`task_outputs_agree`] for modality calls.
-pub fn answers_agree(engine: &str, a: &Answer, b: &Answer) -> bool {
+/// Whether two answers to the same modality call agree; see
+/// [`task_outputs_agree`]. A completion is never compared with another: it is
+/// checked by its decode commitment ([`witness_verdict`]), since a greedy
+/// decode that meets a near tie breaks it differently on other hardware.
+pub fn answers_agree(a: &Answer, b: &Answer) -> bool {
     match (a, b) {
-        (Answer::Chat(a), Answer::Chat(b)) => outputs_agree(engine, a, b),
         (Answer::Task { task: ta, out: a }, Answer::Task { task: tb, out: b }) => {
             ta == tb && task_outputs_agree(ta, a, b)
         }
@@ -369,7 +377,7 @@ fn vectors_agree(a: &[f64], b: &[f64]) -> bool {
     diff <= VECTOR_TOLERANCE * scale + SCALAR_FLOOR
 }
 
-/// The greedy word-prefix rule of [`outputs_agree`] for one string: equal, or
+/// The word-prefix rule for one string of a modality answer: equal, or
 /// the same first [`GREEDY_PREFIX_WORDS`] words (all of them, if shorter).
 fn text_agrees(a: &str, b: &str) -> bool {
     if a == b {
@@ -441,19 +449,6 @@ pub fn parse_answer(body: &Value) -> Option<(InferenceReceipt, Output)> {
     Some((receipt, output))
 }
 
-/// Whether two answers to the same greedy request agree. Identical outputs
-/// always do. A `gguf` decode may round differently on other hardware, so two
-/// answers also agree when their tool calls match and the first
-/// [`GREEDY_PREFIX_WORDS`] words of their text (all of it, if shorter) are the
-/// same; a different model diverges far sooner. Every other engine's output
-/// must match exactly.
-pub fn outputs_agree(engine: &str, a: &Output, b: &Output) -> bool {
-    if a == b {
-        return true;
-    }
-    engine == "gguf" && a.tool_calls == b.tool_calls && text_agrees(&a.text, &b.text)
-}
-
 /// The receipt was decoded greedily, so re-execution is comparable.
 pub fn is_greedy(receipt: &InferenceReceipt) -> bool {
     receipt.sampling.temperature == 0.0
@@ -486,6 +481,9 @@ pub struct ServedAnswer {
     pub receipt: InferenceReceipt,
     pub request: Value,
     pub output: Answer,
+    /// The decode commitment the receipt signs, for a completion that came
+    /// with one; witnesses verify it instead of regenerating the answer.
+    pub commitment: Option<InferenceCommitment>,
 }
 
 /// A dispute as a fault carries it: the receipt, and the request and the
@@ -498,6 +496,9 @@ pub struct FiledAnswer {
     pub receipt: InferenceReceipt,
     pub request: Value,
     pub output: Value,
+    /// The answer's decode commitment in committed form; `null` for an
+    /// answer that came without one.
+    pub commitment: Value,
     pub parts_at: Option<String>,
 }
 
@@ -508,11 +509,15 @@ impl ServedAnswer {
         let (output, output_parts) =
             content_committed(&serde_json::to_value(&self.output).map_err(|e| e.to_string())?);
         parts.extend(output_parts);
+        let (commitment, commitment_parts) =
+            content_committed(&serde_json::to_value(&self.commitment).map_err(|e| e.to_string())?);
+        parts.extend(commitment_parts);
         Ok((
             FiledAnswer {
                 receipt: self.receipt.clone(),
                 request,
                 output,
+                commitment,
                 parts_at: if parts.is_empty() { None } else { parts_at },
             },
             parts,
@@ -531,6 +536,8 @@ impl FiledAnswer {
             request: content_restored(&self.request, parts)?,
             output: serde_json::from_value(content_restored(&self.output, parts)?)
                 .map_err(|e| e.to_string())?,
+            commitment: serde_json::from_value(content_restored(&self.commitment, parts)?)
+                .map_err(|e| e.to_string())?,
         })
     }
 
@@ -544,6 +551,7 @@ impl FiledAnswer {
         let mut wanted = Vec::new();
         references(&self.request, &mut wanted);
         references(&self.output, &mut wanted);
+        references(&self.commitment, &mut wanted);
         let mut parts = std::collections::HashMap::new();
         if wanted.is_empty() {
             return Ok(parts);
@@ -576,6 +584,9 @@ pub enum Reexecution {
     Differs,
     /// No other provider can answer for the same weights right now.
     NoWitness,
+    /// A completion that came without a decode commitment: nothing a witness
+    /// can check without regenerating it.
+    Unchecked,
 }
 
 /// Providers other than the one that signed `original` announcing the same
@@ -617,20 +628,31 @@ fn draw_witness(
     Some(witnesses.swap_remove(pick))
 }
 
-/// Re-execute `dispute.request` on a provider other than the one that signed
-/// the receipt, among those announcing the same model; see [`witness_answer`].
+/// Check `dispute` on a provider other than the one that signed the receipt,
+/// among those announcing the same model: a completion by its decode
+/// commitment ([`witness_verdict`]), a modality call by re-executing it
+/// ([`witness_answer`]).
 pub async fn reexecute(node: &TenzroNode, dispute: &ServedAnswer) -> Result<Reexecution, String> {
+    if matches!(dispute.output, Answer::Chat(_)) && dispute.commitment.is_none() {
+        return Ok(Reexecution::Unchecked);
+    }
     let Some(witness) = draw_witness(&mut witnesses_for(node, &dispute.receipt)) else {
         return Ok(Reexecution::NoWitness);
     };
-    let output = witness_answer(node, dispute, &witness).await?;
-    Ok(
-        if answers_agree(&dispute.receipt.engine, &dispute.output, &output) {
-            Reexecution::Agrees
-        } else {
-            Reexecution::Differs
-        },
-    )
+    let agrees = match (&dispute.output, &dispute.commitment) {
+        (Answer::Chat(_), Some(commitment)) => {
+            witness_verdict(node, dispute, commitment, &witness).await?
+        }
+        _ => answers_agree(
+            &dispute.output,
+            &witness_answer(node, dispute, &witness).await?,
+        ),
+    };
+    Ok(if agrees {
+        Reexecution::Agrees
+    } else {
+        Reexecution::Differs
+    })
 }
 
 /// Re-execute `dispute.request` on `witness`. The witness must return a
@@ -690,6 +712,90 @@ async fn witness_answer(
     Ok(output)
 }
 
+/// The task a witness's signed verdict on a decode commitment is receipted
+/// under.
+pub const VERIFY_COMMITMENT_TASK: &str = "verify_commitment";
+
+/// The decode commitment an answer `body` carries (`commitment.commitment`
+/// of a `tenzro_chat` result, bare or inside a JSON-RPC response), when it
+/// hashes to the one `receipt` signs.
+pub fn answer_commitment(body: &Value, receipt: &InferenceReceipt) -> Option<InferenceCommitment> {
+    let signed = receipt.commitment_hash.as_deref()?;
+    let held = body
+        .get("result")
+        .unwrap_or(body)
+        .get("commitment")?
+        .get("commitment")?;
+    let commitment: InferenceCommitment = serde_json::from_value(held.clone()).ok()?;
+    commitment
+        .hash_hex()
+        .eq_ignore_ascii_case(signed.trim_start_matches("0x"))
+        .then_some(commitment)
+}
+
+/// Ask `witness` whether the completion in `dispute` follows from the model:
+/// it scores the provider's own committed tokens in one prefill, compares the
+/// logits with the committed ones within the verification tolerance, and
+/// checks each emitted token is the one greedy decoding picks from them. A
+/// near tie passes on any hardware; a substituted answer does not. The verdict
+/// must come back under a receipt for the same model hash and engine, signed
+/// by the key the witness registered, binding this request's nonce.
+async fn witness_verdict(
+    node: &TenzroNode,
+    dispute: &ServedAnswer,
+    commitment: &InferenceCommitment,
+    witness: &tenzro_network::ModelRegistrationMessage,
+) -> Result<bool, String> {
+    let original = &dispute.receipt;
+    let witness_key = crate::identity_bootstrap::registered_identity_key(
+        &node.identity_registry_slot(),
+        &witness.machine_did,
+    )
+    .ok_or_else(|| format!("{} has no registered identity key", witness.machine_did))?;
+    let nonce = fresh_nonce();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tenzro_verifyInferenceCommitment",
+        "params": {
+            "commitment_hash": commitment.hash_hex(),
+            "commitment": commitment,
+            "request": dispute.request,
+            "receipt": original,
+            "receipt_nonce": nonce,
+        },
+        "id": 1,
+    });
+    let bytes = crate::infer::call_provider(
+        node,
+        &witness.iroh_endpoint_id,
+        &request,
+        &ProviderCredential::default(),
+    )
+    .await?;
+    let body: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("witness verdict does not parse: {e}"))?;
+    if let Some(err) = body.get("error") {
+        return Err(format!("the witness did not verify the commitment: {err}"));
+    }
+    let (receipt, answer) = parse_task_answer(VERIFY_COMMITMENT_TASK, &body)
+        .ok_or("the witness returned no receipt")?;
+    receipt
+        .verify_signature(&witness_key)
+        .map_err(|e| format!("witness receipt: {e}"))?;
+    if receipt.nonce != nonce || receipt.output_hash != answer.hash() {
+        return Err("the witness receipt does not bind this request and its verdict".to_string());
+    }
+    if receipt.model_hash != original.model_hash || receipt.engine != original.engine {
+        return Err("the witness verified with other weights".to_string());
+    }
+    let Answer::Task { out, .. } = &answer else {
+        return Err("the witness returned no verdict".to_string());
+    };
+    out.get("pass")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "the witness verdict carries no pass".to_string())
+}
+
 /// After an optimistic-level answer this node forwarded, for which
 /// `requester` paid `refund`: draw the sample, and if drawn, re-execute it in
 /// the background and file a fault when the witness disagrees.
@@ -719,6 +825,9 @@ pub fn spawn_reexecution(
             }
             Ok(Reexecution::NoWitness) => {
                 debug!(model = %dispute.receipt.model_id, "no other provider to re-execute the sampled answer")
+            }
+            Ok(Reexecution::Unchecked) => {
+                debug!(model = %dispute.receipt.model_id, "the sampled completion came without a decode commitment")
             }
             Ok(Reexecution::Differs) => {
                 if let Err(e) = file_fault(&node, &dispute, requester, refund).await {
@@ -799,7 +908,7 @@ async fn file_fault(
     dispute: &ServedAnswer,
     requester: tenzro_types::primitives::Address,
     refund: u128,
-) -> Result<(), String> {
+) -> Result<String, String> {
     use tenzro_iroh::IrohResolver as _;
     let provider_did =
         bond_of(node, &dispute.receipt).ok_or("the provider serves under no compute bond")?;
@@ -822,6 +931,16 @@ async fn file_fault(
         refund,
     )?;
     let fault_id = fault_id_of(&op).ok_or("not a filing")?;
+    // A fault is filed once: its id is fixed by the receipt, the provider,
+    // the requester and the refund, and one already on chain is not paid for
+    // again.
+    if node
+        .chain_state()
+        .is_some_and(|chain| already_filed(&chain, &fault_id))
+    {
+        info!(fault = %fault_id, "inference fault already filed");
+        return Ok(fault_id);
+    }
     let gas = filing_gas(&op);
     crate::rpc::submit_as_validator(
         node,
@@ -831,7 +950,70 @@ async fn file_fault(
     .await
     .map_err(|e| e.message)?;
     info!(fault = %fault_id, model = %dispute.receipt.model_id, "filed inference fault");
-    Ok(())
+    Ok(fault_id)
+}
+
+/// The answer an upheld committee challenge over `commitment_hash` takes to a
+/// fault, read from the `dispute` its caller hands in (`receipt`, `request`,
+/// `output`). The receipt must be the one that signed the challenged
+/// commitment and bind the output, and the answer must be greedy, the only
+/// decoding validators re-execute.
+pub fn challenged_answer(commitment_hash: &str, dispute: &Value) -> Result<ServedAnswer, String> {
+    let part = |name: &str| {
+        dispute
+            .get(name)
+            .filter(|v| !v.is_null())
+            .cloned()
+            .ok_or_else(|| format!("the dispute carries no {name}"))
+    };
+    let receipt: InferenceReceipt =
+        serde_json::from_value(part("receipt")?).map_err(|e| format!("receipt: {e}"))?;
+    let output: Answer =
+        serde_json::from_value(part("output")?).map_err(|e| format!("output: {e}"))?;
+    let request = part("request")?;
+    if !receipt
+        .commitment_hash
+        .as_deref()
+        .is_some_and(|h| h.eq_ignore_ascii_case(commitment_hash.trim_start_matches("0x")))
+    {
+        return Err("the receipt does not sign the challenged commitment".to_string());
+    }
+    if receipt.output_hash != output.hash() {
+        return Err("the receipt does not bind this output".to_string());
+    }
+    if !is_greedy(&receipt) {
+        return Err(
+            "the answer was sampled; validators re-execute only a greedy answer".to_string(),
+        );
+    }
+    Ok(ServedAnswer {
+        receipt,
+        request,
+        output,
+        // Validators re-execute a greedy answer; they have no use for the
+        // commitment a witness would check.
+        commitment: None,
+    })
+}
+
+/// Whether the fault `fault_id` is in chain state already.
+fn already_filed(chain: &dyn tenzro_vm::VmState, fault_id: &str) -> bool {
+    tenzro_vm::native::inference_fault::read_fault(chain, fault_id).is_some()
+}
+
+/// File the fault for an answer a committee upheld a challenge against, and
+/// return its id. Validators judge it as they judge any fault, and an upheld
+/// one pays the penalty out of the provider's bond. It claims no refund: who
+/// paid for the answer, and how much, is not something a committee saw.
+pub async fn file_challenged_fault(
+    node: &Arc<TenzroNode>,
+    answer: &ServedAnswer,
+) -> Result<String, String> {
+    let filer = node
+        .ledger_submitter()
+        .ok_or("this node has no validator account to file a fault from")?
+        .address();
+    file_fault(node, answer, filer, 0).await
 }
 
 /// The gas limit a fault filing carries: the base cost of a transaction, then
@@ -875,7 +1057,7 @@ async fn judge(node: &TenzroNode, evidence: &InferenceFaultEvidence) -> Option<b
         // A dispute that does not hold together accuses no one.
         return Some(false);
     }
-    if receipt.verify_against_catalog().is_err() {
+    if receipt.verify_against_catalog(&node.catalog()).is_err() {
         return Some(false);
     }
     corroborated(node, &dispute).await
@@ -888,6 +1070,9 @@ const VERDICT_WITNESSES: usize = 2;
 /// drawn at random and judge it by [`verdict_of`]. `None` while too few
 /// witnesses answer.
 async fn corroborated(node: &TenzroNode, dispute: &ServedAnswer) -> Option<bool> {
+    if let Answer::Chat(_) = &dispute.output {
+        return commitment_corroborated(node, dispute).await;
+    }
     let mut witnesses = witnesses_for(node, &dispute.receipt);
     let mut answers = Vec::with_capacity(VERDICT_WITNESSES);
     while answers.len() < VERDICT_WITNESSES {
@@ -899,7 +1084,32 @@ async fn corroborated(node: &TenzroNode, dispute: &ServedAnswer) -> Option<bool>
             }
         }
     }
-    verdict_of(&dispute.receipt.engine, &dispute.output, &answers)
+    verdict_of(&dispute.output, &answers)
+}
+
+/// The verdict on a disputed completion from distinct witnesses' signed
+/// verdicts on its decode commitment: upheld when [`VERDICT_WITNESSES`] of
+/// them find it fails, dismissed as soon as one passes it, `None` (no
+/// attestation) while fewer have answered. A completion filed without a
+/// commitment accuses no one: the only check left would be a regeneration,
+/// which a near tie breaks differently on other hardware.
+async fn commitment_corroborated(node: &TenzroNode, dispute: &ServedAnswer) -> Option<bool> {
+    let Some(commitment) = dispute.commitment.as_ref() else {
+        return Some(false);
+    };
+    let mut witnesses = witnesses_for(node, &dispute.receipt);
+    let mut failed = 0;
+    while failed < VERDICT_WITNESSES {
+        let witness = draw_witness(&mut witnesses)?;
+        match witness_verdict(node, dispute, commitment, &witness).await {
+            Ok(true) => return Some(false),
+            Ok(false) => failed += 1,
+            Err(e) => {
+                debug!(witness = %witness.machine_did, error = %e, "witness did not verify the commitment")
+            }
+        }
+    }
+    Some(true)
 }
 
 /// The verdict on an accused answer from what distinct witnesses returned
@@ -908,16 +1118,16 @@ async fn corroborated(node: &TenzroNode, dispute: &ServedAnswer) -> Option<bool>
 /// one machine reproduced and signed, never on one witness's word; dismissed
 /// when every witness agrees with it; `None` (no attestation) when they split
 /// or fewer than [`VERDICT_WITNESSES`] answered.
-fn verdict_of(engine: &str, accused: &Answer, witnessed: &[Answer]) -> Option<bool> {
+fn verdict_of(accused: &Answer, witnessed: &[Answer]) -> Option<bool> {
     if witnessed.len() < VERDICT_WITNESSES {
         return None;
     }
-    if witnessed.iter().all(|w| answers_agree(engine, accused, w)) {
+    if witnessed.iter().all(|w| answers_agree(accused, w)) {
         return Some(false);
     }
     let reproduced = witnessed
         .iter()
-        .all(|w| !answers_agree(engine, accused, w) && answers_agree(engine, &witnessed[0], w));
+        .all(|w| !answers_agree(accused, w) && answers_agree(&witnessed[0], w));
     reproduced.then_some(true)
 }
 
@@ -1004,66 +1214,132 @@ mod tests {
     }
 
     #[test]
-    fn greedy_gguf_answers_agree_on_their_leading_words() {
-        let a = out(&words(GREEDY_PREFIX_WORDS, "end."));
-        let b = out(&words(GREEDY_PREFIX_WORDS, "finish."));
-        assert!(outputs_agree("gguf", &a, &b));
-        // Another model diverges early.
-        let c = out(&format!("x {}", words(GREEDY_PREFIX_WORDS, "end.")));
-        assert!(!outputs_agree("gguf", &a, &c));
-        // A truncated answer is not the same answer.
-        assert!(!outputs_agree("gguf", &a, &out("w0 w1")));
-        // Other engines compare exactly.
-        assert!(!outputs_agree("onnx-text-embedding", &a, &b));
-        assert!(outputs_agree("onnx-text-embedding", &a, &a.clone()));
-    }
-
-    #[test]
     fn one_lying_witness_cannot_frame_an_honest_provider() {
-        let honest = Answer::Chat(out(&words(GREEDY_PREFIX_WORDS, "end.")));
-        let forged = Answer::Chat(out("a substituted answer"));
-        let other = Answer::Chat(out("another substituted answer"));
+        let task = |text: &str| Answer::Task {
+            task: "transcribe".into(),
+            out: serde_json::json!({ "text": text }),
+        };
+        let honest = task(&words(GREEDY_PREFIX_WORDS, "end."));
+        let forged = task("a substituted answer");
+        let other = task("another substituted answer");
         // A malicious witness alone: the fault is not upheld.
-        assert_eq!(
-            verdict_of("gguf", &honest, std::slice::from_ref(&forged)),
-            None
-        );
+        assert_eq!(verdict_of(&honest, std::slice::from_ref(&forged)), None);
         // Beside an honest witness, in either order: still not upheld.
-        assert_eq!(
-            verdict_of("gguf", &honest, &[forged.clone(), honest.clone()]),
-            None
-        );
-        assert_eq!(
-            verdict_of("gguf", &honest, &[honest.clone(), forged.clone()]),
-            None
-        );
+        assert_eq!(verdict_of(&honest, &[forged.clone(), honest.clone()]), None);
+        assert_eq!(verdict_of(&honest, &[honest.clone(), forged.clone()]), None);
         // Witnesses that also disagree with each other prove nothing.
-        assert_eq!(
-            verdict_of("gguf", &honest, &[forged.clone(), other.clone()]),
-            None
-        );
+        assert_eq!(verdict_of(&honest, &[forged.clone(), other.clone()]), None);
         // Honest witnesses dismiss it.
         assert_eq!(
-            verdict_of("gguf", &honest, &[honest.clone(), honest.clone()]),
+            verdict_of(&honest, &[honest.clone(), honest.clone()]),
             Some(false)
         );
         // A substituted answer two witnesses reproduce otherwise is upheld.
         assert_eq!(
-            verdict_of("gguf", &forged, &[honest.clone(), honest.clone()]),
+            verdict_of(&forged, &[honest.clone(), honest.clone()]),
             Some(true)
         );
     }
 
     #[test]
-    fn different_tool_calls_never_agree() {
-        let mut a = out("same");
-        let mut b = out("same");
-        a.tool_calls = "[1]".into();
-        b.tool_calls = "[2]".into();
-        assert!(!outputs_agree("gguf", &a, &b));
+    fn a_completion_is_never_compared_by_its_words() {
+        // Two completions with the same text are still not "in agreement":
+        // a completion is checked by its decode commitment only.
+        let a = Answer::Chat(out("the same words"));
+        assert!(!answers_agree(&a, &a.clone()));
+    }
+
+    fn commitment(tokens: &[u32]) -> InferenceCommitment {
+        use tenzro_model::toploc::{StepRecord, TopKEntry};
+        InferenceCommitment {
+            k: 4,
+            prompt_tokens: 3,
+            steps: tokens
+                .iter()
+                .map(|&t| StepRecord {
+                    token_id: t,
+                    top_k: (0..4)
+                        .map(|i| TopKEntry {
+                            token_id: t + i,
+                            logit: 2.0 - i as f32 * 0.01,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_answer_keeps_only_the_commitment_its_receipt_signs() {
+        let c = commitment(&[5, 6, 7]);
+        let receipt = signed_with("hi", Some(&c.hash_hex()), 0.0);
+        let body = |held: &InferenceCommitment| {
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": {
+                "output": "hi",
+                "commitment": { "hash": held.hash_hex(), "k": held.k, "steps": held.steps.len(), "commitment": held },
+            }})
+        };
+        let kept = |body: &Value, receipt: &InferenceReceipt| {
+            answer_commitment(body, receipt).map(|c| c.hash_hex())
+        };
+        assert_eq!(kept(&body(&c), &receipt), Some(c.hash_hex()));
+        // A bare result carries it too.
+        assert_eq!(kept(&body(&c)["result"], &receipt), Some(c.hash_hex()));
+        // Another commitment than the signed one is not the answer's.
+        assert_eq!(kept(&body(&commitment(&[5, 6, 8])), &receipt), None);
+        // A receipt that signs no commitment keeps none.
+        assert_eq!(kept(&body(&c), &signed("hi")), None);
+    }
+
+    #[tokio::test]
+    async fn a_completion_without_a_commitment_is_not_checked_and_accuses_no_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = crate::node::TenzroNode::new(crate::NodeConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let dispute = ServedAnswer {
+            receipt: signed("hello"),
+            request: serde_json::json!({"method": "tenzro_chat", "params": {"message": "hi"}}),
+            output: Answer::Chat(out("hello")),
+            commitment: None,
+        };
+        assert_eq!(reexecute(&node, &dispute).await, Ok(Reexecution::Unchecked));
+        assert_eq!(commitment_corroborated(&node, &dispute).await, Some(false));
+    }
+
+    #[test]
+    fn a_dispute_carries_its_commitment_by_content_and_restores_it() {
+        let c = commitment(&(0..400).collect::<Vec<u32>>());
+        let receipt = signed_with("hello", Some(&c.hash_hex()), 0.0);
+        let dispute = ServedAnswer {
+            receipt,
+            request: serde_json::json!({"method": "tenzro_chat", "params": {"message": "hi"}}),
+            output: Answer::Chat(out("hello")),
+            commitment: Some(c.clone()),
+        };
+        let (filed, parts) = dispute.dispute(Some("holder".into())).unwrap();
+        // Too large to sit inline: held by its content hash.
+        assert!(!parts.is_empty());
+        assert!(serde_json::to_vec(&filed).unwrap().len() < MAX_FAULT_DISPUTE_BYTES);
+        let held: std::collections::HashMap<String, Vec<u8>> = parts
+            .into_iter()
+            .map(|p| (blake3::hash(&p).to_hex().to_string(), p))
+            .collect();
+        let restored = filed.served(&held).unwrap();
+        assert_eq!(
+            restored.commitment.map(|r| r.hash_hex()),
+            Some(c.hash_hex())
+        );
     }
 
     fn signed(text: &str) -> InferenceReceipt {
+        signed_with(text, None, 0.0)
+    }
+
+    fn signed_with(text: &str, commitment: Option<&str>, temperature: f64) -> InferenceReceipt {
         use crate::inference_receipt::{ModelIdentity, ReceiptClaims, SamplingParams};
         let signer = tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(
             tenzro_crypto::composite::testing::TestHybridSigner::random(),
@@ -1086,19 +1362,104 @@ mod tests {
                 provenance: Vec::new(),
                 sampling: SamplingParams {
                     seed: 0,
-                    temperature: 0.0,
+                    temperature,
                     top_p: 1.0,
                     top_k: None,
                     min_p: None,
                     max_output_tokens: 16,
                     keyed_sampler: false,
                 },
-                commitment_hash: None,
+                commitment_hash: commitment.map(str::to_string),
                 tee: None,
                 activation_fingerprint: None,
             },
         )
         .unwrap()
+    }
+
+    fn challenged(receipt: &InferenceReceipt, text: &str) -> Value {
+        serde_json::json!({
+            "receipt": receipt,
+            "request": {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            "output": Answer::Chat(out(text)),
+        })
+    }
+
+    #[test]
+    fn a_fault_on_chain_is_not_filed_again() {
+        use tenzro_types::inference_verification::InferenceFaultEvidence;
+        use tenzro_vm::native::inference_fault::{FaultEvidence, FaultRecord};
+        let mut chain = tenzro_vm::StateAdapter::new();
+        let receipt = signed("hello");
+        let served = ServedAnswer {
+            receipt: receipt.clone(),
+            request: serde_json::json!({"model": "m", "messages": []}),
+            output: Answer::Chat(out("hello")),
+            commitment: None,
+        };
+        let (filed, _) = served.dispute(None).unwrap();
+        let evidence: InferenceFaultEvidence =
+            evidence_for(&filed, receipt.machine_did.clone(), "ee".repeat(20), 0).unwrap();
+        let fault_id = evidence.fault_id();
+        assert!(!already_filed(&chain, &fault_id));
+        let record = FaultRecord {
+            fault_id: fault_id.clone(),
+            evidence: FaultEvidence::Inference(evidence),
+            filed_at_ms: 0,
+            attestations: Vec::new(),
+            upheld: None,
+            refunded: 0,
+            penalty: 0,
+        };
+        tenzro_vm::VmState::set_storage(
+            &mut chain,
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            format!("inference_fault:{fault_id}").as_bytes(),
+            serde_json::to_vec(&record).unwrap(),
+        );
+        assert!(already_filed(&chain, &fault_id));
+    }
+
+    #[test]
+    fn an_upheld_challenge_takes_the_answer_its_commitment_was_signed_into() {
+        let hash = "ef".repeat(32);
+        let receipt = signed_with("hello", Some(&hash), 0.0);
+        let answer = challenged_answer(
+            &format!("0x{}", hash.to_uppercase()),
+            &challenged(&receipt, "hello"),
+        )
+        .expect("the receipt signs this commitment");
+        assert_eq!(answer.receipt, receipt);
+        assert_eq!(answer.output, Answer::Chat(out("hello")));
+        // What a fault needs: the dispute and its evidence build from it.
+        let (filed, _) = answer.dispute(None).unwrap();
+        evidence_for(&filed, receipt.machine_did.clone(), "ee".repeat(20), 0).unwrap();
+    }
+
+    #[test]
+    fn an_answer_that_is_not_the_challenged_one_is_not_taken_to_a_fault() {
+        let hash = "ef".repeat(32);
+        let err = |receipt: &InferenceReceipt, text: &str| {
+            challenged_answer(&hash, &challenged(receipt, text)).unwrap_err()
+        };
+        // Another commitment, or none.
+        let other = signed_with("hello", Some(&"12".repeat(32)), 0.0);
+        assert!(err(&other, "hello").contains("challenged commitment"));
+        assert!(err(&signed("hello"), "hello").contains("challenged commitment"));
+        // An output the receipt does not bind.
+        let receipt = signed_with("hello", Some(&hash), 0.0);
+        assert!(err(&receipt, "something else").contains("bind"));
+        // A sampled answer, which validators cannot re-execute.
+        let sampled = signed_with("hello", Some(&hash), 0.7);
+        assert!(err(&sampled, "hello").contains("sampled"));
+        // A dispute with a part missing.
+        let mut partial = challenged(&receipt, "hello");
+        partial.as_object_mut().unwrap().remove("request");
+        assert!(
+            challenged_answer(&hash, &partial)
+                .unwrap_err()
+                .contains("request")
+        );
     }
 
     #[test]
@@ -1108,6 +1469,7 @@ mod tests {
             receipt,
             request: serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "say \"hi\""}]}),
             output: Answer::Chat(out(&"a \"quoted\" answer ".repeat(64))),
+            commitment: None,
         };
         let (filed, _) = served.dispute(Some("holder".into())).unwrap();
         let evidence =
@@ -1140,6 +1502,7 @@ mod tests {
             receipt: receipt.clone(),
             request: serde_json::json!({"model": "m", "messages": []}),
             output: Answer::Chat(output),
+            commitment: None,
         };
         let (filed, parts) = dispute.dispute(Some("holder".into())).unwrap();
         assert!(
@@ -1260,6 +1623,7 @@ mod tests {
             receipt,
             request: serde_json::json!({ "method": "tenzro_segment", "params": { "image_base64": "A".repeat(200_000) } }),
             output: answer.clone(),
+            commitment: None,
         };
         let (filed, parts) = served.dispute(Some("holder".into())).unwrap();
         assert_eq!(parts.len(), 2, "the image and the masks");
@@ -1379,7 +1743,7 @@ mod tests {
         );
         let back: Answer = serde_json::from_str(&serde_json::to_string(&answer).unwrap()).unwrap();
         assert_eq!(back, answer);
-        assert!(!answers_agree("onnx", &answer, &Answer::Chat(out("hi"))));
+        assert!(!answers_agree(&answer, &Answer::Chat(out("hi"))));
         assert!(parse_task_answer("rerank", &serde_json::json!({"error": {"code": 1}})).is_none());
     }
 

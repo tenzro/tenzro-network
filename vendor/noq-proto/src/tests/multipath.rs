@@ -1,14 +1,14 @@
 //! Tests for multipath
 
-use std::net::SocketAddr;
-use std::num::NonZeroU32;
-use std::sync::Arc;
-use std::time::Duration;
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use core::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use std::dbg;
 
 use assert_matches::assert_matches;
 use testresult::TestResult;
 use tracing::info;
 
+use crate::connection::timer::{PathTimer, Timer};
 use crate::{
     ClientConfig, ConnectionId, ConnectionIdGenerator, Endpoint, EndpointConfig, FourTuple,
     LOCAL_CID_COUNT, NetworkChangeHint, PathId, PathStatus, RandomConnectionIdGenerator,
@@ -451,10 +451,15 @@ fn open_path_validation_fails_server_side() -> TestResult {
 
     info!("manual keep-alive of PathId::ZERO");
     pair.ping_path(Client, PathId::ZERO)?;
+    // Sent here, before the clock moves: `drive_until_timer` advances time before it
+    // drives, so a queued keep-alive would otherwise go out at the deadline itself.
     pair.drive();
 
     info!("advancing time to past client path {path_id} idle");
-    pair.advance_time();
+    pair.drive_until_timer(Client, Timer::PerPath(path_id, PathTimer::PathIdle));
+    // Deliver the abandonment to the server: the timer fires while driving the client, and
+    // the loop drives the server before that packet arrives. Without this step the
+    // `poll(Server)` check below would pass simply because the server never heard about it.
     pair.drive();
 
     // The client gave up first and timed out.
@@ -803,7 +808,7 @@ fn per_path_observed_address() -> TestResult {
 
     let mut found_first = false;
     let mut found_second = false;
-    let post_connect_events = std::iter::from_fn(|| pair.poll(Client));
+    let post_connect_events = core::iter::from_fn(|| pair.poll(Client));
     for event in client_events.into_iter().chain(post_connect_events) {
         if let Event::Path(PathEvent::ObservedAddr { id, addr }) = event {
             if id == PathId::ZERO && addr == first_addr {
@@ -2291,5 +2296,152 @@ fn regression_discarded_path_stats_are_up_to_date() -> TestResult {
     assert_ne!(discarded_stats.cwnd, 0);
     assert_ne!(discarded_stats.current_mtu, 0);
 
+    Ok(())
+}
+
+/// A connection whose path 0 is a backup and whose path 1, over its own pair of
+/// addresses, is the available path. Returns the pair, path 1, and path 0's client and
+/// server addresses.
+fn backup_and_available_paths() -> (ConnPair, PathId, SocketAddr, SocketAddr) {
+    let mut builder = ConnPair::builder().enable_multipath();
+    builder.server_transport_cfg.max_idle_timeout = None;
+    builder.client_transport_cfg.max_idle_timeout = None;
+    let mut pair = builder.connect();
+    let client0 = pair.routes.as_basic().client_addr;
+    let server0 = pair.routes.as_basic().server_addr;
+    let (mut client1, mut server1) = (client0, server0);
+    client1.set_port(client0.port() + 1);
+    server1.set_port(server0.port() + 1);
+    pair.routes =
+        ManyToManyRouting::simple_symmetric([client0, client1], [server0, server1]).into();
+    pair.set_path_status(Client, PathId::ZERO, PathStatus::Backup)
+        .unwrap();
+    let path1 = pair
+        .open_path(
+            Client,
+            FourTuple {
+                local_ip: Some(client1.ip()),
+                remote: server1,
+            },
+            PathStatus::Available,
+        )
+        .unwrap();
+    pair.drive();
+    while pair.poll(Client).is_some() {}
+    while pair.poll(Server).is_some() {}
+    (pair, path1, client0, server0)
+}
+
+/// Sends `len` bytes on a new stream from the client while only path 0's addresses
+/// route, and steps the pair until the server has read them all or five simulated
+/// seconds have passed. Returns the bytes read and the time taken.
+fn send_with_only_path_zero_routed(
+    pair: &mut ConnPair,
+    client0: SocketAddr,
+    server0: SocketAddr,
+    len: usize,
+) -> (usize, Duration) {
+    pair.routes = ManyToManyRouting::simple_symmetric([client0], [server0]).into();
+    let start = pair.time;
+    let s = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, s).write(&vec![7u8; len]).unwrap();
+    pair.send_stream(Client, s).finish().unwrap();
+    let mut got = 0;
+    while got < len && pair.time < start + Duration::from_secs(5) {
+        if !pair.step() {
+            break;
+        }
+        let _ = pair.streams(Server).accept(Dir::Uni);
+        let mut recv = pair.recv_stream(Server, s);
+        if let Ok(mut chunks) = recv.read(true) {
+            while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+                got += chunk.bytes.len();
+            }
+            let _ = chunks.finalize();
+        }
+    }
+    (got, pair.time - start)
+}
+
+/// The available path stops carrying anything mid-transfer: the data moves to the
+/// backup path within a second instead of waiting on the dead path.
+#[test]
+fn data_leaves_a_path_that_stopped_answering() -> TestResult {
+    let _guard = subscribe();
+    let (mut pair, path1, client0, server0) = backup_and_available_paths();
+    let path1_before = pair.conn_mut(Client).path_stats(path1).unwrap();
+    const LEN: usize = 20_000;
+    let (got, took) = send_with_only_path_zero_routed(&mut pair, client0, server0, LEN);
+    let path1_after = pair.conn_mut(Client).path_stats(path1).unwrap();
+    assert!(
+        path1_after.udp_tx.datagrams > path1_before.udp_tx.datagrams,
+        "the transfer started on the available path"
+    );
+    assert_eq!(got, LEN, "{got} of {LEN} bytes arrived in {took:?}");
+    assert!(took < Duration::from_secs(1), "the data took {took:?}");
+    Ok(())
+}
+
+/// Packets on a path that stopped answering can still arrive late. The data handed to
+/// another path is acknowledged once, however the two acknowledgements come in: counting
+/// it twice took the unacknowledged total below zero.
+#[test]
+fn late_acknowledgements_of_data_handed_over_are_counted_once() -> TestResult {
+    let _guard = subscribe();
+    let (mut pair, _path1, _client0, _server0) = backup_and_available_paths();
+    // Every packet now takes three seconds each way, so the probes on the available path
+    // time out twice well before the first acknowledgement can come back.
+    pair.routes.set_latency(Duration::from_secs(3));
+    const LEN: usize = 20_000;
+    let s = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, s).write(&vec![7u8; LEN]).unwrap();
+    pair.send_stream(Client, s).finish().unwrap();
+    let start = pair.time;
+    let mut got = 0;
+    while pair.time < start + Duration::from_secs(60) {
+        if !pair.step() {
+            break;
+        }
+        let _ = pair.streams(Server).accept(Dir::Uni);
+        let mut recv = pair.recv_stream(Server, s);
+        if let Ok(mut chunks) = recv.read(true) {
+            while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+                got += chunk.bytes.len();
+            }
+            let _ = chunks.finalize();
+        }
+    }
+    assert_eq!(got, LEN, "{got} of {LEN} bytes arrived");
+    Ok(())
+}
+
+/// Once the path answers again, data goes back to it.
+#[test]
+fn data_returns_to_a_path_that_answers_again() -> TestResult {
+    let _guard = subscribe();
+    let (mut pair, path1, client0, server0) = backup_and_available_paths();
+    let (mut client1, mut server1) = (client0, server0);
+    client1.set_port(client0.port() + 1);
+    server1.set_port(server0.port() + 1);
+    let (got, took) = send_with_only_path_zero_routed(&mut pair, client0, server0, 1_000);
+    assert_eq!(got, 1_000, "{got} of 1000 bytes arrived in {took:?}");
+
+    pair.routes =
+        ManyToManyRouting::simple_symmetric([client0, client1], [server0, server1]).into();
+    pair.drive();
+    let path0_before = pair.conn_mut(Client).path_stats(PathId::ZERO).unwrap();
+    let path1_before = pair.conn_mut(Client).path_stats(path1).unwrap();
+    let s = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, s)
+        .write(b"back on path 1")
+        .unwrap();
+    pair.drive();
+    let path0_after = pair.conn_mut(Client).path_stats(PathId::ZERO).unwrap();
+    let path1_after = pair.conn_mut(Client).path_stats(path1).unwrap();
+    assert_eq!(
+        path0_after.udp_tx.datagrams, path0_before.udp_tx.datagrams,
+        "nothing more on the backup path"
+    );
+    assert!(path1_after.udp_tx.datagrams > path1_before.udp_tx.datagrams);
     Ok(())
 }

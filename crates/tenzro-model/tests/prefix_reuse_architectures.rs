@@ -33,7 +33,7 @@ use praecise_runtime::{
     BatchEngine, BatchPrompt, BatchRequest, ChatMessage, GenerationConfig, InferenceResult,
 };
 use tenzro_model::{
-    DownloadProgress, DownloadState, HfDownloader, HfModelEntry, SourcePolicy, get_model_by_id,
+    Catalog, CatalogCell, DownloadProgress, DownloadState, HfDownloader, HfModelEntry, SourcePolicy,
 };
 
 /// One architecture class and the model that stands for it.
@@ -53,8 +53,9 @@ struct Class {
 const ENCODER_DECODER: &str = "encoder-decoder";
 
 fn catalog(id: &str) -> HfModelEntry {
-    tenzro_catalog::install_test_seed();
-    get_model_by_id(id).unwrap_or_else(|| panic!("{id} must be in the catalog"))
+    Catalog::test_seed()
+        .get_model_by_id(id)
+        .unwrap_or_else(|| panic!("{id} must be in the catalog"))
 }
 
 /// One pinned catalog entry per class, fetched through the node's downloader.
@@ -90,7 +91,7 @@ fn classes() -> Vec<Class> {
 }
 
 async fn fetch(dir: &Path, e: &HfModelEntry) -> (PathBuf, Option<PathBuf>) {
-    let downloader = HfDownloader::new(dir.to_path_buf());
+    let downloader = HfDownloader::new(dir.to_path_buf(), CatalogCell::new(Catalog::test_seed()));
     let (tx, _rx) = tokio::sync::watch::channel(DownloadProgress {
         model_id: e.id.clone(),
         status: DownloadState::Pending,

@@ -118,7 +118,46 @@ pub struct Payer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wire {
     X402,
-    Mpp,
+    /// An HTTP Payment challenge; the header it asked the credential in.
+    Mpp(MppHeader),
+}
+
+/// Where an HTTP Payment challenge asks for the credential: its `header`
+/// parameter, `Authorization` when it names none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MppHeader {
+    Authorization,
+    PaymentAuthorization,
+}
+
+impl MppHeader {
+    /// The header a challenge's `header` parameter names. Only the two
+    /// headers the scheme defines are honoured: a challenge naming any other
+    /// would have the credential written into a header of the server's
+    /// choosing.
+    fn named(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None => Ok(Self::Authorization),
+            Some(v) if v.eq_ignore_ascii_case("Authorization") => Ok(Self::Authorization),
+            Some(v)
+                if v.eq_ignore_ascii_case(
+                    tenzro_payments::middleware::PAYMENT_AUTHORIZATION_HEADER,
+                ) =>
+            {
+                Ok(Self::PaymentAuthorization)
+            }
+            Some(v) => Err(format!(
+                "the payment challenge asks for the credential in {v}, which is not a payment header"
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Authorization => "Authorization",
+            Self::PaymentAuthorization => tenzro_payments::middleware::PAYMENT_AUTHORIZATION_HEADER,
+        }
+    }
 }
 
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -128,18 +167,26 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// The `request` parameter of a `Payment` challenge.
-fn payment_request_param(value: &str) -> Option<&str> {
+/// The parameter `name` of a `Payment` challenge.
+fn payment_param<'a>(value: &'a str, name: &str) -> Option<&'a str> {
     let rest = value.trim().strip_prefix("Payment")?;
     rest.split(',').find_map(|p| {
         let (k, v) = p.trim().split_once('=')?;
-        (k.trim() == "request").then(|| v.trim().trim_matches('"'))
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().trim_matches('"'))
     })
 }
 
 /// The challenge a 402 response carries, if any.
 fn challenge_of(headers: &[(String, String)]) -> Option<Result<(PaymentChallenge, Wire), String>> {
-    if let Some(v) = header(headers, "www-authenticate").and_then(payment_request_param) {
+    let www_authenticate = header(headers, "www-authenticate");
+    if let Some(v) = www_authenticate.and_then(|w| payment_param(w, "request")) {
+        let named = www_authenticate.and_then(|w| payment_param(w, "header"));
+        let answer_in = match MppHeader::named(named) {
+            Ok(h) => h,
+            Err(e) => return Some(Err(e)),
+        };
         let parsed = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(v)
             .map_err(|e| format!("payment challenge is not base64url: {e}"))
@@ -151,7 +198,7 @@ fn challenge_of(headers: &[(String, String)]) -> Option<Result<(PaymentChallenge
                 let wire = if c.protocol.eq_ignore_ascii_case("x402") {
                     Wire::X402
                 } else {
-                    Wire::Mpp
+                    Wire::Mpp(answer_in)
                 };
                 (c, wire)
             });
@@ -261,6 +308,7 @@ impl Payer {
                 amount: c.amount,
                 currency: &c.asset,
                 chain: &c.chain,
+                nonce: &c.challenge_id,
             },
             merchant.as_ref(),
             self.mandate_keys.as_ref(),
@@ -309,11 +357,11 @@ impl Payer {
                     payload,
                 ))
             }
-            Wire::Mpp => {
+            Wire::Mpp(answer_in) => {
                 let v = tenzro_payments::mpp::IetfPaymentBody::for_credential(cred)
                     .and_then(|b| b.to_header())
                     .map_err(|e| e.to_string())?;
-                Ok(("Authorization".to_string(), v))
+                Ok((answer_in.name().to_string(), v))
             }
         }
     }
@@ -677,6 +725,49 @@ pub(crate) mod tests {
         assert!(p.header.1.starts_with("Payment "));
     }
 
+    /// A challenge that asks for the credential in Payment-Authorization is
+    /// answered there, so the client keeps its Authorization header; one
+    /// naming any other header is refused.
+    #[tokio::test]
+    async fn an_mpp_challenge_is_answered_in_the_header_it_names() {
+        let (payer, authority, _, _) = payer_fixture("500");
+        let gw = gateway(&authority).await;
+        let (mut c, _) = challenge_headers(&gw, 100).await;
+        c.protocol = "mpp".into();
+        let request = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&c).unwrap());
+        let challenge = |named: &str| {
+            vec![(
+                "WWW-Authenticate".to_string(),
+                format!(
+                    "Payment id=\"{}\", realm=\"/report\", method=\"tenzro\", intent=\"charge\", request=\"{request}\", header=\"{named}\"",
+                    c.challenge_id
+                ),
+            )]
+        };
+        assert!(matches!(
+            payer.answer(
+                &target(),
+                &agent(),
+                402,
+                &challenge("payment-authorization"),
+                "a"
+            ),
+            Paid::Authorized { .. }
+        ));
+        let p = payer.presented(&target()).unwrap().unwrap();
+        assert_eq!(p.header.0, "Payment-Authorization");
+        assert!(p.header.1.starts_with("Payment "));
+
+        let (payer, _, _, _) = payer_fixture("500");
+        let cookie = challenge("Cookie");
+        let Paid::Refused(why) = payer.answer(&target(), &agent(), 402, &cookie, "b") else {
+            panic!("answered in a header the scheme does not define");
+        };
+
+        assert!(why.contains("not a payment header"), "{why}");
+    }
+
     mod ap2_mandates {
         use super::*;
         use p256::ecdsa::SigningKey;
@@ -723,7 +814,11 @@ pub(crate) mod tests {
             }
             body.insert("_sd".into(), Json::Array(digests));
             body.insert("_sd_alg".into(), "sha-256".into());
-            let mut out = jws(k, Json::Object(body));
+            let mut h = Map::new();
+            h.insert("alg".into(), "ES256".into());
+            h.insert("typ".into(), "dc+sd-jwt".into());
+            h.insert("jwk".into(), ap2::jwk_of(k.verifying_key()));
+            let mut out = ap2::sign_jws(&h, &Json::Object(body), |m| k.sign(m));
             for d in discs {
                 out.push('~');
                 out.push_str(&d);

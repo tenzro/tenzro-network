@@ -13,7 +13,10 @@
 //!
 //! [`SessionSigner`] replaces its session key once half the lifetime has
 //! passed, so a process that runs for weeks costs one long-lived signature
-//! per half lifetime.
+//! per half lifetime. Each replacement falls at a random point of the eighth
+//! of the lifetime after that half, so machines started together (a rack
+//! powered back on, devices behind one key holder) do not all ask their
+//! hardware for a certificate in the same moment.
 //!
 //! A signer made with [`SessionSigner::new_hybrid`] holds an ML-DSA-65
 //! session key beside the Ed25519 one ([`KeyType::Ed25519MlDsa65`]): every
@@ -121,6 +124,14 @@ impl SessionKey {
             }
         }
     }
+}
+
+/// How long after it is certified a session key of `lifetime_ms` is
+/// replaced: half the lifetime, plus the share of a further eighth that
+/// `draw` picks.
+#[cfg(any(test, feature = "test-keys"))]
+fn renewal_delay_ms(lifetime_ms: u64, draw: u64) -> u64 {
+    lifetime_ms / 2 + draw % (lifetime_ms / 8).max(1)
 }
 
 /// How long a session key is valid after it is certified.
@@ -500,7 +511,7 @@ impl SessionSigner {
                 not_after_ms,
                 signature,
             },
-            renew_at_ms: now.saturating_add(lifetime_ms / 2),
+            renew_at_ms: now.saturating_add(renewal_delay_ms(lifetime_ms, rand::random())),
         })
     }
 
@@ -658,6 +669,30 @@ mod tests {
         );
         assert_eq!(id.1.load(Ordering::SeqCst), 2);
         second.verify_now(id.public_key(), b"m").unwrap();
+    }
+
+    #[test]
+    fn a_renewal_falls_in_the_eighth_after_half_the_lifetime_and_spreads() {
+        let day = SESSION_LIFETIME.as_millis() as u64;
+        let delays: Vec<u64> = (0..1_000u64)
+            .map(|i| renewal_delay_ms(day, i.wrapping_mul(0x9e37_79b9_7f4a_7c15)))
+            .collect();
+        assert!(
+            delays
+                .iter()
+                .all(|d| (day / 2..day / 2 + day / 8).contains(d))
+        );
+        // Spread over the window, not bunched at its start.
+        let late = delays.iter().filter(|d| **d >= day / 2 + day / 16).count();
+        assert!(
+            (300..700).contains(&late),
+            "{late} of 1000 in the later half"
+        );
+        // The extremes of a draw stay inside the window, and a lifetime too
+        // short to have an eighth still renews at its half.
+        assert_eq!(renewal_delay_ms(day, 0), day / 2);
+        assert!(renewal_delay_ms(day, u64::MAX) < day / 2 + day / 8);
+        assert_eq!(renewal_delay_ms(4, u64::MAX), 2);
     }
 
     #[test]

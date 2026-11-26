@@ -1,6 +1,6 @@
 # @tenzro/agents
 
-Tenzro delegated agents: Terms, wallets, payments, governance, lifecycle and the task market.
+Tenzro delegated agents: Terms, wallets, payments, governance and lifecycle.
 
 One capability of the Tenzro Network TypeScript SDK. Most applications install [`tenzro-sdk`](https://www.npmjs.com/package/tenzro-sdk), which re-exports this package with the others; install `@tenzro/agents` alone to ship only what you use.
 

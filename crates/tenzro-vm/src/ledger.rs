@@ -317,7 +317,36 @@ fn conservation_error(delta: i128, fee: u128, declared: i128) -> String {
 /// burned (negative). TNZO supply is fixed at genesis, so a transaction that
 /// declares an increase never conserves value, whatever its balances.
 pub fn conserves_value(balance_delta: i128, fee: u128, supply_change: i128) -> bool {
-    supply_change <= 0 && balance_delta.checked_add(fee as i128) == Some(supply_change)
+    let Ok(fee) = i128::try_from(fee) else {
+        return false;
+    };
+    supply_change <= 0 && balance_delta.checked_add(fee) == Some(supply_change)
+}
+
+/// Gate of the fee payer rule: the first epoch from which a transaction
+/// whose memo carries another account's consent
+/// (`tenzro_crypto::fee_payer`) has its fee paid by that account. Before it
+/// the memo is a memo and the sender pays.
+pub const FEE_PAYER_GATE: &str = "feature.fee_payer.activation_epoch";
+
+/// The fee payer `tx` names, once the fee payer rule is live; `None` before,
+/// and for a transaction that names none.
+pub fn fee_payer_in_force<'a>(
+    state: &dyn VmState,
+    tx: &'a VmTransaction,
+) -> Option<&'a crate::types::VmFeePayer> {
+    tx.fee_payer
+        .as_ref()
+        .filter(|_| crate::feature_gate::is_live_now(state, FEE_PAYER_GATE))
+}
+
+/// The account the fee of `tx` is taken from: its fee payer when the rule is
+/// live and it names one whose consent stands, otherwise its sender.
+fn fee_account(state: &dyn VmState, tx: &VmTransaction) -> Vec<u8> {
+    match fee_payer_in_force(state, tx) {
+        Some(crate::types::VmFeePayer::Consented { account, .. }) => account.clone(),
+        _ => tx.from.clone(),
+    }
 }
 
 /// Debits up to `fee` from `payer` and credits what was taken to the fee
@@ -410,13 +439,19 @@ pub async fn execute_in_block(
     base_fee: u128,
     fees: &mut BlockFees,
 ) -> TxOutcome {
-    if let Some(rejected) = below_base_fee(tx, base_fee) {
+    let waived = waived_run(state, tx);
+    let tx = waived.as_ref().unwrap_or(tx);
+    if waived.is_none()
+        && let Some(rejected) = below_base_fee(tx, base_fee)
+    {
         return rejected;
     }
 
     state.begin_transaction();
     let outcome = contain_panic(runtime.execute_transaction(tx, state)).await;
-    settle_transaction(state, tx, outcome, base_fee, fees)
+    let outcome = settle_transaction(state, tx, outcome, base_fee, fees);
+    record_waiver(state, tx, waived.is_some(), &outcome);
+    outcome
 }
 
 /// [`execute_in_block`] for a transaction whose signature has already been
@@ -430,19 +465,57 @@ pub(crate) async fn execute_checked_in_block(
     fees: &mut BlockFees,
     checked: crate::runtime::SignatureChecked,
 ) -> TxOutcome {
-    if let Some(rejected) = below_base_fee(tx, base_fee) {
+    let waived = waived_run(state, tx);
+    let tx = waived.as_ref().unwrap_or(tx);
+    if waived.is_none()
+        && let Some(rejected) = below_base_fee(tx, base_fee)
+    {
         return rejected;
     }
 
     state.begin_transaction();
     let outcome = contain_panic(runtime.execute_checked(tx, state, checked)).await;
-    settle_transaction(state, tx, outcome, base_fee, fees)
+    let outcome = settle_transaction(state, tx, outcome, base_fee, fees);
+    record_waiver(state, tx, waived.is_some(), &outcome);
+    outcome
+}
+
+/// The transaction to run in place of `tx` when its fee is waived
+/// ([`crate::native::first_registration`]): the same transaction at gas
+/// price 0, so no executor debits gas for it and it owes nothing. The
+/// signature stands, being checked against the digest the sender signed.
+fn waived_run(state: &StateAdapter, tx: &VmTransaction) -> Option<VmTransaction> {
+    crate::native::first_registration::waives(state, tx).then(|| VmTransaction {
+        gas_price: 0,
+        ..tx.clone()
+    })
+}
+
+/// Counts a waived transaction that executed, kept or reverted, against its
+/// account's and its epoch's bounds. One the runtime or the executor
+/// refused was not executed and counts against nothing.
+fn record_waiver(state: &mut StateAdapter, tx: &VmTransaction, waived: bool, outcome: &TxOutcome) {
+    if waived && !matches!(outcome, TxOutcome::Rejected(_)) {
+        crate::native::first_registration::record(state, tx);
+    }
 }
 
 /// EIP-7702 delegations stand even when the execution after them reverts
 /// (the authorities' nonces, never journaled, already stand).
 fn reapply_delegations(state: &mut StateAdapter, tx: &VmTransaction, result: &ExecutionResult) {
-    let now = crate::native::deterministic_now_ms(tx);
+    if result.delegations.is_empty() {
+        return;
+    }
+    // A transaction that executed carried the block timestamp it ran at; one
+    // without it is reported and its delegations are not counted, since no
+    // clock other validators share could stand in.
+    let Ok(now) = crate::native::deterministic_now_ms(tx) else {
+        tracing::error!(
+            tx = %hex::encode(tx.hash()),
+            "a reverted transaction's EIP-7702 delegations carry no block time and were not counted"
+        );
+        return;
+    };
     for (authority, code) in &result.delegations {
         state.set_code(authority, code.clone());
         // The change counts against the ceiling although the call reverted.
@@ -479,7 +552,8 @@ pub fn settle_transaction(
     if !result.success {
         state.revert_transaction();
         reapply_delegations(state, tx, &result);
-        let fee = collect_fee(state, &tx.from, owed);
+        let pays = fee_account(&*state, tx);
+        let fee = collect_fee(state, &pays, owed);
         fees.add(fee, result.gas_used, tx.gas_price, base_fee);
         let reason = result
             .revert_reason
@@ -504,7 +578,8 @@ pub fn settle_transaction(
         );
         state.revert_transaction();
         reapply_delegations(state, tx, &result);
-        let fee = collect_fee(state, &tx.from, owed);
+        let pays = fee_account(&*state, tx);
+        let fee = collect_fee(state, &pays, owed);
         fees.add(fee, result.gas_used, tx.gas_price, base_fee);
         let mut failed = result;
         failed.success = false;
@@ -520,8 +595,9 @@ pub fn settle_transaction(
     }
 
     // The resources whose own market prices them above compute gas are
-    // paid on top, from the sender, inside the transaction: a sender that
-    // cannot pay them has its transaction undone like any failed one.
+    // paid on top, from the account that pays the fee, inside the
+    // transaction: one that cannot pay them has the transaction undone like
+    // any failed one.
     let units = resource_units(tx, &result);
     let premium = if fee_free {
         0
@@ -529,11 +605,12 @@ pub fn settle_transaction(
         resource_premium(state, &units, base_fee)
     };
     if premium > 0 {
-        let balance = state.get_balance(&tx.from);
+        let pays = fee_account(&*state, tx);
+        let balance = state.get_balance(&pays);
         if balance < premium {
             state.revert_transaction();
             reapply_delegations(state, tx, &result);
-            let fee = collect_fee(state, &tx.from, owed);
+            let fee = collect_fee(state, &pays, owed);
             fees.add(fee, result.gas_used, tx.gas_price, base_fee);
             let reason = format!("cannot pay the resource fees of {premium} beyond gas");
             let mut failed = result;
@@ -548,13 +625,14 @@ pub fn settle_transaction(
                 reason,
             };
         }
-        state.set_balance(&tx.from, balance - premium);
+        state.set_balance(&pays, balance - premium);
     }
     let owed = owed.saturating_add(premium);
 
     state.commit_transaction();
-    // The executor already debited the gas from the sender, and the resource
-    // premium was debited above; both land in the pool here, which is what
+    // The executor already debited the gas from the sender (out of what its
+    // fee payer advanced, when it has one), and the resource premium was
+    // debited above; both land in the pool here, which is what
     // makes the transaction's net effect equal to its declared supply change.
     if owed > 0 {
         let pool = state.get_balance(&FEE_POOL_ADDRESS);
@@ -762,5 +840,13 @@ mod tests {
     fn a_declared_supply_increase_never_conserves_value() {
         assert!(!conserves_value(500_000 - 21_000, 21_000, 500_000));
         assert!(!conserves_value(1 - 21_000, 21_000, 1));
+    }
+
+    /// A fee past the largest signed amount is never read as a negative one:
+    /// as a wrapped -1 it would let balances gain 1 and still conserve value.
+    #[test]
+    fn a_fee_past_the_signed_range_never_conserves_value() {
+        assert!(!conserves_value(1, u128::MAX, 0));
+        assert!(!conserves_value(i128::MAX - 4, (1u128 << 127) | 5, 0));
     }
 }

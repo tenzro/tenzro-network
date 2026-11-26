@@ -44,9 +44,11 @@ pub(crate) fn llama_backend() -> Arc<LlamaBackend> {
         .clone()
 }
 
-use crate::catalog::{MtpKind, get_model_by_id};
+use crate::catalog::{Catalog, CatalogCell, MtpKind};
 use crate::error::{ModelError, Result};
-use praecise_runtime::batching::{BatchEngine, BatchPrompt, BatchRequest, BatchSpeculation};
+use praecise_runtime::batching::{
+    BatchEngine, BatchLimits, BatchPrompt, BatchRequest, BatchSpeculation,
+};
 
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -324,6 +326,7 @@ fn render_node_vendors() -> Vec<tenzro_types::GpuVendor> {
 
 /// The GPU vendor behind a PCI vendor id, for the vendors that make GPUs.
 /// Virtual display adapters and board management controllers map to `None`.
+#[cfg(any(target_os = "linux", test))]
 fn gpu_vendor_from_pci_id(id: &str) -> Option<tenzro_types::GpuVendor> {
     match id {
         "0x10de" => Some(tenzro_types::GpuVendor::Nvidia),
@@ -476,7 +479,25 @@ const DEFAULT_CONTEXT_LENGTH: u32 = 8192;
 use crate::memory_budget::{LOAD_HEADROOM_DEN, LOAD_HEADROOM_NUM};
 
 mod session_kv;
-pub use session_kv::{ExportedDelta, SequenceEngine, SessionTurn, StandbyModel};
+pub use session_kv::{ExportedDelta, SequenceEngine, SessionTurn, StandbyModel, TurnCheckpoint};
+
+/// Refuse a verification whose prompt does not tokenize to the prompt length
+/// the commitment declares: the verifier was handed another prompt, or holds
+/// another tokenizer, and its recomputed logits would say nothing about the
+/// provider's.
+fn check_prompt_length(
+    prompt_tokens: usize,
+    commitment: &crate::toploc::InferenceCommitment,
+) -> Result<()> {
+    if prompt_tokens != commitment.prompt_tokens as usize {
+        return Err(ModelError::InferenceError(format!(
+            "prompt tokenizes to {prompt_tokens} tokens but the commitment declares {} — \
+             different tokenizer or altered prompt",
+            commitment.prompt_tokens,
+        )));
+    }
+    Ok(())
+}
 
 /// Why the batch engine cannot serve `model`, if it cannot.
 ///
@@ -499,6 +520,15 @@ pub fn batch_engine_refusal(model: &LlamaModel) -> Option<String> {
         );
     }
     None
+}
+
+/// Whether a batch engine of `model` can move its sequences to another
+/// engine of the same weights. An encoder-decoder's decoder cache depends on
+/// an encoder output the engine does not export, so its engine serves one
+/// request at a time without migration, and no continuity session runs on it.
+#[must_use]
+pub fn batch_engine_migrates(model: &LlamaModel) -> bool {
+    !(model.has_encoder() && model.has_decoder())
 }
 
 /// Internal representation of a loaded model
@@ -565,13 +595,21 @@ fn is_unified_memory() -> bool {
 /// Speculative type for a model whose MTP head is inline (trained into its own
 /// GGUF), or `None` when it has a separate drafter or no MTP. `0` = draft-mtp,
 /// `1` = draft-dflash, matching [`LoadedDrafter::spec_type`].
-fn inline_mtp_spec_type(model_id: &str) -> Option<i32> {
-    let entry = get_model_by_id(model_id)?;
-    // A declared drafter means the separate-drafter path, not inline.
-    if entry.drafter_id.is_some() {
+fn inline_mtp_spec_type(catalog: &Catalog, model_id: &str) -> Option<i32> {
+    let entry = catalog.get_model_by_id(model_id)?;
+    inline_head_spec_type(entry.drafter_id.is_some(), &entry.mtp_kind)
+}
+
+/// The selection rule behind [`inline_mtp_spec_type`]: a declared drafter means
+/// the separate-drafter path, and only a kind that trains the head into the
+/// model's own file asks the loader to read it. A model without one must load
+/// without the flag, since the loader aborts the process on a file that lacks
+/// the head it was told to read.
+fn inline_head_spec_type(has_drafter: bool, kind: &MtpKind) -> Option<i32> {
+    if has_drafter {
         return None;
     }
-    match entry.mtp_kind {
+    match kind {
         MtpKind::DraftMtp => Some(0),
         MtpKind::DraftDflash => Some(1),
         MtpKind::Generic | MtpKind::None => None,
@@ -724,6 +762,10 @@ pub struct ModelRuntime {
     /// discovery call must not queue behind an in-flight generation holding the
     /// model mutex.
     media_capable: Arc<dashmap::DashSet<String>>,
+    /// Sequence slots the batch engine of a model opens, set by the node from
+    /// the concurrency it admits for that model. A model with none set opens
+    /// the engine's process-wide `BATCH_*` limits.
+    slots: Arc<DashMap<String, usize>>,
     /// Per-model-id load lock, held across the whole load so concurrent loads
     /// of the same model coalesce into one. Without it the `is_loaded` check
     /// and the map insert straddle a multi-second GPU load, so two serve
@@ -744,6 +786,9 @@ pub struct ModelRuntime {
     /// model for the Praecise engine and is refused while an ONNX runtime
     /// holds it.
     host: Arc<crate::model_host::ModelHost>,
+    /// The node's catalog, read for each model's speculation, projector and
+    /// reasoning settings.
+    catalog: CatalogCell,
     backend: Arc<LlamaBackend>,
     hardware: HardwareInfo,
     /// Continuity sessions and standby weights.
@@ -787,17 +832,32 @@ impl Drop for InflightGuard {
 /// does not stop a blocking task, so this is how in-flight GPU work is released
 /// on cancellation of a non-streaming serial request (the batched scheduler
 /// and the streaming path already detect this via `result_tx`/`token_tx`).
-struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+struct CancelOnDrop(Option<Arc<std::sync::atomic::AtomicBool>>);
+
+impl CancelOnDrop {
+    fn new(flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self(Some(flag))
+    }
+
+    /// The decode returned: leave the flag as the decode left it, so a flag
+    /// the caller shares (a spot request's yield flag) still says whether it
+    /// was raised during the decode.
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
+        if let Some(flag) = &self.0 {
+            flag.store(true, Ordering::Relaxed);
+        }
     }
 }
 
 impl ModelRuntime {
-    pub fn new() -> Result<Self> {
-        Self::with_host(Arc::default())
+    pub fn new(catalog: CatalogCell) -> Result<Self> {
+        Self::with_host(Arc::default(), catalog)
     }
 
     /// A runtime that claims the models it loads through `host`, which it
@@ -806,7 +866,10 @@ impl ModelRuntime {
     /// A GPU build fails when this machine has a GPU that none of its compiled
     /// backends can drive: every layer would otherwise run on the CPU. The CPU
     /// build starts and serves CPU-tier models only (`hardware_policy`).
-    pub fn with_host(host: Arc<crate::model_host::ModelHost>) -> Result<Self> {
+    pub fn with_host(
+        host: Arc<crate::model_host::ModelHost>,
+        catalog: CatalogCell,
+    ) -> Result<Self> {
         let backend = llama_backend();
 
         let has_gpu = backend.supports_gpu_offload();
@@ -837,9 +900,11 @@ impl ModelRuntime {
             inflight_since: Arc::new(DashMap::new()),
             warm_prefixes: Arc::new(DashMap::new()),
             media_capable: Arc::new(dashmap::DashSet::new()),
+            slots: Arc::new(DashMap::new()),
             load_locks: Arc::new(DashMap::new()),
             stops: Arc::default(),
             host,
+            catalog,
             backend,
             hardware,
             sessions: Arc::new(session_kv::SessionStore::default()),
@@ -1153,6 +1218,119 @@ impl ModelRuntime {
         }
 
         Ok(())
+    }
+
+    /// Admit what the batching engine will hold for `model` at
+    /// `context_length` tokens per sequence, its weights (`weights_bytes`)
+    /// already loaded. Replaces the provisional commitment made from the file
+    /// size; refuses with the figures when the whole does not fit.
+    fn admit_engine(
+        model_id: &str,
+        model: &LlamaModel,
+        backend: &LlamaBackend,
+        context_length: u32,
+        drafted: u8,
+        weights_bytes: u64,
+    ) -> Result<()> {
+        if std::env::var("TENZRO_SKIP_MODEL_ADMISSION").as_deref() == Ok("1") {
+            return Ok(());
+        }
+        let figures = Self::measure_sequences(model, backend, weights_bytes).ok_or_else(|| {
+            ModelError::Unservable {
+                model_id: model_id.to_string(),
+                reason: "the per-sequence memory of the model could not be measured".to_string(),
+            }
+        })?;
+        let ledger = crate::memory_budget::global();
+        let snapshot = ledger.snapshot();
+        let budgets = crate::serve_memory::EngineBudgets::resolve(
+            snapshot.machine_available_bytes,
+            snapshot.total_bytes,
+        );
+        let plan = crate::serve_memory::allocation(&figures, context_length, drafted, &budgets);
+        const MIB: u64 = 1_048_576;
+        info!(
+            "{}: {} slots of {} tokens: weights {} MiB, KV {} MiB, sequence state {} MiB, \
+             checkpoints {} MiB, compute {} MiB, total {} MiB",
+            model_id,
+            plan.slots,
+            context_length,
+            plan.weights_bytes / MIB,
+            plan.kv_cache_bytes / MIB,
+            plan.sequence_state_bytes / MIB,
+            plan.checkpoint_bytes / MIB,
+            plan.compute_bytes / MIB,
+            plan.total_bytes() / MIB,
+        );
+        ledger
+            .admit_with_resident(
+                model_id,
+                crate::memory_budget::Tier::Resident,
+                plan.total_bytes(),
+                plan.weights_bytes,
+            )
+            .map_err(|denied| {
+                warn!(
+                    model_id = %model_id,
+                    required_mb = plan.total_bytes() / MIB,
+                    "refusing load: the serve does not fit the memory budget ({denied:?})"
+                );
+                ModelError::InsufficientMemory {
+                    model_id: model_id.to_string(),
+                    required_mb: plan.total_bytes() / MIB,
+                    available_mb: match denied.denied_by {
+                        crate::memory_budget::DeniedBy::Ledger => denied.tier_available_bytes,
+                        crate::memory_budget::DeniedBy::Machine => denied
+                            .machine_available_bytes
+                            .saturating_sub(snapshot.reserve_bytes)
+                            .saturating_add(plan.weights_bytes),
+                    } / MIB,
+                }
+            })
+    }
+
+    /// Per-sequence figures of `model`, measured on a one-sequence probe the
+    /// way the batching engine measures them when it sizes its slots: the KV
+    /// bytes one more token adds, the fixed state of a sequence, and the size
+    /// of one prompt checkpoint (only a model with recurrent layers keeps
+    /// checkpoints; pure attention rewinds by position).
+    fn measure_sequences(
+        model: &LlamaModel,
+        backend: &LlamaBackend,
+        weights_bytes: u64,
+    ) -> Option<crate::serve_memory::ModelFigures> {
+        use llama_cpp_2::LlamaStateSeqFlags;
+        let probe = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(256))
+            .with_n_seq_max(1)
+            .with_kv_unified(false)
+            .with_n_batch(256)
+            .with_n_ubatch(256);
+        let mut ctx = model.new_context(backend, probe).ok()?;
+        let mut sizes = [(0u64, 0u64); 2];
+        let mut batch = LlamaBatch::new(1, 1);
+        for (pos, size) in sizes.iter_mut().enumerate() {
+            batch.clear();
+            batch.add(model.token_bos(), pos as i32, &[0], false).ok()?;
+            ctx.decode(&mut batch).ok()?;
+            *size = (
+                ctx.state_seq_get_size_ext(0, LlamaStateSeqFlags::PARTIAL_ONLY) as u64,
+                ctx.state_seq_get_size_ext(0, LlamaStateSeqFlags::empty()) as u64,
+            );
+        }
+        let [(_, full1), (partial2, full2)] = sizes;
+        let kv_bytes_per_token = full2.saturating_sub(full1);
+        let stateful = model.is_recurrent() || model.is_hybrid();
+        Some(crate::serve_memory::ModelFigures {
+            weights_bytes,
+            kv_bytes_per_token,
+            sequence_state_bytes: if stateful {
+                full1.saturating_sub(kv_bytes_per_token)
+            } else {
+                0
+            },
+            checkpoint_bytes: if stateful { partial2 } else { 0 },
+        })
     }
 
     /// Detected local hardware, probed once per process. Detection shells
@@ -1547,6 +1725,7 @@ impl ModelRuntime {
         let gguf_path_owned = gguf_path.to_path_buf();
         let model_id_owned = model_id.to_string();
         let backend = self.backend.clone();
+        let catalog = self.catalog.current();
         #[cfg(unix)]
         let staged = self.sessions.staged_for(model_id, gguf_path);
 
@@ -1563,7 +1742,7 @@ impl ModelRuntime {
             let model_params = LlamaModelParams::default()
                 .with_n_gpu_layers(n_gpu_layers)
                 .with_use_mmap(use_mmap_for_weights())
-                .with_load_mtp(inline_mtp_spec_type(&model_id_owned).is_some());
+                .with_load_mtp(inline_mtp_spec_type(&catalog, &model_id_owned).is_some());
 
             // Weights staged on standby are already resident: activating them
             // skips the read from storage.
@@ -1644,7 +1823,8 @@ impl ModelRuntime {
             );
 
             #[cfg(feature = "mtmd")]
-            let projector = Self::load_projector(&model_id_owned, &gguf_path_owned, &model);
+            let projector =
+                Self::load_projector(&catalog, &model_id_owned, &gguf_path_owned, &model);
 
             Ok::<LoadedModel, ModelError>(LoadedModel {
                 #[cfg(feature = "mtmd")]
@@ -1652,7 +1832,7 @@ impl ModelRuntime {
                 model,
                 backend,
                 context_length: effective_ctx,
-                inline_mtp_spec_type: inline_mtp_spec_type(&model_id_owned),
+                inline_mtp_spec_type: inline_mtp_spec_type(&catalog, &model_id_owned),
             })
         })
         .await
@@ -1677,7 +1857,10 @@ impl ModelRuntime {
         // concurrency, so the two never disagree about which path a model is
         // on. A drafter that appears later cannot attach to a batched target
         // (`load_drafter` refuses); the model has to be re-served.
-        let wants_drafter = get_model_by_id(model_id)
+        let wants_drafter = self
+            .catalog
+            .current()
+            .get_model_by_id(model_id)
             .map(|e| {
                 e.mtp_kind != MtpKind::None
                     && e.drafter_id
@@ -1719,15 +1902,43 @@ impl ModelRuntime {
             // `enable_thinking` overrides it, and the engine's per-request
             // reasoning budget closes the block before `max_tokens` runs out,
             // so a small `max_tokens` still gets an answer.
-            let enable_thinking = crate::catalog::resolve_enable_thinking(model_id, None);
+            let enable_thinking = self
+                .catalog
+                .current()
+                .resolve_enable_thinking(model_id, None);
             #[cfg(feature = "mtmd")]
             let speculation = self.batch_speculation(model_id, gguf_path).await;
             #[cfg(not(feature = "mtmd"))]
             let (projector, speculation) = (None, None);
-            // Every batched model can move its sequences to another engine of
-            // the same weights, so any of them serves continuity sessions.
-            let fingerprint = self.weights_fingerprint(model_id, gguf_path).await?;
-            let engine = BatchEngine::spawn_with_migration(
+            // The engine sizes its slots, recurrent state and checkpoints
+            // from free memory when it starts. Its whole footprint is admitted
+            // here first, from the same per-sequence figures it measures, so a
+            // load that would not fit is refused while only the weights are in.
+            // The measurement creates a context and decodes on it, so it runs
+            // on a blocking thread and hands the model back.
+            let drafted = speculation.as_ref().map_or(0, |s| s.n_max);
+            let admitted_id = model_id.to_string();
+            let (model, backend) = tokio::task::spawn_blocking(move || {
+                Self::admit_engine(
+                    &admitted_id,
+                    &model,
+                    &backend,
+                    context_length,
+                    drafted,
+                    file_len,
+                )
+                .map(|()| (model, backend))
+            })
+            .await
+            .map_err(|e| ModelError::Other(format!("Task join error: {}", e)))??;
+            // A batched model that can move its sequences to another engine
+            // of the same weights serves continuity sessions.
+            let migration = if batch_engine_migrates(&model) {
+                Some(self.weights_fingerprint(model_id, gguf_path).await?)
+            } else {
+                None
+            };
+            let engine = BatchEngine::spawn_with_limits(
                 model_id.to_string(),
                 model,
                 backend,
@@ -1735,7 +1946,8 @@ impl ModelRuntime {
                 enable_thinking,
                 projector,
                 speculation,
-                fingerprint,
+                migration,
+                self.batch_limits(model_id),
             )?;
             LoadedEntry::Batched(engine)
         };
@@ -1761,8 +1973,13 @@ impl ModelRuntime {
     /// with no `mmproj`, or one whose projector has not been downloaded,
     /// returns `None` and the model serves text-only.
     #[cfg(feature = "mtmd")]
-    fn load_projector(model_id: &str, gguf_path: &Path, model: &LlamaModel) -> Option<MtmdContext> {
-        get_model_by_id(model_id)?.mmproj.as_ref()?;
+    fn load_projector(
+        catalog: &Catalog,
+        model_id: &str,
+        gguf_path: &Path,
+        model: &LlamaModel,
+    ) -> Option<MtmdContext> {
+        catalog.get_model_by_id(model_id)?.mmproj.as_ref()?;
 
         let path = Self::projector_path(model_id, gguf_path)?;
         let path_str = path.to_str()?;
@@ -1827,6 +2044,24 @@ impl ModelRuntime {
         None
     }
 
+    /// Open `slots` sequence slots in the batch engine of `model_id` when it
+    /// next loads, so the requests the node admits concurrently are the ones
+    /// the engine decodes together. A model already loaded keeps its engine
+    /// until it is loaded again.
+    pub fn set_slots(&self, model_id: &str, slots: usize) {
+        self.slots.insert(model_id.to_string(), slots);
+    }
+
+    /// The limits of the batch engine `model_id` loads under: the process's
+    /// `BATCH_*` limits, with the slot count the node set for the model.
+    fn batch_limits(&self, model_id: &str) -> BatchLimits {
+        let limits = BatchLimits::from_env();
+        match self.slots.get(model_id).map(|n| *n) {
+            Some(slots) => limits.with_max_slots(slots),
+            None => limits,
+        }
+    }
+
     /// Whether a loaded model can accept image or audio input — its catalog
     /// entry declares an `mmproj` and that projector loaded successfully.
     pub fn supports_media(&self, model_id: &str) -> bool {
@@ -1850,7 +2085,8 @@ impl ModelRuntime {
         model_id: &str,
         gguf_path: &Path,
     ) -> Option<BatchSpeculation> {
-        let entry = get_model_by_id(model_id);
+        let catalog = self.catalog.current();
+        let entry = catalog.get_model_by_id(model_id);
         let n_max = std::env::var("TENZRO_BATCH_DRAFT_N")
             .ok()
             .and_then(|v| v.trim().parse::<u8>().ok())
@@ -1896,7 +2132,7 @@ impl ModelRuntime {
 
         let Some(path) = drafter else {
             // The target's own head, when it has one.
-            let kind = inline_mtp_spec_type(model_id)?;
+            let kind = inline_mtp_spec_type(&catalog, model_id)?;
             return Some(BatchSpeculation {
                 spec_type: kind,
                 n_max,
@@ -2204,7 +2440,8 @@ impl ModelRuntime {
     /// filtered out of speculative routing forever), while a drafter loaded
     /// for one model says nothing about a different one.
     pub fn can_speculate(&self, model_id: &str) -> bool {
-        self.loaded_drafters.contains_key(model_id) || inline_mtp_spec_type(model_id).is_some()
+        self.loaded_drafters.contains_key(model_id)
+            || inline_mtp_spec_type(&self.catalog.current(), model_id).is_some()
     }
 
     /// Whether *any* of `model_ids` can be decoded speculatively here.
@@ -2229,19 +2466,24 @@ impl ModelRuntime {
     }
 
     /// Re-execute a committed inference as a single prefill and compare
-    /// the recomputed logits against the commitment (TOPLOC check).
+    /// the recomputed logits against the commitment (TOPLOC check), under
+    /// `tolerance`.
     ///
     /// The verifier must hold the same model weights the provider used.
     /// The prompt is tokenized exactly as the generation path tokenizes
     /// it (`AddBos::Always`); the committed output tokens are appended
     /// and the whole sequence is decoded in one batch, which is roughly
     /// two orders of magnitude cheaper than the original token-by-token
-    /// decode.
+    /// decode. A model on the batch engine is scored there, in one slot.
+    ///
+    /// A prompt that does not tokenize to the committed prompt length is an
+    /// error, not a failed check: the verifier was handed another prompt.
     pub async fn verify_inference_commitment(
         &self,
         model_id: &str,
         prompt: &str,
         commitment: crate::toploc::InferenceCommitment,
+        tolerance: crate::toploc::Tolerance,
     ) -> Result<crate::toploc::VerificationOutcome> {
         let entry = self
             .loaded_models
@@ -2251,9 +2493,40 @@ impl ModelRuntime {
             .clone();
         let _guard = self.track_inflight(model_id);
         match entry.as_ref() {
-            LoadedEntry::Batched(_) | LoadedEntry::Hosted(..) | LoadedEntry::Pipeline(_) => {
-                Err(ModelError::InferenceError(
-                    "commitment verification requires the model loaded in serial mode".to_string(),
+            LoadedEntry::Hosted(..) | LoadedEntry::Pipeline(_) => Err(ModelError::InferenceError(
+                "commitment verification needs the model on the serial or the batch engine"
+                    .to_string(),
+            )),
+            LoadedEntry::Batched(engine) => {
+                if commitment.steps.is_empty() {
+                    return Ok(crate::toploc::verify_commitment_with(
+                        &commitment,
+                        &[],
+                        &tolerance,
+                    ));
+                }
+                let vocab = self.session_vocab(model_id)?;
+                let prompt_len = vocab
+                    .str_to_token(prompt, AddBos::Always)
+                    .map_err(|e| ModelError::Other(format!("Tokenization failed: {e}")))?
+                    .len();
+                check_prompt_length(prompt_len, &commitment)?;
+                let continuation: Vec<i32> =
+                    commitment.steps.iter().map(|s| s.token_id as i32).collect();
+                let rows = engine
+                    .score_continuation(
+                        BatchPrompt::Raw(prompt.to_string()),
+                        &continuation,
+                        commitment.k as usize,
+                    )
+                    .map_err(ModelError::from)?
+                    .await
+                    .map_err(|_| ModelError::Other("batch engine dropped the scoring".into()))?
+                    .map_err(ModelError::from)?;
+                Ok(crate::toploc::verify_commitment_with(
+                    &commitment,
+                    &rows,
+                    &tolerance,
                 ))
             }
             LoadedEntry::Serial(model_mutex) => {
@@ -2261,7 +2534,7 @@ impl ModelRuntime {
                 let prompt = prompt.to_string();
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
-                    Self::verify_commitment_sync(&loaded, &prompt, &commitment)
+                    Self::verify_commitment_sync(&loaded, &prompt, &commitment, &tolerance)
                 });
                 handle
                     .await
@@ -2274,23 +2547,21 @@ impl ModelRuntime {
         loaded: &LoadedModel,
         prompt: &str,
         commitment: &crate::toploc::InferenceCommitment,
+        tolerance: &crate::toploc::Tolerance,
     ) -> Result<crate::toploc::VerificationOutcome> {
         if commitment.steps.is_empty() {
-            return Ok(crate::toploc::verify_commitment(commitment, &[]));
+            return Ok(crate::toploc::verify_commitment_with(
+                commitment,
+                &[],
+                tolerance,
+            ));
         }
 
         let prompt_tokens = loaded
             .model
             .str_to_token(prompt, AddBos::Always)
             .map_err(|e| ModelError::Other(format!("Tokenization failed: {}", e)))?;
-        if prompt_tokens.len() != commitment.prompt_tokens as usize {
-            return Err(ModelError::InferenceError(format!(
-                "prompt tokenizes to {} tokens but the commitment declares {} — \
-                 different tokenizer or altered prompt",
-                prompt_tokens.len(),
-                commitment.prompt_tokens,
-            )));
-        }
+        check_prompt_length(prompt_tokens.len(), commitment)?;
 
         let prompt_len = prompt_tokens.len();
         let steps = commitment.steps.len();
@@ -2360,7 +2631,11 @@ impl ModelRuntime {
             start = end;
         }
 
-        Ok(crate::toploc::verify_commitment(commitment, &recomputed))
+        Ok(crate::toploc::verify_commitment_with(
+            commitment,
+            &recomputed,
+            tolerance,
+        ))
     }
 
     /// Run a prompt on a hosted engine and await its result, optionally
@@ -2428,7 +2703,10 @@ impl ModelRuntime {
 
         let backend = self.backend.clone();
         let gguf = gguf_path.to_path_buf();
-        let enable_thinking = crate::catalog::resolve_enable_thinking(model_id, None);
+        let enable_thinking = self
+            .catalog
+            .current()
+            .resolve_enable_thinking(model_id, None);
         let gpu = crate::hardware_policy::usable_accelerators() > 0;
         let driver = tokio::task::spawn_blocking(move || {
             crate::layer_pipeline::PipelineDriver::start(
@@ -2587,6 +2865,7 @@ impl ModelRuntime {
     /// the sequence early. `reasoning_tx` streams the model's reasoning apart
     /// from the answer's tokens.
     async fn run_batched(
+        &self,
         engine: &BatchEngine,
         prompt: BatchPrompt,
         config: &GenerationConfig,
@@ -2594,7 +2873,7 @@ impl ModelRuntime {
         reasoning_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<InferenceResult> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let mut config = Self::batched_config(engine, config);
+        let mut config = self.batched_config(engine, config);
         config.reasoning_tx = reasoning_tx;
         engine.submit(BatchRequest {
             prompt,
@@ -2610,7 +2889,7 @@ impl ModelRuntime {
     }
 
     /// `config` as a batch engine request carries it.
-    fn batched_config(engine: &BatchEngine, config: &GenerationConfig) -> GenerationConfig {
+    fn batched_config(&self, engine: &BatchEngine, config: &GenerationConfig) -> GenerationConfig {
         // The batched engine builds its own `StopStream` from whatever
         // `config.stop` it is handed and never reaches `decode_loop`, where
         // the serial path picks up the chat-template terminators. Handing it
@@ -2629,10 +2908,11 @@ impl ModelRuntime {
         // Qwen `reasoning_effort`. Resolved here from the catalog, as the serial
         // path does; without it the engine always wrote `reasoning_effort`, and
         // muse-glimmer reasoned at its `high` default whatever the caller asked.
-        if let Some((name, value)) = crate::catalog::resolve_reasoning_effort(
-            engine.model_id(),
-            config.reasoning_effort.as_deref(),
-        ) {
+        if let Some((name, value)) = self
+            .catalog
+            .current()
+            .resolve_reasoning_effort(engine.model_id(), config.reasoning_effort.as_deref())
+        {
             config.reasoning_effort = Some(value);
             config.reasoning_kwarg = Some(name);
         }
@@ -2660,7 +2940,7 @@ impl ModelRuntime {
 
         match entry.as_ref() {
             LoadedEntry::Batched(engine) => {
-                Self::run_batched(
+                self.run_batched(
                     engine,
                     BatchPrompt::Raw(prompt.to_string()),
                     config,
@@ -2681,12 +2961,14 @@ impl ModelRuntime {
                 let model_mutex = model_mutex.clone();
                 // Speculative decoding on the raw-completion path too: default
                 // draft_n from the catalog when a drafter is loaded.
+                let catalog = self.catalog.current();
                 let mut config = config.clone();
                 if config.draft_n.is_none()
                     && (self.loaded_drafters.contains_key(model_id)
-                        || inline_mtp_spec_type(model_id).is_some())
+                        || inline_mtp_spec_type(&catalog, model_id).is_some())
                 {
-                    config.draft_n = crate::catalog::get_model_by_id(model_id)
+                    config.draft_n = catalog
+                        .get_model_by_id(model_id)
                         .and_then(|e| e.mtp_default_draft_n);
                 }
                 let drafter_mutex = if config.draft_n.is_some() {
@@ -2699,7 +2981,7 @@ impl ModelRuntime {
                 let prompt = prompt.to_string();
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let cancel_blocking = cancel.clone();
-                let _cancel_guard = CancelOnDrop(cancel);
+                let _cancel_guard = CancelOnDrop::new(cancel);
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
                     let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
@@ -2735,12 +3017,20 @@ impl ModelRuntime {
         config: &GenerationConfig,
         token_tx: Option<tokio::sync::mpsc::Sender<String>>,
         reasoning_tx: Option<tokio::sync::mpsc::Sender<String>>,
+        yield_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<InferenceResult> {
         use crate::tool_grammar::render_turn;
         match entry {
             LoadedEntry::Batched(engine) => {
-                let turn = render_turn(engine.chat_template(), model_id, messages, tools, config)?;
-                Self::run_batched(
+                let turn = render_turn(
+                    &self.catalog.current(),
+                    engine.chat_template(),
+                    model_id,
+                    messages,
+                    tools,
+                    config,
+                )?;
+                self.run_batched(
                     engine,
                     BatchPrompt::Raw(turn.prompt),
                     &turn.config,
@@ -2750,13 +3040,27 @@ impl ModelRuntime {
                 .await
             }
             LoadedEntry::Hosted(_, model, template) => {
-                let turn = render_turn(template.as_ref(), model_id, messages, tools, config)?;
+                let turn = render_turn(
+                    &self.catalog.current(),
+                    template.as_ref(),
+                    model_id,
+                    messages,
+                    tools,
+                    config,
+                )?;
                 let mut config = turn.config;
                 config.reasoning_tx = reasoning_tx;
                 Self::run_hosted(model, BatchPrompt::Raw(turn.prompt), &config, token_tx).await
             }
             LoadedEntry::Pipeline(driver) => {
-                let turn = render_turn(driver.chat_template(), model_id, messages, tools, config)?;
+                let turn = render_turn(
+                    &self.catalog.current(),
+                    driver.chat_template(),
+                    model_id,
+                    messages,
+                    tools,
+                    config,
+                )?;
                 driver
                     .generate(
                         BatchPrompt::Raw(turn.prompt),
@@ -2772,12 +3076,14 @@ impl ModelRuntime {
                 // set draft_n when a drafter is loaded for this target. A
                 // grammar-constrained turn does not speculate; the decode loop
                 // suppresses the drafter for it.
+                let catalog = self.catalog.current();
                 let mut config = config.clone();
                 if config.draft_n.is_none()
                     && (self.loaded_drafters.contains_key(model_id)
-                        || inline_mtp_spec_type(model_id).is_some())
+                        || inline_mtp_spec_type(&catalog, model_id).is_some())
                 {
-                    config.draft_n = crate::catalog::get_model_by_id(model_id)
+                    config.draft_n = catalog
+                        .get_model_by_id(model_id)
                         .and_then(|e| e.mtp_default_draft_n);
                 }
                 let drafter_mutex = if config.draft_n.is_some() {
@@ -2790,15 +3096,24 @@ impl ModelRuntime {
                 let messages = messages.to_vec();
                 let tools = tools.to_vec();
                 let model_id = model_id.to_string();
-                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // A spot request's yield flag stops the decode at its next
+                // token; the drop guard stops it when the caller goes away.
+                let cancel = yield_flag
+                    .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
                 let cancel_blocking = cancel.clone();
-                let _cancel_guard = CancelOnDrop(cancel);
+                let cancel_guard = CancelOnDrop::new(cancel);
                 let handle = tokio::task::spawn_blocking(move || {
                     let loaded = model_mutex.blocking_lock();
                     let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
                     let template = ChatTemplateSource::from_model(&loaded.model).ok();
-                    let turn =
-                        render_turn(template.as_ref(), &model_id, &messages, &tools, &config)?;
+                    let turn = render_turn(
+                        &catalog,
+                        template.as_ref(),
+                        &model_id,
+                        &messages,
+                        &tools,
+                        &config,
+                    )?;
                     let grammar = if tools.is_empty() {
                         None
                     } else {
@@ -2815,9 +3130,11 @@ impl ModelRuntime {
                         Some(&cancel_blocking),
                     )
                 });
-                handle
+                let result = handle
                     .await
-                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
+                cancel_guard.disarm();
+                result
             }
         }
     }
@@ -2846,8 +3163,78 @@ impl ModelRuntime {
         self.record_warm_prompt(model_id, &warm_prompt_bytes(messages));
 
         let _guard = self.track_inflight(model_id);
-        self.run_turn(model_id, &entry, messages, &[], config, None, None)
+        self.run_turn(model_id, &entry, messages, &[], config, None, None, None)
             .await
+    }
+
+    /// [`Self::generate_chat`] for a spot request: the decode stops at its
+    /// next token once `yield_flag` is raised, and the result holds what it
+    /// produced until then, its commitment included. Only the serial engine
+    /// can stop a decode this way and return it; on the batched, hosted and
+    /// pipelined engines the request runs to its end, as any request does.
+    pub async fn generate_chat_yielding(
+        &self,
+        model_id: &str,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        yield_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<InferenceResult> {
+        crate::access::check(model_id)?;
+        let entry = self
+            .loaded_models
+            .get(model_id)
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
+        self.record_warm_prompt(model_id, &warm_prompt_bytes(messages));
+        let _guard = self.track_inflight(model_id);
+        self.run_turn(
+            model_id,
+            &entry,
+            messages,
+            &[],
+            config,
+            None,
+            None,
+            Some(yield_flag),
+        )
+        .await
+    }
+
+    /// The prompt `messages`, offering `tools`, render to for `model_id`
+    /// under `config`, exactly as a chat completion on this runtime renders
+    /// it: through the chat template the loaded model carries. What a
+    /// re-execution of a chat completion replays.
+    pub async fn chat_prompt(
+        &self,
+        model_id: &str,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        config: &GenerationConfig,
+    ) -> Result<String> {
+        let entry = self
+            .loaded_models
+            .get(model_id)
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
+        let template = match entry.as_ref() {
+            LoadedEntry::Batched(engine) => engine.chat_template().cloned(),
+            LoadedEntry::Hosted(_, _, template) => template.clone(),
+            LoadedEntry::Pipeline(driver) => driver.chat_template().cloned(),
+            LoadedEntry::Serial(model_mutex) => {
+                ChatTemplateSource::from_model(&model_mutex.lock().await.model).ok()
+            }
+        };
+        Ok(crate::tool_grammar::render_turn(
+            &self.catalog.current(),
+            template.as_ref(),
+            model_id,
+            messages,
+            tools,
+            config,
+        )?
+        .prompt)
     }
 
     /// Generate a chat completion that may call `tools`.
@@ -2879,7 +3266,7 @@ impl ModelRuntime {
 
         let _guard = self.track_inflight(model_id);
         let inner = self
-            .run_turn(model_id, &entry, messages, tools, config, None, None)
+            .run_turn(model_id, &entry, messages, tools, config, None, None, None)
             .await?;
         Ok(with_tools_result(inner))
     }
@@ -2921,6 +3308,7 @@ impl ModelRuntime {
             config,
             Some(token_tx),
             reasoning_tx,
+            None,
         )
         .await
     }
@@ -2990,6 +3378,7 @@ impl ModelRuntime {
                 #[cfg(feature = "mtmd")]
                 Self::place_media_markers(&mut messages, media.len())?;
                 let turn = crate::tool_grammar::render_turn(
+                    &self.catalog.current(),
                     engine.chat_template(),
                     model_id,
                     &messages,
@@ -2999,7 +3388,7 @@ impl ModelRuntime {
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
                 engine.submit(BatchRequest {
                     prompt: BatchPrompt::Raw(turn.prompt),
-                    config: Self::batched_config(engine, &turn.config),
+                    config: self.batched_config(engine, &turn.config),
                     token_tx: None,
                     result_tx,
                     media: media.to_vec(),
@@ -3022,11 +3411,13 @@ impl ModelRuntime {
                     let model_id = model_id.to_string();
                     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let cancel_blocking = cancel.clone();
-                    let _cancel_guard = CancelOnDrop(cancel);
+                    let _cancel_guard = CancelOnDrop::new(cancel);
+                    let catalog = self.catalog.current();
                     let handle = tokio::task::spawn_blocking(move || -> Result<InferenceResult> {
                         let loaded = model_mutex.blocking_lock();
                         let template = ChatTemplateSource::from_model(&loaded.model).ok();
                         let turn = crate::tool_grammar::render_turn(
+                            &catalog,
                             template.as_ref(),
                             &model_id,
                             &messages,
@@ -3083,7 +3474,7 @@ impl ModelRuntime {
 
         match entry.as_ref() {
             LoadedEntry::Batched(engine) => {
-                Self::run_batched(
+                self.run_batched(
                     engine,
                     BatchPrompt::Raw(prompt.to_string()),
                     config,
@@ -3116,12 +3507,14 @@ impl ModelRuntime {
                 // Default draft count from the catalog when omitted but a drafter
                 // is loaded, so speculative decoding actually engages (see
                 // generate_chat_stream for the rationale).
+                let catalog = self.catalog.current();
                 let mut config = config.clone();
                 if config.draft_n.is_none()
                     && (self.loaded_drafters.contains_key(model_id)
-                        || inline_mtp_spec_type(model_id).is_some())
+                        || inline_mtp_spec_type(&catalog, model_id).is_some())
                 {
-                    config.draft_n = crate::catalog::get_model_by_id(model_id)
+                    config.draft_n = catalog
+                        .get_model_by_id(model_id)
                         .and_then(|e| e.mtp_default_draft_n);
                 }
                 let drafter_mutex = if config.draft_n.is_some() {
@@ -3783,7 +4176,11 @@ fn with_tools_result(inner: InferenceResult) -> ChatWithToolsResult {
         match inner.stop_reason {
             StopReason::Length => "max_tokens",
             StopReason::StopSequence => "stop_sequence",
-            StopReason::Eos => "end_turn",
+            // A sequence the batch engine yielded to make room stopped before
+            // its turn ended; the caller may continue it.
+            StopReason::Preempted => "pause_turn",
+            // End of generation, and any end the engine adds later.
+            _ => "end_turn",
         }
     };
     ChatWithToolsResult {
@@ -3813,6 +4210,17 @@ fn warm_prompt_bytes(messages: &[ChatMessage]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_inline_head_asks_the_loader_to_read_it() {
+        assert_eq!(inline_head_spec_type(false, &MtpKind::DraftMtp), Some(0));
+        assert_eq!(inline_head_spec_type(false, &MtpKind::DraftDflash), Some(1));
+        assert_eq!(inline_head_spec_type(false, &MtpKind::Generic), None);
+        assert_eq!(inline_head_spec_type(false, &MtpKind::None), None);
+        // A paired drafter carries the head; the target loads without it.
+        assert_eq!(inline_head_spec_type(true, &MtpKind::DraftMtp), None);
+        assert_eq!(inline_head_spec_type(true, &MtpKind::DraftDflash), None);
+    }
 
     #[test]
     fn test_generation_config_default() {
@@ -4000,9 +4408,22 @@ mod tests {
         assert_eq!(gpu_vendor_from_pci_id("0x1a03"), None);
     }
 
+    /// The engine of a model opens the slots the node admits for it; a model
+    /// the node set none for keeps the process's limits.
+    #[test]
+    fn a_model_engine_opens_the_slots_set_for_it() {
+        let rt = ModelRuntime::new(CatalogCell::default()).unwrap();
+        let process = BatchLimits::from_env();
+        rt.set_slots("sized", 3);
+        assert_eq!(rt.batch_limits("sized"), process.with_max_slots(3));
+        assert_eq!(rt.batch_limits("unsized"), process);
+        rt.set_slots("sized", 5);
+        assert_eq!(rt.batch_limits("sized").max_slots, 5);
+    }
+
     #[tokio::test]
     async fn unloading_a_model_that_is_not_loaded_fails() {
-        let rt = ModelRuntime::new().unwrap();
+        let rt = ModelRuntime::new(CatalogCell::default()).unwrap();
         let err = rt.unload_model("never-loaded").await.unwrap_err();
         assert!(matches!(err, ModelError::ModelNotFound(_)), "{err}");
     }
@@ -4012,7 +4433,7 @@ mod tests {
     /// anywhere else.
     #[tokio::test]
     async fn only_locally_loaded_models_are_listed_or_served() {
-        let rt = ModelRuntime::new().unwrap();
+        let rt = ModelRuntime::new(CatalogCell::default()).unwrap();
         assert!(rt.list_loaded().is_empty());
         assert!(!rt.is_loaded("qwen3.8-27b"));
         let messages = [ChatMessage {
@@ -4029,7 +4450,7 @@ mod tests {
 
     #[test]
     fn load_lock_is_shared_per_id_and_distinct_across_ids() {
-        let rt = ModelRuntime::new().unwrap();
+        let rt = ModelRuntime::new(CatalogCell::default()).unwrap();
         let a1 = rt.load_lock("model-a");
         let a2 = rt.load_lock("model-a");
         let b = rt.load_lock("model-b");
@@ -4052,7 +4473,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
-        let rt = Arc::new(ModelRuntime::new().unwrap());
+        let rt = Arc::new(ModelRuntime::new(CatalogCell::default()).unwrap());
         let in_section = Arc::new(AtomicUsize::new(0));
         let max_in_section = Arc::new(AtomicUsize::new(0));
 
@@ -4113,7 +4534,7 @@ mod tests {
     /// before the stop must not install.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_while_a_request_is_loading_discards_the_load() {
-        let rt = Arc::new(ModelRuntime::new().unwrap());
+        let rt = Arc::new(ModelRuntime::new(CatalogCell::default()).unwrap());
         let weights_read = Arc::new(tokio::sync::Notify::new());
         let stopped = Arc::new(tokio::sync::Notify::new());
 
@@ -4149,7 +4570,7 @@ mod tests {
     /// any file is read, so the error names the stop rather than the path.
     #[tokio::test]
     async fn a_stopped_model_refuses_every_load() {
-        let rt = ModelRuntime::new().unwrap();
+        let rt = ModelRuntime::new(CatalogCell::default()).unwrap();
         rt.stop_model("muse-a").await.unwrap();
         let missing = Path::new("/nonexistent/muse-a.gguf");
 
@@ -4170,7 +4591,7 @@ mod tests {
     /// its own load.
     #[test]
     fn a_serve_after_a_stop_reopens_loads_but_not_the_stale_one() {
-        let rt = ModelRuntime::new().unwrap();
+        let rt = ModelRuntime::new(CatalogCell::default()).unwrap();
         let stale = rt.load_ticket("muse-a").unwrap();
         rt.hold_stopped("muse-a");
         rt.resume_model("muse-a");
@@ -4185,7 +4606,7 @@ mod tests {
     /// a load in progress across an eviction still installs.
     #[tokio::test]
     async fn eviction_does_not_stop_the_model() {
-        let rt = ModelRuntime::new().unwrap();
+        let rt = ModelRuntime::new(CatalogCell::default()).unwrap();
         let ticket = rt.load_ticket("muse-a").unwrap();
         let _ = rt.unload_model("muse-a").await;
         assert!(!rt.is_stopped("muse-a"));

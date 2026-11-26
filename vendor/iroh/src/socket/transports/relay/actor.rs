@@ -362,10 +362,15 @@ impl ActiveRelayActor {
     /// disconnected relay cannot have an endpoint route) keeps that lookup from stalling
     /// for however long is left of this relay's own unrelated backoff.
     ///
+    /// Datagrams queued for this relay meanwhile are dropped: nothing can carry them, and
+    /// a full queue would stop [`RelayActor`] from handing datagrams to every other relay,
+    /// so one unreachable relay a peer's address names would stall all relay traffic.
+    ///
     /// Returns `false` if the actor should shut down instead of retrying.
     async fn sleep_backoff(&mut self, delay: Duration) -> bool {
         let sleep = time::sleep(delay);
         tokio::pin!(sleep);
+        let mut dropped = false;
         loop {
             tokio::select! {
                 biased;
@@ -384,7 +389,20 @@ impl ActiveRelayActor {
                         }
                     }
                 }
+                // Before the drain: the polls are biased, so datagrams that keep
+                // arriving would otherwise keep the drain ready and the delay would
+                // never be seen to end.
                 _ = &mut sleep => return true,
+                item = self.relay_datagrams_send.recv() => {
+                    if item.is_none() {
+                        debug!("Datagram send channel dropped, shutting down.");
+                        return false;
+                    }
+                    if !dropped {
+                        debug!("Dropping datagrams to send while backing off.");
+                        dropped = true;
+                    }
+                }
             }
         }
     }
@@ -1985,6 +2003,106 @@ mod tests {
         // The backoff itself still runs to completion.
         let (_actor, keep_running) = backoff.await.expect("backoff task panicked");
         assert!(keep_running, "backoff should complete normally");
+    }
+
+    /// An actor with a send queue of `queue` that nothing serves, the sender of that queue, an item
+    /// addressed through the relay it would serve, and its inboxes' senders, which keep the
+    /// inboxes open for as long as the test holds them.
+    fn backing_off_actor(queue: usize) -> (
+        ActiveRelayActor,
+        mpsc::Sender<RelaySendItem>,
+        RelaySendItem,
+        (
+            mpsc::Sender<ActiveRelayPrioMessage>,
+            mpsc::Sender<ActiveRelayMessage>,
+        ),
+    ) {
+        let secret_key = SecretKey::from_bytes(&[1u8; 32]);
+        let peer = SecretKey::from_bytes(&[2u8; 32]).public();
+        let url: RelayUrl = "https://relay.invalid".parse().unwrap();
+        let (prio_inbox_tx, prio_inbox_rx) = mpsc::channel(8);
+        let (inbox_tx, inbox_rx) = mpsc::channel(16);
+        let (send_datagram_tx, send_datagram_rx) = mpsc::channel(queue);
+        let (recv_datagram_tx, _recv_datagram_rx) = mpsc::channel(16);
+        let opts = ActiveRelayActorOptions {
+            url: url.clone(),
+            prio_inbox_: prio_inbox_rx,
+            inbox: inbox_rx,
+            relay_datagrams_send: send_datagram_rx,
+            relay_datagrams_recv: recv_datagram_tx,
+            connection_opts: RelayConnectionOptions {
+                secret_key,
+                dns_resolver: DnsResolver::new(),
+                proxy_url: None,
+                prefer_ipv6: Arc::new(AtomicBool::new(true)),
+                tls_config: CaTlsConfig::insecure_skip_verify()
+                    .client_config(default_provider())
+                    .expect("infallible"),
+                auth_token: None,
+            },
+            stop_token: CancellationToken::new(),
+            metrics: Default::default(),
+            my_relay: Default::default(),
+        };
+        let actor = ActiveRelayActor::new(opts);
+        let item = RelaySendItem {
+            remote_endpoint: peer,
+            url,
+            datagrams: Datagrams::from(b"undeliverable"),
+        };
+        (actor, send_datagram_tx, item, (prio_inbox_tx, inbox_tx))
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_datagrams_dropped_during_backoff() {
+        tokio::time::pause();
+        let (mut actor, send_datagram_tx, item, _inboxes) = backing_off_actor(16);
+
+        let backoff = tokio::spawn(async move {
+            let keep_running = actor.sleep_backoff(Duration::from_secs(10)).await;
+            (actor, keep_running)
+        });
+
+        // Twice the queue's capacity goes in well before the delay elapses. Before the
+        // backoff wait dropped them, the queue stayed full until the delay was over, and
+        // the sender, standing in for the actor that serves every relay, waited with it.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for _ in 0..32 {
+                send_datagram_tx
+                    .send(item.clone())
+                    .await
+                    .expect("actor alive");
+            }
+        })
+        .await
+        .expect("the queue drains during a 10s backoff");
+
+        let (_actor, keep_running) = backoff.await.expect("backoff task panicked");
+        assert!(keep_running, "backoff should complete normally");
+    }
+
+    /// Datagrams that never stop arriving must not keep the backoff from ending: the relay
+    /// is dialled again once its delay is over, whatever is queued for it.
+    #[tokio::test]
+    #[traced_test]
+    async fn test_backoff_ends_while_datagrams_keep_arriving() {
+        // A queue far longer than the backoff lasts keeps the datagram arm ready for the whole
+        // delay: the backoff must end with datagrams still waiting, not after they are all drained.
+        const QUEUED: usize = 200_000;
+        let (mut actor, send_datagram_tx, item, _inboxes) = backing_off_actor(QUEUED);
+        for _ in 0..QUEUED {
+            send_datagram_tx
+                .try_send(item.clone())
+                .expect("the queue holds them all");
+        }
+
+        let keep_running = actor.sleep_backoff(Duration::from_millis(5)).await;
+        assert!(keep_running, "backoff should complete normally");
+        assert!(
+            actor.relay_datagrams_send.try_recv().is_ok(),
+            "the backoff ended only after every queued datagram was drained"
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@
 //!
 //! ```rust,no_run
 //! use tenzro_model::{
+//!     CatalogCell,
 //!     registry::ModelRegistry,
 //!     provider::ProviderManager,
 //!     routing::{InferenceRouter, RoutingConfig, RoutingStrategy},
@@ -34,7 +35,7 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create registry and register a model
-//! let registry = ModelRegistry::new();
+//! let registry = ModelRegistry::new(CatalogCell::default());
 //! // let model = ModelInfo::new(...);
 //! // registry.register_model(model)?;
 //!
@@ -125,7 +126,6 @@ pub mod cluster;
 pub mod decision_runtime;
 #[cfg(feature = "engine")]
 pub mod detection_runtime;
-pub mod difficulty;
 pub mod engine_config;
 pub mod error;
 pub mod freivalds;
@@ -177,7 +177,6 @@ pub mod projector;
 pub mod provenance;
 pub mod provider;
 pub mod provider_liveness;
-pub mod provisioning;
 pub mod quant;
 pub mod registry;
 #[cfg(feature = "engine")]
@@ -189,6 +188,8 @@ pub mod sealed;
 #[cfg(feature = "engine")]
 pub mod segmentation_runtime;
 pub mod serve_advisor;
+/// What a batched serve allocates, part by part, before the engine takes it.
+pub mod serve_memory;
 pub mod sla;
 /// Speech synthesis on the Praecise engine through an audio projector.
 #[cfg(feature = "mtmd")]
@@ -222,20 +223,11 @@ pub use audio_runtime::{
 // The batching engine lives in the Praecise engine; re-exported so existing callers
 // (`tenzro_model::max_slots`, the node's capacity cap) keep working.
 pub use catalog::{
-    EmbedModelEntry, EmbeddingTemplate, HfModelEntry, LicenseTier, MediaGenExpertPair,
-    MediaGenModelEntry, ModelArchitecture, MoeShape, MtpKind, OmniModelEntry, OnnxAudioEntry,
-    OnnxDetectionEntry, OnnxForecastEntry, OnnxSegmentationEntry, OnnxTextEmbeddingEntry,
-    OnnxTextSegmentationEntry, OnnxVideoEntry, OnnxVisionEntry, TtsModelEntry, VisionPreprocess,
-    get_audio_catalog, get_audio_model_by_id, get_decision_catalog, get_decision_model_by_id,
-    get_detection_catalog, get_detection_model_by_id, get_embed_catalog, get_embed_model_by_id,
-    get_forecast_catalog, get_forecast_model_by_id, get_media_gen_catalog,
-    get_media_gen_model_by_id, get_media_gen_models_for_kind, get_model_by_id, get_model_catalog,
-    get_omni_catalog, get_omni_model_by_id, get_rerank_catalog, get_rerank_model_by_id,
-    get_segmentation_catalog, get_segmentation_model_by_id, get_text_embedding_catalog,
-    get_text_embedding_model_by_id, get_text_segmentation_catalog,
-    get_text_segmentation_model_by_id, get_tts_catalog, get_tts_model_by_id, get_video_catalog,
-    get_video_model_by_id, get_vision_catalog, get_vision_model_by_id, license_territory,
-    media_gen_model_splits,
+    Catalog, CatalogCell, EmbedModelEntry, EmbeddingTemplate, HfModelEntry, LicenseTier,
+    MediaGenExpertPair, MediaGenModelEntry, ModelArchitecture, MoeShape, MtpKind, OmniModelEntry,
+    OnnxAudioEntry, OnnxDetectionEntry, OnnxForecastEntry, OnnxSegmentationEntry,
+    OnnxTextEmbeddingEntry, OnnxTextSegmentationEntry, OnnxVideoEntry, OnnxVisionEntry,
+    TtsModelEntry, VisionPreprocess, license_territory,
 };
 pub use chat::{
     ChatMessage, ChatWithToolsResult, GenerationConfig, InferenceResult, StopReason, ToolCall,
@@ -246,15 +238,16 @@ pub use detection_runtime::{
     DetectResult, Detection, DetectionRuntime, Detector, DetrFamily, GenericDetrDetector,
     StubDetector,
 };
-pub use engine_config::{EnginesConfig, EnvironmentPin, OnnxConfig, OnnxSettings};
+pub use engine_config::{EnergyConfig, EnginesConfig, EnvironmentPin, OnnxConfig, OnnxSettings};
 pub use error::{ModelError, Result};
 pub use hf_download::{
     ArtifactSpec, BlobFetcher, DownloadProgress, DownloadState, HfArtifactDownloader, HfDownloader,
     PeerHint, SourcePolicy,
 };
 pub use jurisdiction::{
-    Ed25519JurisdictionSigner, JurisdictionError, JurisdictionSigner, SharedJurisdictionSigner,
-    check_receipt_satisfies_pin, verify_receipt, verify_response_receipt,
+    Ed25519JurisdictionSigner, IdentityKeyCheck, IdentityKeyJurisdictionSigner, JurisdictionError,
+    JurisdictionSigner, SharedJurisdictionSigner, check_receipt_satisfies_pin, verify_receipt,
+    verify_response_receipt,
 };
 pub use latency::LatencyTail;
 pub use library::{
@@ -314,6 +307,7 @@ pub use routing::{
 #[cfg(feature = "engine")]
 pub use runtime::{
     ExportedDelta, HardwareInfo, ModelRuntime, SequenceEngine, SessionTurn, StandbyModel,
+    TurnCheckpoint,
 };
 pub use sealed::{
     DEFAULT_SHARD_BYTES, RecipientEnclaveAttester, RecipientSpec, SEALED_WRAP_ALG,
@@ -326,10 +320,11 @@ pub use segmentation_runtime::{
     SegmentResult, SegmentationRuntime, Segmenter, StubSegmenter,
 };
 pub use sla::{
-    CapacityResult, CapacityWork, MAX_POSSESSION_DEALS, MAX_PROBE_TOKENS, MAX_STATE_READS,
-    MIN_SLA_RESPONSE_WINDOW_MS, PendingSlaResponse, PossessionDeal, SLA_PROBE_DOMAIN,
-    SLA_RESPONSE_DOMAIN, STATE_READ_NAMESPACE, SlaEnvelope, SlaManager, SlaProbe, SlaResponse,
-    SlaResult, SlaSignature, StateReadEntry, Verified, inference_prompt, possession_nonce,
+    BeaconProbe, CapacityResult, CapacityWork, MAX_POSSESSION_DEALS, MAX_PROBE_TOKENS,
+    MAX_STATE_READS, MIN_SLA_RESPONSE_WINDOW_MS, PendingSlaResponse, PossessionDeal, ProbeBeacon,
+    SLA_BEACON_TOPIC, SLA_PROBE_DOMAIN, SLA_RESPONSE_DOMAIN, STATE_READ_NAMESPACE, SlaEnvelope,
+    SlaManager, SlaProbe, SlaResponse, SlaResult, SlaSignature, StateReadEntry, Verified,
+    inference_prompt, possession_nonce, probe_wire,
     response_signing_payload as sla_response_signing_payload, state_read_keys,
 };
 #[cfg(feature = "engine")]
@@ -344,9 +339,9 @@ pub use text_segmentation_runtime::{
     TextSegmentConfig, TextSegmentResult, TextSegmentation, TextSegmentationRuntime,
 };
 pub use toploc::{
-    DEFAULT_COMMITMENT_K, InferenceCommitment, MAX_COMMITMENT_K, MAX_MEAN_LOGIT_DELTA,
-    MIN_INDEX_OVERLAP, MIN_PASSING_STEP_FRACTION, StepComparison, StepRecord, TopKEntry,
-    VerificationOutcome, compare_step, top_k_from_logits, verify_commitment,
+    DEFAULT_COMMITMENT_K, InferenceCommitment, MAX_COMMITMENT_K, MIN_INDEX_OVERLAP, StepComparison,
+    StepRecord, Tolerance, TopKEntry, VerificationOutcome, compare_step, top_k_from_logits,
+    verify_commitment_with,
 };
 #[cfg(feature = "engine")]
 pub use ts_runtime::{
@@ -364,24 +359,6 @@ pub use vision_runtime::{
     VisionRuntime, cosine_similarity, image_dimensions,
 };
 
-/// The catalog seed installed in this test process, for tests that read
-/// catalog entries; installed again whenever another catalog replaced it.
-#[cfg(test)]
-pub(crate) fn seeded_catalog() {
-    static SEED: std::sync::OnceLock<Vec<catalog::CatalogEntry>> = std::sync::OnceLock::new();
-    let entries = SEED.get_or_init(|| {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tenzro-catalog/seed");
-        catalog::read_entries(&dir).expect("the seed parses")
-    });
-    let current = catalog::store::current();
-    if current.len() == entries.len() && entries.iter().all(|e| current.entry(e.id()).is_some()) {
-        return;
-    }
-    let (catalog, errors) = catalog::Catalog::build(entries.clone());
-    assert!(errors.is_empty(), "seed entries refused: {errors:?}");
-    catalog::store::install(catalog);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,7 +366,7 @@ mod tests {
     #[test]
     fn test_module_imports() {
         // Simple test to verify all modules are accessible
-        let _registry = ModelRegistry::new();
+        let _registry = ModelRegistry::new(CatalogCell::default());
         let _provider_manager = ProviderManager::new();
         let _prices = PriceContext::default();
         let _library = ModelLibrary::new();

@@ -1,0 +1,132 @@
+{
+ "siblings": [
+  {
+   "rfilename": ".gitattributes",
+   "size": 3135
+  },
+  {
+   "rfilename": "Qwen3-0.6B-BF16.gguf",
+   "size": 1198182848
+  },
+  {
+   "rfilename": "Qwen3-0.6B-IQ4_NL.gguf",
+   "size": 381566656
+  },
+  {
+   "rfilename": "Qwen3-0.6B-IQ4_XS.gguf",
+   "size": 367804096
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q2_K.gguf",
+   "size": 296238784
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q2_K_L.gguf",
+   "size": 296238784
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q3_K_M.gguf",
+   "size": 347127488
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q3_K_S.gguf",
+   "size": 323075776
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q4_0.gguf",
+   "size": 382156480
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q4_1.gguf",
+   "size": 409091776
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q4_K_M.gguf",
+   "size": 396705472
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q4_K_S.gguf",
+   "size": 383270592
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q5_K_M.gguf",
+   "size": 444415680
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q5_K_S.gguf",
+   "size": 436616896
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q6_K.gguf",
+   "size": 495107776
+  },
+  {
+   "rfilename": "Qwen3-0.6B-Q8_0.gguf",
+   "size": 639447744
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-IQ1_M.gguf",
+   "size": 220754624
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-IQ1_S.gguf",
+   "size": 214643392
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-IQ2_M.gguf",
+   "size": 268702400
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-IQ2_XXS.gguf",
+   "size": 234074816
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-IQ3_XXS.gguf",
+   "size": 282088128
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-Q2_K_XL.gguf",
+   "size": 301727424
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-Q3_K_XL.gguf",
+   "size": 356622016
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-Q4_K_XL.gguf",
+   "size": 405372608
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-Q5_K_XL.gguf",
+   "size": 446381760
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-Q6_K_XL.gguf",
+   "size": 576467648
+  },
+  {
+   "rfilename": "Qwen3-0.6B-UD-Q8_K_XL.gguf",
+   "size": 844288704
+  },
+  {
+   "rfilename": "README.md",
+   "size": 17082
+  },
+  {
+   "rfilename": "config.json",
+   "size": 752
+  },
+  {
+   "rfilename": "imatrix_unsloth.dat",
+   "size": 1153380
+  },
+  {
+   "rfilename": "params",
+   "size": 178
+  },
+  {
+   "rfilename": "template",
+   "size": 1482
+  }
+ ]
+}

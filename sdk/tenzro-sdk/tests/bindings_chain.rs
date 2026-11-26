@@ -205,7 +205,7 @@ async fn chain_reads() {
     );
     node.answer("web3_clientVersion", json!("tenzro-node/0.9.0"));
     node.answer("eth_chainId", json!("0x3444"));
-    node.answer("tenzro_syncing", json!(false));
+    node.answer("tenzro_syncing", json!({"state": "following"}));
     let info = node
         .check(
             "tenzro_getNodeStatus",
@@ -271,12 +271,22 @@ async fn chain_reads() {
     .await;
     assert!(
         !node
-            .check("tenzro_syncing", json!(false), c.syncing(), json!([]))
+            .check(
+                "tenzro_syncing",
+                json!({"state": "following"}),
+                c.syncing(),
+                json!([])
+            )
             .await
     );
     assert!(
-        node.check("tenzro_syncing", json!({"syncing": true, "startingBlock": "0x0", "currentBlock": "0x1", "highestBlock": "0x9"}), c.syncing(), json!([]))
-            .await
+        node.check(
+            "tenzro_syncing",
+            json!({"state": "catching_up", "local_height": 1, "network_head": 9}),
+            c.syncing(),
+            json!([])
+        )
+        .await
     );
     assert_eq!(
         node.check(
@@ -358,6 +368,16 @@ async fn node_operation() {
         (
             "tenzro_trafficStats",
             Box::pin(n.traffic_stats()),
+            json!({}),
+        ),
+        (
+            "tenzro_getAppTransportInfo",
+            Box::pin(n.app_transport_info()),
+            json!({}),
+        ),
+        (
+            "tenzro_getAppTransportUsage",
+            Box::pin(n.app_transport_usage()),
             json!({}),
         ),
         (
@@ -469,15 +489,24 @@ async fn node_operation() {
         )
         .await;
     assert_eq!(root.certified_by_checkpoint, None);
+    let reply = json!({"height": 9, "state_root": "0xaa", "state_trie_hash": "sha256", "certified_by_checkpoint": 2, "namespace": "accounts", "key": "ab", "value": null, "proof": {}});
     let proof = node
         .check(
             "tenzro_getStateProof",
-            json!({"height": 9, "state_root": "0xaa", "certified_by_checkpoint": 2, "namespace": "accounts", "key": "ab", "value": null, "proof": {}}),
-            n.get_state_proof("accounts", "ab"),
+            reply.clone(),
+            n.get_state_proof("accounts", "ab", None),
             json!({"namespace": "accounts", "key": "ab"}),
         )
         .await;
     assert_eq!(proof.value, None);
+    assert_eq!(proof.state_trie_hash, "sha256");
+    node.check(
+        "tenzro_getStateProof",
+        reply,
+        n.get_state_proof("accounts", "ab", Some(7)),
+        json!({"namespace": "accounts", "key": "ab", "height": 7}),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -602,6 +631,13 @@ async fn consensus_reads() {
         json!({"current": {"level": "l0"}}),
         c.get_hardware_level(ADDR),
         json!({"address": ADDR}),
+    )
+    .await;
+    node.check(
+        "tenzro_fleetHostEvidence",
+        json!({"did": "did:tenzro:machine:h"}),
+        c.fleet_host_evidence("did:tenzro:human:o", true, false),
+        json!({"operator": "did:tenzro:human:o", "bind": true, "gpu": false}),
     )
     .await;
     node.check(
@@ -1055,14 +1091,14 @@ async fn staking_validators_and_sla() {
     );
     node.check(
         "tenzro_listValidators",
-        json!({"count": 0, "validators": []}),
+        json!({"count": 0, "operators": {"machines": 0, "distinct_operators": 0, "without_identity": 0}, "validators": []}),
         v.list(Some(tenzro_sdk::ValidatorStatus::Active)),
         json!({"status": "Active"}),
     )
     .await;
     node.check(
         "tenzro_listActiveValidators",
-        json!({"count": 0, "validators": []}),
+        json!({"count": 0, "operators": {"machines": 0, "distinct_operators": 0, "without_identity": 0}, "validators": []}),
         v.list_active(),
         json!({}),
     )
@@ -1080,6 +1116,23 @@ async fn staking_validators_and_sla() {
         "tenzro_slaListOutstandingProbes",
         json!({"count": 0, "probes": []}),
         sla.list_outstanding_probes(),
+        json!([]),
+    )
+    .await;
+    node.check(
+        "tenzro_slaGetEnergy",
+        json!({
+            "probe_interval_ms": 600000, "probes_per_unit_per_day": 144,
+            "wake_rule_live": false, "challenge_share_bps": 930,
+            "budget_bps": 0, "within_budget": true, "units": 1,
+            "fleet_joules_per_day": "6200000", "challenge_joules_per_day": "576000",
+            "tiers": [{"tier": "Warm", "units": 1, "burst_rounds_between": 36,
+                       "challenge_joules_per_unit_per_day": "576000",
+                       "idle_joules_per_unit_per_day": "6200000",
+                       "fleet_joules_per_day": "6200000",
+                       "challenge_joules_per_day": "576000"}],
+        }),
+        sla.energy_report(),
         json!([]),
     )
     .await;
@@ -1150,7 +1203,7 @@ async fn snapshots_storage_tokens_and_reserves() {
     let node = Node::start().await;
     let c = node.client().await;
     let snap = c.snapshot();
-    node.check("tenzro_listSnapshots", json!({"snapshots": [{"height": 1, "state_root": "0xa", "manifest_blob": "b", "buckets": 2}], "endpoint_id": null}), snap.list_snapshots(), json!([])).await;
+    node.check("tenzro_listSnapshots", json!({"snapshots": [{"height": 1, "checkpoint_height": 3, "checkpoint_hash": "0xc", "state_root": "0xa", "manifest_blob": "b", "buckets": 2}], "endpoint_id": null}), snap.list_snapshots(), json!([])).await;
     node.check(
         "tenzro_getSnapshotManifest",
         json!({"height": 1, "state_root": [0], "anchor_chain": [0], "buckets": []}),
@@ -1163,16 +1216,21 @@ async fn snapshots_storage_tokens_and_reserves() {
     node.check(
         "tenzro_storageStoreObject",
         json!({"object_id": "o", "size_bytes": 2, "data_shards": 4, "parity_shards": 2}),
-        st.store_object("o", ADDR, b"hi", 4, 2, "did:tenzro:human:o", &FixedSigner),
-        json!({"object_id": "o", "owner": ADDR, "data": "aGk=", "data_shards": 4, "parity_shards": 2, "owner_did": "did:tenzro:human:o"}),
+        st.store_object("o", ADDR, b"hi", 4, 2, Some("cold"), "did:tenzro:human:o", None, &FixedSigner),
+        json!({"object_id": "o", "owner": ADDR, "data": "aGk=", "data_shards": 4, "parity_shards": 2, "owner_did": "did:tenzro:human:o", "class": "cold"}),
     )
     .await;
     assert_eq!(
         node.check(
             "tenzro_storageRetrieveObject",
             json!({"object_id": "o", "data": "aGk=", "size_bytes": 2}),
-            st.retrieve_object("o", "did:tenzro:human:o", &FixedSigner),
-            json!({"object_id": "o"})
+            st.retrieve_object(
+                "o",
+                "did:tenzro:human:o",
+                Some(&json!({"cumulative_amount": "5"})),
+                &FixedSigner
+            ),
+            json!({"object_id": "o", "voucher": {"cumulative_amount": "5"}})
         )
         .await,
         b"hi"
@@ -1185,10 +1243,31 @@ async fn snapshots_storage_tokens_and_reserves() {
     )
     .await;
     node.check(
+        "tenzro_storageSetPricing",
+        json!({"mode": "fixed"}),
+        st.set_read_rates(7, 300, 20, 1),
+        json!({"mode": "fixed", "rate": "7", "read_rates": {"hot": "300", "warm": "20", "cold": "1"}}),
+    )
+    .await;
+    node.check(
         "tenzro_storageStatus",
         json!({"is_storage_provider": true, "effective_rate_wei": "7", "object_count": 1}),
         st.status(),
         json!([]),
+    )
+    .await;
+    node.check(
+        "tenzro_getStorageHoldingReceipt",
+        json!(null),
+        st.holding_receipt("o"),
+        json!([{"object_id": "o"}]),
+    )
+    .await;
+    node.check(
+        "tenzro_listStorageProviders",
+        json!({"providers": [], "standing_max": 10000, "new_provider_share_bps": 2000}),
+        st.providers(),
+        json!({}),
     )
     .await;
 
@@ -1305,13 +1384,6 @@ async fn economics_gateway_and_payments() {
     )
     .await;
     node.check(
-        "tenzro_getBurnRateRecommendation",
-        json!({}),
-        b.get_burn_rate_recommendation(),
-        json!({}),
-    )
-    .await;
-    node.check(
         "tenzro_getFeeRate",
         json!({"rate_nano_usd": "5"}),
         b.get_fee_rate(),
@@ -1361,6 +1433,155 @@ async fn economics_gateway_and_payments() {
     .await;
 }
 
+#[tokio::test]
+async fn compute_bonds_claims_feed_and_rental() {
+    let node = Node::start().await;
+    let c = node.client().await;
+    let cp = c.compute();
+    let bond = json!({
+        "provider_did": "did:tenzro:machine:a", "provider_address": ADDR, "amount": "5",
+        "status": "Active", "cooldown_until": null, "vault": "0xcd", "is_eligible": true,
+        "effective_amount": "5",
+    });
+    let params = node
+        .check(
+            "tenzro_computeBondParams",
+            json!({"min_bond_wei": "1000", "cooldown_ms": 60000}),
+            cp.bond_params(),
+            json!([]),
+        )
+        .await;
+    assert_eq!(params.min_bond_wei, "1000");
+    let got = node
+        .check(
+            "tenzro_getComputeBond",
+            bond.clone(),
+            cp.get_bond("did:tenzro:machine:a"),
+            json!([{"provider_did": "did:tenzro:machine:a"}]),
+        )
+        .await
+        .expect("a bond");
+    assert!(got.is_eligible);
+    assert!(
+        node.check(
+            "tenzro_getComputeBond",
+            Value::Null,
+            cp.get_bond("did:tenzro:machine:b"),
+            json!([{"provider_did": "did:tenzro:machine:b"}]),
+        )
+        .await
+        .is_none()
+    );
+    let bonds = node
+        .check(
+            "tenzro_listComputeBonds",
+            json!({"count": 1, "bonds": [bond]}),
+            cp.list_bonds(),
+            json!([]),
+        )
+        .await;
+    assert_eq!(bonds, vec![got.clone()]);
+
+    // A claim as the node writes it: u128 fields as numbers below u64::MAX,
+    // the state as its tagged object.
+    let claim = json!({
+        "claim_id": "c1", "writer": "ab", "holder": "cd", "hardware_class": 3, "region": "DE",
+        "delivery_start_ms": 3_600_000, "epochs": 2, "strike_per_epoch": 7,
+        "provider_did": "did:tenzro:machine:a", "storage_descriptor": "ee", "unit": null,
+        "units_per_epoch": 0, "epochs_settled": 1, "collateral": "36893488147419103232",
+        "payment": 7, "state": {"state": "held"}, "total_strike": "14",
+        "delivery_end_ms": 10_800_000, "vault": "0xff",
+    });
+    let one = node
+        .check(
+            "tenzro_computeGetClaim",
+            claim.clone(),
+            cp.get_claim("c1"),
+            json!({"claim_id": "c1"}),
+        )
+        .await;
+    assert_eq!(one.state, tenzro_sdk::ClaimState::Held);
+    assert_eq!(one.collateral, 1u128 << 65);
+    assert_eq!(one.storage_descriptor.as_deref(), Some("ee"));
+    let list = node
+        .check(
+            "tenzro_computeListClaims",
+            json!({"total": 3, "claims": [claim]}),
+            cp.list_claims(ADDR, Some(1)),
+            json!({"party": ADDR, "limit": 1}),
+        )
+        .await;
+    assert_eq!((list.total, list.claims), (3, vec![one]));
+    assert_eq!(
+        node.sent("tenzro_computeListClaims")["params"],
+        json!({"party": ADDR, "limit": 1})
+    );
+
+    let feed = node
+        .check(
+            "tenzro_computePriceFeed",
+            json!({
+                "window_ms": 86_400_000, "min_distinct_observers": 2, "total": 1,
+                "entries": [{
+                    "provider": ADDR, "model_id": "m", "hardware_class": "Cpu", "region": "",
+                    "observations": 4, "distinct_observers": 2, "attested": true,
+                    "success_rate_bps": 9_900, "latency_p50_ms": 20, "latency_p90_ms": null,
+                    "price_per_1k_output_tokens_wei": "5", "price_per_compute_second_wei": null,
+                    "last_observed_ms": 1,
+                }],
+                "claims_note": "n",
+            }),
+            cp.price_feed(&tenzro_sdk::PriceFeedQuery {
+                hardware_class: Some("cpu".into()),
+                attested_only: true,
+                ..Default::default()
+            }),
+            json!({"hardware_class": "cpu", "attested_only": true}),
+        )
+        .await;
+    assert!(feed.entries[0].attested);
+    assert_eq!(
+        node.sent("tenzro_computePriceFeed")["params"],
+        json!({"hardware_class": "cpu", "attested_only": true})
+    );
+
+    // Renting signs a CreateEscrow with stream release to the bonded
+    // address; a payload that does not match it is refused unsigned.
+    node.answer("tenzro_getNonce", json!("0x2"));
+    node.answer("eth_chainId", json!("0x539"));
+    node.answer("eth_gasPrice", json!("0x1"));
+    node.answer(
+        "tenzro_getSigningPayload",
+        json!({"kind": "plain", "tx_type_json": "{}", "digest": "00".repeat(32)}),
+    );
+    let rent = tenzro_sdk::RentRequest::for_bond(&got, 7, 3).unwrap();
+    let err = cp.rent(&FixedSigner, &rent).await.unwrap_err();
+    assert!(err.to_string().contains("signing payload"), "{err}");
+    let asked = node.sent("tenzro_getSigningPayload")["params"].clone();
+    let escrow = &asked["tx_type"]["CreateEscrow"];
+    assert_eq!(escrow["payee"], json!([3u8; 32].to_vec()));
+    assert_eq!(escrow["amount"], json!(21));
+    assert_eq!(
+        escrow["release_conditions"],
+        json!({"Stream": {"rate_per_epoch": 7, "epoch_ms": tenzro_sdk::SLA_EPOCH_MS}})
+    );
+    let expires = escrow["expires_at"].as_i64().unwrap();
+    let signed_at = asked["timestamp"].as_i64().unwrap();
+    let room = 4 * tenzro_sdk::SLA_EPOCH_MS as i64;
+    assert!(
+        (room - 5_000..=room).contains(&(expires - signed_at)),
+        "the term plus one epoch for the funding block to land: {expires} - {signed_at}"
+    );
+    assert!(
+        !node
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["method"] == "tenzro_sendRawTransaction")
+    );
+}
+
 struct FixedSigner;
 
 #[async_trait::async_trait]
@@ -1373,6 +1594,9 @@ impl HybridSigner for FixedSigner {
     }
     async fn sign_composite(&self, _m_prime: &[u8]) -> SdkResult<([u8; 64], Option<Vec<u8>>)> {
         Ok(([9; 64], None))
+    }
+    async fn sign_ml_dsa_leg(&self, _m_prime: &[u8]) -> SdkResult<Vec<u8>> {
+        unreachable!("this signer holds no ML-DSA-65 key")
     }
     async fn sign_p256(&self, _message: &[u8]) -> SdkResult<[u8; 64]> {
         Ok([9; 64])

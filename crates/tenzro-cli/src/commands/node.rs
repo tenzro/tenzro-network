@@ -69,7 +69,7 @@ impl NodeCommand {
 /// Start a Tenzro Network node
 #[derive(Debug, Parser)]
 pub struct NodeStartCmd {
-    /// Comma-separated node roles. One stake backs every role.
+    /// Comma-separated node roles. Each role is bonded separately from the same account.
     /// Tokens: validator, ai, storage, tee, user. Examples:
     /// "validator", "validator,storage,ai", "storage".
     #[arg(long, default_value = "user")]
@@ -487,26 +487,43 @@ pub struct NodeSyncingCmd {
 
 impl NodeSyncingCmd {
     pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::{RpcClient, parse_hex_u64};
+        use crate::rpc::RpcClient;
         output::print_header("Sync Status");
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc.call("tenzro_syncing", serde_json::json!([])).await?;
-        if result.is_boolean() {
-            let syncing = result.as_bool().unwrap_or(false);
-            if syncing {
-                output::print_info("Node is syncing...");
-            } else {
-                output::print_success("Node is fully synced.");
+        let text = |key: &str| result.get(key).and_then(|v| v.as_str());
+        let number = |key: &str| result.get(key).and_then(|v| v.as_u64());
+        match text("state") {
+            Some("following") => output::print_success("Following the network."),
+            Some("catching_up") => output::print_info("Catching up."),
+            Some("starting") => output::print_info("Starting: nothing heard of the network yet."),
+            Some("stalled") => output::print_info(&format!(
+                "Stalled: {}.",
+                match (text("reason"), text("detail")) {
+                    (Some("no_peer_heard"), _) => "no peer has answered".to_string(),
+                    (Some("range_brought_nothing"), Some(detail)) => detail.to_string(),
+                    _ => "behind the network and importing nothing".to_string(),
+                }
+            )),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "tenzro_syncing answered with state {other:?}"
+                ));
             }
-        } else {
-            // Heights come back hex-encoded ("0x...") per the eth_syncing /
-            // tenzro_syncing JSON-RPC convention.
-            if let Some(current) = result.get("currentBlock").and_then(|v| v.as_str()) {
-                output::print_field("Current Block", &parse_hex_u64(current).to_string());
-            }
-            if let Some(highest) = result.get("highestBlock").and_then(|v| v.as_str()) {
-                output::print_field("Highest Block", &parse_hex_u64(highest).to_string());
-            }
+        }
+        if let Some(height) = number("local_height") {
+            output::print_field("Height", &height.to_string());
+        }
+        if let Some(head) = number("network_head") {
+            output::print_field("Network Head", &head.to_string());
+        }
+        if let (Some(behind), before) = (number("behind"), number("behind_before")) {
+            let trend = match before {
+                Some(b) if behind < b => " (closing)",
+                Some(b) if behind > b => " (growing)",
+                _ => "",
+            };
+            output::print_field("Behind", &format!("{behind}{trend}"));
         }
         Ok(())
     }
@@ -997,6 +1014,10 @@ pub enum StorageCommand {
     SetPricing(StorageSetPricingCmd),
     /// Show this node's storage-provider state (rate, object count)
     Status(StorageStatusCmd),
+    /// Show this node's signed receipt for the shards it holds of an object stored under a placement constraint
+    Receipts(StorageReceiptsCmd),
+    /// List the storage providers this node knows, with their placement and pricing
+    Providers(StorageProvidersCmd),
 }
 
 impl StorageCommand {
@@ -1006,6 +1027,8 @@ impl StorageCommand {
             Self::Retrieve(cmd) => cmd.execute().await,
             Self::SetPricing(cmd) => cmd.execute().await,
             Self::Status(cmd) => cmd.execute().await,
+            Self::Receipts(cmd) => cmd.execute().await,
+            Self::Providers(cmd) => cmd.execute().await,
         }
     }
 }
@@ -1031,6 +1054,40 @@ pub struct StorageStoreCmd {
     /// Parity shards (default 2)
     #[arg(long, default_value = "2")]
     parity_shards: u64,
+    /// DID that owns the object: only it may read the object back, and it signs this request
+    #[arg(long)]
+    owner_did: String,
+    /// Hardware key namespace holding the key `--owner-did` resolves to
+    #[arg(long, default_value = "client")]
+    key_namespace: String,
+    /// Country (two-letter code) a holder must declare; repeat for several. This node must be in one
+    #[arg(long = "jurisdiction")]
+    jurisdiction: Vec<String>,
+    /// Operator account (hex) that must run a holder; repeat for several. This node must be run by one
+    #[arg(long = "operator")]
+    operators: Vec<String>,
+    /// Storage class the object is bought under (hot, warm or cold); it prices the object's reads
+    #[arg(long = "class", value_parser = ["hot", "warm", "cold"])]
+    class: Option<String>,
+}
+
+/// `request` with the envelope of `did`, signed by `signer` for `method`
+/// over every field beside it: the proof a storage request is the DID's
+/// own, which the node checks before storing or reading an object.
+fn did_signed_request(
+    signer: &impl tenzro_crypto::composite::HybridSigner,
+    did: &str,
+    method: &str,
+    mut request: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let envelope = crate::keystore::did_envelope_by(
+        signer,
+        did,
+        method,
+        &tenzro_identity::envelope::request_binding(&request),
+    )?;
+    request["did_envelope"] = envelope.into();
+    Ok(request)
 }
 
 impl StorageStoreCmd {
@@ -1044,17 +1101,31 @@ impl StorageStoreCmd {
 
         output::print_header("Store Object");
         let rpc = RpcClient::new(&self.rpc);
+        let mut request = serde_json::json!({
+            "object_id": self.object_id,
+            "owner": self.owner,
+            "data": data_b64,
+            "data_shards": self.data_shards,
+            "parity_shards": self.parity_shards,
+            "owner_did": self.owner_did,
+        });
+        if !self.jurisdiction.is_empty() || !self.operators.is_empty() {
+            request["placement"] = serde_json::json!({
+                "jurisdiction": self.jurisdiction,
+                "operators": self.operators,
+            });
+        }
+        if let Some(class) = &self.class {
+            request["class"] = serde_json::json!(class);
+        }
+        let request = did_signed_request(
+            &crate::keystore::client_signer(&self.key_namespace)?,
+            &self.owner_did,
+            "tenzro_storageStoreObject",
+            request,
+        )?;
         let result: serde_json::Value = rpc
-            .call(
-                "tenzro_storageStoreObject",
-                serde_json::json!([{
-                    "object_id": self.object_id,
-                    "owner": self.owner,
-                    "data": data_b64,
-                    "data_shards": self.data_shards,
-                    "parity_shards": self.parity_shards,
-                }]),
-            )
+            .call("tenzro_storageStoreObject", serde_json::json!([request]))
             .await?;
         output::print_json(&result)?;
         Ok(())
@@ -1073,6 +1144,16 @@ pub struct StorageRetrieveCmd {
     /// Where the bytes are written
     #[arg(long)]
     out: PathBuf,
+    /// DID reading the object, which its access policy must admit; it signs this request
+    #[arg(long)]
+    reader_did: String,
+    /// Hardware key namespace holding the key `--reader-did` resolves to
+    #[arg(long, default_value = "client")]
+    key_namespace: String,
+    /// JSON file holding a channel voucher to the node that pays for the read, when the object's
+    /// class is priced
+    #[arg(long, value_name = "FILE")]
+    voucher: Option<PathBuf>,
 }
 
 impl StorageRetrieveCmd {
@@ -1082,11 +1163,21 @@ impl StorageRetrieveCmd {
 
         output::print_header("Retrieve Object");
         let rpc = RpcClient::new(&self.rpc);
+        let mut read = serde_json::json!({ "object_id": self.object_id });
+        if let Some(path) = &self.voucher {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("reading {}: {}", path.display(), e))?;
+            read["voucher"] = serde_json::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("{} is not a voucher: {e}", path.display()))?;
+        }
+        let request = did_signed_request(
+            &crate::keystore::client_signer(&self.key_namespace)?,
+            &self.reader_did,
+            "tenzro_storageRetrieveObject",
+            read,
+        )?;
         let result: serde_json::Value = rpc
-            .call(
-                "tenzro_storageRetrieveObject",
-                serde_json::json!([{ "object_id": self.object_id }]),
-            )
+            .call("tenzro_storageRetrieveObject", serde_json::json!([request]))
             .await?;
         let data = result
             .get("data")
@@ -1112,6 +1203,15 @@ pub struct StorageSetPricingCmd {
     /// Fixed byte-epoch rate (wei)
     #[arg(long)]
     rate: u128,
+    /// What reading a hot object costs, wei per GiB
+    #[arg(long)]
+    read_hot: Option<u128>,
+    /// What reading a warm object costs, wei per GiB
+    #[arg(long)]
+    read_warm: Option<u128>,
+    /// What reading a cold object costs, wei per GiB
+    #[arg(long)]
+    read_cold: Option<u128>,
 }
 
 impl StorageSetPricingCmd {
@@ -1119,13 +1219,59 @@ impl StorageSetPricingCmd {
         use crate::rpc::RpcClient;
         output::print_header("Set Storage Rate");
         let rpc = RpcClient::new(&self.rpc);
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "mode": "fixed",
             "rate": self.rate.to_string(),
         });
+        let mut read_rates = serde_json::Map::new();
+        for (class, rate) in [
+            ("hot", self.read_hot),
+            ("warm", self.read_warm),
+            ("cold", self.read_cold),
+        ] {
+            if let Some(rate) = rate {
+                read_rates.insert(class.to_string(), rate.to_string().into());
+            }
+        }
+        if !read_rates.is_empty() {
+            params["read_rates"] = read_rates.into();
+        }
         let result: serde_json::Value = rpc
             .call("tenzro_storageSetPricing", serde_json::json!([params]))
             .await?;
+        output::print_json(&result)?;
+        Ok(())
+    }
+}
+
+/// Show this node's signed holding receipt for an object stored under a
+/// placement constraint.
+#[derive(Debug, Parser)]
+pub struct StorageReceiptsCmd {
+    /// Object id
+    #[arg(long)]
+    object_id: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl StorageReceiptsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Storage Holding Receipt");
+        let result: serde_json::Value = RpcClient::new(&self.rpc)
+            .call(
+                "tenzro_getStorageHoldingReceipt",
+                serde_json::json!([{ "object_id": self.object_id }]),
+            )
+            .await?;
+        if result.is_null() {
+            output::print_info(
+                "This node holds no shard of that object under a placement constraint.",
+            );
+            return Ok(());
+        }
         output::print_json(&result)?;
         Ok(())
     }
@@ -1163,6 +1309,26 @@ impl StorageStatusCmd {
                 .unwrap_or(0)
                 .to_string(),
         );
+        Ok(())
+    }
+}
+
+/// List the storage providers this node knows.
+#[derive(Debug, Parser)]
+pub struct StorageProvidersCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl StorageProvidersCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Storage Providers");
+        let result: serde_json::Value = RpcClient::new(&self.rpc)
+            .call("tenzro_listStorageProviders", serde_json::json!([]))
+            .await?;
+        output::print_json(&result)?;
         Ok(())
     }
 }
@@ -1281,6 +1447,10 @@ pub enum NodeRpcCommand {
     VerifyDaPointer(NodeVerifyDaPointerRpcCmd),
     /// Call tenzro_verifyEventProof (verify event proof) and print the node's answer
     VerifyEventProof(NodeVerifyEventProofRpcCmd),
+    /// Call tenzro_getAppTransportInfo: the URL application devices reach this node under and the certificate hashes it signed
+    AppTransportInfo(NodeAppTransportInfoRpcCmd),
+    /// Call tenzro_getAppTransportUsage: what the application transport carried
+    AppTransportUsage(NodeAppTransportUsageRpcCmd),
 }
 
 impl NodeRpcCommand {
@@ -1318,7 +1488,45 @@ impl NodeRpcCommand {
             Self::DaBackends(cmd) => cmd.execute().await,
             Self::VerifyDaPointer(cmd) => cmd.execute().await,
             Self::VerifyEventProof(cmd) => cmd.execute().await,
+            Self::AppTransportInfo(cmd) => cmd.execute().await,
+            Self::AppTransportUsage(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Call tenzro_getAppTransportInfo (where application devices reach this node)
+#[derive(Debug, clap::Parser)]
+pub struct NodeAppTransportInfoRpcCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl NodeAppTransportInfoRpcCmd {
+    pub async fn execute(&self) -> anyhow::Result<()> {
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getAppTransportInfo", serde_json::json!([]))
+            .await?;
+        crate::output::print_json(&result)
+    }
+}
+
+/// Call tenzro_getAppTransportUsage (what the application transport carried)
+#[derive(Debug, clap::Parser)]
+pub struct NodeAppTransportUsageRpcCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl NodeAppTransportUsageRpcCmd {
+    pub async fn execute(&self) -> anyhow::Result<()> {
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getAppTransportUsage", serde_json::json!([]))
+            .await?;
+        crate::output::print_json(&result)
     }
 }
 
@@ -2010,5 +2218,82 @@ impl NodeVerifyEventProofRpcCmd {
             )
             .await?;
         crate::output::print_json(&result)
+    }
+}
+
+#[cfg(test)]
+mod storage_request_tests {
+    use super::*;
+
+    #[test]
+    fn a_store_names_one_of_the_three_classes_and_pricing_takes_read_rates() {
+        use clap::Parser as _;
+        let base = [
+            "store",
+            "--object-id",
+            "o",
+            "--owner",
+            "0x01",
+            "--file",
+            "f",
+            "--owner-did",
+            "did:tenzro:human:o",
+        ];
+        let cold = StorageStoreCmd::try_parse_from(base.iter().copied().chain(["--class", "cold"]))
+            .unwrap();
+        assert_eq!(cold.class.as_deref(), Some("cold"));
+        assert!(
+            StorageStoreCmd::try_parse_from(base.iter().copied().chain(["--class", "icy"]))
+                .is_err()
+        );
+        let pricing =
+            StorageSetPricingCmd::try_parse_from(["pricing", "--rate", "7", "--read-cold", "1"])
+                .unwrap();
+        assert_eq!((pricing.read_hot, pricing.read_cold), (None, Some(1)));
+        let read = StorageRetrieveCmd::try_parse_from([
+            "retrieve",
+            "--object-id",
+            "o",
+            "--out",
+            "x",
+            "--reader-did",
+            "did:tenzro:human:o",
+            "--voucher",
+            "v.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            read.voucher.as_deref(),
+            Some(std::path::Path::new("v.json"))
+        );
+    }
+    use tenzro_crypto::composite::HybridSigner as _;
+    use tenzro_crypto::composite::testing::TestHybridSigner;
+    use tenzro_identity::envelope::{
+        TenzroDidEnvelope, params_hash, request_binding, verify_envelope_with_key,
+    };
+
+    /// A storage request carries the envelope of the DID it names, for the
+    /// method it is sent as, over every field beside it: the node refuses a
+    /// store or a read without one.
+    #[test]
+    fn a_storage_request_carries_its_dids_envelope() {
+        let owner = TestHybridSigner::p256_only(0x51);
+        let request = did_signed_request(
+            &owner,
+            "did:tenzro:human:owner",
+            "tenzro_storageStoreObject",
+            serde_json::json!({ "object_id": "o", "owner_did": "did:tenzro:human:owner" }),
+        )
+        .unwrap();
+        let env = TenzroDidEnvelope::from_header_value(request["did_envelope"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(env.did, "did:tenzro:human:owner");
+        assert_eq!(env.method, "tenzro_storageStoreObject");
+        assert_eq!(env.params_hash, params_hash(&request_binding(&request)));
+        verify_envelope_with_key(&env, &owner.public_key().p256).expect("the owner's key");
+        let mut swapped = request.clone();
+        swapped["object_id"] = serde_json::json!("other");
+        assert_ne!(env.params_hash, params_hash(&request_binding(&swapped)));
     }
 }

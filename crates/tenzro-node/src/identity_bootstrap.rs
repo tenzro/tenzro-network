@@ -65,6 +65,10 @@ pub struct RecordedPeers {
     /// The peer gate, whose protected identities (the boot list and the
     /// validators' machines) stand as registered here as they do there.
     pub gate: Option<tenzro_iroh::IdentityGate>,
+    /// Consensus chain state, which holds the balance a machine that is not
+    /// registered yet pays its registration from. Without it no such
+    /// machine's registration is passed on.
+    pub chain: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl tenzro_network::PeerIdentities for RecordedPeers {
@@ -96,6 +100,50 @@ impl tenzro_network::PeerIdentities for RecordedPeers {
             None => Standing::Registered,
         }
     }
+    fn may_neighbour(&self, endpoint: tenzro_iroh::EndpointId) -> bool {
+        self.gate
+            .as_ref()
+            .is_none_or(|g| g.may_dial(self.machine_did(endpoint).as_deref()))
+    }
+
+    fn can_pay(&self, tx: &tenzro_types::transaction::SignedTransaction) -> bool {
+        let (Some(chain), Some(consensus)) = (&self.chain, &self.consensus) else {
+            return false;
+        };
+        let t = &tx.transaction;
+        // The chain may waive the fee of a first registration from an
+        // account that cannot pay it: such a registration is paid for.
+        tenzro_network::covers_fee(
+            t,
+            price_floor(consensus.mempool(), tx),
+            balance_of(chain, &t.from),
+        ) || tenzro_vm::native::first_registration::waives_sender(
+            &tenzro_vm::StateAdapter::with_storage(chain.clone()),
+            t.from.as_bytes(),
+            t.gas_limit,
+        )
+    }
+}
+
+/// The least gas price `pool` admits `tx` at: its lane's under admission
+/// control, else the base fee. 0 while the pool has not read a base fee.
+fn price_floor(
+    pool: &tenzro_consensus::Mempool,
+    tx: &tenzro_types::transaction::SignedTransaction,
+) -> u64 {
+    match pool.admission() {
+        Some(ctrl) => pool.required_gas_price(ctrl, ctrl.assign_lane(tx)),
+        None => pool.current_min_gas_price(tenzro_consensus::admission::Lane::Open),
+    }
+}
+
+/// What `account` holds in the consensus state `chain`.
+fn balance_of(
+    chain: &Arc<dyn tenzro_storage::KvStore>,
+    account: &tenzro_types::primitives::Address,
+) -> u128 {
+    use tenzro_vm::VmState;
+    tenzro_vm::StateAdapter::with_storage(chain.clone()).get_balance(account.as_bytes())
 }
 
 /// This machine's identity, when this process has already opened its
@@ -129,6 +177,12 @@ pub fn remote_tpm_configured() -> bool {
     REMOTE.get().is_some()
 }
 
+/// The key holder's socket, when the identity key is held by a provider.
+#[cfg(unix)]
+pub fn key_holder_socket() -> Option<std::path::PathBuf> {
+    REMOTE.get().map(|config| config.key_holder.clone())
+}
+
 /// This machine's identity key, opened once. `None` when the machine has no
 /// TPM 2.0 or Secure Enclave. A node process never runs in that state: it
 /// refuses to start ([`require_hardware_identity`]).
@@ -144,7 +198,7 @@ pub const NO_HARDWARE_IDENTITY: &str = "this machine has no TPM 2.0 (Linux /dev/
      Device), run `tenzro-node tpm provision` as the node user, and start again. If it has none (a \
      Raspberry Pi, for example), keep the key in another machine's TPM: run `tenzro-node tpm \
      key-holder` and start with --tpm-key-holder (docs/NODE.md, Raspberry Pi and other edge \
-     devices), or use the network with a passkey instead: tenzro setup --path network.";
+     devices; the key holder runs on Linux and macOS), or use the network with a passkey instead: tenzro setup --path network.";
 
 /// Refuses on a machine with no TPM 2.0 or Secure Enclave. Needs no
 /// configuration, so a node checks it before anything else.
@@ -382,11 +436,39 @@ pub fn staked_relays(chain: &dyn tenzro_vm::VmState) -> Vec<url::Url> {
         .collect()
 }
 
+/// The boot identities governance put on chain, once
+/// `feature.boot_nodes.activation_epoch` is in force: the list a node that has
+/// chain state joins through beside its operator's and its genesis file's. An
+/// entry that does not parse is skipped (the chain refused it at proposal).
+pub fn governed_boot(chain: &dyn tenzro_vm::VmState) -> Vec<BootIdentity> {
+    if !tenzro_vm::feature_gate::is_live_now(
+        chain,
+        tenzro_vm::native::gateway_sets::BOOT_NODES_GATE,
+    ) {
+        return Vec::new();
+    }
+    tenzro_vm::native::gateway_sets::boot_nodes(chain)
+        .iter()
+        .filter_map(|entry| entry.parse().ok())
+        .collect()
+}
+
 /// Admits the boot relays and the relays of staked edge operators
 /// (`staked`, see [`staked_relays`]) and starts this node's relay role when
-/// configured.
-pub async fn start(config: &NodeConfig, staked: &[url::Url]) -> Result<Arc<IdentityTransport>> {
-    let boot = boot_entries(config)?;
+/// configured. `governed` is the chain's boot list ([`governed_boot`]); a
+/// fresh node with no chain state yet passes none and joins through its
+/// operator's list and its genesis file's.
+pub async fn start(
+    config: &NodeConfig,
+    staked: &[url::Url],
+    governed: &[BootIdentity],
+) -> Result<Arc<IdentityTransport>> {
+    let mut boot = boot_entries(config)?;
+    for entry in governed {
+        if !boot.iter().any(|e| e.did == entry.did) {
+            boot.push(entry.clone());
+        }
+    }
     if boot.is_empty() && staked.is_empty() && config.iroh.relay.is_none() {
         tracing::warn!(
             "No boot identities: this node reaches no one by identity. Pass --boot-nodes \
@@ -435,6 +517,7 @@ pub async fn start(config: &NodeConfig, staked: &[url::Url]) -> Result<Arc<Ident
     transport.add_relay_candidates(&extra);
     transport.set_static_addrs(config.iroh.peer_addrs.clone());
     transport.keep_direct_addrs(config.data_dir.join("iroh").join("direct-addrs.json"));
+    transport.keep_record_sequence(config.data_dir.join("iroh").join("record-sequence"));
     // Providers of weights gated behind a licence serve them to this machine
     // only when its record states its operator accepted that licence.
     transport
@@ -538,23 +621,41 @@ fn keep_pq_pins(transport: &Arc<IdentityTransport>, data_dir: std::path::PathBuf
 /// another scheme (ML-DSA-87 / P-384) names its machine identity on chain
 /// apart from its consensus key; `registered` returns it (see
 /// [`tenzro_vm::native::validator_machine::machine_of`]). A validator that
-/// names none is not pinned. Returns how many were pinned.
+/// names none is not pinned. The machines pinned become the discovery
+/// store's committee (see [`tenzro_iroh::DiscoveryStore::set_committee`]),
+/// so this node answers a member's epoch-set record to the other members.
+/// Returns how many were pinned.
 pub fn pin_validator_pq_keys(
     identity: &IdentityTransport,
     validators: &[tenzro_consensus::ValidatorInfo],
     registered: impl Fn(&tenzro_types::primitives::Address) -> Option<(String, Vec<u8>)>,
 ) -> usize {
-    let mut pinned = 0;
+    let mut committee = std::collections::HashSet::new();
     for v in validators {
-        if v.public_key.scheme() == tenzro_types::signature_scheme::SignatureScheme::MlDsa65P256 {
-            identity.pin_pq_key(&did_of_key(&v.public_key.p256), v.public_key.ml_dsa.clone());
-            pinned += 1;
-        } else if let Some((did, machine_pq_key)) = registered(&v.address) {
-            identity.pin_pq_key(&did, machine_pq_key);
-            pinned += 1;
-        }
+        let Some((did, machine_pq_key)) = validator_machine(v, &registered) else {
+            continue;
+        };
+        identity.pin_pq_key(&did, machine_pq_key);
+        committee.insert(did);
     }
+    let pinned = committee.len();
+    identity.store().set_committee(committee);
     pinned
+}
+
+/// The machine identity of validator `v` and the ML-DSA key its endpoint
+/// records are held to: named by its consensus key when that is ML-DSA-65
+/// with P-256, otherwise the machine `registered` reads for its account from
+/// the chain, if it registered one.
+pub fn validator_machine(
+    v: &tenzro_consensus::ValidatorInfo,
+    registered: impl Fn(&tenzro_types::primitives::Address) -> Option<(String, Vec<u8>)>,
+) -> Option<(String, Vec<u8>)> {
+    if v.public_key.scheme() == tenzro_types::signature_scheme::SignatureScheme::MlDsa65P256 {
+        Some((did_of_key(&v.public_key.p256), v.public_key.ml_dsa.clone()))
+    } else {
+        registered(&v.address)
+    }
 }
 
 /// Keeps the validators of the current epoch pinned (see
@@ -581,6 +682,37 @@ pub fn keep_validators_pinned(
     });
 }
 
+/// Keeps the node's health in step with whether it follows the network, so
+/// a node behind it is never reported healthy
+/// ([`crate::follow_state::unhealthy_reason`]).
+fn report_sync_health(node: Arc<crate::node::TenzroNode>) {
+    use crate::follow_state::{HEALTH_EVERY, HEALTH_SUBSYSTEM, unhealthy_reason};
+    tokio::spawn(async move {
+        let mut said: Option<Option<String>> = None;
+        loop {
+            tokio::time::sleep(HEALTH_EVERY).await;
+            let Some(consensus) = node.consensus() else {
+                continue;
+            };
+            let height = node.status().await.block_height;
+            let reason = unhealthy_reason(
+                &consensus
+                    .follow()
+                    .state(height, consensus.validates_alone()),
+            );
+            if said.as_ref() == Some(&reason) {
+                continue;
+            }
+            let health = node.health_monitor();
+            match &reason {
+                None => health.mark_healthy(HEALTH_SUBSYSTEM),
+                Some(why) => health.mark_degraded(HEALTH_SUBSYSTEM, why.clone()),
+            }
+            said = Some(reason);
+        }
+    });
+}
+
 /// How often the node follows the chain's post-quantum policies.
 const CHAIN_POLICY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -596,6 +728,7 @@ pub fn keep_chain_policies(node: Arc<crate::node::TenzroNode>) {
     // Every node registers its own machine identity once the chain has
     // finalized, and keeps trying until it is on chain.
     crate::machine_registration::spawn(node.clone());
+    report_sync_health(node.clone());
     tokio::spawn(async move {
         loop {
             if let Some(chain) = crate::rpc::chain_state_of(&node) {
@@ -854,6 +987,87 @@ pub fn seed_gossip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader of chain state that knows only the base fee.
+    struct BaseFee(u128);
+
+    impl tenzro_consensus::mempool::AccountStateReader for BaseFee {
+        fn account_nonce(&self, _: &tenzro_types::primitives::Address) -> u64 {
+            0
+        }
+        fn account_balance(&self, _: &tenzro_types::primitives::Address) -> u128 {
+            u128::MAX
+        }
+        fn block_base_fee(&self) -> u128 {
+            self.0
+        }
+    }
+
+    /// A pool that has not read chain state, or reads a base fee of 0, has
+    /// no price floor, and nothing is paid for on its terms.
+    #[test]
+    fn a_pool_that_has_read_no_base_fee_prices_nothing() {
+        use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
+        let tx = SignedTransaction::new(
+            Transaction::new(
+                7u64.into(),
+                tenzro_types::primitives::Address::zero(),
+                tenzro_types::primitives::Address::zero(),
+                0u64.into(),
+                TransactionType::Transfer { amount: 0 },
+                tenzro_types::constants::BASE_TRANSACTION_GAS,
+                0,
+            ),
+            vec![0; 64],
+            Default::default(),
+        );
+        let pool = || tenzro_consensus::Mempool::new(Arc::new(Default::default()));
+
+        let unread = pool();
+        assert_eq!(price_floor(&unread, &tx), 0);
+        assert!(!tenzro_network::covers_fee(
+            &tx.transaction,
+            price_floor(&unread, &tx),
+            u128::MAX
+        ));
+
+        let zero = pool();
+        zero.set_state_reader(Arc::new(BaseFee(0))).unwrap();
+        assert_eq!(price_floor(&zero, &tx), 0);
+        assert!(!tenzro_network::covers_fee(
+            &tx.transaction,
+            price_floor(&zero, &tx),
+            u128::MAX
+        ));
+
+        let priced = pool();
+        priced.set_state_reader(Arc::new(BaseFee(9))).unwrap();
+        assert_eq!(price_floor(&priced, &tx), 9);
+        assert!(!tenzro_network::covers_fee(&tx.transaction, 9, u128::MAX));
+    }
+
+    #[test]
+    fn an_accounts_balance_is_read_from_chain_state_by_its_account_slot() {
+        use tenzro_vm::VmState;
+        let chain: Arc<dyn tenzro_storage::KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let mut slot = [0u8; 32];
+        slot[..20].copy_from_slice(&[7u8; 20]);
+        let account = tenzro_types::primitives::Address::new(slot);
+        assert_eq!(
+            balance_of(&chain, &account),
+            0,
+            "an account nothing was paid to"
+        );
+
+        // Credited under the 20-byte address, read by the 32-byte slot a
+        // transaction names its sender with.
+        let mut state = tenzro_vm::StateAdapter::with_storage(chain.clone());
+        state.set_balance(&slot[..20], 1_234);
+        state.commit().unwrap();
+        assert_eq!(balance_of(&chain, &account), 1_234);
+        let other = tenzro_types::primitives::Address::new([9u8; 32]);
+        assert_eq!(balance_of(&chain, &other), 0);
+    }
     use crate::config::GenesisValidator;
 
     /// Each ML-DSA-65 / P-256 validator's records are held to the ML-DSA-65
@@ -892,6 +1106,11 @@ mod tests {
             Some(a.ml_dsa.clone())
         );
         assert_eq!(transport.store().pinned_pq_key(&did_of_key(&b.p256)), None);
+        assert!(transport.store().in_epoch_set(&did_of_key(&a.p256)));
+        assert!(
+            !transport.store().in_epoch_set(&did_of_key(&b.p256)),
+            "a validator that names no machine is not in the committee"
+        );
     }
 
     /// An ML-DSA-87 / P-384 validator that registered its machine identity
@@ -923,6 +1142,13 @@ mod tests {
             transport.store().pinned_pq_key(&machine_did),
             Some(machine_key.clone())
         );
+        assert!(transport.store().in_epoch_set(&machine_did));
+        assert_eq!(
+            pin_validator_pq_keys(&transport, &[], |_| None),
+            0,
+            "a committee that left is replaced"
+        );
+        assert!(!transport.store().in_epoch_set(&machine_did));
     }
 
     /// The pins of identities met before are read back at start and saved

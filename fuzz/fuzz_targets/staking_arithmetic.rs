@@ -35,7 +35,9 @@ fuzz_target!(|ops: Vec<(u8, u8, u128, u64)>| {
         if !ok {
             return;
         }
-        let sum = (1..=ACCOUNTS).fold(0u128, |t, i| t.saturating_add(bonded_stake_of(&state, &[i; 20])));
+        let sum = (1..=ACCOUNTS).fold(0u128, |t, i| {
+            t.saturating_add(bonded_stake_of(&state, &[i; 20]))
+        });
         assert_eq!(total_bonded_stake(&state), sum);
         assert!(vault_liabilities(&state) >= sum);
         let bps = correlated_slash_bps(amount, sum.max(1), (at % 10_001) as u32, (at % 101) as u32);

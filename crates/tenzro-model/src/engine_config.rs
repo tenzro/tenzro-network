@@ -25,6 +25,27 @@ pub struct OnnxConfig {
     /// busy.
     #[serde(default)]
     pub queue_depth: Option<u32>,
+    /// Run sessions on the machine's neural processor ahead of its GPU. Off
+    /// unless set: an NPU takes quantized, static-shape models only.
+    #[serde(default)]
+    pub npu: Option<bool>,
+}
+
+/// `[energy]` table: the power an operator lets serving draw at once. Unset,
+/// nothing is refused for power.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnergyConfig {
+    /// Watts every request in flight may draw together. Zero: no energy
+    /// bound.
+    #[serde(default)]
+    pub budget_watts: u32,
+    /// Watts one request draws, by admission queue: `onnx/<kind>` (forecast,
+    /// vision, embedding, segmentation, detection, audio, video),
+    /// `diffusion`, `<engine>/<task>` for a media engine's task, or
+    /// `language` for every language model. A queue with no entry draws
+    /// nothing against the budget.
+    #[serde(default)]
+    pub draw_watts: BTreeMap<String, u32>,
 }
 
 /// Resolved ONNX serving limits for this process.
@@ -36,6 +57,8 @@ pub struct OnnxSettings {
     pub concurrency: u32,
     /// Waiting requests per ONNX runtime before new ones are refused as busy.
     pub queue_depth: u32,
+    /// Whether sessions go to the machine's neural processor first.
+    pub npu: bool,
 }
 
 impl OnnxSettings {
@@ -59,6 +82,7 @@ impl OnnxSettings {
             threads,
             concurrency,
             queue_depth,
+            npu: config.npu.unwrap_or(false),
         }
     }
 

@@ -40,6 +40,48 @@ export interface SlaOutstandingProbes {
   probes: SlaOutstandingProbe[];
 }
 
+/** One readiness tier's row of an {@link SlaEnergyReport}. */
+export interface SlaTierEnergy {
+  /** The declared readiness tier. */
+  tier: 'Cold' | 'Cool' | 'Warm';
+  /** Eligible compute bonds whose provider declared this tier. */
+  units: number;
+  /** Probe rounds between this tier's burst challenges. */
+  burst_rounds_between: number;
+  /** Challenge energy one unit of this tier spends per day, joules, decimal string. */
+  challenge_joules_per_unit_per_day: string;
+  /** One unit of this tier's own energy per day, joules, decimal string. */
+  idle_joules_per_unit_per_day: string;
+  /** These units' own energy over a day, joules, decimal string. */
+  fleet_joules_per_day: string;
+  /** Challenge energy these units spend over a day, joules, decimal string. */
+  challenge_joules_per_day: string;
+}
+
+/** Result of `tenzro_slaGetEnergy`. */
+export interface SlaEnergyReport {
+  /** The governed probe interval in force, ms. */
+  probe_interval_ms: number;
+  /** Probes one bonded unit answers per day at that interval. */
+  probes_per_unit_per_day: number;
+  /** Whether the wake-cost rule prices these figures; before it every probe is charged a cool-tier wake. */
+  wake_rule_live: boolean;
+  /** Challenge energy as a share of the fleet's own energy, basis points. */
+  challenge_share_bps: number;
+  /** The governed challenge energy budget, basis points; zero is disabled. */
+  budget_bps: number;
+  /** Whether the cadence in force holds within that budget. */
+  within_budget: boolean;
+  /** Eligible compute bonds. */
+  units: number;
+  /** The whole fleet's own energy over a day, joules, decimal string. */
+  fleet_joules_per_day: string;
+  /** The whole fleet's challenge energy over a day, joules, decimal string. */
+  challenge_joules_per_day: string;
+  /** The fleet by declared readiness tier, cold first. */
+  tiers: SlaTierEnergy[];
+}
+
 /** Result of `tenzro_slaGetParams`. */
 export interface SlaParams {
   /** What a frozen unavailable verdict takes from the provider's compute bond into the insurance pool, wei, decimal string. */
@@ -110,6 +152,14 @@ export class SlaClient {
       'tenzro_slaListOutstandingProbes',
       []
     );
+  }
+
+  /**
+   * What SLA challenges cost the bonded compute fleet in energy at the
+   * probe cadence in force (`tenzro_slaGetEnergy`).
+   */
+  async energyReport(): Promise<SlaEnergyReport> {
+    return this.rpc.call<SlaEnergyReport>('tenzro_slaGetEnergy', []);
   }
 
   /**

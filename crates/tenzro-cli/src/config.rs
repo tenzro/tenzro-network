@@ -86,8 +86,6 @@ pub struct PersistedConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_models: Option<String>,
     pub pricing: Option<ProviderPricing>,
-    #[serde(default)]
-    pub served_models: Vec<String>,
     /// OAuth 2.1 access token (ES256 JWT, optionally DPoP-bound).
     /// Sent as `Authorization: Bearer <token>` on privileged calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]

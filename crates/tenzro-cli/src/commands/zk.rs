@@ -37,7 +37,9 @@ impl ZkCommand {
 ///
 /// The 32-byte witness is read as hex from standard input and never leaves
 /// this process: it is not an argument (shell history), not a file, and not
-/// sent to any node. The output is the proof bundle `tenzro zk verify` takes.
+/// sent to any node. Standard output carries the proof bundle `tenzro zk
+/// verify` takes and nothing else; progress goes to standard error, so
+/// `tenzro zk prove ... > bundle.json` writes a bundle that verifies.
 #[derive(Debug, Parser)]
 pub struct ZkProveCmd {
     /// Circuit identifier — `identity` or `settlement`.
@@ -66,7 +68,6 @@ impl ZkProveCmd {
         let witness = parse_word("witness (stdin)", &line)?;
         line.clear();
 
-        output::print_header("Create ZK Proof");
         let spinner = output::create_spinner("Proving in every proof system...");
         let proofs = tokio::task::spawn_blocking(move || {
             tenzro_zk::ProofSystem::ALL
@@ -77,17 +78,27 @@ impl ZkProveCmd {
         .await??;
         spinner.finish_and_clear();
 
-        output::print_success("Proofs generated");
-        output::print_json(&serde_json::json!({
-            "circuit_id": circuit.id(),
-            "public_inputs": proofs[0].public_inputs.iter().map(|p| format!("0x{}", hex::encode(p))).collect::<Vec<_>>(),
-            "proofs": proofs.iter().map(|p| serde_json::json!({
-                "system": p.system.as_str(),
-                "proof": format!("0x{}", hex::encode(&p.proof_bytes)),
-            })).collect::<Vec<_>>(),
-        }))?;
+        output::print_json(&proof_bundle(circuit, &proofs))?;
+        eprintln!("Proofs generated in {} proof systems", proofs.len());
         Ok(())
     }
+}
+
+/// The bundle `tenzro zk prove` prints and `tenzro zk verify` reads:
+/// `{circuit_id, public_inputs, proofs: [{system, proof}]}`, every byte
+/// string as 0x-prefixed hex.
+fn proof_bundle(circuit: tenzro_zk::Circuit, proofs: &[tenzro_zk::Proof]) -> serde_json::Value {
+    serde_json::json!({
+        "circuit_id": circuit.id(),
+        "public_inputs": proofs
+            .first()
+            .map(|p| p.public_inputs.iter().map(|i| format!("0x{}", hex::encode(i))).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "proofs": proofs.iter().map(|p| serde_json::json!({
+            "system": p.system.as_str(),
+            "proof": format!("0x{}", hex::encode(&p.proof_bytes)),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// Verify a proof bundle against a node.

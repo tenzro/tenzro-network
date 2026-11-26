@@ -40,6 +40,10 @@ pub trait RouteState {
     fn network_limit(&self, route: &BridgeRoute) -> Option<MintRateLimit>;
     /// The network-wide outflow limits, if set.
     fn outflow_limits(&self) -> Option<NetworkOutflowLimits>;
+    /// Whether `feature.ccip_finality_policy` is live: a delivery then draws
+    /// on the bucket its requested finality names
+    /// ([`super::finality::consume_fast_inbound`]).
+    fn finality_policy_live(&self) -> bool;
     /// Read a framework value.
     fn get(&self, key: &str) -> Option<Vec<u8>>;
     /// Write framework values, all or none.

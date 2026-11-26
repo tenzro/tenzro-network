@@ -1,7 +1,7 @@
 //! Gossip layer for Tenzro Network
 //!
 //! This crate provides the gossip messages, topics and validation for Tenzro
-//! Network, an AI-Native, Agentic, Tokenized Settlement Layer blockchain.
+//! Network, a network of compute of every kind settled in TNZO.
 //! Every topic is carried by iroh-gossip over the node's iroh endpoint
 //! ([`gossip`]); finding peers, relays and point-to-point paths belongs to
 //! `tenzro-iroh`.
@@ -57,20 +57,22 @@ pub mod gossip;
 pub mod gossip_validation;
 pub mod message;
 pub mod metrics;
+pub mod path_metrics;
 pub mod peer_status;
 pub mod service;
+pub mod wire;
 
 pub use error::{NetworkError, Result};
 pub use gossip::NetworkGossip;
 pub use gossip_validation::{
     CONSENSUS_TOPICS, GossipLimits, PeerIdentities, VALIDATORS_TOPIC, ValidatedMessage,
-    ValidationTicket,
+    ValidationTicket, covers_fee,
 };
 pub use message::{
-    AnnouncementKind, BatchedAnnouncementMessage, BlobAnnouncementMessage, MessagePayload,
-    ModelRegistrationMessage, ModelSchedule, NetworkMessage, ProviderAnnouncementMessage,
-    ProviderHeartbeatMessage, ShardReplicationEntry, ShardReplicationMessage, SignedAnnouncement,
-    StatusMessage,
+    AnnouncementKind, BatchedAnnouncementMessage, BlobAnnouncementMessage,
+    ConstrainedShardReplicationMessage, MessagePayload, ModelRegistrationMessage, ModelSchedule,
+    NetworkMessage, ProviderAnnouncementMessage, ProviderHeartbeatMessage, STORAGE_PLACEMENT_TOPIC,
+    ShardReplicationEntry, ShardReplicationMessage, SignedAnnouncement, StatusMessage,
 };
 pub use metrics::NetworkMetrics;
 pub use peer_status::{DEFAULT_FRESHNESS, PeerStatus as PeerChainStatus, PeerStatusTracker};

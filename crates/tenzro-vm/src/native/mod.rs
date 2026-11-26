@@ -53,8 +53,10 @@ pub use participation::{
     Participation, begin_block as begin_block_participation, read_missed_epochs, read_participation,
 };
 pub use staking::{
-    ACTIVE_FLOOR_PARAM, EXIT_CHURN_PARAM, INACTIVITY_ACTIVATION_PARAM, INACTIVITY_LIMIT_PARAM,
-    JAIL_TERM_PARAM, genesis_validator_bonds, reinstated_at_epoch, staking_vault_address,
+    ACTIVE_FLOOR_PARAM, ACTIVE_SET_CAP_GATE, ACTIVE_SET_CAP_PARAM, DEFERRED_SLASH_REMOVAL_KEY,
+    EXIT_CHURN_PARAM, EXIT_FLOOR_GATE, INACTIVITY_ACTIVATION_PARAM, INACTIVITY_LIMIT_PARAM,
+    JAIL_TERM_PARAM, OUTSIDE_CAP_GATE, SLASH_SEAT_HELD_TOPIC, SeatHeld, active_set_cap,
+    genesis_validator_bonds, reinstated_at_epoch, seated_index_entries, staking_vault_address,
     vrf_key_of,
 };
 pub use staking::{SIGNATURE_SCHEMES_PARAM, scheme_admitted};
@@ -83,21 +85,19 @@ use crate::{
     error::{Result, VmError},
     gas::GasMeter,
     traits::{VmExecutor, VmState, VmType},
-    types::{
-        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log,
-        StateChange, VmTransaction,
-    },
+    types::{CallResult, ContractCall, ExecutionResult, Log, StateChange, VmTransaction},
 };
 
 pub mod meter_bond;
 pub(crate) mod payment_settlement;
 pub use meter_bond::{meter_bond_storage_key, meter_bond_vault, read_meter_bond};
+pub use payment_settlement::GAS_ESCROW_CLAIM_PER_VOUCHER;
 pub use payment_settlement::netting as settlement_netting;
 pub use payment_settlement::plan::{
     GAS_SETTLEMENT_PLAN, LegEvidence, SELECTOR_SETTLEMENT_PLAN, SETTLEMENT_PLAN_TOPIC,
-    begin_block as begin_block_plans, plan_vault_address, read_decision, read_decision_commitment,
-    read_leg_evidence, read_leg_receipt, read_leg_receipt_commitment, read_plan,
-    settlement_plan_gas,
+    TreasuryLine, begin_block as begin_block_plans, plan_vault_address, read_decision,
+    read_decision_commitment, read_leg_evidence, read_leg_receipt, read_leg_receipt_commitment,
+    read_plan, read_treasury_line, settlement_plan_gas,
 };
 pub use payment_settlement::recon::{
     RECON_MISMATCH_TOPIC, RECON_REWARD_PARAM, RECON_ROUTES_KEY, ReconJobs, list_mismatches,
@@ -110,15 +110,20 @@ pub use payment_settlement::{
 };
 pub use payment_settlement::{amount_with_leg, declared_leg};
 pub mod compute_claim;
+pub mod storage_class;
 pub use compute_claim::{GAS_COMPUTE_CLAIM, SELECTOR_COMPUTE_CLAIM};
 #[cfg(test)]
 mod agent_control_tests;
+#[cfg(test)]
+mod light_client_keys_tests;
 pub mod registry;
 pub use registry::{GAS_REGISTRY, SELECTOR_REGISTRY};
 #[cfg(test)]
 mod breaker_latency_tests;
 #[cfg(test)]
 mod bridge_watcher_tests;
+#[cfg(test)]
+mod capped_resource_ordering_tests;
 #[cfg(test)]
 mod charter_tests;
 #[cfg(test)]
@@ -157,8 +162,9 @@ pub mod upgrade;
 pub use upgrade::{
     PROTOCOL_VERSION_KEY, PROTOCOL_VERSION_TOPIC, PendingProtocolVersion, ProtocolVersionRecord,
     Readiness, ReadySignal, SELECTOR_SECURITY_DISCLOSURE, SELECTOR_UPGRADE_READY,
-    SecurityCommitment, UPGRADE_SCHEDULED_TOPIC, genesis_protocol_version, protocol_version_at,
-    read_protocol_version, read_security_commitment, read_upgrade_activation, readiness,
+    SecurityCommitment, UPGRADE_PLATFORMS_TOPIC, UPGRADE_SCHEDULED_TOPIC, genesis_protocol_version,
+    protocol_version_at, read_protocol_version, read_security_commitment, read_upgrade_activation,
+    read_upgrade_platforms, readiness, upgrade_readiness,
 };
 #[cfg(test)]
 mod confidential_job_tests;
@@ -177,6 +183,8 @@ mod payout_gates_tests;
 #[cfg(test)]
 mod protocol_version_tests;
 #[cfg(test)]
+mod release_floor_tests;
+#[cfg(test)]
 mod sponsored_bond_tests;
 #[cfg(test)]
 mod upgrade_tests;
@@ -194,10 +202,12 @@ pub use role_stake::{
     sla_subject, stake_ladder, wallet_providers_for_domain,
 };
 pub mod availability_reward;
+pub mod burn_bound_release;
 pub mod burn_netting;
 pub mod economy;
 pub mod participation;
 pub mod payout_swap;
+pub mod reward_root;
 pub mod rewards;
 pub mod settlement_asset;
 pub use economy::{
@@ -207,6 +217,7 @@ pub use economy::{
     safety_rate, settlement_fee, slash_agent_bond, usd_to_wei,
 };
 pub mod agent_audit;
+pub mod agent_cap;
 pub mod agent_terms;
 pub mod bridge_watcher;
 pub mod remote_grant;
@@ -235,34 +246,61 @@ pub use bridge_circuit::{
     placeholders_key as bridge_placeholders_key, read_bridge_circuit, read_bridge_mint_limits,
     read_bridge_outflow_limits, read_bridge_route_mode, read_route_placeholders,
 };
+pub mod affiliated_share;
 pub mod beacon;
+pub mod bond_onramp;
+pub mod build_attestation;
 pub mod da_retention;
 pub mod did_services;
+pub mod first_registration;
+pub mod gateway_sets;
+pub mod identity_caps;
+pub mod identity_keys;
 pub mod identity_revocation;
+pub mod identity_succession;
+pub mod native_call;
+pub mod operator;
+pub mod operator_cap;
+pub mod paid_readiness;
+pub mod presence;
+pub mod registration_attestation;
+pub mod rpc_provider_leg;
 pub mod sla_energy_budget;
+pub mod sponsorship_end;
 pub mod validator_machine;
+pub mod zk_verdict;
 pub use crate::account_outflow::SELECTOR_ACCOUNT_OUTFLOW;
 pub use bridge_watcher::SELECTOR_BRIDGE_WATCHER;
+pub use build_attestation::{SELECTOR_BUILD_ATTESTATION, build_attestations};
 pub use da_retention::begin_block as begin_block_da_retention;
 pub use did_services::{SELECTOR_IDENTITY_SERVICES, read_did_services};
+pub use identity_keys::{
+    SELECTOR_IDENTITY_KEYS, delegation_revoked_at_ms, read_identity_head, read_identity_keys,
+};
 pub use identity_revocation::{SELECTOR_IDENTITY_REVOKE, read_delegated_agents};
+pub use identity_succession::{SELECTOR_IDENTITY_SUCCESSION, agent_successor};
 pub use rewards::{
     CALENDAR_KEY, CheckpointSigners, EpochVotes, REWARD_SCHEDULE_KEY, VESTING_RELEASED_TOPIC,
     begin_block as begin_block_rewards, block_ms_at, calendar_ms, genesis_calendar,
     genesis_reward_schedule, read_coupons, read_epoch_summary, read_epoch_votes,
     read_reward_schedule, read_reward_state, read_vesting,
 };
-pub use sla_energy_budget::{
-    MAX_SLA_CHALLENGE_ENERGY_BUDGET_BPS, SLA_CHALLENGE_ENERGY_BUDGET_BPS_PARAM,
-    SLA_CHALLENGE_JOULES_PER_PROBE, SLA_FLEET_JOULES_PER_UNIT_PER_DAY,
-    challenge_energy_within_budget, fleet_unit_count, total_challenge_energy_joules_per_day,
-    total_fleet_energy_joules_per_day,
+pub use rpc_provider_leg::{
+    SELECTOR_RPC_PROVIDER, leg_paid as rpc_provider_leg_paid, named_provider as rpc_provider_of,
 };
+pub use sla_energy_budget::{
+    EnergyReport, MAX_SLA_CHALLENGE_ENERGY_BUDGET_BPS, SLA_CHALLENGE_ENERGY_BUDGET_BPS_PARAM,
+    SLA_CHALLENGE_JOULES_PER_PROBE, SLA_FLEET_JOULES_PER_UNIT_PER_DAY, TierEnergy,
+    challenge_energy_within_budget, energy_report, fleet_unit_count,
+    total_challenge_energy_joules_per_day, total_fleet_energy_joules_per_day,
+};
+pub use zk_verdict::{SELECTOR_ZK_VERDICT, zk_verdicts};
 pub mod funding;
 pub mod hardware_level;
 pub mod key_release;
 pub mod machine_attestation;
 pub mod payout_gates;
+pub mod rpc_provider_approval;
 pub mod sponsored_bond;
 pub mod stable_payout;
 pub use funding::{
@@ -506,6 +544,10 @@ const GAS_INCREASE_VALIDATOR_STAKE: u64 = 60_000;
 /// Depositing to the treasury: two balance reads, two writes.
 const GAS_TREASURY_DEPOSIT: u64 = 40_000;
 pub const GAS_ESCROW_CREATE: u64 = 75_000;
+/// Gate of the rule that refuses escrows under a custom release condition:
+/// the first epoch from which `CreateEscrow` refuses one and no proof
+/// releases one already in state.
+pub const CUSTOM_ESCROW_REFUSED_GATE: &str = "feature.custom_escrow_refused.activation_epoch";
 pub const GAS_ESCROW_RELEASE: u64 = 60_000;
 pub const GAS_ESCROW_REFUND: u64 = 50_000;
 // Kill-switch gas costs (controller-tier intervention is intentionally
@@ -567,6 +609,23 @@ pub const DEFAULT_COMPUTE_BOND_MIN_TNZO: u64 = 100;
 pub fn compute_bond_min(state: &dyn VmState) -> u128 {
     u128::from(network_param(state, COMPUTE_BOND_MIN_PARAM))
         .saturating_mul(tenzro_types::constants::ONE_TNZO)
+}
+
+/// Gate: the first epoch from which a new compute bond must meet the
+/// minimum kept at its USD value the way role stakes are
+/// ([`role_stake::usd_floored`]), so a price crash does not make posting
+/// one cheaper. Bonds already posted keep serving at the TNZO minimum.
+pub const USD_COMPUTE_BOND_KEY: &str = "feature.usd_compute_bond.activation_epoch";
+
+/// The least a new compute bond posts: [`compute_bond_min`], kept at its
+/// USD value once [`USD_COMPUTE_BOND_KEY`] is live.
+pub fn compute_bond_entry_min(state: &dyn VmState) -> u128 {
+    let min = compute_bond_min(state);
+    if crate::feature_gate::is_live_now(state, USD_COMPUTE_BOND_KEY) {
+        role_stake::usd_floored(state, min)
+    } else {
+        min
+    }
 }
 // InsurancePool payouts: governance-approved, settled on-chain. Heavier than
 // bond ops because they cross from singleton pool vault into a user wallet
@@ -861,6 +920,11 @@ impl NativeExecutor {
                 }
             }
             ProposalAction::ParameterChange { key, value, .. } => {
+                crate::governance::change_released(
+                    key,
+                    network_param(state, crate::governance::RELEASE_FLOOR_PARAM),
+                )
+                .map_err(|e| VmError::InvalidTransaction(e.to_string()))?;
                 let in_force = network_param(state, key);
                 let scheduled = pending_param(state, key).map_or(in_force, |p| p.value);
                 crate::feature_gate::check_change(state, key, *value)?;
@@ -882,6 +946,12 @@ impl NativeExecutor {
                 crate::governance::joint_change_allowed(key, *value, &scheduled_of)
                     .map_err(|e| VmError::InvalidTransaction(e.to_string()))?;
                 sla_energy_budget::param_change_allowed(state, key, *value, &scheduled_of)?;
+                inference_fault::challenge_window_change_allowed(
+                    state,
+                    key,
+                    *value,
+                    &scheduled_of,
+                )?;
             }
             ProposalAction::SetBridgeRoute { route, .. } => {
                 bridge_circuit::check_route_raise(state, route)?;
@@ -976,7 +1046,7 @@ impl NativeExecutor {
                     *role,
                     *term_ends_ms,
                     key_root,
-                    deterministic_now_ms(tx),
+                    deterministic_now_ms(tx)?,
                 )
                 .map_err(|e| VmError::InvalidTransaction(format!("guardian seat refused: {e}")))?;
             }
@@ -1032,6 +1102,23 @@ impl NativeExecutor {
                     )));
                 }
             }
+            ProposalAction::SetBridgeFinalityPolicy {
+                adapter,
+                source_chain,
+                asset,
+                policy,
+                ..
+            } => {
+                crate::feature_gate::refuse_dormant_action(state, &action)
+                    .map_err(VmError::InvalidTransaction)?;
+                bridge::check_finality_policy(
+                    state,
+                    *adapter,
+                    source_chain,
+                    asset.as_deref(),
+                    policy.as_ref(),
+                )?;
+            }
             ProposalAction::SponsorValidatorBond {
                 validator, amount, ..
             } => {
@@ -1044,17 +1131,27 @@ impl NativeExecutor {
                     state,
                     operator.as_bytes(),
                     criteria,
-                    deterministic_now_ms(tx),
+                    deterministic_now_ms(tx)?,
                 )?;
             }
             ProposalAction::RevokeOperator { operator, .. } => {
                 payout_gates::check_revoke_operator(state, operator.as_bytes())?;
+            }
+            ProposalAction::ApproveRpcProvider { provider, .. } => {
+                rpc_provider_approval::check_label(provider)?;
+            }
+            ProposalAction::RevokeRpcProvider { provider, .. } => {
+                rpc_provider_approval::check_revoke(state, provider)?;
             }
             ProposalAction::ApproveGrantee { grantee, .. } => {
                 funding::require_registered_recipient(state, grantee.as_bytes())?;
             }
             ProposalAction::RevokeGrantee { grantee, .. } => {
                 payout_gates::check_revoke_grantee(state, grantee.as_bytes())?;
+            }
+            ProposalAction::SetAffiliation { .. } => {
+                crate::feature_gate::refuse_dormant_action(state, &action)
+                    .map_err(VmError::InvalidTransaction)?;
             }
             ProposalAction::SponsorOperatorRunningCost {
                 operator,
@@ -1120,7 +1217,9 @@ impl NativeExecutor {
             } => {
                 funding::check_release_admissible(state, grant_id, *index)?;
             }
-            ProposalAction::PolicyUpdate { .. } => {
+            ProposalAction::PolicyUpdate { update, .. } => {
+                crate::feature_gate::refuse_dormant_policy(state, update)
+                    .map_err(VmError::InvalidTransaction)?;
                 if let Some(basis) = action.security_basis() {
                     upgrade::admit_security_fix(state, &tx.from, basis)?;
                 }
@@ -1238,7 +1337,7 @@ impl NativeExecutor {
 
         // The window has to be shut by the same clock every validator sees, or
         // two nodes disagree about whether a late ballot counted and fork.
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
         if !proposal.is_open_at(now_ms) {
             return Err(VmError::InvalidTransaction(format!(
                 "voting on {proposal_id} closed at {} (now {now_ms})",
@@ -1263,7 +1362,7 @@ impl NativeExecutor {
                 in_favour,
                 &validator,
                 approval,
-                deterministic_now_ms(tx).max(0) as u64,
+                deterministic_now_ms(tx)?.max(0) as u64,
             )?),
         };
 
@@ -1293,6 +1392,20 @@ impl NativeExecutor {
         let previous = load_vote(state, &ballot_id, &voter_hex);
 
         let mut tally = load_tally(state, &ballot_id);
+        let (weight, root_change) = root_capped(
+            state,
+            &ballot_id,
+            &validator,
+            weight,
+            previous.map(|(w, _)| w),
+            tally.total_eligible,
+        );
+        if weight == 0 {
+            return Err(VmError::InvalidTransaction(format!(
+                "{}'s root already counts the most one root may on this proposal",
+                hex::encode(&validator)
+            )));
+        }
         tally.apply_vote(weight, in_favour, previous);
         let (tally_blob, prior_tally) = store_tally(state, &ballot_id, &tally)?;
         let (vote_blob, prior_vote) = store_vote(
@@ -1355,6 +1468,7 @@ impl NativeExecutor {
         ];
         state_changes.extend(proposal_change);
         state_changes.extend(spent_change);
+        state_changes.extend(root_change);
 
         let mut log_data = Vec::with_capacity(32 + 32 + 16 + 1);
         log_data.extend_from_slice(&proposal_id_bytes);
@@ -1572,7 +1686,7 @@ impl NativeExecutor {
         })?;
 
         let tally = load_tally(state, &proposal.ballot_id());
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
 
         // A pause stops enactment, which is the blast radius that matters:
         // an attack that has already carried a vote is exactly what the brake
@@ -1777,6 +1891,11 @@ impl NativeExecutor {
                 let param = crate::governance::governed_param(key).ok_or_else(|| {
                     VmError::InvalidTransaction(format!("'{key}' is not a governed parameter"))
                 })?;
+                crate::governance::change_released(
+                    key,
+                    network_param(state, crate::governance::RELEASE_FLOOR_PARAM),
+                )
+                .map_err(|e| VmError::InvalidTransaction(e.to_string()))?;
                 if *value < param.min || *value > param.max {
                     return Err(VmError::InvalidTransaction(format!(
                         "{key} = {value} is outside the permitted range {}..={}",
@@ -1804,6 +1923,12 @@ impl NativeExecutor {
                 crate::governance::joint_change_allowed(key, *value, &scheduled_of)
                     .map_err(|e| VmError::InvalidTransaction(e.to_string()))?;
                 sla_energy_budget::param_change_allowed(state, key, *value, &scheduled_of)?;
+                inference_fault::challenge_window_change_allowed(
+                    state,
+                    key,
+                    *value,
+                    &scheduled_of,
+                )?;
                 schedule_param_change(state, key, param, *value, &proposal.id, &mut state_changes)?;
                 // Setting validator mode again is how governance re-arms the
                 // rate after the dispersion breaker fell back to its own rate.
@@ -1934,7 +2059,7 @@ impl NativeExecutor {
                 bridge_committee::on_route_installed(
                     state,
                     route,
-                    deterministic_now_ms(tx),
+                    deterministic_now_ms(tx)?,
                     &mut state_changes,
                 )?;
                 payment_settlement::recon::note_route(
@@ -2118,6 +2243,33 @@ impl NativeExecutor {
                 ));
                 (0u128, Vec::new())
             }
+            ProposalAction::SetBridgeFinalityPolicy {
+                adapter,
+                source_chain,
+                asset,
+                policy,
+                ..
+            } => {
+                crate::feature_gate::refuse_dormant_action(state, &proposal.action)
+                    .map_err(VmError::InvalidTransaction)?;
+                // Checked again against the route as it stands now: a vote
+                // does not make a policy suit a route that changed since.
+                let route = bridge::check_finality_policy(
+                    state,
+                    *adapter,
+                    source_chain,
+                    asset.as_deref(),
+                    policy.as_ref(),
+                )?;
+                bridge::set_finality_policy(
+                    state,
+                    &route,
+                    asset.as_deref(),
+                    policy.as_ref(),
+                    &mut state_changes,
+                )?;
+                (0u128, Vec::new())
+            }
             ProposalAction::SponsorValidatorBond {
                 validator, amount, ..
             } => {
@@ -2159,6 +2311,26 @@ impl NativeExecutor {
                 )?;
                 (0u128, Vec::new())
             }
+            ProposalAction::ApproveRpcProvider { provider, .. } => {
+                rpc_provider_approval::approve(
+                    state,
+                    &proposal_id,
+                    provider,
+                    now_ms,
+                    &mut state_changes,
+                    &mut action_logs,
+                )?;
+                (0u128, Vec::new())
+            }
+            ProposalAction::RevokeRpcProvider { provider, .. } => {
+                rpc_provider_approval::revoke(
+                    state,
+                    provider,
+                    &mut state_changes,
+                    &mut action_logs,
+                )?;
+                (0u128, Vec::new())
+            }
             ProposalAction::ApproveGrantee {
                 grantee,
                 class,
@@ -2179,6 +2351,22 @@ impl NativeExecutor {
             }
             ProposalAction::RevokeGrantee { grantee, .. } => {
                 payout_gates::revoke_grantee(state, grantee, &mut state_changes, &mut action_logs)?;
+                (0u128, Vec::new())
+            }
+            ProposalAction::SetAffiliation {
+                account,
+                affiliated,
+                ..
+            } => {
+                crate::feature_gate::refuse_dormant_action(state, &proposal.action)
+                    .map_err(VmError::InvalidTransaction)?;
+                affiliated_share::set(
+                    state,
+                    account,
+                    *affiliated,
+                    &mut state_changes,
+                    &mut action_logs,
+                )?;
                 (0u128, Vec::new())
             }
             ProposalAction::SponsorOperatorRunningCost {
@@ -2304,6 +2492,7 @@ impl NativeExecutor {
                 let blob = serde_json::to_vec(&record).map_err(|e| {
                     VmError::Internal(format!("cannot serialise the revocation record: {e}"))
                 })?;
+                agent_cap::note_retiring(state, did, &mut state_changes)?;
                 state.set_storage(&SYSTEM_ADDRESS, &revocation_key, blob.clone());
                 state_changes.push(StateChange::new(
                     SYSTEM_ADDRESS.to_vec(),
@@ -2311,6 +2500,13 @@ impl NativeExecutor {
                     None,
                     Some(blob.clone()),
                 ));
+                identity_keys::record_event(
+                    state,
+                    did,
+                    b"IdentityRevoked",
+                    &blob,
+                    &mut state_changes,
+                )?;
                 action_logs.push(Log::new(
                     SYSTEM_ADDRESS.to_vec(),
                     vec![b"IdentityRevoked".to_vec()],
@@ -2364,7 +2560,7 @@ impl NativeExecutor {
                     *vesting,
                     asset.as_deref(),
                     release,
-                    deterministic_now_ms(tx),
+                    deterministic_now_ms(tx)?,
                     &mut state_changes,
                     &mut action_logs,
                 )?;
@@ -2408,11 +2604,13 @@ impl NativeExecutor {
                 state,
                 grant_id,
                 *index,
-                deterministic_now_ms(tx),
+                deterministic_now_ms(tx)?,
                 &mut state_changes,
                 &mut action_logs,
             )?,
             ProposalAction::PolicyUpdate { update, .. } => {
+                crate::feature_gate::refuse_dormant_policy(state, update)
+                    .map_err(VmError::InvalidTransaction)?;
                 // Checked again against the rules in force now: a vote does
                 // not make an inapplicable change applicable.
                 crate::governance::validate_policy_update(update)
@@ -2420,7 +2618,7 @@ impl NativeExecutor {
                 bridge_circuit::apply_policy(
                     state,
                     update,
-                    deterministic_now_ms(tx),
+                    deterministic_now_ms(tx)?,
                     &mut state_changes,
                     &mut action_logs,
                 )?;
@@ -2428,6 +2626,19 @@ impl NativeExecutor {
                     update
                 {
                     funding::set_endorsement_roots(state, roots_pem, &mut state_changes)?;
+                }
+                if let tenzro_types::token::PolicyUpdate::WebauthnRootsSet { roots_pem } = update {
+                    registration_attestation::set_roots(state, roots_pem, &mut state_changes)?;
+                }
+                if let tenzro_types::token::PolicyUpdate::NrasJwksSet { jwks_json } = update {
+                    gateway_sets::set_nras_jwks(state, jwks_json, &mut state_changes)?;
+                }
+                if let tenzro_types::token::PolicyUpdate::BootNodesSet { identities } = update {
+                    gateway_sets::set_boot_nodes(state, identities, &mut state_changes)?;
+                }
+                if let tenzro_types::token::PolicyUpdate::UpdateNoticeKeysSet { keys_hex } = update
+                {
+                    gateway_sets::set_update_notice_keys(state, keys_hex, &mut state_changes)?;
                 }
                 if let tenzro_types::token::PolicyUpdate::GpuDeviceRootsSet { roots_pem } = update {
                     hardware_level::set_gpu_roots(state, roots_pem, &mut state_changes)?;
@@ -2443,19 +2654,14 @@ impl NativeExecutor {
                 if let tenzro_types::token::PolicyUpdate::HandoverProgramSet { image_id } = update {
                     evidence::set_handover_program(state, image_id, &mut state_changes)?;
                 }
-                if let tenzro_types::token::PolicyUpdate::ProtocolUpgrade { version, code_hash } =
-                    update
-                {
-                    upgrade::schedule(
-                        state,
-                        &proposal_id,
-                        version,
-                        code_hash,
-                        tx.block_height.unwrap_or_default(),
-                        &mut state_changes,
-                        &mut action_logs,
-                    )?;
-                }
+                upgrade::schedule(
+                    state,
+                    &proposal_id,
+                    update,
+                    tx.block_height.unwrap_or_default(),
+                    &mut state_changes,
+                    &mut action_logs,
+                )?;
                 let record = crate::governance::PolicyEnactedLog {
                     proposal_id: proposal_id.clone(),
                     update: update.clone(),
@@ -2548,7 +2754,7 @@ impl NativeExecutor {
             tx.nonce,
             &payload,
             gas_cost,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
         )?;
         economy::check_provider_exposure(
             state,
@@ -2556,7 +2762,7 @@ impl NativeExecutor {
             &payload.asset_id,
             payload.amount,
             &escrow_id,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
             &mut state_changes,
         )?;
         // Each new escrow pays for looking at old records, so they are
@@ -2564,7 +2770,7 @@ impl NativeExecutor {
         let mut logs = vec![log];
         logs.extend(sweep_escrow_records(
             state,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
             &mut state_changes,
         )?);
         state_changes.extend(charge_and_advance(tx, state, gas_cost));
@@ -2595,7 +2801,7 @@ impl NativeExecutor {
             &payload.escrow_id,
             &payload.proof,
             &tx.from,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
         )?;
         state_changes.extend(charge_and_advance(tx, state, gas_cost));
         Ok(ExecutionResult::success(
@@ -2625,7 +2831,7 @@ impl NativeExecutor {
             state,
             &payload.escrow_id,
             &tx.from,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
         )?;
         state_changes.extend(charge_and_advance(tx, state, gas_cost));
         Ok(ExecutionResult::success(
@@ -2669,7 +2875,11 @@ impl NativeExecutor {
 
         validate_killswitch_dids(&payload.agent_did, &payload.controller_did)?;
         validate_reason_text_len(payload.reason_text.as_deref())?;
-        require_agent_controller(state, &tx.from, &payload.agent_did, &payload.controller_did)?;
+        let root_pause =
+            is_root_pause(state, &tx.from, &payload.agent_did, &payload.controller_did);
+        if !root_pause {
+            require_agent_controller(state, &tx.from, &payload.agent_did, &payload.controller_did)?;
+        }
 
         // Charge sender for gas.
         let gas_cost = tx.gas_price.saturating_mul(GAS_KILLSWITCH_PAUSE as u128);
@@ -2703,7 +2913,7 @@ impl NativeExecutor {
             cascade: None,
             pause_until: payload.until,
             frozen_at_block: BlockHeight::new(tx.block_height.unwrap_or(0)),
-            timestamp: Timestamp::new(deterministic_now_ms(tx)),
+            timestamp: Timestamp::new(deterministic_now_ms(tx)?),
         };
         let blob = serde_json::to_vec(&receipt).map_err(|e| {
             VmError::Internal(format!("Failed to serialize KillSwitchReceipt: {}", e))
@@ -2756,13 +2966,17 @@ impl NativeExecutor {
             vec![KILL_SWITCH_TOPICS[0].to_vec()],
             encode_killswitch_log_data(&payload.agent_did, &payload.controller_did, &receipt_id),
         )];
-        agent_audit::withdraw_authority(
-            state,
-            &payload.agent_did,
-            deterministic_now_ms(tx).max(0) as u64,
-            &mut state_changes,
-            &mut logs,
-        )?;
+        // A root's pause of itself writes the one record every agent under
+        // it is read against; it walks none of them.
+        if !root_pause {
+            agent_audit::withdraw_authority(
+                state,
+                &payload.agent_did,
+                deterministic_now_ms(tx)?.max(0) as u64,
+                &mut state_changes,
+                &mut logs,
+            )?;
+        }
 
         Ok(ExecutionResult::success(
             gas_meter.final_used(),
@@ -2828,7 +3042,7 @@ impl NativeExecutor {
             cascade: None,
             pause_until: None,
             frozen_at_block: BlockHeight::new(tx.block_height.unwrap_or(0)),
-            timestamp: Timestamp::new(deterministic_now_ms(tx)),
+            timestamp: Timestamp::new(deterministic_now_ms(tx)?),
         };
         let blob = serde_json::to_vec(&receipt).map_err(|e| {
             VmError::Internal(format!("Failed to serialize KillSwitchReceipt: {}", e))
@@ -2848,7 +3062,7 @@ impl NativeExecutor {
                 by: hex::encode(&tx.from),
                 reason_code: payload.reason_code,
                 evidence_hash: payload.evidence_hash.clone(),
-                at_ms: deterministic_now_ms(tx),
+                at_ms: deterministic_now_ms(tx)?,
                 revoked: false,
             },
             &mut state_changes,
@@ -2955,7 +3169,7 @@ impl NativeExecutor {
             cascade: Some(payload.cascade),
             pause_until: None,
             frozen_at_block: BlockHeight::new(tx.block_height.unwrap_or(0)),
-            timestamp: Timestamp::new(deterministic_now_ms(tx)),
+            timestamp: Timestamp::new(deterministic_now_ms(tx)?),
         };
         let blob = serde_json::to_vec(&receipt).map_err(|e| {
             VmError::Internal(format!("Failed to serialize KillSwitchReceipt: {}", e))
@@ -2996,7 +3210,7 @@ impl NativeExecutor {
         agent_audit::withdraw_authority(
             state,
             &payload.agent_did,
-            deterministic_now_ms(tx).max(0) as u64,
+            deterministic_now_ms(tx)?.max(0) as u64,
             &mut state_changes,
             &mut logs,
         )?;
@@ -3361,7 +3575,7 @@ impl NativeExecutor {
                 "only the account that posted the bond may withdraw it".to_string(),
             ));
         }
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
         if agent_bond_frozen(state, &payload.agent_did, now_ms) {
             return Err(VmError::InvalidTransaction(format!(
                 "the bond of {} is frozen while the agent is paused or quarantined",
@@ -3508,7 +3722,7 @@ impl NativeExecutor {
             })?;
 
         validate_compute_bond_provider_did(&payload.provider_did)?;
-        let min = compute_bond_min(state);
+        let min = compute_bond_entry_min(state);
         if payload.amount < min {
             return Err(VmError::InvalidTransaction(format!(
                 "a compute bond must hold at least {min} wei (compute_bond.min_tnzo)"
@@ -3766,10 +3980,10 @@ impl NativeExecutor {
                 MAX_SLA_OUTCOMES
             )));
         }
-        let gas = GAS_SLA_ATTEST + GAS_SLA_OUTCOME * payload.outcomes.len() as u64;
+        let gas = sla_attest_gas(payload.outcomes.len());
         gas_meter.consume(gas)?;
 
-        let now_epoch = (deterministic_now_ms(tx).max(0) / MARKET_EPOCH_MS) as u64;
+        let now_epoch = (deterministic_now_ms(tx)?.max(0) / MARKET_EPOCH_MS) as u64;
         if payload.epoch >= now_epoch || payload.epoch + MARKET_SUBMIT_WINDOW < now_epoch {
             return Err(VmError::InvalidTransaction(format!(
                 "epoch {} is not a closed epoch within the last {} (current {})",
@@ -3804,6 +4018,9 @@ impl NativeExecutor {
         let mut state_changes = Vec::new();
         let mut logs = Vec::new();
         let mut recorded = 0usize;
+        // Whether a compute bond's hour is excused, asked once per bond: the answer reads the
+        // owner's held claims, so a payload that names one bond many times scans them once.
+        let mut excused_hours = std::collections::HashMap::<String, bool>::new();
         sweep_open_sla(state, now_epoch, &mut state_changes)?;
         for outcome in payload.outcomes {
             // Only a compute bond or a bonded storage stake can owe an SLA.
@@ -3831,6 +4048,22 @@ impl NativeExecutor {
             // No validator attests its own availability.
             if matches!(subject.kind, SlaSubjectKind::RoleStake(r) if r.is_validator())
                 && subject.owner == tx.from
+            {
+                continue;
+            }
+            // A compute provider that had said it was offline, and owed the
+            // hour to no held claim, gets no verdict for it.
+            if subject.kind == SlaSubjectKind::ComputeBond
+                && *excused_hours
+                    .entry(outcome.provider_did.clone())
+                    .or_insert_with(|| {
+                        presence::excused(
+                            state,
+                            &subject.owner,
+                            &outcome.provider_did,
+                            payload.epoch,
+                        )
+                    })
             {
                 continue;
             }
@@ -3939,8 +4172,14 @@ impl NativeExecutor {
             // A provider judged unavailable pays the governed penalty out of
             // its compute bond or role stake into the insurance pool.
             if !verdict.available {
-                let penalty = network_param(state, SLA_UNAVAILABLE_PENALTY_GWEI_PARAM) as u128
-                    * 1_000_000_000;
+                let multiple = sla_failure_multiple(
+                    state,
+                    &outcome.provider_did,
+                    payload.epoch,
+                    &mut state_changes,
+                )?;
+                let penalty = sla_unavailable_penalty(state, &outcome.provider_did, payload.epoch)
+                    .saturating_mul(multiple);
                 match subject.kind {
                     SlaSubjectKind::ComputeBond => {
                         let (_, _, bond_log) = inference_fault::slash_compute_bond(
@@ -3996,21 +4235,13 @@ impl NativeExecutor {
                     }
                 }
             } else {
-                // A validator's verdict pays against its registered machine
-                // identity, which the hardware binding checks.
-                let paid_did = match subject.kind {
-                    SlaSubjectKind::RoleStake(r) if r.is_validator() => {
-                        identity_did_of(state, &subject.owner)
-                            .unwrap_or_else(|| outcome.provider_did.clone())
-                    }
-                    _ => outcome.provider_did.clone(),
-                };
+                let paid_did = availability_reward_did(state, &subject, &outcome.provider_did);
                 availability_reward::pay_if_available(
                     state,
                     &paid_did,
                     &subject.owner,
                     payload.epoch,
-                    deterministic_now_ms(tx),
+                    deterministic_now_ms(tx)?,
                     &mut state_changes,
                     &mut logs,
                 )?;
@@ -4114,7 +4345,7 @@ impl NativeExecutor {
         // The deadline is derived from the block timestamp so every
         // replica computes the same value; `FinalizeComputeBondWithdrawal`
         // reads it back rather than consulting a local clock.
-        let cooldown_until_ms = deterministic_now_ms(tx)
+        let cooldown_until_ms = deterministic_now_ms(tx)?
             .saturating_add(network_param(state, COMPUTE_BOND_COOLDOWN_PARAM) as i64);
         marker["op"] = serde_json::Value::String("WithdrawInitiated".to_string());
         marker["cooldown_until_ms"] = serde_json::Value::String(cooldown_until_ms.to_string());
@@ -4224,7 +4455,7 @@ impl NativeExecutor {
             .ok_or_else(|| {
                 VmError::Internal("compute bond marker is missing cooldown_until_ms".to_string())
             })?;
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
         if now_ms < cooldown_until_ms {
             return Err(VmError::InvalidTransaction(format!(
                 "compute bond cooldown has not elapsed ({} ms remaining)",
@@ -4338,7 +4569,7 @@ impl NativeExecutor {
             &payload.payee,
             payload.amount,
             &payload.authorization,
-            deterministic_now_ms(tx).max(0) as u64,
+            deterministic_now_ms(tx)?.max(0) as u64,
         )?;
 
         // When the payer's own account is an agent's, this settlement is
@@ -4347,7 +4578,7 @@ impl NativeExecutor {
         // generic settlement names no operation for `check_agent_payment`'s
         // fuller terms gate to check, but a revoked, quarantined or
         // over-cap agent is refused here regardless.
-        let settle_at_ms = deterministic_now_ms(tx).max(0) as u64;
+        let settle_at_ms = deterministic_now_ms(tx)?.max(0) as u64;
         let agent_did = identity_did_of(state, payload.payer.as_bytes())
             .filter(|did| did.starts_with("did:tenzro:agent:"));
         let mut agent_spend_changes = Vec::new();
@@ -4389,7 +4620,7 @@ impl NativeExecutor {
         let outcome = payment_settlement::settle_native(
             state,
             tx.chain_id,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
             &payment_settlement::NativePayment {
                 payer: &payload.payer,
                 payee: &payload.payee,
@@ -4610,6 +4841,9 @@ impl NativeExecutor {
                 available: balance,
             });
         }
+        if crate::feature_gate::is_live_now(state, staking::OUTSIDE_CAP_GATE) {
+            staking::check_outside_cap(state, &tx.from, additional)?;
+        }
         let new_balance = balance.saturating_sub(total_debit);
         state.set_balance(&tx.from, new_balance);
 
@@ -4623,7 +4857,7 @@ impl NativeExecutor {
 
         let bond_key = format!("staking_bond:{}", hex::encode(&tx.from));
         let prior_bond = staking::bonded_stake_of(state, &tx.from);
-        staking::add_bond(state, &tx.from, additional, deterministic_now_ms(tx))?;
+        staking::add_bond(state, &tx.from, additional, deterministic_now_ms(tx)?)?;
         let new_bond = staking::bonded_stake_of(state, &tx.from);
 
         let old_nonce = state.get_nonce(&tx.from);
@@ -4772,6 +5006,9 @@ impl NativeExecutor {
                 available: bal,
             });
         }
+        if crate::feature_gate::is_live_now(state, staking::OUTSIDE_CAP_GATE) {
+            staking::check_outside_cap(state, &tx.from, stake)?;
+        }
         let new_bal = bal.saturating_sub(total_debit);
         state.set_balance(&tx.from, new_bal);
 
@@ -4783,7 +5020,8 @@ impl NativeExecutor {
             .checked_add(stake)
             .ok_or_else(|| VmError::Internal("staking vault overflow".to_string()))?;
         state.set_balance(&STAKING_VAULT_ADDRESS, new_vault);
-        staking::add_bond(state, &tx.from, stake, deterministic_now_ms(tx))?;
+        staking::add_bond(state, &tx.from, stake, deterministic_now_ms(tx)?)?;
+        staking::seat_validator(state, &tx.from);
 
         // Persist a marker for re-org replay & audit. Body is the JSON
         // payload — the registry hydrates from this if it ever needs to.
@@ -4913,10 +5151,19 @@ impl NativeExecutor {
         // Every validator key, genesis or registered, indexes the bond it
         // answers with; the slash goes to the insurance pool.
         let mut slash_changes = Vec::new();
+        let mut logs = Vec::new();
         if let Some(account) =
             staking::account_of_consensus_key(state, &evidence.public_key.fingerprint())
         {
             staking::slash_for_equivocation(state, &account, index, &mut slash_changes)?;
+            if let Some(held) = staking::hold_seat_after_slash(state, &account, &mut slash_changes)
+            {
+                logs.push(Log::new(
+                    SYSTEM_ADDRESS.to_vec(),
+                    vec![staking::SLASH_SEAT_HELD_TOPIC.to_vec()],
+                    held.encode(),
+                ));
+            }
         }
         let old_nonce = state.get_nonce(&tx.from);
         state.set_nonce(&tx.from, old_nonce + 1);
@@ -4955,7 +5202,10 @@ impl NativeExecutor {
         Ok(ExecutionResult::success(
             gas_meter.final_used(),
             tx.from.to_vec(),
-            vec![log],
+            {
+                logs.push(log);
+                logs
+            },
             state_changes,
         ))
     }
@@ -5082,7 +5332,7 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_REVOKE_DELEGATED_AGENT)?;
         let (changes, logs) =
-            agent_audit::revoke(state, &tx.from, &tx.data[4..], deterministic_now_ms(tx))?;
+            agent_audit::revoke(state, &tx.from, &tx.data[4..], deterministic_now_ms(tx)?)?;
         self.settle_native(
             tx,
             state,
@@ -5116,7 +5366,23 @@ impl NativeExecutor {
         let p: Payload = serde_json::from_slice(&tx.data[4..]).map_err(|e| {
             VmError::InvalidTransaction(format!("Invalid ReclaimAgentFunds payload: {e}"))
         })?;
-        require_agent_controller(state, &tx.from, &p.agent_did, &p.controller_did)?;
+        match identity_succession::agent_successor(state, &p.agent_did) {
+            // The agent's root was revoked in favour of a successor: what
+            // its wallet holds is the successor's to reclaim, and nobody
+            // else's, the revoked root included.
+            Some(successor) => {
+                if p.controller_did != successor
+                    || identity_did_of(state, &tx.from).as_deref() != Some(successor.as_str())
+                {
+                    return Err(VmError::InvalidTransaction(format!(
+                        "{}'s root was revoked in favour of {successor}; only that identity \
+                         reclaims its funds, from the wallet it is registered with",
+                        p.agent_did
+                    )));
+                }
+            }
+            None => require_agent_controller(state, &tx.from, &p.agent_did, &p.controller_did)?,
+        }
         let wallet = tenzro_types::agent_terms::agent_wallet(&p.agent_did);
         let held = state.get_balance(&wallet);
         let amount = match p.amount.as_deref() {
@@ -5207,7 +5473,7 @@ impl NativeExecutor {
                             .to_string(),
                     ));
                 }
-                let now = deterministic_now_ms(tx);
+                let now = deterministic_now_ms(tx)?;
                 let latest = now.saturating_add(
                     (network_param(state, AGENT_TOPUP_MAX_DAYS_PARAM) as i64)
                         .saturating_mul(86_400_000),
@@ -5259,7 +5525,7 @@ impl NativeExecutor {
         gas_meter.consume(GAS_TOPUP_AGENT)?;
         let p: Payload = serde_json::from_slice(&tx.data[4..])
             .map_err(|e| VmError::InvalidTransaction(format!("Invalid TopUpAgent payload: {e}")))?;
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let allowance = read_agent_topup(state, &p.agent_did).ok_or_else(|| {
             VmError::InvalidTransaction(format!("{} has no top-up allowance", p.agent_did))
         })?;
@@ -5346,14 +5612,26 @@ impl NativeExecutor {
         let p: Payload = serde_json::from_slice(&tx.data[4..]).map_err(|e| {
             VmError::InvalidTransaction(format!("Invalid SetAgentTerms payload: {e}"))
         })?;
+        let seed = match p.rotate {
+            None => agent_cap::seed_gas(state, &p.terms.controller_did),
+            Some(_) => 0,
+        };
+        gas_meter.consume(seed)?;
         let (changes, logs) = agent_terms::set_terms(
             state,
             &p.terms,
             p.rotate,
             &p.approval,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
         )?;
-        self.settle_native(tx, state, gas_meter, GAS_SET_AGENT_TERMS, changes, logs)
+        self.settle_native(
+            tx,
+            state,
+            gas_meter,
+            GAS_SET_AGENT_TERMS.saturating_add(seed),
+            changes,
+            logs,
+        )
     }
 
     /// Handle an `AgentAct`: one action by a delegated agent.
@@ -5370,7 +5648,7 @@ impl NativeExecutor {
             tx.chain_id,
             &action,
             &signature,
-            deterministic_now_ms(tx),
+            deterministic_now_ms(tx)?,
         )?;
         // What the action's settlements burned leaves supply; declared here,
         // or the block's value check reverts the action.
@@ -5391,7 +5669,7 @@ impl NativeExecutor {
         let op: tenzro_types::settlement::PaymentOp = serde_json::from_slice(&tx.data[4..])
             .map_err(|e| VmError::InvalidTransaction(format!("Invalid Payment payload: {e}")))?;
         let mut changes = Vec::new();
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let log = payment_settlement::apply_payment_op(
             state,
             tx.chain_id,
@@ -5424,7 +5702,7 @@ impl NativeExecutor {
                 VmError::InvalidTransaction(format!("Invalid RemoteGrantSettle payload: {e}"))
             })?;
         let (changes, logs) =
-            remote_grant::settle(state, tx.chain_id, deterministic_now_ms(tx), &payload)?;
+            remote_grant::settle(state, tx.chain_id, deterministic_now_ms(tx)?, &payload)?;
         self.settle_native(tx, state, gas_meter, GAS_REMOTE_GRANT_SETTLE, changes, logs)
     }
 
@@ -5439,7 +5717,7 @@ impl NativeExecutor {
         let gas = agent_audit::flag_gas(payload)?;
         gas_meter.consume(gas)?;
         let (changes, logs) =
-            agent_audit::flag(state, &tx.from, deterministic_now_ms(tx), payload)?;
+            agent_audit::flag(state, &tx.from, deterministic_now_ms(tx)?, payload)?;
         self.settle_native(tx, state, gas_meter, gas, changes, logs)
     }
 
@@ -5453,7 +5731,7 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(economy::GAS_FEE_RATE_SUBMIT)?;
         let (changes, logs) =
-            economy::submit_rate(state, &tx.from, &tx.data[4..], deterministic_now_ms(tx))?;
+            economy::submit_rate(state, &tx.from, &tx.data[4..], deterministic_now_ms(tx)?)?;
         self.settle_native(
             tx,
             state,
@@ -5473,7 +5751,7 @@ impl NativeExecutor {
     ) -> Result<ExecutionResult> {
         gas_meter.consume(GAS_AGENT_AUDIT_COMMIT)?;
         let (mut state_changes, logs) =
-            agent_audit::commit(state, &tx.from, deterministic_now_ms(tx), &tx.data[4..])?;
+            agent_audit::commit(state, &tx.from, deterministic_now_ms(tx)?, &tx.data[4..])?;
         let (bal, new_bal) = self.charge_gas(tx, state, GAS_AGENT_AUDIT_COMMIT)?;
         let old_nonce = state.get_nonce(&tx.from);
         state.set_nonce(&tx.from, old_nonce + 1);
@@ -5508,7 +5786,7 @@ impl NativeExecutor {
         op: impl FnOnce(&mut dyn VmState, &VmTransaction, i64) -> Result<(Vec<StateChange>, Vec<Log>)>,
     ) -> Result<ExecutionResult> {
         gas_meter.consume(gas)?;
-        let (mut state_changes, logs) = op(state, tx, deterministic_now_ms(tx))?;
+        let (mut state_changes, logs) = op(state, tx, deterministic_now_ms(tx)?)?;
         let (bal, new_bal) = self.charge_gas(tx, state, gas)?;
         let old_nonce = state.get_nonce(&tx.from);
         state.set_nonce(&tx.from, old_nonce + 1);
@@ -5615,6 +5893,8 @@ impl NativeExecutor {
             )));
         }
 
+        registration_attestation::require(&*state, &payload, || deterministic_now_ms(tx))?;
+
         let key = identity_storage_key(&payload.did);
         let existing = state.get_storage(&SYSTEM_ADDRESS, &key);
 
@@ -5636,6 +5916,16 @@ impl NativeExecutor {
             // the proof verified above is that controller's own signature over
             // every field being written, so the overwrite is authorized.
         }
+
+        // A machine registered under a root counts against the root's
+        // ceiling of delegated identities.
+        let mut cap_changes = Vec::new();
+        identity_caps::note_machine_registration(
+            state,
+            &payload.did,
+            !existing.as_ref().is_some_and(|b| !b.is_empty()),
+            &mut cap_changes,
+        )?;
 
         // Canonical blob = the exact JSON body the submitter signed over, so
         // the stored record and the emitted log are byte-identical on every
@@ -5707,7 +5997,7 @@ impl NativeExecutor {
         let registered_at = if existing.as_ref().is_some_and(|b| !b.is_empty()) {
             None
         } else {
-            let at = deterministic_now_ms(tx).to_le_bytes().to_vec();
+            let at = deterministic_now_ms(tx)?.to_le_bytes().to_vec();
             state.set_storage(&SYSTEM_ADDRESS, registered_at_key.as_bytes(), at.clone());
             Some(at)
         };
@@ -5742,6 +6032,7 @@ impl NativeExecutor {
             ),
         ];
         machine_attestation::note_registered_tpm(state, &payload, &mut changes)?;
+        changes.extend(cap_changes);
         if let Some(at) = registered_at {
             changes.push(StateChange::new(
                 SYSTEM_ADDRESS.to_vec(),
@@ -5751,6 +6042,13 @@ impl NativeExecutor {
             ));
         }
         changes.extend(enrolment_changes);
+        identity_keys::record_event(
+            state,
+            &payload.did,
+            b"IdentityRegister",
+            &log.data,
+            &mut changes,
+        )?;
         let logs = std::iter::once(log).chain(enrolment_log).collect();
         Ok(ExecutionResult::success(
             gas_meter.final_used(),
@@ -5797,6 +6095,12 @@ impl NativeExecutor {
                 )));
             }
         };
+        if staking::seat_held_after_slash(state, &validator, params_epoch(state)) {
+            return Err(VmError::InvalidTransaction(
+                "a validator slashed for signing two checkpoints cannot exit while it holds its seat"
+                    .to_string(),
+            ));
+        }
 
         let gas_cost = tx.gas_price.saturating_mul(GAS_VALIDATOR_EXIT as u128);
         let bal = state.get_balance(&tx.from);
@@ -5806,7 +6110,7 @@ impl NativeExecutor {
                 available: bal,
             });
         }
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
 
         // Exit is two steps under the one transaction type. The first moves
         // the bond into unbonding: it stops counting as stake at once, but
@@ -5816,6 +6120,9 @@ impl NativeExecutor {
         // A sponsored part of the bond is never paid to the validator: it
         // returns to the treasury with the withdrawal.
         let mut sponsored_returned = 0u128;
+        if crate::feature_gate::is_live_now(state, staking::EXIT_FLOOR_GATE) {
+            staking::check_exit_floor(state, &validator)?;
+        }
         let (step, amount) = match staking::begin_unbonding(state, &validator, now_ms)? {
             Some(unbonding) => ("unbonding", unbonding.amount),
             None => {
@@ -6351,6 +6658,11 @@ struct PostComputeBondPayload {
     amount: u128,
 }
 
+/// Gas an SLA attestation of `outcomes` outcomes is charged.
+fn sla_attest_gas(outcomes: usize) -> u64 {
+    GAS_SLA_ATTEST + GAS_SLA_OUTCOME * outcomes as u64
+}
+
 /// JSON payload decoded from `tx.data[4..]` for `SlaAttest`.
 #[derive(Debug, Clone, serde::Deserialize)]
 struct SlaAttestPayload {
@@ -6374,6 +6686,9 @@ pub const SLA_UNAVAILABLE_PENALTY_GWEI_PARAM: &str = "sla.unavailable.penalty_gw
 
 /// Governed key: how often validators probe each bonded provider, ms.
 pub const SLA_PROBE_INTERVAL_PARAM: &str = "sla.probe_interval_ms";
+/// Governed key: probe rounds between two burst challenges against each
+/// operator claiming more than one compute unit.
+pub const SLA_BURST_ROUNDS_PARAM: &str = "feature.sla_burst.rounds_between";
 /// Governed key: how long a provider has to answer a scheduled probe, ms.
 pub const SLA_PROBE_WINDOW_PARAM: &str = "sla.probe_window_ms";
 
@@ -6384,6 +6699,28 @@ pub const CHALLENGE_COMMIT_WINDOW_PARAM: &str = "inference.challenge_commit_wind
 pub const CHALLENGE_REVEAL_WINDOW_PARAM: &str = "inference.challenge_reveal_window_secs";
 /// Ten TNZO.
 pub const DEFAULT_SLA_UNAVAILABLE_PENALTY_GWEI: u64 = 10_000_000_000;
+
+/// Gate: the first epoch from which an unavailable SLA verdict's penalty is
+/// set in USD and is never less than what the hour refunds: the larger of
+/// [`USD_SLA_PENALTY_PARAM`] at the fee rate and the hourly strikes of the
+/// provider's held claims, so being found unavailable never costs a
+/// provider less than the buyers it failed are paid back.
+pub const USD_SLA_PENALTY_KEY: &str = "feature.usd_sla_penalty.activation_epoch";
+/// Governed: the unavailable penalty once [`USD_SLA_PENALTY_KEY`] is live,
+/// micro-USD. Zero at genesis: the vote that activates it sets it, and the
+/// hour's refund is the floor either way.
+pub const USD_SLA_PENALTY_PARAM: &str = "feature.usd_sla_penalty.micro_usd";
+
+/// The penalty, in base units, an unavailable verdict for `provider_did` in
+/// market hour `epoch` takes.
+pub fn sla_unavailable_penalty(state: &dyn VmState, provider_did: &str, epoch: u64) -> u128 {
+    if !crate::feature_gate::is_live_now(state, USD_SLA_PENALTY_KEY) {
+        return network_param(state, SLA_UNAVAILABLE_PENALTY_GWEI_PARAM) as u128 * 1_000_000_000;
+    }
+    let usd =
+        u128::from(network_param(state, USD_SLA_PENALTY_PARAM)).saturating_mul(1_000_000_000_000);
+    economy::usd_to_wei(state, usd).max(compute_claim::hour_refund(state, provider_did, epoch))
+}
 // Per outcome, on top of the base cost.
 pub const GAS_SLA_OUTCOME: u64 = 10_000;
 
@@ -6419,6 +6756,12 @@ fn sla_bucket(provider_did: &str, epoch: u64) -> String {
     format!("{}:{}", epoch, provider_did)
 }
 
+/// System storage slot of the frozen SLA verdict for `provider_did` and
+/// `epoch`.
+pub fn sla_verdict_key(provider_did: &str, epoch: u64) -> String {
+    format!("sla:{}", sla_bucket(provider_did, epoch))
+}
+
 fn sla_open_count_key(epoch: u64) -> String {
     format!("sla_open_n:{epoch}")
 }
@@ -6439,6 +6782,52 @@ fn sla_down_count_key(epoch: u64) -> String {
 
 fn sla_down_key(epoch: u64, i: u64) -> String {
     format!("sla_down_i:{epoch}:{i}")
+}
+
+/// Gate of the failure-window rule: from its epoch, the unavailable verdict
+/// that brings a subject's count within [`SLA_FAILURE_WINDOW_EPOCHS_PARAM`]
+/// to [`SLA_FAILURE_MAX_PARAM`] takes [`SLA_FAILURE_MULTIPLE_PARAM`] times the
+/// flat penalty, and the count starts again. Never at genesis.
+pub const SLA_FAILURE_WINDOW_KEY: &str = "feature.sla_failure_window.activation_epoch";
+/// One-hour epochs a failure counts toward the multiple.
+pub const SLA_FAILURE_WINDOW_EPOCHS_PARAM: &str = "feature.sla_failure_window.window_epochs";
+/// Failures within the window that trigger the multiple.
+pub const SLA_FAILURE_MAX_PARAM: &str = "feature.sla_failure_window.max_failures";
+/// What the triggering failure's penalty is multiplied by.
+pub const SLA_FAILURE_MULTIPLE_PARAM: &str = "feature.sla_failure_window.multiple";
+
+fn sla_failures_key(provider_did: &str) -> String {
+    format!("sla_fail:{provider_did}")
+}
+
+/// What the penalty of `provider_did`'s unavailable verdict at `epoch` is
+/// multiplied by: 1 before the failure-window gate, and from it the governed
+/// multiple when this failure brings the count within the window to the
+/// governed maximum (which then starts again). The record holds at most the
+/// maximum's worth of epochs.
+fn sla_failure_multiple(
+    state: &mut dyn VmState,
+    provider_did: &str,
+    epoch: u64,
+    changes: &mut Vec<StateChange>,
+) -> Result<u128> {
+    if !crate::feature_gate::is_live_now(state, SLA_FAILURE_WINDOW_KEY) {
+        return Ok(1);
+    }
+    let window = network_param(state, SLA_FAILURE_WINDOW_EPOCHS_PARAM).max(1);
+    let max = network_param(state, SLA_FAILURE_MAX_PARAM).max(1) as usize;
+    let key = sla_failures_key(provider_did);
+    let mut failures: Vec<u64> = funding::read_json(state, &key).unwrap_or_default();
+    failures.retain(|e| e.saturating_add(window) > epoch && *e <= epoch);
+    failures.push(epoch);
+    let multiple = if failures.len() >= max {
+        failures.clear();
+        u128::from(network_param(state, SLA_FAILURE_MULTIPLE_PARAM).max(1))
+    } else {
+        1
+    };
+    funding::write_json(state, &key, &failures, changes)?;
+    Ok(multiple)
 }
 
 /// Governed key: epochs a frozen SLA verdict is kept.
@@ -6540,7 +6929,7 @@ fn read_sla_verdict_kept(
     provider_did: &str,
     epoch: u64,
 ) -> Option<SlaVerdict> {
-    let key = format!("sla:{}", sla_bucket(provider_did, epoch));
+    let key = sla_verdict_key(provider_did, epoch);
     serde_json::from_slice(&state.get_storage(&SYSTEM_ADDRESS, key.as_bytes())?).ok()
 }
 
@@ -6752,15 +7141,12 @@ fn escrow_storage_key(escrow_id_hex: &str) -> String {
 /// different results on different validators, splitting the
 /// finalized state and breaking consensus.
 ///
-/// This helper:
-/// 1. Prefers `tx.block_timestamp_ms` when the consensus event loop
-///    has supplied it (the canonical case under finalized execution).
-/// 2. Falls back to `Utc::now()` ONLY when no block timestamp is set,
-///    which is the test / read-only-call path that doesn't go through
-///    consensus and therefore can't break replay determinism.
-pub(crate) fn deterministic_now_ms(tx: &VmTransaction) -> i64 {
-    tx.block_timestamp_ms
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+/// The block timestamp is the only clock: a transaction that carries none
+/// is refused, on every path, so no handler can decide on a host clock.
+pub(crate) fn deterministic_now_ms(tx: &VmTransaction) -> Result<i64> {
+    tx.block_timestamp_ms.ok_or_else(|| {
+        VmError::InvalidTransaction("transaction carries no block timestamp".to_string())
+    })
 }
 
 /// Log topics of a pause, a quarantine and a termination, in that order.
@@ -6961,7 +7347,7 @@ pub(crate) fn open_proposal(
     let proposal_hash: [u8; 32] = hasher.finalize().into();
     let proposal_id = hex::encode(proposal_hash);
 
-    let now_ms = deterministic_now_ms(tx);
+    let now_ms = deterministic_now_ms(tx)?;
     let mut proposer = [0u8; 32];
     let len = tx.from.len().min(32);
     proposer[..len].copy_from_slice(&tx.from[..len]);
@@ -7083,16 +7469,22 @@ pub fn governance_receipt_slots(
     let mut slots = vec![("proposal", governance_proposal_key(proposal_id))];
     if let Some(p) = load_proposal(state, proposal_id) {
         slots.push(("tally", governance_tally_key(&p.ballot_id())));
-        if let crate::governance::ProposalAction::PolicyUpdate {
-            update: tenzro_types::token::PolicyUpdate::ProtocolUpgrade { code_hash, .. },
-            ..
-        } = &p.action
+        if let crate::governance::ProposalAction::PolicyUpdate { update, .. } = &p.action
+            && let Some((_, binaries)) = upgrade::upgrade_binaries(update)
         {
-            slots.push((
-                "readiness",
-                format!("upgrade_ready:{}", hex::encode(code_hash)),
-            ));
+            for code_hash in binaries {
+                slots.push((
+                    "readiness",
+                    format!("upgrade_ready:{}", hex::encode(code_hash)),
+                ));
+            }
             slots.push(("activation", "upgrade_activation".to_string()));
+            if matches!(
+                update,
+                tenzro_types::token::PolicyUpdate::ProtocolUpgradePlatforms { .. }
+            ) {
+                slots.push(("platforms", "upgrade_platforms".to_string()));
+            }
         }
     }
     slots.push(("veto_total", format!("veto_total:{proposal_id}")));
@@ -7158,7 +7550,7 @@ pub(crate) fn cast_agent_ballot(
         .ok_or_else(|| refuse("the validator is a 20 or 32 byte account".into()))?;
     let validator_did = identity_of_wallet(state, &validator)
         .ok_or_else(|| refuse("the validator has no identity".into()))?;
-    if crate::funding::root_did(&validator_did) != terms.controller_did {
+    if operator::root_did_in_force(state, &validator_did) != terms.controller_did {
         return Err(refuse(
             "the validator is not the agent's principal's".into(),
         ));
@@ -7178,10 +7570,18 @@ pub(crate) fn cast_agent_ballot(
     let cap_bps = u128::from(scope.max_weight_bps)
         .min(u128::from(network_param(state, AGENT_WEIGHT_MAX_PARAM)));
     let cap = tally.total_eligible.saturating_mul(cap_bps) / 10_000;
-    let counted = weight.min(cap);
+    let (counted, root_change) = root_capped(
+        state,
+        &ballot_id,
+        &validator,
+        weight.min(cap),
+        previous.map(|(w, _, _)| w),
+        tally.total_eligible,
+    );
     if counted == 0 {
         return Err(refuse("the agent's ballot cap counts nothing".into()));
     }
+    changes.extend(root_change);
     tally.apply_vote(counted, ballot.in_favour, previous.map(|(w, f, _)| (w, f)));
     let (tally_blob, prior_tally) = store_tally(state, &ballot_id, &tally)?;
     let (vote_blob, prior_vote) = store_vote(
@@ -7279,7 +7679,7 @@ fn operator_may_vote(state: &dyn VmState, signer: &[u8], validator: &[u8]) -> Re
             hex::encode(validator)
         ))
     })?;
-    if crate::funding::root_did(&validator_did) != signer_did {
+    if operator::root_did_in_force(state, &validator_did) != signer_did {
         return Err(VmError::InvalidTransaction(format!(
             "{signer_did} does not operate validator {}",
             hex::encode(validator)
@@ -7377,6 +7777,31 @@ pub fn is_identity_revoked(state: &dyn VmState, did: &str) -> bool {
         .is_some_and(|b| !b.is_empty())
 }
 
+/// Gate of the rule that a root's revocation reaches every identity derived
+/// under it ([`identity_revoked_in_force`]).
+pub const ROOT_REVOCATION_REACH_KEY: &str = "feature.root_revocation_reach.activation_epoch";
+
+/// Whether `did` may no longer act: chain state records it as revoked or,
+/// once the reach rule is live, records as revoked the root its DID is
+/// derived under (`did:tenzro:machine:{root}:{id}`). A revocation walks the
+/// root's agents and marks each; a machine the root registered without terms
+/// is in no index, so its standing is read from its root's.
+pub fn identity_revoked_in_force(state: &dyn VmState, did: &str) -> bool {
+    if is_identity_revoked(state, did) {
+        return true;
+    }
+    if !crate::feature_gate::is_live_now(state, ROOT_REVOCATION_REACH_KEY) {
+        return false;
+    }
+    // Human and machine roots derive their ids in separate domains, so at
+    // most one of the two names a registered root.
+    tenzro_types::identity::delegated_root_id(did).is_some_and(|root| {
+        ["human", "machine"]
+            .iter()
+            .any(|kind| is_identity_revoked(state, &format!("did:tenzro:{kind}:{root}")))
+    })
+}
+
 /// Stake `addr` currently has bonded, in the smallest unit.
 ///
 /// This is the voter's weight. Zero means not a validator, which is also what
@@ -7444,6 +7869,34 @@ pub fn vault_recovery_address() -> Address {
 }
 
 /// The DID bound to `addr`, if any.
+/// First epoch from which an available verdict on any role stake (an RPC
+/// operator, an edge relay, a storage stake) pays against the owner's
+/// registered machine identity, as a validator's does; before it only a
+/// validator's does, and the other roles' verdicts never reach a hardware
+/// binding the availability reward can check.
+pub const ROLE_AVAILABILITY_REWARD_GATE: &str = "feature.role_availability_reward.activation_epoch";
+
+/// The DID an available verdict on `subject` pays against: for a role stake,
+/// the owner's registered machine identity, whose hardware binding the
+/// availability reward checks (every role once
+/// [`ROLE_AVAILABILITY_REWARD_GATE`] is live, a validator's always); for a
+/// compute bond, its provider DID.
+fn availability_reward_did(
+    state: &dyn VmState,
+    subject: &role_stake::SlaSubject,
+    provider_did: &str,
+) -> String {
+    match subject.kind {
+        SlaSubjectKind::RoleStake(r)
+            if r.is_validator()
+                || crate::feature_gate::is_live_now(state, ROLE_AVAILABILITY_REWARD_GATE) =>
+        {
+            identity_did_of(state, &subject.owner).unwrap_or_else(|| provider_did.to_string())
+        }
+        _ => provider_did.to_string(),
+    }
+}
+
 pub fn identity_did_of(state: &dyn VmState, addr: &[u8]) -> Option<String> {
     let blob = state.get_storage(&SYSTEM_ADDRESS, identity_wallet_index_key(addr).as_bytes())?;
     if blob.is_empty() {
@@ -7569,6 +8022,17 @@ pub fn stored_param(state: &dyn VmState, key: &str) -> Option<u64> {
         })
 }
 
+/// [`stored_param`] through any reader of committed system storage, for code
+/// that does not hold the chain state itself.
+pub fn stored_param_through(
+    mut system: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+    key: &str,
+) -> Option<u64> {
+    system(governed_param_key(key).as_bytes())
+        .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+        .map(u64::from_le_bytes)
+}
+
 pub fn network_param(state: &dyn VmState, key: &str) -> u64 {
     stored_param(state, key).unwrap_or_else(|| {
         debug_assert!(
@@ -7687,6 +8151,9 @@ fn schedule_param_change(
     proposal_id: &str,
     changes: &mut Vec<StateChange>,
 ) -> Result<u64> {
+    if std::env::var("ECON_DBG").is_ok() {
+        eprintln!("schedule_param_change key={} value={}", key, value);
+    }
     let current = network_param(state, key);
     let grace = if param.tighten.tightens(current, value) {
         network_param(state, crate::governance::TIGHTENING_GRACE_PARAM)
@@ -7751,6 +8218,8 @@ pub fn begin_block_params(state: &mut dyn VmState, epoch: u64) -> Result<Vec<(St
         PARAMS_EPOCH_KEY.as_bytes(),
         epoch.to_le_bytes().to_vec(),
     );
+    // Basket weights enacted for this epoch take effect at the next start.
+    settlement_asset::refresh_unit_basket(state);
 
     let index = pending_param_keys(state);
     if index.is_empty() {
@@ -7793,8 +8262,31 @@ pub fn begin_block_params(state: &mut dyn VmState, epoch: u64) -> Result<Vec<(St
                 );
                 continue;
             }
+            // The release floor may have been lowered since the change was
+            // enacted: a key newer than the floor is dropped, as at enactment.
+            if crate::governance::change_released(
+                &key,
+                network_param(&*state, crate::governance::RELEASE_FLOOR_PARAM),
+            )
+            .is_err()
+            {
+                state.set_storage(
+                    &SYSTEM_ADDRESS,
+                    pending_param_key(&key).as_bytes(),
+                    Vec::new(),
+                );
+                continue;
+            }
             let in_force = |k: &str| network_param(&*state, k);
-            if crate::governance::joint_change_allowed(&key, pending.value, &in_force).is_err() {
+            if crate::governance::joint_change_allowed(&key, pending.value, &in_force).is_err()
+                || inference_fault::challenge_window_change_allowed(
+                    &*state,
+                    &key,
+                    pending.value,
+                    &in_force,
+                )
+                .is_err()
+            {
                 held.push(key);
                 continue;
             }
@@ -7823,6 +8315,9 @@ pub fn begin_block_params(state: &mut dyn VmState, epoch: u64) -> Result<Vec<(St
             .map_err(|e| VmError::Internal(format!("encoding pending index: {e}")))?
     };
     state.set_storage(&SYSTEM_ADDRESS, PENDING_PARAMS_INDEX_KEY.as_bytes(), blob);
+    if std::env::var("ECON_DBG").is_ok() && !applied.is_empty() {
+        eprintln!("begin_block_params epoch {} applied {:?}", epoch, applied);
+    }
     Ok(applied)
 }
 
@@ -7868,6 +8363,63 @@ fn store_tally(
         serde_json::to_vec(tally).map_err(|e| VmError::Internal(format!("encoding tally: {e}")))?;
     state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), blob.clone());
     Ok((blob, previous))
+}
+
+/// Governed key: most of a proposal's eligible stake the ballots of one
+/// root's validators may count together, bps, once [`ROOT_VOTE_CAP_GATE`] is
+/// live.
+pub const ROOT_VOTE_CAP_PARAM: &str = "feature.root_vote_cap.max_share_bps";
+
+/// First epoch from which [`ROOT_VOTE_CAP_PARAM`] bounds a root's ballots.
+pub const ROOT_VOTE_CAP_GATE: &str = "feature.root_vote_cap.activation_epoch";
+
+fn root_vote_key(ballot_id: &str, root: &str) -> String {
+    format!("gov_root_vote:{ballot_id}:{root}")
+}
+
+/// What a ballot of `weight` by `validator` counts once its root's cap is
+/// applied, and the change to the root's running total. The root is the
+/// root identity of the validator's identity, or the validator itself when
+/// it has none. `previous` is what this validator's earlier ballot counted;
+/// a changed ballot gives that room back first. Before
+/// [`ROOT_VOTE_CAP_GATE`] the weight counts whole and nothing is written.
+fn root_capped(
+    state: &mut dyn VmState,
+    ballot_id: &str,
+    validator: &[u8],
+    weight: u128,
+    previous: Option<u128>,
+    total_eligible: u128,
+) -> (u128, Option<StateChange>) {
+    if !crate::feature_gate::is_live_now(state, ROOT_VOTE_CAP_GATE) {
+        return (weight, None);
+    }
+    let root = identity_of_wallet(state, validator)
+        .map(|did| crate::funding::root_did(&did))
+        .unwrap_or_else(|| hex::encode(validator));
+    let key = root_vote_key(ballot_id, &root);
+    let prior = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes());
+    let recorded = prior
+        .as_deref()
+        .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        .map_or(0, u128::from_le_bytes);
+    let used = recorded.saturating_sub(previous.unwrap_or(0));
+    let cap = staking::bps_share(
+        total_eligible,
+        u128::from(network_param(state, ROOT_VOTE_CAP_PARAM)),
+    );
+    let counted = weight.min(cap.saturating_sub(used));
+    let total = used.saturating_add(counted).to_le_bytes().to_vec();
+    state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), total.clone());
+    (
+        counted,
+        Some(StateChange::new(
+            SYSTEM_ADDRESS.to_vec(),
+            key.into_bytes(),
+            prior,
+            Some(total),
+        )),
+    )
 }
 
 /// A voter's existing ballot as `(weight, in_favour)`, if they have one.
@@ -8060,13 +8612,43 @@ pub fn agent_bond_frozen(state: &dyn VmState, agent_did: &str, now_ms: i64) -> b
         || agent_audit::read_agent_quarantine(state, agent_did).is_some()
 }
 
-/// Whether `agent_did`'s controller paused it until after `now_ms`. A paused
-/// agent neither acts nor pays, and its bond stays.
+/// Gate of the rule that a root pauses every agent it delegated with one
+/// pause of itself ([`is_root_pause`]).
+pub const ROOT_PAUSE_KEY: &str = "feature.root_pause.activation_epoch";
+
+/// Whether `agent_did`'s controller paused it until after `now_ms`: the
+/// agent itself or, once the root pause is live, the root its DID is derived
+/// under. A paused agent neither acts nor pays, and its bond stays.
 pub fn agent_paused(state: &dyn VmState, agent_did: &str, now_ms: i64) -> bool {
+    pause_runs(state, agent_did, now_ms)
+        || (crate::feature_gate::is_live_now(state, ROOT_PAUSE_KEY)
+            && tenzro_types::identity::delegated_root_id(agent_did).is_some_and(|root| {
+                // Human and machine roots derive their ids in separate
+                // domains, so at most one of the two is a root.
+                ["human", "machine"]
+                    .iter()
+                    .any(|kind| pause_runs(state, &format!("did:tenzro:{kind}:{root}"), now_ms))
+            }))
+}
+
+/// Whether the pause recorded for `did` ends after `now_ms`.
+fn pause_runs(state: &dyn VmState, did: &str, now_ms: i64) -> bool {
     state
-        .get_storage(&SYSTEM_ADDRESS, agent_pause_key(agent_did).as_bytes())
+        .get_storage(&SYSTEM_ADDRESS, agent_pause_key(did).as_bytes())
         .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
         .is_some_and(|b| i64::from_le_bytes(b) > now_ms)
+}
+
+/// Whether a pause naming `agent_did` as its own controller is a root
+/// pausing every agent it delegated: the rule is live, the DID is a root (a
+/// human or an autonomous machine), and `from` is the wallet that root's
+/// identity is registered with. The pause is recorded for the root alone and
+/// ends, or is replaced by a later pause, as an agent's does.
+fn is_root_pause(state: &dyn VmState, from: &[u8], agent_did: &str, controller_did: &str) -> bool {
+    agent_did == controller_did
+        && crate::feature_gate::is_live_now(state, ROOT_PAUSE_KEY)
+        && tenzro_types::agent_terms::RootKind::of(agent_did).is_some()
+        && identity_did_of(state, from).as_deref() == Some(agent_did)
 }
 
 /// The controller `agent_did` answers to on chain: the one its terms name,
@@ -8438,6 +9020,13 @@ pub(crate) fn lock_escrow(
             "Escrow amount must be greater than zero".to_string(),
         ));
     }
+    if matches!(payload.release_conditions, ReleaseConditions::Custom { .. })
+        && crate::feature_gate::is_live_now(state, CUSTOM_ESCROW_REFUSED_GATE)
+    {
+        return Err(VmError::InvalidTransaction(
+            "a custom release condition names no rule the ledger checks".to_string(),
+        ));
+    }
     if let ReleaseConditions::Stream {
         rate_per_epoch,
         epoch_ms,
@@ -8612,6 +9201,17 @@ pub(crate) fn release_escrow(
             "Escrow {} has expired",
             escrow_id_hex
         )));
+    }
+    // A custom condition is free text no validator can check: once the rule
+    // is live no proof releases an escrow under one, and its payer refunds
+    // it.
+    if matches!(escrow.release_conditions, ReleaseConditions::Custom { .. })
+        && crate::feature_gate::is_live_now(state, CUSTOM_ESCROW_REFUSED_GATE)
+    {
+        return Err(VmError::InvalidTransaction(
+            "Proof verification failed: a custom condition names no rule the ledger checks"
+                .to_string(),
+        ));
     }
     match quorum {
         Some((claim, verifiers)) => verify_quorum_release(escrow_id, &claim, &verifiers, proof)?,
@@ -9087,6 +9687,104 @@ impl VmExecutor for NativeExecutor {
                     identity_revocation::apply(state, &op, now)
                 })
             }
+            native_call::SELECTOR_NATIVE_CALL => {
+                let (inner, payload) = native_call::open(state, &tx.data[4..])?;
+                match inner {
+                    bond_onramp::SELECTOR_BOND_WITH_STABLE => self.execute_system_op(
+                        tx,
+                        state,
+                        &mut gas_meter,
+                        bond_onramp::GAS_BOND_WITH_STABLE,
+                        |state, tx, now| bond_onramp::apply(state, &tx.from, payload, now),
+                    ),
+                    SELECTOR_RPC_PROVIDER => self.execute_system_op(
+                        tx,
+                        state,
+                        &mut gas_meter,
+                        rpc_provider_leg::GAS_RPC_PROVIDER,
+                        |state, tx, _now| rpc_provider_leg::apply(state, &tx.from, payload),
+                    ),
+                    tenzro_native_ops::SELECTOR_GATEWAY_DELIVERY => {
+                        let op: tenzro_native_ops::gateway_delivery::GatewayDeliveryOp =
+                            serde_json::from_slice(payload).map_err(|e| {
+                                VmError::InvalidTransaction(format!(
+                                    "Invalid gateway delivery payload: {e}"
+                                ))
+                            })?;
+                        let gas = bridge::gateway_delivery_gas(state, &op);
+                        self.execute_system_op(tx, state, &mut gas_meter, gas, |state, tx, now| {
+                            bridge::admit_gateway_delivery(state, tx, &op, now)
+                        })
+                    }
+                    SELECTOR_BUILD_ATTESTATION => self.execute_system_op(
+                        tx,
+                        state,
+                        &mut gas_meter,
+                        build_attestation::GAS_BUILD_ATTESTATION,
+                        |state, tx, _now| {
+                            build_attestation::apply(
+                                state,
+                                &tx.from,
+                                payload,
+                                tx.block_height.unwrap_or_default(),
+                            )
+                        },
+                    ),
+                    SELECTOR_IDENTITY_SUCCESSION => {
+                        let op: tenzro_native_ops::identity_succession::IdentitySuccessionOp =
+                            serde_json::from_slice(payload).map_err(|e| {
+                                VmError::InvalidTransaction(format!(
+                                    "Invalid identity succession payload: {e}"
+                                ))
+                            })?;
+                        let gas = identity_succession::gas(state, &op);
+                        self.execute_system_op(tx, state, &mut gas_meter, gas, |state, _tx, now| {
+                            identity_succession::apply(state, &op, now)
+                        })
+                    }
+                    SELECTOR_IDENTITY_KEYS => {
+                        let op: tenzro_native_ops::identity_keys::IdentityKeyOp =
+                            serde_json::from_slice(payload).map_err(|e| {
+                                VmError::InvalidTransaction(format!(
+                                    "Invalid identity key payload: {e}"
+                                ))
+                            })?;
+                        self.execute_system_op(
+                            tx,
+                            state,
+                            &mut gas_meter,
+                            identity_keys::GAS_IDENTITY_KEYS,
+                            |state, _tx, now| identity_keys::apply(state, &op, now),
+                        )
+                    }
+                    presence::SELECTOR_PROVIDER_PRESENCE => {
+                        let op: tenzro_native_ops::provider_presence::ProviderPresenceOp =
+                            serde_json::from_slice(payload).map_err(|e| {
+                                VmError::InvalidTransaction(format!(
+                                    "Invalid provider presence payload: {e}"
+                                ))
+                            })?;
+                        self.execute_system_op(
+                            tx,
+                            state,
+                            &mut gas_meter,
+                            presence::GAS_PROVIDER_PRESENCE,
+                            |state, tx, now| presence::apply(state, &tx.from, &op, now),
+                        )
+                    }
+                    SELECTOR_ZK_VERDICT => self.execute_system_op(
+                        tx,
+                        state,
+                        &mut gas_meter,
+                        zk_verdict::GAS_ZK_VERDICT,
+                        |state, tx, _now| zk_verdict::apply(state, &tx.from, payload),
+                    ),
+                    other => Err(VmError::InvalidTransaction(format!(
+                        "{} is listed for native calls but has no handler",
+                        hex::encode(other)
+                    ))),
+                }
+            }
             SELECTOR_BRIDGE_WATCHER => {
                 let op: bridge_watcher::Op =
                     serde_json::from_slice(&tx.data[4..]).map_err(|e| {
@@ -9197,18 +9895,7 @@ impl VmExecutor for NativeExecutor {
         ))
     }
 
-    async fn deploy_contract(
-        &self,
-        _deployment: &ContractDeployment,
-        _state: &mut dyn VmState,
-    ) -> Result<DeployResult> {
-        // Native executor doesn't deploy contracts
-        Err(VmError::ExecutionFailed(
-            "Native executor does not support contract deployment".to_string(),
-        ))
-    }
-
-    async fn estimate_gas(&self, tx: &VmTransaction, _state: &dyn VmState) -> Result<u64> {
+    async fn estimate_gas(&self, tx: &VmTransaction, state: &dyn VmState) -> Result<u64> {
         // Estimate gas based on transaction type
         if tx.data.is_empty() {
             return Ok(GAS_TRANSFER);
@@ -9229,6 +9916,7 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_GOVERNANCE_EXECUTE => GAS_GOVERNANCE_EXECUTE,
             SELECTOR_GOVERNANCE_VETO => GAS_GOVERNANCE_EXECUTE,
             SELECTOR_GOVERNANCE_PAUSE => GAS_GOVERNANCE_EXECUTE,
+            SELECTOR_GOVERNANCE_FEATURE_PAUSE => GAS_GOVERNANCE_EXECUTE,
             SELECTOR_GOVERNANCE_VETO_SIGNAL
             | SELECTOR_GOVERNANCE_VETO_WITHDRAW
             | SELECTOR_GOVERNANCE_CONCERN => veto_escrow::GAS_HOLDER_GOVERNANCE,
@@ -9239,6 +9927,7 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_ESCROW_CREATE => GAS_ESCROW_CREATE,
             SELECTOR_ESCROW_RELEASE => GAS_ESCROW_RELEASE,
             SELECTOR_ESCROW_REFUND => GAS_ESCROW_REFUND,
+            SELECTOR_ESCROW_CLAIM => payment_settlement::escrow_claim_gas(&tx.data[4..]),
             SELECTOR_ESCROW_PREIMAGE_CLAIM => payment_settlement::GAS_ESCROW_PREIMAGE_CLAIM,
             SELECTOR_ESCROW_STREAM_CLAIM => payment_settlement::GAS_ESCROW_STREAM_CLAIM,
             SELECTOR_METER_BOND_POST => meter_bond::GAS_METER_BOND_POST,
@@ -9254,7 +9943,9 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_INCREASE_COMPUTE_BOND => GAS_COMPUTE_BOND_INCREASE,
             SELECTOR_WITHDRAW_COMPUTE_BOND => GAS_COMPUTE_BOND_WITHDRAW,
             SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL => GAS_COMPUTE_BOND_FINALIZE,
-            SELECTOR_SLA_ATTEST => GAS_SLA_ATTEST + GAS_SLA_OUTCOME * MAX_SLA_OUTCOMES as u64,
+            SELECTOR_SLA_ATTEST => serde_json::from_slice::<SlaAttestPayload>(&tx.data[4..])
+                .map(|p| sla_attest_gas(p.outcomes.len()))
+                .unwrap_or(sla_attest_gas(MAX_SLA_OUTCOMES)),
             availability_reward::SELECTOR_DECLARE_READINESS_TIER => {
                 availability_reward::GAS_DECLARE_READINESS_TIER
             }
@@ -9297,7 +9988,25 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_IDENTITY_SERVICES => did_services::GAS_IDENTITY_SERVICES,
             SELECTOR_ACCOUNT_OUTFLOW => crate::account_outflow::GAS_ACCOUNT_OUTFLOW,
             SELECTOR_BRIDGE_WATCHER => bridge_watcher::GAS_BRIDGE_WATCHER,
-            SELECTOR_IDENTITY_REVOKE => identity_revocation::GAS_IDENTITY_REVOKE,
+            SELECTOR_IDENTITY_REVOKE => serde_json::from_slice(&tx.data[4..])
+                .map(|op| identity_revocation::gas(state, &op))
+                .unwrap_or(identity_revocation::GAS_IDENTITY_REVOKE),
+            SELECTOR_IDENTITY_KEYS => identity_keys::GAS_IDENTITY_KEYS,
+            SELECTOR_IDENTITY_SUCCESSION => identity_succession::GAS_IDENTITY_SUCCESSION,
+            SELECTOR_BUILD_ATTESTATION => build_attestation::GAS_BUILD_ATTESTATION,
+            presence::SELECTOR_PROVIDER_PRESENCE => presence::GAS_PROVIDER_PRESENCE,
+            SELECTOR_ZK_VERDICT => zk_verdict::GAS_ZK_VERDICT,
+            bond_onramp::SELECTOR_BOND_WITH_STABLE => bond_onramp::GAS_BOND_WITH_STABLE,
+            SELECTOR_RPC_PROVIDER => rpc_provider_leg::GAS_RPC_PROVIDER,
+            tenzro_native_ops::SELECTOR_GATEWAY_DELIVERY => {
+                native_call::gas(tenzro_native_ops::SELECTOR_GATEWAY_DELIVERY)
+                    .unwrap_or(GAS_TRANSFER)
+            }
+            native_call::SELECTOR_NATIVE_CALL => tx
+                .data
+                .get(4..8)
+                .and_then(|inner| native_call::gas(inner.try_into().ok()?))
+                .unwrap_or(GAS_TRANSFER),
             SELECTOR_AGENT_AUDIT_COMMIT => GAS_AGENT_AUDIT_COMMIT,
             SELECTOR_LIFT_AGENT_QUARANTINE => GAS_LIFT_AGENT_QUARANTINE,
             SELECTOR_REVOKE_DELEGATED_AGENT => GAS_REVOKE_DELEGATED_AGENT,
@@ -9309,10 +10018,10 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_PAYMENT => payment_settlement::GAS_PAYMENT_OP,
             SELECTOR_REMOTE_GRANT_SETTLE => GAS_REMOTE_GRANT_SETTLE,
             SELECTOR_HANDOVER_DUTY => duty::GAS_HANDOVER_DUTY,
-            SELECTOR_AGENT_AUDIT_FLAG => {
+            SELECTOR_AGENT_AUDIT_FLAG => agent_audit::flag_gas(&tx.data[4..]).unwrap_or(
                 GAS_AGENT_AUDIT_FLAG
-                    + GAS_AGENT_AUDIT_FINDING * tenzro_types::agent_audit::MAX_FINDINGS as u64
-            }
+                    + GAS_AGENT_AUDIT_FINDING * tenzro_types::agent_audit::MAX_FINDINGS as u64,
+            ),
             SELECTOR_VALIDATOR_UPDATE_METADATA => GAS_VALIDATOR_UPDATE_METADATA,
             SELECTOR_IDENTITY_REGISTER => GAS_IDENTITY_REGISTER,
             _ => GAS_TRANSFER, // Default to transfer cost
@@ -9323,7 +10032,454 @@ impl VmExecutor for NativeExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every native transaction kind the executor dispatches has its own
+    /// gas estimate: a kind that fell to the default would be estimated as a
+    /// plain transfer, and a client trusting the estimate would underpay.
+    /// Read from this file's two matches, so a kind added to the dispatch
+    /// without an estimate fails here.
+    #[test]
+    fn every_dispatched_native_kind_has_a_gas_estimate() {
+        let src = include_str!("mod.rs");
+        let arms = |start: &str| -> std::collections::BTreeSet<String> {
+            let from = src.find(start).expect(start);
+            let body = &src[from..];
+            let end = body.find("\n        }").expect("the match ends");
+            body[..end]
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|word| word.starts_with("SELECTOR_"))
+                .map(str::to_string)
+                .collect()
+        };
+        let dispatched = arms("let out = match selector {");
+        let estimated = arms("Ok(match selector {");
+        assert!(dispatched.len() > 50, "{} kinds read", dispatched.len());
+        let missing: Vec<&String> = dispatched.difference(&estimated).collect();
+        assert!(missing.is_empty(), "no gas estimate for {missing:?}");
+    }
+
+    /// Every fixed-cost native kind is estimated at the constant its
+    /// executor charges, and every kind whose charge is computed from its
+    /// payload or state is estimated by a computation too. Read from the
+    /// dispatch, the estimate and the executors' own `consume` calls, so an
+    /// estimate that drifts from its charge fails here.
+    #[test]
+    fn every_native_estimate_is_the_gas_its_kind_is_charged() {
+        // The kinds whose charge is computed, not one constant.
+        const COMPUTED: [&str; 12] = [
+            "SELECTOR_AGENT_AUDIT_FLAG",
+            "SELECTOR_BRIDGE",
+            "SELECTOR_ESCROW_CLAIM",
+            "SELECTOR_GATEWAY_DELIVERY",
+            "SELECTOR_HARDWARE_PROOF",
+            "SELECTOR_IDENTITY_REVOKE",
+            "SELECTOR_INFERENCE_FAULT",
+            "SELECTOR_NATIVE_CALL",
+            "SELECTOR_SETTLEMENT_PLAN",
+            "SELECTOR_SLA_ATTEST",
+            "SELECTOR_TRAINING_PROOF",
+            "SELECTOR_ZK_ATTEST",
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let read = |p: std::path::PathBuf| std::fs::read_to_string(&p).unwrap();
+        // The executors, the native module first: a name defined twice is
+        // the native executor's.
+        let mut sources = vec![read(dir.join("native/mod.rs"))];
+        for d in [dir.join("native"), dir.clone()] {
+            let mut files: Vec<_> = std::fs::read_dir(&d)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "rs")
+                        && !p.ends_with("native/mod.rs")
+                        && !p.to_string_lossy().ends_with("_tests.rs")
+                })
+                .collect();
+            files.sort();
+            sources.extend(files.into_iter().map(read));
+        }
+        let words = |t: &str| -> Vec<String> {
+            t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        // The arms of the match opened by `start`: the selectors each names
+        // and the text of its expression.
+        let arms = |start: &str| -> std::collections::BTreeMap<String, String> {
+            let src = &sources[0];
+            let body = &src[src.find(start).expect(start)..];
+            let body = &body[..body.find("\n        }").expect("the match ends")];
+            let mut out: Vec<(Vec<String>, String, bool)> = Vec::new();
+            for line in body.lines().skip(1) {
+                let indent = line.len() - line.trim_start().len();
+                let t = line.trim();
+                if indent == 12 && t.starts_with("_ =>") {
+                    break;
+                }
+                let head = t.trim_start_matches(['|', ' ']).split_whitespace().next();
+                if indent == 12 && head.is_some_and(|h| h.contains("SELECTOR_")) {
+                    let (lhs, rhs) = t.split_once("=>").unwrap_or((t, ""));
+                    let names: Vec<String> = words(lhs)
+                        .into_iter()
+                        .filter(|w| w.starts_with("SELECTOR_"))
+                        .collect();
+                    let open = !t.contains("=>");
+                    match out.last_mut() {
+                        Some(last) if last.2 => {
+                            last.0.extend(names);
+                            last.1.push_str(rhs);
+                            last.2 = open;
+                        }
+                        _ => out.push((names, rhs.to_string(), open)),
+                    }
+                } else if let Some(last) = out.last_mut() {
+                    last.1.push(' ');
+                    last.1.push_str(t);
+                }
+            }
+            out.into_iter()
+                .flat_map(|(names, rhs, _)| names.into_iter().map(move |n| (n, rhs.clone())))
+                .collect()
+        };
+        let fn_body = |name: &str| -> String {
+            for src in &sources {
+                let Some(at) = src
+                    .find(&format!("fn {name}("))
+                    .or_else(|| src.find(&format!("fn {name}<")))
+                else {
+                    continue;
+                };
+                let open = at + src[at..].find('{').unwrap();
+                let mut depth = 0;
+                for (i, c) in src[open..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return src[open..open + i].to_string();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            String::new()
+        };
+        let gas_words = |t: &str| -> std::collections::BTreeSet<String> {
+            words(t)
+                .into_iter()
+                .filter(|w| w.starts_with("GAS_"))
+                .collect()
+        };
+        // The constants an arm charges: those it passes, else those its
+        // executor consumes.
+        let charged = |rhs: &str| -> std::collections::BTreeSet<String> {
+            let passed = gas_words(rhs);
+            if !passed.is_empty() {
+                return passed;
+            }
+            let mut consumed = std::collections::BTreeSet::new();
+            for call in rhs.split('(').filter_map(|p| words(p).pop()) {
+                if call.starts_with("execute_") && call != "execute_system_op" {
+                    let body = fn_body(&call);
+                    for part in body.split("consume(").skip(1) {
+                        consumed.extend(gas_words(part.split(')').next().unwrap_or_default()));
+                    }
+                }
+            }
+            consumed
+        };
+
+        let dispatched = arms("let out = match selector {");
+        let estimated = arms("Ok(match selector {");
+        assert!(dispatched.len() > 50, "{} kinds read", dispatched.len());
+        let mut wrong = Vec::new();
+        for (kind, rhs) in &dispatched {
+            let estimate = estimated.get(kind).map_or("", String::as_str);
+            let bare = estimate.replace(['{', '}', ','], "");
+            let bare = bare.trim();
+            let one_constant = !bare.is_empty()
+                && bare
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
+            let charge = charged(rhs);
+            if COMPUTED.contains(&kind.as_str()) {
+                if one_constant {
+                    wrong.push(format!(
+                        "{kind}: charged by a computation, estimated as {bare}"
+                    ));
+                }
+            } else if charge.len() != 1 || !one_constant || charge != gas_words(bare) {
+                wrong.push(format!(
+                    "{kind}: charged {charge:?}, estimated {estimate:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// A native transaction of `selector` carrying `payload`.
+    fn estimate_tx(selector: [u8; 4], payload: &[u8]) -> VmTransaction {
+        let mut data = selector.to_vec();
+        data.extend_from_slice(payload);
+        VmTransaction::new(
+            vec![1u8; 32],
+            None,
+            0,
+            data,
+            10_000_000,
+            1_000_000_000,
+            0,
+            VmType::Tenzro,
+            VmConfig::default().chain_id,
+        )
+    }
+
+    /// A claim of `n` vouchers is estimated at `n` vouchers' charge.
+    #[tokio::test]
+    async fn an_escrow_claim_of_one_three_and_thirty_two_vouchers_is_estimated_at_its_charge() {
+        use tenzro_types::payment_authorization::{EscrowClaim, EscrowVoucher};
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let state = crate::state_adapter::StateAdapter::new();
+        for n in [1usize, 3, 32] {
+            let claims: Vec<EscrowClaim> = (0..n)
+                .map(|i| EscrowClaim {
+                    voucher: EscrowVoucher {
+                        escrow_id: [i as u8; 32],
+                        cumulative_amount: 1,
+                        binding: [0u8; 32],
+                        public_key: vec![4u8; 65],
+                        signature: Default::default(),
+                        agent: None,
+                        attribution: None,
+                    },
+                    amount: 1,
+                })
+                .collect();
+            let payload = serde_json::to_vec(&serde_json::json!({ "claims": claims })).unwrap();
+            let tx = estimate_tx(SELECTOR_ESCROW_CLAIM, &payload);
+            assert_eq!(
+                executor.estimate_gas(&tx, &state).await.unwrap(),
+                payment_settlement::GAS_ESCROW_CLAIM_PER_VOUCHER * n as u64,
+                "{n} vouchers"
+            );
+        }
+    }
+
+    /// The kinds charged by a computation over their payload are estimated
+    /// by the same computation: at their charge, never below it.
+    #[tokio::test]
+    async fn computed_native_kinds_are_estimated_at_their_charge() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let state = crate::state_adapter::StateAdapter::new();
+        let estimate = |selector: [u8; 4], payload: Vec<u8>| {
+            let tx = estimate_tx(selector, &payload);
+            let executor = &executor;
+            let state = &state;
+            async move { executor.estimate_gas(&tx, state).await.unwrap() }
+        };
+
+        let message = tenzro_types::bridge_transfer::BridgeOp::SendMessage {
+            target_chain: "ethereum".into(),
+            payload: vec![7u8; 300],
+        };
+        assert_eq!(
+            estimate(SELECTOR_BRIDGE, serde_json::to_vec(&message).unwrap()).await,
+            bridge_gas(&message)
+        );
+
+        let dispute = tenzro_types::settlement::PlanOp::DisputeRail {
+            plan_id: [1u8; 32],
+            index: 0,
+            evidence: vec![9u8; 500],
+        };
+        assert_eq!(
+            estimate(
+                SELECTOR_SETTLEMENT_PLAN,
+                serde_json::to_vec(&dispute).unwrap()
+            )
+            .await,
+            settlement_plan_gas(&dispute)
+        );
+
+        for payload in [Vec::new(), vec![0u8; 4_096]] {
+            assert_eq!(
+                estimate(SELECTOR_ZK_ATTEST, payload.clone()).await,
+                zk_registry::zk_attest_gas(payload.len())
+            );
+            assert_eq!(
+                estimate(SELECTOR_HARDWARE_PROOF, payload.clone()).await,
+                hardware_level::proof_gas(&payload)
+            );
+        }
+    }
+
+    /// The kinds charged by their state or the size of their payload are
+    /// estimated at exactly what their executors charge: a revocation per
+    /// agent the revoked root delegated, an SLA attestation per outcome, an
+    /// audit flag per finding, a fault or training proof per byte.
+    #[tokio::test]
+    async fn state_and_size_dependent_kinds_are_estimated_at_their_charge() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = crate::state_adapter::StateAdapter::new();
+        let root = "did:tenzro:human:estimate-root";
+        let mut changes = Vec::new();
+        for i in 0..3 {
+            identity_revocation::index_delegated_agent(
+                &mut state,
+                root,
+                &format!("did:tenzro:machine:estimate-root:agent-{i}"),
+                &mut changes,
+            )
+            .unwrap();
+        }
+        let estimate = |selector: [u8; 4], payload: Vec<u8>| {
+            let tx = estimate_tx(selector, &payload);
+            let executor = &executor;
+            let state = &state;
+            async move { executor.estimate_gas(&tx, state).await.unwrap() }
+        };
+
+        let revoke = tenzro_types::identity::IdentityRevocationOp {
+            did: root.to_string(),
+            reason: "key lost".to_string(),
+            approver_did: root.to_string(),
+            approval: tenzro_types::agent_terms::AgentTermsApproval {
+                account: vec![1u8; 32],
+                nonce: [0u8; 16],
+                root_public_key: vec![4u8; 65],
+                signature: Default::default(),
+            },
+        };
+        assert_eq!(
+            estimate(
+                SELECTOR_IDENTITY_REVOKE,
+                serde_json::to_vec(&revoke).unwrap()
+            )
+            .await,
+            identity_revocation::GAS_IDENTITY_REVOKE
+                + 3 * identity_revocation::GAS_IDENTITY_REVOKE_PER_AGENT
+        );
+        assert_eq!(
+            identity_revocation::gas(&state, &revoke),
+            identity_revocation::GAS_IDENTITY_REVOKE
+                + 3 * identity_revocation::GAS_IDENTITY_REVOKE_PER_AGENT
+        );
+
+        let outcomes: Vec<_> = (0..2)
+            .map(|i| serde_json::json!({ "provider_did": format!("did:tenzro:machine:p{i}"), "available": true, "capacity": null }))
+            .collect();
+        let sla =
+            serde_json::to_vec(&serde_json::json!({ "epoch": 1, "outcomes": outcomes })).unwrap();
+        assert_eq!(
+            estimate(SELECTOR_SLA_ATTEST, sla).await,
+            GAS_SLA_ATTEST + 2 * GAS_SLA_OUTCOME
+        );
+
+        let findings: Vec<_> = (0..3)
+            .map(
+                |epoch| tenzro_types::agent_audit::AuditFinding::MissingCommit {
+                    committer: "did:tenzro:machine:committer".to_string(),
+                    epoch,
+                },
+            )
+            .collect();
+        let flag =
+            serde_json::to_vec(&serde_json::json!({ "epoch": 3, "findings": findings })).unwrap();
+        assert_eq!(
+            agent_audit::flag_gas(&flag).unwrap(),
+            GAS_AGENT_AUDIT_FLAG + 3 * GAS_AGENT_AUDIT_FINDING
+        );
+        assert_eq!(
+            estimate(SELECTOR_AGENT_AUDIT_FLAG, flag).await,
+            GAS_AGENT_AUDIT_FLAG + 3 * GAS_AGENT_AUDIT_FINDING
+        );
+
+        let proof = vec![7u8; 500];
+        let data_len = 4 + proof.len() as u64;
+        assert_eq!(
+            estimate(SELECTOR_INFERENCE_FAULT, proof.clone()).await,
+            GAS_INFERENCE_FAULT + GAS_INFERENCE_FAULT_BYTE * data_len
+        );
+        assert_eq!(
+            estimate(SELECTOR_TRAINING_PROOF, proof).await,
+            GAS_TRAINING_PROOF + GAS_TRAINING_PROOF_BYTE * data_len
+        );
+    }
+
+    /// A claim is estimated at what it is charged: one voucher's worth per
+    /// claim, and the most a claim may carry when the payload does not
+    /// parse.
+    #[test]
+    fn an_escrow_claim_is_estimated_per_voucher() {
+        let max = tenzro_types::payment_authorization::MAX_VOUCHERS_PER_CLAIM as u64;
+        assert_eq!(
+            payment_settlement::escrow_claim_gas(b"not json"),
+            payment_settlement::GAS_ESCROW_CLAIM_PER_VOUCHER * max
+        );
+        assert!(payment_settlement::escrow_claim_gas(b"not json") > GAS_TRANSFER);
+    }
     use crate::state_adapter::StateAdapter;
+
+    /// Before the failure-window gate every unavailable verdict takes the
+    /// flat penalty and nothing is recorded.
+    #[test]
+    fn before_the_failure_window_gate_the_penalty_is_flat() {
+        let mut state = StateAdapter::new();
+        let mut changes = Vec::new();
+        for epoch in 1..=10 {
+            assert_eq!(
+                sla_failure_multiple(&mut state, "did:p", epoch, &mut changes).unwrap(),
+                1
+            );
+        }
+        assert!(changes.is_empty());
+    }
+
+    /// From the gate the third failure within thirty days takes five times
+    /// the penalty and the count starts again; failures older than the
+    /// window do not count.
+    #[test]
+    fn from_the_gate_the_third_failure_in_the_window_takes_the_multiple() {
+        let mut state = StateAdapter::new();
+        set_genesis_param(&mut state, SLA_FAILURE_WINDOW_KEY, 0);
+        let mut changes = Vec::new();
+        let mut at = |state: &mut StateAdapter, e| {
+            sla_failure_multiple(state, "did:p", e, &mut changes).unwrap()
+        };
+        assert_eq!(at(&mut state, 100), 1);
+        assert_eq!(at(&mut state, 200), 1);
+        assert_eq!(at(&mut state, 300), 5);
+        // The count started again.
+        assert_eq!(at(&mut state, 301), 1);
+        assert_eq!(at(&mut state, 302), 1);
+        // 301 and 302 are more than 720 epochs back: this is the first again.
+        assert_eq!(at(&mut state, 1_100), 1);
+        assert_eq!(at(&mut state, 1_101), 1);
+        assert_eq!(at(&mut state, 1_102), 5);
+        // Another subject keeps its own count.
+        assert_eq!(
+            sla_failure_multiple(&mut state, "did:q", 1_102, &mut Vec::new()).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_failure_window_gate_is_dormant_and_follows_the_convention() {
+        for key in [
+            SLA_FAILURE_WINDOW_KEY,
+            SLA_FAILURE_WINDOW_EPOCHS_PARAM,
+            SLA_FAILURE_MAX_PARAM,
+            SLA_FAILURE_MULTIPLE_PARAM,
+        ] {
+            let p = crate::governance::governed_param(key).unwrap();
+            assert!(crate::feature_gate::follows_convention(p), "{key}");
+        }
+        let gate = crate::governance::governed_param(SLA_FAILURE_WINDOW_KEY).unwrap();
+        assert_eq!(gate.genesis, crate::feature_gate::NEVER);
+    }
 
     #[tokio::test]
     async fn test_native_transfer() {
@@ -9347,7 +10503,8 @@ mod tests {
             0,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
 
@@ -9379,7 +10536,8 @@ mod tests {
             0,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let result = executor.execute_transaction(&tx, &mut state).await;
 
@@ -9477,6 +10635,17 @@ mod tests {
             (SELECTOR_ACCOUNT_OUTFLOW, "account_outflow"),
             (SELECTOR_BRIDGE_WATCHER, "bridge_watcher"),
             (SELECTOR_IDENTITY_REVOKE, "identity_revoke"),
+            (SELECTOR_IDENTITY_KEYS, "identity_keys"),
+            (SELECTOR_IDENTITY_SUCCESSION, "identity_succession"),
+            (SELECTOR_BUILD_ATTESTATION, "build_attestation"),
+            (SELECTOR_ZK_VERDICT, "zk_verdict"),
+            (SELECTOR_RPC_PROVIDER, "rpc_provider"),
+            (bond_onramp::SELECTOR_BOND_WITH_STABLE, "bond_with_stable"),
+            (
+                tenzro_native_ops::SELECTOR_GATEWAY_DELIVERY,
+                "gateway_delivery",
+            ),
+            (native_call::SELECTOR_NATIVE_CALL, "native_call"),
             (SELECTOR_AGENT_AUDIT_COMMIT, "agent_audit_commit"),
             (SELECTOR_LIFT_AGENT_QUARANTINE, "lift_agent_quarantine"),
             (SELECTOR_REVOKE_DELEGATED_AGENT, "revoke_delegated_agent"),
@@ -9538,7 +10707,8 @@ mod tests {
             0,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         tx.block_timestamp_ms = Some(at_ms);
         tx
     }
@@ -10777,7 +11947,8 @@ mod tests {
             0,
             crate::VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         tx.block_timestamp_ms = Some(1);
         assert!(
             executor.execute_transaction(&tx, &mut state).await.is_err(),
@@ -10816,6 +11987,7 @@ mod tests {
                 VmType::Tenzro,
                 1337,
             )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
         };
         let below = executor
             .execute_transaction(&post(min - 1, 0), &mut state)
@@ -11142,6 +12314,176 @@ mod tests {
             native_asset: None,
             assets: Vec::new(),
         }
+    }
+
+    /// A CCIP 2.0 route to set finality policies on.
+    fn gov_ccip_2_0_route() -> tenzro_types::bridge_route::BridgeRoute {
+        let mut route = gov_bridge_route();
+        route.lane_limits = Some(tenzro_types::bridge_route::CcipLane {
+            version: tenzro_types::bridge_route::CcipLaneVersion::V2_0,
+            off_ramp: [0x0f; 20],
+            ccv_and_executor_hash: [0xcc; 32],
+            ..route.lane_limits.unwrap()
+        });
+        route
+    }
+
+    fn set_finality_policy(
+        route: &tenzro_types::bridge_route::BridgeRoute,
+        policy: Option<tenzro_bridge::route::finality::CcipFinalityPolicy>,
+    ) -> crate::governance::ProposalAction {
+        crate::governance::ProposalAction::SetBridgeFinalityPolicy {
+            adapter: route.adapter,
+            source_chain: route.source_chain.clone(),
+            asset: None,
+            policy,
+            memo: "transfers at twelve blocks".into(),
+        }
+    }
+
+    /// While `feature.ccip_finality_policy` is dormant a finality policy
+    /// proposal is refused where a node admits transactions and where the
+    /// executor runs them, so no node sends one to a node of the previous
+    /// release. Once live it sets the policy the route framework reads, and
+    /// a proposal of `None` clears it.
+    #[tokio::test]
+    async fn a_finality_policy_waits_for_its_gate_and_then_sets_the_route_policy() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        let route = gov_ccip_2_0_route();
+        let install = crate::governance::ProposalAction::SetBridgeRoute {
+            route: route.clone(),
+            memo: "ethereum peer".into(),
+        };
+        assert!(
+            gov_carry(&executor, &mut state, &a, &install)
+                .await
+                .unwrap()
+                .success
+        );
+
+        let policy = tenzro_bridge::route::finality::CcipFinalityPolicy {
+            allowed: [0, 0, 0, 12],
+            fast_inbound: tenzro_types::bridge_route::LaneRateLimit {
+                capacity: 500,
+                rate: 5,
+            },
+        };
+        let set = set_finality_policy(&route, Some(policy));
+        let as_submitted = tenzro_types::transaction::TransactionType::GovernancePropose {
+            proposal: serde_json::to_vec(&set).unwrap(),
+        };
+        assert!(crate::feature_gate::refuse_dormant_kind(&state, &as_submitted).is_err());
+        let proposed = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&set), 100_000, 0), &mut state)
+            .await;
+        assert!(
+            proposed.as_ref().map_or(true, |r| !r.success),
+            "a dormant proposal is refused: {proposed:?}"
+        );
+        let key = tenzro_bridge::route::finality::policy_key(&route, None);
+        assert!(
+            state
+                .get_storage(&GOVERNED_STATE_ADDRESS, key.as_bytes())
+                .is_none_or(|v| v.is_empty())
+        );
+
+        set_governed_param_for_test(&mut state, bridge::CCIP_FINALITY_POLICY_KEY, 0);
+        assert!(crate::feature_gate::refuse_dormant_kind(&state, &as_submitted).is_ok());
+        assert!(
+            gov_carry(&executor, &mut state, &a, &set)
+                .await
+                .unwrap()
+                .success
+        );
+        let stored = state
+            .get_storage(&GOVERNED_STATE_ADDRESS, key.as_bytes())
+            .expect("the policy is stored");
+        assert_eq!(
+            serde_json::from_slice::<tenzro_bridge::route::finality::CcipFinalityPolicy>(&stored)
+                .unwrap(),
+            policy
+        );
+
+        let clear = set_finality_policy(&route, None);
+        assert!(
+            gov_carry(&executor, &mut state, &a, &clear)
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            state
+                .get_storage(&GOVERNED_STATE_ADDRESS, key.as_bytes())
+                .is_none_or(|v| v.is_empty())
+        );
+    }
+
+    /// A policy on a route that proves every delivery final, or on a route
+    /// that is not a CCIP 2.0 lane, is refused at submission.
+    #[tokio::test]
+    async fn a_finality_policy_is_refused_on_a_route_it_cannot_apply_to() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        set_governed_param_for_test(&mut state, bridge::CCIP_FINALITY_POLICY_KEY, 0);
+        let route = gov_bridge_route();
+        let install = crate::governance::ProposalAction::SetBridgeRoute {
+            route: route.clone(),
+            memo: "ethereum peer".into(),
+        };
+        assert!(
+            gov_carry(&executor, &mut state, &a, &install)
+                .await
+                .unwrap()
+                .success
+        );
+        let set = set_finality_policy(
+            &route,
+            Some(tenzro_bridge::route::finality::CcipFinalityPolicy {
+                allowed: [0, 0, 0, 12],
+                fast_inbound: tenzro_types::bridge_route::LaneRateLimit {
+                    capacity: 500,
+                    rate: 5,
+                },
+            }),
+        );
+        let proposed = executor
+            .execute_transaction(&gov_tx(&a, gov_propose_data(&set), 100_000, 0), &mut state)
+            .await;
+        assert!(
+            proposed.as_ref().map_or(true, |r| !r.success),
+            "a 1.6.0 lane carries no finality: {proposed:?}"
+        );
+    }
+
+    /// A node meets a proposal action it does not know (as a node of the
+    /// previous release meets one appended later) as a proposal it cannot
+    /// decode: the transaction is refused, nothing panics, and the gate
+    /// check at admission leaves the refusal to the executor.
+    #[tokio::test]
+    async fn a_proposal_action_this_release_does_not_know_is_refused_cleanly() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let a = vec![1u8; 20];
+        gov_bond(&mut state, &a, GOV_STAKE);
+        let unknown = br#"{"action":"an_action_from_a_later_release","memo":"m"}"#;
+        let as_submitted = tenzro_types::transaction::TransactionType::GovernancePropose {
+            proposal: unknown.to_vec(),
+        };
+        assert!(crate::feature_gate::refuse_dormant_kind(&state, &as_submitted).is_ok());
+        let mut data = SELECTOR_GOVERNANCE_PROPOSE.to_vec();
+        data.extend_from_slice(unknown);
+        let proposed = executor
+            .execute_transaction(&gov_tx(&a, data, 100_000, 0), &mut state)
+            .await;
+        assert!(
+            proposed.as_ref().map_or(true, |r| !r.success),
+            "an undecodable proposal is refused: {proposed:?}"
+        );
     }
 
     /// A carried route proposal writes the route into consensus state, where
@@ -11967,6 +13309,7 @@ mod tests {
                 VmType::Evm,
                 1337,
             )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
         };
         let ok = |r: &Result<ExecutionResult>| matches!(r, Ok(x) if x.success);
         for seed in [41u8, 42] {
@@ -12041,6 +13384,7 @@ mod tests {
                 VmType::Evm,
                 1337,
             )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
         };
         let (seed, stranger) = (51u8, 52u8);
         let from = account(seed);
@@ -12191,7 +13535,8 @@ mod tests {
                 0,
                 VmType::Evm,
                 1337,
-            );
+            )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
             let result = executor.execute_transaction(&tx, &mut state).await;
             let refused = match result {
                 Err(_) => true,
@@ -12247,7 +13592,8 @@ mod tests {
                     0,
                     VmType::Evm,
                     1337,
-                );
+                )
+                .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
                 let ok = matches!(executor.execute_transaction(&tx, &mut state).await, Ok(r) if r.success);
                 (ok, state)
             }
@@ -12281,6 +13627,7 @@ mod tests {
             VmType::Evm,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     const REG_GAS_COST: u128 = 1_000_000_000u128 * GAS_VALIDATOR_REGISTER as u128;
@@ -12453,6 +13800,7 @@ mod tests {
             VmType::Tenzro,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     /// A first registration is what enrols the controller's ML-DSA-65 key:
@@ -12529,7 +13877,8 @@ mod tests {
             1,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         // The same controller re-registering refreshes the identity record, so
         // the second registration is accepted; the key enrolled for the
         // account is held in account_keys and is not touched by it.
@@ -12798,7 +14147,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         assert!(executor.execute_transaction(&tx, &mut state).await.is_err());
         assert!(
             executor
@@ -12856,7 +14206,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         assert!(executor.execute_transaction(&tx, &mut state).await.is_err());
     }
 
@@ -12904,7 +14255,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         assert!(executor.execute_transaction(&tx, &mut state).await.is_err());
     }
 
@@ -13000,7 +14352,8 @@ mod tests {
                 nonce,
                 VmType::Evm,
                 1337,
-            );
+            )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
             tx.block_timestamp_ms = Some(at_ms);
             tx
         };
@@ -13055,6 +14408,60 @@ mod tests {
         );
     }
 
+    /// On a chain that keeps the seated index, once the exit-floor gate is
+    /// live an exit that would leave the seated set below the launch
+    /// arithmetic is refused; the same exits go through while it is dormant.
+    #[tokio::test]
+    async fn a_validator_exit_below_the_launch_arithmetic_waits_for_its_gate() {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let stake: u128 = 1_000_000_000_000_000;
+        let exit = |n: u8, nonce: u64| {
+            let mut tx = VmTransaction::new(
+                account(n),
+                None,
+                0,
+                SELECTOR_VALIDATOR_EXIT.to_vec(),
+                200_000,
+                1_000_000_000,
+                nonce,
+                VmType::Evm,
+                1337,
+            );
+            tx.block_timestamp_ms = Some(1_700_000_000_000);
+            tx
+        };
+        for live in [false, true] {
+            let mut state = StateAdapter::new();
+            for (k, v) in staking::seated_index_entries(&[]) {
+                state.set_storage(&SYSTEM_ADDRESS, &k, v);
+            }
+            for n in 1..=5u8 {
+                state.set_balance(&account(n), 10_000_000_000_000_000_000);
+                let reg = register_tx(n, stake, 0);
+                assert!(
+                    executor
+                        .execute_transaction(&reg, &mut state)
+                        .await
+                        .unwrap()
+                        .success
+                );
+            }
+            if live {
+                set_governed_param_for_test(&mut state, staking::EXIT_FLOOR_GATE, 0);
+            }
+            // Five seated: one may leave and four remain.
+            let first = executor
+                .execute_transaction(&exit(1, 1), &mut state)
+                .await
+                .unwrap();
+            assert!(first.success);
+            // Four seated: a second exit leaves three.
+            let second = executor.execute_transaction(&exit(2, 1), &mut state).await;
+            let went_through = second.as_ref().is_ok_and(|r| r.success);
+            assert_eq!(went_through, !live, "gate live: {live}");
+        }
+    }
+
     /// The account a `ValidatorExit` log names is read back from the log the
     /// handler emits, for both exit steps.
     #[tokio::test]
@@ -13086,7 +14493,8 @@ mod tests {
                 nonce,
                 VmType::Evm,
                 1337,
-            );
+            )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
             tx.block_timestamp_ms = Some(at);
             let r = executor.execute_transaction(&tx, &mut state).await.unwrap();
             assert!(r.success);
@@ -13148,6 +14556,7 @@ mod tests {
             VmType::Tenzro,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     fn preimage_claim_data(escrow_id: [u8; 32], preimage: &[u8]) -> Vec<u8> {
@@ -13562,7 +14971,8 @@ mod tests {
             7,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let create_res = executor
             .execute_transaction(&create_tx, &mut state)
@@ -13593,7 +15003,8 @@ mod tests {
             8,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
 
         let release_res = executor
             .execute_transaction(&release_tx, &mut state)
@@ -13643,7 +15054,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let create_res = executor
             .execute_transaction(&create_tx, &mut state)
             .await
@@ -13667,7 +15079,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let res = executor.execute_transaction(&release_tx, &mut state).await;
         assert!(res.is_err(), "attacker release must fail");
         let err_msg = format!("{}", res.unwrap_err());
@@ -13680,6 +15093,78 @@ mod tests {
         // Vault still funded; escrow still in Funded state.
         assert_eq!(state.get_balance(vault_addr.as_bytes()), 5_000);
         assert_eq!(state.get_balance(payee_addr.as_bytes()), 0);
+    }
+
+    /// Once its gate is live, an escrow under a custom condition is refused
+    /// at creation and one already in state is released by no proof: the
+    /// condition is free text no validator can check. Before the gate both
+    /// work as they did: any non-empty proof releases it.
+    #[tokio::test]
+    async fn a_custom_condition_escrow_is_refused_once_the_rule_is_live() {
+        let custom = || ReleaseConditions::Custom {
+            condition: "the goods arrived".to_string(),
+        };
+        let proof =
+            || ServiceProof::new(tenzro_types::settlement::ProofType::Cryptographic, vec![1]);
+        let release = |escrow_id: [u8; 32]| {
+            let mut tx = release_tx(&[1u8; 32], escrow_id, proof());
+            tx.nonce = 1;
+            tx
+        };
+
+        // Dormant: created, and released on a non-empty proof.
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let (escrow_id, vault) = create_escrow_with(&executor, &mut state, custom()).await;
+        assert_eq!(state.get_balance(vault.as_bytes()), 5_000);
+        let res = executor
+            .execute_transaction(&release(escrow_id), &mut state)
+            .await
+            .unwrap();
+        assert!(res.success);
+        assert_eq!(state.get_balance(vault.as_bytes()), 0);
+
+        // Live: one created before is released by no proof.
+        let mut state = StateAdapter::new();
+        let (escrow_id, vault) = create_escrow_with(&executor, &mut state, custom()).await;
+        set_genesis_param(&mut state, CUSTOM_ESCROW_REFUSED_GATE, 0);
+        let refused = match executor
+            .execute_transaction(&release(escrow_id), &mut state)
+            .await
+        {
+            Ok(res) => !res.success,
+            Err(_) => true,
+        };
+        assert!(refused);
+        assert_eq!(state.get_balance(vault.as_bytes()), 5_000);
+
+        // Live: none is created.
+        let mut state = StateAdapter::new();
+        set_genesis_param(&mut state, CUSTOM_ESCROW_REFUSED_GATE, 0);
+        let payer = vec![1u8; 32];
+        state.set_balance(&payer, 10_000_000_000_000_000_000u128);
+        let expires_at = chrono::Utc::now().timestamp_millis() as u64 + 24 * 60 * 60 * 1000;
+        let tx = VmTransaction::new(
+            payer,
+            None,
+            0,
+            make_create_escrow_data(&Address::new([2u8; 32]), 5_000, expires_at, custom()),
+            GAS_ESCROW_CREATE,
+            1_000_000_000,
+            0,
+            VmType::Tenzro,
+            1337,
+        );
+        let refused = match executor.execute_transaction(&tx, &mut state).await {
+            Ok(res) => !res.success,
+            Err(_) => true,
+        };
+        assert!(refused);
+        let nonce_zero = derive_escrow_id(&Address::new([1u8; 32]), 0);
+        assert_eq!(
+            state.get_balance(derive_vault_address(&nonce_zero).as_bytes()),
+            0
+        );
     }
 
     /// A funded `ConsumerSignature` escrow from payer `[1; 32]` to payee
@@ -13712,7 +15197,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let res = executor.execute_transaction(&tx, state).await.unwrap();
         assert!(res.success);
         let escrow_id: [u8; 32] = res.output.as_slice().try_into().unwrap();
@@ -13979,7 +15465,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let create_res = executor
             .execute_transaction(&create_tx, &mut state)
             .await
@@ -14000,7 +15487,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let refund_res = executor
             .execute_transaction(&refund_tx, &mut state)
             .await
@@ -14057,7 +15545,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let create_res = executor
             .execute_transaction(&create_tx, &mut state)
             .await
@@ -14075,7 +15564,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let res = executor.execute_transaction(&refund_tx, &mut state).await;
         assert!(res.is_err(), "premature refund must fail");
         let err_msg = format!("{}", res.unwrap_err());
@@ -14184,7 +15674,8 @@ mod tests {
             nonce,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let res = executor.execute_transaction(&tx, state).await.unwrap();
         assert!(res.success);
         res.output.as_slice().try_into().unwrap()
@@ -14202,6 +15693,7 @@ mod tests {
             VmType::Tenzro,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     /// Any account may release a quorum-attested escrow with a threshold of
@@ -14320,7 +15812,8 @@ mod tests {
             0,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let res = executor.execute_transaction(&tx, &mut state).await;
         assert!(res.is_err() || !res.unwrap().success);
         assert_eq!(state.get_balance(&payer), 10_000_000_000_000_000_000u128);
@@ -14345,7 +15838,8 @@ mod tests {
             1,
             VmType::Tenzro,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let res = executor.execute_transaction(&tx, &mut state).await;
         assert!(res.is_err() || !res.unwrap().success);
         assert_eq!(
@@ -14373,6 +15867,7 @@ mod tests {
             VmType::Tenzro,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     fn bond_validator(state: &mut StateAdapter, addr: &[u8], stake: u128) {
@@ -14498,6 +15993,159 @@ mod tests {
     /// hardware binding is on and passed: nothing at the genesis cap, and
     /// nothing with a cap while binding is off.
     #[tokio::test]
+    async fn an_offline_hour_of_a_compute_provider_gets_no_verdict_once_the_rule_is_in_force() {
+        async fn attest(
+            executor: &NativeExecutor,
+            state: &mut StateAdapter,
+            validator: &[u8],
+            epoch: u64,
+            did: &str,
+            now_ms: i64,
+        ) -> Result<ExecutionResult> {
+            let mut tx = sla_tx(validator, epoch, &[(did, false)], now_ms);
+            tx.nonce = state.get_nonce(validator);
+            executor.execute_transaction(&tx, state).await
+        }
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let (a, c, owner) = (vec![1u8; 20], vec![3u8; 20], vec![7u8; 20]);
+        bond_validator(&mut state, &a, 100);
+        bond_validator(&mut state, &c, 300);
+        let did = "did:tenzro:machine:gpu";
+        let vault = derive_compute_bond_vault_address(did);
+        let bond: u128 = 1_000_000_000_000_000_000_000;
+        let marker = serde_json::json!({
+            "provider_did": did,
+            "provider_address": hex::encode(&owner),
+            "amount": bond.to_string(),
+            "vault": hex::encode(vault.as_bytes()),
+            "op": "Posted",
+        });
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            compute_bond_storage_key(did).as_bytes(),
+            serde_json::to_vec(&marker).unwrap(),
+        );
+        state.set_balance(vault.as_bytes(), bond);
+        state.set_balance(&owner, 10_000_000_000_000_000_000);
+        let presence_tx = |state: &StateAdapter, from: &[u8], online: bool, now_ms: i64| {
+            let mut tx = selector_tx(
+                from.to_vec(),
+                native_call::SELECTOR_NATIVE_CALL,
+                serde_json::json!({"provider_did": did, "online": online}),
+                state.get_nonce(from),
+            );
+            tx.data.splice(4..4, presence::SELECTOR_PROVIDER_PRESENCE);
+            tx.block_timestamp_ms = Some(now_ms);
+            tx
+        };
+
+        // Dormant: nobody can go offline, and an offline claim excuses nothing.
+        let hour10 = 10 * MARKET_EPOCH_MS + 5;
+        let r = executor
+            .execute_transaction(&presence_tx(&state, &owner, false, hour10), &mut state)
+            .await;
+        assert!(r.is_err() || !r.unwrap().success);
+        set_governed_param_for_test(&mut state, native_call::GATE, 0);
+        let r = executor
+            .execute_transaction(&presence_tx(&state, &owner, false, hour10), &mut state)
+            .await;
+        assert!(
+            r.is_err() || !r.unwrap().success,
+            "the rule's own gate is still dormant"
+        );
+        let mut offline = presence_record(&state, did);
+        offline.offline_from = Some(0);
+        write_presence(&mut state, did, &offline);
+        assert!(
+            !presence::excused(&state, &owner, did, 5),
+            "dormant: every hour is judged"
+        );
+        write_presence(&mut state, did, &presence::Presence::default());
+
+        // In force: only the bond's owner, and only a real change.
+        set_governed_param_for_test(&mut state, presence::GATE, 0);
+        let r = executor
+            .execute_transaction(&presence_tx(&state, &a, false, hour10), &mut state)
+            .await;
+        assert!(r.is_err() || !r.unwrap().success, "not the bond's owner");
+        let r = executor
+            .execute_transaction(&presence_tx(&state, &owner, true, hour10), &mut state)
+            .await;
+        assert!(r.is_err() || !r.unwrap().success, "already online");
+        let r = executor
+            .execute_transaction(&presence_tx(&state, &owner, false, hour10), &mut state)
+            .await
+            .unwrap();
+        assert!(r.success);
+        assert_eq!(r.logs[0].topics[0], presence::PRESENCE_TOPIC.to_vec());
+
+        // Hour 10, the hour it was sent in, is judged: unavailable costs the bond.
+        let later = 13 * MARKET_EPOCH_MS + 5;
+        attest(&executor, &mut state, &a, 10, did, later)
+            .await
+            .unwrap();
+        attest(&executor, &mut state, &c, 10, did, later)
+            .await
+            .unwrap();
+        assert!(!read_sla_verdict(&state, did, 10).unwrap().available);
+        let after_hour10 = state.get_balance(vault.as_bytes());
+        assert!(after_hour10 < bond);
+
+        // Hour 11 it was offline: outcomes for it are left out, no verdict, no penalty.
+        for validator in [&a, &c] {
+            let _ = attest(&executor, &mut state, validator, 11, did, later).await;
+        }
+        assert_eq!(read_sla_verdict(&state, did, 11), None);
+        assert_eq!(state.get_balance(vault.as_bytes()), after_hour10);
+
+        // Back online in hour 13: hour 13 is still excused, hour 14 is judged again.
+        executor
+            .execute_transaction(&presence_tx(&state, &owner, true, later), &mut state)
+            .await
+            .unwrap();
+        let much_later = 16 * MARKET_EPOCH_MS + 5;
+        for validator in [&a, &c] {
+            let _ = attest(&executor, &mut state, validator, 13, did, much_later).await;
+        }
+        assert_eq!(read_sla_verdict(&state, did, 13), None);
+        attest(&executor, &mut state, &a, 14, did, much_later)
+            .await
+            .unwrap();
+        attest(&executor, &mut state, &c, 14, did, much_later)
+            .await
+            .unwrap();
+        assert!(!read_sla_verdict(&state, did, 14).unwrap().available);
+        assert!(state.get_balance(vault.as_bytes()) < after_hour10);
+    }
+
+    fn presence_record(state: &StateAdapter, did: &str) -> presence::Presence {
+        let marker: serde_json::Value = serde_json::from_slice(
+            &state
+                .get_storage(&SYSTEM_ADDRESS, compute_bond_storage_key(did).as_bytes())
+                .unwrap(),
+        )
+        .unwrap();
+        marker
+            .get("presence")
+            .map(|v| serde_json::from_value(v.clone()).unwrap())
+            .unwrap_or_default()
+    }
+
+    fn write_presence(state: &mut StateAdapter, did: &str, presence: &presence::Presence) {
+        let key = compute_bond_storage_key(did);
+        let mut marker: serde_json::Value =
+            serde_json::from_slice(&state.get_storage(&SYSTEM_ADDRESS, key.as_bytes()).unwrap())
+                .unwrap();
+        marker["presence"] = serde_json::to_value(presence).unwrap();
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            key.as_bytes(),
+            serde_json::to_vec(&marker).unwrap(),
+        );
+    }
+
+    #[tokio::test]
     async fn an_available_sla_verdict_pays_the_governed_availability_reward() {
         let executor = NativeExecutor::new(VmConfig::default()).unwrap();
         let mut state = StateAdapter::new();
@@ -14594,6 +16242,7 @@ mod tests {
             availability_reward::AVAILABILITY_REWARD_REQUIRE_HARDWARE_PARAM,
             1,
         );
+        availability_reward::tests::earn_paid_work(&mut state, &[9u8; 20]);
         let bound_now = availability_reward::tests::BOUND_NOW_MS;
         let bound_epoch = (bound_now / MARKET_EPOCH_MS) as u64 - 1;
         let subject_owner = [9u8; 20];
@@ -14638,6 +16287,7 @@ mod tests {
             VmType::Tenzro,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     #[tokio::test]
@@ -14727,5 +16377,60 @@ mod tests {
             crate::ledger::execute_in_block(&runtime, &mut state, &transfer, 1, &mut fees).await,
             crate::ledger::TxOutcome::Rejected(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod role_availability_tests {
+    use super::*;
+    use crate::state_adapter::StateAdapter;
+    use tenzro_types::network::NetworkRole;
+
+    /// An RPC operator's, an edge relay's and a storage stake's available
+    /// verdict pays against the owner's machine identity once the gate is
+    /// live, as a validator's always does; a compute bond keeps its DID.
+    #[test]
+    fn a_role_stake_verdict_pays_the_owners_machine_identity_once_live() {
+        let mut state = StateAdapter::new();
+        let owner = vec![0x44u8; 32];
+        let machine = "did:tenzro:machine:op:rpc-1";
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            identity_wallet_index_key(&owner).as_bytes(),
+            machine.as_bytes().to_vec(),
+        );
+        let subject = |kind| role_stake::SlaSubject {
+            kind,
+            owner: owner.clone(),
+            identity: None,
+        };
+        let roles = [
+            NetworkRole::Rpc,
+            NetworkRole::Edge,
+            NetworkRole::StorageProvider,
+        ];
+        let validator = NetworkRole::ALL
+            .into_iter()
+            .find(|r| r.is_validator())
+            .unwrap();
+        let did =
+            |state: &StateAdapter, kind| availability_reward_did(state, &subject(kind), "subject");
+        for r in roles {
+            assert_eq!(
+                did(&state, SlaSubjectKind::RoleStake(r)),
+                "subject",
+                "{r:?} dormant"
+            );
+        }
+        assert_eq!(did(&state, SlaSubjectKind::RoleStake(validator)), machine);
+        set_genesis_param(&mut state, ROLE_AVAILABILITY_REWARD_GATE, 0);
+        for r in roles {
+            assert_eq!(
+                did(&state, SlaSubjectKind::RoleStake(r)),
+                machine,
+                "{r:?} live"
+            );
+        }
+        assert_eq!(did(&state, SlaSubjectKind::ComputeBond), "subject");
     }
 }

@@ -33,9 +33,9 @@
 //! Integers are big-endian so keys sort by version.
 
 pub mod capture;
-pub mod hashing;
-pub mod proof;
 pub mod snapshot;
+
+pub use tenzro_state_proof::{hashing, proof};
 
 use crate::error::{Result, StorageError};
 use crate::kv::{KvStore, WriteOp};

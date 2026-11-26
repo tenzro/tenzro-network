@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refuses to install on a glibc the Tenzro programs cannot run on, before anything is unpacked, in plain words
+# (otherwise dpkg unpacks and leaves /usr/bin/tenzro unconfigured, and apt prints a dependency error).
+set -e
+MIN=2.39
+case "$1" in
+install|upgrade)
+    have=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+    [ -n "$have" ] || exit 0
+    if [ "$(printf '%s\n%s\n' "$MIN" "$have" | sort -V | head -n1)" != "$MIN" ]; then
+        echo "Tenzro needs glibc $MIN or newer (Ubuntu 24.04, Debian 13, Fedora 40). This machine has glibc $have, so nothing was installed." >&2
+        echo "Use one of those releases, or run Tenzro in a container based on one." >&2
+        exit 1
+    fi
+    ;;
+esac
+exit 0

@@ -79,6 +79,96 @@ pub fn holdings_value_e6(state: &dyn VmState, account: &[u8]) -> u128 {
         .fold(0u128, u128::saturating_add)
 }
 
+/// Gate: first epoch whose stable settlements keep the treasury's intake in
+/// the payment's asset under its `max_exposure_bps` of the treasury: the
+/// part of the treasury leg and of the fee's treasury and burn shares that
+/// would lift the asset past it is waived to the payee
+/// ([`waive_over_ceiling`]). Until then only payout swaps are held to the
+/// ceiling.
+pub const INTAKE_EXPOSURE_GATE: &str = "feature.stable_intake_exposure.activation_epoch";
+
+fn waived_key(token: &[u8; 32]) -> String {
+    format!("treasury_intake_waived:{}", hex::encode(token))
+}
+
+/// What settlements in `token` have waived to their payees in all, in the
+/// token's smallest unit, because the treasury held as much of it as its
+/// ceiling allows.
+pub fn intake_waived(state: &dyn VmState, token: &[u8; 32]) -> u128 {
+    super::funding::read_json::<String>(state, &waived_key(token))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// What each registered settlement asset has waived to payees
+/// ([`intake_waived`]), by token id hex, as decimal strings; `None` while
+/// [`INTAKE_EXPOSURE_GATE`] is dormant.
+pub fn intake_waived_report(state: &dyn VmState) -> Option<Vec<(String, String)>> {
+    crate::feature_gate::is_live_now(state, INTAKE_EXPOSURE_GATE).then(|| {
+        listed_ids(state)
+            .iter()
+            .map(|id| (hex::encode(id), intake_waived(state, id).to_string()))
+            .collect()
+    })
+}
+
+/// The settlement fee `alloc` and treasury `leg` of a payment in `token`,
+/// with the part the treasury would keep past the asset's exposure ceiling
+/// waived: the leg first, then the fee's treasury share, then its burn
+/// share. What is waived stays in the payee's credit and is added to
+/// [`intake_waived`]. The insurance share is not the treasury's and is kept.
+pub(super) fn waive_over_ceiling(
+    state: &mut dyn VmState,
+    token: &[u8; 32],
+    p: &Permitted,
+    mut alloc: tenzro_types::split::FeeAllocation,
+    mut leg: u128,
+    changes: &mut Vec<StateChange>,
+) -> Result<(tenzro_types::split::FeeAllocation, u128)> {
+    let intake = alloc
+        .treasury
+        .saturating_add(alloc.burn)
+        .saturating_add(leg);
+    let mut waived = intake - exposure_room(state, token, p, intake);
+    if waived == 0 {
+        return Ok((alloc, leg));
+    }
+    let total = waived;
+    let from_leg = waived.min(leg);
+    leg -= from_leg;
+    waived -= from_leg;
+    for part in [&mut alloc.treasury, &mut alloc.burn] {
+        let take = waived.min(*part);
+        *part -= take;
+        alloc.fee -= take;
+        waived -= take;
+    }
+    let sum = intake_waived(state, token).saturating_add(total);
+    super::funding::write_json(state, &waived_key(token), &sum.to_string(), changes)?;
+    Ok((alloc, leg))
+}
+
+/// The most of `want` units of `p`'s asset the treasury can take in while
+/// the asset stays within its exposure ceiling.
+fn exposure_room(state: &dyn VmState, token: &[u8; 32], p: &Permitted, want: u128) -> u128 {
+    if fits(state, token, p, want) {
+        return want;
+    }
+    if !fits(state, token, p, 0) {
+        return 0;
+    }
+    let (mut lo, mut hi) = (0u128, want);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(state, token, p, mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// Refuses adding `intake` of `p`'s asset to the treasury when the asset
 /// would then make up more of the treasury's whole value (its TNZO and its
 /// settlement-asset holdings, at the rates in force) than the entry's
@@ -89,16 +179,7 @@ pub(super) fn check_exposure(
     p: &Permitted,
     intake: u128,
 ) -> Result<()> {
-    let treasury = derive_treasury_address();
-    let tnzo_rate = super::economy::read_fee_rate(state).rate_nano_usd;
-    let eq = |x: u128| tnzo_eq(x, p.rate_nano_usd, p.asset.decimals, tnzo_rate, false);
-    let held =
-        crate::token_ledger::balance(state, token, treasury.as_bytes()).saturating_add(intake);
-    let after = eq(held);
-    let total = state
-        .get_balance(treasury.as_bytes())
-        .saturating_add(holdings_tnzo_eq(state, treasury.as_bytes()))
-        .saturating_add(eq(intake));
+    let (after, total) = exposure_after(state, token, p, intake);
     let ceiling = p.asset.max_exposure_bps;
     if after.saturating_mul(10_000) > total.saturating_mul(u128::from(ceiling)) {
         return Err(VmError::InvalidTransaction(format!(
@@ -108,6 +189,33 @@ pub(super) fn check_exposure(
         )));
     }
     Ok(())
+}
+
+/// Whether the treasury can take in `intake` of `p`'s asset within its
+/// exposure ceiling.
+fn fits(state: &dyn VmState, token: &[u8; 32], p: &Permitted, intake: u128) -> bool {
+    let (after, total) = exposure_after(state, token, p, intake);
+    after.saturating_mul(10_000) <= total.saturating_mul(u128::from(p.asset.max_exposure_bps))
+}
+
+/// What `p`'s asset and the whole treasury would be worth, in TNZO at the
+/// rates in force, once the treasury took in `intake` of the asset.
+fn exposure_after(
+    state: &dyn VmState,
+    token: &[u8; 32],
+    p: &Permitted,
+    intake: u128,
+) -> (u128, u128) {
+    let treasury = derive_treasury_address();
+    let tnzo_rate = super::economy::read_fee_rate(state).rate_nano_usd;
+    let eq = |x: u128| tnzo_eq(x, p.rate_nano_usd, p.asset.decimals, tnzo_rate, false);
+    let held =
+        crate::token_ledger::balance(state, token, treasury.as_bytes()).saturating_add(intake);
+    let total = state
+        .get_balance(treasury.as_bytes())
+        .saturating_add(holdings_tnzo_eq(state, treasury.as_bytes()))
+        .saturating_add(eq(intake));
+    (eq(held), total)
 }
 
 /// The validator rate and decimals of a registered asset whose rate sits on
@@ -438,6 +546,145 @@ pub fn unit_of_account() -> tenzro_types::settlement::UnitOfAccount {
     }
 }
 
+/// First epoch from which ledger payments are valued in the fiat basket:
+/// per-currency validator medians combined by governed weights. Before it,
+/// and whenever a weighted currency has no rate in force, they are valued in
+/// the dollar.
+pub const UNIT_BASKET_GATE: &str = "feature.unit_basket.activation_epoch";
+
+/// Id of the fiat basket a payment is valued in once [`UNIT_BASKET_GATE`]
+/// is live.
+pub const BASKET_ID: &str = "BASKET";
+
+/// Governed key: the weight of the US dollar in the basket, bps.
+pub const BASKET_USD_WEIGHT_PARAM: &str = "feature.unit_basket.weight_usd_bps";
+/// Governed key: the weight of the euro in the basket, bps.
+pub const BASKET_EUR_WEIGHT_PARAM: &str = "feature.unit_basket.weight_eur_bps";
+/// Governed key: the weight of the yuan in the basket, bps.
+pub const BASKET_CNY_WEIGHT_PARAM: &str = "feature.unit_basket.weight_cny_bps";
+/// Governed key: the weight of the yen in the basket, bps.
+pub const BASKET_JPY_WEIGHT_PARAM: &str = "feature.unit_basket.weight_jpy_bps";
+/// Governed key: the weight of the pound in the basket, bps.
+pub const BASKET_GBP_WEIGHT_PARAM: &str = "feature.unit_basket.weight_gbp_bps";
+
+/// The basket's currencies, the governed key of each one's weight in bps,
+/// and its genesis weight: the IMF SDR weights of its 2022 review, rounded
+/// to basis points summing to 10,000.
+pub const BASKET_WEIGHTS: [(&str, &str, u64); 5] = [
+    ("USD", BASKET_USD_WEIGHT_PARAM, 4_338),
+    ("EUR", BASKET_EUR_WEIGHT_PARAM, 2_931),
+    ("CNY", BASKET_CNY_WEIGHT_PARAM, 1_228),
+    ("JPY", BASKET_JPY_WEIGHT_PARAM, 759),
+    ("GBP", BASKET_GBP_WEIGHT_PARAM, 744),
+];
+
+const BASKET_ANCHOR_KEY: &str = "unit_basket_anchor";
+
+/// The weights the basket is valued at and the scale that makes it worth,
+/// at the epoch they took effect, exactly what the unit was worth before.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct BasketAnchor {
+    weights: Vec<u64>,
+    /// Nano-units of scale per nano-USD of the weighted average, decimal.
+    scale_e9: String,
+    version: u32,
+}
+
+/// Nano-USD of the weights' average over the currencies' rates in force,
+/// or `None` while a weighted currency has no rate or no weight is set.
+fn weighted_nano_usd(state: &dyn VmState, weights: &[u64]) -> Option<u128> {
+    let total: u64 = weights.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let mut sum = 0u128;
+    for ((currency, _, _), weight) in BASKET_WEIGHTS.iter().zip(weights) {
+        if *weight == 0 {
+            continue;
+        }
+        let rate = if *currency == NUMERAIRE {
+            NUMERAIRE_NANO
+        } else {
+            super::economy::read_symbol_rate(state, currency)?.0
+        };
+        sum = sum.saturating_add(rate.saturating_mul(u128::from(*weight)));
+    }
+    Some(sum / u128::from(total))
+}
+
+fn read_anchor(state: &dyn VmState) -> Option<BasketAnchor> {
+    state
+        .get_storage(&SYSTEM_ADDRESS, BASKET_ANCHOR_KEY.as_bytes())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// Nano-USD one unit of `anchor`'s basket is worth at the rates in force.
+fn anchored_nano_usd(state: &dyn VmState, anchor: &BasketAnchor) -> Option<u128> {
+    let scale: u128 = anchor.scale_e9.parse().ok()?;
+    let value = weighted_nano_usd(state, &anchor.weights)?.saturating_mul(scale) / NUMERAIRE_NANO;
+    (value > 0).then_some(value)
+}
+
+/// At an epoch start once [`UNIT_BASKET_GATE`] is live, takes the governed
+/// weights when they differ from those the basket is valued at, scaled so
+/// the unit is worth what it was worth a moment before: one dollar at the
+/// switch, the old basket's value at a reweight. Nothing jumps. While a
+/// weighted currency has no rate in force the old weights stay.
+pub(super) fn refresh_unit_basket(state: &mut dyn VmState) {
+    if !crate::feature_gate::is_live_now(state, UNIT_BASKET_GATE) {
+        return;
+    }
+    let weights: Vec<u64> = BASKET_WEIGHTS
+        .iter()
+        .map(|(_, key, _)| network_param(state, key))
+        .collect();
+    let anchor = read_anchor(state);
+    if anchor.as_ref().is_some_and(|a| a.weights == weights) {
+        return;
+    }
+    let Some(weighted) = weighted_nano_usd(state, &weights).filter(|w| *w > 0) else {
+        return;
+    };
+    let unit_now = match &anchor {
+        Some(a) => match anchored_nano_usd(state, a) {
+            Some(v) => v,
+            None => return,
+        },
+        None => NUMERAIRE_NANO,
+    };
+    let next = BasketAnchor {
+        weights,
+        scale_e9: (unit_now.saturating_mul(NUMERAIRE_NANO) / weighted).to_string(),
+        version: anchor.map_or(1, |a| a.version + 1),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&next) {
+        state.set_storage(&SYSTEM_ADDRESS, BASKET_ANCHOR_KEY.as_bytes(), bytes);
+    }
+}
+
+/// The unit a ledger payment worth `usd_e6` millionths of a dollar is
+/// valued in, and its value in millionths of that unit: the basket once
+/// [`UNIT_BASKET_GATE`] is live and every weighted currency has a rate in
+/// force, the dollar otherwise.
+pub fn valued_in_unit(
+    state: &dyn VmState,
+    usd_e6: u128,
+) -> (tenzro_types::settlement::UnitOfAccount, u128) {
+    if crate::feature_gate::is_live_now(state, UNIT_BASKET_GATE)
+        && let Some(anchor) = read_anchor(state)
+        && let Some(unit) = anchored_nano_usd(state, &anchor)
+    {
+        return (
+            tenzro_types::settlement::UnitOfAccount {
+                basket: BASKET_ID.to_string(),
+                version: anchor.version,
+            },
+            usd_e6.saturating_mul(NUMERAIRE_NANO) / unit,
+        );
+    }
+    (unit_of_account(), usd_e6)
+}
+
 fn pow10(decimals: u8) -> revm::primitives::U256 {
     revm::primitives::U256::from(10u8).pow(revm::primitives::U256::from(decimals))
 }
@@ -521,18 +768,80 @@ pub fn read_epoch_inflow(state: &dyn VmState, token: &[u8; 32]) -> u128 {
         .map_or(0, |i| i.value_e6)
 }
 
+/// The gate of the per-payer share of an asset's epoch inflow cap.
+pub const PAYER_SHARE_GATE: &str = "feature.settlement_asset_payer_share.activation_epoch";
+
+/// The governed share, in basis points, of an asset's epoch inflow cap one
+/// payer may use in an epoch once the gate is live.
+pub const PAYER_SHARE_BPS_KEY: &str = "feature.settlement_asset_payer_share.share_bps";
+
+fn payer_inflow_key(token: &[u8; 32], payer: &[u8]) -> String {
+    format!(
+        "settlement_inflow:{}:{}",
+        hex::encode(token),
+        hex::encode(payer)
+    )
+}
+
+/// What `payer` has settled in `token` in `epoch`, micro-units.
+fn read_payer_inflow(state: &dyn VmState, token: &[u8; 32], payer: &[u8], epoch: u64) -> u128 {
+    read_json::<Inflow>(state, &payer_inflow_key(token, payer))
+        .filter(|i| i.epoch == epoch)
+        .map_or(0, |i| i.value_e6)
+}
+
+/// Once the gate is live, one payer may use at most the governed share of an
+/// asset's epoch inflow cap, so a higher fee, which orders a payment earlier,
+/// cannot take the whole of what is left. Before it, and when the cap is
+/// zero (the cap check refuses it), nothing is counted.
+fn admit_payer_share(
+    state: &mut dyn VmState,
+    token: &[u8; 32],
+    payer: &[u8],
+    cap: u128,
+    value_e6: u128,
+    epoch: u64,
+    changes: &mut Vec<StateChange>,
+) -> Result<()> {
+    if !crate::feature_gate::is_live_now(state, PAYER_SHARE_GATE) {
+        return Ok(());
+    }
+    let share = u128::from(network_param(state, PAYER_SHARE_BPS_KEY).min(10_000));
+    let allowed = (cap / 10_000) * share + (cap % 10_000) * share / 10_000;
+    let paid = read_payer_inflow(state, token, payer, epoch);
+    let total = paid.saturating_add(value_e6);
+    if total > allowed {
+        return Err(VmError::InvalidTransaction(format!(
+            "this payer has {} micro-units of its share of the epoch inflow cap left; the payment is worth {value_e6}",
+            allowed.saturating_sub(paid)
+        )));
+    }
+    super::funding::write_json(
+        state,
+        &payer_inflow_key(token, payer),
+        &Inflow {
+            epoch,
+            value_e6: total,
+        },
+        changes,
+    )
+    .map(|_| ())
+}
+
 /// Counts `value_e6` against the asset's epoch inflow cap, refusing a
 /// payment that would pass it.
 pub(super) fn admit_inflow(
     state: &mut dyn VmState,
     token: &[u8; 32],
     permitted: &Permitted,
+    payer: &[u8],
     value_e6: u128,
     changes: &mut Vec<StateChange>,
 ) -> Result<()> {
     let epoch = super::economy::read_current_epoch(state);
     let used = read_epoch_inflow(state, token);
     let cap = u128::from(permitted.asset.epoch_inflow_cap_units).saturating_mul(1_000_000);
+    admit_payer_share(state, token, payer, cap, value_e6, epoch, changes)?;
     let total = used.saturating_add(value_e6);
     if total > cap {
         return Err(VmError::InvalidTransaction(format!(
@@ -1064,7 +1373,7 @@ mod tests {
         install_for_test(&mut state, &entry);
         assert!(quote_asset(&state, &hex_id, 1_000_000).is_ok());
         let p = permitted(&state, &held).unwrap();
-        admit_inflow(&mut state, &held, &p, 2_500_000, &mut Vec::new()).unwrap();
+        admit_inflow(&mut state, &held, &p, &[7; 32], 2_500_000, &mut Vec::new()).unwrap();
         let e = quote_asset(&state, &hex_id, 1_000_000).unwrap_err();
         assert_eq!(e.code, "asset_inflow_full");
         assert!(
@@ -1074,13 +1383,54 @@ mod tests {
             e.reason
         );
         assert!(quote_asset(&state, &hex_id, 500_000).is_ok());
-        admit_inflow(&mut state, &held, &p, 500_000, &mut Vec::new()).unwrap();
+        admit_inflow(&mut state, &held, &p, &[7; 32], 500_000, &mut Vec::new()).unwrap();
         assert_eq!(
             quote_asset(&state, &hex_id, 1).unwrap_err().code,
             "asset_inflow_full"
         );
         // The settlement path refuses past the cap too: first-come, at once.
-        assert!(admit_inflow(&mut state, &held, &p, 1, &mut Vec::new()).is_err());
+        assert!(admit_inflow(&mut state, &held, &p, &[7; 32], 1, &mut Vec::new()).is_err());
+    }
+
+    /// Dormant, the first payer to settle can use the whole epoch cap; once
+    /// the gate is live no payer may use more than the governed share of it,
+    /// whatever its fee, and the next payer still settles.
+    #[test]
+    fn a_payer_share_of_the_epoch_inflow_cap_binds_only_once_the_gate_is_live() {
+        let mut state = StateAdapter::new();
+        super::super::economy::write_symbol_rate_for_tests(&mut state, "USDC", 0, 1_000_000_000);
+        let held = token_held_by(&mut state, &[9; 32], "USDC", 10_000_000);
+        let hex_id = format!("0x{}", hex::encode(held));
+        let mut entry = SettlementAsset::new(&hex_id, "USDC", "USD", 6);
+        entry.epoch_inflow_cap_units = 10;
+        install_for_test(&mut state, &entry);
+        let p = permitted(&state, &held).unwrap();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+
+        // Dormant: one payer takes the whole cap.
+        admit_inflow(&mut state, &held, &p, &a, 10_000_000, &mut Vec::new()).unwrap();
+        assert!(admit_inflow(&mut state, &held, &p, &b, 1, &mut Vec::new()).is_err());
+
+        // Live: a fresh asset's cap is shared, a quarter to each payer.
+        let mut state = StateAdapter::new();
+        super::super::economy::write_symbol_rate_for_tests(&mut state, "USDC", 0, 1_000_000_000);
+        let held = token_held_by(&mut state, &[9; 32], "USDC", 10_000_000);
+        let hex_id = format!("0x{}", hex::encode(held));
+        let mut entry = SettlementAsset::new(&hex_id, "USDC", "USD", 6);
+        entry.epoch_inflow_cap_units = 10;
+        install_for_test(&mut state, &entry);
+        let p = permitted(&state, &held).unwrap();
+        set_governed_param_for_test(&mut state, PAYER_SHARE_GATE, 0);
+        admit_inflow(&mut state, &held, &p, &a, 2_500_000, &mut Vec::new()).unwrap();
+        let refused = admit_inflow(&mut state, &held, &p, &a, 1, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("share of the epoch inflow cap"),
+            "{refused}"
+        );
+        admit_inflow(&mut state, &held, &p, &b, 2_500_000, &mut Vec::new()).unwrap();
+        assert_eq!(read_epoch_inflow(&state, &held), 5_000_000);
     }
 
     fn rules(suspend: u64, resume: u64, band: u64) -> BreakerRules {
@@ -1240,5 +1590,61 @@ mod tests {
         assert_eq!(logs.last().unwrap().topics[0], ASSET_RESUMED_TOPIC.to_vec());
         assert!(permitted(&state, &held).is_ok());
         assert!(quote_asset(&state, &hex_id, 1_000_000).is_ok());
+    }
+
+    /// Payments stay valued in the dollar until the basket's gate is live
+    /// and its first epoch start has anchored it; from then a payment is
+    /// valued in the basket, worth one dollar at the switch, moving with the
+    /// currencies after it, carried through a reweight without a jump, and
+    /// valued in the dollar again while a weighted currency has no rate.
+    #[test]
+    fn the_fiat_basket_starts_at_one_dollar_and_never_jumps() {
+        let mut state = StateAdapter::new();
+        for (symbol, nano_usd) in [
+            ("EUR", 1_100_000_000u128),
+            ("CNY", 140_000_000),
+            ("JPY", 6_700_000),
+            ("GBP", 1_270_000_000),
+        ] {
+            super::super::economy::write_symbol_rate_for_tests(&mut state, symbol, 1, nano_usd);
+        }
+        let usd = unit_of_account();
+        refresh_unit_basket(&mut state);
+        assert_eq!(valued_in_unit(&state, 1_000_000), (usd.clone(), 1_000_000));
+
+        set_genesis_param(&mut state, UNIT_BASKET_GATE, 0);
+        assert_eq!(
+            valued_in_unit(&state, 1_000_000),
+            (usd.clone(), 1_000_000),
+            "not anchored before an epoch start"
+        );
+        refresh_unit_basket(&mut state);
+        let (unit, at_switch) = valued_in_unit(&state, 1_000_000);
+        assert_eq!((unit.basket.as_str(), unit.version), (BASKET_ID, 1));
+        assert!(at_switch.abs_diff(1_000_000) <= 1, "{at_switch}");
+
+        // The euro rises 10%: the basket is worth more dollars, so a dollar
+        // payment is worth fewer basket units.
+        super::super::economy::write_symbol_rate_for_tests(&mut state, "EUR", 2, 1_210_000_000);
+        let (_, after_rise) = valued_in_unit(&state, 1_000_000);
+        assert!(after_rise < at_switch);
+
+        // A reweight to the dollar alone keeps the unit's value.
+        for (i, (_, key, _)) in BASKET_WEIGHTS.iter().enumerate() {
+            set_genesis_param(&mut state, key, if i == 0 { 10_000 } else { 0 });
+        }
+        refresh_unit_basket(&mut state);
+        let (unit, reweighted) = valued_in_unit(&state, 1_000_000);
+        assert_eq!(unit.version, 2);
+        assert!(
+            reweighted.abs_diff(after_rise) <= 1,
+            "{reweighted} against {after_rise}"
+        );
+
+        // A weighted currency without a rate values the payment in dollars.
+        let mut bare = StateAdapter::new();
+        set_genesis_param(&mut bare, UNIT_BASKET_GATE, 0);
+        refresh_unit_basket(&mut bare);
+        assert_eq!(valued_in_unit(&bare, 1_000_000), (usd, 1_000_000));
     }
 }

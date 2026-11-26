@@ -205,8 +205,25 @@ pub mod service {
             "NVIDIA's RIM service returned {id} with a SHA-256 other than the pinned one"
         );
         std::fs::create_dir_all(cache_dir()).expect("cache directory");
-        std::fs::write(&path, &rim).expect("cache the RIM");
+        write_cached(&path, &rim);
         String::from_utf8(rim).expect("a RIM is UTF-8")
+    }
+
+    /// Writes `bytes` to `path` so that a reader sees the whole file or none
+    /// of it: into a temporary name of its own in the same directory, then
+    /// renamed over `path`. Tests in one binary and tests in several binaries
+    /// share the cache, so a plain write would show a half-written file to
+    /// whoever reads it meanwhile.
+    pub(super) fn write_cached(path: &std::path::Path, bytes: &[u8]) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "swidtag.{}.{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&tmp, bytes).expect("write the RIM beside its cache entry");
+        std::fs::rename(&tmp, path).expect("move the RIM into the cache");
     }
 }
 
@@ -224,6 +241,42 @@ mod tests {
     /// NVIDIA's sample H100 report (nvtrust, Apache-2.0): VBIOS 96.00.9F.00.01,
     /// driver 550.90.07.
     const REPORT_HEX: &str = include_str!("../testdata/nvidia/hopper_attestation_report.hex");
+
+    /// The cache is shared by tests that run at the same time: a reader sees
+    /// the whole file or none of it, never a partial one.
+    #[test]
+    fn a_reader_of_the_rim_cache_never_sees_a_partial_file() {
+        let dir = std::env::temp_dir().join(format!("rim-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rim.swidtag");
+        let body = vec![0xa5u8; 256 * 1024];
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let (path, body) = (path.clone(), body.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        service::write_cached(&path, &body);
+                    }
+                })
+            })
+            .collect();
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (path, len) = (path.clone(), body.len());
+                std::thread::spawn(move || {
+                    for _ in 0..400 {
+                        if let Ok(read) = std::fs::read(&path) {
+                            assert_eq!(read.len(), len, "a partial file was visible");
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in writers.into_iter().chain(readers) {
+            t.join().unwrap();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn nvidias_published_sample_rim_reads_as_reference_values() {

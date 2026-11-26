@@ -747,6 +747,15 @@ pub(super) fn commit_in_unit(
     changes: &mut Vec<StateChange>,
     logs: &mut Vec<Log>,
 ) -> Result<()> {
+    super::affiliated_share::count_payout(
+        state,
+        view.unit.year_prefix(),
+        view.year,
+        view.totals.sponsorship.saturating_add(view.totals.grants),
+        account,
+        counted,
+        changes,
+    )?;
     let mut totals = view.totals;
     let ledger_kind = match kind {
         PayoutKind::Grant => {
@@ -921,6 +930,7 @@ pub(super) fn plan_hours(
         ));
     }
     let approval = require_approved_operator(state, operator)?;
+    super::sponsorship_end::require_sponsorship_open(state)?;
     if rate == 0 {
         return Err(refuse(format!(
             "running-cost sponsorship is disabled: governance has not set {rate_param}"
@@ -1059,6 +1069,46 @@ pub struct PayoutReport {
     pub by_class_usd_e6: std::collections::BTreeMap<String, String>,
     /// The page of disbursements asked for, oldest first.
     pub records: Vec<PayoutRecord>,
+}
+
+/// The year's sponsorship and grants paid to accounts marked as affiliated
+/// with the founders, against the year's total, in TNZO and in USD; `None`
+/// while [`super::affiliated_share::GATE`] is dormant.
+pub fn affiliated_report(state: &dyn VmState, now_ms: i64) -> Option<AffiliatedReport> {
+    use super::affiliated_share as a;
+    if !crate::feature_gate::is_live_now(state, a::GATE) {
+        return None;
+    }
+    let year = year_of(now_ms);
+    let of = |unit: Unit| {
+        let t: YearTotals = read_json(state, &year_key(unit, year)).unwrap_or_default();
+        a::AffiliatedYear::new(
+            a::affiliated_paid(state, unit.year_prefix(), year),
+            t.sponsorship.saturating_add(t.grants),
+        )
+    };
+    Some(AffiliatedReport {
+        year,
+        tnzo: of(Unit::Tnzo),
+        usd_e6: of(Unit::Usd),
+        cap_bps: network_param(state, a::CAP_PARAM),
+        accounts: a::affiliated_accounts(state),
+    })
+}
+
+/// [`affiliated_report`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AffiliatedReport {
+    /// The calendar year counted, years since 1970.
+    pub year: i64,
+    /// In TNZO, wei.
+    pub tnzo: super::affiliated_share::AffiliatedYear,
+    /// In stable assets, micro-dollars.
+    pub usd_e6: super::affiliated_share::AffiliatedYear,
+    /// The governed cap, bps.
+    pub cap_bps: u64,
+    /// The marked accounts, hex.
+    pub accounts: Vec<String>,
 }
 
 /// Disbursements logged so far.

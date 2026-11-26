@@ -16,21 +16,22 @@ use std::path::PathBuf;
 
 use super::detect::{KeyRoot, Machine, Net};
 
+/// The one question, as it is asked.
+pub const QUESTION: &str = "What do you want to do?";
+
 /// The one question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Path {
-    UseNetwork,
     Provide,
     Validate,
     Local,
 }
 
 impl Path {
-    pub const ALL: [Path; 4] = [Path::UseNetwork, Path::Provide, Path::Validate, Path::Local];
+    pub const ALL: [Path; 3] = [Path::Provide, Path::Validate, Path::Local];
 
     pub fn label(self) -> &'static str {
         match self {
-            Path::UseNetwork => "Use the network",
             Path::Provide => "Provide compute",
             Path::Validate => "Run a validator",
             Path::Local => "Try a local chain",
@@ -39,9 +40,6 @@ impl Path {
 
     pub fn blurb(self) -> &'static str {
         match self {
-            Path::UseNetwork => {
-                "Get a wallet and identity, then use models, payments and agents. No special hardware."
-            }
             Path::Provide => {
                 "Serve AI models from this machine and get paid for the work. Needs a hardware key and a node."
             }
@@ -263,10 +261,16 @@ impl Opts {
             holder_label: machine_name.clone(),
             machine_name,
             rpc: rpc.to_string(),
-            holder_socket: data_dir.join("holder").join("h.sock").display().to_string(),
+            holder_socket: holder_socket(&data_dir).display().to_string(),
             data_dir,
         }
     }
+}
+
+/// Where setup starts this machine's key holder, under the node's data
+/// directory.
+pub fn holder_socket(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("holder").join("h.sock")
 }
 
 /// A legal machine name from any hostname: 3 to 63 of `[a-z0-9-]`, not
@@ -409,7 +413,7 @@ fn key_steps(m: &Machine, o: &Opts) -> Result<Vec<Step>, Box<Plan>> {
                     "If the machine has one, turn it on in the firmware settings (fTPM, PTT or Security Device) and reboot.",
                     "Or keep the keys in another machine's TPM with a key holder (limits are shown before you start).",
                 ],
-                vec![Offer::Delegate, Offer::SwitchTo(Path::UseNetwork)],
+                vec![Offer::Delegate],
                 path,
             )));
         }
@@ -418,7 +422,7 @@ fn key_steps(m: &Machine, o: &Opts) -> Result<Vec<Step>, Box<Plan>> {
                 "This Mac has no usable Secure Enclave.",
                 "A node keeps its keys in hardware and there is none to use here.",
                 &["Use a Mac with Apple silicon or a T2 chip, or a machine with a TPM 2.0."],
-                vec![Offer::SwitchTo(Path::UseNetwork)],
+                vec![Offer::Finish],
                 path,
             )));
         }
@@ -539,7 +543,6 @@ fn node_ready(m: &Machine, path: Path) -> Result<(), Box<Plan>> {
 /// Plan the steps of `path`. Pure.
 pub fn plan(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
     match path {
-        Path::UseNetwork => plan_use(m, net, o),
         Path::Provide => plan_serve(Path::Provide, m, net, o),
         Path::Validate => plan_serve(Path::Validate, m, net, o),
         Path::Local => plan_local(m, o),
@@ -568,35 +571,6 @@ fn network_down(path: Path, net: &Net, o: &Opts) -> Option<Plan> {
         vec![Offer::SwitchTo(Path::Local), Offer::Finish],
         path,
     ))
-}
-
-fn plan_use(m: &Machine, net: &Net, o: &Opts) -> Plan {
-    if let Some(b) = network_down(Path::UseNetwork, net, o) {
-        return b;
-    }
-    let _ = m;
-    let steps = vec![
-        Step::info(
-            "about",
-            "What happens",
-            "A wallet and identity are created for you on the network. You approve them with a passkey in your browser (a phone works too).".into(),
-            "The passkey, not a password, controls your account. Nothing secret is stored by this program.",
-        ),
-        Step::exec(
-            "setup",
-            "Create your identity and wallet",
-            "Runs the same setup as `tenzro setup`, with these answers filled in.".into(),
-            "It opens your browser for the passkey and saves your settings.",
-            Prog::Cli,
-            &setup_args("consume", "self", o).iter().map(String::as_str).collect::<Vec<_>>(),
-        ),
-    ];
-    Plan {
-        path: Path::UseNetwork,
-        steps,
-        blocked: None,
-        next: "tenzro".into(),
-    }
 }
 
 fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
@@ -697,7 +671,7 @@ fn plan_serve(path: Path, m: &Machine, net: &Net, o: &Opts) -> Plan {
             Step::info(
                 "admission",
                 "Admission needs approval",
-                "Validator admission is closed while the network stabilises: only the admitted set may register, and governance extends the set with an ApproveValidators proposal. Run as an operator or a participant now, and write to team@tenzro.com to ask to be admitted.".into(),
+                "Validator admission is closed while the network stabilises: only the admitted set may register, and governance extends the set with an ApproveValidators proposal. Run as an operator now, and write to team@tenzro.com to ask to be admitted.".into(),
                 "It keeps the early validator set small and known until the network is stable. Everything else (syncing, following the chain, serving as an operator) works without approval.",
             )
             .manual(&[
@@ -868,19 +842,9 @@ mod tests {
     }
 
     #[test]
-    fn using_the_network_needs_no_hardware_and_one_command() {
-        let m = machine(KeyRoot::NoTpm);
-        let p = plan(Path::UseNetwork, &m, &up(), &opts(&m));
-        assert!(p.blocked.is_none());
-        let cmd = p.steps.last().unwrap().command_line().unwrap();
-        assert!(cmd.starts_with("tenzro setup --yes --path network --mode consume"));
-        assert_eq!(p.next, "tenzro");
-    }
-
-    #[test]
     fn with_the_network_down_every_network_path_is_blocked_and_offers_local() {
         let m = machine(KeyRoot::TpmReady);
-        for path in [Path::UseNetwork, Path::Provide, Path::Validate] {
+        for path in [Path::Provide, Path::Validate] {
             let p = plan(path, &m, &Net::NotResolving, &opts(&m));
             let b = p.blocked.expect("blocked");
             assert!(b.why.contains("does not resolve"));

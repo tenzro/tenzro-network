@@ -6,6 +6,10 @@ import type { RpcClient } from "@tenzro/core";
 export interface SnapshotSummary {
   /** Height of the committed state. */
   height: number;
+  /** Height of the block that commits the state root: the `--checkpoint-height` a joining node passes to restore this snapshot. */
+  checkpoint_height: number;
+  /** Hash of that block (hex, `0x`-prefixed): the `--checkpoint-hash`. */
+  checkpoint_hash: string;
   /** State root at that height. */
   state_root: string;
   /** BLAKE3 hash (hex) of the manifest blob. */

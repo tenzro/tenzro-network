@@ -259,16 +259,87 @@ pub(crate) async fn call_provider(
     body: &Value,
     credential: &crate::forward_billing::ProviderCredential,
 ) -> Result<Bytes, String> {
+    call_provider_timed(node, endpoint_id, body, credential)
+        .await
+        .map(|(bytes, _)| bytes)
+}
+
+/// [`call_provider`], with the milliseconds from sending the request to the
+/// provider's response head. A call answered whole is answered once the
+/// provider is done, so this is how long the call took on the provider's
+/// side and on the way.
+pub(crate) async fn call_provider_timed(
+    node: &TenzroNode,
+    endpoint_id: &str,
+    body: &Value,
+    credential: &crate::forward_billing::ProviderCredential,
+) -> Result<(Bytes, u64), String> {
+    let sent = std::time::Instant::now();
     let exchange = async {
         let response = open_provider(node, endpoint_id, body, credential).await?;
-        response
+        let head_ms = sent.elapsed().as_millis() as u64;
+        let bytes = response
             .bytes(tenzro_iroh::MAX_INFER_BYTES)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        Ok((bytes, head_ms))
     };
     tokio::time::timeout(CALL_TIMEOUT, exchange)
         .await
         .map_err(|_| format!("no answer within {}s", CALL_TIMEOUT.as_secs()))?
+}
+
+/// What a finished leg of a forwarded stream says about its provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamLeg {
+    /// It dropped mid-stream.
+    Dropped,
+    /// It streamed; its first bytes came this many milliseconds after the
+    /// request.
+    Served(u64),
+    /// It ended cleanly without sending anything: no measurement.
+    Silent,
+}
+
+/// The [`StreamLeg`] of a leg that `dropped` or not, whose first bytes came
+/// `first_byte_ms` after the request if any came.
+pub(crate) fn stream_leg(dropped: bool, first_byte_ms: Option<u64>) -> StreamLeg {
+    match (dropped, first_byte_ms) {
+        (true, _) => StreamLeg::Dropped,
+        (false, Some(ms)) => StreamLeg::Served(ms),
+        (false, None) => StreamLeg::Silent,
+    }
+}
+
+/// Record a stream leg against `provider`: a drop as a stream failure, a
+/// served leg as a success at its latency, a silent one not at all, since a
+/// latency of 0 would lower the provider's average for nothing it did.
+pub(crate) fn record_stream_leg(
+    pm: &tenzro_model::ProviderManager,
+    provider: &tenzro_types::primitives::Address,
+    leg: StreamLeg,
+) {
+    match leg {
+        StreamLeg::Dropped => pm.record_stream_failure(provider),
+        StreamLeg::Served(ms) => pm.record_success(provider, ms),
+        StreamLeg::Silent => {}
+    }
+}
+
+/// Record a forwarded call `provider` answered whole: the time to its
+/// response head is its latency as this node saw it. An answer that is an
+/// error records nothing.
+pub(crate) fn record_answer_latency(
+    node: &TenzroNode,
+    provider: &tenzro_types::primitives::Address,
+    answer: &Value,
+    head_ms: u64,
+) {
+    if answer.get("error").is_none()
+        && let Some(pm) = node.provider_manager()
+    {
+        pm.record_success(provider, head_ms);
+    }
 }
 
 fn parse_error(id: Value, message: String) -> Bytes {
@@ -377,5 +448,38 @@ impl IrohInferDispatcher {
             Ok(body) => jsonrpc_reply(Bytes::from(body)),
             Err(e) => Reply::full(500, format!("encode infer response: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stream_leg_that_sent_nothing_records_nothing() {
+        assert_eq!(stream_leg(true, Some(40)), StreamLeg::Dropped);
+        assert_eq!(stream_leg(true, None), StreamLeg::Dropped);
+        assert_eq!(stream_leg(false, Some(40)), StreamLeg::Served(40));
+        assert_eq!(stream_leg(false, None), StreamLeg::Silent);
+
+        let pm = tenzro_model::ProviderManager::new();
+        let address = tenzro_types::primitives::Address([3u8; 32]);
+        pm.upsert_from_announcement(
+            address,
+            "p".into(),
+            Vec::new(),
+            Default::default(),
+            Default::default(),
+            tenzro_types::model::ProviderStatus::Active,
+            false,
+            None,
+            None,
+        );
+        record_stream_leg(&pm, &address, StreamLeg::Served(40));
+        record_stream_leg(&pm, &address, StreamLeg::Silent);
+        let metrics = pm.get_metrics(&address).expect("provider");
+        // The silent leg neither counted nor pulled the average to 0.
+        assert_eq!(metrics.successful_requests, 1);
+        assert_eq!(metrics.avg_latency_ms, 40);
     }
 }

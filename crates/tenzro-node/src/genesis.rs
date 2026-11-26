@@ -18,7 +18,7 @@ use tenzro_types::{
     block::{Block, BlockHeader, BlockMetadata},
     primitives::{Address, BlockHeight, Hash, Nonce, Timestamp},
 };
-use tracing::{info, warn};
+use tracing::info;
 
 /// ERC-8004 predeploy bundle, baked into the binary at compile time.
 ///
@@ -568,7 +568,9 @@ async fn create_genesis(
         let mut stewards = 0u64;
         for g in &genesis_config.economy.guardians {
             if g.placeholder {
-                warn!(
+                // A seat the genesis leaves for governance to fill is a recorded state of the
+                // network, not a fault: info, so a clean start has no warning for it.
+                info!(
                     role = g.role.as_str(),
                     "genesis guardian seat is a placeholder; governance fills it"
                 );
@@ -796,6 +798,15 @@ async fn create_genesis(
         // genesis file): each one is written as approved.
         let admitted: Vec<[u8; 32]> = bonds.iter().map(|b| b.0).collect();
         entries.extend(tenzro_vm::validator_admission::genesis_entries(&admitted));
+        // A genesis that names the exit-floor or outside-stake gate at epoch 0
+        // keeps the index of seated validators those rules read; any other
+        // genesis keeps none.
+        let names_at_zero = |key: &str| genesis_config.network_params.get(key) == Some(&0);
+        if names_at_zero(tenzro_vm::native::EXIT_FLOOR_GATE)
+            || names_at_zero(tenzro_vm::native::OUTSIDE_CAP_GATE)
+        {
+            entries.extend(tenzro_vm::native::seated_index_entries(&admitted));
+        }
         if bonded > 0 {
             let system = hex::encode(tenzro_vm::native::SYSTEM_ADDRESS);
             for (key, value) in entries {
@@ -1437,6 +1448,28 @@ mod tests {
         );
     }
 
+    /// The genesis carries the governed parameters of 0.2.1 and leaves out
+    /// every key a later release added (gates, new bounds, the release floor)
+    /// unless the genesis file names it, so a release that adds a governed
+    /// key does not change the genesis state root.
+    /// The mainnet genesis carries the long governance values the launch
+    /// rules decide (docs/VALIDATOR-SET-RULES.md): three days of voting, two
+    /// of timelock and 2160 epochs before a loosening of a guard applies.
+    #[test]
+    fn the_mainnet_genesis_carries_the_long_governance_values() {
+        let g: GenesisConfig =
+            toml::from_str(include_str!("../../../config/genesis-prod.toml")).unwrap();
+        assert_eq!(
+            g.network_param("governance.voting_period_ms"),
+            3 * 86_400_000
+        );
+        assert_eq!(g.network_param("governance.timelock_ms"), 2 * 86_400_000);
+        assert_eq!(
+            g.network_param("governance.guard_loosening_grace_epochs"),
+            2160
+        );
+    }
+
     /// The genesis carries every governed parameter except the `feature.`
     /// keys the genesis file does not name, so a release that adds a feature
     /// gate does not change the genesis state root.
@@ -1446,7 +1479,7 @@ mod tests {
         let params = g.network_params().unwrap();
         let carried = tenzro_vm::governance::GOVERNED_PARAMS
             .iter()
-            .filter(|p| !tenzro_vm::feature_gate::is_feature_key(p.key))
+            .filter(|p| tenzro_vm::feature_gate::in_genesis_root(p.key, false))
             .count();
         assert_eq!(params.len(), carried);
         assert!(
@@ -1460,6 +1493,26 @@ mod tests {
 
     /// The local block history window the launch genesis names.
     const LAUNCH_HISTORY_RETENTION_BLOCKS: u64 = 100_000;
+
+    /// Hash of the public network's genesis block.
+    const PUBLIC_NETWORK_GENESIS_HASH: &str =
+        "b3f2132ab5e3f0f91ca0ac5f08c5c708839ed1f9af0d8a1f36b8b27ec08787ac";
+
+    /// A node started without `--genesis` starts on the built-in genesis and
+    /// gets the public network's genesis block from it. A value changed in the
+    /// embedded file changes this hash.
+    #[tokio::test]
+    async fn the_built_in_genesis_starts_a_node_on_the_public_networks_genesis_block() {
+        let genesis = crate::config::public_network_genesis().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(RocksDbStore::open(&StorageConfig::new(dir.path().to_path_buf())).unwrap());
+        let block = initialize_genesis(&store, &genesis).await.unwrap();
+        assert_eq!(
+            hex::encode(block.hash().as_bytes()),
+            PUBLIC_NETWORK_GENESIS_HASH
+        );
+    }
 
     /// The launch genesis seeds the history window storage maintenance reads,
     /// so the registry value of two weeks of blocks does not apply on the new
@@ -2677,5 +2730,80 @@ mod tests {
         store.delete(CF_METADATA, b"genesis_inputs_digest").unwrap();
         let err = initialize_genesis(&store, &cfg).await.unwrap_err();
         assert!(format!("{err}").contains("no genesis_inputs_digest"));
+    }
+
+    /// The most of the fixed supply one genesis account may hold, in basis
+    /// points: the lower edge of the 10-40% concentration warning band
+    /// (`tenzro_getEconomyMetrics`, `research::concentration`). The allocation
+    /// list of the final genesis is the owner's input; until it is written in,
+    /// this holds whatever the genesis files carry and fails the moment an
+    /// account in one of them exceeds the bound.
+    const GENESIS_CONCENTRATION_BOUND_BPS: u128 = 1_000;
+
+    /// The first account whose balance, in whole TNZO, exceeds `bound_bps` of
+    /// the fixed supply.
+    fn concentration_breach(
+        accounts: &[crate::config::GenesisAccount],
+        bound_bps: u128,
+    ) -> Option<(String, u128)> {
+        let supply = tenzro_token::tnzo::MAX_SUPPLY / tenzro_types::constants::ONE_TNZO;
+        accounts
+            .iter()
+            .find(|a| a.balance * 10_000 > supply * bound_bps)
+            .map(|a| (a.address.clone(), a.balance * 10_000 / supply))
+    }
+
+    fn account(address: &str, balance: u128) -> crate::config::GenesisAccount {
+        crate::config::GenesisAccount {
+            address: address.to_string(),
+            balance,
+        }
+    }
+
+    /// The check fails for an account over the bound, holds at the bound, and
+    /// names the account.
+    #[test]
+    fn the_concentration_check_fails_over_the_bound_and_holds_at_it() {
+        let supply = tenzro_token::tnzo::MAX_SUPPLY / tenzro_types::constants::ONE_TNZO;
+        let at = supply * GENESIS_CONCENTRATION_BOUND_BPS / 10_000;
+        assert_eq!(
+            concentration_breach(
+                &[account("a", at), account("b", 1)],
+                GENESIS_CONCENTRATION_BOUND_BPS
+            ),
+            None
+        );
+        let over = concentration_breach(
+            &[account("a", 1), account("b", at + 1)],
+            GENESIS_CONCENTRATION_BOUND_BPS,
+        );
+        assert_eq!(over.map(|(who, _)| who), Some("b".to_string()));
+        assert_eq!(
+            concentration_breach(&[], GENESIS_CONCENTRATION_BOUND_BPS),
+            None
+        );
+    }
+
+    /// No account of a shipped production genesis holds more than the bound
+    /// of the fixed supply.
+    #[test]
+    fn no_genesis_account_of_a_shipped_genesis_exceeds_the_concentration_bound() {
+        for (name, text) in [
+            (
+                "genesis-prod.toml",
+                include_str!("../../../config/genesis-prod.toml"),
+            ),
+            (
+                "genesis-launch.toml",
+                include_str!("../../../config/genesis-launch.toml"),
+            ),
+        ] {
+            let genesis: GenesisConfig = toml::from_str(text).unwrap();
+            assert_eq!(
+                concentration_breach(&genesis.accounts, GENESIS_CONCENTRATION_BOUND_BPS),
+                None,
+                "{name} allocates over {GENESIS_CONCENTRATION_BOUND_BPS} bps of the supply to one account"
+            );
+        }
     }
 }

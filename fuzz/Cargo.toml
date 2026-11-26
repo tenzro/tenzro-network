@@ -109,12 +109,10 @@ bench = false
 # The root workspace's patches, which a separate workspace does not inherit: all of them, so the targets
 # exercise the same patched crates the node builds with (checked by scripts/testnet/security/test_security_programme.py).
 [patch.crates-io]
-lance-linalg = { path = "../vendor/lance-linalg" }
 noq-proto = { path = "../vendor/noq-proto" }
+c-kzg = { path = "../vendor/c-kzg-unlinked" }
 reed-solomon-erasure = { path = "../vendor/reed-solomon-erasure" }
 iroh = { path = "../vendor/iroh" }
-iroh-gossip = { path = "../vendor/iroh-gossip" }
-openh264-sys2 = { path = "../vendor/openh264-sys2" }
 
 [[bin]]
 name = "external_tx_decode"
@@ -196,6 +194,13 @@ bench = false
 [[bin]]
 name = "agent_protocol_messages"
 path = "fuzz_targets/agent_protocol_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_signature_form"
+path = "fuzz_targets/record_signature_form.rs"
 test = false
 doc = false
 bench = false

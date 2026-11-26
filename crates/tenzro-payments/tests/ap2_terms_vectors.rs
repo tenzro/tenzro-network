@@ -50,7 +50,11 @@ fn sd_jwt(k: &SigningKey, claims: Value) -> String {
     }
     body.insert("_sd".into(), Value::Array(digests));
     body.insert("_sd_alg".into(), "sha-256".into());
-    let mut out = jws(k, &Value::Object(body));
+    let mut h = Map::new();
+    h.insert("alg".into(), "ES256".into());
+    h.insert("typ".into(), "dc+sd-jwt".into());
+    h.insert("jwk".into(), jwk_of(k.verifying_key()));
+    let mut out = sign_jws(&h, &Value::Object(body), |m| k.sign(m));
     for d in discs {
         out.push('~');
         out.push_str(&d);
@@ -140,6 +144,7 @@ fn every_vector_decides_as_stated() {
             amount: u128::from(amount),
             currency,
             chain: "tenzro:1337",
+            nonce: "n",
         };
         let terms = PerTx(u128::from(case["terms_max"].as_u64().unwrap()));
         let got = verify(

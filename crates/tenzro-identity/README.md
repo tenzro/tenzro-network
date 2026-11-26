@@ -121,7 +121,7 @@ authorisations expire.
 machine from the old owner and attaching it to the new one in the same step, so
 no window exists in which both or neither claims it.
 
-Reachable as `tenzro_transferMachineOwnership` (admin-token gated, authorisation
+Reachable as `tenzro_transferMachineOwnership` (admin-class: the operator DID or a policy admin, authorisation
 TTL-bounded against replay) and `tenzro device transfer` on the CLI.
 
 Full model: `docs/TDIP.md`.

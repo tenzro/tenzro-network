@@ -526,58 +526,19 @@ pub struct GuardianStateOutput {
 
 // ─── Economic policy ───
 
-/// Division when the serving node validates for itself.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct EconomicValidatingSchedule {
-    pub operator_bps: u32,
-    pub treasury_bps: u32,
-}
-
-/// Division when an RPC provider validates on the serving node's behalf.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct EconomicDelegatedSchedule {
-    pub operator_bps: u32,
-    pub rpc_provider_bps: u32,
-    pub treasury_bps: u32,
-}
-
-/// Every rate the network charges.
+/// The governance-set economic policy.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EconomicPolicyRates {
-    pub validating: EconomicValidatingSchedule,
-    pub delegated: EconomicDelegatedSchedule,
     /// convert_to_tnzo or keep_inbound.
     pub default_conversion: String,
     /// The smallest charge settled on its own, wei.
     pub micro_settlement_floor: ChainWei,
 }
 
-/// One payee's share in this node's mode.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct EconomicShare {
-    pub role: String,
-    pub bps: u32,
-}
-
-/// The operator's share in each economic mode.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct OperatorShareByMode {
-    pub private: u32,
-    pub public_validating: u32,
-    pub public_delegated: u32,
-}
-
-/// This node's economic policy and the mode it settles under.
+/// This node's economic policy.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EconomicPolicyOutput {
     pub policy: EconomicPolicyRates,
-    pub validating: bool,
-    /// `0x` hex.
-    pub rpc_provider_payee: Option<String>,
-    pub visibility: String,
-    pub mode: String,
-    pub shares: Vec<EconomicShare>,
-    pub operator_share_bps_by_mode: OperatorShareByMode,
 }
 
 // ─── Data availability ───
@@ -913,13 +874,52 @@ pub struct EventsPageEntry {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EventsPageOutput {
     pub events: Vec<EventsPageEntry>,
-    /// Pass back as from_cursor to resume (height:tx_index:event_index).
+    /// On a page read forward: pass back as from_cursor to resume
+    /// (height:tx_index:event_index).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// On a newest-first page: pass back as before_cursor for the older
+    /// page; null once the oldest locally held height was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_cursor: Option<String>,
     /// The highest height the event log holds.
     pub tip: Option<u64>,
     /// When completeness was asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completeness: Option<EventCompletenessProof>,
+    /// On the newest page, for a caller that may read the node's
+    /// conditions: their changes, newest first, with no proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_events: Option<Vec<NodeConditionChange>>,
+}
+
+/// How much a node condition matters.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeConditionSeverity {
+    /// Worth knowing; nothing is failing.
+    Info,
+    /// The node works and will stop doing something if this is left.
+    Warning,
+    /// The node is not doing its work.
+    Critical,
+}
+
+/// A node condition opening, clearing or being answered.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NodeConditionChange {
+    /// The change's sequence on the node's event stream.
+    pub sequence: u64,
+    /// `condition_opened`, `condition_cleared` or `condition_answered`.
+    pub kind: String,
+    pub summary: String,
+    /// When the node saw it, RFC 3339 in UTC.
+    pub at: String,
+    /// The node's height when it saw it.
+    pub block: u64,
+    /// The condition's id.
+    pub condition: String,
+    pub severity: NodeConditionSeverity,
 }
 
 /// Whether an event proof checks against a certified checkpoint.
@@ -2453,6 +2453,60 @@ pub enum GovPolicyUpdate {
     FinalityProgramSet {
         image_id: String,
     },
+    /// A protocol upgrade of a release built for several platforms: one
+    /// binary per platform. Refused until
+    /// `feature.upgrade_platforms.activation_epoch` is in force.
+    ProtocolUpgradePlatforms {
+        version: String,
+        digests: Vec<GovPlatformDigest>,
+    },
+    /// PEM roots a human root's passkey attestation must chain to once
+    /// registration attestation is in force.
+    WebauthnRootsSet {
+        roots_pem: Vec<String>,
+    },
+    /// The JSON Web Key Set NVIDIA attestation tokens are verified under,
+    /// once `feature.nras_jwks.activation_epoch` is in force. Empty
+    /// recognises none.
+    NrasJwksSet {
+        jwks_json: String,
+    },
+    /// The machine identities a node dials to find the network, once
+    /// `feature.boot_nodes.activation_epoch` is in force.
+    BootNodesSet {
+        identities: Vec<String>,
+    },
+    /// The release signing keys (hex SEC1 P-256) a signed update notice must
+    /// verify under, once `feature.update_notice_keys.activation_epoch` is in
+    /// force.
+    UpdateNoticeKeysSet {
+        keys_hex: Vec<String>,
+    },
+}
+
+/// The binary a protocol upgrade names for one platform.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GovPlatformDigest {
+    /// Target triple, such as `x86_64-unknown-linux-gnu`.
+    pub platform: String,
+    /// SHA-256 of the binary, an array of 32 byte values.
+    pub code_hash: Vec<u8>,
+}
+
+/// The binary a scheduled upgrade names for one platform.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GovActivationDigest {
+    pub platform: String,
+    /// Hex.
+    pub code_hash: String,
+}
+
+/// The binaries of a scheduled upgrade built for several platforms.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GovUpgradePlatforms {
+    /// The proposal the scheduled activation names.
+    pub proposal_id: String,
+    pub digests: Vec<GovActivationDigest>,
 }
 
 /// Where an agent account is deployed on a chain family. Byte fields are
@@ -2685,6 +2739,14 @@ pub enum GovProposalAction {
         operator: Vec<u8>,
         memo: String,
     },
+    ApproveRpcProvider {
+        provider: String,
+        memo: String,
+    },
+    RevokeRpcProvider {
+        provider: String,
+        memo: String,
+    },
     ReinstateValidator {
         /// The jailed validator, an array of 32 byte values.
         validator: Vec<u8>,
@@ -2884,6 +2946,9 @@ pub struct GovUpgradeReadiness {
     pub signals: Vec<GovReadySignal>,
     /// The latest scheduled activation, of any binary.
     pub scheduled: Option<GovUpgradeActivation>,
+    /// The binaries of the latest upgrade built for several platforms; it
+    /// belongs to `scheduled` when their proposal ids match.
+    pub scheduled_platforms: Option<GovUpgradePlatforms>,
     pub this_node_runs_it: bool,
 }
 

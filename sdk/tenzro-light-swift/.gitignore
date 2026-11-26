@@ -1,0 +1,4 @@
+.build/
+# Written by bindings.sh from the built library.
+Sources/TenzroLight/TenzroLight.swift
+Sources/TenzroLightFFI/include/

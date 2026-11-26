@@ -65,8 +65,17 @@ pub struct VerifyPolicy {
 }
 
 /// The NVIDIA attestation service key set this process verifies GPU evidence
-/// against, once configured.
-static NVIDIA_JWKS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// against outside block execution: the one governance put on chain, or until
+/// there is one the operator's own. Block execution takes the chain's set
+/// explicitly and never reads this.
+static NVIDIA_JWKS: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+fn nvidia_jwks_in_force() -> Option<String> {
+    NVIDIA_JWKS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
 
 /// Configure the NVIDIA attestation service's signing keys for this process.
 ///
@@ -75,11 +84,21 @@ static NVIDIA_JWKS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// deployment that wants GPU evidence verified has to supply the keys. The
 /// node reads them from its configuration at startup.
 ///
-/// Returns whether this call was the one that set them. The key set is fixed
-/// for the life of the process: swapping it at runtime would change what a
-/// report already accepted would mean.
+/// Returns whether this call set them: one already in force is kept.
 pub fn configure_nvidia_jwks(jwks: String) -> bool {
-    NVIDIA_JWKS.set(jwks).is_ok()
+    let mut slot = NVIDIA_JWKS.write().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(jwks);
+    true
+}
+
+/// Replace the key set this process verifies GPU evidence against with the
+/// one governance put on chain (`None` when it put none, which leaves GPU
+/// evidence refused). A node calls it as it applies each enacted policy.
+pub fn replace_nvidia_jwks(jwks: Option<String>) {
+    *NVIDIA_JWKS.write().unwrap_or_else(|e| e.into_inner()) = jwks;
 }
 
 impl VerifyPolicy {
@@ -94,7 +113,7 @@ impl VerifyPolicy {
             now: chrono::Utc::now().timestamp().max(0) as u64,
             expected_user_data,
             max_age_secs: 600,
-            nvidia_jwks: NVIDIA_JWKS.get().cloned(),
+            nvidia_jwks: nvidia_jwks_in_force(),
         }
     }
 }
@@ -143,6 +162,26 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_key_set_on_chain_replaces_the_operators_and_clearing_it_refuses_gpu_evidence() {
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        replace_nvidia_jwks(None);
+        assert!(configure_nvidia_jwks("operator".into()));
+        assert!(!configure_nvidia_jwks("second".into()));
+        assert_eq!(
+            VerifyPolicy::now(vec![]).nvidia_jwks.as_deref(),
+            Some("operator")
+        );
+        replace_nvidia_jwks(Some("chain".into()));
+        assert_eq!(
+            VerifyPolicy::now(vec![]).nvidia_jwks.as_deref(),
+            Some("chain")
+        );
+        replace_nvidia_jwks(None);
+        assert_eq!(VerifyPolicy::now(vec![]).nvidia_jwks, None);
+    }
     use super::*;
 
     #[test]

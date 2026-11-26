@@ -52,6 +52,9 @@ pub enum Surface {
     Mcp,
     McpCompact,
     A2a,
+    /// A receipt for work an agent had done outside the network, reported
+    /// over JSON-RPC.
+    External,
 }
 
 impl Surface {
@@ -61,6 +64,7 @@ impl Surface {
             Self::Mcp => "mcp",
             Self::McpCompact => "mcp_compact",
             Self::A2a => "a2a",
+            Self::External => "external",
         }
     }
 }
@@ -461,7 +465,7 @@ pub(crate) async fn handle_get(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(256)
         .min(4096) as usize;
-    let controller = tenzro_vm::funding::root_did(&agent);
+    let controller = crate::agent_audit::controller_of(node, &agent);
     crate::agent_audit::may_read(node, auth_ctx, Some(&controller)).await?;
     let log = node.tool_calls();
     let internal = |m: String| crate::rpc::JsonRpcError {

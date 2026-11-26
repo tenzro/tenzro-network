@@ -67,7 +67,8 @@ pub struct IssuerRecord {
 /// delegations were revoked. The chain implements it.
 pub trait IssuerResolver: Send + Sync {
     fn resolve(&self, identity: &str) -> DelegationResult<IssuerRecord>;
-    fn is_revoked(&self, delegation_id: &[u8; 32]) -> bool;
+    /// Whether `identity` revoked the delegation `delegation_id`.
+    fn is_revoked(&self, identity: &str, delegation_id: &[u8; 32]) -> bool;
 
     /// The identity key that may have issued a delegation made at
     /// `issued_at_ms` under key version `issuer_version`, as seen at
@@ -198,7 +199,7 @@ pub(crate) mod tests {
         pub(crate) fn rotate(&self) {
             self.keys.lock().unwrap().push((
                 MlDsaSigningKey::generate(),
-                SigningKey::generate(&mut rand::rngs::OsRng),
+                SigningKey::from_bytes(&rand::random()),
             ));
         }
         pub(crate) fn version(&self) -> u64 {
@@ -219,7 +220,7 @@ pub(crate) mod tests {
                 ml_dsa: ml.verifying_key_bytes().to_vec(),
             })
         }
-        fn is_revoked(&self, id: &[u8; 32]) -> bool {
+        fn is_revoked(&self, _identity: &str, id: &[u8; 32]) -> bool {
             self.revoked.lock().unwrap().contains(id)
         }
     }

@@ -601,12 +601,10 @@ pub async fn call(
     alpn: &[u8],
     request: Bytes,
 ) -> IrohResult<Bytes> {
-    let conn = endpoint
-        .connect(remote, alpn)
+    let conn = crate::bounded::connect(endpoint, remote, alpn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("connect: {e}")))?;
-    let (mut send, mut recv) = conn
-        .open_bi()
+    let (mut send, mut recv) = crate::bounded::open_bi(&conn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("open_bi: {e}")))?;
     write_frame(&mut send, &request).await?;
@@ -629,16 +627,14 @@ pub async fn call_pq(
     channel: &crate::pq_endpoint::PqChannel,
     peer: &crate::identity_record::EndpointRecord,
 ) -> IrohResult<Bytes> {
-    let conn = endpoint
-        .connect(remote, alpn)
+    let conn = crate::bounded::connect(endpoint, remote, alpn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("connect: {e}")))?;
     if let Err(e) = channel.dial(&conn, peer).await {
         conn.close(1u32.into(), b"ml-dsa endpoint authentication failed");
         return Err(e);
     }
-    let (mut send, mut recv) = conn
-        .open_bi()
+    let (mut send, mut recv) = crate::bounded::open_bi(&conn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("open_bi: {e}")))?;
     write_frame(&mut send, &request).await?;
@@ -650,6 +646,10 @@ pub async fn call_pq(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
     use iroh::protocol::Router;
@@ -675,7 +675,10 @@ mod tests {
     #[tokio::test]
     async fn roundtrip_jsonrpc_over_iroh() {
         // Server side: bind endpoint, accept A2A ALPN.
-        let server_ep = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server_ep = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         let proto = JsonRpcProtocol::a2a(Arc::new(EchoDispatcher), AdmissionLimits::default());
         let _router = Router::builder(server_ep.clone())
             .accept(ALPN_A2A, proto)
@@ -685,7 +688,10 @@ mod tests {
         // its full EndpointAddr (direct socket addresses) so the test is
         // hermetic — no relay or discovery service involved.
         let server_addr = server_ep.addr();
-        let client_ep = Endpoint::bind(presets::Minimal).await.unwrap();
+        let client_ep = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         let req = Bytes::from_static(b"null");
         let resp = call(&client_ep, server_addr, ALPN_A2A, req).await.unwrap();
         let resp_str = std::str::from_utf8(&resp).unwrap();
@@ -697,7 +703,10 @@ mod tests {
     /// peer cannot hold unbounded streams open.
     #[tokio::test]
     async fn stalled_streams_are_cut_off_and_capped_per_peer() {
-        let server_ep = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server_ep = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         let limits = AdmissionLimits {
             max_in_flight: 64,
             max_in_flight_per_peer: 8,
@@ -710,7 +719,10 @@ mod tests {
                 JsonRpcProtocol::a2a(Arc::new(EchoDispatcher), limits),
             )
             .spawn();
-        let client_ep = Endpoint::bind(presets::Minimal).await.unwrap();
+        let client_ep = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         let conn = client_ep.connect(server_ep.addr(), ALPN_A2A).await.unwrap();
         let mut held = Vec::new();
         for _ in 0..64 {
@@ -761,8 +773,14 @@ mod tests {
         use crate::pq_endpoint::tests::TestMachinePq;
         use crate::pq_endpoint::{ChannelKeys, PqChannel};
 
-        let server_ep = Endpoint::bind(presets::Minimal).await.unwrap();
-        let client_ep = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server_ep = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
+        let client_ep = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         let now = crate::relay::now_ms();
         let bound = |seed: u8, id: iroh::EndpointId, pq: &TestMachinePq| {
             let mut r = EndpointRecord::sign(

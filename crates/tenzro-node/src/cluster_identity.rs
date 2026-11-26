@@ -105,6 +105,9 @@ pub struct ClusterIdentity {
     lan: RwLock<HashMap<String, LanMember>>,
     /// The network whose custody challenges approve the lists held.
     chain_id: u64,
+    /// Set once local-network discovery has started, so a role taken up
+    /// again does not start it twice.
+    lan_started: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for ClusterIdentity {
@@ -122,6 +125,7 @@ impl ClusterIdentity {
             storage: None,
             lan: RwLock::new(HashMap::new()),
             chain_id,
+            lan_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -311,6 +315,12 @@ impl ClusterIdentity {
     /// Announce this machine on the local network and admit the co-members it
     /// finds there, for as long as the node runs.
     pub fn spawn_lan_discovery(self: &Arc<Self>, endpoint: tenzro_iroh::Endpoint) {
+        if self
+            .lan_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
         let Some(self_did) = machine_did() else {
             return;
         };

@@ -488,7 +488,7 @@ mod tests {
     /// `TENZRO_DEVICE_KEY_DIR` pointing at a scratch directory. Run with `--ignored --nocapture
     /// --test-threads 1`.
     #[test]
-    #[ignore]
+    #[ignore = "needs a provisioned TPM and TENZRO_DEVICE_KEY_DIR; run under scripts/tests/cargo-test-with-swtpm.sh with --ignored --test-threads 1"]
     fn gate_hardware_composite_signing() {
         let iters: usize = std::env::var("TDC_SIGN_ITERS")
             .ok()
@@ -555,7 +555,7 @@ mod tests {
     /// and `TENZRO_DEVICE_KEY_DIR` pointing at a scratch directory. Run with
     /// `--ignored --test-threads 1`.
     #[test]
-    #[ignore]
+    #[ignore = "needs a provisioned TPM and TENZRO_DEVICE_KEY_DIR; run under scripts/tests/cargo-test-with-swtpm.sh with --ignored --test-threads 1"]
     fn hardware_ml_dsa_87_p384_consensus_key() {
         use tenzro_device_key::signer::{MlDsaSupport, ml_dsa_support};
         let scheme = SignatureScheme::MlDsa87P384;
@@ -592,7 +592,7 @@ mod tests {
     /// provisioned TPM and `TENZRO_DEVICE_KEY_DIR` pointing at a scratch
     /// directory. Run with `--ignored --test-threads 1`.
     #[test]
-    #[ignore]
+    #[ignore = "needs a provisioned TPM and TENZRO_DEVICE_KEY_DIR; run under scripts/tests/cargo-test-with-swtpm.sh with --ignored --test-threads 1"]
     fn hardware_node_configured_for_ml_dsa_87_p384() {
         use tenzro_device_key::signer::{MlDsaSupport, ml_dsa_support};
         let scheme = SignatureScheme::MlDsa87P384;

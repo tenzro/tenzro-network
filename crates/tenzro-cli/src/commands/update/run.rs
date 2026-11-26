@@ -106,7 +106,7 @@ pub enum Why {
 }
 
 impl Why {
-    fn says(&self) -> String {
+    pub fn says(&self) -> String {
         match self {
             Why::Asked => "--no-restart was given.".into(),
             Why::ServesRole => "this node serves a staked role, so the moment of its restart is yours to choose.".into(),
@@ -159,12 +159,24 @@ pub fn plan(os: &str, service: &NodeService, role: Role, no_restart: bool) -> Pl
 }
 
 /// The roles a node reports in `tenzro_getNodeStatus`, as a [`Role`]. Pure.
+/// A list that names no role, or holds anything but names, is not read as
+/// "follows only": the node is not restarted on a reading it did not give.
 pub fn role_of(status: &Value) -> Role {
     let roles: Vec<&str> = match status.get("roles") {
-        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
-        Some(Value::String(s)) => s.split(',').map(str::trim).collect(),
+        Some(Value::Array(a)) => match a.iter().map(Value::as_str).collect::<Option<Vec<_>>>() {
+            Some(names) => names,
+            None => return Role::Unknown,
+        },
+        Some(Value::String(s)) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .collect(),
         _ => return Role::Unknown,
     };
+    if roles.is_empty() {
+        return Role::Unknown;
+    }
     if notice::serves_role(roles) {
         Role::Serves
     } else {
@@ -216,7 +228,7 @@ pub trait Machine {
     /// The advice for an operator who restarts a node that serves a role.
     async fn restart_advice(&self) -> String;
     /// Restarts the node service.
-    fn restart(&self) -> Result<()>;
+    async fn restart(&self) -> Result<()>;
     /// Waits between two health probes.
     async fn sleep(&self, d: Duration);
     /// One health probe of the running node.
@@ -226,9 +238,9 @@ pub trait Machine {
 /// The whole update: check, install, restart, health gate. Returns how it
 /// ended; the caller turns that into the exit status.
 pub async fn flow(ctx: &Ctx, layout: &Layout, opts: &Opts, m: &impl Machine) -> Result<Outcome> {
-    let release = match super::check_or_explain(ctx, m.now()).await? {
+    let release = match super::check_or_explain(ctx, layout, m.now()).await? {
         Availability::UpToDate => {
-            super::say_current(ctx);
+            super::say_current(ctx, layout);
             if let Ok(Some(t)) = health::load(&ctx.data_dir)
                 && t.state == health::TrialState::Pending
             {
@@ -252,7 +264,7 @@ pub async fn flow(ctx: &Ctx, layout: &Layout, opts: &Opts, m: &impl Machine) -> 
             manifest_version,
             description,
         } => {
-            super::say_available(ctx, &release, manifest_version, &description);
+            super::say_available(ctx, layout, &release, manifest_version, &description);
             release
         }
     };
@@ -299,7 +311,7 @@ pub async fn flow(ctx: &Ctx, layout: &Layout, opts: &Opts, m: &impl Machine) -> 
     output::print_success(&format!("Installed {} ({names}).", applied.release));
     output::print_field("Previous kept at", &applied.installed.previous);
     output::print_info("Restarting the node service onto the new release.");
-    if let Err(e) = m.restart() {
+    if let Err(e) = m.restart().await {
         output::print_warning(&format!(
             "{} is installed, but the node service was not restarted: {e:#}",
             applied.release
@@ -332,7 +344,7 @@ pub async fn flow(ctx: &Ctx, layout: &Layout, opts: &Opts, m: &impl Machine) -> 
             output::print_warning(&format!("Rolled back to the previous release: {reason}."));
             // The binaries are the previous release again; the service still
             // runs whatever it last started. One more restart runs them.
-            let previous_runs = match m.restart() {
+            let previous_runs = match m.restart().await {
                 Ok(()) => {
                     output::print_info(
                         "The node service was restarted and runs the previous release again.",
@@ -427,7 +439,7 @@ impl Machine for Host<'_> {
         notice::restart_advice(&self.data_dir, &self.cmd.rpc_url, super::now_ms()).await
     }
 
-    fn restart(&self) -> Result<()> {
+    async fn restart(&self) -> Result<()> {
         service::restart(&self.service)
     }
 
@@ -441,11 +453,22 @@ impl Machine for Host<'_> {
 }
 
 impl WholeArgs {
-    pub(super) async fn execute(&self) -> Result<()> {
-        let ctx = Ctx::from_args(&self.args)?;
-        let layout = super::layout_of(&self.install_dir)?;
-        // The signed notice first, as `tenzro update check` does: it also
-        // reaches a machine that cannot read the channel's manifest.
+    /// The options as `tenzro update --yes --rpc-url <rpc_url>` reads them,
+    /// with the channel and the data directory from the environment.
+    fn confirmed(rpc_url: &str) -> Result<WholeArgs> {
+        #[derive(clap::Parser)]
+        struct Confirmed {
+            #[command(flatten)]
+            whole: WholeArgs,
+        }
+        let parsed =
+            <Confirmed as clap::Parser>::try_parse_from(["tenzro", "--yes", "--rpc-url", rpc_url])?;
+        Ok(parsed.whole)
+    }
+
+    /// The signed notice first, as `tenzro update check` does: it also
+    /// reaches a machine that cannot read the channel's manifest.
+    async fn refresh_notice(&self, ctx: &Ctx) {
         let (endpoint, _) = crate::endpoint::resolve();
         let _ = notice::refresh(
             &ctx.data_dir,
@@ -454,11 +477,13 @@ impl WholeArgs {
             super::now_ms(),
         )
         .await;
+    }
+
+    /// The notice, then the limits and the machine the flow runs on.
+    async fn prepare(&self, ctx: &Ctx, consent: Consent) -> Result<(Opts, Host<'_>)> {
+        self.refresh_notice(ctx).await;
         let opts = Opts {
-            consent: consent(
-                self.yes,
-                std::io::IsTerminal::is_terminal(&std::io::stdin()),
-            ),
+            consent,
             policy: health::Policy {
                 window_ms: self.health_window_secs.saturating_mul(1000),
                 max_boot_attempts: self.max_boot_attempts,
@@ -474,6 +499,17 @@ impl WholeArgs {
                 .timeout(Duration::from_secs(5))
                 .build()?,
         };
+        Ok((opts, host))
+    }
+
+    pub(super) async fn execute(&self) -> Result<()> {
+        let ctx = Ctx::from_args(&self.args)?;
+        let layout = super::layout_of(&self.install_dir)?;
+        let asked = consent(
+            self.yes,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        );
+        let (opts, host) = self.prepare(&ctx, asked).await?;
         match flow(&ctx, &layout, &opts, &host).await? {
             Outcome::NeedsYes { release } => bail!(
                 "release {release} was not installed: no terminal is attached to confirm on. To install it, run: tenzro update --yes"
@@ -485,5 +521,109 @@ impl WholeArgs {
             | Outcome::Installed(_)
             | Outcome::Healthy => Ok(()),
         }
+    }
+}
+
+/// A stage of an update nobody watches at a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Fetching the release and checking every file against its signature.
+    Downloading,
+    /// Restarting the node service onto the release.
+    Restarting,
+    /// Probing the restarted node for the health window.
+    Verifying,
+}
+
+/// The release installed here and what the channel offers, as `tenzro update
+/// check` finds them.
+pub async fn look(rpc_url: &str) -> Result<(String, Availability)> {
+    let cmd = WholeArgs::confirmed(rpc_url)?;
+    let ctx = Ctx::from_args(&cmd.args)?;
+    let layout = super::layout_of(&cmd.install_dir)?;
+    cmd.refresh_notice(&ctx).await;
+    let current = ctx.installed(&layout)?.to_string();
+    let found = super::check(&ctx, &layout, super::now_ms()).await?;
+    Ok((current, found))
+}
+
+/// Bare `tenzro update` for a caller that confirmed the install before it
+/// started and has no terminal: the same flow, with `watch` told each stage.
+pub async fn unattended(rpc_url: &str, watch: &(dyn Fn(Stage) + Send + Sync)) -> Result<Outcome> {
+    let cmd = WholeArgs::confirmed(rpc_url)?;
+    let ctx = Ctx::from_args(&cmd.args)?;
+    let layout = super::layout_of(&cmd.install_dir)?;
+    let (opts, host) = cmd.prepare(&ctx, Consent::Given).await?;
+    flow(&ctx, &layout, &opts, &Watched { host, watch }).await
+}
+
+/// Puts the previous release back, as `tenzro update rollback` does, in the
+/// install this `tenzro` runs from.
+///
+/// Called from a blocking thread, which waits for the update lock there.
+pub fn roll_back_here() -> Result<super::install::RolledBack> {
+    let cmd = WholeArgs::confirmed(crate::endpoint::LOCAL_RPC)?;
+    tokio::runtime::Handle::current().block_on(super::roll_back(
+        &super::layout_of(&cmd.install_dir)?,
+        &cmd.args.at.data_dir(),
+    ))
+}
+
+/// The machine, for an update nobody watches.
+struct Watched<'a> {
+    host: Host<'a>,
+    watch: &'a (dyn Fn(Stage) + Send + Sync),
+}
+
+impl Machine for Watched<'_> {
+    fn now(&self) -> u64 {
+        self.host.now()
+    }
+
+    /// The install was confirmed before the update started.
+    fn confirm(&self, _question: &str) -> Result<bool> {
+        Ok(true)
+    }
+
+    async fn plan(&self) -> Plan {
+        let plan = self.host.plan().await;
+        (self.watch)(Stage::Downloading);
+        plan
+    }
+
+    fn service_mismatch(&self, layout: &Layout) -> Option<Why> {
+        self.host.service_mismatch(layout)
+    }
+
+    async fn restart_advice(&self) -> String {
+        self.host.restart_advice().await
+    }
+
+    /// A systemd unit is the administrator's, so the node is asked to restart
+    /// itself, with the operator's session; it ends with the status its unit
+    /// starts it again on. A launchd agent is this user's and is restarted
+    /// as the terminal restarts it.
+    async fn restart(&self) -> Result<()> {
+        (self.watch)(Stage::Restarting);
+        match self.host.service {
+            NodeService::Systemd(_) => {
+                let node = crate::rpc::RpcClient::at(&self.host.cmd.rpc_url);
+                let asked = node.call::<Value>("tenzro_restartNode", serde_json::json!([]));
+                tokio::time::timeout(Duration::from_secs(10), asked)
+                    .await
+                    .map_err(|_| anyhow!("the node did not answer the restart"))??;
+                Ok(())
+            }
+            _ => self.host.restart().await,
+        }
+    }
+
+    async fn sleep(&self, d: Duration) {
+        self.host.sleep(d).await
+    }
+
+    async fn probe(&self) -> Result<Observation> {
+        (self.watch)(Stage::Verifying);
+        self.host.probe().await
     }
 }

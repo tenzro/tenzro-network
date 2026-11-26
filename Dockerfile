@@ -6,6 +6,7 @@ FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
     pkg-config \
     libssl-dev \
     libclang-dev \
@@ -51,20 +52,33 @@ ENV CXX=clang++
 ENV CMAKE_ARGS="-DGGML_NATIVE=OFF"
 
 # Keep line tables and symbols through the cargo build; the debug files are split off
-# and the shipped binary stripped in the next step (release profile stays strip = "symbols").
+# and the shipped binary loses its debug sections in the next step, as the release profile's
+# strip = "debuginfo" would have it: function names stay.
 ENV CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY tools/ tools/
+# The CLI's built-in assistant embeds the guides in docs/ at compile time.
+COPY docs/ docs/
 COPY sdk/tenzro-ts-sdk/native/ sdk/tenzro-ts-sdk/native/
 COPY sdk/tenzro-py/native/ sdk/tenzro-py/native/
+COPY sdk/tenzro-ffi/ sdk/tenzro-ffi/
+COPY sdk/tenzro-light-wasm/ sdk/tenzro-light-wasm/
+COPY sdk/tenzro-android-node/native/ sdk/tenzro-android-node/native/
 # vendor/* subtrees (erc8004-evm, erc8004-solana, erc8004-atom)
 # are source artifacts for regenerate.sh, not build-time
 # dependencies — they're copied here because COPY vendor/ is a single layer
 # and the cost is negligible vs. surgical sub-copies.
 COPY vendor/ vendor/
+
+# ONNX Runtime from the pinned library (packaging/onnxruntime.tsv), checked by hash; the build downloads nothing.
+COPY packaging/onnxruntime.tsv packaging/onnxruntime.tsv
+COPY scripts/release/fetch-onnxruntime.py scripts/release/fetch-onnxruntime.py
+RUN python3 scripts/release/fetch-onnxruntime.py --target "$(uname -m)-unknown-linux-gnu" \
+      --prefix /opt/onnxruntime --link-at /opt/onnxruntime/pinned
+ENV ORT_LIB_LOCATION=/opt/onnxruntime/pinned
 
 # Build tenzro-node and tenzro-cli. NODE_BUILD=edge builds the node as the
 # light build for the edge tier (no model engines, the edge profile, see
@@ -79,12 +93,12 @@ RUN if [ "$NODE_BUILD" = edge ]; then \
     fi
 
 
-# Split the debug information off: the shipped binaries are stripped, the debug files
+# Split the debug information off: the shipped binaries keep their function names, the debug files
 # (matched by build-id and .gnu_debuglink) are collected for crash symbolisation.
 RUN set -eux; mkdir -p /debug; \
     for b in tenzro-node tenzro; do \
       objcopy --only-keep-debug target/release/$b /debug/$b.debug; \
-      strip --strip-all target/release/$b; \
+      strip --strip-debug target/release/$b; \
       objcopy --add-gnu-debuglink=/debug/$b.debug target/release/$b; \
     done
 

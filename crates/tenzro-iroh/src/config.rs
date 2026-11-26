@@ -165,16 +165,14 @@ impl TenzroIrohConfig {
         }
     }
 
-    /// Default configuration with the endpoint on a loopback port that was
-    /// free when this was called, for a node that only talks to peers on
-    /// the same host and must not contend for the fixed default port. When no
-    /// port can be probed, port 0 leaves the choice to the operating system.
+    /// Default configuration with the endpoint on a loopback port the
+    /// operating system picks when it binds, for a node that only talks to
+    /// peers on the same host and must not contend for the fixed default
+    /// port. A port chosen ahead of the bind could be taken by another
+    /// endpoint in between; read the bound address from the endpoint.
     pub fn loopback() -> Self {
-        let bind_addr = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|s| s.local_addr())
-            .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0));
         Self {
-            bind_addr,
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             ..Self::default()
         }
     }

@@ -19,6 +19,9 @@ use crate::rpc::RpcClient;
 pub enum AccessCommand {
     /// Sign in with this machine's hardware key and store the access token.
     SignIn(SignInCmd),
+    /// Ask the node for a single-use sign-in challenge, for a client that
+    /// answers it with a passkey or a hardware key of its own.
+    Challenge(ChallengeCmd),
     /// The access policy in force, as `access.toml`.
     Show(RpcArg),
     /// Replace the access policy with a TOML file.
@@ -40,6 +43,7 @@ impl AccessCommand {
     pub async fn execute(&self) -> Result<()> {
         match self {
             Self::SignIn(c) => c.execute().await,
+            Self::Challenge(c) => c.execute().await,
             Self::Show(c) => show(c).await,
             Self::Set(c) => c.execute().await,
             Self::Preview(c) => c.execute().await,
@@ -59,6 +63,32 @@ pub struct RpcArg {
 }
 
 #[derive(Debug, Parser)]
+pub struct ChallengeCmd {
+    /// The DID of a hardware key that will sign; omit for a passkey
+    #[arg(long)]
+    did: Option<String>,
+    /// Thumbprint of the DPoP key the token will be bound to
+    #[arg(long)]
+    dpop_jkt: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ChallengeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let mut params = json!({ "dpop_jkt": self.dpop_jkt });
+        if let Some(did) = &self.did {
+            params["did"] = json!(did);
+        }
+        let result: Value = RpcClient::new(&self.rpc)
+            .call("tenzro_accessChallenge", params)
+            .await?;
+        output::print_json(&result)
+    }
+}
+
+#[derive(Debug, Parser)]
 pub struct SignInCmd {
     /// Hardware key to sign in with, by label. The default is this machine's
     /// identity key, which signs in as its machine DID.
@@ -69,6 +99,11 @@ pub struct SignInCmd {
     /// than the machine's default one. The DPoP key stays this client's own.
     #[arg(long)]
     key_namespace: Option<String>,
+    /// The key holder that holds this machine's keys, when they are in
+    /// another machine's TPM. Without these flags a machine with no TPM or
+    /// Secure Enclave signs through the key holder `tenzro setup` recorded.
+    #[command(flatten)]
+    delegated: crate::keystore::DelegatedKey,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -77,64 +112,53 @@ pub struct SignInCmd {
 impl SignInCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Sign In");
+        // The key holder is installed before any key is opened, so the
+        // identity key and the DPoP key are both reached through it.
+        let delegated = self.delegated.install()? || crate::keystore::route_keys_to_key_holder()?;
+        if delegated {
+            if self.key_namespace.is_some() {
+                return Err(anyhow!(
+                    "--key-namespace names a key in this machine's own TPM or Secure Enclave; \
+                     through a key holder the keys are the ones its grant names"
+                ));
+            }
+            output::print_info("keys delegated to the key holder: signing in through it");
+        }
         // The DPoP key is opened before the namespace is set, so the token
         // binds the client key every later request proves with.
-        let jkt = crate::dpop::DpopKey::load_or_create()?.jkt()?;
+        let dpop = crate::dpop::load_or_create()?;
         if let Some(namespace) = &self.key_namespace {
             tenzro_device_key::set_label_namespace(namespace)
                 .map_err(|e| anyhow!("--key-namespace: {e}"))?;
         }
         let key = tenzro_device_key::signer::open_or_create(&self.key_label)
             .map_err(|e| anyhow!("hardware key {}: {e}", self.key_label))?;
-        let public_key = key
-            .public_key_sec1()
-            .map_err(|e| anyhow!("hardware key: {e}"))?;
-        let did = tenzro_types::did_derivation::machine_did(&public_key);
 
         let rpc = RpcClient::new(&self.rpc);
-        let challenge: Value = rpc
-            .call(
-                "tenzro_accessChallenge",
-                json!({ "did": did, "dpop_jkt": jkt }),
-            )
-            .await
-            .context("asking for a sign-in challenge")?;
-        let digest_hex = challenge["device_digest"]
-            .as_str()
-            .ok_or_else(|| anyhow!("no device_digest"))?;
-        let digest = hex::decode(digest_hex).context("device_digest is not hex")?;
-        let signature = key
-            .sign(&digest)
-            .map_err(|e| anyhow!("signing the challenge: {e}"))?;
-
-        let issued: Value = rpc
-            .call(
-                "tenzro_issueAccessToken",
-                json!({
-                    "challenge_id": challenge["challenge_id"],
-                    "proof": {
-                        "kind": "device",
-                        "public_key": hex::encode(public_key),
-                        "signature": hex::encode(signature),
-                    },
-                }),
-            )
-            .await
-            .context("answering the sign-in challenge")?;
-        let token = issued["access_token"]
-            .as_str()
-            .ok_or_else(|| anyhow!("no access_token"))?;
-        let expires_in = issued["expires_in"].as_u64().unwrap_or(0);
+        let signed = tenzro_auth::client::sign_in(
+            |method, params| {
+                let rpc = &rpc;
+                async move {
+                    rpc.call::<Value>(method, params)
+                        .await
+                        .map_err(|e| format!("{e:#}"))
+                }
+            },
+            key.as_ref(),
+            dpop,
+        )
+        .await?;
 
         let mut cfg = crate::config::load_config();
-        cfg.access_token = Some(token.to_string());
-        cfg.access_token_expires_at = Some(chrono::Utc::now().timestamp() as u64 + expires_in);
+        cfg.access_token = Some(signed.access_token.clone());
+        cfg.access_token_expires_at =
+            Some(chrono::Utc::now().timestamp() as u64 + signed.expires_in);
         cfg.access_token_rpc = Some(self.rpc.clone());
         crate::config::save_config(&cfg)?;
 
-        output::print_field("DID", &did);
-        output::print_field("Expires in", &format!("{expires_in}s"));
-        output::print_json(&issued["classes"])
+        output::print_field("DID", &signed.did);
+        output::print_field("Expires in", &format!("{}s", signed.expires_in));
+        output::print_json(&signed.classes)
     }
 }
 

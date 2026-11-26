@@ -224,6 +224,21 @@ impl KeystoreClient {
         self.rpc.call("tenzro_getKeystore", params).await
     }
 
+    /// `tenzro_getAccountSigningKey`: the public keys the P-256 key
+    /// `public_key` (hex `x || y`) signs with for `account` now, as a
+    /// signature by it is judged in a block: `p256`, `ml_dsa` (the
+    /// ML-DSA-65 key enrolled for it, if any) and `rp_id` (the relying party
+    /// a passkey assertion by it must be for, when the account's keystore
+    /// links it). An error says why the key does not act for the account.
+    pub async fn account_signing_key(&self, public_key: &str, account: &str) -> SdkResult<Value> {
+        self.rpc
+            .call(
+                "tenzro_getAccountSigningKey",
+                json!({ "public_key": public_key, "account": account }),
+            )
+            .await
+    }
+
     /// `tenzro_resolveCredential`: the accounts whose keystore links the
     /// passkey with this credential id (hex), registered on `rp_id`.
     pub async fn resolve_credential(&self, credential_id: &str, rp_id: &str) -> SdkResult<Value> {
@@ -327,6 +342,32 @@ mod tests {
                 case["op"]
             );
         }
+    }
+
+    /// A recovery code is kept by its holder and reaches the chain only as a commitment or a claim: nothing in this
+    /// module touches the filesystem, and a commitment is not the code.
+    #[test]
+    fn a_recovery_code_is_never_written_to_disk() {
+        let source = include_str!("keystore.rs");
+        // The module has no filesystem or process-environment API at all.
+        let (code_part, _tests) = source.split_once("#[cfg(test)]").unwrap();
+        for api in [
+            "std::fs",
+            "tokio::fs",
+            "File::create",
+            "OpenOptions",
+            "write_all",
+            "fs::write",
+        ] {
+            assert!(!code_part.contains(api), "the keystore module uses {api}");
+        }
+        let code = "ab".repeat(32);
+        let commitment = recovery_code_commitment(7, "aa", &code).unwrap();
+        assert_ne!(
+            commitment.to_vec(),
+            hex::decode(&code).unwrap(),
+            "the commitment is not the code"
+        );
     }
 
     #[test]

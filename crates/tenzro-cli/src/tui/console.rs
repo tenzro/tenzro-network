@@ -1,13 +1,18 @@
 //! The console: what a node is doing, on five screens and a health screen,
-//! read over the same RPC the commands use. It only reads; sending, signing
-//! and every key operation stay in the commands, where the key is held by the
-//! machine's hardware. Nothing secret is ever shown.
+//! read over the same RPC the commands use. The screens only read; sending,
+//! signing and every key operation stay in the commands, where the key is held
+//! by the machine's hardware. Nothing secret is ever shown.
 //!
 //! Screens mirror the TypeScript console in `sdk/tenzro-tui`: Overview,
 //! Wallet, Models, Validators, Governance, with the same keys, footer and help
 //! overlay, plus Health for operators. The header always carries one status
 //! word; when the node stops answering the last values stay on screen marked
 //! STALE rather than disappearing or passing for live.
+//!
+//! `a` or `/` puts the assistant in place of the screens: a question answered
+//! from the shipped guides, or one of the commands run for the person. A
+//! command that changes the machine is shown first and runs on their own
+//! terminal only after a yes.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -21,6 +26,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
+use super::assistant::{After, Link, Panel};
 use super::keys::{self, Act, CONSOLE, SCREENS};
 use super::theme::{Theme, Word};
 use super::ui;
@@ -400,6 +406,10 @@ pub struct Console {
     pub account: Arc<Mutex<Option<String>>>,
     /// The release notice for the header, when one is due today (see `update::notice`).
     pub update: Option<String>,
+    /// The conversation with the assistant, kept while the screens show.
+    pub assistant: Panel,
+    /// The assistant is on screen and takes every key.
+    pub asking: bool,
     rx: Receiver<Snapshot>,
     refresh: Arc<Notify>,
     tick_started: Instant,
@@ -425,6 +435,7 @@ impl Console {
             holder,
         );
         let mut c = Self::offline(url, theme);
+        c.assistant = Panel::new(Link::to(url, handle));
         c.rx = rx;
         c.refresh = refresh;
         c.account = account;
@@ -448,6 +459,8 @@ impl Console {
             leave: None,
             account: Arc::new(Mutex::new(None)),
             update: None,
+            assistant: Panel::new(None),
+            asking: false,
             rx,
             refresh: Arc::new(Notify::new()),
             tick_started: Instant::now(),
@@ -459,9 +472,28 @@ impl Console {
             self.snap = s;
         }
         let _ = self.tick_started;
+        self.assistant.tick();
+    }
+
+    /// Pasted text: typed into the assistant's line or the field being
+    /// edited, and never taken as keys.
+    pub fn on_paste(&mut self, text: &str) {
+        if self.asking {
+            self.assistant.on_paste(text);
+        } else if let Some(buf) = self.edit.as_mut() {
+            buf.extend(text.chars().filter(|c| !c.is_control()));
+        }
     }
 
     pub fn on_key(&mut self, name: &str) {
+        if self.asking {
+            match self.assistant.on_key(name) {
+                After::Stay => {}
+                After::Close => self.asking = false,
+                After::Quit => self.leave = Some(Leave::Quit),
+            }
+            return;
+        }
         if let Some(buf) = self.edit.as_mut() {
             match name {
                 "Esc" => self.edit = None,
@@ -517,6 +549,13 @@ impl Console {
             Act::Refresh => self.refresh.notify_one(),
             Act::Edit if self.screen == 1 => self.edit = Some(String::new()),
             Act::More => self.leave = Some(Leave::More),
+            Act::Assistant => {
+                self.asking = true;
+                // A slash is already the start of a tool's name.
+                if name == "/" {
+                    self.assistant.on_key(name);
+                }
+            }
             Act::Help => self.help = true,
             Act::Quit => self.leave = Some(Leave::Quit),
             _ => {}
@@ -571,6 +610,11 @@ impl Console {
             &format!("{}  {}", self.url, ui::clip(&reason, reason_w)),
             right,
         );
+        if self.asking {
+            self.assistant.view(f, t, body);
+            ui::footer(f, ft, t, self.assistant.footer());
+            return;
+        }
         let [tabs, content] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
         let mut spans = Vec::new();
@@ -1350,6 +1394,68 @@ mod tests {
         c.leave = None;
         c.on_key("q");
         assert_eq!(c.leave, Some(Leave::Quit));
+    }
+
+    #[test]
+    fn the_assistant_takes_the_screen_and_every_key_until_it_is_closed() {
+        let mut c = live();
+        c.on_key("a");
+        assert!(c.asking);
+        for (w, h) in [(80, 24), (120, 40)] {
+            let text = screen(&c, w, h);
+            assert!(text.contains("Assistant"), "{text}");
+            assert!(text.contains("Esc back to the screens"), "{text}");
+            assert!(!text.contains("1 Overview"), "{text}");
+        }
+        // Keys that move between screens or quit are now only letters.
+        for k in ["q", "2", "m", "?"] {
+            c.on_key(k);
+        }
+        assert_eq!((c.screen, c.leave.clone(), c.help), (0, None, false));
+        assert!(screen(&c, 80, 24).contains("> q2m?"));
+        c.on_key("Esc");
+        assert!(c.asking);
+        c.on_key("Esc");
+        assert!(!c.asking);
+        assert!(screen(&c, 80, 24).contains("a ask"));
+
+        c.on_key("/");
+        assert!(c.asking);
+        let text = screen(&c, 80, 24);
+        assert!(text.contains("/status"), "{text}");
+        assert!(text.contains("Tab complete"), "{text}");
+        c.on_key("Ctrl-C");
+        assert_eq!(c.leave, Some(Leave::Quit));
+    }
+
+    #[test]
+    fn a_changing_command_waits_for_a_yes_and_is_then_handed_to_the_terminal() {
+        let mut c = live();
+        c.on_key("a");
+        for k in "/serve qwen".chars() {
+            c.on_key(&k.to_string());
+        }
+        c.on_key("Enter");
+        assert!(
+            screen(&c, 80, 24)
+                .contains("Run tenzro model serve qwen --rpc http://127.0.0.1:8545? y / n")
+        );
+        assert_eq!(c.assistant.handover, None);
+        c.on_paste("y\n");
+        c.on_key("Enter");
+        assert_eq!(c.assistant.handover, None, "a pasted y answers nothing");
+        c.on_key("y");
+        assert_eq!(c.assistant.handover, None, "y alone runs nothing");
+        c.on_key("Enter");
+        let argv: Vec<String> = vec![
+            "model".into(),
+            "serve".into(),
+            "qwen".into(),
+            "--rpc".into(),
+            "http://127.0.0.1:8545".into(),
+        ];
+        assert_eq!(c.assistant.handover, Some(argv));
+        assert!(c.asking);
     }
 
     #[test]

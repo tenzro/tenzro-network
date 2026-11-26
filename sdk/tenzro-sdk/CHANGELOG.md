@@ -5,13 +5,28 @@
 First release.
 
 ### Added
+- `MultimodalClient::transcribe_recording` (`tenzro_transcribeStream`): a
+  whole recording through the streaming transcription, every event in order.
+  `ConsensusClient::fleet_host_evidence` (`tenzro_fleetHostEvidence`).
+  Both SDKs now bind the same node methods; the methods neither binds on
+  purpose are listed in the README.
+- `light` feature (preview, off by default): `TenzroClient::light_client`
+  checks checkpoint certificates, epoch handovers, state values and identity
+  keys and key histories from a trusted committee with the `tenzro-light`
+  crate.
+- `compute::ComputeClient` (`client.compute()`): typed compute bonds, compute
+  claims and the observed price feed, and `rent`, which signs a `CreateEscrow`
+  with stream release to a provider's bonded address (`RentRequest`). The
+  compute bond reads moved here from `ProviderClient`.
 - `network::NetworkPreset`, `network::PREVIEW_NETWORK` and
   `SdkConfig::preview()`.
 - `TypedTxClient::prepare(from, &tx)` and `PreparedTransaction`: a dry run
   that has the node encode the signing payload, checks it and returns the
   unsigned request and digest.
 - `SdkError::Node(NodeError)` carries the code, message and data of a JSON-RPC
-  error the node answers with; `NodeError::is_light_build()`.
+  error the node answers with; `NodeError::is_light_build()`,
+  `is_jurisdiction_unmet()` (-32024) and `is_below_settlement_floor()` (-32026,
+  a charge below the micro-settlement floor).
 - `PageRequest` for event-log pages; typed admin audit log, kill-switch
   receipts, escrow pages, treasury accounts, ZK, TEE, finality and inference
   results.

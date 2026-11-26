@@ -17,7 +17,9 @@
 //!   escrow record still owes (the amount less what was claimed, while it is
 //!   funded);
 //! * bridge: each TNZO route vault holds at least what the route's supply
-//!   record says is locked.
+//!   record says is locked;
+//! * role stake, once [`ROLE_STAKE_GUARD_KEY`] is live: the role-stake vault
+//!   holds at least every role's bonded stake.
 //!
 //! Escrow, channel and bridge vaults are one per escrow or route, too many to
 //! read every block. Those modules record, each time they move value through
@@ -54,16 +56,24 @@ pub enum GuardedModule {
     PaymentChannel,
     /// Bridge routes: TNZO locked in a route's vault and released from it.
     Bridge,
+    /// Role stakes other than the validator bond, held by the role-stake
+    /// vault. Checked once [`ROLE_STAKE_GUARD_KEY`] is live.
+    RoleStake,
 }
+
+/// Feature gate: the first epoch whose blocks check the role-stake vault and
+/// freeze role staking when it holds less than the bonded role stakes.
+pub const ROLE_STAKE_GUARD_KEY: &str = "feature.role_stake_guard.activation_epoch";
 
 impl GuardedModule {
     /// Every guarded module, in check order.
-    pub const ALL: [GuardedModule; 5] = [
+    pub const ALL: [GuardedModule; 6] = [
         GuardedModule::Staking,
         GuardedModule::Insurance,
         GuardedModule::Escrow,
         GuardedModule::PaymentChannel,
         GuardedModule::Bridge,
+        GuardedModule::RoleStake,
     ];
 
     /// Stable name, used in storage keys and messages.
@@ -74,6 +84,7 @@ impl GuardedModule {
             Self::Escrow => "escrow",
             Self::PaymentChannel => "payment_channel",
             Self::Bridge => "bridge",
+            Self::RoleStake => "role_stake",
         }
     }
 
@@ -112,6 +123,14 @@ impl GuardedModule {
             Self::Staking => (
                 state.get_balance(&crate::native::staking_vault_address()),
                 crate::native::staking::vault_liabilities(state),
+            ),
+            // A lower bound: unbonding role stake also stays in the vault
+            // until it is withdrawn, and has no running total.
+            Self::RoleStake => (
+                state.get_balance(crate::native::role_stake_vault().as_bytes()),
+                crate::native::role_stake_totals(state)
+                    .iter()
+                    .fold(0u128, |t, (_, r)| t.saturating_add(r.bonded)),
             ),
             Self::Insurance => {
                 let t = crate::native::insurance::read_totals(state);
@@ -278,6 +297,11 @@ pub fn check_block(state: &mut dyn VmState) -> Vec<(GuardedModule, ModuleFreeze)
         if frozen(state, module).is_some() {
             continue;
         }
+        if module == GuardedModule::RoleStake
+            && !crate::feature_gate::is_live_now(state, ROLE_STAKE_GUARD_KEY)
+        {
+            continue;
+        }
         let (held, owed) = module.held_and_owed(state);
         if held >= owed {
             if module.per_vault() {
@@ -327,6 +351,45 @@ mod tests {
     const STAKE: u128 = 1_000_000;
     const ALICE: [u8; 20] = [0xa1; 20];
     const BOB: [u8; 20] = [0xb0; 20];
+
+    /// The role-stake vault is checked only once its gate is live; a short
+    /// vault then freezes role staking and nothing else.
+    #[test]
+    fn a_short_role_stake_vault_freezes_role_staking_once_its_gate_is_live() {
+        use tenzro_types::network::NetworkRole;
+        for live in [false, true] {
+            let mut state = funded();
+            crate::native::role_stake::bond_role_for_test(
+                &mut state,
+                &ALICE,
+                NetworkRole::Attestor,
+                STAKE,
+            );
+            if live {
+                crate::native::set_genesis_param(&mut state, ROLE_STAKE_GUARD_KEY, 0);
+            }
+            assert!(check_block(&mut state).is_empty(), "a full vault is fine");
+            let vault = crate::native::role_stake_vault();
+            state.set_balance(vault.as_bytes(), STAKE - 1);
+            let froze = check_block(&mut state);
+            if live {
+                assert_eq!(
+                    froze,
+                    vec![(
+                        GuardedModule::RoleStake,
+                        ModuleFreeze {
+                            held: STAKE - 1,
+                            owed: STAKE
+                        }
+                    )]
+                );
+                assert!(require_unfrozen(&state, GuardedModule::RoleStake).is_err());
+                assert!(require_unfrozen(&state, GuardedModule::Staking).is_ok());
+            } else {
+                assert!(froze.is_empty(), "dormant: {froze:?}");
+            }
+        }
+    }
 
     /// A state with one bond held by the staking vault and an insurance
     /// pool whose record matches its balance.

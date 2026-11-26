@@ -391,8 +391,7 @@ pub async fn authenticate_dialer(
     peer: &EndpointRecord,
 ) -> IrohResult<()> {
     bound_key(peer)?;
-    let (mut send, mut recv) = conn
-        .open_bi()
+    let (mut send, mut recv) = crate::bounded::open_bi(conn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("open_bi: {e}")))?;
     let proof = prove(own, &exporter(conn, DIALER)?)?;
@@ -540,6 +539,10 @@ pub fn save_pins(path: &std::path::Path, pins: &[SavedPin]) -> std::io::Result<(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 pub(crate) mod tests {
     use super::*;
     use crate::identity_record::tests::TestMachineKey;
@@ -801,7 +804,10 @@ pub(crate) mod tests {
         let server_record = bound(&server_machine, &server_pq, 1);
         let client_record = bound(&client_machine, &client_pq, 1);
         let (tx, done) = tokio::sync::mpsc::unbounded_channel();
-        let server = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         let router = Router::builder(server.clone())
             .accept(
                 ALPN,
@@ -812,7 +818,10 @@ pub(crate) mod tests {
                 },
             )
             .spawn();
-        let client = Endpoint::bind(presets::Minimal).await.unwrap();
+        let client = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         Pair {
             _router: router,
             server,

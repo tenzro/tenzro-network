@@ -60,6 +60,11 @@ pub enum VmError {
     #[error("Invalid nonce: expected {expected}, got {got}")]
     InvalidNonce { expected: u64, got: u64 },
 
+    /// The block had already used its gas for EVM and SVM transactions when
+    /// this one came up, so it did not run. It runs in a later block.
+    #[error("the block's gas limit of {limit} for EVM and SVM transactions was reached")]
+    BlockGasLimit { limit: u64 },
+
     /// Missing signature
     #[error("Transaction signature is required but missing")]
     MissingSignature,

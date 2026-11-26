@@ -9,7 +9,10 @@
 //! `--json`, or `TENZRO_PROGRESS=json`, it writes one JSON object per line.
 //! Progress goes to standard error so a command's own output stays clean.
 //!
-//! ```ignore
+//! ```no_run
+//! # use tenzro_cli::progress;
+//! # let total = 4_000_000_000_u64;
+//! # let bytes_so_far = 1_000_000_u64;
 //! let p = progress::global();
 //! let steps = p.steps(&["Download the model", "Start the node"]);
 //! let dl = steps.bytes(0, "Model download", Some(total));

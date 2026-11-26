@@ -10,9 +10,10 @@
 //! committee.
 #![no_std]
 
-use soroban_sdk::crypto::bn254::{Bn254G1Affine, Bn254G2Affine, Bn254Fr};
+use soroban_sdk::crypto::bn254::{Bn254Fr, Bn254G1Affine, Bn254G2Affine};
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Bytes, BytesN, Env, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Bytes,
+    BytesN, Env, Vec,
 };
 use tenzro_finality_verifier::{Bn254, Error as ProofError, Journal, Params, Store};
 
@@ -101,13 +102,22 @@ struct Host<'a>(&'a Env);
 impl Bn254 for Host<'_> {
     fn g1_add(&self, a: &[u8; 64], b: &[u8; 64]) -> Option<[u8; 64]> {
         let bn = self.0.crypto().bn254();
-        Some(bn.g1_add(&Bn254G1Affine::from_array(self.0, a), &Bn254G1Affine::from_array(self.0, b)).to_array())
+        Some(
+            bn.g1_add(
+                &Bn254G1Affine::from_array(self.0, a),
+                &Bn254G1Affine::from_array(self.0, b),
+            )
+            .to_array(),
+        )
     }
 
     fn g1_mul(&self, p: &[u8; 64], s: &[u8; 32]) -> Option<[u8; 64]> {
         let bn = self.0.crypto().bn254();
         let s = Bn254Fr::from_bytes(BytesN::from_array(self.0, s));
-        Some(bn.g1_mul(&Bn254G1Affine::from_array(self.0, p), &s).to_array())
+        Some(
+            bn.g1_mul(&Bn254G1Affine::from_array(self.0, p), &s)
+                .to_array(),
+        )
     }
 
     fn pairing4(&self, pairs: &[([u8; 64], [u8; 128]); 4]) -> Option<bool> {
@@ -134,7 +144,10 @@ impl Store for Ledger<'_> {
         let key = Key::Committee(epoch);
         let root = BytesN::from_array(self.0, &root);
         self.0.storage().persistent().set(&key, &root);
-        self.0.storage().persistent().extend_ttl(&key, ENTRY_TTL, ENTRY_TTL);
+        self.0
+            .storage()
+            .persistent()
+            .extend_ttl(&key, ENTRY_TTL, ENTRY_TTL);
         CommitteeHandedOver { epoch, root }.publish(self.0);
     }
 
@@ -153,7 +166,9 @@ impl Store for Ledger<'_> {
         };
         let key = Key::Checkpoint(j.index);
         env.storage().persistent().set(&key, &checkpoint);
-        env.storage().persistent().extend_ttl(&key, ENTRY_TTL, ENTRY_TTL);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ENTRY_TTL, ENTRY_TTL);
         let latest: u64 = env.storage().instance().get(&Key::Latest).unwrap_or(0);
         if j.index > latest {
             env.storage().instance().set(&Key::Latest, &j.index);
@@ -170,8 +185,16 @@ impl Store for Ledger<'_> {
 }
 
 fn params(env: &Env) -> Params {
-    let p: StoredParams = env.storage().instance().get(&Key::Params).expect("constructed");
-    Params { image_id: p.image_id.to_array(), chain_id: p.chain_id, genesis_hash: p.genesis_hash.to_array() }
+    let p: StoredParams = env
+        .storage()
+        .instance()
+        .get(&Key::Params)
+        .expect("constructed");
+    Params {
+        image_id: p.image_id.to_array(),
+        chain_id: p.chain_id,
+        genesis_hash: p.genesis_hash.to_array(),
+    }
 }
 
 fn checkpoint(env: &Env, index: u64) -> Checkpoint {
@@ -196,20 +219,38 @@ impl FinalityClient {
         genesis_hash: BytesN<32>,
         genesis_committee_root: BytesN<32>,
     ) {
-        env.storage().instance().set(&Key::Params, &StoredParams { image_id, chain_id, genesis_hash });
+        env.storage().instance().set(
+            &Key::Params,
+            &StoredParams {
+                image_id,
+                chain_id,
+                genesis_hash,
+            },
+        );
         env.storage().instance().extend_ttl(ENTRY_TTL, ENTRY_TTL);
         let key = Key::Committee(0);
-        env.storage().persistent().set(&key, &genesis_committee_root);
-        env.storage().persistent().extend_ttl(&key, ENTRY_TTL, ENTRY_TTL);
+        env.storage()
+            .persistent()
+            .set(&key, &genesis_committee_root);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ENTRY_TTL, ENTRY_TTL);
     }
 
     /// Accept the checkpoint `journal` states, proven by `seal`. Returns its
     /// index.
     pub fn submit(env: Env, journal: Bytes, seal: Bytes) -> Result<u64, Error> {
-        let journal = to_vec::<{ tenzro_finality_verifier::JOURNAL_LEN }>(&journal).ok_or(Error::MalformedJournal)?;
+        let journal = to_vec::<{ tenzro_finality_verifier::JOURNAL_LEN }>(&journal)
+            .ok_or(Error::MalformedJournal)?;
         let seal = to_vec::<{ 4 + 8 * 32 }>(&seal).ok_or(Error::MalformedSeal)?;
         env.storage().instance().extend_ttl(ENTRY_TTL, ENTRY_TTL);
-        let j = tenzro_finality_verifier::submit(&Host(&env), &params(&env), &mut Ledger(&env), &journal, &seal)?;
+        let j = tenzro_finality_verifier::submit(
+            &Host(&env),
+            &params(&env),
+            &mut Ledger(&env),
+            &journal,
+            &seal,
+        )?;
         Ok(j.index)
     }
 

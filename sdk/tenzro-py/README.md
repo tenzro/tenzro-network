@@ -6,6 +6,8 @@ hardware. It carries:
 - **Every RPC method the node serves**, one typed method each, on a synchronous
   (`RpcClient`) and an asynchronous (`AsyncRpcClient`) client. The methods are
   generated from the node's method table, so the SDK never lags the node.
+  Storage and compute rental also have typed clients in `tenzro.chain`
+  (`StorageClient`, `ComputeClient`).
 - **Typed transactions** for every consensus transaction type, built
   client-side, checked against the node's signing payload and signed with the
   caller's hardware key.
@@ -214,6 +216,39 @@ report = verify_governance_receipt(node.get_governance_receipt({"proposal_id": p
 print(report.proposal["status"], report.executed_height)
 ```
 
+## Storage and compute
+
+`StorageClient` stores and reads back objects on a node serving the `storage`
+role. The provider erasure-codes each object across shards and prices storage
+at a fixed rate per byte-epoch (`set_fixed_rate`). Storage is held to proofs of
+retrievability: a renter pays through a storage compute claim that commits the
+object's `descriptor_digest`, and each hour the claim pays the provider only if
+validators found its bond available, which requires a possession proof of the
+object.
+
+`ComputeClient` covers compute rental. Rental is held to availability proofs
+and billed per epoch: validators probe every bonded provider and freeze one SLA
+verdict per provider and hour, and an hour judged unavailable is never paid.
+`bond_params`, `get_bond` and `list_bonds` read provider bonds; `get_claim` and
+`list_claims` read compute claims (a storage claim carries
+`storage_descriptor`); `price_feed` reads what validators observed providers
+charge. `rent` signs a `CreateEscrow` with stream release to the provider's
+bonded address (`rent_transaction` builds it unsigned); the provider draws
+accrued epochs with `ClaimEscrowStream` and the renter stops the rental with
+`RefundEscrow`.
+
+```python
+from tenzro.chain import ComputeClient, RentRequest, StorageClient
+
+stored = StorageClient(provider_node).store_object("photo-1", owner, data, owner_did, signer)
+print(stored["descriptor_digest"])  # what a storage compute claim commits to
+
+compute = ComputeClient(node)
+bond = compute.get_bond("did:tenzro:machine:<provider>")
+# Three hours at 2 TNZO an hour, streamed per hour.
+compute.rent(signer, RentRequest.for_bond(bond, 2 * 10**18, 3))
+```
+
 ## Errors
 
 A JSON-RPC error the node answers with raises `RpcError` with its `code`,
@@ -253,7 +288,7 @@ modules (`device`).
 | `tenzro.admin` | `audit_log`, `verify_audit_log` (operator only) |
 | `tenzro.bridge` | bridge sends, agents' accounts on other chains and action digests, EIP-7702 (`tenzro.bridge.eip7702`) |
 | `tenzro.inference` | `ChatClient`, `AsyncChatClient`, `ChatStreamAssembler` |
-| `tenzro.chain` | `verify_governance_receipt`; ABI: `abi_encode`, `abi_decode`, `encode_function_call`, `function_selector`, `event_topic`; NFTs on the factory precompile: `nft_calldata`, `nft_decode`, `decode_nft_transfer`, `nft_collection_id`, `nft_transaction`, `NftClient` |
+| `tenzro.chain` | `verify_governance_receipt`; ABI: `abi_encode`, `abi_decode`, `encode_function_call`, `function_selector`, `event_topic`; NFTs on the factory precompile: `nft_calldata`, `nft_decode`, `decode_nft_transfer`, `nft_collection_id`, `nft_transaction`, `NftClient`; storage: `StorageClient`; compute rental: `ComputeClient`, `RentRequest`, `rent_transaction` |
 
 The same split holds in the TypeScript SDK (`@tenzro/core` and one package per
 capability) and the Rust SDK (one cargo feature per capability).

@@ -29,7 +29,7 @@ use parking_lot::RwLock;
 use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_payments::gateway::{RailOutcome, SettlementInstruction, SettlementRail};
 use tenzro_payments::payer_auth::{EnrolledKeys, PayerKeyResolver};
-use tenzro_payments::terms_gate::{PaymentIntent, TermsGate};
+use tenzro_payments::terms_gate::{PaymentIntent, TAINT_HOLD_MS, TermsGate};
 use tenzro_payments::{PaymentError, Result as PayResult};
 use tenzro_types::agent_terms::{
     ActionHistory, AgentAction, AgentPayment, AgentTerms, DAY_MS, HOUR_MS, OP_PAY, agent_wallet,
@@ -181,6 +181,11 @@ pub trait Authority: Send + Sync {
     fn bind_sandbox(&self, names: &[&str], agent_did: &str);
     /// The serving node's machine DID the extensions act as.
     fn machine_did(&self) -> String;
+
+    /// Record that content from outside the agent's terms reached it at
+    /// `now_ms`. For [`TAINT_HOLD_MS`] afterwards every action it proposes
+    /// counts as derived from untrusted input.
+    fn label_untrusted(&self, agent_did: &str, now_ms: u64);
     /// Hold `proposed` to the agent's Terms and revocation state without
     /// counting it.
     fn check(&self, agent_did: &str, proposed: &Proposed, now_ms: u64) -> Result<(), Refusal>;
@@ -216,6 +221,8 @@ struct State {
     payee_rules: HashMap<Address, SplitRule>,
     did_keys: HashMap<String, Vec<p256::ecdsa::VerifyingKey>>,
     mandates: HashMap<(String, String), String>,
+    /// When untrusted input last reached each agent, unix ms.
+    untrusted_at: HashMap<String, u64>,
     nonce: u64,
 }
 
@@ -465,7 +472,14 @@ impl StateAuthority {
         Ok(())
     }
 
-    fn action(&self, agent_did: &str, p: &Proposed, nonce: u64) -> AgentAction {
+    /// Whether untrusted input reached the agent inside the hold window.
+    fn tainted(s: &State, agent_did: &str, now_ms: u64) -> bool {
+        s.untrusted_at
+            .get(agent_did)
+            .is_some_and(|at| now_ms.saturating_sub(*at) < TAINT_HOLD_MS)
+    }
+
+    fn action(&self, agent_did: &str, p: &Proposed, nonce: u64, tainted: bool) -> AgentAction {
         AgentAction {
             agent_did: agent_did.to_string(),
             machine_did: self.machine_did.clone(),
@@ -488,7 +502,7 @@ impl StateAuthority {
             ballot: None,
             veto_signal: None,
             nonce,
-            tainted: false,
+            tainted,
             step_up: None,
         }
     }
@@ -528,11 +542,18 @@ impl Authority for StateAuthority {
         self.machine_did.clone()
     }
 
+    fn label_untrusted(&self, agent_did: &str, now_ms: u64) {
+        let mut s = self.state.write();
+        let at = s.untrusted_at.entry(agent_did.to_string()).or_default();
+        *at = (*at).max(now_ms);
+    }
+
     fn check(&self, agent_did: &str, proposed: &Proposed, now_ms: u64) -> Result<(), Refusal> {
         let d = self.standing(agent_did, now_ms)?;
         let s = self.state.read();
         let history = Self::history(&s, agent_did, &proposed.counterparty, &d.spent, now_ms);
-        let action = self.action(agent_did, proposed, s.nonce + 1);
+        let tainted = Self::tainted(&s, agent_did, now_ms);
+        let action = self.action(agent_did, proposed, s.nonce + 1, tainted);
         check_action(&d.terms, &action, &history, false, now_ms)
             .map_err(|d| Refusal(format!("outside the agent's approved terms: {d}")))
     }
@@ -542,7 +563,8 @@ impl Authority for StateAuthority {
         let mut s = self.state.write();
         let history = Self::history(&s, agent_did, &proposed.counterparty, &d.spent, now_ms);
         s.nonce += 1;
-        let action = self.action(agent_did, proposed, s.nonce);
+        let tainted = Self::tainted(&s, agent_did, now_ms);
+        let action = self.action(agent_did, proposed, s.nonce, tainted);
         check_action(&d.terms, &action, &history, false, now_ms)
             .map_err(|d| Refusal(format!("outside the agent's approved terms: {d}")))?;
         s.acts.entry(agent_did.to_string()).or_default().push(Act {
@@ -611,7 +633,8 @@ impl TermsGate for StateAuthority {
             model: None,
             payment: Some(("gate".to_string(), [1; 32])),
         };
-        let action = self.action(intent.payer_did, &p, 0);
+        let tainted = Self::tainted(&s, intent.payer_did, now);
+        let action = self.action(intent.payer_did, &p, 0, tainted);
         check_action(&d.terms, &action, &history, false, now).map_err(|d| {
             PaymentError::VerificationFailed(format!("outside the agent's approved terms: {d}"))
         })
@@ -855,6 +878,53 @@ mod tests {
             Authority::authorize(&*a, &agent(), &pay(60), 1_000 + DAY_MS).is_ok(),
             "a day later the first payment has aged out"
         );
+    }
+
+    #[test]
+    fn untrusted_input_holds_payments_to_the_tainted_limit_for_the_hold_window() {
+        let a = authority(|t| t.delegation_scope.tainted_value_limit = Some("50".into()));
+        let pay = |to: &str, amount| Proposed {
+            operation: "pay".into(),
+            counterparty: to.into(),
+            amount,
+            payment_protocol: Some("x402".into()),
+            payment: Some(("p".into(), [1; 32])),
+            ..Default::default()
+        };
+        Authority::authorize(&*a, &agent(), &pay("0xaa", 80), 1_000).unwrap();
+
+        a.label_untrusted(&agent(), 2_000);
+        let over = Authority::authorize(&*a, &agent(), &pay("0xaa", 80), 3_000).unwrap_err();
+        assert!(over.0.contains("untrusted input, amount"), "{over}");
+        let stranger = Authority::check(&*a, &agent(), &pay("0xbb", 10), 3_000).unwrap_err();
+        assert!(
+            stranger.0.contains("untrusted input, new counterparty"),
+            "{stranger}"
+        );
+        Authority::authorize(&*a, &agent(), &pay("0xaa", 50), 3_000).unwrap();
+        Authority::authorize(&*a, &agent(), &fetch(), 3_000).unwrap();
+
+        // An older label does not shorten the hold.
+        a.label_untrusted(&agent(), 1_500);
+        let last = 2_000 + TAINT_HOLD_MS - 1;
+        assert!(Authority::check(&*a, &agent(), &pay("0xaa", 80), last).is_err());
+        Authority::authorize(&*a, &agent(), &pay("0xbb", 80), last + 1).unwrap();
+    }
+
+    #[test]
+    fn an_agent_with_no_tainted_limit_pays_nothing_after_untrusted_input() {
+        let a = authority(|_| {});
+        let pay = Proposed {
+            operation: "pay".into(),
+            counterparty: "0xaa".into(),
+            amount: 1,
+            payment_protocol: Some("x402".into()),
+            payment: Some(("p".into(), [1; 32])),
+            ..Default::default()
+        };
+        Authority::authorize(&*a, &agent(), &pay, 1_000).unwrap();
+        a.label_untrusted(&agent(), 2_000);
+        assert!(Authority::authorize(&*a, &agent(), &pay, 3_000).is_err());
     }
 
     #[test]

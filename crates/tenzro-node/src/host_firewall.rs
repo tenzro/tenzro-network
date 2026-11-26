@@ -15,13 +15,24 @@
 //! - The macOS application firewall, when turned on, refuses incoming
 //!   connections to applications it was not told to allow.
 //!
-//! [`allow`], run only when the operator asks (`tenzro-node doctor
-//! --allow-inbound`), adds one rule scoped to the node binary and its UDP
-//! port (on Windows, for the private and public profiles; a domain
-//! network's rules belong to its administrator) and removes the block rules
-//! Windows left for that binary. It needs administrator rights, and says so
-//! when it lacks them. Linux host firewalls are the operator's: the node only
-//! reports the command to run.
+//! [`allow`], run when the operator asks (`tenzro-node doctor
+//! --allow-inbound`, which the Windows task registration runs), adds one rule
+//! for the node's UDP port and removes the block rules Windows left for the
+//! node's binaries. It needs administrator rights, and says so when it lacks
+//! them. Linux host firewalls are the operator's: the node only reports the
+//! command to run.
+//!
+//! On Windows the rule is keyed to the port, not to the program. A versioned
+//! install starts the node through the `current` junction, and the kernel
+//! records the process under the release directory the junction resolves to
+//! (`versions\<release>\bin\tenzro-node.exe`), which is what a program rule
+//! is matched against; every update makes a new one, and `tenzro update` runs
+//! without the rights to write a rule. A rule for the port holds across
+//! updates. It covers the private profile only. On a network Windows files
+//! as public (a café, an airport) inbound stays closed, since there the port
+//! would be open to every machine on the network; on a domain network it
+//! stays closed too, since a domain's firewall belongs to its administrator.
+//! The node works on both through its relays and hole punching.
 
 use std::path::Path;
 use std::process::Command;
@@ -44,6 +55,40 @@ pub struct FirewallState {
     pub detail: String,
     /// What to run to let peers in, when something is in the way.
     pub fix: Option<String>,
+}
+
+/// The UDP port the node's endpoint binds with `iroh`: the relay UDP port
+/// while it serves the relay role, its bind port otherwise. `None` for a
+/// private node, which binds no IP socket, and for a port left to the system
+/// (`0`), which no rule can name ahead of time.
+pub fn node_udp_port(iroh: &tenzro_iroh::TenzroIrohConfig) -> Option<u16> {
+    if iroh.relay_only {
+        return None;
+    }
+    let port = if iroh.relay.is_some() {
+        iroh.relay_udp_port
+    } else {
+        iroh.bind_addr.port()
+    };
+    (port != 0).then_some(port)
+}
+
+/// The directory every release of the install `binary` belongs to: the root
+/// of a versioned install (`<root>\current\bin` or `<root>\versions\<release>\bin`),
+/// else the binary's own directory.
+pub fn install_root(binary: &Path) -> std::path::PathBuf {
+    let bin = binary.parent().unwrap_or(Path::new(""));
+    let release = bin
+        .parent()
+        .filter(|_| bin.file_name().is_some_and(|n| n == "bin"));
+    let named = |p: &Path, n: &str| p.file_name().is_some_and(|f| f == n);
+    match release {
+        Some(r) if named(r, "current") => r.parent().unwrap_or(r).to_path_buf(),
+        Some(r) if r.parent().is_some_and(|v| named(v, "versions")) => {
+            r.parent().and_then(Path::parent).unwrap_or(r).to_path_buf()
+        }
+        _ => bin.to_path_buf(),
+    }
 }
 
 fn run(program: &str, args: &[&str]) -> Option<String> {
@@ -84,33 +129,45 @@ pub fn ps_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "''"))
 }
 
-/// The PowerShell that reads the firewall profiles and the inbound rules
-/// that name `binary`.
-pub fn windows_query_script(binary: &Path) -> String {
+/// The inbound block rules for any program under `root`: what a dismissed
+/// prompt leaves, once per release directory it was shown for.
+fn windows_block_rules(root: &Path) -> String {
     format!(
-        "$r = @(Get-NetFirewallApplicationFilter -Program {p} -ErrorAction SilentlyContinue | Get-NetFirewallRule | \
-         Where-Object {{ $_.Direction -eq 'Inbound' -and $_.Enabled -eq 'True' }}); \
-         'profiles=' + ((Get-NetFirewallProfile | ForEach-Object {{ \"$($_.Name):$($_.Enabled)\" }}) -join ','); \
-         'allow=' + @($r | Where-Object {{ $_.Action -eq 'Allow' }}).Count; \
-         'block=' + (@($r | Where-Object {{ $_.Action -eq 'Block' }} | ForEach-Object {{ $_.DisplayName }}) -join ';')",
-        p = ps_quote(binary)
+        "@(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.Program -like ({r} + '\\*') }} | Get-NetFirewallRule | \
+         Where-Object {{ $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' }})",
+        r = ps_quote(root)
     )
 }
 
-/// The PowerShell that removes the inbound block rules for `binary` and
-/// installs the node's one allow rule for UDP `port`.
-pub fn windows_allow_script(binary: &Path, port: u16) -> String {
+/// The PowerShell that reads the firewall profiles, the categories of the
+/// networks this machine is on, the ports of the node's rule and the block
+/// rules for the node's binaries under `root`.
+pub fn windows_query_script(root: &Path) -> String {
+    format!(
+        "$rule = Get-NetFirewallRule -Name '{name}' -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' }}; \
+         'profiles=' + ((Get-NetFirewallProfile | ForEach-Object {{ \"$($_.Name):$($_.Enabled)\" }}) -join ','); \
+         'networks=' + ((Get-NetConnectionProfile -ErrorAction SilentlyContinue | ForEach-Object {{ \"$($_.NetworkCategory)\" }}) -join ','); \
+         'rule=' + $(if ($rule) {{ (($rule | Get-NetFirewallPortFilter).LocalPort -join ',') }} else {{ '' }}); \
+         'block=' + ((({blocks}) | ForEach-Object {{ $_.DisplayName }}) -join ';')",
+        name = WINDOWS_RULE_NAME,
+        blocks = windows_block_rules(root),
+    )
+}
+
+/// The PowerShell that removes the inbound block rules for the node's
+/// binaries under `root` and installs the node's one allow rule for UDP
+/// `port`, replacing an earlier one.
+pub fn windows_allow_script(root: &Path, port: u16) -> String {
     format!(
         "$ErrorActionPreference = 'Stop'; \
-         $b = @(Get-NetFirewallApplicationFilter -Program {p} -ErrorAction SilentlyContinue | Get-NetFirewallRule | \
-         Where-Object {{ $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' }}); \
-         foreach ($x in $b) {{ 'removed block rule: ' + $x.DisplayName; $x | Remove-NetFirewallRule }}; \
+         foreach ($x in {blocks}) {{ 'removed block rule: ' + $x.DisplayName; $x | Remove-NetFirewallRule }}; \
          Remove-NetFirewallRule -Name '{name}' -ErrorAction SilentlyContinue; \
          New-NetFirewallRule -Name '{name}' -DisplayName 'Tenzro node (UDP {port})' \
-         -Description 'Lets Tenzro peers reach this node directly. Added by tenzro-node doctor --allow-inbound.' \
-         -Direction Inbound -Action Allow -Program {p} -Protocol UDP -LocalPort {port} -Profile Private,Public | Out-Null; \
-         'added rule {name}: inbound UDP {port} for ' + {p} + ' on the private and public profiles'",
-        p = ps_quote(binary),
+         -Description 'Lets Tenzro peers reach this node directly; keyed to the port, so it holds across updates. Added by tenzro-node doctor --allow-inbound.' \
+         -Direction Inbound -Action Allow -Protocol UDP -LocalPort {port} -Profile Private | Out-Null; \
+         'added rule {name}: inbound UDP {port} on the private profile; on public and domain networks inbound stays closed'",
+        blocks = windows_block_rules(root),
         name = WINDOWS_RULE_NAME,
     )
 }
@@ -133,7 +190,20 @@ pub fn parse_windows_query(out: &str, port: u16) -> FirewallState {
     } else {
         Some(profiles.iter().any(|(_, e)| *e))
     };
-    let allows: usize = field("allow=").parse().unwrap_or(0);
+    let rule_ports: Vec<&str> = field("rule=")
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let port_text = port.to_string();
+    let rule_has_port = rule_ports.iter().any(|p| *p == port_text);
+    let networks: Vec<&str> = field("networks=")
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    let no_private =
+        !networks.is_empty() && !networks.iter().any(|n| n.eq_ignore_ascii_case("Private"));
     let blocks: Vec<&str> = field("block=")
         .split(';')
         .filter(|s| !s.is_empty())
@@ -154,10 +224,26 @@ pub fn parse_windows_query(out: &str, port: u16) -> FirewallState {
             ),
             fix,
         ),
-        _ if allows > 0 => (
-            Some(true),
-            format!("an allow rule lets peers reach the node (UDP {port})"),
+        _ if rule_has_port && no_private => (
+            Some(false),
+            format!(
+                "the node's rule opens UDP {port} on private networks, and this machine is on no private network \
+                 (public or domain only), where inbound stays closed; the node works through its relays and hole punching"
+            ),
             None,
+        ),
+        _ if rule_has_port => (
+            Some(true),
+            format!("the node's rule lets peers reach it on UDP {port}"),
+            None,
+        ),
+        Some(true) if !rule_ports.is_empty() => (
+            Some(false),
+            format!(
+                "the node's rule opens UDP {} but the node binds UDP {port}",
+                rule_ports.join(",")
+            ),
+            fix,
         ),
         Some(true) => (
             Some(false),
@@ -228,7 +314,7 @@ pub fn state(binary: &Path, port: u16) -> FirewallState {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                &windows_query_script(binary),
+                &windows_query_script(&install_root(binary)),
             ],
         ) {
             Some(out) => parse_windows_query(&out, port),
@@ -281,7 +367,7 @@ pub fn allow(binary: &Path, port: u16) -> Result<String, String> {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                &windows_allow_script(binary, port),
+                &windows_allow_script(&install_root(binary), port),
             ])
             .output()
             .map_err(|e| format!("run PowerShell: {e}"))?;
@@ -314,18 +400,70 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn the_windows_rule_is_scoped_to_the_binary_and_its_udp_port() {
-        let bin = PathBuf::from(r"C:\Program Files\Tenzro\tenzro-node.exe");
-        let script = windows_allow_script(&bin, 9001);
-        assert!(script.contains(r"-Program 'C:\Program Files\Tenzro\tenzro-node.exe'"));
+    fn the_windows_rule_is_keyed_to_the_udp_port_on_the_private_profile() {
+        let script = windows_allow_script(Path::new(r"C:\Users\op\.tenzro\install"), 9001);
         assert!(script.contains("-Protocol UDP -LocalPort 9001"));
-        assert!(script.contains("-Profile Private,Public"));
+        assert!(script.contains("-Profile Private |"));
+        assert!(!script.contains("Domain") && !script.contains("-Profile Public"));
         assert!(script.contains("-Direction Inbound -Action Allow"));
+        assert!(script.contains("-Name 'TenzroNode-UDP'"));
+        // Keyed to the port: no program condition, so an update needs no new rule.
+        assert!(!script.contains("-Program"));
         assert!(!script.contains("-LocalPort Any") && !script.contains("-Protocol Any"));
-        // Only block rules for this binary are removed.
-        assert!(script.contains(
-            "Get-NetFirewallApplicationFilter -Program 'C:\\Program Files\\Tenzro\\tenzro-node.exe'"
-        ));
+        // Block rules are removed for programs under the install root only.
+        assert!(script.contains(r"$_.Program -like ('C:\Users\op\.tenzro\install' + '\*')"));
+        assert!(script.contains("$_.Action -eq 'Block'"));
+    }
+
+    #[test]
+    fn every_release_of_an_install_has_one_root() {
+        let root = PathBuf::from("/home/op/.tenzro/install");
+        for binary in [
+            root.join("current").join("bin").join("tenzro-node.exe"),
+            root.join("versions")
+                .join("tenzro-node-windows-x86_64-cpu-0123456789ab")
+                .join("bin")
+                .join("tenzro-node.exe"),
+        ] {
+            assert_eq!(install_root(&binary), root, "{}", binary.display());
+        }
+        let flat = PathBuf::from("/opt/tenzro/bin/tenzro-node");
+        assert_eq!(install_root(&flat), PathBuf::from("/opt/tenzro/bin"));
+        let loose = PathBuf::from("/opt/tenzro/tenzro-node");
+        assert_eq!(install_root(&loose), PathBuf::from("/opt/tenzro"));
+    }
+
+    #[test]
+    fn the_port_is_the_one_the_endpoint_binds() {
+        let mut iroh = tenzro_iroh::TenzroIrohConfig::default();
+        assert_eq!(node_udp_port(&iroh), Some(9001));
+        iroh.bind_addr.set_port(9100);
+        assert_eq!(node_udp_port(&iroh), Some(9100));
+        iroh.relay = Some(tenzro_iroh::RelayRoleConfig {
+            bind_addr: "0.0.0.0:3340".parse().unwrap(),
+            public_url: "https://relay.example".parse().unwrap(),
+        });
+        assert_eq!(
+            node_udp_port(&iroh),
+            Some(443),
+            "the relay role binds its own port"
+        );
+        iroh.relay_udp_port = 28045;
+        assert_eq!(node_udp_port(&iroh), Some(28045));
+        iroh.relay = None;
+        iroh.bind_addr.set_port(0);
+        assert_eq!(
+            node_udp_port(&iroh),
+            None,
+            "a port the system picks cannot be named in a rule"
+        );
+        iroh.bind_addr.set_port(9001);
+        iroh.relay_only = true;
+        assert_eq!(
+            node_udp_port(&iroh),
+            None,
+            "a private node binds no IP socket"
+        );
     }
 
     #[test]
@@ -337,7 +475,7 @@ mod tests {
     #[test]
     fn a_dismissed_windows_prompt_is_reported_as_blocking() {
         let s = parse_windows_query(
-            "profiles=Domain:True,Private:True,Public:True\nallow=1\nblock=tenzro-node.exe;tenzro-node.exe\n",
+            "profiles=Domain:True,Private:True,Public:True\nnetworks=Private\nrule=9001\nblock=tenzro-node.exe;tenzro-node.exe\n",
             9001,
         );
         assert_eq!(
@@ -351,17 +489,45 @@ mod tests {
                 .contains("tenzro-node doctor --allow-inbound")
         );
         let s = parse_windows_query(
-            "profiles=Domain:True,Private:True,Public:True\nallow=1\nblock=\n",
+            "profiles=Domain:True,Private:True,Public:True\nnetworks=Private,Public\nrule=9001\nblock=\n",
             9001,
         );
         assert_eq!(s.allows_node, Some(true));
         let s = parse_windows_query(
-            "profiles=Domain:True,Private:True,Public:True\nallow=0\nblock=\n",
+            "profiles=Domain:True,Private:True,Public:True\nnetworks=Private\nrule=\nblock=\n",
             9001,
         );
         assert_eq!(s.allows_node, Some(false));
         let s = parse_windows_query(
-            "profiles=Domain:False,Private:False,Public:False\nallow=0\nblock=\n",
+            "profiles=Domain:True,Private:True,Public:True\nnetworks=Private\nrule=9001\nblock=\n",
+            443,
+        );
+        assert_eq!(s.allows_node, Some(false), "a rule for another port");
+        assert!(
+            s.detail
+                .contains("opens UDP 9001 but the node binds UDP 443")
+        );
+        let s = parse_windows_query(
+            "profiles=Domain:True,Private:True,Public:True\nnetworks=Public\nrule=9001\nblock=\n",
+            9001,
+        );
+        assert_eq!(
+            s.allows_node,
+            Some(false),
+            "inbound stays closed on a public network"
+        );
+        assert!(s.detail.contains("on no private network") && s.fix.is_none());
+        let s = parse_windows_query(
+            "profiles=Domain:True,Private:True,Public:True\nnetworks=DomainAuthenticated\nrule=9001\nblock=\n",
+            9001,
+        );
+        assert_eq!(
+            s.allows_node,
+            Some(false),
+            "inbound stays closed on a domain network"
+        );
+        let s = parse_windows_query(
+            "profiles=Domain:False,Private:False,Public:False\nnetworks=Public\nrule=\nblock=\n",
             9001,
         );
         assert_eq!((s.enabled, s.allows_node), (Some(false), Some(true)));

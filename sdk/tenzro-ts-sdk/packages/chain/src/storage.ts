@@ -46,11 +46,17 @@ function toBase64(data: Uint8Array): string {
  * Decentralized storage client.
  *
  * A node started with the `storage` role spawns a storage-provider runtime:
- * it erasure-codes objects, publishes their shards over the content-addressed
- * transport. A renter pays for keeping an object through a storage compute
- * claim that commits the object's descriptor digest; each hour the claim pays
+ * it erasure-codes objects and publishes their shards over the
+ * content-addressed transport. The provider prices storage at a fixed rate per
+ * byte-epoch that never follows demand ({@link StorageClient.setFixedRate}).
+ *
+ * Storage is held to proofs of retrievability: a renter pays for keeping an
+ * object through a storage compute claim that commits the object's descriptor
+ * digest ({@link StoredObject.descriptor_digest}), and each hour the claim pays
  * the provider only if validators found its bond available, which requires a
- * possession proof of the object.
+ * possession proof of the object. The claim is written and bought with the
+ * `ComputeClaim` transaction and read through `ComputeClient.getClaim`, where
+ * `storage_descriptor` names the object.
  *
  * These calls target the provider node directly; they succeed only when that
  * node is serving the storage role.
@@ -66,6 +72,10 @@ export class StorageClient {
    * Stores an object owned by `ownerDid`: erasure-codes `data` and publishes
    * its shards over the transport. Only `ownerDid` may retrieve it. `signer`
    * holds the key `ownerDid` resolves to and signs the request's envelope.
+   * `placement` limits which holders may take its shards; the storing node
+   * must itself be inside it.
+   * `options.class` (`hot`, `warm` or `cold`) is the storage class the object
+   * is bought under, which prices its reads.
    *
    * @example
    * ```typescript
@@ -89,6 +99,8 @@ export class StorageClient {
     parityShards: number,
     ownerDid: string,
     signer: HybridSigner,
+    placement?: Placement,
+    options: { class?: "hot" | "warm" | "cold" } = {},
   ): Promise<StoredObject> {
     const params = await withRequestEnvelope(signer, ownerDid, "tenzro_storageStoreObject", {
       object_id: objectId,
@@ -97,6 +109,8 @@ export class StorageClient {
       data_shards: dataShards,
       parity_shards: parityShards,
       owner_did: ownerDid,
+      ...(placement ? { placement } : {}),
+      ...(options.class ? { class: options.class } : {}),
     });
     return this.rpc.call<StoredObject>("tenzro_storageStoreObject", params);
   }
@@ -104,11 +118,19 @@ export class StorageClient {
   /**
    * Rebuilds an object from its shards for `readerDid` and returns its bytes.
    * The object's access policy must admit `readerDid`; `signer` holds the key
-   * it resolves to and signs the request's envelope.
+   * it resolves to and signs the request's envelope. An object stored under
+   * a priced class is paid with `voucher`, a channel voucher to the node
+   * covering the read.
    */
-  async retrieveObject(objectId: string, readerDid: string, signer: HybridSigner): Promise<Uint8Array> {
+  async retrieveObject(
+    objectId: string,
+    readerDid: string,
+    signer: HybridSigner,
+    voucher?: Record<string, unknown>,
+  ): Promise<Uint8Array> {
     const params = await withRequestEnvelope(signer, readerDid, "tenzro_storageRetrieveObject", {
       object_id: objectId,
+      ...(voucher ? { voucher } : {}),
     });
     const out = await this.rpc.call<{ data: string }>("tenzro_storageRetrieveObject", params);
     return fromBase64(out.data);
@@ -122,33 +144,52 @@ export class StorageClient {
     return this.rpc.call("tenzro_storageSetPricing", [{ mode: "fixed", rate: rate.toString() }]);
   }
 
-  /** Returns this node's storage-provider status (rate, object count). */
+  /**
+   * This node's signed receipt for the shards of `objectId` it holds now
+   * under a placement constraint, or `null` when it holds none.
+   */
+  async storageHoldingReceipt(objectId: string): Promise<Record<string, unknown> | null> {
+    return this.rpc.call("tenzro_getStorageHoldingReceipt", [{ object_id: objectId }]);
+  }
+
+  /**
+   * The storage providers the node has heard announce, best record first,
+   * each with its standing read from consensus state and whether any SLA
+   * verdict judged it.
+   */
+  async storageProviders(): Promise<Record<string, unknown>> {
+    return this.rpc.call("tenzro_listStorageProviders", {});
+  }
+
+  /**
+   * Sets the byte-epoch rate and what reading each class costs, wei per
+   * gibibyte read, each under its governed ceiling.
+   */
+  async setReadRates(
+    rate: bigint | string,
+    readRates: { hot: bigint | string; warm: bigint | string; cold: bigint | string },
+  ): Promise<Record<string, unknown>> {
+    return this.rpc.call("tenzro_storageSetPricing", [
+      {
+        mode: "fixed",
+        rate: rate.toString(),
+        read_rates: { hot: readRates.hot.toString(), warm: readRates.warm.toString(), cold: readRates.cold.toString() },
+      },
+    ]);
+  }
+
+  /** Returns this node's storage-provider status (rates, object count). */
   async status(): Promise<StorageStatus> {
     return this.rpc.call<StorageStatus>("tenzro_storageStatus", []);
   }
+}
 
-  /** `tenzro_daAvailability`. */
-  daAvailability<T = unknown>(params: { address?: unknown } = {}): Promise<T> {
-    return this.rpc.call<T>("tenzro_daAvailability", params);
-  }
-
-  /** `tenzro_daChallenge` (operator only). */
-  daChallenge<T = unknown>(params: { commitment?: unknown; target_index?: unknown } = {}): Promise<T> {
-    return this.rpc.call<T>("tenzro_daChallenge", params);
-  }
-
-  /** `tenzro_daCommittee`. */
-  daCommittee<T = unknown>(): Promise<T> {
-    return this.rpc.call<T>("tenzro_daCommittee");
-  }
-
-  /** `tenzro_daListBlobs`. */
-  daListBlobs<T = unknown>(): Promise<T> {
-    return this.rpc.call<T>("tenzro_daListBlobs");
-  }
-
-  /** `tenzro_daListChallenges`. */
-  daListChallenges<T = unknown>(params: { limit?: unknown } = {}): Promise<T> {
-    return this.rpc.call<T>("tenzro_daListChallenges", params);
-  }
+/**
+ * Where an object's shards may be held: in one of `jurisdiction` (country
+ * codes, by the region each holder declares), by one of `operators`
+ * (provider accounts, hex), or both.
+ */
+export interface Placement {
+  jurisdiction?: string[];
+  operators?: string[];
 }

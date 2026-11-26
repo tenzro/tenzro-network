@@ -896,7 +896,7 @@ mod tests {
     /// network would be. Prints one `GATE {json}` line. Run with
     /// `--release --ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn gate_certificate_forgery() {
         use rand::{Rng, SeedableRng};
         let total: u64 = std::env::var("TDC_FORGERY_MUTATIONS")

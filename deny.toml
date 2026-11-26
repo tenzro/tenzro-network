@@ -20,25 +20,37 @@ ignore = [
     # ledger records across the workspace, and moving off it is a data-format
     # migration, not a dependency bump.
     { id = "RUSTSEC-2025-0141", reason = "bincode is the on-disk record encoding; replacement is a format migration" },
+    # chrono: unmaintained, every version, no patched release
+    # (https://rustsec.org/advisories/RUSTSEC-2026-0543.html, read 19 Nov 2026). The
+    # workspace crates use its types in the serialized form of identity, trust and
+    # ledger records, so moving to jiff or time changes those forms and waits for a
+    # flag-day release. Re-open when chrono is migrated or a maintained release appears.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained with no fix; replacing it changes serialized record forms" },
     # rsa: timing side channel with no fixed release; reached only through
     # transitive dependencies, never for keys this node holds.
     { id = "RUSTSEC-2023-0071", reason = "no fixed rsa release; not used for this node's keys" },
     # hickory-proto 0.25: NSEC3 validation loop with no fixed 0.25 release;
     # the node's own resolver is hickory 0.26, this copy is transitive.
-    { id = "RUSTSEC-2026-0118", reason = "no fixed release; transitive copy, DNSSEC validation not enabled" },
     # tracing-subscriber 0.2: ANSI escapes in formatted logs. The only copy is
     # ark-relations' optional constraint-trace layer (via risc0-groth16), which
     # nothing here installs; the node logs through tracing-subscriber 0.3.
     { id = "RUSTSEC-2025-0055", reason = "0.2 copy only behind ark-relations' constraint-trace layer, never installed" },
+    # Yanked upstream, kept pinned (24 Nov 2026): every risc0-zkvm 3.0.x, risc0-groth16
+    # up to 3.0.5 and risc0-circuit-recursion up to 4.0.5 is yanked; the unyanked
+    # ones (zkvm 3.1.0, groth16 3.0.6, recursion 4.1.0) may change the
+    # CONTROL_ROOT / BN254_CONTROL_ID constants the seven deployed finality
+    # verifier contracts check, and the finality guest's proven image id depends
+    # on these exact versions. No yank reason is published. Revisit together
+    # with the guest rebuild and the contract redeploy.
+    { crate = "risc0-zkvm@3.0.6", reason = "yanked; pinned with the deployed verifier constants, revisit with the contract redeploy (24 Nov 2026)" },
+    { crate = "risc0-groth16@3.0.5", reason = "yanked; pinned with the deployed verifier constants, revisit with the contract redeploy (24 Nov 2026)" },
+    { crate = "risc0-circuit-recursion@4.0.5", reason = "yanked; pinned with the deployed verifier constants, revisit with the contract redeploy (24 Nov 2026)" },
     # crypto-bigint 0.5.5: secret-dependent branches, no fixed 0.5 release. It
     # enters only through elliptic-curve 0.13 (k256 recovery over public
     # transaction data, p521 attestation-chain verification); the 0.7 line
     # under the signing stack is on a fixed release. The full decision and
     # what would reopen it are in .cargo/audit.toml.
     { id = "RUSTSEC-2026-0387", reason = "0.5.5 only under public-data verification; 0.7 line upgraded; see .cargo/audit.toml" },
-    # Yanked release candidates of the RustCrypto 0.14 stack that p256 and
-    # ml-dsa pin exactly; they move with those pins.
-    { crate = "der@0.8.0", reason = "pinned by the p256 / ml-dsa release candidates" },
 ]
 
 [licenses]

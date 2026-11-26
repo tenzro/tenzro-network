@@ -126,6 +126,9 @@ mod tests {
     use tenzro_cluster::membership::testing::{Key, RP_ID, custody_digest, membership};
     use tenzro_cluster::{MembershipBook, VerifiedMembership};
 
+    /// Why a host can miss its own announcements.
+    const NOT_HEARD: &str = "a host firewall that drops multicast DNS coming back to this host (UDP 5353 to 224.0.0.251, docs/NETWORK.md) keeps every announcement from arriving";
+
     fn endpoint_id(seed: u8) -> EndpointId {
         iroh::SecretKey::from_bytes(&[seed; 32]).public()
     }
@@ -145,11 +148,75 @@ mod tests {
         assert_eq!(LanBinding::parse(&data), Some(b));
     }
 
+    /// Whether this host hands a process its own multicast DNS announcements.
+    ///
+    /// Two discoveries with an unsigned binding look for each other first.
+    /// The announced addresses are loopback, but the announcements go out on
+    /// the interface the multicast DNS group is routed over, and come back to
+    /// this host only if its firewall lets them in: a firewall whose default
+    /// input policy drops them (as `ufw` does unless UDP 5353 to 224.0.0.251
+    /// is allowed, see docs/NETWORK.md), or another DNS responder holding the
+    /// port, keeps every announcement from returning. Sent on the loopback
+    /// interface they would return, but the discovery's lookup does not let
+    /// the interface be chosen. Neither discovery then ever sees the other,
+    /// and no discovery between endpoints of one host can be observed there. The test then prints a `SKIP-UNSUPPORTED:`
+    /// line, which the release gate lists.
+    async fn host_delivers_its_own_multicast() -> bool {
+        let (ep_watcher, ep_announcer) = (endpoint_id(21), endpoint_id(22));
+        let (Ok(watcher), Ok(announcer)) = (
+            LanDiscovery::start(ep_watcher),
+            LanDiscovery::start(ep_announcer),
+        ) else {
+            return false;
+        };
+        let mut seen = watcher.sightings().await;
+        let probe = LanBinding {
+            member_id: "probe".to_string(),
+            signature: vec![0],
+        };
+        if announcer
+            .announce(["127.0.0.1:47002".parse().unwrap()], &probe)
+            .is_err()
+        {
+            return false;
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(s) = seen.next().await {
+                if s.endpoint_id == ep_announcer {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Two endpoints on this host find each other by multicast alone, and
     /// only the one whose binding checks against the membership list is
     /// accepted as a member.
+    ///
+    /// Multicast DNS listens on every interface, and a test binary that does
+    /// makes Windows and macOS ask the user to let it through the firewall,
+    /// once for every new build. The test therefore runs only where
+    /// `TENZRO_TEST_MULTICAST=1` is set (row K of scripts/genesis-gate.sh
+    /// sets it) and reports a `SKIP-UNSUPPORTED:` line otherwise.
     #[tokio::test(flavor = "multi_thread")]
     async fn lan_discovery_finds_members_on_loopback_without_an_external_network() {
+        if std::env::var("TENZRO_TEST_MULTICAST").as_deref() != Ok("1") {
+            eprintln!(
+                "SKIP-UNSUPPORTED: lan_discovery_finds_members_on_loopback_without_an_external_network: \
+                 TENZRO_TEST_MULTICAST is not 1"
+            );
+            return;
+        }
+        if !host_delivers_its_own_multicast().await {
+            eprintln!(
+                "SKIP-UNSUPPORTED: lan_discovery_finds_members_on_loopback_without_an_external_network: \
+                 this host does not deliver its own multicast DNS announcements"
+            );
+            return;
+        }
         let (op, a, b, stranger) = (Key::new(1), Key::new(2), Key::new(3), Key::new(4));
         let mut book = MembershipBook::new();
         book.offer(
@@ -192,7 +259,14 @@ mod tests {
                 rejected_impostor = true;
             }
         }
-        assert_eq!(verified, Some(b.machine_did()));
-        assert!(rejected_impostor, "the impostor was never seen");
+        assert_eq!(
+            verified,
+            Some(b.machine_did()),
+            "the member was never verified; {NOT_HEARD}"
+        );
+        assert!(
+            rejected_impostor,
+            "the impostor was never seen; {NOT_HEARD}"
+        );
     }
 }

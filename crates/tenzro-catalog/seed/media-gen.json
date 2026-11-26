@@ -318,7 +318,7 @@
         "default_width": 2048,
         "description": "Qwen-Image-2.1 unified text-to-image and multi-reference editing, 7B DiT. Qwen Research License: non-commercial, so never charged for",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "qwen-image",
         "gguf_file": null,
@@ -475,7 +475,7 @@
         "default_width": 1328,
         "description": "Qwen-Image-Edit instruction-driven image editing, multi-reference",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "qwen-image",
         "gguf_file": null,
@@ -610,7 +610,7 @@
         "default_width": 1024,
         "description": "Z-Image Turbo few-step text-to-image, 9 steps without guidance",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "z-image",
         "gguf_file": null,
@@ -724,7 +724,7 @@
         "default_width": 1024,
         "description": "FLUX.2 klein 4B text-to-image and editing, runs on consumer GPUs",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "flux2",
         "gguf_file": null,
@@ -839,7 +839,7 @@
         "default_width": 1024,
         "description": "FLUX.2 klein base 4B — undistilled text-to-image and editing",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "flux2",
         "gguf_file": null,
@@ -1651,12 +1651,12 @@
       "spec": {
         "config_repo": null,
         "default_fps": null,
-        "default_guidance_scale": 3.5,
+        "default_guidance_scale": 4.0,
         "default_height": 1024,
         "default_num_frames": null,
         "default_steps": 50,
         "default_width": 1024,
-        "description": "FLUX 3 Image Klein Base 5.6B, undistilled, bfloat16: 50 steps at guidance 3.5, built for fine-tuning and research. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet.",
+        "description": "FLUX 3 Image Klein Base 5.6B, undistilled, bfloat16: 50 steps at guidance 4.0, built for fine-tuning and research. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet.",
         "distilled": false,
         "expert_pair": null,
         "family": "flux3",
@@ -1978,7 +1978,7 @@
         "default_width": 1280,
         "description": "Wan 2.2 hybrid text/image-to-video at 720P 24fps on a single 24 GB GPU; also rolls forward as a prompt-driven world session",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "wan2.2",
         "gguf_file": null,
@@ -2248,7 +2248,7 @@
         "default_width": 768,
         "description": "LTX-2.3 22B distilled text-to-video with a synchronized soundtrack: Q5_K_M transformer, 8-step distilled schedule at half size, latent upsampling and a 3-step refinement, no guidance",
         "distilled": true,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "ltx2",
         "gguf_file": "distilled-1.1/ltx-2.3-22b-distilled-1.1-UD-Q5_K_M.gguf",
@@ -2401,7 +2401,7 @@
         "default_width": 768,
         "description": "LTX-2.3 22B text-to-video with a synchronized soundtrack, 30 steps with prompt, spatio-temporal and modality guidance, in bf16",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "ltx2",
         "gguf_file": null,
@@ -2743,7 +2743,7 @@
         "default_width": 1,
         "description": "ACE-Step v1.5 XL Turbo text-to-music: 48 kHz stereo, prompt plus optional lyrics, guidance-distilled to 8 steps.",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "acestep",
         "gguf_file": null,
@@ -2871,7 +2871,7 @@
         "default_width": 1,
         "description": "ACE-Step v1.5 XL SFT text-to-music: 48 kHz stereo, the supervised fine-tune, 50 steps at guidance 7.0.",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "acestep",
         "gguf_file": null,
@@ -2999,7 +2999,7 @@
         "default_width": 1,
         "description": "ACE-Step v1.5 XL Base text-to-music: 48 kHz stereo, the un-fine-tuned base for adaptation, 50 steps at guidance 7.0.",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "acestep",
         "gguf_file": null,
@@ -4013,7 +4013,7 @@
         "default_width": 832,
         "description": "NVIDIA Cosmos3 Edge world foundation model, 4B, image-to-video at 480p/121 frames. Ungated, commercial use permitted. Takes JSON-structured prompts rather than plain text",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "cosmos3",
         "gguf_file": null,
@@ -4088,7 +4088,7 @@
         "default_width": 384,
         "description": "DeepSeek Janus-Pro 1B unified model: its language backbone writes a 24x24 grid of image tokens under classifier-free guidance, one token per step, and a VQ decoder turns the grid into a 384x384 image. The backbone runs from a GGUF of its language model (f16), the image head and decoder from the checkpoint.",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "janus",
         "gguf_file": "Janus-Pro-1B.f16.gguf",
@@ -4195,168 +4195,6 @@
         "pipeline_class": "Hunyuan3DDiTFlowMatchingPipeline",
         "size_bytes": 13400000000,
         "status": "planned",
-        "transformer_class": null
-      }
-    }
-  },
-  {
-    "capabilities": [],
-    "capability_priors": {},
-    "components": [
-      {
-        "path": "pipeline.json",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "222c359ab1ed9bc6735a640a34f95d47f8681b9bc4aaa101bfb80274676253c6",
-        "size": 4186
-      },
-      {
-        "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.json",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "6cdfb636854f60ffcadd8c49244169cd449f34c5ccdb55b5ff7c04678f9c399e",
-        "size": 467
-      },
-      {
-        "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "ca01377c485bec418076d38ee80166d32dc776d744f2553b835cba1e97a7abf6",
-        "size": 2584426920
-      },
-      {
-        "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "ddbd7a1d34ce9a8e7af2f6ef9ae686d9ab49f69e62dacb98d8409b511cdbd5e2",
-        "size": 458
-      },
-      {
-        "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "ec5e0917ef9b7e25ad51dffc7d19687a42019871f94239f2fa7f86264c55b70f",
-        "size": 2584574424
-      },
-      {
-        "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.json",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "3093796257a62f838d2e5578ac4580ca3b7d88d10b87d348065d3fdfcc4c2077",
-        "size": 458
-      },
-      {
-        "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "8371aa1c5d13be79dcd5ddfd2cf3835e902e204dc34427169a1c702828e1a94d",
-        "size": 2584672728
-      },
-      {
-        "path": "ckpts/shape_dec_next_dc_f16c32_fp16.json",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "5f1b856dffce79466fb18f5f0eefc08f08c673b24b3c05b20359c0b6d318a209",
-        "size": 678
-      },
-      {
-        "path": "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581",
-        "size": 948490494
-      },
-      {
-        "path": "ckpts/tex_dec_next_dc_f16c32_fp16.json",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "22074e4ab5b28e2b72d33a3fe61bf416134b89e12d0fc5c729f37da75da0c4d1",
-        "size": 705
-      },
-      {
-        "path": "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
-        "repo": "microsoft/TRELLIS.2-4B",
-        "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
-        "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c",
-        "size": 948458812
-      },
-      {
-        "at": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.json",
-        "path": "ckpts/ss_dec_conv3d_16l8_fp16.json",
-        "repo": "microsoft/TRELLIS-image-large",
-        "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
-        "sha256": "646781293f1cda74720de85d1cef50a957fb4aebd9a4bd014e454e32f2330ac5",
-        "size": 245
-      },
-      {
-        "at": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
-        "path": "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
-        "repo": "microsoft/TRELLIS-image-large",
-        "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
-        "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a",
-        "size": 147591972
-      },
-      {
-        "at": "facebook/dinov3-vitl16-pretrain-lvd1689m/config.json",
-        "path": "config.json",
-        "repo": "facebook/dinov3-vitl16-pretrain-lvd1689m",
-        "revision": "ea8dc2863c51be0a264bab82070e3e8836b02d51",
-        "sha256": "135ecd23e34a70b6fbed8b083fdecb319b7e3a54e3d849258bbe4ddcf1783bb5",
-        "size": 745
-      },
-      {
-        "at": "facebook/dinov3-vitl16-pretrain-lvd1689m/model.safetensors",
-        "path": "model.safetensors",
-        "repo": "facebook/dinov3-vitl16-pretrain-lvd1689m",
-        "revision": "ea8dc2863c51be0a264bab82070e3e8836b02d51",
-        "sha256": "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179",
-        "size": 1212559808
-      }
-    ],
-    "gated": true,
-    "licence": {
-      "components": [
-        {
-          "covers": "image encoder (DINOv3 ViT-L/16)",
-          "id": "dinov3",
-          "name": "DINOv3 License",
-          "tier": "commercial_custom"
-        }
-      ],
-      "name": "MIT",
-      "tier": "permissive"
-    },
-    "model": {
-      "engine": "media-gen",
-      "spec": {
-        "config_repo": null,
-        "default_fps": null,
-        "default_guidance_scale": 7.5,
-        "default_height": 1024,
-        "default_num_frames": null,
-        "default_steps": 12,
-        "default_voxel_resolution": 512,
-        "default_width": 1024,
-        "description": "Microsoft TRELLIS.2 image-to-3D: the object on a transparent background in, a GLB mesh with PBR materials out, built on the 512³ surface path (the 1024 and 1536 paths are not served). Its DINOv3 image encoder is gated behind Meta's DINOv3 License, so the entry is gated: the operator accepts dinov3 and the encoder comes from network providers or the operator's own origin credential.",
-        "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
-        "expert_pair": null,
-        "family": "trellis2",
-        "gguf_file": null,
-        "gguf_repo": null,
-        "hf_repo": "microsoft/TRELLIS.2-4B",
-        "id": "trellis2-4b",
-        "kinds": [
-          "image23d"
-        ],
-        "latent_upsampler": null,
-        "max_resolution": 1536,
-        "min_vram_gb": 16,
-        "name": "TRELLIS.2 4B",
-        "parameters": "4B",
-        "pipeline_class": "Trellis2ImageTo3DPipeline",
-        "size_bytes": 11010783100,
-        "status": "native",
         "transformer_class": null
       }
     }
@@ -4521,7 +4359,7 @@
         "default_width": 512,
         "description": "FLUX 3 world-action policy for the SO-101 arm: two cameras side by side on a 256x512 canvas, 42-step delta-action chunks at 30 Hz, 4 Euler steps. Under the FLUX Kommunity License: a node serves it once its operator has accepted flux-kommunity-1.0; the weights are gated at their origin.",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "flux3-action",
         "gguf_file": null,
@@ -4645,7 +4483,7 @@
         "default_width": 736,
         "description": "FLUX 3 world-action policy for the DROID platform: three cameras on a 544x736 canvas, 32-step absolute-action chunks at 15 Hz, 4 UniPC steps. Under the FLUX Kommunity License: a node serves it once its operator has accepted flux-kommunity-1.0; the weights are gated at their origin.",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "flux3-action",
         "gguf_file": null,
@@ -4760,7 +4598,7 @@
         "default_width": 736,
         "description": "NVIDIA Cosmos3 Edge world-action policy for the DROID platform: one observation image plus an instruction to a 32-step action chunk (10 values per step: end-effector pose and gripper) with its rollout frames, at 15 Hz. Ungated, commercial use permitted; the commercially servable policy entry. Observation canvases are the action resolution-tier canvases, for example 256x256 (tier 256) or 736x544 (tier 480).",
         "distilled": false,
-        "engine_rev": "4feb740dc1fd93712c5d98e2bc55d97b92c090f3",
+        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
         "expert_pair": null,
         "family": "cosmos3",
         "gguf_file": null,

@@ -845,7 +845,7 @@ mod tests {
         delegation: Delegation,
     ) -> SignedDelegation {
         let digest = v.delegation_digest(&delegation).unwrap();
-        let (sig, recid) = key.sign_prehash_recoverable(&digest).unwrap();
+        let (sig, recid) = key.sign_prehash_recoverable(&digest);
         let mut bytes = sig.to_bytes().to_vec();
         bytes.push(recid.to_byte());
         SignedDelegation {
@@ -1122,7 +1122,7 @@ mod tests {
         let leaf_hash = delegation_hash(&d).unwrap();
         let signed = sign_delegation(v, payer, d);
         let digest = v.redemption_digest(&leaf_hash, &auth, requirement);
-        let (sig, recid) = binder.sign_prehash_recoverable(&digest).unwrap();
+        let (sig, recid) = binder.sign_prehash_recoverable(&digest);
         let mut bytes = sig.to_bytes().to_vec();
         bytes.push(recid.to_byte());
         let proof = RedemptionProof {

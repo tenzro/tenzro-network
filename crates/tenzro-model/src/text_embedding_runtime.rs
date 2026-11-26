@@ -576,8 +576,10 @@ mod tests {
                 "TENZRO_VL_GGUF, TENZRO_VL_MMPROJ and TENZRO_VL_EXPECTED must name the embedder, its projector and the reference"
             );
         };
-        crate::seeded_catalog();
-        let entry = crate::catalog::get_embed_model_by_id("qwen3-vl-embedding-2b").unwrap();
+        let catalog = crate::Catalog::test_seed();
+        let entry = catalog
+            .get_embed_model_by_id("qwen3-vl-embedding-2b")
+            .unwrap();
         let spec = entry.vision_input.clone().unwrap();
         let expected = std::path::PathBuf::from(expected);
         let exp: serde_json::Value =

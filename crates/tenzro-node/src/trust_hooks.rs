@@ -101,17 +101,35 @@ pub(crate) fn admit_own_model(node: &TenzroNode, model_id: &str) -> Result<(), J
 /// verdict, and a validator flags it to consensus as a `PolicyViolation`
 /// finding: the operator's compute bond is slashed once validators holding two
 /// thirds of bonded stake have proved the same violation.
+///
+/// A record is taken only from an author `admit` passes: an identity nobody
+/// can resolve signs nothing another node can check. A record the ledger
+/// already holds is not judged again. Two kinds have no author to ask about
+/// and are taken on what they prove themselves: a model manifest is unsigned
+/// and named by the hash of its content, and violation evidence stands on
+/// the operator's own signatures inside it, whoever hands it in. Naming the
+/// author verifies the record's signature, which the ledger then verifies
+/// again when it applies the record.
 pub(crate) fn apply(
     ledger: &TrustLedger,
     catalog: Option<&crate::catalog_sync::CatalogSync>,
     findings: Option<&crate::agent_audit::FindingSink>,
+    admit: &dyn Fn(&str) -> Result<(), String>,
     record: &Value,
 ) -> Result<Applied, tenzro_trust::TrustError> {
+    if !ledger.holds(record)
+        && let Some(author) = tenzro_trust::ledger::author(record)?
+    {
+        admit(&author).map_err(tenzro_trust::TrustError::Unadmitted)?;
+    }
     if matches!(
         tenzro_trust::ledger::RecordKind::of(record),
         Ok(tenzro_trust::ledger::RecordKind::Manifest)
     ) {
-        check_catalog_pins(&tenzro_trust::ModelManifest::from_json(record)?)?;
+        let manifest = tenzro_trust::ModelManifest::from_json(record)?;
+        if let Some(sync) = catalog {
+            check_catalog_pins(&sync.catalog(), &manifest)?;
+        }
     }
     let applied = ledger.apply(record)?;
     if let (Some(v), Some(sink)) = (&applied.violation, findings) {
@@ -131,6 +149,21 @@ pub(crate) fn apply(
     Ok(applied)
 }
 
+/// The author rule of a node's edge: a registered identity, in the node's
+/// onboarding mode. The node's own records are its own to keep.
+pub(crate) fn author_gate(
+    edge: crate::identity_gate::Edge,
+) -> impl Fn(&str) -> Result<(), String> + Send + Sync + 'static {
+    let own = crate::identity_bootstrap::machine_did();
+    move |author| {
+        edge.admits(
+            "tenzro_submitTrustRecord",
+            Some(author),
+            own.as_deref() == Some(author),
+        )
+    }
+}
+
 /// [`apply`] against this node's ledger.
 pub(crate) fn apply_record(
     node: &TenzroNode,
@@ -143,6 +176,7 @@ pub(crate) fn apply_record(
         ledger,
         node.catalog_sync().map(|c| c.as_ref()),
         node.finding_sink().as_ref(),
+        &author_gate(crate::identity_gate::Edge::of(node)),
         record,
     )
 }
@@ -172,6 +206,7 @@ pub(crate) fn spawn_subscriber(
     ledger: Arc<TrustLedger>,
     catalog: Option<Arc<crate::catalog_sync::CatalogSync>>,
     findings: Option<crate::agent_audit::FindingSink>,
+    admit: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static,
     network: Arc<tenzro_network::TenzroNetworkService>,
 ) {
     use tenzro_network::{MessagePayload, NetworkService};
@@ -193,7 +228,13 @@ pub(crate) fn spawn_subscriber(
             let Ok(record) = serde_json::from_slice::<Value>(&data) else {
                 continue;
             };
-            if let Err(e) = apply(&ledger, catalog.as_deref(), findings.as_ref(), &record) {
+            if let Err(e) = apply(
+                &ledger,
+                catalog.as_deref(),
+                findings.as_ref(),
+                &admit,
+                &record,
+            ) {
                 tracing::debug!(error = %e, "trust record from a peer refused");
             }
         }
@@ -203,8 +244,13 @@ pub(crate) fn spawn_subscriber(
 /// The licence the file `name`/`path` is gated behind, when the catalog
 /// entry pinning it says its origin gates it. Such a file passes only between
 /// nodes whose operators accepted the licence.
-pub(crate) fn gating_licence(name: &str, path: &str) -> Option<String> {
-    tenzro_model::catalog::file(name, path)
+pub(crate) fn gating_licence(
+    catalog: &tenzro_model::Catalog,
+    name: &str,
+    path: &str,
+) -> Option<String> {
+    catalog
+        .file(name, path)
         .and_then(|(entry, _)| entry.gating_licence().map(str::to_string))
 }
 
@@ -219,7 +265,7 @@ pub(crate) async fn bind_gated(
     path: &str,
     blake3: &str,
 ) -> Result<(), String> {
-    let Some(licence) = gating_licence(name, path) else {
+    let Some(licence) = gating_licence(&node.catalog(), name, path) else {
         return Ok(());
     };
     if !node
@@ -245,10 +291,11 @@ pub const OBSERVER_KEY_LABEL: &str = "tenzro/node/trust-observer";
 /// Refuse a manifest named after a Hub repository whose files contradict the
 /// catalog's pinned hashes for that repository.
 pub(crate) fn check_catalog_pins(
+    catalog: &tenzro_model::Catalog,
     m: &tenzro_trust::ModelManifest,
 ) -> Result<(), tenzro_trust::TrustError> {
     for f in &m.files {
-        if let Some((_, pin)) = tenzro_model::catalog::file(&m.name, &f.path)
+        if let Some((_, pin)) = catalog.file(&m.name, &f.path)
             && (pin.sha256 != f.sha256 || pin.size != f.size)
         {
             return Err(tenzro_trust::TrustError::FileMismatch {
@@ -270,6 +317,7 @@ pub(crate) fn check_catalog_pins(
 /// `local` is the weight file the node resolves for the model (the first
 /// shard of a split model).
 pub(crate) fn gguf_files(
+    catalog: &tenzro_model::Catalog,
     model_id: &str,
     local: &std::path::Path,
 ) -> (String, Vec<(String, std::path::PathBuf)>) {
@@ -279,7 +327,7 @@ pub(crate) fn gguf_files(
             .unwrap_or_default()
             .to_string()
     };
-    let Some(entry) = tenzro_model::catalog::get_model_by_id(model_id) else {
+    let Some(entry) = catalog.get_model_by_id(model_id) else {
         return (
             model_id.to_string(),
             vec![(file_name(local), local.to_path_buf())],
@@ -431,13 +479,14 @@ pub(crate) async fn verify_before_load(
     files: Vec<(String, std::path::PathBuf)>,
 ) -> Result<LoadProvenance, JsonRpcError> {
     let ledger = node.trust_ledger().cloned();
+    let catalog = node.catalog();
     let model = name.to_string();
     let outcome = tokio::task::spawn_blocking(move || -> Result<LoadProvenance, String> {
         let total = files.len();
         let mut roots: Vec<String> = Vec::new();
         let mut verified = 0;
         for (path, local) in &files {
-            let pin = tenzro_model::catalog::file(&model, path).map(|(_, c)| c);
+            let pin = catalog.file(&model, path).map(|(_, c)| c.clone());
             let listed = ledger.as_ref().and_then(|l| l.verified_entry(&model, path));
             if pin.is_none() && listed.is_none() {
                 continue;
@@ -525,6 +574,41 @@ mod tests {
         let digest = tenzro_trust::proof::signing_digest(&doc, &opts);
         let sig: [u8; 64] = key.sign_prehash(&digest).as_bytes().try_into().unwrap();
         tenzro_trust::proof::attach_hardware(doc, opts, &sig)
+    }
+
+    #[test]
+    fn a_record_is_taken_only_from_an_author_the_edge_admits_and_judged_once() {
+        let ledger = TrustLedger::new();
+        let files = [ObservedFile {
+            path: "model.gguf".into(),
+            size: 1,
+            sha256: "a".repeat(64),
+            blake3: None,
+        }];
+        let record = observe(41, "https://a.example/m", "org/model", &files);
+        let author = tenzro_trust::ledger::author(&record).unwrap().unwrap();
+        let refuse = |who: &str| Err(format!("{who}: no registered identity"));
+        let err = apply(&ledger, None, None, &refuse, &record).unwrap_err();
+        assert!(
+            matches!(&err, tenzro_trust::TrustError::Unadmitted(why) if why.contains(&author)),
+            "{err}"
+        );
+        assert!(!ledger.holds(&record));
+
+        let asked = std::sync::Mutex::new(Vec::new());
+        let admit = |who: &str| {
+            asked.lock().unwrap().push(who.to_string());
+            Ok(())
+        };
+        assert!(apply(&ledger, None, None, &admit, &record).unwrap().new);
+        assert_eq!(*asked.lock().unwrap(), [author]);
+        // The ledger holds it now: it is not judged again, whoever would refuse it.
+        assert!(!apply(&ledger, None, None, &refuse, &record).unwrap().new);
+        // A record whose signature does not verify names no author to ask about.
+        let mut forged = record.clone();
+        forged["locator"] = serde_json::json!("https://c.example/m");
+        assert!(apply(&ledger, None, None, &admit, &forged).is_err());
+        assert_eq!(asked.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

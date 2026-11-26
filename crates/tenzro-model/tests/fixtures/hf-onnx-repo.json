@@ -1,0 +1,88 @@
+{
+ "siblings": [
+  {
+   "rfilename": ".gitattributes",
+   "size": 1689
+  },
+  {
+   "rfilename": "README.md",
+   "size": 2413
+  },
+  {
+   "rfilename": "added_tokens.json",
+   "size": 707
+  },
+  {
+   "rfilename": "chat_template.jinja",
+   "size": 4116
+  },
+  {
+   "rfilename": "config.json",
+   "size": 1576
+  },
+  {
+   "rfilename": "generation_config.json",
+   "size": 122
+  },
+  {
+   "rfilename": "merges.txt",
+   "size": 1671853
+  },
+  {
+   "rfilename": "onnx/model.onnx",
+   "size": 307161415
+  },
+  {
+   "rfilename": "onnx/model.onnx_data",
+   "size": 2093436928
+  },
+  {
+   "rfilename": "onnx/model_bnb4.onnx",
+   "size": 886593402
+  },
+  {
+   "rfilename": "onnx/model_fp16.onnx",
+   "size": 583522
+  },
+  {
+   "rfilename": "onnx/model_fp16.onnx_data",
+   "size": 1199927296
+  },
+  {
+   "rfilename": "onnx/model_int8.onnx",
+   "size": 613527539
+  },
+  {
+   "rfilename": "onnx/model_q4.onnx",
+   "size": 914121462
+  },
+  {
+   "rfilename": "onnx/model_q4f16.onnx",
+   "size": 567458583
+  },
+  {
+   "rfilename": "onnx/model_quantized.onnx",
+   "size": 613527631
+  },
+  {
+   "rfilename": "onnx/model_uint8.onnx",
+   "size": 613527631
+  },
+  {
+   "rfilename": "special_tokens_map.json",
+   "size": 613
+  },
+  {
+   "rfilename": "tokenizer.json",
+   "size": 11423705
+  },
+  {
+   "rfilename": "tokenizer_config.json",
+   "size": 9731
+  },
+  {
+   "rfilename": "vocab.json",
+   "size": 2776833
+  }
+ ]
+}

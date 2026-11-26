@@ -42,14 +42,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use tenzro_model::{Catalog, CatalogCell};
 use tenzro_model::{
     ChatMessage, DownloadProgress, DownloadState, GenerationConfig, HfDownloader, ModelRuntime,
-    SourcePolicy, get_decision_model_by_id, get_model_by_id,
+    SourcePolicy,
 };
+
+#[path = "support/listing.rs"]
+mod listing;
 
 fn main() {
     tenzro_model::parse_jail::enter_if_requested();
-    let Ok(wanted) = std::env::var("TENZRO_REAL_SCENARIOS") else {
+    let scenarios = std::env::var("TENZRO_REAL_SCENARIOS");
+    if listing::answered_list("real_model_requests", scenarios.is_ok()) {
+        return;
+    }
+    let Ok(wanted) = scenarios else {
         println!(
             "real_model_requests: skipped (set TENZRO_REAL_SCENARIOS=long,audio,video,decision)"
         );
@@ -100,11 +108,12 @@ fn main() {
 
 /// Fetch a registry model (and its projector) through the node's downloader.
 async fn fetch(dir: &Path, id: &str) -> Result<PathBuf, String> {
-    tenzro_catalog::install_test_seed();
-    let entry = get_model_by_id(id)
-        .or_else(|| get_decision_model_by_id(id))
+    let catalog = Catalog::test_seed();
+    let entry = catalog
+        .get_model_by_id(id)
+        .or_else(|| catalog.get_decision_model_by_id(id))
         .ok_or_else(|| format!("{id} is not in the catalog"))?;
-    let downloader = HfDownloader::new(dir.to_path_buf());
+    let downloader = HfDownloader::new(dir.to_path_buf(), CatalogCell::new(catalog));
     if downloader.is_downloaded(id)
         && (entry.mmproj.is_none() || downloader.mmproj_path(id).exists())
     {
@@ -180,7 +189,9 @@ fn needle_prompt(target_tokens: usize) -> String {
 async fn long_context(dir: &Path) -> Result<String, String> {
     const ID: &str = "nemotron-3.5-bolt-e4b";
     let path = fetch(dir, ID).await?;
-    let rt = Arc::new(ModelRuntime::new().map_err(|e| e.to_string())?);
+    let rt = Arc::new(
+        ModelRuntime::new(CatalogCell::new(Catalog::test_seed())).map_err(|e| e.to_string())?,
+    );
     rt.load_model_with_context(ID, &path, Some(40_960))
         .await
         .map_err(|e| format!("load: {e}"))?;
@@ -260,7 +271,9 @@ async fn media_request(
     kind: &str,
 ) -> Result<String, String> {
     let path = fetch(dir, id).await?;
-    let rt = Arc::new(ModelRuntime::new().map_err(|e| e.to_string())?);
+    let rt = Arc::new(
+        ModelRuntime::new(CatalogCell::new(Catalog::test_seed())).map_err(|e| e.to_string())?,
+    );
     rt.load_model_with_context(id, &path, Some(8192))
         .await
         .map_err(|e| format!("load: {e}"))?;
@@ -379,7 +392,7 @@ async fn video_engine(dir: &Path) -> Result<String, String> {
 
     const ID: &str = "nemotron-3.5-bolt-74b-a9b";
     let path = fetch(dir, ID).await?;
-    let mmproj = HfDownloader::new(dir.to_path_buf()).mmproj_path(ID);
+    let mmproj = HfDownloader::new(dir.to_path_buf(), CatalogCell::default()).mmproj_path(ID);
     let backend = Arc::new(LlamaBackend::init().map_err(|e| e.to_string())?);
     let model = tenzro_model::parse_jail::load_llama(&backend, &path, &LlamaModelParams::default())
         .map_err(|e| format!("load: {e}"))?;
@@ -449,10 +462,11 @@ async fn latent_real() -> Result<String, String> {
         ExpertExecuteRequest, ExpertFfn, GatingNetwork, LatentProjection, MoeCombiner,
         MoeExpertRuntime, MoeExtractor, MoeTensorNaming, latent_moe_forward,
     };
-    tenzro_catalog::install_test_seed();
     const REPO: &str = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16";
-    let revision = get_model_by_id("nemotron-3.5-bolt-74b-a9b")
-        .and(tenzro_catalog::moe_source("nemotron-3.5-bolt-74b-a9b"))
+    let catalog = Catalog::test_seed();
+    let revision = catalog
+        .get_model_by_id("nemotron-3.5-bolt-74b-a9b")
+        .and(catalog.moe_source("nemotron-3.5-bolt-74b-a9b"))
         .map(|s| s.revision)
         .ok_or("the 74B entry carries no MoE checkpoint source")?;
     let layer = 1u32; // the first MoE layer: mamba, moe, mamba, moe, ...

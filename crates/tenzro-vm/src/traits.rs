@@ -6,9 +6,7 @@ use std::any::Any;
 
 use crate::{
     error::Result,
-    types::{
-        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, VmTransaction,
-    },
+    types::{CallResult, ContractCall, ExecutionResult, VmTransaction},
 };
 
 /// Virtual machine type identifier
@@ -79,22 +77,6 @@ pub trait VmExecutor: Send + Sync {
     ///
     /// The call result including output and gas used
     async fn call(&self, call: &ContractCall, state: &dyn VmState) -> Result<CallResult>;
-
-    /// Deploy a new contract
-    ///
-    /// # Arguments
-    ///
-    /// * `deployment` - The contract deployment parameters
-    /// * `state` - Mutable reference to the VM state
-    ///
-    /// # Returns
-    ///
-    /// The deployment result including contract address and gas used
-    async fn deploy_contract(
-        &self,
-        deployment: &ContractDeployment,
-        state: &mut dyn VmState,
-    ) -> Result<DeployResult>;
 
     /// Estimate gas required for a transaction
     ///

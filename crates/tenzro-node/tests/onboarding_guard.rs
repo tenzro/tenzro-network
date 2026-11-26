@@ -183,10 +183,22 @@ fn a_delegated_root_that_is_not_there_does_not_start_a_node() {
         ),
     ];
     for (name, args, envs) in cases {
+        // A node started before its key holder waits for one to answer; a
+        // short wait keeps the refusal inside the limit.
+        let mut envs = envs;
+        envs.push(("TENZRO_TPM_KEY_HOLDER_WAIT", "2"));
         let ended = start(&args, &envs, LIMIT);
         assert!(
             !ended.success,
             "a node started on a delegated root that does not exist: {name}\n{}",
+            ended.stderr
+        );
+        // A holder without a label is refused before the socket is read.
+        let labelled =
+            args.contains(&"--tpm-label") || envs.iter().any(|(key, _)| *key == "TENZRO_TPM_LABEL");
+        assert!(
+            !labelled || ended.stderr.contains(missing),
+            "the refusal does not name the key holder's socket: {name}\n{}",
             ended.stderr
         );
     }
@@ -287,6 +299,10 @@ fn the_start_gate_comes_before_everything_that_makes_a_participant() {
     let sub = main.find("cli.command.take()").expect("subcommand branch");
     assert!(sub < gate_key_store);
     let branch = &main[sub..gate_key_store];
-    assert!(branch.contains("return run_subcommand(cmd, &config).await;"));
+    // However the call is wrapped (`.await;` or `.await.map(..)` on later lines), the branch
+    // returns from it.
+    assert!(
+        branch.contains("return run_subcommand(cmd, &config, key_holder.as_deref(), roles_named)")
+    );
     assert!(!branch.contains("TenzroNode::new"));
 }

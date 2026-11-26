@@ -2051,3 +2051,872 @@ mod ibc_refunds {
         }
     }
 }
+
+/// `abi.encode(bytes, bytes, bytes[])` behind a selector: the calldata of
+/// the ERC-7786 `sendMessage`.
+fn send_message_call(recipient: &[u8], payload: &[u8], attributes: &[&[u8]]) -> Vec<u8> {
+    fn word(v: usize) -> [u8; 32] {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&(v as u64).to_be_bytes());
+        w
+    }
+    fn bytes(v: &[u8]) -> Vec<u8> {
+        let mut out = word(v.len()).to_vec();
+        out.extend_from_slice(v);
+        out.resize(out.len() + (32 - v.len() % 32) % 32, 0);
+        out
+    }
+    let (recipient, payload) = (bytes(recipient), bytes(payload));
+    let mut array = word(attributes.len()).to_vec();
+    let encoded: Vec<Vec<u8>> = attributes.iter().map(|a| bytes(a)).collect();
+    let mut offset = attributes.len() * 32;
+    for e in &encoded {
+        array.extend_from_slice(&word(offset));
+        offset += e.len();
+    }
+    for e in &encoded {
+        array.extend_from_slice(e);
+    }
+    use sha3::Digest as _;
+    let mut out = sha3::Keccak256::digest(b"sendMessage(bytes,bytes,bytes[])")[..4].to_vec();
+    out.extend_from_slice(&word(96));
+    out.extend_from_slice(&word(96 + recipient.len()));
+    out.extend_from_slice(&word(96 + recipient.len() + payload.len()));
+    out.extend(recipient);
+    out.extend(payload);
+    out.extend(array);
+    out
+}
+
+/// Run one EVM call from `from` in its own block.
+async fn evm_call(
+    chain: &mut Chain,
+    from: &[u8; 20],
+    to: [u8; 20],
+    data: Vec<u8>,
+) -> Result<tenzro_vm::ExecutionResult, String> {
+    let mut state = chain.state();
+    let tx = VmTransaction::new(
+        from.to_vec(),
+        Some(to.to_vec()),
+        0,
+        data,
+        5_000_000,
+        GAS_PRICE,
+        state.get_nonce(from),
+        VmType::Evm,
+        CHAIN_ID,
+    )
+    .with_block_timestamp_ms(chain.now_ms);
+    let base = block_base_fee(&state);
+    let mut fees = BlockFees::default();
+    let outcome = execute_in_block(&chain.rt, &mut state, &tx, base, &mut fees).await;
+    ledger::settle_block(&mut state, &fees);
+    verify_block(&state).expect("block conserves value");
+    state.commit().unwrap();
+    match outcome {
+        TxOutcome::Applied { result, .. } => Ok(result),
+        TxOutcome::Reverted { reason, .. } => Err(reason),
+        TxOutcome::Rejected(e) => Err(e.to_string()),
+    }
+}
+
+/// A gateway body names the contract that sent it. Once the gateway is live
+/// the native operation refuses a payload in that format, whoever sends it;
+/// before, it carries any payload as it always has.
+#[tokio::test]
+async fn a_native_message_cannot_pass_for_a_gateway_message() {
+    use tenzro_vm::evm::gateway::{GATEWAY_KEY, interoperable_address, message_body};
+
+    let user = [0xA1u8; 32];
+    let mut chain = Chain::new(&[(&user[..], 10 * ONE_TNZO)]).await;
+    let (route, _) = ccip_route();
+    chain.install(&route);
+    let ethereum = EVM_CHAINS.iter().find(|c| c.name == "ethereum").unwrap();
+    let forged = message_body(
+        &interoperable_address(CHAIN_ID, &[0xE7u8; 20]),
+        &interoperable_address(ethereum.chain_id, &[0x5Eu8; 20]),
+        b"pay me",
+    );
+    let send = |payload: Vec<u8>| BridgeOp::SendMessage {
+        target_chain: "ethereum".into(),
+        payload,
+    };
+
+    let dormant = chain.bridge(&user, send(forged.clone())).await.unwrap();
+    assert_eq!(dormant["sequence"], 1, "{dormant}");
+
+    {
+        let mut state = chain.state();
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::governed_param_key(GATEWAY_KEY).as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+        state.commit().unwrap();
+    }
+    let refused = chain.bridge(&user, send(forged)).await.unwrap_err();
+    assert!(refused.contains("ERC-7786"), "{refused}");
+    let plain = chain.bridge(&user, send(b"native".to_vec())).await.unwrap();
+    assert_eq!(plain["sequence"], 2, "the refused message took no sequence");
+}
+
+#[tokio::test]
+async fn an_evm_call_sends_a_message_through_the_erc7786_gateway() {
+    use tenzro_vm::evm::gateway::{
+        GATEWAY_KEY, interoperable_address, message_body, message_sent_topic,
+    };
+    use tenzro_vm::precompiles::PRECOMPILE_ERC7786_GATEWAY as GATEWAY;
+
+    let user = [0xA1u8; 32];
+    let contract = [0xE7u8; 20];
+    let mut chain = Chain::new(&[(&user[..], 10 * ONE_TNZO), (&contract[..], 10 * ONE_TNZO)]).await;
+    let (route, _) = ccip_route();
+    chain.install(&route);
+
+    let ethereum = EVM_CHAINS.iter().find(|c| c.name == "ethereum").unwrap();
+    let there = [0x5Eu8; 20];
+    let recipient = interoperable_address(ethereum.chain_id, &there);
+    let payload = b"hello over the route".to_vec();
+    let bridge_logs = |result: &tenzro_vm::ExecutionResult| -> Vec<serde_json::Value> {
+        result
+            .logs
+            .iter()
+            .filter(|l| l.address == tenzro_vm::native::SYSTEM_ADDRESS.to_vec())
+            .map(|l| serde_json::from_slice(&l.data).unwrap())
+            .collect()
+    };
+
+    // Dormant: the address is an account with no code. The call succeeds,
+    // logs nothing and queues nothing.
+    let quiet = evm_call(
+        &mut chain,
+        &contract,
+        GATEWAY,
+        send_message_call(&recipient, &payload, &[]),
+    )
+    .await
+    .unwrap();
+    assert!(quiet.logs.is_empty(), "{:?}", quiet.logs);
+    let native = chain
+        .bridge(
+            &user,
+            BridgeOp::SendMessage {
+                target_chain: "ethereum".into(),
+                payload: b"native".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(native["sequence"], 1, "the dormant call queued nothing");
+
+    // Live from epoch 0.
+    {
+        let mut state = chain.state();
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::governed_param_key(GATEWAY_KEY).as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+        state.commit().unwrap();
+    }
+    let sent = evm_call(
+        &mut chain,
+        &contract,
+        GATEWAY,
+        send_message_call(&recipient, &payload, &[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sent.output, vec![0u8; 32], "the send id is zero");
+    let announced: Vec<_> = sent
+        .logs
+        .iter()
+        .filter(|l| l.address == GATEWAY.to_vec())
+        .collect();
+    assert_eq!(announced.len(), 1);
+    assert_eq!(
+        announced[0].topics,
+        vec![message_sent_topic().to_vec(), vec![0u8; 32]]
+    );
+    let queued = bridge_logs(&sent);
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0]["sequence"], 2, "{queued:?}");
+    assert_eq!(queued[0]["route"], route.storage_key());
+    let body = message_body(
+        &interoperable_address(CHAIN_ID, &contract),
+        &recipient,
+        &payload,
+    );
+    let message = hex::decode(queued[0]["message"].as_str().unwrap()).unwrap();
+    assert!(
+        message.ends_with(&body),
+        "the route carries the gateway's body"
+    );
+    assert!(body.starts_with(&tenzro_vm::evm::gateway::message_tag()));
+
+    // The gateway keeps nothing between transactions: the next send queues
+    // exactly one message, at the next sequence.
+    let again = evm_call(
+        &mut chain,
+        &contract,
+        GATEWAY,
+        send_message_call(&recipient, &payload, &[]),
+    )
+    .await
+    .unwrap();
+    let queued = bridge_logs(&again);
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0]["sequence"], 3, "{queued:?}");
+
+    // An attribute is refused, and so is a chain no route serves.
+    let attribute = [0x39u8, 0xf8, 0x7b, 0xa1, 0, 0, 0, 1];
+    assert!(
+        evm_call(
+            &mut chain,
+            &contract,
+            GATEWAY,
+            send_message_call(&recipient, &payload, &[&attribute]),
+        )
+        .await
+        .is_err()
+    );
+    let elsewhere = interoperable_address(999_999_999, &there);
+    assert!(
+        evm_call(
+            &mut chain,
+            &contract,
+            GATEWAY,
+            send_message_call(&elsewhere, &payload, &[]),
+        )
+        .await
+        .is_err()
+    );
+    let after = chain
+        .bridge(
+            &user,
+            BridgeOp::SendMessage {
+                target_chain: "ethereum".into(),
+                payload: b"native".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(after["sequence"], 4, "the refused calls queued nothing");
+
+    // A paused route passes the gateway's own check (the route exists) and
+    // refuses the message afterwards: the whole transaction is undone.
+    use tenzro_vm::native::bridge_circuit::{
+        BridgeCircuitAuthority, BridgeCircuitTrip, circuit_key,
+    };
+    let pause = |chain: &Chain, record: Vec<u8>| {
+        let mut state = chain.state();
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            circuit_key(route.adapter, &route.source_chain).as_bytes(),
+            record,
+        );
+        state.commit().unwrap();
+    };
+    pause(
+        &chain,
+        serde_json::to_vec(&BridgeCircuitTrip {
+            adapter: route.adapter,
+            source_chain: route.source_chain.clone(),
+            mode: tenzro_types::bridge_route::BridgeRouteMode::Paused,
+            by: BridgeCircuitAuthority::Governance,
+            reason: "test".into(),
+            evidence_hash: None,
+            epoch: 0,
+            at_ms: NOW_MS,
+        })
+        .unwrap(),
+    );
+    let refused = evm_call(
+        &mut chain,
+        &contract,
+        GATEWAY,
+        send_message_call(&recipient, &payload, &[]),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.contains("ERC-7786 gateway"), "{refused}");
+    pause(&chain, Vec::new());
+    let resumed = evm_call(
+        &mut chain,
+        &contract,
+        GATEWAY,
+        send_message_call(&recipient, &payload, &[]),
+    )
+    .await
+    .unwrap();
+    let queued = bridge_logs(&resumed);
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(
+        queued[0]["sequence"], 5,
+        "the undone transaction left nothing in the gateway or on the route"
+    );
+}
+
+/// A Tenzro-VM contract-call transaction whose one call sends `payload` to
+/// `recipient` through the ERC-7786 gateway.
+async fn through_a_contract_call(
+    chain: &mut Chain,
+    recipient: &[u8],
+    payload: &[u8],
+) -> Result<serde_json::Value, String> {
+    use tenzro_types::transaction::{CallVm, VmCall};
+    let calls = vec![VmCall {
+        vm: CallVm::Evm,
+        to: tenzro_vm::precompiles::PRECOMPILE_ERC7786_GATEWAY.to_vec(),
+        value: 0,
+        data: send_message_call(recipient, payload, &[]),
+    }];
+    chain
+        .send(
+            &[0xC4u8; 20],
+            tenzro_vm::native::SELECTOR_CONTRACT_CALL,
+            VmCall::encode_list(&calls),
+        )
+        .await
+}
+
+/// A message an EVM contract sends through the ERC-7786 gateway while it is
+/// called from a Tenzro-VM contract-call transaction goes to its route in that
+/// transaction: it is not left queued for the next EVM transaction to deliver
+/// as its own, and a route that refuses it fails that transaction alone, not
+/// every EVM transaction after it.
+#[tokio::test]
+async fn a_gateway_message_sent_from_a_contract_call_transaction_is_delivered_in_it() {
+    use tenzro_vm::evm::gateway::{GATEWAY_KEY, interoperable_address};
+    use tenzro_vm::native::bridge_circuit::{
+        BridgeCircuitAuthority, BridgeCircuitTrip, circuit_key,
+    };
+    use tenzro_vm::precompiles::PRECOMPILE_ERC7786_GATEWAY as GATEWAY;
+
+    let caller = [0xC4u8; 20];
+    let contract = [0xE7u8; 20];
+    let mut chain =
+        Chain::new(&[(&caller[..], 10 * ONE_TNZO), (&contract[..], 10 * ONE_TNZO)]).await;
+    let (route, _) = ccip_route();
+    chain.install(&route);
+    {
+        let mut state = chain.state();
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::governed_param_key(GATEWAY_KEY).as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+        state.commit().unwrap();
+    }
+    let ethereum = EVM_CHAINS.iter().find(|c| c.name == "ethereum").unwrap();
+    let recipient = interoperable_address(ethereum.chain_id, &[0x5Eu8; 20]);
+    let payload = b"from a contract call".to_vec();
+    let queued_by = |result: &tenzro_vm::ExecutionResult| -> Vec<serde_json::Value> {
+        result
+            .logs
+            .iter()
+            .filter(|l| l.address == tenzro_vm::native::SYSTEM_ADDRESS.to_vec())
+            .map(|l| serde_json::from_slice(&l.data).unwrap())
+            .collect()
+    };
+    // The message takes the next sequence in the transaction that sent it.
+    through_a_contract_call(&mut chain, &recipient, &payload)
+        .await
+        .unwrap();
+    let native = chain
+        .bridge(
+            &caller,
+            BridgeOp::SendMessage {
+                target_chain: "ethereum".into(),
+                payload: b"native".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(native["sequence"], 2, "the contract call's message took 1");
+
+    // An EVM transaction after it delivers its own message and no one else's.
+    let own = evm_call(
+        &mut chain,
+        &contract,
+        GATEWAY,
+        send_message_call(&recipient, &payload, &[]),
+    )
+    .await
+    .unwrap();
+    let queued = queued_by(&own);
+    assert_eq!(
+        queued.len(),
+        1,
+        "no stranger's message rode along: {queued:?}"
+    );
+    assert_eq!(queued[0]["sequence"], 3, "{queued:?}");
+
+    // A route that refuses the message fails the contract call that sent it
+    // and leaves nothing behind: the EVM transactions after it still run.
+    let pause = |chain: &Chain, record: Vec<u8>| {
+        let mut state = chain.state();
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            circuit_key(route.adapter, &route.source_chain).as_bytes(),
+            record,
+        );
+        state.commit().unwrap();
+    };
+    pause(
+        &chain,
+        serde_json::to_vec(&BridgeCircuitTrip {
+            adapter: route.adapter,
+            source_chain: route.source_chain.clone(),
+            mode: tenzro_types::bridge_route::BridgeRouteMode::Paused,
+            by: BridgeCircuitAuthority::Governance,
+            reason: "test".into(),
+            evidence_hash: None,
+            epoch: 0,
+            at_ms: NOW_MS,
+        })
+        .unwrap(),
+    );
+    let refused = through_a_contract_call(&mut chain, &recipient, &payload)
+        .await
+        .unwrap_err();
+    assert!(refused.contains("ERC-7786 gateway"), "{refused}");
+    let plain = evm_call(&mut chain, &contract, [0x77u8; 20], Vec::new()).await;
+    assert!(
+        plain.is_ok(),
+        "an EVM transaction after it still runs: {plain:?}"
+    );
+    pause(&chain, Vec::new());
+    let resumed = evm_call(
+        &mut chain,
+        &contract,
+        GATEWAY,
+        send_message_call(&recipient, &payload, &[]),
+    )
+    .await
+    .unwrap();
+    let queued = queued_by(&resumed);
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(
+        queued[0]["sequence"], 4,
+        "the refused call left nothing queued"
+    );
+}
+
+/// Receiving through the ERC-7786 gateway: the gateway-delivery native call.
+mod gateway_delivery {
+    use super::*;
+    use tenzro_native_ops::SELECTOR_GATEWAY_DELIVERY;
+    use tenzro_native_ops::gateway_delivery::GatewayDeliveryOp;
+    use tenzro_vm::evm::gateway::{
+        DELIVERY_GAS_KEY, GATEWAY_KEY, interoperable_address, message_body, receive_id,
+        receive_message_selector,
+    };
+    use tenzro_vm::native::native_call::{GATE as NATIVE_CALL_GATE, SELECTOR_NATIVE_CALL};
+    use tenzro_vm::precompiles::PRECOMPILE_ERC7786_GATEWAY as GATEWAY;
+
+    const RELAYER: [u8; 32] = [0xC1; 32];
+    const CONTRACT: [u8; 20] = [0xE7; 20];
+    const REMOTE: [u8; 20] = [0x5E; 20];
+    const GAS_LIMIT: u64 = 5_000_000;
+
+    /// Code that returns the `receiveMessage` selector: the recipient accepts.
+    fn accept() -> Vec<u8> {
+        let mut code = vec![0x63];
+        code.extend(receive_message_selector());
+        code.extend([
+            0x60, 0xE0, 0x1B, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xF3,
+        ]);
+        code
+    }
+
+    /// A recipient that stores the receive id (slot 0), its caller (slot 1)
+    /// and the block's base fee (slot 2), then accepts.
+    fn recording_recipient() -> Vec<u8> {
+        let mut code = vec![
+            0x60, 0x04, 0x35, 0x60, 0x00, 0x55, // sstore(0, calldataload(4))
+            0x33, 0x60, 0x01, 0x55, // sstore(1, caller)
+            0x48, 0x60, 0x02, 0x55, // sstore(2, basefee)
+        ];
+        code.extend(accept());
+        code
+    }
+
+    /// A recipient that calls the gateway with `call`, stores one more than
+    /// the call's success flag in slot 3, then accepts.
+    fn sending_recipient(call: &[u8]) -> Vec<u8> {
+        let len = (call.len() as u16).to_be_bytes();
+        let mut code = vec![
+            0x61, len[0], len[1], 0x61, 0x00, 47, 0x60, 0x00, 0x39, // codecopy(0, 47, len)
+            0x60, 0x00, 0x60, 0x00, 0x61, len[0], len[1], 0x60, 0x00, 0x60, 0x00, 0x61, 0x10, 0x12,
+            0x5A, 0xF1, // call(gas, 0x1012, 0, 0, len, 0, 0)
+            0x60, 0x01, 0x01, 0x60, 0x03, 0x55, // sstore(3, success + 1)
+        ];
+        code.extend(accept());
+        assert_eq!(code.len(), 47);
+        code.extend_from_slice(call);
+        code
+    }
+
+    fn set_code(chain: &Chain, code: Vec<u8>) {
+        let mut state = chain.state();
+        state.set_code(&CONTRACT, code);
+        state.commit().unwrap();
+    }
+
+    fn slot(chain: &Chain, n: u8) -> Vec<u8> {
+        let mut key = [0u8; 32];
+        key[31] = n;
+        chain
+            .state()
+            .get_storage(&CONTRACT, &key)
+            .unwrap_or_default()
+    }
+
+    /// Switch on the gates `keys` name from epoch 0.
+    fn switch_on(chain: &Chain, keys: &[&str]) {
+        let mut state = chain.state();
+        for key in keys {
+            state.set_storage(
+                &tenzro_vm::native::SYSTEM_ADDRESS,
+                tenzro_vm::native::governed_param_key(key).as_bytes(),
+                0u64.to_le_bytes().to_vec(),
+            );
+        }
+        state.commit().unwrap();
+    }
+
+    /// The gateway and native calls are in force.
+    fn go_live(chain: &Chain) {
+        switch_on(chain, &[NATIVE_CALL_GATE, GATEWAY_KEY]);
+    }
+
+    /// The body of a gateway message from `REMOTE` on Ethereum to `CONTRACT`.
+    fn body(payload: &[u8]) -> Vec<u8> {
+        let ethereum = EVM_CHAINS.iter().find(|c| c.name == "ethereum").unwrap();
+        message_body(
+            &interoperable_address(ethereum.chain_id, &REMOTE),
+            &interoperable_address(CHAIN_ID, &CONTRACT),
+            payload,
+        )
+    }
+
+    fn deliver_op(
+        route: &BridgeRoute,
+        keys: &Committees,
+        nonce: u64,
+        body: Vec<u8>,
+    ) -> GatewayDeliveryOp {
+        GatewayDeliveryOp {
+            adapter: BridgeRouteAdapter::Ccip,
+            source_chain: "ethereum".into(),
+            delivery: deliver(route, keys, 3, nonce, body).encode(),
+        }
+    }
+
+    /// The gas a delivery is charged: the bridge operation and the whole of
+    /// the delivery gas.
+    fn delivery_gas(chain: &Chain, op: &GatewayDeliveryOp) -> u64 {
+        use tenzro_vm::native::bridge::{GAS_BRIDGE, GAS_BRIDGE_BYTE};
+        let cap = tenzro_vm::native::network_param(&chain.state(), DELIVERY_GAS_KEY);
+        GAS_BRIDGE + GAS_BRIDGE_BYTE * op.delivery.len() as u64 + cap
+    }
+
+    /// What a delivery is charged.
+    fn charge(chain: &Chain, op: &GatewayDeliveryOp) -> u128 {
+        GAS_PRICE * u128::from(delivery_gas(chain, op))
+    }
+
+    /// Run one native transaction from the relayer in its own block, under a
+    /// base fee above zero.
+    async fn run(chain: &mut Chain, data: Vec<u8>, gas_limit: u64) -> TxOutcome {
+        let nonce = *chain.nonces.entry(RELAYER.to_vec()).or_default();
+        let mut state = chain.state();
+        let base = block_base_fee(&state).max(1_000_000_000);
+        let tx = VmTransaction::new(
+            RELAYER.to_vec(),
+            None,
+            0,
+            data,
+            gas_limit,
+            GAS_PRICE,
+            nonce,
+            VmType::Tenzro,
+            CHAIN_ID,
+        )
+        .with_block_timestamp_ms(chain.now_ms)
+        .with_block_base_fee(base);
+        let mut fees = BlockFees::default();
+        let outcome = execute_in_block(&chain.rt, &mut state, &tx, base, &mut fees).await;
+        if !matches!(outcome, TxOutcome::Rejected(_)) {
+            *chain.nonces.get_mut(&RELAYER[..]).unwrap() += 1;
+        }
+        ledger::settle_block(&mut state, &fees);
+        verify_block(&state).expect("block conserves value");
+        state.commit().unwrap();
+        assert_ledger_balances(&chain.store);
+        outcome
+    }
+
+    async fn run_op(chain: &mut Chain, op: &BridgeOp) -> TxOutcome {
+        let mut data = SELECTOR_BRIDGE.to_vec();
+        data.extend(serde_json::to_vec(op).unwrap());
+        run(chain, data, GAS_LIMIT).await
+    }
+
+    /// The native call that carries `op`.
+    fn delivery_call(op: &GatewayDeliveryOp) -> Vec<u8> {
+        let mut data = SELECTOR_NATIVE_CALL.to_vec();
+        data.extend(SELECTOR_GATEWAY_DELIVERY);
+        data.extend(tenzro_native_ops::encode(op));
+        data
+    }
+
+    async fn run_delivery(chain: &mut Chain, op: &GatewayDeliveryOp) -> TxOutcome {
+        run(chain, delivery_call(op), GAS_LIMIT).await
+    }
+
+    /// The bridge log a kept delivery wrote.
+    fn delivered_log(result: &tenzro_vm::ExecutionResult) -> serde_json::Value {
+        let log = result
+            .logs
+            .iter()
+            .find(|l| l.topics.get(1).is_some_and(|t| t == b"message_delivered"))
+            .expect("the delivery logs message_delivered");
+        serde_json::from_slice(&log.data).unwrap()
+    }
+
+    /// The fee and the reason of a transaction that was undone.
+    fn reverted(outcome: TxOutcome) -> (u128, u64, String) {
+        match outcome {
+            TxOutcome::Reverted {
+                result,
+                fee,
+                reason,
+            } => (fee, result.gas_used, reason),
+            TxOutcome::Applied { .. } => panic!("the transaction was kept"),
+            TxOutcome::Rejected(e) => panic!("the transaction never ran: {e}"),
+        }
+    }
+
+    async fn chain_with_route() -> (Chain, BridgeRoute, Committees) {
+        let chain = Chain::new(&[(&RELAYER[..], 100 * ONE_TNZO)]).await;
+        let (route, keys) = ccip_route();
+        chain.install(&route);
+        (chain, route, keys)
+    }
+
+    /// A delivery waits for native calls and for the gateway: refused while
+    /// either is dormant, without calling the recipient or consuming the
+    /// delivery.
+    #[tokio::test]
+    async fn a_delivery_waits_for_native_calls_and_the_gateway() {
+        let (mut chain, route, keys) = chain_with_route().await;
+        set_code(&chain, recording_recipient());
+        let op = deliver_op(&route, &keys, 9, body(b"hello"));
+
+        reverted(run_delivery(&mut chain, &op).await);
+        switch_on(&chain, &[NATIVE_CALL_GATE]);
+        let (_, _, reason) = reverted(run_delivery(&mut chain, &op).await);
+        assert!(reason.contains(GATEWAY_KEY), "{reason}");
+        assert!(slot(&chain, 0).is_empty(), "the recipient was not called");
+
+        switch_on(&chain, &[GATEWAY_KEY]);
+        assert!(matches!(
+            run_delivery(&mut chain, &op).await,
+            TxOutcome::Applied { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_gateway_message_is_delivered_to_its_recipient_once() {
+        let (mut chain, route, keys) = chain_with_route().await;
+        go_live(&chain);
+        set_code(&chain, recording_recipient());
+        let op = deliver_op(&route, &keys, 9, body(b"hello"));
+        let owed = charge(&chain, &op);
+        let before = chain.balance(&RELAYER);
+        let base_fee = block_base_fee(&chain.state()).max(1_000_000_000);
+
+        let TxOutcome::Applied { result, fee } = run_delivery(&mut chain, &op).await else {
+            panic!("the delivery was not kept");
+        };
+        assert_eq!(fee, owed);
+        assert_eq!(before - chain.balance(&RELAYER), owed);
+        let out = delivered_log(&result);
+        assert_eq!(out["recipient"], hex::encode(CONTRACT), "{out}");
+
+        let id = receive_id(&route.storage_key(), 9);
+        assert_eq!(out["receive_id"], hex::encode(id), "{out}");
+        assert_eq!(slot(&chain, 0), id.to_vec());
+        let mut caller = vec![0u8; 12];
+        caller.extend_from_slice(&GATEWAY);
+        assert_eq!(slot(&chain, 1), caller, "the gateway is msg.sender");
+        let mut base = [0u8; 32];
+        base[16..].copy_from_slice(&base_fee.to_be_bytes());
+        assert_eq!(
+            slot(&chain, 2),
+            base.to_vec(),
+            "the block's base fee is visible"
+        );
+
+        // A delivery is consumed once.
+        reverted(run_delivery(&mut chain, &op).await);
+    }
+
+    /// A recipient that does not accept fails the whole operation: the
+    /// delivery stays open, and the sender has paid for the bridge operation
+    /// and the whole of the delivery gas.
+    #[tokio::test]
+    async fn a_refused_delivery_is_paid_in_full_and_may_be_submitted_again() {
+        let (mut chain, route, keys) = chain_with_route().await;
+        go_live(&chain);
+        let op = deliver_op(&route, &keys, 9, body(b"hello"));
+        let owed = charge(&chain, &op);
+        let recipients: [(&str, Vec<u8>); 4] = [
+            ("no code", vec![]),
+            ("reverts", vec![0x60, 0x00, 0x60, 0x00, 0xFD]),
+            ("uses all its gas", vec![0x5B, 0x60, 0x00, 0x56]),
+            ("returns something else", vec![0x60, 0x20, 0x60, 0x00, 0xF3]),
+        ];
+        for (what, code) in recipients {
+            set_code(&chain, code);
+            let before = chain.balance(&RELAYER);
+            let account_nonce = chain.state().get_nonce(&RELAYER);
+            let (fee, gas_used, reason) = reverted(run_delivery(&mut chain, &op).await);
+            assert!(reason.contains("ERC-7786 gateway"), "{what}: {reason}");
+            assert_eq!(fee, owed, "{what}");
+            assert_eq!(gas_used, delivery_gas(&chain, &op), "{what}");
+            assert_eq!(before - chain.balance(&RELAYER), owed, "{what}");
+            assert_eq!(
+                chain.state().get_nonce(&RELAYER),
+                account_nonce + 1,
+                "{what}"
+            );
+        }
+
+        set_code(&chain, recording_recipient());
+        assert!(
+            matches!(
+                run_delivery(&mut chain, &op).await,
+                TxOutcome::Applied { .. }
+            ),
+            "the refused attempts consumed nothing of the delivery"
+        );
+    }
+
+    /// The recipient is only ever called for a sender shown able to pay for
+    /// the whole of the delivery gas.
+    #[tokio::test]
+    async fn a_delivery_that_cannot_pay_for_its_gas_never_reaches_the_recipient() {
+        let (mut chain, route, keys) = chain_with_route().await;
+        go_live(&chain);
+        set_code(&chain, recording_recipient());
+        let op = deliver_op(&route, &keys, 9, body(b"hello"));
+        let cap = tenzro_vm::native::network_param(&chain.state(), DELIVERY_GAS_KEY);
+        let short = delivery_gas(&chain, &op) - 1;
+
+        let (_, gas_used, reason) = reverted(run(&mut chain, delivery_call(&op), short).await);
+        assert!(gas_used < cap, "{gas_used}: {reason}");
+        assert!(slot(&chain, 0).is_empty(), "the recipient was not called");
+
+        let mut poor = Chain::new(&[(&RELAYER[..], charge(&chain, &op) - 1)]).await;
+        poor.install(&route);
+        go_live(&poor);
+        set_code(&poor, recording_recipient());
+        let (_, gas_used, reason) = reverted(run_delivery(&mut poor, &op).await);
+        assert!(gas_used < cap, "{gas_used}: {reason}");
+        assert!(slot(&poor, 0).is_empty(), "the recipient was not called");
+    }
+
+    #[tokio::test]
+    async fn a_recipient_cannot_send_while_it_receives() {
+        let (mut chain, route, keys) = chain_with_route().await;
+        go_live(&chain);
+        let ethereum = EVM_CHAINS.iter().find(|c| c.name == "ethereum").unwrap();
+        let reply = send_message_call(
+            &interoperable_address(ethereum.chain_id, &REMOTE),
+            b"reply",
+            &[],
+        );
+        set_code(&chain, sending_recipient(&reply));
+        let op = deliver_op(&route, &keys, 9, body(b"hello"));
+        assert!(matches!(
+            run_delivery(&mut chain, &op).await,
+            TxOutcome::Applied { .. }
+        ));
+        let mut refused = vec![0u8; 32];
+        refused[31] = 1;
+        assert_eq!(slot(&chain, 3), refused, "the gateway refused the send");
+
+        // Nothing was queued, on the route or in the gateway.
+        let TxOutcome::Applied { result, .. } = run_op(
+            &mut chain,
+            &BridgeOp::SendMessage {
+                target_chain: "ethereum".into(),
+                payload: b"native".to_vec(),
+            },
+        )
+        .await
+        else {
+            panic!("the native message was not sent");
+        };
+        let out: serde_json::Value = serde_json::from_slice(&result.output).unwrap();
+        assert_eq!(out["sequence"], 1, "{out}");
+        let gateway_count = chain.state().get_storage(
+            &GATEWAY,
+            &tenzro_vm::evm::precompile_host::slot_key(b"gateway/count", &[]),
+        );
+        assert!(gateway_count.is_none_or(|v| v.iter().all(|b| *b == 0)));
+    }
+
+    #[tokio::test]
+    async fn a_delivery_names_a_sender_on_its_route_and_a_recipient_on_this_chain() {
+        let (mut chain, route, keys) = chain_with_route().await;
+        go_live(&chain);
+        set_code(&chain, recording_recipient());
+        let ethereum = EVM_CHAINS.iter().find(|c| c.name == "ethereum").unwrap();
+        let other = EVM_CHAINS.iter().find(|c| c.name != "ethereum").unwrap();
+        let here = interoperable_address(CHAIN_ID, &CONTRACT);
+        let there = interoperable_address(ethereum.chain_id, &REMOTE);
+
+        let wrong_sender =
+            message_body(&interoperable_address(other.chain_id, &REMOTE), &here, b"x");
+        let wrong_recipient = message_body(&there, &there, b"x");
+        let untagged = body(b"x")[32..].to_vec();
+        for (nonce, bad) in [(1, wrong_sender), (2, wrong_recipient), (3, untagged)] {
+            let (_, _, reason) =
+                reverted(run_delivery(&mut chain, &deliver_op(&route, &keys, nonce, bad)).await);
+            assert!(reason.contains("gateway"), "{reason}");
+        }
+        assert!(slot(&chain, 0).is_empty(), "the recipient was not called");
+
+        // Publishing a gateway message calls nobody and takes nothing from
+        // its delivery.
+        let d = deliver(&route, &keys, 3, 9, body(b"hello")).encode();
+        let publish = BridgeOp::AdmitMessage {
+            adapter: BridgeRouteAdapter::Ccip,
+            source_chain: "ethereum".into(),
+            delivery: d.clone(),
+        };
+        assert!(matches!(
+            run_op(&mut chain, &publish).await,
+            TxOutcome::Applied { .. }
+        ));
+        assert!(slot(&chain, 0).is_empty(), "publishing calls nobody");
+        let op = GatewayDeliveryOp {
+            adapter: BridgeRouteAdapter::Ccip,
+            source_chain: "ethereum".into(),
+            delivery: d,
+        };
+        assert!(matches!(
+            run_delivery(&mut chain, &op).await,
+            TxOutcome::Applied { .. }
+        ));
+        assert_eq!(
+            slot(&chain, 0),
+            receive_id(&route.storage_key(), 9).to_vec()
+        );
+    }
+}

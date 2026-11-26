@@ -218,19 +218,16 @@ pub async fn apply(
         .map_err(NodeError::Storage)?
         .ok_or_else(|| refuse("this node holds no block at its tip"))?;
     let epochs = consensus.epoch_manager();
-    let tip_epoch = epochs
-        .get_epoch_for_height(BlockHeight::from(tip))
-        .map(|e| e.number)
-        .unwrap_or_else(|| epochs.current_epoch().number);
     let tip_checkpoint = consensus
         .checkpoint(m.anchor_checkpoint_index)
         .filter(|c| c.last_height == tip)
-        .map(|c| (c.index, c.digest()));
+        .map(|c| (c.index, c.digest(), c.epoch));
     let local = LocalView {
         chain_id,
         tip_height: tip,
         tip_hash: tip_block.hash().0,
-        tip_epoch,
+        tip_epoch: tip_block.header.epoch,
+        current_epoch: epochs.current_epoch().number,
         tip_checkpoint,
     };
     recovery_manifest::check(m, &local).map_err(|e| refuse(format!("{e:?}")))?;
@@ -337,4 +334,187 @@ pub async fn apply(
         epoch: m.to_epoch,
         root,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenzro_consensus::recovery_manifest::SuccessorMember;
+    use tenzro_consensus::validator_key::ValidatorSigner;
+    use tenzro_consensus::validator_key::test_signer::SoftwareTestSigner;
+    use tenzro_storage::StorageConfig;
+    use tenzro_types::Address;
+
+    fn manifest() -> RecoveryManifest {
+        RecoveryManifest {
+            chain_id: 7,
+            anchor_height: 40,
+            anchor_hash: [9; 32],
+            anchor_checkpoint_index: 14,
+            anchor_checkpoint_digest: [3; 32],
+            from_epoch: 2,
+            to_epoch: 3,
+            successor: (0..4u8)
+                .map(|i| {
+                    let key = SoftwareTestSigner::from_seed(i as u64 + 1)
+                        .public_key()
+                        .clone();
+                    SuccessorMember {
+                        name: format!("v{i}"),
+                        address: Address::new([i + 1; 32]),
+                        stake: 5_000_000,
+                        ml_dsa_public_key: key.ml_dsa.clone(),
+                        p256_public_key: key.p256.clone(),
+                        node_key: [i + 1; 32],
+                        live: true,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn store() -> (tempfile::TempDir, RocksDbStore) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = RocksDbStore::open(&StorageConfig::new(dir.path().join("db"))).unwrap();
+        (dir, store)
+    }
+
+    fn refused(r: Result<RecoveryRequest>, flag: &str) {
+        match r {
+            Err(NodeError::Config(why)) => assert!(why.contains(flag), "{flag}: {why}"),
+            other => panic!("{flag}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_is_read_from_the_manifest_file_and_its_hex_arguments() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("manifest.json");
+        let m = manifest();
+        std::fs::write(&path, m.to_json()).unwrap();
+        let digest = hex::encode(m.digest());
+        let confirm = format!("0x{}\n", hex::encode([5u8; 32]));
+
+        let req = RecoveryRequest::load(
+            &path,
+            &digest,
+            Some(&confirm),
+            Some((m.anchor_height, m.anchor_hash)),
+            true,
+        )
+        .unwrap();
+        assert_eq!(req.manifest, m);
+        assert_eq!(req.digest, m.digest());
+        assert_eq!(req.confirm_root, Some([5; 32]));
+        assert_eq!(req.checkpoint, Some((40, [9; 32])));
+        assert!(req.check_only);
+
+        let req = RecoveryRequest::load(&path, &digest, None, None, false).unwrap();
+        assert_eq!(req.confirm_root, None);
+        assert!(!req.check_only);
+    }
+
+    #[test]
+    fn a_request_names_the_flag_it_could_not_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("manifest.json");
+        let m = manifest();
+        let digest = hex::encode(m.digest());
+
+        // No file.
+        refused(
+            RecoveryRequest::load(&path, &digest, None, None, false),
+            "--recovery-manifest",
+        );
+        // A file that is not a manifest.
+        std::fs::write(&path, b"{\"chain_id\": 7}").unwrap();
+        refused(
+            RecoveryRequest::load(&path, &digest, None, None, false),
+            "recovery manifest",
+        );
+        std::fs::write(&path, m.to_json()).unwrap();
+        // A digest that is not hex, and one that is not 32 bytes.
+        refused(
+            RecoveryRequest::load(&path, "not hex", None, None, false),
+            "--recovery-digest",
+        );
+        refused(
+            RecoveryRequest::load(&path, &digest[2..], None, None, false),
+            "--recovery-digest: expected 32 bytes",
+        );
+        // A root to confirm that is not 32 bytes.
+        refused(
+            RecoveryRequest::load(&path, &digest, Some("0x0505"), None, false),
+            "--recovery-confirm: expected 32 bytes",
+        );
+    }
+
+    #[test]
+    fn the_recovery_root_covers_the_anchor_state_and_the_manifest() {
+        let m = manifest();
+        let root = recovery_root([1; 32], &m).unwrap();
+        assert_eq!(root, recovery_root([1; 32], &m.clone()).unwrap());
+
+        // Another state at the anchor.
+        assert_ne!(root, recovery_root([2; 32], &m).unwrap());
+        // Another successor stake.
+        let mut other = m.clone();
+        other.successor[0].stake += 1;
+        assert_ne!(root, recovery_root([1; 32], &other).unwrap());
+        // Another anchor.
+        let mut other = m.clone();
+        other.anchor_height += 1;
+        assert_ne!(root, recovery_root([1; 32], &other).unwrap());
+        // A field only the manifest digest carries.
+        let mut other = m.clone();
+        other.successor[0].live = false;
+        assert_ne!(root, recovery_root([1; 32], &other).unwrap());
+    }
+
+    #[test]
+    fn the_recovery_root_refuses_a_successor_key_that_is_not_a_key() {
+        let mut m = manifest();
+        m.successor[1].ml_dsa_public_key.truncate(10);
+        match recovery_root([1; 32], &m) {
+            Err(NodeError::Config(why)) => assert!(why.contains("recovery manifest"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_pending_start_is_offered_only_while_the_chain_is_at_the_anchor() {
+        let (_dir, storage) = store();
+        assert_eq!(pending_start(&storage, 40).unwrap(), None);
+
+        let pending = PendingStart {
+            epoch: 3,
+            start: EpochStart {
+                first_height: 41,
+                first_checkpoint: 15,
+                prev_checkpoint: [3; 32],
+                timestamp_ms: 1_000,
+                base_blocks: vec![(40, [9; 32], [1; 32])],
+                leader_lookahead_rounds: 4,
+            },
+        };
+        storage
+            .put(
+                CF_METADATA,
+                START_KEY,
+                &bincode::serialize(&pending).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(pending_start(&storage, 40).unwrap(), Some(pending));
+        // Before the anchor and after the first block of the recovery epoch.
+        assert_eq!(pending_start(&storage, 39).unwrap(), None);
+        assert_eq!(pending_start(&storage, 41).unwrap(), None);
+    }
+
+    #[test]
+    fn a_pending_start_that_does_not_decode_is_an_error() {
+        let (_dir, storage) = store();
+        storage.put(CF_METADATA, START_KEY, &[0xff; 3]).unwrap();
+        assert!(pending_start(&storage, 40).is_err());
+    }
 }

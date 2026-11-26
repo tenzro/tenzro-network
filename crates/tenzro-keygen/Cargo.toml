@@ -28,6 +28,7 @@ test-keys = ["tenzro-device-key/test-root"]
 workspace = true
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
 tempfile = { workspace = true }
 curve25519-dalek = { workspace = true }
 tenzro-device-key = { path = "../tenzro-device-key", version = "0.4.0", features = ["test-root"] }

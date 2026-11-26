@@ -165,6 +165,8 @@ const MIN_AUTOMATIC_ACK_DELAY: Duration = Duration::from_millis(25);
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
     use crate::Side;
 

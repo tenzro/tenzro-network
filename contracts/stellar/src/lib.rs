@@ -24,12 +24,12 @@
 //! Stellar are accounts (Ed25519 keys).
 #![no_std]
 
-use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::crypto::Hash;
+use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN, Env,
-    Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
+    Bytes, BytesN, Env, Vec,
 };
 
 /// Smallest TNZO units per asset unit.
@@ -117,7 +117,8 @@ fn check_committee(env: &Env, committee: &Vec<BytesN<20>>, threshold: u32) {
 fn raw32(env: &Env, a: &Address) -> BytesN<32> {
     let x = a.clone().to_xdr(env);
     let tail = x.slice(x.len() - 32..);
-    tail.try_into().unwrap_or_else(|_| panic_with_error!(env, Error::MalformedRecord))
+    tail.try_into()
+        .unwrap_or_else(|_| panic_with_error!(env, Error::MalformedRecord))
 }
 
 /// The account whose Ed25519 key is `key`.
@@ -125,7 +126,8 @@ fn account(env: &Env, key: &BytesN<32>) -> Address {
     // ScVal::Address(ScAddress::Account(PublicKey::Ed25519(key))) in XDR.
     let mut x = Bytes::from_array(env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0]);
     x.append(&Bytes::from_array(env, &key.to_array()));
-    soroban_sdk::xdr::FromXdr::from_xdr(env, &x).unwrap_or_else(|_| panic_with_error!(env, Error::MalformedRecord))
+    soroban_sdk::xdr::FromXdr::from_xdr(env, &x)
+        .unwrap_or_else(|_| panic_with_error!(env, Error::MalformedRecord))
 }
 
 fn be(env: &Env, v: u64) -> Bytes {
@@ -138,7 +140,9 @@ fn signer_of(env: &Env, digest: &Hash<32>, signature: &BytesN<65>) -> BytesN<20>
     let mut rs = [0u8; 64];
     rs.copy_from_slice(&sig[..64]);
     let v = if sig[64] >= 27 { sig[64] - 27 } else { sig[64] };
-    let key = env.crypto().secp256k1_recover(digest, &BytesN::from_array(env, &rs), u32::from(v));
+    let key = env
+        .crypto()
+        .secp256k1_recover(digest, &BytesN::from_array(env, &rs), u32::from(v));
     let key = Bytes::from_array(env, &key.to_array()).slice(1..);
     let h = env.crypto().keccak256(&key).to_array();
     let mut a = [0u8; 20];
@@ -175,7 +179,14 @@ fn outbound_hash(env: &Env, c: &Config, record: &Bytes) -> Hash<32> {
 
 /// Keccak-256 of the committee domain, Tenzro's chain id, the route key, the
 /// set index, the member count, the members, the threshold and the expiry.
-fn handover_hash(env: &Env, c: &Config, set_index: u32, committee: &Vec<BytesN<20>>, threshold: u32, expires_at: u64) -> Hash<32> {
+fn handover_hash(
+    env: &Env,
+    c: &Config,
+    set_index: u32,
+    committee: &Vec<BytesN<20>>,
+    threshold: u32,
+    expires_at: u64,
+) -> Hash<32> {
     let mut m = Bytes::from_slice(env, COMMITTEE_DOMAIN);
     m.append(&be(env, c.tenzro_chain_id));
     m.append(&be(env, u64::from(c.route_key.len())));
@@ -197,7 +208,9 @@ fn read_u64(r: &Bytes, at: u32) -> u64 {
 }
 
 fn read32(env: &Env, r: &Bytes, at: u32) -> BytesN<32> {
-    r.slice(at..at + 32).try_into().unwrap_or_else(|_| panic_with_error!(env, Error::MalformedRecord))
+    r.slice(at..at + 32)
+        .try_into()
+        .unwrap_or_else(|_| panic_with_error!(env, Error::MalformedRecord))
 }
 
 #[contract]
@@ -262,7 +275,10 @@ impl Bridge {
         record.append(&Bytes::from_array(&env, &c.token.to_array()));
         record.append(&Bytes::from_array(&env, &c.tenzro_endpoint.to_array()));
         record.append(&Bytes::from_array(&env, &recipient.to_array()));
-        record.append(&Bytes::from_array(&env, &((amount as u128) * SCALE).to_be_bytes()));
+        record.append(&Bytes::from_array(
+            &env,
+            &((amount as u128) * SCALE).to_be_bytes(),
+        ));
         TransferOut { record }.publish(&env);
     }
 
@@ -290,7 +306,11 @@ impl Bridge {
         record.slice(152..168).copy_into_slice(&mut amount);
         let amount = u128::from_be_bytes(amount);
         let here = raw32(&env, &env.current_contract_address());
-        if source_selector != c.tenzro_selector || dest_selector != c.stellar_selector || endpoint != here || token != c.token {
+        if source_selector != c.tenzro_selector
+            || dest_selector != c.stellar_selector
+            || endpoint != here
+            || token != c.token
+        {
             panic_with_error!(&env, Error::WrongRoute);
         }
         if env.storage().persistent().has(&Key::Executed(sequence)) {
@@ -299,17 +319,38 @@ impl Bridge {
         if amount == 0 || amount % SCALE != 0 || amount / SCALE > i128::MAX as u128 {
             panic_with_error!(&env, Error::BadAmount);
         }
-        env.storage().persistent().set(&Key::Executed(sequence), &true);
+        env.storage()
+            .persistent()
+            .set(&Key::Executed(sequence), &true);
         let to = account(&env, &recipient);
         let units = (amount / SCALE) as i128;
         StellarAssetClient::new(&env, &c.asset).mint(&to, &units);
-        TransferIn { sequence, recipient: to, amount: units }.publish(&env);
+        TransferIn {
+            sequence,
+            recipient: to,
+            amount: units,
+        }
+        .publish(&env);
     }
 
     /// The digest the trusted committee signs to hand the contract over to
     /// committee `set_index`.
-    pub fn handover_digest(env: Env, set_index: u32, committee: Vec<BytesN<20>>, threshold: u32, expires_at: u64) -> BytesN<32> {
-        handover_hash(&env, &config(&env), set_index, &committee, threshold, expires_at).into()
+    pub fn handover_digest(
+        env: Env,
+        set_index: u32,
+        committee: Vec<BytesN<20>>,
+        threshold: u32,
+        expires_at: u64,
+    ) -> BytesN<32> {
+        handover_hash(
+            &env,
+            &config(&env),
+            set_index,
+            &committee,
+            threshold,
+            expires_at,
+        )
+        .into()
     }
 
     /// Hand the contract over to committee `set_index`, signed by the

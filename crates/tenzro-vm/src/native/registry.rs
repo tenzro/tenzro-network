@@ -303,7 +303,7 @@ impl NativeExecutor {
         }
         let sender =
             Address::from_bytes(&tx.from).ok_or_else(|| refuse("sender is not an address"))?;
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let mut changes = Vec::new();
         let detail = match op {
             RegistryOp::Put {

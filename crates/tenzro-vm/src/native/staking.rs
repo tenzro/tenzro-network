@@ -61,6 +61,124 @@ pub const INACTIVITY_LIMIT_PARAM: &str = "staking.inactivity_limit_epochs";
 /// the active set.
 pub const ACTIVE_FLOOR_PARAM: &str = "staking.active_set_floor";
 
+/// Governed key: most validators the active set holds once
+/// [`ACTIVE_SET_CAP_GATE`] is live; bonded candidates beyond it wait in
+/// stake order for a free seat.
+pub const ACTIVE_SET_CAP_PARAM: &str = "feature.active_set_cap.max_active";
+
+/// First epoch from which [`ACTIVE_SET_CAP_PARAM`] bounds the active set.
+pub const ACTIVE_SET_CAP_GATE: &str = "feature.active_set_cap.activation_epoch";
+
+/// The active-set cap in force: `None` until [`ACTIVE_SET_CAP_GATE`] is
+/// live.
+pub fn active_set_cap(state: &dyn VmState) -> Option<usize> {
+    crate::feature_gate::is_live_now(state, ACTIVE_SET_CAP_GATE)
+        .then(|| usize::try_from(network_param(state, ACTIVE_SET_CAP_PARAM)).unwrap_or(usize::MAX))
+}
+/// Gate key: the first epoch from which a validator slashed for signing two
+/// checkpoints keeps its seat while the active set without it would not hold
+/// the launch arithmetic. Before it, the validator is jailed at once.
+pub const DEFERRED_SLASH_REMOVAL_KEY: &str = "feature.deferred_slash_removal.activation_epoch";
+
+/// Prefix of the record that a validator slashed for signing two checkpoints
+/// may still hold its seat: the hex account maps to the last epoch, big
+/// endian, through which it may. Written only once the deferred-removal rule
+/// is live.
+const SEAT_HELD_PREFIX: &str = "slash_seat_held:";
+
+fn seat_held_key(addr: &[u8]) -> Vec<u8> {
+    format!("{SEAT_HELD_PREFIX}{}", hex::encode(addr)).into_bytes()
+}
+
+/// Topic of the log that tells every node replaying a block how the
+/// removal of the validator slashed by the next `CheckpointEquivocation` log
+/// of the same transaction waits. Emitted only once the deferred-removal rule
+/// is live, so blocks before it carry the same logs as before.
+pub const SLASH_SEAT_HELD_TOPIC: &[u8] = b"SlashSeatHeld";
+
+/// What a [`SLASH_SEAT_HELD_TOPIC`] log carries: the epochs the seat may be
+/// held, and the validators the certified participation record counted as
+/// having missed the last epoch, each a 32-byte account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeatHeld {
+    /// Epochs after the slash at which the validator is removed regardless.
+    pub cap_epochs: u64,
+    /// Validators not live when the set that would remain is judged.
+    pub absent: Vec<[u8; 32]>,
+}
+
+impl SeatHeld {
+    /// The log data: `cap_epochs_be(8) || absent accounts (32 each)`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + 32 * self.absent.len());
+        out.extend_from_slice(&self.cap_epochs.to_be_bytes());
+        for a in &self.absent {
+            out.extend_from_slice(a);
+        }
+        out
+    }
+
+    /// Reads the log data; `None` when it is not that layout.
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        let (cap_epochs, rest) = data.split_first_chunk::<8>()?;
+        let (absent, tail) = rest.as_chunks::<32>();
+        if !tail.is_empty() {
+            return None;
+        }
+        Some(Self {
+            cap_epochs: u64::from_be_bytes(*cap_epochs),
+            absent: absent.to_vec(),
+        })
+    }
+}
+
+/// Records that `addr`, just slashed for signing two checkpoints, may keep
+/// its seat until the epoch `staking.inactivity_limit_epochs` after the
+/// current one, when the deferred-removal rule is live, and returns what the
+/// nodes are told about it; does nothing and returns `None` before. Through
+/// that epoch it earns no validator rewards, its governance vote weighs
+/// nothing and it cannot start an exit. A later slash extends the record
+/// from its own epoch.
+pub fn hold_seat_after_slash(
+    state: &mut dyn VmState,
+    addr: &[u8],
+    changes: &mut Vec<StateChange>,
+) -> Option<SeatHeld> {
+    let epoch = super::params_epoch(state);
+    if !crate::feature_gate::is_live(state, DEFERRED_SLASH_REMOVAL_KEY, epoch) {
+        return None;
+    }
+    let cap_epochs = network_param(state, INACTIVITY_LIMIT_PARAM);
+    let until = epoch.saturating_add(cap_epochs);
+    let key = seat_held_key(addr);
+    let old = state.get_storage(&SYSTEM_ADDRESS, &key);
+    let new = until.to_be_bytes().to_vec();
+    state.set_storage(&SYSTEM_ADDRESS, &key, new.clone());
+    changes.push(StateChange::new(
+        SYSTEM_ADDRESS.to_vec(),
+        key,
+        old,
+        Some(new),
+    ));
+    let mut absent: Vec<[u8; 32]> = super::read_missed_epochs(state)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, missed)| *missed > 0)
+        .filter_map(|(v, _)| <[u8; 32]>::try_from(v.as_bytes()).ok())
+        .collect();
+    absent.sort_unstable();
+    Some(SeatHeld { cap_epochs, absent })
+}
+
+/// Whether `addr` holds a seat after a slash in `epoch`
+/// ([`hold_seat_after_slash`]).
+pub fn seat_held_after_slash(state: &dyn VmState, addr: &[u8], epoch: u64) -> bool {
+    state
+        .get_storage(&SYSTEM_ADDRESS, &seat_held_key(addr))
+        .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok())
+        .is_some_and(|until| epoch <= u64::from_be_bytes(until))
+}
+
 /// Governed key: the first epoch whose validators' participation is
 /// counted toward inactivity ejection. A running chain sets it to an epoch
 /// every node has reached the build that keeps the count; a new chain
@@ -94,6 +212,29 @@ pub fn reinstated_at_epoch(state: &dyn VmState, addr: &[u8]) -> Option<u64> {
 pub const CORRELATION_WINDOW_PARAM: &str = "slashing.correlation_window_checkpoints";
 /// Genesis value of [`CORRELATION_WINDOW_PARAM`].
 pub const DEFAULT_CORRELATION_WINDOW_CHECKPOINTS: u64 = 16;
+
+/// Feature gate: the first epoch whose equivocation slashes correlate over
+/// [`CORRELATION_WINDOW_DAY_PARAM`] checkpoints, at least a day. A window of
+/// a few seconds lets operators who equivocate together spread their
+/// offences a little apart and each pay the isolated floor.
+pub const CORRELATION_WINDOW_DAY_KEY: &str = "feature.correlation_window_day.activation_epoch";
+/// Governed key, read once [`CORRELATION_WINDOW_DAY_KEY`] is live in place
+/// of [`CORRELATION_WINDOW_PARAM`]: the checkpoints the correlation window
+/// spans. Its registry minimum is one day of checkpoints at the 500 ms
+/// interval.
+pub const CORRELATION_WINDOW_DAY_PARAM: &str = "feature.correlation_window_day.checkpoints";
+/// One day of checkpoints at the 500 ms interval: the registry minimum and
+/// genesis value of [`CORRELATION_WINDOW_DAY_PARAM`].
+pub const CORRELATION_WINDOW_DAY_CHECKPOINTS: u64 = 172_800;
+
+/// The correlation window, in checkpoints, for a block of the current epoch.
+pub fn correlation_window(state: &dyn VmState) -> u64 {
+    if crate::feature_gate::is_live_now(state, CORRELATION_WINDOW_DAY_KEY) {
+        network_param(state, CORRELATION_WINDOW_DAY_PARAM)
+    } else {
+        network_param(state, CORRELATION_WINDOW_PARAM)
+    }
+}
 
 /// Governed key: the least an equivocation costs, bps of the offender's
 /// stake. An isolated equivocation is far more often a misconfigured
@@ -177,6 +318,153 @@ fn sponsored_unbonding_key(addr: &[u8]) -> String {
 
 fn bond_key(addr: &[u8]) -> String {
     format!("staking_bond:{}", hex::encode(addr))
+}
+
+/// The gate of the exit floor: the first epoch whose blocks refuse a
+/// validator's exit that would leave the seated set below the launch
+/// arithmetic.
+pub const EXIT_FLOOR_GATE: &str = "feature.validator_exit_floor.activation_epoch";
+
+/// The seated validators, ascending by account, as a JSON list of hex
+/// accounts. A chain keeps it only when its genesis wrote it; a chain without
+/// the key has no index and the exit floor never applies to it.
+const SEATED_INDEX_KEY: &[u8] = b"staking_seated_validators";
+
+/// The validators the genesis seated, in the same form.
+const GENESIS_SET_KEY: &[u8] = b"staking_genesis_validators";
+
+fn read_seated(state: &dyn VmState) -> Option<Vec<String>> {
+    state
+        .get_storage(&SYSTEM_ADDRESS, SEATED_INDEX_KEY)
+        .filter(|b| !b.is_empty())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+fn write_seated(state: &mut dyn VmState, seated: &[String]) {
+    let bytes = serde_json::to_vec(seated).unwrap_or_default();
+    state.set_storage(&SYSTEM_ADDRESS, SEATED_INDEX_KEY, bytes);
+}
+
+/// The storage entries that start the seated index with `accounts` and
+/// record them as the genesis validators, for a genesis that names the
+/// exit-floor gate. The genesis set is what the outside-stake cap measures
+/// "outside" against.
+pub fn seated_index_entries(accounts: &[[u8; 32]]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut seated: Vec<String> = accounts.iter().map(hex::encode).collect();
+    seated.sort();
+    seated.dedup();
+    let list = serde_json::to_vec(&seated).unwrap_or_default();
+    vec![
+        (SEATED_INDEX_KEY.to_vec(), list.clone()),
+        (GENESIS_SET_KEY.to_vec(), list),
+    ]
+}
+
+/// Seats `addr` in the index when the chain keeps one.
+pub fn seat_validator(state: &mut dyn VmState, addr: &[u8]) {
+    let Some(mut seated) = read_seated(state) else {
+        return;
+    };
+    let h = hex::encode(addr);
+    if let Err(at) = seated.binary_search(&h) {
+        seated.insert(at, h);
+        write_seated(state, &seated);
+    }
+}
+
+/// Takes `addr` off the index when it holds no bond any more.
+fn unseat_if_unbonded(state: &mut dyn VmState, addr: &[u8]) {
+    if bonded_stake_of(state, addr) > 0 {
+        return;
+    }
+    let Some(mut seated) = read_seated(state) else {
+        return;
+    };
+    let h = hex::encode(addr);
+    if let Ok(at) = seated.binary_search(&h) {
+        seated.remove(at);
+        write_seated(state, &seated);
+    }
+}
+
+/// The seated validators with their bonds, or `None` when the chain keeps no
+/// index.
+pub fn seated_bonds(state: &dyn VmState) -> Option<Vec<(Vec<u8>, u128)>> {
+    read_seated(state).map(|seated| {
+        seated
+            .iter()
+            .filter_map(|h| hex::decode(h).ok())
+            .map(|a| {
+                let bond = bonded_stake_of(state, &a);
+                (a, bond)
+            })
+            .collect()
+    })
+}
+
+/// The gate of the outside-stake cap.
+pub const OUTSIDE_CAP_GATE: &str = "feature.validator_outside_stake_cap.activation_epoch";
+
+/// The most stake validators outside the genesis set may hold, in basis
+/// points of the seated stake, once the cap is live.
+pub const OUTSIDE_CAP_BPS_KEY: &str = "feature.validator_outside_stake_cap.cap_bps";
+
+/// Refuses a bond of `added` by `account` when it would take the stake of the
+/// validators outside the genesis set past the governed share of the seated
+/// stake. A chain with no index is not refused.
+pub fn check_outside_cap(state: &dyn VmState, account: &[u8], added: u128) -> Result<()> {
+    let Some(seated) = seated_bonds(state) else {
+        return Ok(());
+    };
+    let genesis: Vec<String> = state
+        .get_storage(&SYSTEM_ADDRESS, GENESIS_SET_KEY)
+        .filter(|b| !b.is_empty())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let inside = |a: &[u8]| genesis.binary_search(&hex::encode(a)).is_ok();
+    let total = seated
+        .iter()
+        .fold(added, |t, (_, bond)| t.saturating_add(*bond));
+    let mut outside = if inside(account) { 0 } else { added };
+    for (a, bond) in &seated {
+        if !inside(a) {
+            outside = outside.saturating_add(*bond);
+        }
+    }
+    let cap_bps = u128::from(network_param(state, OUTSIDE_CAP_BPS_KEY).min(10_000));
+    // outside / total <= cap_bps / 10_000, without overflow for any stake.
+    let allowed = (total / 10_000) * cap_bps + (total % 10_000) * cap_bps / 10_000;
+    if outside > allowed {
+        return Err(VmError::InvalidTransaction(format!(
+            "this bond would take the stake of validators outside the genesis set to {outside} of {total} seated, past the {cap_bps} basis points the network allows in this phase"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses the exit of `validator` when the seated set without it would not
+/// hold the launch arithmetic. A chain with no index, or a validator that is
+/// not seated, is not refused.
+pub fn check_exit_floor(state: &dyn VmState, validator: &[u8]) -> Result<()> {
+    let Some(seated) = seated_bonds(state) else {
+        return Ok(());
+    };
+    if !seated.iter().any(|(a, _)| a == validator) {
+        return Ok(());
+    }
+    let without: Vec<u128> = seated
+        .iter()
+        .filter(|(a, _)| a != validator)
+        .map(|(_, bond)| tenzro_types::launch_rule::voting_power(*bond))
+        .collect();
+    if tenzro_types::launch_rule::all_live_set_accepted(&without) {
+        return Ok(());
+    }
+    Err(VmError::InvalidTransaction(format!(
+        "the exit would leave {} seated validators below the launch arithmetic: a set needs at least {} members and must keep more than two thirds of its stake without its largest; a replacement must bond first",
+        without.len(),
+        tenzro_types::launch_rule::MIN_LAUNCH_VALIDATORS
+    )))
 }
 
 fn unbonding_key(addr: &[u8]) -> String {
@@ -370,6 +658,7 @@ pub(super) fn recall_sponsored_bond(
         .checked_sub(amount)
         .ok_or_else(|| VmError::Internal("sponsored bond exceeds the bond".to_string()))?;
     write_u128(state, bond_key(addr).as_bytes(), rest);
+    unseat_if_unbonded(state, addr);
     let bonded_total = total_bonded(state).saturating_sub(amount);
     let unbonding_total = read_u128(state, TOTAL_UNBONDING_KEY).saturating_add(amount);
     write_u128(state, TOTAL_BONDED_KEY, bonded_total);
@@ -509,6 +798,9 @@ pub fn vote_weight(
     addr: &[u8],
     proposal: &crate::governance::Proposal,
 ) -> u128 {
+    if seat_held_after_slash(state, addr, super::params_epoch(state)) {
+        return 0;
+    }
     let aged_at = proposal
         .created_ms
         .saturating_sub(proposal.rules.min_bond_age_ms.max(0));
@@ -554,6 +846,7 @@ pub fn begin_unbonding(
     let bonded_total = total_bonded(state).saturating_sub(bond);
     let unbonding_total = read_u128(state, TOTAL_UNBONDING_KEY).saturating_add(bond);
     write_u128(state, bond_key(addr).as_bytes(), 0);
+    unseat_if_unbonded(state, addr);
     write_u128(state, TOTAL_BONDED_KEY, bonded_total);
     write_u128(state, TOTAL_UNBONDING_KEY, unbonding_total);
     write_unbonding(state, addr, Some(unbonding));
@@ -732,7 +1025,7 @@ pub fn slash_for_equivocation(
     index: u64,
     changes: &mut Vec<StateChange>,
 ) -> Result<u128> {
-    let window_checkpoints = network_param(state, CORRELATION_WINDOW_PARAM);
+    let window_checkpoints = correlation_window(state);
     let floor_bps = network_param(state, EQUIVOCATION_MIN_SLASH_PARAM).min(10_000) as u32;
     let multiplier = network_param(state, CORRELATION_MULTIPLIER_PARAM).min(100) as u32;
     let mut window = window_offences(state)?;
@@ -789,6 +1082,7 @@ pub fn slash_for_equivocation(
         }
         let owed = bps_share(o.at_stake, u128::from(rate)).saturating_sub(o.taken);
         let (from_bond, from_unbonding) = take(state, &o.addr, owed)?;
+        super::rewards::claw_back_rewards(state, &o.addr, rate - o.applied_bps, changes)?;
         o.applied_bps = rate;
         o.taken = o
             .taken
@@ -814,8 +1108,9 @@ pub enum SlashedStake {
 }
 
 /// Slashes `bps` basis points of `stake` of `addr`, bonded and unbonding,
-/// into the insurance pool, recording the credit. The one route by which a
-/// protocol offence takes stake. Returns the amount taken.
+/// into the insurance pool, recording the credit, and claws back the same
+/// share of its vesting rewards once that rule is live. The one route by
+/// which a protocol offence takes stake. Returns the amount taken.
 pub fn slash_to_insurance(
     state: &mut dyn VmState,
     addr: &[u8],
@@ -830,6 +1125,7 @@ pub fn slash_to_insurance(
         }
     };
     credit_pool(state, taken, changes)?;
+    super::rewards::claw_back_rewards(state, addr, bps, changes)?;
     Ok(taken)
 }
 
@@ -968,6 +1264,7 @@ fn remove(
     if from_bond > 0 {
         let bonded_total = total_bonded(state).saturating_sub(from_bond);
         write_u128(state, bond_key(addr).as_bytes(), bond - from_bond);
+        unseat_if_unbonded(state, addr);
         write_u128(state, TOTAL_BONDED_KEY, bonded_total);
     }
     if let Some(u) = unbonding
@@ -991,6 +1288,16 @@ fn remove(
 mod tests {
     use super::*;
     use crate::state_adapter::StateAdapter;
+
+    /// The active-set cap reaches the epoch plan only once its gate is live.
+    #[test]
+    fn the_active_set_cap_is_in_force_only_once_its_gate_is_live() {
+        let mut state = StateAdapter::new();
+        super::super::set_genesis_param(&mut state, ACTIVE_SET_CAP_PARAM, 21);
+        assert_eq!(active_set_cap(&state), None);
+        super::super::set_genesis_param(&mut state, ACTIVE_SET_CAP_GATE, 0);
+        assert_eq!(active_set_cap(&state), Some(21));
+    }
 
     /// Twenty years of monthly top-ups: the bond history a vote reads keeps
     /// only what the longest voting period and the longest minimum bond age
@@ -1048,6 +1355,77 @@ mod tests {
                 who
             })
             .collect()
+    }
+
+    fn seat(state: &mut StateAdapter, who: &[[u8; 32]]) {
+        for (k, v) in seated_index_entries(who) {
+            state.set_storage(&SYSTEM_ADDRESS, &k, v);
+        }
+    }
+
+    /// A chain whose genesis kept no index of seated validators is never
+    /// refused, whatever its size.
+    #[test]
+    fn a_chain_without_the_seated_index_never_refuses_an_exit() {
+        let mut state = StateAdapter::new();
+        let set = validators(&mut state, 4);
+        assert!(check_exit_floor(&state, &set[0]).is_ok());
+    }
+
+    /// An exit that leaves the seated set holding the launch arithmetic is
+    /// admitted; one that leaves it below is refused, and a validator that is
+    /// not seated is not held back.
+    #[test]
+    fn an_exit_below_the_launch_arithmetic_is_refused_and_one_above_it_is_not() {
+        let mut state = StateAdapter::new();
+        let set = validators(&mut state, 5);
+        seat(&mut state, &set);
+        assert!(check_exit_floor(&state, &set[0]).is_ok());
+
+        let mut state = StateAdapter::new();
+        let set = validators(&mut state, 4);
+        seat(&mut state, &set);
+        let refused = check_exit_floor(&state, &set[0]).unwrap_err().to_string();
+        assert!(refused.contains("below the launch arithmetic"), "{refused}");
+        assert!(check_exit_floor(&state, &[99; 32]).is_ok());
+    }
+
+    /// A validator whose whole bond moves to unbonding leaves the index, and
+    /// is seated again by a registration.
+    #[test]
+    fn a_validator_that_unbonds_leaves_the_seated_index_and_registers_back() {
+        let mut state = StateAdapter::new();
+        let set = validators(&mut state, 5);
+        seat(&mut state, &set);
+        assert_eq!(seated_bonds(&state).unwrap().len(), 5);
+        begin_unbonding(&mut state, &set[0], 0).unwrap();
+        assert_eq!(seated_bonds(&state).unwrap().len(), 4);
+        add_bond(&mut state, &set[0], STAKE, 0).unwrap();
+        seat_validator(&mut state, &set[0]);
+        assert_eq!(seated_bonds(&state).unwrap().len(), 5);
+    }
+
+    /// Validators outside the genesis set may hold at most the governed share
+    /// of the seated stake: with four genesis validators of equal stake one
+    /// outside validator of that stake is a fifth, exactly the 20% the
+    /// network starts with, and a second is refused.
+    #[test]
+    fn outside_validators_are_held_to_their_share_of_the_seated_stake() {
+        let mut state = StateAdapter::new();
+        let set = validators(&mut state, 4);
+        seat(&mut state, &set);
+        assert!(check_outside_cap(&state, &[50; 32], STAKE).is_ok());
+        // The fifth validator bonds and seats.
+        add_bond(&mut state, &[50; 32], STAKE, 0).unwrap();
+        seat_validator(&mut state, &[50; 32]);
+        let refused = check_outside_cap(&state, &[51; 32], STAKE)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("outside the genesis set"), "{refused}");
+        // A genesis validator topping up is never held to the cap.
+        assert!(check_outside_cap(&state, &set[0], STAKE).is_ok());
+        // A chain with no index is not held to it either.
+        assert!(check_outside_cap(&StateAdapter::new(), &[51; 32], STAKE).is_ok());
     }
 
     fn rate(bps: u32) -> u128 {
@@ -1166,6 +1544,66 @@ mod tests {
         }
         let pool = derive_insurance_pool_address().as_bytes().to_vec();
         assert_eq!(state.get_balance(&pool), 34 * STAKE);
+    }
+
+    /// Two offences a thousand checkpoints (about eight minutes) apart: with
+    /// the day-long window dormant each pays the isolated floor; live, they
+    /// correlate and the earlier offender is topped up to the shared rate.
+    #[test]
+    fn a_live_day_long_window_correlates_offences_minutes_apart() {
+        for live in [false, true] {
+            let mut state = StateAdapter::new();
+            let v = validators(&mut state, 100);
+            if live {
+                crate::native::set_genesis_param(&mut state, CORRELATION_WINDOW_DAY_KEY, 0);
+                assert_eq!(
+                    correlation_window(&state),
+                    CORRELATION_WINDOW_DAY_CHECKPOINTS
+                );
+            } else {
+                assert_eq!(
+                    correlation_window(&state),
+                    DEFAULT_CORRELATION_WINDOW_CHECKPOINTS
+                );
+            }
+            let mut changes = Vec::new();
+            slash_for_equivocation(&mut state, &v[0], 100, &mut changes).unwrap();
+            let later = slash_for_equivocation(&mut state, &v[1], 1_100, &mut changes).unwrap();
+            let floor = rate(DEFAULT_EQUIVOCATION_MIN_SLASH_BPS as u32);
+            if live {
+                // Two of a hundred equal stakes, times the multiplier: 6%,
+                // paid by the later offender and topped up for the earlier.
+                assert_eq!(later, rate(600) + (rate(600) - floor));
+            } else {
+                assert_eq!(later, floor);
+            }
+        }
+    }
+
+    /// Nothing keeps offences by the old window's length: with the day-long
+    /// window live, an offence a day less one checkpoint older still
+    /// correlates with the new one, and one a day and a checkpoint older does
+    /// not.
+    #[test]
+    fn a_live_day_long_window_holds_an_offence_up_to_a_day_old() {
+        let floor = rate(DEFAULT_EQUIVOCATION_MIN_SLASH_BPS as u32);
+        for (gap, correlated) in [
+            (CORRELATION_WINDOW_DAY_CHECKPOINTS - 1, true),
+            (CORRELATION_WINDOW_DAY_CHECKPOINTS, true),
+            (CORRELATION_WINDOW_DAY_CHECKPOINTS + 1, false),
+        ] {
+            let mut state = StateAdapter::new();
+            let v = validators(&mut state, 100);
+            crate::native::set_genesis_param(&mut state, CORRELATION_WINDOW_DAY_KEY, 0);
+            let mut changes = Vec::new();
+            slash_for_equivocation(&mut state, &v[0], 100, &mut changes).unwrap();
+            let later = slash_for_equivocation(&mut state, &v[1], 100 + gap, &mut changes).unwrap();
+            if correlated {
+                assert_eq!(later, rate(600) + (rate(600) - floor), "gap {gap}");
+            } else {
+                assert_eq!(later, floor, "gap {gap}");
+            }
+        }
     }
 
     #[test]

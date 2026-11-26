@@ -1,0 +1,13 @@
+[package]
+name = "c-kzg"
+version = "2.1.8"
+edition = "2021"
+license = "Apache-2.0"
+description = "Stands in for c-kzg 2 in dependency resolution; never compiled"
+publish = false
+
+[features]
+default = []
+std = []
+portable = []
+ethereum_kzg_settings = []

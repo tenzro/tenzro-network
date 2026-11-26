@@ -33,19 +33,43 @@ stage=$(mktemp -d)/$name
 trap 'rm -rf "$src" "$(dirname "$stage")"' EXIT
 git archive --format=tar "$commit" | tar -x -C "$src"
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo/target-release/macos}
+# ONNX Runtime from the pinned library (packaging/onnxruntime.tsv), checked by hash; nothing is fetched by the
+# build. Intel macOS has no prebuilt runtime and loads one at run time, so it links none.
+if [ "$target" = aarch64-apple-darwin ]; then
+    python3 "$src/scripts/release/fetch-onnxruntime.py" --target "$target" --link-at "$src/.onnxruntime/host" >/dev/null
+fi
 (cd "$src" && CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="--remap-path-prefix=$src=." \
     cargo build --release --locked --target "$target" -p tenzro-node -p tenzro-cli)
 out=$CARGO_TARGET_DIR/$target/release
 mkdir -p "$stage/bin"
 install -m755 "$out/tenzro-node" "$stage/bin/tenzro-node"
 install -m755 "$out/tenzro" "$stage/bin/tenzro"
-# Debug symbols to a dSYM bundle, shipped separately; the binaries are stripped.
+# Debug symbols to a dSYM bundle, shipped separately; the binaries keep their function names.
 dbg=$(dirname "$stage")/$name-debug
 mkdir -p "$dbg"
-for b in tenzro-node tenzro; do dsymutil "$stage/bin/$b" -o "$dbg/$b.dSYM" && strip -x "$stage/bin/$b"; done
+for b in tenzro-node tenzro; do dsymutil "$stage/bin/$b" -o "$dbg/$b.dSYM" && strip -S "$stage/bin/$b"; done
 release_network_profile "$src" "$stage"
+release_console "$src" "$stage"
+# Tenzro Control, the desktop app the installer puts in /Applications, for the
+# same processor.
+app=$(sh "$src/apps/tenzro-control/apple/bundle.sh" "$([ "$arch" = x86_64 ] && echo macos-x86_64 || echo macos)" | tail -n 1)
+mkdir -p "$stage/control"
+ditto "$app" "$stage/control/Tenzro Control.app"
 mach=arm64; [ "$arch" = x86_64 ] && mach=x86_64
-file "$stage/bin/tenzro-node" | grep -q "$mach" || { echo "REFUSING: not an $mach Mach-O"; exit 1; }
+# Developer ID signing with the hardened runtime, when this Mac holds the
+# release identity (TENZRO_MACOS_SIGN_IDENTITY, a codesign identity name).
+# Without it the binaries keep their ad-hoc signatures.
+if [ -n "${TENZRO_MACOS_SIGN_IDENTITY:-}" ]; then
+    for b in "$stage/bin/tenzro-node" "$stage/bin/tenzro" "$stage/control/Tenzro Control.app"; do
+        codesign --force --options runtime --timestamp ${TENZRO_MACOS_CODESIGN_ENTITLEMENTS:+--entitlements "$TENZRO_MACOS_CODESIGN_ENTITLEMENTS"} --sign "$TENZRO_MACOS_SIGN_IDENTITY" "$b"
+        codesign --verify --strict "$b"
+    done
+else
+    echo "not Developer ID signed: TENZRO_MACOS_SIGN_IDENTITY is not set"
+fi
+for bin in "$stage/bin/tenzro-node" "$stage/control/Tenzro Control.app/Contents/MacOS/TenzroControl"; do
+    file "$bin" | grep -q "$mach" || { echo "REFUSING: $(basename "$bin") is not an $mach Mach-O"; exit 1; }
+done
 if [ "$flavour" = metal ]; then
     grep -qa ggml_metal "$stage/bin/tenzro-node" || { echo "REFUSING: no Metal backend linked"; exit 1; }
 else

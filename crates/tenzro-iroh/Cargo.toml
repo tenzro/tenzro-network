@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "Iroh (QUIC-native content-addressed transport) integration for Tenzro Network — endpoint lifecycle, blob distribution, CRDT documents, and the tenzro:// URI resolver"
 
+[features]
+# Loopback ports for tests in other crates that must name a port before
+# something binds it (src/test_ports.rs).
+test-support = []
+
 [dependencies]
 tenzro-types = { workspace = true }
 tenzro-onboarding-types = { workspace = true }
@@ -55,7 +60,7 @@ serde_json = { workspace = true }
 
 # The relay role: the iroh relay service embedded in one HTTP listener
 # beside the identity directory and pkarr store (src/relay.rs).
-iroh-relay = { version = "1.3", features = ["server", "platform-verifier"] }
+iroh-relay = { version = "1.4.1", features = ["server", "platform-verifier"] }
 netdev = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

@@ -37,7 +37,7 @@
 //! account must end exactly that amount lower and otherwise unchanged. A
 //! transfer whose data is the 104-byte pay data (Tenzro payee, request and
 //! quote digests, USD price) is a payment, logged as a `Reported` report.
-use solana_program::account_info::{AccountInfo, next_account_info};
+use solana_program::account_info::{next_account_info, AccountInfo};
 use solana_program::clock::Clock;
 use solana_program::entrypoint::ProgramResult;
 use solana_program::log::sol_log_data;
@@ -45,7 +45,7 @@ use solana_program::program::invoke_signed;
 use solana_program::program_error::ProgramError;
 use solana_program::pubkey::Pubkey;
 use solana_program::rent::Rent;
-use solana_program::sysvar::{Sysvar, instructions as ix_sysvar};
+use solana_program::sysvar::{instructions as ix_sysvar, Sysvar};
 use tenzro_finality_verifier::{agent, state_proof};
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -64,9 +64,11 @@ pub mod config {
 }
 
 /// The secp256r1 signature-verify program.
-pub const SECP256R1_PROGRAM_ID: Pubkey = Pubkey::from_str_const("Secp256r1SigVerify1111111111111111111111111");
+pub const SECP256R1_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("Secp256r1SigVerify1111111111111111111111111");
 pub const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
-pub const TOKEN_PROGRAM_ID: Pubkey = Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+pub const TOKEN_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
 pub const ACCOUNT_LEN: usize = 447;
 pub const BUFFER_LEN: usize = 4096;
@@ -147,16 +149,22 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0])
     }
     fn u16(&mut self) -> Result<u16, AccountError> {
-        Ok(u16::from_be_bytes(self.take(2)?.try_into().expect("2 bytes")))
+        Ok(u16::from_be_bytes(
+            self.take(2)?.try_into().expect("2 bytes"),
+        ))
     }
     fn u32(&mut self) -> Result<u32, AccountError> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes")))
+        Ok(u32::from_be_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
     }
     fn b32(&mut self) -> Result<[u8; 32], AccountError> {
         Ok(self.take(32)?.try_into().expect("32 bytes"))
     }
     fn u128(&mut self) -> Result<u128, AccountError> {
-        Ok(u128::from_be_bytes(self.take(16)?.try_into().expect("16 bytes")))
+        Ok(u128::from_be_bytes(
+            self.take(16)?.try_into().expect("16 bytes"),
+        ))
     }
 }
 
@@ -182,7 +190,14 @@ fn action<'a>(r: &mut Reader<'a>) -> Result<Action<'a>, AccountError> {
     let dl = r.u32()? as usize;
     let data = r.take(dl)?;
     let used = start.len() - r.0.len();
-    Ok(Action { encoded: &start[..used], target, selector, amount, relay_refund, data })
+    Ok(Action {
+        encoded: &start[..used],
+        target,
+        selector,
+        amount,
+        relay_refund,
+        data,
+    })
 }
 
 /// The account of the agent with SHA-256 `agent`.
@@ -196,7 +211,8 @@ pub fn buffer_address(program_id: &Pubkey, relayer: &Pubkey) -> (Pubkey, u8) {
 }
 
 fn grant_of(d: &[u8]) -> Result<agent::Grant, AccountError> {
-    agent::Grant::decode(&d[O_GRANT..O_GRANT + agent::GRANT_LEN]).ok_or(AccountError::MalformedGrant)
+    agent::Grant::decode(&d[O_GRANT..O_GRANT + agent::GRANT_LEN])
+        .ok_or(AccountError::MalformedGrant)
 }
 
 fn u128_at(d: &[u8], o: usize) -> u128 {
@@ -207,8 +223,14 @@ fn u64_at(d: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(d[o..o + 8].try_into().expect("8 bytes"))
 }
 
-pub fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    let (&op, rest) = data.split_first().ok_or(ProgramError::InvalidInstructionData)?;
+pub fn process_instruction(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    let (&op, rest) = data
+        .split_first()
+        .ok_or(ProgramError::InvalidInstructionData)?;
     match op {
         0 => create(program_id, accounts, rest),
         1 => write(program_id, accounts, rest),
@@ -255,12 +277,20 @@ fn create(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Program
     if account.owner == program_id {
         return Err(AccountError::AlreadyCreated.into());
     }
-    create_pda(payer, account, system, program_id, ACCOUNT_LEN, &[b"agent", &agent_hash, &[bump]])?;
+    create_pda(
+        payer,
+        account,
+        system,
+        program_id,
+        ACCOUNT_LEN,
+        &[b"agent", &agent_hash, &[bump]],
+    )?;
     let mut d = account.try_borrow_mut_data()?;
     d[O_INIT] = 1;
     d[O_BUMP] = bump;
     d[O_AGENT..O_AGENT + 32].copy_from_slice(&agent_hash);
-    d[O_TREE_KEY..O_TREE_KEY + 32].copy_from_slice(&agent::grant_tree_key(did, config::CAIP2.as_bytes()));
+    d[O_TREE_KEY..O_TREE_KEY + 32]
+        .copy_from_slice(&agent::grant_tree_key(did, config::CAIP2.as_bytes()));
     Ok(())
 }
 
@@ -277,13 +307,23 @@ fn write(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramR
         return Err(AccountError::WrongAccount.into());
     }
     if buffer.owner != program_id {
-        create_pda(relayer, buffer, system, program_id, BUFFER_LEN, &[b"sync", relayer.key.as_ref(), &[bump]])?;
+        create_pda(
+            relayer,
+            buffer,
+            system,
+            program_id,
+            BUFFER_LEN,
+            &[b"sync", relayer.key.as_ref(), &[bump]],
+        )?;
     }
     let mut r = Reader(data);
     let offset = r.u16()? as usize;
     let bytes = r.0;
     let mut d = buffer.try_borrow_mut_data()?;
-    let end = offset.checked_add(bytes.len()).filter(|e| *e <= BUFFER_LEN).ok_or(AccountError::Malformed)?;
+    let end = offset
+        .checked_add(bytes.len())
+        .filter(|e| *e <= BUFFER_LEN)
+        .ok_or(AccountError::Malformed)?;
     d[offset..end].copy_from_slice(bytes);
     Ok(())
 }
@@ -298,8 +338,11 @@ fn asset(caip19: &[u8]) -> Result<(u8, [u8; 32]), AccountError> {
     if rest == "slip44:501" {
         return Ok((ASSET_NATIVE, [0u8; 32]));
     }
-    let mint = rest.strip_prefix("token:").ok_or(AccountError::AssetMismatch)?;
-    let key: Pubkey = core::str::FromStr::from_str(mint).map_err(|_| AccountError::AssetMismatch)?;
+    let mint = rest
+        .strip_prefix("token:")
+        .ok_or(AccountError::AssetMismatch)?;
+    let key: Pubkey =
+        core::str::FromStr::from_str(mint).map_err(|_| AccountError::AssetMismatch)?;
     Ok((ASSET_TOKEN, key.to_bytes()))
 }
 
@@ -312,7 +355,10 @@ fn sync(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramRe
     if !relayer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if account.owner != program_id || buffer.owner != program_id || *buffer.key != buffer_address(program_id, relayer.key).0 {
+    if account.owner != program_id
+        || buffer.owner != program_id
+        || *buffer.key != buffer_address(program_id, relayer.key).0
+    {
         return Err(AccountError::WrongAccount.into());
     }
     if *finality.key != config::FINALITY_STATE || *finality.owner != config::FINALITY_PROGRAM {
@@ -344,7 +390,10 @@ fn sync(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramRe
     }
     let g = agent::Grant::decode(grant_bytes).ok_or(AccountError::MalformedGrant)?;
     let chain = solana_program::hash::hashv(&[config::CAIP2.as_bytes()]).to_bytes();
-    if g.chain != chain || g.agent[..] != d[O_AGENT..O_AGENT + 32] || g.account != account.key.to_bytes() {
+    if g.chain != chain
+        || g.agent[..] != d[O_AGENT..O_AGENT + 32]
+        || g.account != account.key.to_bytes()
+    {
         return Err(AccountError::NotThisAccount.into());
     }
     let installed = d[O_INSTALLED] == 1;
@@ -357,7 +406,11 @@ fn sync(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramRe
             return Err(AccountError::StaleGrant.into());
         }
         if later {
-            sol_log_data(&[b"GrantClosed", &cur.seq.to_be_bytes(), &u128_at(&d, O_SPENT).to_be_bytes()]);
+            sol_log_data(&[
+                b"GrantClosed",
+                &cur.seq.to_be_bytes(),
+                &u128_at(&d, O_SPENT).to_be_bytes(),
+            ]);
         } else {
             new_seq = false;
         }
@@ -397,17 +450,24 @@ fn verified_keys(sysvar: &AccountInfo, message: &[u8]) -> Result<Vec<[u8; 33]>, 
     let mut keys = Vec::with_capacity(count);
     for i in 0..count {
         let base = 2 + 14 * i;
-        let field = |k: usize| -> Option<usize> { Some(u16::from_le_bytes([*d.get(base + 2 * k)?, *d.get(base + 2 * k + 1)?]) as usize) };
+        let field = |k: usize| -> Option<usize> {
+            Some(u16::from_le_bytes([*d.get(base + 2 * k)?, *d.get(base + 2 * k + 1)?]) as usize)
+        };
         let f = |k| field(k).ok_or(AccountError::SignatureMismatch);
-        let (sig_ix, pk_off, pk_ix, msg_off, msg_len, msg_ix) = (f(1)?, f(2)?, f(3)?, f(4)?, f(5)?, f(6)?);
+        let (sig_ix, pk_off, pk_ix, msg_off, msg_len, msg_ix) =
+            (f(1)?, f(2)?, f(3)?, f(4)?, f(5)?, f(6)?);
         if sig_ix != 0xFFFF || pk_ix != 0xFFFF || msg_ix != 0xFFFF {
             return Err(AccountError::SignatureMismatch.into());
         }
-        let msg = d.get(msg_off..msg_off + msg_len).ok_or(AccountError::SignatureMismatch)?;
+        let msg = d
+            .get(msg_off..msg_off + msg_len)
+            .ok_or(AccountError::SignatureMismatch)?;
         if msg != message {
             return Err(AccountError::SignatureMismatch.into());
         }
-        let pk = d.get(pk_off..pk_off + 33).ok_or(AccountError::SignatureMismatch)?;
+        let pk = d
+            .get(pk_off..pk_off + 33)
+            .ok_or(AccountError::SignatureMismatch)?;
         keys.push(pk.try_into().expect("33 bytes"));
     }
     Ok(keys)
@@ -423,7 +483,11 @@ fn act(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8], exact: bool) 
     if account.owner != program_id {
         return Err(AccountError::WrongAccount.into());
     }
-    let sysvar = if exact { None } else { Some(next_account_info(it)?) };
+    let sysvar = if exact {
+        None
+    } else {
+        Some(next_account_info(it)?)
+    };
     let mut r = Reader(data);
     let a = action(&mut r)?;
     let (g, spent, nonce) = {
@@ -515,7 +579,11 @@ fn act(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8], exact: bool) 
             for _ in 0..pl {
                 proof.push(r.b32()?);
             }
-            if !agent::merkle_verify(&g.targets_root, &agent::target_leaf(a.target, a.selector), &proof) {
+            if !agent::merkle_verify(
+                &g.targets_root,
+                &agent::target_leaf(a.target, a.selector),
+                &proof,
+            ) {
                 return Err(AccountError::TargetNotAllowed.into());
             }
         }
@@ -532,11 +600,18 @@ fn act(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8], exact: bool) 
     if a.relay_refund > 0 {
         move_lamports(account, relayer, a.relay_refund)?;
     }
-    sol_log_data(&[b"Acted", &g.seq.to_be_bytes(), &nonce.to_be_bytes(), &digest, &a.amount.to_be_bytes()]);
+    sol_log_data(&[
+        b"Acted",
+        &g.seq.to_be_bytes(),
+        &nonce.to_be_bytes(),
+        &digest,
+        &a.amount.to_be_bytes(),
+    ]);
     // A transfer whose data is the pay data (payee, request, quote, USD
     // price) is a payment: report it for Tenzro to record as this agent's.
     if a.data.len() == agent::PAY_DATA_LEN {
-        let report = agent::paid_report(&g, nonce, a.data, a.amount).ok_or(AccountError::UnsupportedAction)?;
+        let report = agent::paid_report(&g, nonce, a.data, a.amount)
+            .ok_or(AccountError::UnsupportedAction)?;
         sol_log_data(&[b"Reported", &report]);
     }
     Ok(())
@@ -551,7 +626,10 @@ fn move_lamports(from: &AccountInfo, to: &AccountInfo, amount: u128) -> ProgramR
         return Err(ProgramError::InsufficientFunds);
     }
     **from.try_borrow_mut_lamports()? = have - amount;
-    **to.try_borrow_mut_lamports()? = to.lamports().checked_add(amount).ok_or(ProgramError::ArithmeticOverflow)?;
+    **to.try_borrow_mut_lamports()? = to
+        .lamports()
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
     Ok(())
 }
 
@@ -585,7 +663,11 @@ fn execute<'a, 'b>(
             {
                 // SPL token account: mint 0..32, owner 32..64.
                 let s = source.try_borrow_data()?;
-                if source.owner != &TOKEN_PROGRAM_ID || s.len() < 64 || s[..32] != mint || s[32..64] != account.key.to_bytes() {
+                if source.owner != &TOKEN_PROGRAM_ID
+                    || s.len() < 64
+                    || s[..32] != mint
+                    || s[32..64] != account.key.to_bytes()
+                {
                     return Err(AccountError::WrongTokenAccount.into());
                 }
             }
@@ -603,15 +685,28 @@ fn execute<'a, 'b>(
             };
             invoke_signed(
                 &ix,
-                &[source.clone(), destination.clone(), account.clone(), token_program.clone()],
+                &[
+                    source.clone(),
+                    destination.clone(),
+                    account.clone(),
+                    token_program.clone(),
+                ],
                 &[&[b"agent", &agent_hash, &[bump]]],
             )
         }
         ([SELECTOR_LOCK], ASSET_TOKEN) => {
             let [lock_program, config, leg, system, mint_a, source, vault, token_program] =
                 core::array::from_fn(|_| next_account_info(it));
-            let (lock_program, config, leg, system, mint_a, source, vault, token_program) =
-                (lock_program?, config?, leg?, system?, mint_a?, source?, vault?, token_program?);
+            let (lock_program, config, leg, system, mint_a, source, vault, token_program) = (
+                lock_program?,
+                config?,
+                leg?,
+                system?,
+                mint_a?,
+                source?,
+                vault?,
+                token_program?,
+            );
             if a.target != lock_program.key.as_ref() || *token_program.key != TOKEN_PROGRAM_ID {
                 return Err(AccountError::TargetNotAllowed.into());
             }
@@ -619,11 +714,18 @@ fn execute<'a, 'b>(
                 return Err(AccountError::WrongTokenAccount.into());
             }
             let before = source.try_borrow_data()?.to_vec();
-            if source.owner != &TOKEN_PROGRAM_ID || before.len() < 72 || before[..32] != mint || before[32..64] != account.key.to_bytes() {
+            if source.owner != &TOKEN_PROGRAM_ID
+                || before.len() < 72
+                || before[..32] != mint
+                || before[32..64] != account.key.to_bytes()
+            {
                 return Err(AccountError::WrongTokenAccount.into());
             }
             let amount = u64::try_from(a.amount).map_err(|_| AccountError::UnsupportedAction)?;
-            if a.data.len() != LOCK_IX_LEN || a.data[0] != 1 || a.data[34..42] != amount.to_le_bytes() {
+            if a.data.len() != LOCK_IX_LEN
+                || a.data[0] != 1
+                || a.data[34..42] != amount.to_le_bytes()
+            {
                 return Err(AccountError::UnsupportedAction.into());
             }
             use solana_program::instruction::AccountMeta;
@@ -663,7 +765,10 @@ fn execute<'a, 'b>(
             let after = source.try_borrow_data()?;
             let had = u64::from_le_bytes(before[64..72].try_into().expect("8 bytes"));
             let has = u64::from_le_bytes(after[64..72].try_into().expect("8 bytes"));
-            if had.checked_sub(amount) != Some(has) || after[..64] != before[..64] || after[72..] != before[72..] {
+            if had.checked_sub(amount) != Some(has)
+                || after[..64] != before[..64]
+                || after[72..] != before[72..]
+            {
                 return Err(AccountError::PulledOtherThanStated.into());
             }
             Ok(())

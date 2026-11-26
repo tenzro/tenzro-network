@@ -455,7 +455,7 @@ mod tests {
     /// `TENZRO_CERT_RUNS` times (default 5). Prints one `COST {json}` line.
     /// Run with `--release --ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn cost_of_a_compact_certificate() {
         let env = |k: &str, d: usize| {
             std::env::var(k)

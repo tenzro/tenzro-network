@@ -1,6 +1,6 @@
 {
   "name": "@tenzro/inject",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Tenzro injected provider — window.tenzro for browser extensions and dApps. CAIP-25/27 multichain core, EIP-1193/EIP-6963 EVM façade, Wallet Standard SVM façade. Holds no key: the user's passkey signs in the open wallet.",
   "keywords": [
     "tenzro",

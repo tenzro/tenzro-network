@@ -6,6 +6,7 @@ pub mod iroh_transport;
 pub mod oauth;
 mod rpc_tools;
 pub mod server;
+pub mod tool_signature;
 mod tool_types_access;
 mod tool_types_catalog;
 mod tool_types_chain;

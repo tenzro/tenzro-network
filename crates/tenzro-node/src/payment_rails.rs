@@ -243,6 +243,39 @@ impl LedgerSubmitter {
         tx_type: TransactionType,
         gas_limit: u64,
     ) -> Result<String, String> {
+        self.submit_at(to, tx_type, gas_limit, None).await
+    }
+
+    /// The nonce the next transaction from this account would be admitted
+    /// at now: the first one the chain and the mempool leave free.
+    pub fn next_nonce(&self) -> u64 {
+        use tenzro_vm::traits::VmState as _;
+        let storage = self.storage.clone();
+        self.consensus.mempool().next_nonce(&self.node_addr, || {
+            tenzro_vm::StateAdapter::with_storage(storage).get_nonce(self.node_addr.as_bytes())
+        })
+    }
+
+    /// [`submit_with_gas`](Self::submit_with_gas) for a transaction whose
+    /// payload is bound to the nonce it is sent at: refused, and not signed,
+    /// when the account's next free nonce is no longer `nonce`.
+    pub async fn submit_at_nonce(
+        &self,
+        to: Address,
+        tx_type: TransactionType,
+        gas_limit: u64,
+        nonce: u64,
+    ) -> Result<String, String> {
+        self.submit_at(to, tx_type, gas_limit, Some(nonce)).await
+    }
+
+    async fn submit_at(
+        &self,
+        to: Address,
+        tx_type: TransactionType,
+        gas_limit: u64,
+        expected_nonce: Option<u64>,
+    ) -> Result<String, String> {
         // Every account transaction carries the ML-DSA-65 leg, checked against
         // the key the account enrolled, and this account is the node's
         // whether or not it is a validator. Nothing is admitted from it before
@@ -265,6 +298,12 @@ impl LedgerSubmitter {
             self.storage.clone(),
             &self.node_addr,
             |nonce| {
+                if expected_nonce.is_some_and(|expected| expected != nonce) {
+                    return Err(format!(
+                        "the account's next nonce moved to {nonce}; the transaction was built \
+                         for another one"
+                    ));
+                }
                 let tx = Transaction::new(
                     ChainId::from(self.chain_id),
                     self.node_addr,
@@ -324,7 +363,7 @@ impl LedgerSubmitter {
     }
 
     /// The execution receipt for `tx_hash`, if its block has finalized.
-    pub(crate) fn receipt(&self, tx_hash: &str) -> Option<TxReceiptRecord> {
+    pub fn receipt(&self, tx_hash: &str) -> Option<TxReceiptRecord> {
         let key = format!("receipt:{tx_hash}");
         let bytes = self.storage.get(CF_TRANSACTIONS, key.as_bytes()).ok()??;
         serde_json::from_slice(&bytes).ok()
@@ -394,6 +433,29 @@ impl SettlementRail for LedgerRail {
     }
 
     async fn settle(&self, i: &SettlementInstruction) -> PaymentResult<RailOutcome> {
+        // A token that serves only some jurisdictions is accepted only from a
+        // payer whose live jurisdiction claim it serves, judged per request.
+        let token = if i.asset.eq_ignore_ascii_case("TNZO") {
+            None
+        } else {
+            tenzro_types::payment_authorization::asset_token_id(&i.asset)
+                .map_err(|e| PaymentError::SettlementError(e.to_string()))?
+        };
+        if let Some(token) = token {
+            let chain = tenzro_vm::StateAdapter::with_storage(self.submitter.storage.clone());
+            let admitted = tenzro_vm::token_ledger::jurisdiction_admits(
+                &mut tenzro_vm::token_ledger::StateView(&chain),
+                &token,
+                i.payer.address.as_bytes(),
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .map_err(|e| PaymentError::SettlementError(e.to_string()))?;
+            if let Err(refusal) = admitted {
+                return Ok(RailOutcome::Failed {
+                    reason: format!("the payer may not pay in {}: {refusal}", i.asset),
+                });
+            }
+        }
         let tx_type = TransactionType::PayerSettle {
             payer: i.payer.address,
             payee: i.payee,

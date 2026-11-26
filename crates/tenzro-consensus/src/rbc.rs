@@ -7,17 +7,18 @@
 //! authenticated channel, so its sender is known, and only the author may
 //! propose in its own instance.
 //!
-//! Messages and thresholds (weights in seats, see [`crate::committee`]):
+//! Messages and thresholds (weights in seats; `t` is the most seats faulty
+//! validators can hold, see [`crate::committee::BroadcastThresholds`]):
 //!
 //! | on | condition | action |
 //! |---|---|---|
 //! | PROPOSE from the author | first one | send ECHO(d) |
 //! | ECHO(d) | non-author weight >= ceil(n/2) | send VOTE(d) once |
-//! | ECHO(d) or VOTE(d) | non-author weight >= ceil((n+f-1)/2) | send ACK(d) once |
-//! | ACK(d) | non-author weight >= ceil((n+f-1)/2) | send READY(d) once |
-//! | READY(d) | weight >= f+1 | send READY(d) once |
-//! | ECHO(d) | non-author weight >= ceil((n+2f-2)/2) | deliver d (two steps) |
-//! | READY(d) | weight >= 2f+1 | deliver d |
+//! | ECHO(d) or VOTE(d) | non-author weight >= ceil((n+t-1)/2) | send ACK(d) once |
+//! | ACK(d) | non-author weight >= ceil((n+t-1)/2) | send READY(d) once |
+//! | READY(d) | weight >= t+1 | send READY(d) once |
+//! | ECHO(d) | non-author weight >= ceil((n+2t-2)/2) | deliver d (two steps) |
+//! | READY(d) | weight >= 2t+1 | deliver d |
 //!
 //! Each sender is counted once per message kind in an instance, whatever
 //! digest it names, so a validator cannot be counted for two digests.
@@ -25,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::committee::{Committee, SeatSet, ValidatorIndex};
+use crate::committee::{BroadcastThresholds, Committee, FaultBound, SeatSet, ValidatorIndex};
 use crate::vertex::{Digest, Round};
 
 /// The first bytes of a digest, enough to tell instances apart in a log.
@@ -107,6 +108,9 @@ pub struct ReliableBroadcast {
     instances: HashMap<(Round, ValidatorIndex), Instance>,
     floor: Round,
     stats: RbcStats,
+    bound: FaultBound,
+    // The thresholds of the committee last seen, by its epoch.
+    thresholds: Option<(u64, BroadcastThresholds)>,
 }
 
 /// How this validator's instances delivered, since it started.
@@ -129,13 +133,32 @@ impl ReliableBroadcast {
         self.instances.len()
     }
 
-    /// Instances for validator `me`.
-    pub fn new(me: ValidatorIndex) -> Self {
+    /// Instances for validator `me`, with thresholds from `bound`.
+    pub fn new(me: ValidatorIndex, bound: FaultBound) -> Self {
         Self {
             me,
+            bound,
             instances: HashMap::new(),
             floor: 0,
             stats: RbcStats::default(),
+            thresholds: None,
+        }
+    }
+
+    /// The fault bound the thresholds are computed from.
+    pub fn bound(&self) -> FaultBound {
+        self.bound
+    }
+
+    /// The thresholds of `committee`, computed once per epoch.
+    fn thresholds(&mut self, committee: &Committee) -> BroadcastThresholds {
+        match self.thresholds {
+            Some((epoch, t)) if epoch == committee.epoch => t,
+            _ => {
+                let t = BroadcastThresholds::of(committee, self.bound);
+                self.thresholds = Some((committee.epoch, t));
+                t
+            }
         }
     }
 
@@ -222,6 +245,7 @@ impl ReliableBroadcast {
         {
             return Vec::new();
         }
+        let need = self.thresholds(committee);
         let inst = self.instances.entry((round, source)).or_default();
         let k = kind as usize;
         if !inst.counted[k].insert(from, committee.seats(from)) {
@@ -295,24 +319,18 @@ impl ReliableBroadcast {
             }
         };
         let mut loopback = Vec::new();
-        if echo >= committee.rbc_vote_threshold() && send(inst, SignalKind::Vote, &mut out) {
+        if echo >= need.vote && send(inst, SignalKind::Vote, &mut out) {
             loopback.push(SignalKind::Vote);
         }
-        if (echo >= committee.rbc_ack_threshold() || vote >= committee.rbc_ack_threshold())
-            && send(inst, SignalKind::Ack, &mut out)
-        {
+        if (echo >= need.ack || vote >= need.ack) && send(inst, SignalKind::Ack, &mut out) {
             loopback.push(SignalKind::Ack);
         }
-        if (ack >= committee.rbc_ack_threshold() || ready >= committee.validity())
-            && send(inst, SignalKind::Ready, &mut out)
-        {
+        if (ack >= need.ack || ready >= need.ready) && send(inst, SignalKind::Ready, &mut out) {
             loopback.push(SignalKind::Ready);
         }
-        if inst.delivered.is_none()
-            && (echo >= committee.rbc_fast_threshold() || ready >= committee.ready_delivery())
-        {
+        if inst.delivered.is_none() && (echo >= need.fast || ready >= need.deliver) {
             inst.delivered = Some(digest);
-            let fast = echo >= committee.rbc_fast_threshold();
+            let fast = echo >= need.fast;
             if fast {
                 self.stats.fast += 1;
             } else {
@@ -464,9 +482,22 @@ mod tests {
         proposals: &[Option<Digest>],
     ) -> Vec<Option<Digest>> {
         let (c, _) = committee(n);
+        run_in(&c, FaultBound::Seats, silent, proposals).0
+    }
+
+    /// The same in the committee `c` under `bound`, with each party's
+    /// delivery counts.
+    fn run_in(
+        c: &Committee,
+        bound: FaultBound,
+        silent: &[ValidatorIndex],
+        proposals: &[Option<Digest>],
+    ) -> (Vec<Option<Digest>>, Vec<RbcStats>) {
+        let n = c.size();
         let author = 0u16;
-        let mut parties: Vec<ReliableBroadcast> =
-            (0..n as u16).map(ReliableBroadcast::new).collect();
+        let mut parties: Vec<ReliableBroadcast> = (0..n as u16)
+            .map(|me| ReliableBroadcast::new(me, bound))
+            .collect();
         let mut queue: VecDeque<(ValidatorIndex, ValidatorIndex, Signal)> = VecDeque::new();
         let mut delivered = vec![None; n];
         let apply =
@@ -489,7 +520,7 @@ mod tests {
                 continue;
             }
             if let Some(d) = proposals[i] {
-                let acts = parties[i].on_propose(&c, author, 1, author, d);
+                let acts = parties[i].on_propose(c, author, 1, author, d);
                 apply(i, acts, &mut queue, &mut delivered);
             }
         }
@@ -497,10 +528,10 @@ mod tests {
             if silent.contains(&to) {
                 continue;
             }
-            let acts = parties[to as usize].on_signal(&c, from, s);
+            let acts = parties[to as usize].on_signal(c, from, s);
             apply(to as usize, acts, &mut queue, &mut delivered);
         }
-        (0..n)
+        let out = (0..n)
             .map(|i| {
                 if silent.contains(&(i as u16)) {
                     None
@@ -508,7 +539,212 @@ mod tests {
                     delivered[i]
                 }
             })
-            .collect()
+            .collect();
+        (out, parties.iter().map(|p| p.stats()).collect())
+    }
+
+    #[test]
+    fn four_equal_weighted_validators_deliver_in_two_steps_with_one_silent() {
+        let c = crate::committee::test_support::seated(&[200, 200, 200, 200]);
+        let d = [7u8; 32];
+        let (out, stats) = run_in(&c, FaultBound::WholeMembers, &[3], &[Some(d); 4]);
+        assert_eq!(out, [Some(d), Some(d), Some(d), None]);
+        for (i, s) in stats.iter().enumerate().take(3) {
+            assert_eq!((s.fast, s.slow), (1, 0), "party {i}");
+        }
+    }
+
+    #[test]
+    fn under_the_seat_bound_one_silent_validator_of_four_sends_delivery_the_slower_way() {
+        let c = crate::committee::test_support::seated(&[200, 200, 200, 200]);
+        let d = [7u8; 32];
+        let (out, stats) = run_in(&c, FaultBound::Seats, &[3], &[Some(d); 4]);
+        assert_eq!(out, [Some(d), Some(d), Some(d), None]);
+        for (i, s) in stats.iter().enumerate().take(3) {
+            assert_eq!((s.fast, s.slow), (0, 1), "party {i}");
+        }
+    }
+
+    #[test]
+    fn a_weighted_equivocating_author_cannot_make_two_digests_deliver() {
+        // The author holds 200 of 800 seats and tells two parties one digest
+        // and the third another, in every split.
+        let c = crate::committee::test_support::seated(&[200, 200, 200, 200]);
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        for other in 1..4usize {
+            let mut proposals = [Some(a); 4];
+            proposals[0] = None;
+            proposals[other] = Some(b);
+            for bound in [FaultBound::Seats, FaultBound::WholeMembers] {
+                let (out, _) = run_in(&c, bound, &[0], &proposals);
+                let delivered: Vec<Digest> = out.into_iter().flatten().collect();
+                assert!(
+                    delivered.windows(2).all(|w| w[0] == w[1]),
+                    "split at {other} under {bound:?}: {delivered:?}"
+                );
+            }
+        }
+    }
+
+    /// Runs one instance in `c` under `bound` where every party in `faulty`
+    /// (the author, party 0, among them) sends every signal for two digests
+    /// to every honest party, before or after the honest parties' own
+    /// messages, and the author proposes the second digest to the honest
+    /// parties in `split` and the first to the rest. Returns what each party
+    /// delivered.
+    fn equivocation(
+        c: &Committee,
+        bound: FaultBound,
+        faulty: &[ValidatorIndex],
+        split: &[ValidatorIndex],
+        forged_first: bool,
+        order: [Digest; 2],
+    ) -> Vec<Vec<Digest>> {
+        type Queue = VecDeque<(ValidatorIndex, ValidatorIndex, Signal)>;
+        let n = c.size() as u16;
+        let honest: Vec<ValidatorIndex> = (0..n).filter(|i| !faulty.contains(i)).collect();
+        let mut parties: Vec<ReliableBroadcast> =
+            (0..n).map(|me| ReliableBroadcast::new(me, bound)).collect();
+        let mut delivered = vec![Vec::new(); n as usize];
+        let take = |i: ValidatorIndex,
+                    acts: Vec<RbcAction>,
+                    queue: &mut Queue,
+                    delivered: &mut [Vec<Digest>]| {
+            for act in acts {
+                match act {
+                    RbcAction::Broadcast(s) => {
+                        for to in honest.iter().filter(|to| **to != i) {
+                            queue.push_back((i, *to, s));
+                        }
+                    }
+                    RbcAction::Deliver { digest, .. } => delivered[i as usize].push(digest),
+                }
+            }
+        };
+        let mut own = Queue::new();
+        for i in &honest {
+            let digest = if split.contains(i) {
+                order[1]
+            } else {
+                order[0]
+            };
+            let acts = parties[*i as usize].on_propose(c, 0, 1, 0, digest);
+            take(*i, acts, &mut own, &mut delivered);
+        }
+        let mut forged = Queue::new();
+        for from in faulty {
+            for digest in order {
+                for kind in [
+                    SignalKind::Echo,
+                    SignalKind::Vote,
+                    SignalKind::Ack,
+                    SignalKind::Ready,
+                ] {
+                    for to in &honest {
+                        let signal = Signal {
+                            kind,
+                            round: 1,
+                            source: 0,
+                            digest,
+                        };
+                        forged.push_back((*from, *to, signal));
+                    }
+                }
+            }
+        }
+        let mut queue = if forged_first {
+            forged.append(&mut own);
+            forged
+        } else {
+            own.append(&mut forged);
+            own
+        };
+        while let Some((from, to, s)) = queue.pop_front() {
+            let acts = parties[to as usize].on_signal(c, from, s);
+            take(to, acts, &mut queue, &mut delivered);
+        }
+        delivered
+    }
+
+    /// No honest party of `c` delivers a digest another delivers not, under
+    /// either bound, for every split of the honest parties and every order.
+    fn assert_no_split(c: &Committee, faulty: &[ValidatorIndex]) {
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        let honest: Vec<ValidatorIndex> = (0..c.size() as u16)
+            .filter(|i| !faulty.contains(i))
+            .collect();
+        for bound in [FaultBound::Seats, FaultBound::WholeMembers] {
+            for mask in 0..1u32 << honest.len() {
+                let split: Vec<ValidatorIndex> = honest
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| mask >> k & 1 == 1)
+                    .map(|(_, i)| *i)
+                    .collect();
+                for forged_first in [true, false] {
+                    for order in [[a, b], [b, a]] {
+                        let delivered = equivocation(c, bound, faulty, &split, forged_first, order);
+                        let all: Vec<Digest> = delivered.iter().flatten().copied().collect();
+                        assert!(
+                            all.windows(2).all(|w| w[0] == w[1]),
+                            "{bound:?}, faulty {faulty:?}, split {split:?}, forged first \
+                             {forged_first}: {delivered:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_author_that_signals_both_digests_cannot_split_weighted_validators() {
+        // The author holds 200 of 800 seats.
+        assert_no_split(&crate::committee::test_support::seated(&[200; 4]), &[0]);
+    }
+
+    #[test]
+    fn faulty_whole_members_holding_the_bound_cannot_split_uneven_committees() {
+        // The author alone holds the bound t; then two members together hold
+        // it, 100 and 100 seats (t = 200) or 150 and 100 (t = 250), and both
+        // signal both digests.
+        for (seats, faulty) in [
+            (&[200, 400, 100, 100][..], &[0u16][..]),
+            (&[100, 400, 200, 100], &[0, 3]),
+            (&[250, 300, 150, 100], &[0]),
+            (&[150, 300, 250, 100], &[0, 3]),
+        ] {
+            let c = crate::committee::test_support::seated(seats);
+            let held: u64 = faulty.iter().map(|i| seats[*i as usize]).sum();
+            assert_eq!(
+                held,
+                crate::committee::largest_faulty_weight(&c),
+                "{seats:?}"
+            );
+            assert_no_split(&c, faulty);
+        }
+    }
+
+    #[test]
+    fn uneven_committees_deliver_with_members_holding_the_bound_silent() {
+        let d = [7u8; 32];
+        for (seats, silent) in [
+            (&[400, 200, 100, 100][..], &[1u16][..]),
+            (&[400, 200, 100, 100], &[2, 3]),
+            (&[300, 250, 150, 100], &[1]),
+            (&[300, 250, 150, 100], &[2, 3]),
+        ] {
+            let c = crate::committee::test_support::seated(seats);
+            for bound in [FaultBound::Seats, FaultBound::WholeMembers] {
+                let (out, _) = run_in(&c, bound, silent, &[Some(d); 4]);
+                for (i, got) in out.iter().enumerate() {
+                    let want = (!silent.contains(&(i as u16))).then_some(d);
+                    assert_eq!(
+                        *got, want,
+                        "{seats:?}, silent {silent:?}, {bound:?}, party {i}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -522,14 +758,14 @@ mod tests {
             digest: d,
         };
         // Enough non-author ECHOs: the two-step path.
-        let mut fast = ReliableBroadcast::new(1);
+        let mut fast = ReliableBroadcast::new(1, FaultBound::Seats);
         for from in [2, 3] {
             fast.on_signal(&c, from, signal(SignalKind::Echo));
         }
         assert_eq!(fast.delivered(1, 0), Some(d));
         assert_eq!(fast.stats(), RbcStats { fast: 1, slow: 0 });
         // No ECHOs at all, a quorum of READYs: the slow path.
-        let mut slow = ReliableBroadcast::new(1);
+        let mut slow = ReliableBroadcast::new(1, FaultBound::Seats);
         for from in [0, 2, 3] {
             slow.on_signal(&c, from, signal(SignalKind::Ready));
         }
@@ -568,7 +804,7 @@ mod tests {
     #[test]
     fn a_proposal_not_from_its_author_is_ignored() {
         let (c, _) = committee(4);
-        let mut p = ReliableBroadcast::new(1);
+        let mut p = ReliableBroadcast::new(1, FaultBound::Seats);
         assert!(p.on_propose(&c, 2, 1, 0, [1; 32]).is_empty());
         assert!(p.proposed(1, 0).is_none());
     }
@@ -576,7 +812,7 @@ mod tests {
     #[test]
     fn a_sender_counts_once_per_kind_whatever_digest_it_names() {
         let (c, _) = committee(4);
-        let mut p = ReliableBroadcast::new(1);
+        let mut p = ReliableBroadcast::new(1, FaultBound::Seats);
         let echo = |d| Signal {
             kind: SignalKind::Echo,
             round: 1,

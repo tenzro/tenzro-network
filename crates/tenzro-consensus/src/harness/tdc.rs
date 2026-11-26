@@ -1631,7 +1631,7 @@ mod epoch_tests {
     /// 50 ms, and no CPU limit: the protocol's own timing. Prints one
     /// `GATE {json}` line. Run with `--ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     #[allow(clippy::needless_range_loop)] // the loop index is also the node's validator index
     fn gate_epoch_handover_timing() {
         let mut p = TdcParams::honest();

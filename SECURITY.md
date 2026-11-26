@@ -36,5 +36,15 @@ Every commit to the main line goes through a standing program on the project's o
 Security fixes go into the latest release. The testnet runs the current release
 line; older releases are not patched.
 
+## Time from an advisory to a signed update
+
+The clock starts when an advisory affecting a released build is published or
+reported to us privately, whichever is first. The target for a signed release
+that fixes it, with its release notice, is 72 hours for an advisory rated
+critical or high and 14 days for any other. When no upstream fix exists, the
+target applies to a release that removes, patches or disables the affected
+code, or to an accepted decision in `.cargo/audit.toml` saying why the build is
+not exposed.
+
 The threat model, the security invariants and the wallet custody model are in
 [docs/security](docs/security).

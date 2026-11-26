@@ -1,11 +1,11 @@
 //! Guided setup wizard.
 //!
-//! `tenzro setup` walks a new participant through hardware detection and
+//! `tenzro setup` walks a new operator through hardware detection and
 //! one of three paths:
 //!
-//! 1. **Join the Tenzro network** — consume models and services, provide
-//!    inference from this machine, or run a validator on the public
-//!    network. Wraps the existing `tenzro join` RPC flow.
+//! 1. **Join the Tenzro network** — provide AI, compute or storage from
+//!    this machine, serve public RPC, or run a validator on the public
+//!    network.
 //! 2. **Create a local or sovereign network** — generate a founding
 //!    validator keyset, assemble a genesis v3 file, and print the exact
 //!    start command for this machine plus a join command for every peer.
@@ -24,6 +24,7 @@ use dialoguer::{Input, MultiSelect, Select, theme::ColorfulTheme};
 use rand::Rng;
 use tenzro_types::network::{NetworkRole, RoleSet};
 
+use crate::commands::fixes;
 use crate::commands::hardware::{HardwareProfile, detect_hardware_profile};
 use crate::commands::join::JoinCmd;
 use crate::commands::preflight;
@@ -33,9 +34,10 @@ use crate::commands::update::install::Layout;
 use crate::config;
 use crate::onboarding::wizard::{
     Admission, AgentDelegation, Authority, AuthorityFacts, Funding, MachineFacts,
-    OPERATOR_SERVICES, OperationMode, PERSONAS, Persona, RESUME_HINT, Step, TESTNET_VALUE_LINE,
-    WizardRecord, admission_menu_note, admission_refusal, funding_decision, gate_admission,
-    gate_roles, persona_availability, required_stake_wei, requirement_line, resolve_choice,
+    OPERATOR_SERVICES, OperationMode, PERSONAS, Persona, Proposal, RESUME_HINT, Step,
+    TESTNET_VALUE_LINE, WizardRecord, admission_menu_note, admission_refusal, funding_decision,
+    gate_admission, gate_roles, persona_availability, required_stake_wei, requirement_line,
+    resolve_choice,
 };
 
 /// Guided setup — join the network, provide, validate, or bootstrap a
@@ -56,11 +58,10 @@ pub struct SetupCmd {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Participation mode on the public network. A shorthand for `--roles`:
-    /// `consume` selects no serving role, `provide` selects the AI provider
-    /// role, `validate` selects the validator role. `--roles` wins when both
+    /// Role on the public network. A shorthand for `--roles`: `provide`
+    /// selects the AI provider role, `validate` selects the validator role. `--roles` wins when both
     /// are given, since it says strictly more.
-    #[arg(long, value_parser = ["consume", "provide", "validate"])]
+    #[arg(long, value_parser = ["provide", "validate"])]
     pub mode: Option<String>,
 
     /// Machine name — a label of 3-63 characters, `[a-z0-9-]`, not starting
@@ -75,7 +76,8 @@ pub struct SetupCmd {
 
     /// How the node is operated: `self` (a human holds the passkey and
     /// approves actions), `autonomous` (the machine answers for itself via
-    /// its TPM 2.0 or Secure Enclave) or `agentic` (an AI agent operates the
+    /// its TPM 2.0 or Secure Enclave, or another machine's TPM through the
+    /// key holder) or `agentic` (an AI agent operates the
     /// node under a delegation from a human passkey). Without it an
     /// interactive run asks.
     #[arg(long, value_parser = ["self", "autonomous", "agentic"])]
@@ -103,6 +105,12 @@ pub struct SetupCmd {
     /// Discard the saved place of an unfinished setup and start over.
     #[arg(long)]
     pub restart: bool,
+
+    /// This machine does not stay on (a laptop, a machine set to sleep):
+    /// setup then proposes following the chain rather than a role. Asked
+    /// when setup runs interactively.
+    #[arg(long)]
+    pub part_time: bool,
 
     /// Comma-separated roles this node serves, e.g.
     /// `validator,ai,storage`.
@@ -164,6 +172,12 @@ pub struct SetupCmd {
     #[arg(long)]
     pub apply: bool,
 
+    /// With --apply, also keep this machine awake while the node runs, on
+    /// mains power only (`tenzro power keep-awake`). Interactive runs are
+    /// asked, and the answer defaults to no.
+    #[arg(long)]
+    pub keep_awake: bool,
+
     /// Non-interactive: accept defaults, take everything else from flags.
     #[arg(long)]
     pub yes: bool,
@@ -215,7 +229,7 @@ impl SetupCmd {
             Some(p) => p.to_string(),
             None => {
                 let items = [
-                    "Join the Tenzro network (consume, provide, or validate)",
+                    "Join the Tenzro network (provide or validate)",
                     "Create a local or sovereign network",
                     "Join an existing private network",
                 ];
@@ -246,7 +260,7 @@ impl SetupCmd {
     ///    this machine's TPM / Secure Enclave) and how the node is operated.
     ///    Blocking: the wallet is created here, from the chosen authority's key
     ///    material, and never before. This process holds no wallet private key.
-    /// 3. **Role** - participant, operator, validator or RPC provider, gated
+    /// 3. **Role** - operator, validator or RPC provider, gated
     ///    by what the machine measures at.
     /// 4. **Funding** - when the role bonds and the wallet holds less.
     /// 5. **Reachability** - public or local network only.
@@ -344,6 +358,8 @@ impl SetupCmd {
                         // Provider registration, bond and pricing follow the
                         // role and funding steps, once the role is known.
                         provider: false,
+                        node_account: false,
+                        delegated: Default::default(),
                         role: None,
                         wallet: None,
                     };
@@ -373,7 +389,10 @@ impl SetupCmd {
                 wiz_section(&Step::Role.progress_line());
                 let admission = self.read_admission(&rec).await;
                 let r = self.resolve_roles(interactive, &machine, &admission)?;
-                wiz_kv("Role", Persona::of_roles(&r).label());
+                wiz_kv(
+                    "Role",
+                    Persona::of_roles(&r).map_or("none (follows the chain)", Persona::label),
+                );
                 wiz_kv("Serving", &r.to_string());
                 wiz_gap();
                 rec.roles = Some(r.to_string());
@@ -713,7 +732,7 @@ impl SetupCmd {
             required += VALIDATOR_GAS_RESERVE_WEI;
         }
         if required == 0 {
-            wiz_note("A participant needs no stake: nothing to fund.");
+            wiz_note("These roles need no stake: nothing to fund.");
             return Ok(true);
         }
         let account = if roles.is_validator() || authority != Authority::Passkey {
@@ -769,7 +788,9 @@ impl SetupCmd {
         }
         wiz_note(TESTNET_VALUE_LINE);
         let need = StakeNeed {
-            role: Persona::of_roles(roles).label().to_ascii_lowercase(),
+            role: Persona::of_roles(roles)
+                .map_or("node", Persona::label)
+                .to_ascii_lowercase(),
             required_wei: required,
             balance_wei: balance,
             account: account.clone(),
@@ -863,6 +884,28 @@ impl SetupCmd {
         service::install(std::env::consts::OS, unit)?;
         wiz_done("Service installed and started");
 
+        wiz_section("Power");
+        let keep_awake = if interactive {
+            prompt_confirm(
+                "Keep this machine awake while the node runs, on mains power only? \
+                 (`tenzro power keep-awake off` undoes it)",
+                false,
+            )?
+        } else {
+            self.keep_awake
+        };
+        if keep_awake {
+            super::power::keep_awake_on(std::env::consts::OS)?;
+        } else {
+            wiz_note(
+                "The machine sleeps as its own settings say; `tenzro power keep-awake on` changes that.",
+            );
+        }
+        wiz_note("To reach, manage and wake this machine from elsewhere, once:");
+        for line in super::power::remote_steps(std::env::consts::OS) {
+            wiz_note(&format!("  {line}"));
+        }
+
         wiz_section("Sync");
         match service::follow_sync(LOCAL_RPC, service::FOLLOW_FOR).await? {
             (Some(s), true) => wiz_done(&format!("Caught up: {}", s.describe())),
@@ -895,16 +938,57 @@ impl SetupCmd {
     /// than later as a raw key-derivation error.
     fn run_preflight(&self, interactive: bool, hw: &HardwareProfile) -> Result<()> {
         wiz_section("Preflight");
-        let facts = preflight::Facts::probe(has_secure_enclave(hw));
-        let checks = preflight::evaluate(&facts);
-        preflight::render(&checks, |line| match line {
-            preflight::Line::Check(preflight::Level::Pass, text) => wiz_done(&text),
-            preflight::Line::Check(preflight::Level::Todo, text) => {
-                wiz_note(&format!("To do: {text}"))
+        let show = |checks: &[preflight::Check]| {
+            preflight::render(checks, |line| match line {
+                preflight::Line::Check(preflight::Level::Pass, text) => wiz_done(&text),
+                preflight::Line::Check(preflight::Level::Todo, text) => {
+                    wiz_note(&format!("To do: {text}"))
+                }
+                preflight::Line::Check(_, text) => wiz_warn(&text),
+                preflight::Line::Fix(text) => wiz_note(&format!("    {text}")),
+            })
+        };
+        let mut facts = preflight::Facts::probe(has_secure_enclave(hw));
+        let mut checks = preflight::evaluate(&facts);
+        show(&checks);
+        // What the machine can repair for itself is offered together, with
+        // one request for the operating system's permission. The TPM keys
+        // are created by the step below.
+        if interactive {
+            let ran = {
+                let steps: Vec<_> = fixes::pending(&checks)
+                    .into_iter()
+                    .filter(|s| s.label != preflight::KEYS_LABEL)
+                    .collect();
+                if steps.is_empty() {
+                    false
+                } else {
+                    wiz_note("This machine can repair these itself:");
+                    for line in fixes::plan_text(&steps, fixes::is_root()).lines() {
+                        wiz_note(line.trim_start());
+                    }
+                    if prompt_confirm("Run these fixes now?", true)? {
+                        for outcome in fixes::apply(&steps)? {
+                            let text = format!("{}: {}", outcome.label, outcome.detail);
+                            if outcome.ok {
+                                wiz_done(&text)
+                            } else {
+                                wiz_warn(&text)
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if ran {
+                facts = preflight::Facts::probe(has_secure_enclave(hw));
+                checks = preflight::evaluate(&facts);
+                wiz_note("Checked again:");
+                show(&checks);
             }
-            preflight::Line::Check(_, text) => wiz_warn(&text),
-            preflight::Line::Fix(text) => wiz_note(&format!("    {text}")),
-        });
+        }
         if preflight::blocked(&checks) {
             return Err(anyhow!(
                 "this machine is not ready: fix the items marked above, then run `tenzro setup` again"
@@ -979,7 +1063,7 @@ impl SetupCmd {
     ///
     /// `--roles` and `--mode` are the script flags: they skip the question and
     /// go through the same requirement gate. Otherwise the user picks a
-    /// persona (participant, operator, validator or RPC provider); each line
+    /// persona (operator, validator or RPC provider); each line
     /// says what it requires, and one the machine does not meet is refused
     /// with what is unmet and how to fix it, never silently.
     fn resolve_roles(
@@ -1001,7 +1085,7 @@ impl SetupCmd {
         if let Some(mode) = self.mode.as_deref() {
             let roles = Persona::from_mode_flag(mode)
                 .map(|p| p.roles(&[]))
-                .unwrap_or_else(RoleSet::client);
+                .ok_or_else(|| anyhow!("unknown --mode '{mode}': use provide or validate"))?;
             gate_roles(&roles, machine)?;
             gate_admission(&roles, admission)?;
             wiz_note(&format!("--mode {mode} selected roles: {roles}"));
@@ -1009,13 +1093,45 @@ impl SetupCmd {
         }
 
         let summary = |p: Persona| match p {
-            Persona::Participant => "use the network and its models, light, no serving duties",
-            Persona::Operator => "provide AI, compute or storage and earn TNZO",
+            Persona::Operator => "provide AI, compute or storage and be paid for the work served",
             Persona::Validator => "take part in consensus",
             Persona::RpcProvider => "serve public RPC",
         };
+        // One question the machine cannot answer by measurement, then a
+        // proposal from what it measures; the operator may choose otherwise.
+        let stays_on = if interactive {
+            prompt_confirm(
+                "Will this machine stay on (on mains power, not set to sleep)?",
+                !self.part_time,
+            )?
+        } else {
+            !self.part_time
+        };
+        let (proposal, why) =
+            crate::onboarding::wizard::propose(machine, stays_on, !admission.refuses_validator());
+        let follow_label = "Follow the chain: keep an up-to-date copy and use the network; no role, \
+                            no bond";
+        let proposed_label = match proposal {
+            Proposal::Persona(p) => p.label(),
+            Proposal::Follow { light: true } => "follow the chain as a light node",
+            Proposal::Follow { light: false } => "follow the chain, keeping all of it",
+        };
+        wiz_note(&format!(
+            "Proposed for this machine: {proposed_label}, because {why}."
+        ));
+        let follow_roles = match proposal {
+            Proposal::Follow { .. } => proposal.roles(),
+            Proposal::Persona(_) => Proposal::Follow {
+                light: machine.ram_gb <= crate::onboarding::wizard::LIGHT_MAX_RAM_GB,
+            }
+            .roles(),
+        };
+        let proposed_index = match proposal {
+            Proposal::Persona(p) => PERSONAS.iter().position(|q| *q == p).unwrap_or(0),
+            Proposal::Follow { .. } => PERSONAS.len(),
+        };
         for _ in 0..5 {
-            let labels: Vec<String> = PERSONAS
+            let mut labels: Vec<String> = PERSONAS
                 .iter()
                 .map(|p| {
                     let gate = persona_availability(*p, machine);
@@ -1037,13 +1153,18 @@ impl SetupCmd {
                     )
                 })
                 .collect();
+            labels.push(follow_label.to_string());
             let items: Vec<&str> = labels.iter().map(String::as_str).collect();
-            let mut persona = PERSONAS[prompt_select(
+            let chosen = prompt_select(
                 interactive,
                 "What do you want to be on the network?",
                 &items,
-                0,
-            )?];
+                proposed_index,
+            )?;
+            if chosen == PERSONAS.len() {
+                return Ok(follow_roles);
+            }
+            let mut persona = PERSONAS[chosen];
 
             // Validator admission is closed to this machine: say why, and
             // offer the roles that are open.
@@ -1052,14 +1173,12 @@ impl SetupCmd {
                 for line in admission_refusal().lines() {
                     wiz_note(line);
                 }
-                let instead = [Persona::Operator, Persona::Participant];
-                let labels: Vec<String> = instead
-                    .iter()
-                    .map(|p| format!("{}: {}", p.label(), summary(*p)))
-                    .collect();
-                let items: Vec<&str> = labels.iter().map(String::as_str).collect();
-                persona = instead
-                    [prompt_select(interactive, "Choose a role that is open now", &items, 1)?];
+                wiz_note(&format!(
+                    "Continuing as {}: {}.",
+                    Persona::Operator.label().to_ascii_lowercase(),
+                    summary(Persona::Operator)
+                ));
+                persona = Persona::Operator;
             }
 
             if let Err(unmet) = persona_availability(persona, machine) {
@@ -1089,7 +1208,9 @@ impl SetupCmd {
             let names: Vec<&str> = offered
                 .iter()
                 .map(|s| match s {
-                    NetworkRole::ModelProvider => "AI provider: serve models and earn TNZO",
+                    NetworkRole::ModelProvider => {
+                        "AI provider: serve models, paid per call at your rate card"
+                    }
                     NetworkRole::ComputeProvider => "Compute provider: rent out accelerator time",
                     _ => "Storage provider: host network storage",
                 })
@@ -1109,7 +1230,7 @@ impl SetupCmd {
             return Ok(Persona::Operator.roles(&chosen));
         }
         Err(anyhow!(
-            "no role the machine meets was chosen after five tries. Fix: pick Participant, or fix the unmet requirements above and run `tenzro setup` again."
+            "no role the machine meets was chosen after five tries. Fix: meet the requirements listed above and run `tenzro setup` again."
         ))
     }
 
@@ -1568,7 +1689,7 @@ impl SetupCmd {
 /// Why a scoped autonomous setup run needs `--rpc`.
 pub const SCOPED_IDENTITY_NEEDS_RPC: &str = "this setup run is scoped to a data directory (--data-dir or \
      $TENZRO_DATA_DIR) and the identity step cannot be skipped: pass --rpc <the node to register this \
-     machine on>. There is no way to set up a participant without its hardware-rooted identity.";
+     machine on>. There is no way to set up a machine without its hardware-rooted identity.";
 
 /// The node the autonomous identity step registers on. The public network
 /// path reaches the public network, the same endpoint `JoinCmd` resolves to
@@ -2013,6 +2134,9 @@ struct ServicePaths {
     tenzro: String,
     /// The install directory an update changes.
     install_dir: String,
+    /// Whether `install_dir` is a versioned install root, whose `current`
+    /// link the start count repoints when it rolls a release back.
+    versioned: bool,
 }
 
 /// The service paths for the `tenzro` at `exe`.
@@ -2024,22 +2148,21 @@ struct ServicePaths {
 /// `tenzro`; when none is there, the usual install location is named, since
 /// launchd needs an absolute path.
 fn service_paths_for(exe: &Path) -> ServicePaths {
-    let node_name = format!("tenzro-node{}", std::env::consts::EXE_SUFFIX);
-    let cli_name = format!("tenzro{}", std::env::consts::EXE_SUFFIX);
     let layout = Layout::of_executable(exe).unwrap_or_else(|_| Layout::Flat {
         dir: exe.parent().map(Path::to_path_buf).unwrap_or_default(),
     });
     let tenzro = match &layout {
-        Layout::Versioned { .. } => layout.binary(&cli_name),
+        Layout::Versioned { .. } => layout.binary("tenzro"),
         Layout::Flat { .. } => exe.to_path_buf(),
     };
-    let node = Some(layout.binary(&node_name))
+    let node = Some(layout.binary("tenzro-node"))
         .filter(|p| p.exists())
         .unwrap_or_else(|| PathBuf::from("/usr/local/bin/tenzro-node"));
     ServicePaths {
         node: node.display().to_string(),
         tenzro: tenzro.display().to_string(),
         install_dir: layout.dir().display().to_string(),
+        versioned: matches!(layout, Layout::Versioned { .. }),
     }
 }
 
@@ -2212,7 +2335,9 @@ Wants=network-online.target
 
 [Service]
 # Confined: the invoking unprivileged user, no new privileges, a read-only
-# system, writable data directory only, and only the TPM and GPU devices.
+# system, writable data directory only (and, for a versioned install, its
+# install root: the start count below repoints `current` there when it rolls
+# a release back), and only the TPM and GPU devices.
 # Every HTTP listener binds loopback; public exposure is the operator's own
 # proxy, outside the node.
 User={user}
@@ -2227,7 +2352,7 @@ LockPersonality=true
 RestrictNamespaces=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths={data_dir}
+ReadWritePaths={writable}
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -2242,6 +2367,8 @@ DeviceAllow=char-drm rw
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 Restart=on-failure
 RestartSec=5
+SuccessExitStatus=75
+RestartForceExitStatus=75
 TimeoutStopSec=60
 KillSignal=SIGTERM
 
@@ -2264,7 +2391,11 @@ WantedBy=multi-user.target
         boot_check = boot_check,
         exec = exec,
         user = user,
-        data_dir = data_dir.display(),
+        writable = if paths.versioned {
+            format!("{} {}", data_dir.display(), paths.install_dir)
+        } else {
+            data_dir.display().to_string()
+        },
     )
 }
 
@@ -2514,6 +2645,7 @@ mod onboarding_tests {
             node: "/opt/tenzro/current/bin/tenzro-node".into(),
             tenzro: "/opt/tenzro/current/bin/tenzro".into(),
             install_dir: "/opt/tenzro".into(),
+            versioned: true,
         }
     }
 
@@ -2546,13 +2678,33 @@ mod onboarding_tests {
         assert_eq!(unit.matches("ExecStartPre=").count(), 1);
         assert!(unit.contains("\nUser=tenzro\n"));
         assert!(
-            unit.contains("\nReadWritePaths=/var/lib/tenzro\n"),
-            "the count writes only under the data directory"
+            unit.contains("\nSuccessExitStatus=75\nRestartForceExitStatus=75\n"),
+            "a restart the operator asks for is a clean end that starts the node again"
+        );
+        assert!(
+            unit.contains("\nReadWritePaths=/var/lib/tenzro /opt/tenzro\n"),
+            "the count writes the update state and, to roll back, the versioned install root"
         );
         assert_eq!(
             service::systemd_program(&unit),
             Some(PathBuf::from("/opt/tenzro/current/bin/tenzro-node"))
         );
+    }
+
+    #[test]
+    fn a_flat_install_stays_read_only_to_the_unit() {
+        let paths = ServicePaths {
+            node: "/usr/local/bin/tenzro-node".into(),
+            tenzro: "/usr/local/bin/tenzro".into(),
+            install_dir: "/usr/local/bin".into(),
+            versioned: false,
+        };
+        let unit = systemd_unit_text(Path::new("/var/lib/tenzro"), &paths, &[], "rpc", "tenzro");
+        let writable: Vec<&str> = unit
+            .lines()
+            .filter(|l| l.starts_with("ReadWritePaths="))
+            .collect();
+        assert_eq!(writable, ["ReadWritePaths=/var/lib/tenzro"]);
     }
 
     #[test]
@@ -2607,6 +2759,7 @@ mod onboarding_tests {
             root.join("current/bin/tenzro").display().to_string()
         );
         assert_eq!(p.install_dir, root.display().to_string());
+        assert!(p.versioned);
         assert!(
             !p.node.contains("versions"),
             "an update removes old release directories"
@@ -2626,6 +2779,7 @@ mod onboarding_tests {
         );
         assert_eq!(p.tenzro, exe.display().to_string());
         assert_eq!(p.install_dir, dir.display().to_string());
+        assert!(!p.versioned);
 
         let node = dir.join(format!("tenzro-node{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&node, b"node").unwrap();

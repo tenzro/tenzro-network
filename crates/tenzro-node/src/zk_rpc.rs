@@ -164,6 +164,52 @@ pub(crate) async fn verify_statement(
     })
 }
 
+/// `tenzro_sendZkProof`.
+///
+/// Params: `proof`, a proof envelope (bincode `tenzro_zk::Proof`) as hex.
+/// Hands it to every validator of the current committee over the zk-proof
+/// protocol; each verifies it and states its verdict on chain, and the proof
+/// is recorded once two thirds of the bonded stake did. Returns what each
+/// validator answered.
+pub(crate) async fn handle_send_zk_proof(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = object_params(params)?;
+    let envelope = params
+        .get("proof")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| invalid_params("proof is required (a proof envelope as hex)"))
+        .and_then(|s| decode_hex(s).map_err(|e| invalid_params(format!("proof: {e}"))))?;
+    if envelope.len() > tenzro_iroh::MAX_PROOF_BYTES {
+        return Err(invalid_params(format!(
+            "a proof envelope is at most {} bytes; this one is {}",
+            tenzro_iroh::MAX_PROOF_BYTES,
+            envelope.len()
+        )));
+    }
+    let consensus = node
+        .consensus()
+        .ok_or_else(|| invalid_params("this node follows no committee"))?;
+    let resolver = node
+        .iroh_resolver()
+        .ok_or_else(|| invalid_params("this node has no network endpoint"))?;
+    let answers =
+        crate::zk_proofs::send_to_validators(consensus, resolver.endpoint(), envelope).await;
+    let taken = answers.iter().filter(|(_, a)| a.is_ok()).count();
+    Ok(json!({
+        "validators": answers.len(),
+        "taken": taken,
+        "answers": answers
+            .iter()
+            .map(|(endpoint, answer)| match answer {
+                Ok(()) => json!({ "endpoint": endpoint, "taken": true }),
+                Err(why) => json!({ "endpoint": endpoint, "taken": false, "reason": why }),
+            })
+            .collect::<Vec<_>>(),
+    }))
+}
+
 /// `tenzro_verifyZkProof`.
 ///
 /// Params: `circuit_id`, `public_inputs` (`[digest, binding]`, 32-byte hex

@@ -164,7 +164,7 @@ async fn execute_refresh(args: &RefreshArgs) -> Result<()> {
 /// The key is created in, and never leaves, this machine's TPM or Secure
 /// Enclave, so there is no path to print.
 fn execute_dpop_key() -> Result<()> {
-    let key = crate::dpop::DpopKey::load_or_create()?;
+    let key = crate::dpop::load_or_create()?;
     output::print_success("DPoP key ready");
     output::print_field("Source", "held by this machine's TPM or Secure Enclave");
     output::print_field("JWK", &key.jwk()?);
@@ -179,7 +179,7 @@ fn execute_dpop_key() -> Result<()> {
 
 /// Sign one proof, for driving the node outside this CLI.
 fn execute_dpop_proof(args: &DpopProofArgs) -> Result<()> {
-    let key = crate::dpop::DpopKey::load_or_create()?;
+    let key = crate::dpop::load_or_create()?;
     let token = args
         .token
         .clone()

@@ -1,10 +1,10 @@
 # Tenzro Network CLI
 
-The official command-line interface for operating Tenzro Network nodes, managing wallets, models, staking, and governance. Interact with Tenzro Ledger (the settlement layer) and earn TNZO tokens.
+The official command-line interface for operating Tenzro Network nodes, managing wallets, models, storage, compute, staking, and governance. Interact with Tenzro Ledger, the settlement layer, and take part as a provider paid for the work it serves.
 
 ## Features
 
-- **Network Onboarding**: One-click participation via `join` command
+- **Network Onboarding**: `setup` for operators and validators; `join --provider` for the provider path
 - **Node Management**: Monitor node status
 - **Live Status**: `tenzro status` — memory, accelerators, loaded models and traffic in one readout, with `--watch` for a continuous refresh and `--json` for scripting
 - **Node Visibility**: `tenzro visibility` — advertise or withhold individual capabilities (ai, storage, database, hosting, rpc, tee, compute) without unloading them; consensus stays advertised so a validator can still vote
@@ -41,8 +41,8 @@ cargo run -p tenzro-cli -- --help
 # Guided setup — join the network, provide, validate, or bootstrap a private network
 tenzro setup
 
-# One-click network participation (provisions identity, wallet, hardware profile)
-tenzro join
+# Provision this machine's identity and wallet, then the provider path on the local node
+tenzro join --provider
 
 # Check your balance
 tenzro wallet balance
@@ -64,7 +64,7 @@ All commands use real JSON-RPC calls via reqwest. No artificial delays.
 # Guided setup wizard: pick a path (join the public network, create a local or
 # sovereign network, or join an existing private network). Every prompt has a
 # matching flag for non-interactive use:
-#   --path {network,local,private}  --mode {consume,provide,validate}
+#   --path {network,local,private}  --mode {provide,validate}
 #   --network-name --chain-id --data-dir --stake --bootstrap --genesis
 #   --name --rpc --yes
 tenzro setup
@@ -75,8 +75,8 @@ tenzro setup
 # join command for each peer
 tenzro setup --path local --network-name lab --yes
 
-# One-click join: provisions identity, wallet, hardware profile
-tenzro join
+# Provision identity and wallet, then the provider path on the local node
+tenzro join --provider
 ```
 
 ### Node Management
@@ -225,7 +225,8 @@ tenzro node storage retrieve --object-id corpus-1 --out ./restored.jsonl
 tenzro wallet balance --address <address>
 
 # Send TNZO, signed in this machine's TPM or Secure Enclave (see Self-Custody below).
-tenzro wallet send <to-address> <amount> --asset TNZO
+# A recipient new to the account is confirmed by repeating its address.
+tenzro wallet send <to-address> <amount> --asset TNZO --confirm-address <to-address>
 
 ```
 
@@ -246,7 +247,7 @@ is refused.
 tenzro wallet create-local --key-namespace payer-1
 
 # Send TNZO signed as that account.
-tenzro wallet send <to-account> <amount> --key-namespace payer-1
+tenzro wallet send <to-account> <amount> --key-namespace payer-1 --confirm-address <to-account>
 ```
 
 `wallet send` reads the amount as an exact decimal, waits for the transfer to be
@@ -259,7 +260,7 @@ identity first: run `tenzro identity register-account` once, after funding it.
 ### Model Management
 
 The `tenzro` CLI is the full node surface: it downloads weights and serves
-models so your node becomes a provider. If you only want to _use_ a model —
+models so your node becomes a provider. If you only want to use a model —
 send a prompt to a provider that already serves it, with no node and no weights
 — call a provider's public RPC through one of the SDKs (TypeScript, Python or
 Rust) instead.
@@ -476,7 +477,8 @@ acceptance is refused with a license error.
 ```bash
 # Bond stake for a role, signed in hardware (a Stake transaction). A node
 # serves a bonded role only while its operator holds that role's bond; the
-# validator role bonds through RegisterValidator.
+# validator role bonds through RegisterValidator. Each stake write waits for
+# its receipt and fails with the revert reason when the chain refused it.
 tenzro stake bond --role rpc --amount 100000000000000000000000
 tenzro stake bond --role storage --amount 50000000000000000000000 --terabytes 4
 tenzro stake bond --role compute --amount 1000000000000000000000 --accelerators consumer,datacentre
@@ -796,10 +798,10 @@ tenzro agent audit evidence export --agent <did> --audit audit.json --out pack.j
 tenzro agent audit evidence profile --file pack.json --out profile.json
 # Verify both offline from the chain's genesis anchor
 tenzro agent audit evidence verify --file pack.json --profile profile.json \
-  --chain-id <id> --genesis-hash <hex> --genesis-committee-root <hex>
+  --chain-id <id> --genesis-hash <hex> --genesis genesis.toml
 # Verify where a trained model came from, and that the weights are the ones named
 tenzro provenance model --file pack.json --chain-id <id> --genesis-hash <hex> \
-  --genesis-committee-root <hex> --weights adapter.gguf
+  --genesis genesis.toml --weights adapter.gguf
 ```
 
 A profile lists evidence; it is not a legal assessment. See
@@ -1181,6 +1183,26 @@ tenzro join
 
 # 3. Start validator node (via tenzro-node binary)
 tenzro-node --roles validator --data-dir ~/.tenzro/validator
+
+# 4. Register the validator after genesis. `tenzro validator keys` prints the
+#    keys and the proofs, signed over the node account (its `address` line):
+#    fund that account with the self-stake plus gas, register its machine
+#    identity, then register with --node-account. A proof that does not bind
+#    the sending account is refused before anything is signed; the command
+#    waits for the receipt and exits non-zero with the chain's reason if the
+#    registration reverted.
+tenzro validator keys --stake 10000
+tenzro validator register-machine
+tenzro validator register --node-account \
+  --ml-dsa-public-key <hex> --p256-public-key <hex> --node-key <hex> \
+  --proof-of-possession <hex> --node-key-proof <hex> --vrf-key <hex> --vrf-key-proof <hex> \
+  --withdrawal-address <hex> --self-stake 10000
+# The registration is a Candidate, PendingActive at the next epoch boundary
+# and Active at the one after.
+tenzro validator get <address>
+
+# Leave the set from the same account
+tenzro validator exit --node-account
 ```
 
 ### Becoming an Inference Provider

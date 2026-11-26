@@ -492,6 +492,7 @@ pub fn outbound_message(route: &BridgeRoute, p: &Packet) -> Result<RouteMessage>
         receiver: data.receiver.into_bytes(),
         token_pool: route.local_endpoint,
         token: route.remote_token,
+        finality: super::finality::WAIT_FOR_FINALITY,
     })
 }
 
@@ -542,6 +543,7 @@ impl RouteAdapter for IbcAdapter {
             token_pool: IbcRoute::end_hash(&p.source_channel),
             token: IbcRoute::end_hash(&p.destination_channel),
             amount: data.amount()?,
+            finality: super::finality::WAIT_FOR_FINALITY,
         })
     }
 

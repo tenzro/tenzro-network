@@ -7,6 +7,10 @@
 //! - **MPP** (Machine Payments Protocol) — HTTP 402-based session payments
 //! - **x402** — HTTP 402 one-shot payments
 
+/// A condition read each time a challenge is issued, so a server offers what
+/// the node serves now rather than what it served when the server was built.
+pub type LiveSwitch = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 pub mod challenge_store;
 pub mod dvp;
 pub mod error;
@@ -31,8 +35,9 @@ pub mod metering;
 pub mod micropayment_route;
 pub mod middleware;
 pub mod payer_auth;
+pub mod principal_chains;
+pub mod rail_intent;
 pub mod receipt_ledger;
-pub mod revenue_split;
 pub mod settlement_asset;
 pub mod settlement_mirror;
 pub mod terms_gate;
@@ -50,7 +55,6 @@ pub use gateway::{
 };
 pub use payer_auth::{EnrolledKeys, PayerKeyResolver, VerifiedPayer};
 pub use receipt_ledger::{ReceiptLedger, ReceiptStore};
-pub use revenue_split::{RevenueSplit, SplitPayees, SplitShare, split_revenue};
 pub use settlement_asset::{
     Caip19, SettlementAsset, SettlementPreferences, SettlementRoute, SwapQuoter, route_settlement,
 };

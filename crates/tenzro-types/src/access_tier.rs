@@ -42,9 +42,8 @@
 //! [`RpcServiceGrant`] is a separate relationship: an RPC provider selling
 //! access to **external networks they broker** — chains beyond Tenzro — to
 //! their own tenants, on their own terms, the way every other chain's RPC
-//! operators do. That revenue is theirs and never enters a
-//! node's revenue split. It is modelled here only so the two cannot be
-//! confused at a call site.
+//! operators do. That revenue is theirs. It is modelled here only so the two
+//! cannot be confused at a call site.
 
 use std::fmt;
 
@@ -320,11 +319,8 @@ impl fmt::Display for RentalFunding {
 /// a data-feed subscription), they sell scoped access to it,
 /// and they bill for it on terms they set.
 ///
-/// **It is deliberately not part of any node's revenue split.** An RPC provider
-/// is paid out of a serving node's revenue only in
-/// [`crate::economics::NodeEconomicMode::PublicDelegated`], and only for
-/// *validating* on that node's behalf. Charging here as well would be charging
-/// twice for two different things and calling it one.
+/// **It is not taken out of any node's settled payments.** The provider bills
+/// its tenants here, on its own terms, and nowhere else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RpcServiceGrant {
     /// The RPC provider's DID.

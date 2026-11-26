@@ -52,6 +52,7 @@
 
 pub mod config;
 pub mod ledger;
+mod mutate;
 pub mod node;
 pub mod report;
 pub mod trace;

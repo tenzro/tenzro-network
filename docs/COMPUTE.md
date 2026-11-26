@@ -6,15 +6,15 @@
 
 ## Abstract
 
-Serving a model is one way a node turns hardware into income. Renting out spare capacity is another. Tenzro Compute is the protocol surface that lets a node offer its idle cycles to the network: a consumer posts a rental task, a bonded provider wins it, validators judge each epoch whether the provider stayed available, and TNZO streams one epoch at a time from the consumer's escrow to the provider.
+Serving a model is one kind of paid work a node does. Renting out capacity is another. Tenzro Compute is the protocol surface that settles capacity rental: a consumer posts a rental task, a bonded provider wins it, validators judge each epoch whether the provider stayed available, and TNZO streams one epoch at a time from the consumer's escrow to the provider.
 
-Compute rental is not a separate role with its own stake. A node that serves AI already declares the capability; renting out compute rides the same `serves_ai()` role and the same stake that backs serving a model. One node can serve inference and rent capacity at once, and a single stake covers both obligations.
+Compute rental is a role a node takes on beside serving models. One node can serve inference and rent capacity at once, from one account, but each obligation has its own bond: renting capacity is backed by the provider's compute bond (§1.1), serving a model by its `ai` role stake, and holding data by its `storage` role stake. No single stake covers every role.
 
 Renting capacity is not the only way an accelerator earns. Generative image and video rendering is a third surface, and a distinct one: a render job is priced per pixel-step and paid once, against a worker receipt for a job its requester signed, both verified against the keys their DIDs list, rather than streamed per epoch against SLA verdicts, and a media worker carries no stake and no coverage obligation. See [`AI.md`](AI.md) §8 for that surface.
 
 Compute rental sits beside the other ways machines of every class take part: GPU providers serve models and rent capacity, and edge devices are designed to orchestrate hybrid jobs that call GPU providers for large models, with every party paid from the caller's budget ([AI.md](AI.md#hybrid-jobs-edge-orchestration-and-model-ladders)).
 
-This document describes the rental lifecycle, the validator SLA verdicts, the streaming-escrow settlement model, how compute shares a coverage budget with storage, and the RPC / CLI / SDK surfaces.
+This document describes the rental lifecycle, the validator SLA verdicts, the streaming-escrow settlement model, how compute relates to storage, and the RPC / CLI / SDK surfaces.
 
 ---
 
@@ -22,7 +22,7 @@ This document describes the rental lifecycle, the validator SLA verdicts, the st
 
 Three properties shape the compute surface:
 
-1. **One stake, many roles.** A provider stakes once. The same stake underwrites serving a model, renting out compute, and holding data. There is no per-service bond. Coverage is read from the provider's bonded role stake in consensus state.
+1. **One account, a bond per role.** A provider bonds each role it takes on separately from the same account: the compute bond backs rented capacity, the `ai` role stake backs serving models and the `storage` role stake backs held data. Each is read from consensus state, and each is what its own obligations are slashed from.
 
 2. **Availability is proven, not asserted.** Validators probe every bonded provider and freeze a verdict per epoch once two thirds of bonded stake have attested it (§1.3). An epoch judged unavailable slashes the provider's compute bond into the insurance pool, and the renter claims that epoch's value back from the pool with the verdict as evidence. No provider's own word settles anything.
 
@@ -95,6 +95,28 @@ attested hold two thirds of bonded stake, the provider's verdict for that hour
 is frozen: available when the stake that said so outweighs the stake that said
 not. Attestations are accepted for 24 closed hours, and a frozen verdict cannot
 be changed. `tenzro_slaVerdict` (`provider_did`, `epoch`) reads it.
+
+### 1.4 Pausing a provider
+
+A compute provider need not be always on. The account that posted the
+compute bond says when the machine stops serving (`tenzro provider pause`)
+and when it serves again (`tenzro provider resume`). Nobody else can, and
+validators and storage stakes have no such switch. Either change takes
+effect at the next hour; the hour it is sent in is judged as it stood.
+
+For an hour the provider was paused, validators leave their probe outcomes
+for it out of their attestations, so the hour gets no verdict: no slash and
+no availability reward. A pause does not excuse an hour the provider owes
+to a held compute claim: that hour is judged as before, paused or not, and
+its verdict settles the claim as in §6.
+
+A pause has no end of its own: a provider that stays paused is left out of every verdict, and
+earns nothing for those hours. Hours a held claim is owed are the exception above, so a provider
+cannot hold a claim and stay silent.
+
+The change is a native call and waits for
+`feature.provider_presence.activation_epoch`; until that epoch nobody can
+pause and every hour is judged.
 
 ---
 
@@ -222,19 +244,29 @@ tenzro provider compute-claims
 tenzro provider pricing show
 
 tenzro provider bond params
-tenzro provider bond post --did <provider-did> --address <addr> --amount 1000
-tenzro provider bond increase --did <provider-did> --address <addr> --amount 500
+tenzro provider bond post --did <provider-did> --amount 1000
+tenzro provider bond increase --did <provider-did> --amount 500
 tenzro provider bond get --did <provider-did>
 tenzro provider bond list
-tenzro provider bond withdraw --did <provider-did> --address <addr>
-tenzro provider bond finalize --did <provider-did> --address <addr>
+tenzro provider bond withdraw --did <provider-did>
+tenzro provider bond finalize --did <provider-did>
+tenzro provider pause --did <provider-did>
+tenzro provider resume --did <provider-did>
 ```
 
 `--amount` on `bond post` and `bond increase` is whole TNZO.
 
+The account that signs a bond transaction is the bond's payout address: the
+client account under `--key-namespace` (default `client`), or with
+`--node-account` this machine's node account. A machine without a TPM or
+Secure Enclave signs as its node account through its key holder, with
+`--tpm-key-holder <socket> --tpm-label <label>` or the key holder `tenzro
+setup` recorded. `increase`, `withdraw`, `finalize`, `pause` and `resume`
+must be signed by the account the bond was posted from.
+
 ### SDKs
 
-Bonds are read through the `provider` client (`compute_bond_params` / `get_compute_bond` / `list_compute_bonds` in Rust, `computeBondParams` / `getComputeBond` / `listComputeBonds` in TypeScript).
+Each SDK has a compute client (`client.compute()` in Rust, `client.compute` in TypeScript, `tenzro.chain.ComputeClient` in Python) with typed requests and responses: bonds (`bond_params` / `get_bond` / `list_bonds`; `bondParams` / `getBond` / `listBonds` in TypeScript), compute claims (`get_claim` / `list_claims`), the price feed (`price_feed`), and `rent`, which signs the `CreateEscrow` with release `Stream` to the provider's bonded address (§2). The escrow locks `rate_per_epoch × epochs` and expires one epoch after the term would end if funded at signing, so the whole term accrues whenever the funding block lands; accrual never exceeds the locked amount.
 
 ### MCP and A2A
 
@@ -244,4 +276,4 @@ The MCP tool `get_compute_bond` reads one bond or lists them all, and returns th
 
 ## 8. How compute relates to storage
 
-Compute and storage are two roles a node can take on against one stake. Both are paid through physical compute claims. A storage claim also commits an object's descriptor digest (`storage_descriptor` on `Offer`), and the delivering bond is found available for an hour only while it proves possession of every object it is paid to keep, so the same hourly SLA verdict settles both. See [`docs/STORAGE.md`](STORAGE.md) for the storage side of the same substrate.
+Compute and storage are two roles a node can take on, each with its own bond: a compute claim names the provider's compute bond, a storage claim its storage stake. Both are paid through physical compute claims. A storage claim also commits an object's descriptor digest (`storage_descriptor` on `Offer`), and the delivering bond is found available for an hour only while it proves possession of every object it is paid to keep, so the same hourly SLA verdict settles both. See [`docs/STORAGE.md`](STORAGE.md) for the storage side of the same substrate.

@@ -228,6 +228,10 @@ impl TenzroMiddleware {
         if let Some(leaf) = &leaf {
             self.last.lock().insert(target.clone(), leaf.clone());
         }
+        // A tool's result is content from outside the agent's terms.
+        if tool.is_some() {
+            self.authority.label_untrusted(&agent, now);
+        }
         HttpRequestResult {
             decision: Decision_::Allow as i32,
             header_mutations: mutations,
@@ -606,6 +610,59 @@ mod tests {
         assert_eq!(spend[0].linked_tx.as_deref(), Some(c.challenge_id.as_str()));
         assert_eq!(spend[1].outcome, ActionOutcome::Allowed);
         assert!(!request_leaf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_payment_after_a_tool_result_is_refused_as_derived_from_untrusted_input() {
+        let (m, authority, records) = fixture(&["tool"]);
+        let gw = gateway(&authority).await;
+        let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}"#;
+        assert_eq!(
+            m.decide_request(&request("sb1", call)).decision,
+            Decision_::Allow as i32
+        );
+        let c = gw
+            .create_challenge(
+                "x402",
+                "/report",
+                250,
+                "TNZO",
+                "0909090909090909090909090909090909090909",
+            )
+            .await
+            .unwrap();
+        let h = tenzro_payments::middleware::payment_required_header(&c).unwrap();
+        let r = m.decide_response(&preflight(
+            402,
+            vec![(
+                tenzro_payments::x402::PAYMENT_REQUIRED_HEADER.into(),
+                h.to_str().unwrap().into(),
+            )],
+        ));
+        let Some(PreflightAction::Inspect(i)) = r.action else {
+            panic!("402 not inspected")
+        };
+        let Some(header_mutation::Operation::Write(w)) = &i.header_mutations[0].operation else {
+            panic!("no payment report");
+        };
+        assert_eq!(w.name, PAYMENT_HEADER);
+        assert!(
+            w.value.starts_with("refused: ") && w.value.contains("untrusted input"),
+            "{}",
+            w.value
+        );
+        // The retried request carries no credential.
+        assert!(
+            m.decide_request(&request("sb1", b""))
+                .header_mutations
+                .is_empty()
+        );
+        let entries = verify_session(records.identity(), &records.entries("sb1")).unwrap();
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.kind != ActionKind::Spend || e.outcome != ActionOutcome::Allowed)
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tenzro-device-key"
-version = "0.1.0"
+version = "0.2.2"
 description = "Hardware device keys for Python: public key, digest signing and attestation from the TPM 2.0 (Linux, Windows) or the Apple Secure Enclave. No key export, no software key."
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"

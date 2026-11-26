@@ -295,39 +295,14 @@ impl KvContinuity {
         let Some(escrow) = read(&id) else {
             return refuse("no such escrow");
         };
-        if escrow.status != tenzro_settlement::EscrowStatus::Funded {
-            return refuse("the escrow is not funded");
-        }
-        if !hex::encode(escrow.payee.as_bytes())
-            .eq_ignore_ascii_case(payee.trim_start_matches("0x"))
-        {
-            return refuse("the escrow pays another account");
-        }
-        if escrow.reference != Some(standby_digest(&spec.session_id)) {
-            return refuse("the escrow is not this session's standby");
-        }
-        let tenzro_types::settlement::ReleaseConditions::Stream {
-            rate_per_epoch,
-            epoch_ms,
-        } = escrow.release_conditions
-        else {
-            return refuse("a standby is paid by a stream escrow");
-        };
-        let per_hour = rate_per_epoch.saturating_mul(3_600_000) / u128::from(epoch_ms.max(1));
-        if per_hour < self.standby_fee_per_hour {
-            return refuse("the stream pays less than the standby fee");
-        }
-        let now = now_ms();
-        let expires = u64::try_from(escrow.expires_at.0).unwrap_or(0);
-        let hours = expires.saturating_sub(now).div_ceil(3_600_000);
-        if hours == 0 {
-            return refuse("the escrow has expired");
-        }
-        let left = escrow.amount.saturating_sub(escrow.claimed);
-        if left < self.standby_fee_per_hour.saturating_mul(hours as u128) {
-            return refuse("the escrow does not cover the standby fee to its expiry");
-        }
-        Ok(())
+        crate::standby_reservation::funds_standby(
+            &escrow,
+            payee,
+            standby_digest(&spec.session_id),
+            self.standby_fee_per_hour,
+            now_ms(),
+        )
+        .or_else(refuse)
     }
 
     /// The chain this node holds for `session_id`, if it is its successor.
@@ -693,14 +668,34 @@ async fn flush(node: &Arc<TenzroNode>, kv: &Arc<KvContinuity>, session_id: &str)
         Ok(Err(e)) => return warn!(session = %session_id, error = %e, "session export failed"),
         Err(e) => return warn!(session = %session_id, error = %e, "session export panicked"),
     };
+    // Hex, two characters per sealed byte.
+    let sealed_bytes = delta.sealed.len() / 2;
     let request = KvRequest::Offer {
         delta: Box::new(delta),
     };
-    if let Err(e) = call(node, &assignment.successor.endpoint_id, &request).await {
-        warn!(session = %session_id, successor = %assignment.successor.endpoint_id, error = %e,
-            "session delta not accepted; assigning a new successor");
-        reassign(node, kv, &assignment).await;
+    let sent = std::time::Instant::now();
+    match call(node, &assignment.successor.endpoint_id, &request).await {
+        Ok(_) => {
+            let elapsed = sent.elapsed();
+            info!(session = %session_id, successor = %assignment.successor.endpoint_id,
+                sealed_bytes, elapsed_ms = elapsed.as_millis() as u64,
+                bytes_per_sec = transfer_rate(sealed_bytes, elapsed),
+                "session delta held by its successor");
+        }
+        Err(e) => {
+            warn!(session = %session_id, successor = %assignment.successor.endpoint_id, error = %e,
+                "session delta not accepted; assigning a new successor");
+            reassign(node, kv, &assignment).await;
+        }
     }
+}
+
+/// Bytes per second over a transfer of `bytes` that took `elapsed`, from the
+/// request leaving to the receiver's acknowledgement. A transfer too quick to
+/// time counts as one millisecond.
+fn transfer_rate(bytes: usize, elapsed: std::time::Duration) -> u64 {
+    let ms = elapsed.as_millis().max(1);
+    (bytes as u128 * 1000 / ms) as u64
 }
 
 /// Replace a session's successor, excluding the one that failed, and restart
@@ -847,7 +842,9 @@ fn rpc_err(code: i32, message: impl Into<String>) -> JsonRpcError {
 
 fn continuity_rpc_err(e: ContinuityError) -> JsonRpcError {
     let code = match e {
-        ContinuityError::OutsideJurisdiction(_) | ContinuityError::NoSuccessor(_) => -32024,
+        ContinuityError::OutsideJurisdiction(_) | ContinuityError::NoSuccessor(_) => {
+            crate::rpc::JURISDICTION_UNMET
+        }
         _ => -32000,
     };
     rpc_err(code, format!("session continuity: {e}"))
@@ -1128,6 +1125,13 @@ pub(crate) async fn handle_session_chat(
     let payee = node
         .operator_payee()
         .map(|a| format!("0x{}", hex::encode(a.as_bytes())));
+    // What the caller is paying continuity for: whether a successor could
+    // take this session over now without reading the conversation again.
+    let (checkpoint, checkpoint_reason) = match &turn.checkpoint {
+        tenzro_model::TurnCheckpoint::Ready => ("ready", None),
+        tenzro_model::TurnCheckpoint::NotDue => ("not_due", None),
+        tenzro_model::TurnCheckpoint::Unavailable(why) => ("unavailable", Some(why.as_str())),
+    };
     Ok(serde_json::json!({
         "output": turn.text,
         "model_id": model_id,
@@ -1140,6 +1144,8 @@ pub(crate) async fn handle_session_chat(
         "continuity": {
             "session_id": session.id,
             "level": session.continuity,
+            "checkpoint": checkpoint,
+            "checkpoint_reason": checkpoint_reason,
             "primary": payee,
             "successor": assignment.as_ref().and_then(|a| a.successor.operator.clone()),
             "successor_endpoint": assignment.as_ref().map(|a| a.successor.endpoint_id.clone()),
@@ -1150,12 +1156,31 @@ pub(crate) async fn handle_session_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transfer_rate_is_bytes_over_the_time_to_the_acknowledgement() {
+        let second = std::time::Duration::from_secs(1);
+        assert_eq!(transfer_rate(4_000_000, second * 2), 2_000_000);
+        assert_eq!(transfer_rate(0, second), 0);
+        // Too quick to time: one millisecond, never a division by zero.
+        assert_eq!(transfer_rate(500, std::time::Duration::ZERO), 500_000);
+    }
     use parking_lot::Mutex;
     use std::collections::HashMap;
     use tenzro_crypto::hybrid_seal::HybridSecretKey;
     use tenzro_model::{
         ExportedDelta, ImportChain, KvBlob, ModelError, ModelFingerprint, SessionTurn,
     };
+
+    /// A session that cannot continue inside its pinned jurisdiction is
+    /// refused with the jurisdiction code, never the settlement floor's.
+    #[test]
+    fn a_session_outside_its_jurisdiction_has_the_jurisdiction_code() {
+        let e = continuity_rpc_err(ContinuityError::OutsideJurisdiction("DE".into()));
+        assert_eq!(e.code, crate::rpc::JURISDICTION_UNMET);
+        assert_eq!(e.code, -32024);
+        assert_ne!(e.code, crate::rpc::BELOW_SETTLEMENT_FLOOR);
+    }
 
     /// A sequence engine without a model: its "cache" is the token list, and
     /// export and import run the real blob format and chain rules.
@@ -1209,6 +1234,7 @@ mod tests {
                 prompt_tokens: wanted.len() as u32,
                 reused_tokens: held as u32,
                 completion_tokens: 1,
+                checkpoint: tenzro_model::TurnCheckpoint::Ready,
             })
         }
         fn export_delta(&self, session: &str) -> tenzro_model::Result<Option<ExportedDelta>> {

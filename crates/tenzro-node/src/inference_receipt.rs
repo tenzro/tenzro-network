@@ -100,15 +100,15 @@ pub fn model_hash_of(entry: &tenzro_model::catalog::CatalogEntry) -> String {
     hex::encode(Sha256::digest(&buf))
 }
 
-/// The identity of `model_id` in this node's installed catalog. `None` for a
-/// model the catalog does not list or lists without files.
-pub fn catalog_identity(model_id: &str) -> Option<ModelIdentity> {
-    let entry = tenzro_model::catalog::entry(model_id)?;
+/// The identity of `model_id` in `catalog`. `None` for a model it does not
+/// list or lists without files.
+pub fn catalog_identity(catalog: &tenzro_model::Catalog, model_id: &str) -> Option<ModelIdentity> {
+    let entry = catalog.entry(model_id)?;
     if entry.components.is_empty() {
         return None;
     }
     Some(ModelIdentity {
-        model_hash: model_hash_of(&entry),
+        model_hash: model_hash_of(entry),
         engine: entry.model.engine().to_string(),
     })
 }
@@ -130,23 +130,68 @@ pub fn upstream_identity(model_id: &str) -> ModelIdentity {
 /// The identity a receipt for `model_id` must name: the catalog's, for a
 /// model the catalog lists (`None` when it lists it without files), and
 /// [`upstream_identity`] for one it does not.
-pub fn expected_identity(model_id: &str) -> Option<ModelIdentity> {
-    match tenzro_model::catalog::entry(model_id) {
-        Some(_) => catalog_identity(model_id),
+pub fn expected_identity(catalog: &tenzro_model::Catalog, model_id: &str) -> Option<ModelIdentity> {
+    match catalog.entry(model_id) {
+        Some(_) => catalog_identity(catalog, model_id),
         None => Some(upstream_identity(model_id)),
     }
 }
 
-/// SHA-256 over the exact input the engine was given: the conversation in
-/// its canonical JSON encoding, then every attached media item's bytes,
-/// length-prefixed. Two providers given the same request derive the same
-/// engine input, so their commitments agree.
-pub fn input_commitment(messages: &[tenzro_model::ChatMessage], media: &[Vec<u8>]) -> String {
+/// What a chat template renders besides the conversation: the tools the
+/// turn offered and the thinking switch and effort the caller set. An unset
+/// switch resolves from the catalog and the receipt's output ceiling, alike
+/// on every node, so these and the conversation fix the prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RenderSettings {
+    pub tools: Vec<tenzro_model::ToolDefinition>,
+    pub enable_thinking: Option<bool>,
+    pub reasoning_effort: Option<String>,
+}
+
+impl RenderSettings {
+    /// The settings a turn offering `tools` under `config` renders with.
+    pub fn of(
+        tools: &[tenzro_model::ToolDefinition],
+        config: &tenzro_model::GenerationConfig,
+    ) -> Self {
+        Self {
+            tools: tools.to_vec(),
+            enable_thinking: config.enable_thinking,
+            reasoning_effort: config.reasoning_effort.clone(),
+        }
+    }
+
+    /// The generation config a re-execution renders the turn with, under an
+    /// output ceiling of `max_tokens`.
+    pub fn config(&self, max_tokens: u32) -> tenzro_model::GenerationConfig {
+        tenzro_model::GenerationConfig {
+            max_tokens,
+            enable_thinking: self.enable_thinking,
+            reasoning_effort: self.reasoning_effort.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+/// SHA-256 over the exact input the engine was given: the conversation and
+/// the render settings in their canonical JSON encodings, then every
+/// attached media item's bytes, each length-prefixed. Two providers given
+/// the same request derive the same engine input, so their commitments
+/// agree.
+pub fn input_commitment(
+    messages: &[tenzro_model::ChatMessage],
+    render: &RenderSettings,
+    media: &[Vec<u8>],
+) -> String {
     let mut h = Sha256::new();
     h.update(INPUT_COMMITMENT_DOMAIN);
-    let encoded = serde_json::to_vec(messages).unwrap_or_default();
-    h.update((encoded.len() as u64).to_le_bytes());
-    h.update(&encoded);
+    for encoded in [
+        serde_json::to_vec(messages).unwrap_or_default(),
+        serde_json::to_vec(render).unwrap_or_default(),
+    ] {
+        h.update((encoded.len() as u64).to_le_bytes());
+        h.update(&encoded);
+    }
     for item in media {
         h.update((item.len() as u64).to_le_bytes());
         h.update(item);
@@ -203,8 +248,8 @@ impl DecodeContext {
         }
     }
 
-    /// This node's decode of `model_id`.
-    pub fn of_this_node(model_id: &str) -> Self {
+    /// This node's decode of `model_id`, at the precision `catalog` names.
+    pub fn of_this_node(catalog: &tenzro_model::Catalog, model_id: &str) -> Self {
         let backend = if cfg!(feature = "cuda") || cfg!(feature = "cuda-no-vmm") {
             "cuda"
         } else if cfg!(feature = "rocm") {
@@ -217,7 +262,8 @@ impl DecodeContext {
             "cpu"
         };
         Self {
-            precision: tenzro_model::get_model_by_id(model_id)
+            precision: catalog
+                .get_model_by_id(model_id)
                 .map(|e| e.quantization)
                 .unwrap_or_default(),
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -304,6 +350,8 @@ pub enum ReceiptError {
     BadTeeEvidence(String),
     #[error("receipt is malformed: {0}")]
     Malformed(String),
+    #[error("the signer revoked this receipt's batch signature at {0} ms")]
+    SignatureRevoked(u64),
 }
 
 /// Everything a receipt states, before it is signed.
@@ -599,12 +647,39 @@ impl InferenceReceipt {
         Ok(verified)
     }
 
-    /// [`Self::verify_offline`] against this node's installed catalog, or for
-    /// a model the catalog does not list, against [`upstream_identity`].
-    pub fn verify_against_catalog(&self) -> Result<(), ReceiptError> {
-        let identity = expected_identity(&self.model_id)
+    /// [`Self::verify_offline`] against `catalog`, or for a model it does
+    /// not list, against [`upstream_identity`].
+    pub fn verify_against_catalog(
+        &self,
+        catalog: &tenzro_model::Catalog,
+    ) -> Result<(), ReceiptError> {
+        let identity = expected_identity(catalog, &self.model_id)
             .ok_or_else(|| ReceiptError::UnknownModel(self.model_id.clone()))?;
         self.verify_offline(&identity.model_hash)
+    }
+
+    /// Refused once the signing machine revoked the batch signature this
+    /// receipt carries. A batch is revoked after it was signed, so every
+    /// receipt in it predates the revocation; the revocation withdraws them
+    /// all, whenever each was made.
+    pub fn check_not_revoked(&self, state: &dyn tenzro_vm::VmState) -> Result<(), ReceiptError> {
+        match self.signature_revoked_at_ms(state) {
+            Some(at) => Err(ReceiptError::SignatureRevoked(at)),
+            None => Ok(()),
+        }
+    }
+
+    /// Block time (ms) at which the machine whose hardware key signed this
+    /// receipt revoked the batch signature it carries, if it did. The
+    /// machine is the one the signing key itself names, whatever the receipt
+    /// says, so a receipt cannot point the lookup at another identity.
+    pub fn signature_revoked_at_ms(&self, state: &dyn tenzro_vm::VmState) -> Option<u64> {
+        let signer = tenzro_types::did_derivation::machine_did(&self.public_key.p256);
+        tenzro_vm::native::delegation_revoked_at_ms(
+            state,
+            &signer,
+            &self.signature.batched.root.id(&self.public_key),
+        )
     }
 
     /// Check the signature, and that it was made by `pinned_key`: the
@@ -724,7 +799,7 @@ pub async fn sign_local(
     let identity = if upstream {
         Some(upstream_identity(model_id))
     } else {
-        catalog_identity(model_id)
+        catalog_identity(&node.catalog(), model_id)
     };
     let Some(identity) = identity else {
         return missing("the catalog states no identity for the model");
@@ -746,7 +821,7 @@ pub async fn sign_local(
         decode: if upstream {
             DecodeContext::upstream()
         } else {
-            DecodeContext::of_this_node(model_id)
+            DecodeContext::of_this_node(&node.catalog(), model_id)
         },
         sampling: served.sampling,
         commitment_hash: served.commitment_hash,
@@ -915,6 +990,60 @@ mod tests {
         InferenceReceipt::sign(signer, claims()).unwrap()
     }
 
+    /// The signer's revocation of a batch is found under the machine its own
+    /// key names, and under no other: a receipt naming another machine, and
+    /// another machine revoking the same identifier, change nothing.
+    #[test]
+    fn a_receipts_signature_revocation_is_read_under_the_signing_machine() {
+        use tenzro_native_ops::identity_keys::delegation_revoked_slot;
+        use tenzro_vm::VmState as _;
+        let mut r = signed(&session());
+        let mut state = tenzro_vm::StateAdapter::new();
+        assert_eq!(r.signature_revoked_at_ms(&state), None);
+
+        let id = r.signature.batched.root.id(&r.public_key);
+        let revoke = |state: &mut tenzro_vm::StateAdapter, did: &str, at: u64| {
+            state.set_storage(
+                &tenzro_vm::native::SYSTEM_ADDRESS,
+                delegation_revoked_slot(did, &id).as_bytes(),
+                at.to_be_bytes().to_vec(),
+            );
+        };
+        // Another machine's record of the same identifier is not the signer's.
+        revoke(&mut state, "did:tenzro:machine:someone-else", 5);
+        assert_eq!(r.signature_revoked_at_ms(&state), None);
+
+        let signer = tenzro_types::did_derivation::machine_did(&r.public_key.p256);
+        revoke(&mut state, &signer, 9);
+        assert_eq!(r.signature_revoked_at_ms(&state), Some(9));
+        // The machine the receipt says it is does not steer the lookup.
+        r.machine_did = "did:tenzro:machine:someone-else".to_string();
+        assert_eq!(r.signature_revoked_at_ms(&state), Some(9));
+    }
+
+    /// A revoked batch withdraws every receipt in it, though each was signed
+    /// before the revocation.
+    #[test]
+    fn a_receipt_signed_before_its_batch_was_revoked_is_refused() {
+        use tenzro_native_ops::identity_keys::delegation_revoked_slot;
+        use tenzro_vm::VmState as _;
+        let r = signed(&session());
+        let mut state = tenzro_vm::StateAdapter::new();
+        assert_eq!(r.check_not_revoked(&state), Ok(()));
+        let signer = tenzro_types::did_derivation::machine_did(&r.public_key.p256);
+        let at = r.signed_at_ms + 60_000;
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            delegation_revoked_slot(&signer, &r.signature.batched.root.id(&r.public_key))
+                .as_bytes(),
+            at.to_be_bytes().to_vec(),
+        );
+        assert_eq!(
+            r.check_not_revoked(&state),
+            Err(ReceiptError::SignatureRevoked(at))
+        );
+    }
+
     /// Hands back a report carrying whatever user data it is asked to bind,
     /// as a provider's hardware would, signed by no vendor root.
     struct UnrootedTee;
@@ -1030,6 +1159,7 @@ mod tests {
                     content: "hi".to_string(),
                     ..Default::default()
                 }],
+                &RenderSettings::default(),
                 &[],
             ),
             output_hash: output_hash("hello", "", ""),
@@ -1100,17 +1230,20 @@ mod tests {
 
     #[test]
     fn the_model_hash_commits_to_every_weight_file() {
-        tenzro_catalog::install_test_seed();
-        let entry = tenzro_catalog::entry("qwen3-0.6b").unwrap();
+        let catalog = tenzro_model::Catalog::test_seed();
+        let entry = catalog.entry("qwen3-0.6b").unwrap().clone();
         let base = model_hash_of(&entry);
-        assert_eq!(catalog_identity("qwen3-0.6b").unwrap().model_hash, base);
+        assert_eq!(
+            catalog_identity(&catalog, "qwen3-0.6b").unwrap().model_hash,
+            base
+        );
         let mut swapped = entry.clone();
         swapped.components[0].sha256 = "00".repeat(32);
         assert_ne!(model_hash_of(&swapped), base);
         let mut reordered = entry.clone();
         reordered.components.reverse();
         assert_eq!(model_hash_of(&reordered), base);
-        assert!(catalog_identity("not-in-the-catalog").is_none());
+        assert!(catalog_identity(&catalog, "not-in-the-catalog").is_none());
     }
 
     #[test]
@@ -1120,13 +1253,48 @@ mod tests {
             content: c.to_string(),
             ..Default::default()
         };
-        let base = input_commitment(&[msg("hi")], &[]);
-        assert_ne!(base, input_commitment(&[msg("ho")], &[]));
-        assert_ne!(base, input_commitment(&[msg("hi")], &[vec![1]]));
+        let plain = RenderSettings::default();
+        let base = input_commitment(&[msg("hi")], &plain, &[]);
+        assert_ne!(base, input_commitment(&[msg("ho")], &plain, &[]));
+        assert_ne!(base, input_commitment(&[msg("hi")], &plain, &[vec![1]]));
         assert_ne!(
-            input_commitment(&[msg("hi")], &[vec![1, 2]]),
-            input_commitment(&[msg("hi")], &[vec![1], vec![2]])
+            input_commitment(&[msg("hi")], &plain, &[vec![1, 2]]),
+            input_commitment(&[msg("hi")], &plain, &[vec![1], vec![2]])
         );
+    }
+
+    /// The tools offered and the thinking switch change the prompt the
+    /// template renders, so each changes the commitment.
+    #[test]
+    fn the_input_commitment_covers_tools_and_the_thinking_switch() {
+        let msgs = [tenzro_model::ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            ..Default::default()
+        }];
+        let plain = RenderSettings::default();
+        let base = input_commitment(&msgs, &plain, &[]);
+        let tools = RenderSettings {
+            tools: vec![tenzro_model::ToolDefinition {
+                name: "lookup".to_string(),
+                description: None,
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            ..RenderSettings::default()
+        };
+        assert_ne!(base, input_commitment(&msgs, &tools, &[]));
+        for render in [
+            RenderSettings {
+                enable_thinking: Some(false),
+                ..RenderSettings::default()
+            },
+            RenderSettings {
+                reasoning_effort: Some("high".to_string()),
+                ..RenderSettings::default()
+            },
+        ] {
+            assert_ne!(base, input_commitment(&msgs, &render, &[]));
+        }
     }
 
     #[test]

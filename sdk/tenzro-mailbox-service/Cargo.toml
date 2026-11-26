@@ -1,0 +1,36 @@
+# Its own workspace: the service is built from the SDK (for the claim it
+# submits) and from the node workspace's mailbox, device-key and crypto
+# crates, and neither workspace takes the other's dependencies.
+[workspace]
+
+[package]
+name = "tenzro-mailbox-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/tenzro/tenzro-network"
+description = "Store-and-forward mailbox (preview) an operator runs beside a Tenzro node: holds sealed messages for offline recipients and claims their escrow vouchers"
+publish = false
+
+[dependencies]
+tenzro-mailbox = { path = "../../crates/tenzro-mailbox" }
+tenzro-crypto = { path = "../../crates/tenzro-crypto" }
+tenzro-types = { path = "../../crates/tenzro-types" }
+tenzro-device-key = { path = "../../crates/tenzro-device-key" }
+tenzro-sdk = { path = "../tenzro-sdk", default-features = false }
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+# As the root workspace pins it: the aws-lc-rs provider, for hybrid post-quantum TLS.
+rustls = { version = "0.23.46", default-features = false, features = ["std", "aws-lc-rs", "tls12"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tenzro-crypto = { path = "../../crates/tenzro-crypto", features = ["test-keys"] }
+tempfile = "3"
+sha2 = "0.10"

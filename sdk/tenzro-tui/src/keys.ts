@@ -7,6 +7,18 @@ export type Action =
   | "screen:models"
   | "screen:validators"
   | "screen:governance"
+  | "screen:health"
+  | "screen:peers"
+  | "screen:logs"
+  | "screen:settings"
+  | "acknowledge"
+  | "stop"
+  | "replay:back"
+  | "replay:forward"
+  | "runbook:genesis"
+  | "runbook:validator"
+  | "runbook:upgrade"
+  | "palette"
   | "next"
   | "prev"
   | "down"
@@ -19,7 +31,7 @@ export type Action =
 
 export interface Binding {
   action: Action;
-  /** Keys as shown to the person, one string each. */
+  /** Keys as shown to the person, one string each. An entry with none is reached through the finder. */
   keys: string[];
   label: string;
   /** Short form for the footer; omitted when the help overlay is enough. */
@@ -32,6 +44,10 @@ export const SCREENS = [
   { id: "models", title: "Models", key: "3", action: "screen:models" },
   { id: "validators", title: "Validators", key: "4", action: "screen:validators" },
   { id: "governance", title: "Governance", key: "5", action: "screen:governance" },
+  { id: "health", title: "Health", key: "6", action: "screen:health" },
+  { id: "peers", title: "Peers", key: "7", action: "screen:peers" },
+  { id: "logs", title: "Logs", key: "8", action: "screen:logs" },
+  { id: "settings", title: "Settings", key: "9", action: "screen:settings" },
 ] as const;
 
 export type ScreenId = (typeof SCREENS)[number]["id"];
@@ -42,12 +58,24 @@ export const BINDINGS: Binding[] = [
   { action: "screen:models", keys: ["3"], label: "Models: what this node holds and serves" },
   { action: "screen:validators", keys: ["4"], label: "Validators: the registered set" },
   { action: "screen:governance", keys: ["5"], label: "Governance: proposals and tallies" },
+  { action: "screen:health", keys: ["6"], label: "Health: what needs attention, and acknowledging it" },
+  { action: "screen:peers", keys: ["7"], label: "Peers: who this node has heard from" },
+  { action: "screen:logs", keys: ["8"], label: "Logs: what this console has seen happen" },
+  { action: "screen:settings", keys: ["9"], label: "Settings: how this console was started" },
   { action: "next", keys: ["Tab", "Right"], label: "Next screen", hint: "Tab next" },
   { action: "prev", keys: ["Shift-Tab", "Left"], label: "Previous screen" },
   { action: "down", keys: ["Down", "j"], label: "Move down in a list", hint: "Up/Down move" },
   { action: "up", keys: ["Up", "k"], label: "Move up in a list" },
   { action: "refresh", keys: ["r"], label: "Refresh now (it also refreshes every 5 s)", hint: "r refresh" },
   { action: "edit", keys: ["e"], label: "Wallet: choose the account to show", hint: "e account" },
+  { action: "acknowledge", keys: ["a"], label: "Health: acknowledge the selected alert with a reason" },
+  { action: "stop", keys: ["S"], label: "Planned stop: check this node can be stopped, then stop it" },
+  { action: "replay:back", keys: ["["], label: "Replay: step back through what this console saw" },
+  { action: "replay:forward", keys: ["]"], label: "Replay: step forward, and past the newest back to now" },
+  { action: "runbook:genesis", keys: [], label: "Runbook: genesis assembly, step by step" },
+  { action: "runbook:validator", keys: [], label: "Runbook: validator entry after genesis" },
+  { action: "runbook:upgrade", keys: [], label: "Runbook: upgrade window, one validator at a time" },
+  { action: "palette", keys: ["/"], label: "Find a screen, an action or a runbook by name", hint: "/ find" },
   { action: "help", keys: ["?"], label: "Show or hide this help", hint: "? help" },
   { action: "close", keys: ["Esc"], label: "Close help or cancel an edit" },
   { action: "quit", keys: ["q", "Ctrl-C"], label: "Quit and restore the terminal", hint: "q quit" },
@@ -88,4 +116,14 @@ export function bindingProblems(table: Binding[] = BINDINGS): string[] {
     labels.set(b.label, b.action);
   }
   return out;
+}
+
+/**
+ * What the palette offers for `query`: every binding whose label holds each
+ * word typed, in table order. The palette reads the same table as the keys,
+ * the footer and the help, so it can offer nothing they do not.
+ */
+export function paletteMatches(query: string, table: Binding[] = BINDINGS): Binding[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return table.filter((b) => b.action !== "palette" && b.action !== "close" && words.every((w) => b.label.toLowerCase().includes(w)));
 }

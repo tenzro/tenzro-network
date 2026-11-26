@@ -8,7 +8,9 @@
 # <dist-dir> is changed. Each package repackages the exact bytes of an archive.
 #
 #   Linux    .deb and .rpm for every linux cpu and cuda archive present (build-linux.sh;
-#            the rpm needs podman or docker for rpmbuild, see linux/build-rpm-image.sh)
+#            the rpm needs podman or docker for rpmbuild, see linux/build-rpm-image.sh), and
+#            tenzro-control's .deb and .rpm from the control/ folder of each cpu archive
+#            (apps/tenzro-control/linux/packaging/build-packages.sh)
 #   Windows  the .msi from the windows cuda zip (windows/build-msi.sh; needs the Windows
 #            build host: WINDOWS_BUILD=0 skips it)
 #   macOS    the .pkg: pkgbuild only runs on macOS. On a Mac it is built here; elsewhere
@@ -26,8 +28,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 [ -f "$dist/SHA256SUMS" ] || { echo "REFUSING: $dist/SHA256SUMS missing" >&2; exit 1; }
 ( cd "$dist" && sha256sum -c --quiet SHA256SUMS ) || { echo "REFUSING: the archives do not match SHA256SUMS" >&2; exit 1; }
 
-for a in tenzro-node-linux-x86_64-cpu tenzro-node-linux-aarch64-cuda tenzro-node-linux-x86_64-cuda; do
+for a in tenzro-node-linux-x86_64-cpu tenzro-node-linux-aarch64-cpu tenzro-node-linux-x86_64-cuda tenzro-node-linux-aarch64-cuda; do
     if [ -f "$dist/$a.tar.gz" ]; then "$here/linux/build-linux.sh" "$dist/$a.tar.gz" "$out"; else echo "skipped $a (no archive)"; fi
+done
+for a in tenzro-node-linux-x86_64-cpu tenzro-node-linux-aarch64-cpu; do
+    if [ -f "$dist/$a.tar.gz" ]; then "$here/../apps/tenzro-control/linux/packaging/build-packages.sh" "$dist/$a.tar.gz" "$out"; fi
 done
 
 if [ -f "$dist/tenzro-node-windows-x86_64-cuda.zip" ] && [ "${WINDOWS_BUILD:-1}" != 0 ]; then
@@ -45,4 +50,9 @@ else
 fi
 
 "$here/gen-packages-json.sh" "$dist" "$out"
-( cd "$out" && sha256sum tenzro-*.deb tenzro-*.rpm tenzro-*.msi tenzro-*.pkg 2>/dev/null | tee SHA256SUMS.packages )
+# The digests of the packages that were built; a kind that was skipped is not an error. The list is
+# written whole or not at all: a package whose digest fails leaves none behind.
+( cd "$out" && shopt -s nullglob && pkgs=(tenzro-*.deb tenzro-*.rpm tenzro-*.msi tenzro-*.pkg) \
+    && [ ${#pkgs[@]} -gt 0 ] && rm -f SHA256SUMS.packages && sha256sum "${pkgs[@]}" > SHA256SUMS.packages.part \
+    && mv SHA256SUMS.packages.part SHA256SUMS.packages && cat SHA256SUMS.packages ) \
+    || { rm -f "$out/SHA256SUMS.packages.part"; echo "REFUSING: no package was built, or one could not be read for its digest" >&2; exit 1; }

@@ -151,6 +151,31 @@ impl NodeInferenceAdmission {
         self.decide_for(surface, caller_did, model_id, Asking::Transport)
     }
 
+    /// The price `caller_did`'s call on `surface` is quoted at when it must
+    /// be paid for: what the access policy's paid rule names, else the
+    /// operator's per-use price.
+    pub(crate) fn quoted_price(
+        &self,
+        surface: tenzro_types::node_access::Surface,
+        caller_did: Option<&str>,
+    ) -> u128 {
+        let policy = self.node.access().policy();
+        let caller = crate::access::Caller {
+            did: caller_did.map(str::to_string),
+            ip: None,
+        };
+        match crate::access::evaluate(
+            &self.node,
+            &policy,
+            &caller,
+            surface,
+            tenzro_types::node_access::MethodClass::Inference,
+        ) {
+            crate::access::Decision::Pay { price, .. } => price.parse().unwrap_or(u128::MAX),
+            _ => self.price,
+        }
+    }
+
     fn decide_for(
         &self,
         surface: tenzro_types::node_access::Surface,
@@ -192,6 +217,18 @@ impl NodeInferenceAdmission {
         let Some(model) = model_id else {
             return InferenceAccess::Refuse(400, "missing model".into());
         };
+        // A node configured to serve models serves them only while the role
+        // is served: before its bond lands and after it goes, a model held
+        // here is refused, except a private one on its own machine.
+        let held = self.node.model_visibility(model);
+        if let Some(why) = model_role_refusal(
+            self.node.config().roles.serves_ai(),
+            self.node.runtime_roles.read().serves_ai(),
+            held.is_some(),
+            matches!(held, Some(Visibility::Private)) && self.listener_is_loopback(),
+        ) {
+            return InferenceAccess::Refuse(403, why);
+        }
         // A caller the policy admitted by name is pre-authorized, and is who a
         // gated model serves. A private model still never leaves this machine.
         if named && !matches!(self.node.model_visibility(model), Some(Visibility::Private)) {
@@ -341,19 +378,29 @@ pub async fn identify_caller(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let auth = auth_context(&node, &req);
+    let mut pairing = None;
     let claims = match crate::access::proved_token(&node, &auth) {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                axum::Json(
-                    serde_json::json!({ "error": { "code": e.code, "message": e.message } }),
-                ),
-            )
-                .into_response();
-        }
+        // A token pairing issued for a few calls only names no caller: the
+        // gate admits it on those calls and refuses it on every other. Its
+        // proof has been spent verifying it here, so the gate gets the claims.
+        Err(e) => match crate::access::proved_pairing_token(&node, &auth) {
+            Some(proved) => {
+                pairing = Some(proved);
+                None
+            }
+            None => {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(
+                        serde_json::json!({ "error": { "code": e.code, "message": e.message } }),
+                    ),
+                )
+                    .into_response();
+            }
+        },
     };
-    match (claims, auth.dpop) {
+    match (claims, auth.dpop.clone()) {
         (Some(claims), Some(dpop)) => {
             let did = claims.sub.clone();
             req.extensions_mut().insert(crate::rpc::ProvedToken {
@@ -363,6 +410,7 @@ pub async fn identify_caller(
             crate::rpc::with_proved_token(
                 dpop,
                 claims,
+                None,
                 tenzro_model::access::as_caller(
                     tenzro_model::access::Caller::Remote { did: Some(did) },
                     next.run(req),
@@ -371,11 +419,16 @@ pub async fn identify_caller(
             .await
         }
         _ => {
-            tenzro_model::access::as_caller(
+            let anonymous = tenzro_model::access::as_caller(
                 tenzro_model::access::Caller::anonymous(),
                 next.run(req),
-            )
-            .await
+            );
+            match (pairing, auth.dpop) {
+                (Some((claims, purpose)), Some(dpop)) => {
+                    crate::rpc::with_proved_token(dpop, claims, Some(purpose), anonymous).await
+                }
+                _ => anonymous.await,
+            }
         }
     }
 }
@@ -417,6 +470,24 @@ impl InferenceAdmission for NodeInferenceAdmission {
     }
 }
 
+/// Why a model held here is refused for want of the model-serving role:
+/// the node is configured to serve models (`configured`) but does not serve
+/// them now (`served`), as before its bond lands and after it goes. A model
+/// it does not hold, and a private model used on its own machine, are left
+/// to the rest of the decision.
+fn model_role_refusal(
+    configured: bool,
+    served: bool,
+    held: bool,
+    own_machine: bool,
+) -> Option<String> {
+    (configured && !served && held && !own_machine).then(|| {
+        "this node does not serve models now: its model-serving role waits for its bond in \
+         chain state"
+            .to_string()
+    })
+}
+
 /// A keyless call for a `Public` model this node serves: pay the operator's
 /// per-use price, or nothing when the price is `0`. A model under a
 /// non-commercial licence is never sold, so it is always free.
@@ -455,8 +526,20 @@ fn forwarded_access(node: Visibility, model: &str, non_commercial: bool) -> Infe
 
 #[cfg(test)]
 mod keyless_access_tests {
-    use super::{Visibility, forwarded_access, public_access};
+    use super::{Visibility, forwarded_access, model_role_refusal, public_access};
     use tenzro_payments::middleware::InferenceAccess;
+
+    /// A model held here is refused while the model-serving role is
+    /// configured but not served; served, never configured, or used
+    /// privately on its own machine, it is not.
+    #[test]
+    fn a_model_is_refused_while_its_role_waits_for_its_bond() {
+        assert!(model_role_refusal(true, false, true, false).is_some());
+        assert_eq!(model_role_refusal(true, true, true, false), None);
+        assert_eq!(model_role_refusal(false, false, true, false), None);
+        assert_eq!(model_role_refusal(true, false, false, false), None);
+        assert_eq!(model_role_refusal(true, false, true, true), None);
+    }
 
     #[test]
     fn a_public_model_is_free_at_price_zero_and_paid_otherwise() {

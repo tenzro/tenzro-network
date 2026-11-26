@@ -58,7 +58,9 @@ fuzz_target!(|input: Input| {
         rustcrypto, libcrux,
         "ML-DSA-65 verifiers disagree: RustCrypto {rustcrypto}, libcrux {libcrux}"
     );
-    if input.sig_edits.is_empty() && input.key_edits.is_empty() && input.sig_len.is_none()
+    if input.sig_edits.is_empty()
+        && input.key_edits.is_empty()
+        && input.sig_len.is_none()
         && input.verify_ctx.is_none()
     {
         assert!(rustcrypto, "an untouched signature is refused");

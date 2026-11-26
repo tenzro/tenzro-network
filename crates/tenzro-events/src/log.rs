@@ -39,10 +39,12 @@ fn read_u64(storage: &dyn KvStore, key: &[u8]) -> Result<Option<u64>> {
 /// One page of a read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
-    /// Events after the requested cursor, in cursor order.
+    /// Events after the requested cursor, in cursor order; from
+    /// [`EventLog::read_before`], events before it, newest first.
     pub events: Vec<ChainEvent>,
     /// The cursor to resume after: the last event returned, or the end of
-    /// the last height read when the page stopped between blocks.
+    /// the last height read when the page stopped between blocks. From
+    /// [`EventLog::read_before`], the cursor to read the older page before.
     pub cursor: Option<EventCursor>,
 }
 
@@ -176,6 +178,64 @@ impl EventLog {
         Ok(page)
     }
 
+    /// The newest events `keep` accepts before `before` (exclusive; `None`
+    /// reads from the tip), newest first: at most `limit` of them, from at
+    /// most `max_heights` heights down from there, none below the floor. The
+    /// page's `cursor` is the `before` that reads the page older than it, or
+    /// `None` once the floor was read.
+    pub fn read_before(
+        &self,
+        before: Option<EventCursor>,
+        limit: usize,
+        max_heights: u64,
+        keep: &dyn Fn(&ChainEvent) -> bool,
+    ) -> Result<Page> {
+        let mut page = Page {
+            events: Vec::new(),
+            cursor: None,
+        };
+        let floor = self.floor()?;
+        let Some(tip) = self.tip() else {
+            return Ok(page);
+        };
+        let top = match before {
+            None => tip,
+            // Nothing at a height comes before its start: the page older than
+            // a height read whole begins one height down.
+            Some(b) if b == EventCursor::block_start(b.height) => match b.height.checked_sub(1) {
+                Some(h) => h.min(tip),
+                None => return Ok(page),
+            },
+            Some(b) => b.height.min(tip),
+        };
+        if top < floor {
+            return Ok(page);
+        }
+        let mut height = top;
+        let mut read = 0;
+        loop {
+            for event in self.block(height)?.into_iter().rev() {
+                if before.is_some_and(|b| event.cursor >= b) || !keep(&event) {
+                    continue;
+                }
+                if page.events.len() == limit {
+                    page.cursor = page.events.last().map(|e| e.cursor);
+                    return Ok(page);
+                }
+                page.events.push(event);
+            }
+            read += 1;
+            if height == floor {
+                return Ok(page);
+            }
+            if read >= max_heights.max(1) {
+                page.cursor = Some(EventCursor::block_start(height));
+                return Ok(page);
+            }
+            height -= 1;
+        }
+    }
+
     /// Deletes the events of heights `first..=last`, handed to the data
     /// availability layer with their blocks, and raises the floor past them.
     pub fn prune_range(&self, first: u64, last: u64) -> Result<usize> {
@@ -277,6 +337,91 @@ mod tests {
         let page = log.read_after(page.cursor, None, 10, 100, &ALL).unwrap();
         assert_eq!(page.events.len(), 2);
         assert_eq!(page.events[0].cursor, EventCursor::new(5, 0, 0));
+    }
+
+    /// Every event from the tip down, newest first, paging back with the
+    /// returned cursor.
+    fn newest_first(log: &EventLog, limit: usize, max_heights: u64) -> Vec<EventCursor> {
+        let mut seen = Vec::new();
+        let mut before = None;
+        // Every page moves the cursor down, so a few hundred pages read any
+        // log these tests write; a cursor that stops moving fails here.
+        for _ in 0..256 {
+            let page = log.read_before(before, limit, max_heights, &ALL).unwrap();
+            seen.extend(page.events.iter().map(|e| e.cursor));
+            match page.cursor {
+                Some(c) => {
+                    assert!(
+                        before.is_none_or(|b| c < b),
+                        "the page cursor did not move: {c:?}"
+                    );
+                    before = Some(c);
+                }
+                None => return seen,
+            }
+        }
+        panic!("paging back did not reach the floor")
+    }
+
+    #[test]
+    fn paging_back_from_the_tip_reads_every_event_newest_first_once() {
+        let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+        let log = EventLog::open(storage.clone()).unwrap();
+        write(&storage, &log, 1, 2);
+        write(&storage, &log, 2, 0);
+        write(&storage, &log, 3, 3);
+        let mut oldest_first = Vec::new();
+        let mut cursor = None;
+        for pages in 0.. {
+            assert!(pages < 256, "reading forward did not reach the tip");
+            let page = log.read_after(cursor, None, 1_000, 100, &ALL).unwrap();
+            if page.events.is_empty() {
+                break;
+            }
+            oldest_first.extend(page.events.iter().map(|e| e.cursor));
+            cursor = page.cursor;
+        }
+        let mut expected = oldest_first.clone();
+        expected.reverse();
+        assert!(expected.len() > 3);
+        // Pages that end inside a block, between blocks and at the floor.
+        for (limit, max_heights) in [(1, 100), (2, 100), (3, 1), (1_000, 100)] {
+            assert_eq!(
+                newest_first(&log, limit, max_heights),
+                expected,
+                "{limit} {max_heights}"
+            );
+        }
+        let first = log.read_before(None, 2, 100, &ALL).unwrap();
+        assert_eq!(first.events[0].cursor, expected[0]);
+        assert_eq!(first.cursor, Some(expected[1]));
+    }
+
+    #[test]
+    fn paging_back_stops_at_the_floor_and_reads_nothing_below_it() {
+        let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+        let log = EventLog::open(storage.clone()).unwrap();
+        for h in 1..=3 {
+            write(&storage, &log, h, 1);
+        }
+        log.prune_range(1, 2).unwrap();
+        let page = log.read_before(None, 100, 100, &ALL).unwrap();
+        assert!(page.events.iter().all(|e| e.cursor.height == 3));
+        assert_eq!(page.cursor, None);
+        let below = log
+            .read_before(Some(EventCursor::block_start(3)), 100, 100, &ALL)
+            .unwrap();
+        assert!(below.events.is_empty());
+        assert_eq!(below.cursor, None);
+    }
+
+    #[test]
+    fn an_empty_log_has_no_newest_page() {
+        let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+        let log = EventLog::open(storage).unwrap();
+        let page = log.read_before(None, 10, 10, &ALL).unwrap();
+        assert!(page.events.is_empty());
+        assert_eq!(page.cursor, None);
     }
 
     #[test]

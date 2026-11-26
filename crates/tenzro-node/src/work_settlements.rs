@@ -627,6 +627,31 @@ fn address_param(params: &Value, key: &str) -> Result<Option<Address>, JsonRpcEr
         .transpose()
 }
 
+/// Adds the root identity behind the payer (the agent the chain recorded as
+/// paying, else the payer's account) and behind the provider, as the chain
+/// tells settlement parties apart: `payer_root` and `provider_root`, null
+/// for an account with no registered identity, named among the chain-held
+/// sources.
+fn with_roots(v: &mut Value, chain: &dyn tenzro_vm::traits::VmState, entry: &WorkSettlement) {
+    let root =
+        |did: Option<String>| did.map(|d| tenzro_vm::native::rewards::root_identity(chain, &d));
+    let payer_did = v["agent_did"].as_str().map(str::to_string).or_else(|| {
+        entry
+            .payer
+            .as_ref()
+            .and_then(|p| tenzro_vm::native::identity_did_of(chain, p.as_bytes()))
+    });
+    v["payer_root"] = json!(root(payer_did));
+    v["provider_root"] = json!(root(tenzro_vm::native::identity_did_of(
+        chain,
+        entry.provider.as_bytes()
+    )));
+    if let Some(sources) = v["sources"]["chain"].as_array_mut() {
+        sources.push(json!("payer_root"));
+        sources.push(json!("provider_root"));
+    }
+}
+
 /// `tenzro_listSettlements { cursor?, limit?, work_class?, provider?,
 /// payer?, from_ms?, to_ms? }`: the calls this node settled, newest first.
 pub(crate) async fn handle_list(
@@ -682,7 +707,11 @@ pub(crate) async fn handle_list(
                     escrow: None,
                 },
             };
-            entry_json(e, &held)
+            let mut v = entry_json(e, &held);
+            if let Some(c) = &chain {
+                with_roots(&mut v, c, e);
+            }
+            v
         })
         .collect();
     Ok(json!({
@@ -703,6 +732,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(RocksDbStore::open_default(dir.path()).unwrap());
         (store, dir)
+    }
+
+    /// A listed settlement names the root identity behind its payer and its
+    /// provider from chain state, and null for an account nobody registered.
+    #[test]
+    fn a_listed_settlement_names_its_payer_and_provider_roots() {
+        use tenzro_vm::VmState as _;
+        let mut chain = tenzro_vm::StateAdapter::new();
+        let payer = Address::new([2u8; 32]);
+        chain.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            format!("identity_wallet:{}", hex::encode(payer.as_bytes())).as_bytes(),
+            b"did:tenzro:human:bob".to_vec(),
+        );
+        let e = entry(1, 2, 100, false);
+        let mut v = entry_json(
+            &e,
+            &OnChain {
+                record: None,
+                receipt: None,
+                escrow: None,
+            },
+        );
+        with_roots(&mut v, &chain, &e);
+        assert_eq!(
+            v["payer_root"],
+            tenzro_vm::native::rewards::root_identity(&chain, "did:tenzro:human:bob")
+        );
+        assert_eq!(
+            v["provider_root"],
+            Value::Null,
+            "the provider registered no identity"
+        );
+        let chain_sources = v["sources"]["chain"].as_array().unwrap();
+        assert!(chain_sources.iter().any(|s| s == "payer_root"));
+        assert!(chain_sources.iter().any(|s| s == "provider_root"));
     }
 
     fn entry(provider: u8, payer: u8, at: u64, ledger: bool) -> WorkSettlement {

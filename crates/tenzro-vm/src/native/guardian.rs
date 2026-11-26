@@ -436,7 +436,7 @@ pub fn check_seat(
             hex::encode(address)
         ));
     }
-    if super::is_identity_revoked(state, did) {
+    if super::identity_revoked_in_force(state, did) {
         return Err(format!("identity {did} is revoked"));
     }
     Ok(())

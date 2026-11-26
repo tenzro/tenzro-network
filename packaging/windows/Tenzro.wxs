@@ -66,8 +66,12 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Tenzro">
         <Directory Id="BINDIR" Name="bin" />
+        <Directory Id="CONTROLDIR" Name="control" />
         <Directory Id="SHAREDIR" Name="share">
           <Directory Id="NETWORKDIR" Name="network" />
+          <Directory Id="CONSOLEDIR" Name="console">
+            <Directory Id="CONSOLESRCDIR" Name="src" />
+          </Directory>
         </Directory>
       </Directory>
     </StandardDirectory>
@@ -121,6 +125,8 @@
     <!-- Shortcuts -->
     <ComponentGroup Id="Shortcuts" Directory="StartMenuDir">
       <Component Id="CmpShortcuts" Bitness="always64">
+        <Shortcut Id="ScControl" Name="Tenzro Control" Description="Set up and run this machine's node"
+                  Target="[CONTROLDIR]TenzroControl.exe" WorkingDirectory="CONTROLDIR" />
         <Shortcut Id="ScTenzro" Name="Tenzro" Description="Open a terminal running tenzro"
                   Target="[System64Folder]cmd.exe" Arguments="/c &quot;&quot;[INSTALLFOLDER]tenzro-terminal.cmd&quot; menu&quot;"
                   WorkingDirectory="USERPROFILEDIR" Show="minimized" />
@@ -155,6 +161,9 @@
       <ComponentGroupRef Id="BinFiles" />
       <ComponentGroupRef Id="PayloadLibs" />
       <ComponentGroupRef Id="NetworkProfiles" />
+      <ComponentGroupRef Id="ConsoleFiles" />
+      <ComponentGroupRef Id="ConsoleSrcFiles" />
+      <ComponentGroupRef Id="ControlFiles" />
       <ComponentGroupRef Id="RootFiles" />
       <ComponentGroupRef Id="Shortcuts" />
     </Feature>
@@ -171,13 +180,13 @@
     <WixVariable Id="WixUILicenseRtf" Value="$(StageDir)\License.rtf" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
 
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Run Tenzro setup now" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open Tenzro Control now" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
-              Value="Tenzro is installed. Nothing has been started and nothing has joined any network. Setup first checks this machine (the check changes nothing), then walks you through your first-run choices. You can run the check again any time from the Start menu (Tenzro hardware check) or by typing tenzro-check." />
+              Value="Tenzro is installed. Nothing has been started and nothing has joined any network. Tenzro Control walks you through the node's own setup and your first-run choices. You can check this machine any time from the Start menu (Tenzro hardware check) or by typing tenzro-check." />
 
-    <CustomAction Id="LaunchSetup" Directory="INSTALLFOLDER" Impersonate="yes" Execute="immediate" Return="asyncNoWait"
-                  ExeCommand="&quot;[System64Folder]cmd.exe&quot; /c &quot;&quot;[INSTALLFOLDER]tenzro-terminal.cmd&quot; setup&quot;" />
+    <CustomAction Id="LaunchControl" Directory="CONTROLDIR" Impersonate="yes" Execute="immediate" Return="asyncNoWait"
+                  ExeCommand="&quot;[CONTROLDIR]TenzroControl.exe&quot;" />
 
     <UI Id="TenzroUI">
       <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
@@ -232,7 +241,7 @@
       <Publish Dialog="BrowseDlg" Control="OK" Event="DoAction" Value="WixUIValidatePath_X64" Order="3" Condition="NOT WIXUI_DONTVALIDATEPATH" />
       <Publish Dialog="BrowseDlg" Control="OK" Event="SpawnDialog" Value="InvalidDirDlg" Order="4" Condition="NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID&lt;&gt;&quot;1&quot;" />
 
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchSetup" Order="998" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchControl" Order="998" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
 
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="LicenseAgreementDlg" Condition="NOT Installed" />

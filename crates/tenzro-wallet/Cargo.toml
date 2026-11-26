@@ -25,7 +25,6 @@ rand = { workspace = true }
 hex = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
-chrono = { workspace = true }
 zeroize = { workspace = true }
 argon2 = { workspace = true }
 reqwest = { workspace = true }

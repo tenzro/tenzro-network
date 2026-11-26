@@ -13,7 +13,7 @@ License: Apache-2.0
  /usr/share/common-licenses/Apache-2.0. Attribution notices are in
  /usr/share/doc/@PKG@/NOTICE.
 
-Files: usr/lib/tenzro/lib/libonnxruntime*
+Files: usr/lib/tenzro/bin/libonnxruntime_providers_*
 Comment: Only in packages that carry ONNX Runtime (the CUDA builds).
  ONNX Runtime, Copyright (c) Microsoft Corporation, https://github.com/microsoft/onnxruntime
 License: MIT

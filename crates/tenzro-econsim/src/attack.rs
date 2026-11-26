@@ -79,6 +79,25 @@ pub enum Adversary {
         /// Share of bonded validators that never vote.
         abstain_share: f64,
     },
+    /// Validators holding a stake share propose moving a governed safety
+    /// bound and vote for it; the rest vote against at the given turnout
+    /// or stay away. Proves B8: a change that loosens a capture guard
+    /// needs yes votes of the large-spend approval share of all eligible
+    /// stake, not just of whoever turns out, while tightening the same
+    /// bound needs only the standard track.
+    SafetyBoundCapture {
+        /// Day of the proposal (stake accumulated by this day).
+        start_day: u32,
+        /// Share of the other validators that vote at all (against).
+        honest_turnout: f64,
+        /// The attacking group is the lowest-id validators bonded on the
+        /// start day that together hold this share of bonded stake.
+        stake_share: f64,
+        /// Governed key to move.
+        key: String,
+        /// Value proposed for `key`.
+        value: u64,
+    },
     /// Validators holding a stake share report the TNZO/USD rate a fixed
     /// step below the rate in force every epoch, so a clamped move
     /// compounds; or, withholding, stop reporting so that fewer reports
@@ -180,6 +199,47 @@ pub enum Adversary {
         /// Keep reporting the skewed rate once the rate is held.
         keep_skew: bool,
     },
+    /// Validators holding a stake share always seal a rate walked below the
+    /// rate in force, same as [`Adversary::RateWalk`], but open what they
+    /// sealed the epoch before only when the honest median (the market
+    /// price every other validator reports) has not moved against their
+    /// walk since they last decided; when it has, they let that epoch's
+    /// seal go unopened rather than open a report that now sits further
+    /// from the honest median, forfeiting the unopened-report slash
+    /// instead. Measured against the same run with every validator
+    /// reporting the market and nobody withholding.
+    RevealWithhold {
+        /// Day the strategy starts.
+        start_day: u32,
+        /// Days it runs.
+        run_days: u32,
+        /// Validators in the coalition (the lowest ids).
+        cartel: u32,
+        /// Step below the rate in force, basis points.
+        step_bps: u32,
+    },
+    /// Reads the insurance pool's real claim cap, payable amount and
+    /// published coverage against the live chain state through a chaos
+    /// plan's TNZO price crash and for a window of simulated claim pressure
+    /// after it. No `PayInsuranceClaim` transaction is submitted: the only
+    /// evidence the native module accepts is a bridge reconciliation
+    /// mismatch, and tenzro-econsim models no bridge, so there is no way to
+    /// make the chain pay a real claim here (a confirmed gap, not worked
+    /// around). What is read is exactly the governed valuation
+    /// (`claim_cap`, `payable`, `coverage`) the chain itself would apply to
+    /// a real one.
+    InsuranceUnderCrash {
+        /// Days before `crash_day` sampled once a day, for the pre-crash
+        /// baseline.
+        baseline_days: u32,
+        /// Day the chaos plan's price crash starts.
+        crash_day: u32,
+        /// Days after `crash_day` sampled three times a day: the spec's
+        /// claims tripled for this many days.
+        claim_window_days: u32,
+        /// Loss one sampled claim would prove, whole TNZO.
+        loss_tnzo: f64,
+    },
 }
 
 impl Adversary {
@@ -190,6 +250,7 @@ impl Adversary {
             Adversary::CartelFalseDown { .. } => "validator cartel false SLA verdicts",
             Adversary::GovernanceCapture { .. } => "governance capture at low turnout",
             Adversary::GovernanceHoldout { .. } => "governance holdout",
+            Adversary::SafetyBoundCapture { .. } => "safety-bound capture at low turnout",
             Adversary::RateWalk { .. } => "rate report walk",
             Adversary::SalamiGrants { .. } => "many grants across a treasury outflow period",
             Adversary::WashRing { .. } => "wash ring across colluding roots",
@@ -198,6 +259,10 @@ impl Adversary {
                 "provider price collusion with false SLA verdicts"
             }
             Adversary::PlaybookTrigger { .. } => "rate hold forced by a skewed rate",
+            Adversary::RevealWithhold { .. } => "selective reveal withholding on the rate walk",
+            Adversary::InsuranceUnderCrash { .. } => {
+                "insurance pool valuation through a price crash"
+            }
         }
     }
 
@@ -209,6 +274,7 @@ impl Adversary {
             Adversary::OracleSkew { .. }
                 | Adversary::ProviderCollusion { .. }
                 | Adversary::PlaybookTrigger { .. }
+                | Adversary::RevealWithhold { .. }
         )
     }
 
@@ -249,6 +315,16 @@ impl Adversary {
                 skew_bps: 0,
                 keep_skew: false,
             }),
+            Adversary::RevealWithhold {
+                start_day,
+                run_days,
+                ..
+            } => Some(Adversary::RevealWithhold {
+                start_day,
+                run_days,
+                cartel: 0,
+                step_bps: 0,
+            }),
             _ => None,
         }
     }
@@ -271,6 +347,11 @@ impl Adversary {
                 ..
             }
             | Adversary::PlaybookTrigger {
+                start_day,
+                run_days,
+                ..
+            }
+            | Adversary::RevealWithhold {
                 start_day,
                 run_days,
                 ..
@@ -334,6 +415,9 @@ pub struct AdversaryState {
     cartel_dids: Vec<String>,
     /// Validators of a governance-capture group.
     capture_ids: Vec<u32>,
+    /// The honest median (market price every non-cartel validator reports)
+    /// last time a reveal-withholding decision was made, nano-USD.
+    last_honest_price_nano: Option<u128>,
 }
 
 const ADV_RENTER: u32 = ids::ADVERSARY;
@@ -372,6 +456,7 @@ impl AdversaryState {
             coupons: BTreeMap::new(),
             cartel_dids: Vec::new(),
             capture_ids: Vec::new(),
+            last_honest_price_nano: None,
         }
     }
 
@@ -590,6 +675,72 @@ pub fn hour(e: &mut Economy) {
                 }
             }
         }
+        Adversary::SafetyBoundCapture {
+            start_day,
+            stake_share,
+            key,
+            value,
+            ..
+        } => {
+            if d >= start_day as f64 && !st.started {
+                st.started = true;
+                st.start_balance = holdings(e, &[]);
+                let bonds: Vec<u128> = e.chain.ledger.bonds_now().to_vec();
+                let total: u128 = bonds.iter().sum();
+                let mut ids = Vec::new();
+                let mut held = 0u128;
+                for (v, b) in bonds.iter().enumerate().filter(|(_, b)| **b > 0) {
+                    if held as f64 >= stake_share * total as f64 {
+                        break;
+                    }
+                    ids.push(v as u32);
+                    held += *b;
+                }
+                st.capture_ids = ids;
+                let from = st.capture_ids.first().copied().unwrap_or(0);
+                let action = ledger::parameter_change(&key, value);
+                st.proposed_action = action.clone();
+                let _ = e.chain.submit(from, NATIVE_GAS, |nonce| SimTx::Propose {
+                    from,
+                    action,
+                    nonce,
+                });
+                st.proposal_ms = now;
+                let mine: u128 = st
+                    .capture_ids
+                    .iter()
+                    .map(|v| bonds.get(*v as usize).copied().unwrap_or(0))
+                    .sum();
+                st.detail.insert(
+                    "attacker_stake_share".into(),
+                    mine as f64 / total.max(1) as f64,
+                );
+                st.detail.insert("attacker_stake_tnzo".into(), tnzo(mine));
+            }
+            if let Some(id) = st.proposal.clone() {
+                let from = st.capture_ids.first().copied().unwrap_or(0);
+                let rules = tenzro_vm::governance::GovernanceRules::GENESIS;
+                if st.proposal_stage == 1
+                    && now >= st.proposal_ms + rules.voting_period_ms + rules.voting_period_ms / 10
+                {
+                    let _ = e.chain.submit(from, NATIVE_GAS, |nonce| SimTx::Execute {
+                        from,
+                        proposal: id.clone(),
+                        nonce,
+                    });
+                    st.proposal_stage = 2;
+                } else if st.proposal_stage == 3
+                    && now >= st.proposal_ms + rules.voting_period_ms * 2 + rules.timelock_ms * 2
+                {
+                    let _ = e.chain.submit(from, NATIVE_GAS, |nonce| SimTx::Execute {
+                        from,
+                        proposal: id,
+                        nonce,
+                    });
+                    st.proposal_stage = 4;
+                }
+            }
+        }
         Adversary::GovernanceHoldout { .. } => {}
         Adversary::SalamiGrants {
             open_day,
@@ -750,6 +901,9 @@ pub fn hour(e: &mut Economy) {
         }
         | Adversary::PlaybookTrigger {
             start_day, cartel, ..
+        }
+        | Adversary::RevealWithhold {
+            start_day, cartel, ..
         } => {
             if d >= start_day as f64 && !st.started {
                 st.started = true;
@@ -810,6 +964,107 @@ pub fn hour(e: &mut Economy) {
                 );
             }
         }
+        Adversary::InsuranceUnderCrash {
+            baseline_days,
+            crash_day,
+            claim_window_days,
+            loss_tnzo,
+        } => {
+            let in_baseline =
+                d < crash_day as f64 && d >= crash_day.saturating_sub(baseline_days) as f64;
+            let in_window = d >= crash_day as f64 && d < (crash_day + claim_window_days) as f64;
+            // The spec's claims tripled for the window: three evaluations a
+            // day there, one a day for the pre-crash baseline.
+            let every_hours: i64 = if in_window {
+                8
+            } else if in_baseline {
+                24
+            } else {
+                0
+            };
+            if every_hours > 0 && now / HOUR_MS % every_hours == 0 {
+                let state = e.chain.state();
+                let epoch = n::economy::read_current_epoch(state);
+                let held = e.chain.balance_of(n::insurance::pool_address().as_bytes());
+                let loss = (loss_tnzo * TNZO as f64) as u128;
+                let cap = n::insurance::claim_cap(state, held);
+                let paid = n::insurance::payable(state, loss);
+                let cov = n::insurance::coverage(state, epoch);
+                // The rate in force: claims are paid in TNZO at this rate,
+                // and `claim_cap` converts its safety-rate valuation back to
+                // TNZO through it, so a claim cap read in TNZO alone cancels
+                // the safety rate out again once the rate in force has
+                // caught up with the crash (both move together). What the
+                // safety rate actually changes is this ratio, and the
+                // pool's USD-valued coverage, which only ever reads the
+                // safety rate.
+                let rate_in_force = n::economy::read_fee_rate(state).rate_nano_usd;
+                if paid > held {
+                    *st.detail.entry("pool_exceeded_count".into()).or_default() += 1.0;
+                }
+                if in_baseline {
+                    st.detail
+                        .insert("baseline_claim_cap_tnzo".into(), tnzo(cap));
+                    st.detail.insert(
+                        "baseline_safety_rate_nano_usd".into(),
+                        cov.safety_rate_nano_usd as f64,
+                    );
+                    st.detail.insert(
+                        "baseline_ratio_bps".into(),
+                        cov.ratio_bps.unwrap_or(0) as f64,
+                    );
+                }
+                if in_window {
+                    let prev = st
+                        .detail
+                        .get("window_claim_cap_min_tnzo")
+                        .copied()
+                        .unwrap_or(f64::MAX);
+                    st.detail
+                        .insert("window_claim_cap_min_tnzo".into(), prev.min(tnzo(cap)));
+                    let prev_sr = st
+                        .detail
+                        .get("window_safety_rate_min_nano_usd")
+                        .copied()
+                        .unwrap_or(f64::MAX);
+                    st.detail.insert(
+                        "window_safety_rate_min_nano_usd".into(),
+                        prev_sr.min(cov.safety_rate_nano_usd as f64),
+                    );
+                    let prev_ratio = st
+                        .detail
+                        .get("window_ratio_bps_min")
+                        .copied()
+                        .unwrap_or(f64::MAX);
+                    st.detail.insert(
+                        "window_ratio_bps_min".into(),
+                        prev_ratio.min(cov.ratio_bps.unwrap_or(u64::MAX) as f64),
+                    );
+                    let safety_over_force =
+                        cov.safety_rate_nano_usd as f64 / (rate_in_force.max(1) as f64);
+                    let prev_sof = st
+                        .detail
+                        .get("window_safety_over_force_min")
+                        .copied()
+                        .unwrap_or(f64::MAX);
+                    st.detail.insert(
+                        "window_safety_over_force_min".into(),
+                        prev_sof.min(safety_over_force),
+                    );
+                    *st.detail.entry("window_evals".into()).or_default() += 1.0;
+                }
+                if let Some(prev) = st.detail.get("coverage_epoch_last").copied()
+                    && (cov.epoch as f64) < prev
+                {
+                    st.detail.insert("coverage_epoch_regressed".into(), 1.0);
+                }
+                st.detail
+                    .entry("coverage_epoch_first".to_string())
+                    .or_insert(cov.epoch as f64);
+                st.detail
+                    .insert("coverage_epoch_last".into(), cov.epoch as f64);
+            }
+        }
     }
     e.adv = Some(st);
 }
@@ -835,6 +1090,42 @@ pub fn rate_walk(e: &Economy) -> Option<(u32, u128, bool)> {
     let now = n::read_fee_rate(e.chain.state()).rate_nano_usd;
     let rate = (now * u128::from(10_000u32.saturating_sub(step_bps)) / 10_000).max(1);
     Some((cartel, rate, withhold))
+}
+
+/// The rate the reveal-withholding coalition seals this epoch (same walk as
+/// [`rate_walk`]), and whether it should withhold opening what it sealed the
+/// epoch before: `(coalition size, rate to seal, withhold the reveal)`,
+/// while the strategy runs. The coalition always seals; it withholds only
+/// when the honest median has moved against its walk since the last time it
+/// decided (first decision always opens, having nothing to compare against).
+pub fn reveal_withhold(e: &mut Economy) -> Option<(u32, u128, bool)> {
+    let mut st = e.adv.take()?;
+    let Adversary::RevealWithhold {
+        start_day,
+        run_days,
+        cartel,
+        step_bps,
+    } = st.spec
+    else {
+        e.adv = Some(st);
+        return None;
+    };
+    let d = day(e);
+    if d < start_day as f64 || d >= (start_day + run_days) as f64 {
+        e.adv = Some(st);
+        return None;
+    }
+    let now = n::read_fee_rate(e.chain.state()).rate_nano_usd;
+    let rate = (now * u128::from(10_000u32.saturating_sub(step_bps)) / 10_000).max(1);
+    let honest_price_nano = (e.price * 1e9).max(1.0) as u128;
+    // The walk pushes the reported rate down from the rate in force: the
+    // honest median moving up since the last decision is against it.
+    let against = st
+        .last_honest_price_nano
+        .is_some_and(|prev| honest_price_nano > prev);
+    st.last_honest_price_nano = Some(honest_price_nano);
+    e.adv = Some(st);
+    Some((cartel, rate, against))
 }
 
 /// The validators skewing their rate report and the factor they report
@@ -1087,6 +1378,48 @@ pub fn on_result(e: &mut Economy, r: &TxResult) {
                 }
             }
         }
+        (Adversary::SafetyBoundCapture { honest_turnout, .. }, SimTx::Propose { action, .. })
+            if r.applied && st.proposal.is_none() && *action == st.proposed_action =>
+        {
+            let id = r.output.clone();
+            st.proposal = Some(id.clone());
+            st.proposal_stage = 1;
+            let bonded: Vec<u32> = e
+                .chain
+                .ledger
+                .bonds_now()
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| **b > 0)
+                .map(|(i, _)| i as u32)
+                .collect();
+            let turnout = *honest_turnout;
+            for v in bonded {
+                if st.capture_ids.contains(&v) {
+                    let id = id.clone();
+                    let _ = e.chain.submit(v, NATIVE_GAS, |nonce| SimTx::Vote {
+                        from: v,
+                        proposal: id,
+                        nonce,
+                    });
+                } else if rand::Rng::gen_range(&mut e.rng, 0.0..1.0) < turnout {
+                    let mut payload = id.clone();
+                    payload.push(0);
+                    let me = ledger::account(v);
+                    payload.push(me.len() as u8);
+                    payload.extend_from_slice(&me);
+                    let _ = e.chain.call(
+                        v,
+                        None,
+                        0,
+                        n::SELECTOR_GOVERNANCE_VOTE,
+                        &payload,
+                        NATIVE_GAS,
+                        None,
+                    );
+                }
+            }
+        }
         (Adversary::SalamiGrants { attackers, .. }, SimTx::Propose { action, .. })
             if r.applied && *action == st.proposed_action =>
         {
@@ -1132,9 +1465,10 @@ pub fn on_result(e: &mut Economy, r: &TxResult) {
                 }
             }
         }
-        (Adversary::GovernanceCapture { .. }, SimTx::Execute { proposal, .. })
-            if st.proposal.as_ref() == Some(proposal) =>
-        {
+        (
+            Adversary::GovernanceCapture { .. } | Adversary::SafetyBoundCapture { .. },
+            SimTx::Execute { proposal, .. },
+        ) if st.proposal.as_ref() == Some(proposal) => {
             if st.proposal_stage == 2 {
                 st.proposal_stage = if r.applied { 3 } else { 5 };
                 st.detail
@@ -1247,6 +1581,13 @@ pub fn finish(e: &mut Economy) {
                 out.profit_tnzo = held as f64 / TNZO as f64 - st.start_balance as f64 / TNZO as f64;
             }
         }
+        // Profit is not the point here: whether the bound actually moved
+        // (and to what) is what this strategy is measured by.
+        Adversary::SafetyBoundCapture { key, value, .. } => {
+            out.detail
+                .insert("final_param".into(), e.chain.param(key) as f64);
+            out.detail.insert("proposed_value".into(), *value as f64);
+        }
         Adversary::SalamiGrants { .. } => {
             // The treasury's own rule, replayed over what was paid: a period
             // opens at the first payment after the last one ended, with the
@@ -1339,15 +1680,21 @@ pub fn finish(e: &mut Economy) {
             out.detail
                 .insert("fees_and_gas_tnzo".into(), tnzo(rewards) - out.profit_tnzo);
         }
+        // Nothing more to compute: every figure is already in `st.detail`,
+        // copied into `out.detail` above.
+        Adversary::InsuranceUnderCrash { .. } => {}
         Adversary::OracleSkew { .. }
         | Adversary::PlaybookTrigger { .. }
-        | Adversary::ProviderCollusion { .. } => {
+        | Adversary::ProviderCollusion { .. }
+        | Adversary::RevealWithhold { .. } => {
             // Each account's holdings, for the comparison with the baseline
             // run ([`pair`]).
             let validators = e.cfg.assumptions.validators + e.cfg.assumptions.standby;
             for v in 0..validators {
                 out.detail.insert(format!("val:{v}"), validator_value(e, v));
             }
+            out.detail
+                .insert("validators_total".into(), validators as f64);
             if matches!(st.spec, Adversary::ProviderCollusion { .. }) {
                 for (i, b) in e.provider_books().iter().enumerate() {
                     out.detail.insert(format!("prov:{i}"), b.3);
@@ -1366,6 +1713,12 @@ pub fn finish(e: &mut Economy) {
                 }
                 out.detail.insert("rate_max_deviation".into(), worst);
                 out.detail.insert("days_rate_held".into(), held);
+                if let Some(dd) = e.out.days.last().filter(|x| x.fair_price_usd > 0.0) {
+                    out.detail.insert(
+                        "final_rate_gap".into(),
+                        (dd.chain_rate_usd / dd.fair_price_usd - 1.0).abs(),
+                    );
+                }
             }
             out.detail.insert("final_price_usd".into(), price);
         }
@@ -1376,6 +1729,7 @@ pub fn finish(e: &mut Economy) {
     out.profit_usd = out.profit_tnzo * price;
     out.succeeded = match &st.spec {
         Adversary::GovernanceHoldout { .. } => e.enacted == 0 && e.failed > 0,
+        Adversary::SafetyBoundCapture { key, value, .. } => e.chain.param(key) == *value,
         // A coalition below half the stake moved the rate in force more
         // than 5% away from the market.
         // A period paid out more than its cap (a thousandth of slack for
@@ -1391,6 +1745,8 @@ pub fn finish(e: &mut Economy) {
             out.detail.get("cartel_stake_share").copied().unwrap_or(1.0) < 0.5
                 && out.detail.get("rate_max_deviation").copied().unwrap_or(0.0) > 0.05
         }
+        // A read-only valuation probe: nothing to call a success or failure.
+        Adversary::InsuranceUnderCrash { .. } => false,
         // Judged once compared with the baseline run.
         s if s.paired() => false,
         _ => out.profit_tnzo > 1.0,
@@ -1408,9 +1764,9 @@ pub fn pair(out: &mut AttackOutcome, base: &AttackOutcome) {
         return;
     };
     let (cartel, providers) = match spec {
-        Adversary::OracleSkew { cartel, .. } | Adversary::PlaybookTrigger { cartel, .. } => {
-            (cartel, 0)
-        }
+        Adversary::OracleSkew { cartel, .. }
+        | Adversary::PlaybookTrigger { cartel, .. }
+        | Adversary::RevealWithhold { cartel, .. } => (cartel, 0),
         Adversary::ProviderCollusion {
             cartel, providers, ..
         } => (cartel, providers),
@@ -1435,6 +1791,21 @@ pub fn pair(out: &mut AttackOutcome, base: &AttackOutcome) {
         "baseline_final_price_usd".into(),
         get(base, "final_price_usd".into()),
     );
+    // Per-validator average gain, cartel against the rest: what a reporting
+    // strategy is actually worth per validator, rather than the group's sum.
+    let total = get(out, "validators_total".into()).round() as u32;
+    if total > cartel {
+        let honest_count = total - cartel;
+        let honest: f64 = (cartel..total)
+            .map(|v| get(out, format!("val:{v}")) - get(base, format!("val:{v}")))
+            .sum();
+        out.detail.insert(
+            "cartel_avg_gain_tnzo".into(),
+            validators / cartel.max(1) as f64,
+        );
+        out.detail
+            .insert("honest_avg_gain_tnzo".into(), honest / honest_count as f64);
+    }
     out.detail
         .retain(|k, _| !k.starts_with("val:") && !k.starts_with("prov:"));
 }

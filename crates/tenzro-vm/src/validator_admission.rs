@@ -42,7 +42,7 @@ pub const REFUSAL_CODE: &str = "validator_admission_closed";
 pub const REFUSAL_RPC_CODE: i32 = -32060;
 
 /// Where to ask to be admitted.
-pub const CONTACT: &str = "team@tenzro.com";
+pub const CONTACT: &str = tenzro_token::validator_registry::VALIDATOR_CONTACT;
 
 /// Whether validator admission is closed in `state`.
 pub fn is_closed(state: &dyn VmState) -> bool {
@@ -64,7 +64,7 @@ pub fn is_admitted(state: &dyn VmState, account: &[u8]) -> bool {
 pub fn refusal_message(account: &[u8]) -> String {
     format!(
         "{REFUSAL_CODE}: {} is not admitted as a validator. Validator admission is closed while \
-         the network stabilises; run as an operator or a participant now. To ask to be admitted, \
+         the network stabilises; run as an operator now. To ask to be admitted, \
          write to {CONTACT}",
         hex::encode(account)
     )

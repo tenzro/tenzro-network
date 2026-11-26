@@ -87,7 +87,7 @@ The Tenzro Network adoption path is staged in three steps (read-only publishing,
 | 1. Card at `/.well-known/tn/agent-card.json` | Not met. The node serves its A2A 1.0 card at `/.well-known/agent-card.json` (the A2A path) on the A2A listener; nothing is served at the `tn/` path. |
 | 2. MeshNodeCards | Not verified here. |
 | 3. OAN-shaped ValidationRecords | Not verified here. |
-| 4. Card signatures under JCS | Met: the card carries detached ES256 JWS signatures over its RFC 8785 canonical form, made by the operator wallet's bound signer. A node without an operator identity or bound signer serves no card. See `docs/architecture/signed-agent-card-a2a-v1.md`. |
+| 4. Card signatures under JCS | Met: the card carries detached ES256 JWS signatures over its RFC 8785 canonical form, made by the machine's identity key in its TPM or Secure Enclave, under the machine DID that key derives. A node whose key cannot sign serves no card. See `docs/architecture/signed-agent-card-a2a-v1.md`. |
 
 ## Boundary
 

@@ -1,0 +1,37 @@
+[package]
+name = "tenzro-ffi"
+version = "0.2.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Tenzro light client for Kotlin and Swift: one Rust core behind UniFFI, the transport and the signer supplied by the app (preview)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+# Writes the Kotlin and Swift bindings from the built library.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+tenzro-light = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uniffi = "0.31"
+
+[dev-dependencies]
+tenzro-light = { workspace = true, features = ["test-support"] }
+tenzro-types = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true

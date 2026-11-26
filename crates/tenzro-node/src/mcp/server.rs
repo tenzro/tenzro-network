@@ -200,130 +200,6 @@ pub struct GetCatalogEntryParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RouteByIntentParams {
-    #[schemars(
-        description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering"
-    )]
-    pub use_case: String,
-    #[schemars(
-        description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional",
-        with = "Option<String>"
-    )]
-    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
-    pub budget: Option<u128>,
-    #[schemars(
-        description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional"
-    )]
-    pub optimize: Option<f64>,
-    #[schemars(description = "Reject any model below this tier: 'cheap' or 'strong'. Optional")]
-    pub quality_floor: Option<String>,
-    #[schemars(description = "Estimated input tokens for cost estimation. Optional")]
-    pub est_input_tokens: Option<u64>,
-    #[schemars(description = "Estimated output tokens for cost estimation. Optional")]
-    pub est_output_tokens: Option<u64>,
-    #[schemars(
-        description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional"
-    )]
-    pub payer_did: Option<String>,
-    #[schemars(
-        description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling: unaffordable models are dropped. Optional"
-    )]
-    pub payer_address: Option<String>,
-    #[schemars(
-        description = "The text the model would answer. Used only to place the request in a difficulty cluster so selection accounts for how hard the prompt is; it is not sent to any provider. Without it the decision rests on declared metadata alone. Optional"
-    )]
-    pub prompt: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ChatByIntentParams {
-    #[schemars(
-        description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering"
-    )]
-    pub use_case: String,
-    #[schemars(
-        description = "The user message (simple single-turn shape). Provide this or 'messages'"
-    )]
-    pub message: Option<String>,
-    #[schemars(
-        description = "Chat turns as [{role, content}] (rich multi-turn shape). The last user turn is what difficulty scoring reads. Provide this or 'message'"
-    )]
-    pub messages: Option<Vec<ChatMessageParam>>,
-    #[schemars(
-        description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional",
-        with = "Option<String>"
-    )]
-    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
-    pub budget: Option<u128>,
-    #[schemars(
-        description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional"
-    )]
-    pub optimize: Option<f64>,
-    #[schemars(description = "Reject any model below this tier: 'cheap' or 'strong'. Optional")]
-    pub quality_floor: Option<String>,
-    #[schemars(description = "Estimated input tokens for cost estimation. Optional")]
-    pub est_input_tokens: Option<u64>,
-    #[schemars(description = "Estimated output tokens for cost estimation. Optional")]
-    pub est_output_tokens: Option<u64>,
-    #[schemars(
-        description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional"
-    )]
-    pub payer_did: Option<String>,
-    #[schemars(
-        description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling and the call bills to it. Optional"
-    )]
-    pub payer_address: Option<String>,
-    #[schemars(description = "Temperature (0.0-2.0). Optional")]
-    pub temperature: Option<f64>,
-    #[schemars(description = "Maximum tokens to generate. Optional")]
-    pub max_tokens: Option<u32>,
-    #[schemars(
-        description = "Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. 'DE,EU'), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Optional"
-    )]
-    pub jurisdiction: Option<String>,
-    #[schemars(
-        description = "Set to 'required' to fail the request unless the response carries a verifiable signed jurisdiction receipt. Optional"
-    )]
-    pub jurisdiction_receipt: Option<String>,
-    #[schemars(
-        description = "p95 latency target in milliseconds; providers observed slower are skipped. Optional"
-    )]
-    pub max_p95_ms: Option<u64>,
-    #[schemars(
-        description = "Continuity level: 'none', 'standby' or 'hot_successor'. Above 'none' the network assigns a successor in the same jurisdiction that holds the session's KV cache and takes over if the provider fails; needs 'jurisdiction' and 'session_id'. Optional"
-    )]
-    pub continuity: Option<String>,
-    #[schemars(
-        description = "The session the turns belong to, when continuity is above 'none'. Optional"
-    )]
-    pub session_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RecordRouteOutcomeParams {
-    #[schemars(
-        description = "The model that served the call. Take it from the routing decision's model_id"
-    )]
-    pub model_id: String,
-    #[schemars(
-        description = "The difficulty cluster the request landed in. Take it from the routing decision's 'cluster'"
-    )]
-    pub cluster: u32,
-    #[schemars(
-        description = "How the call turned out: 'resolved' (answered acceptably), 'escalated' (you took the answer to a stronger model), or 'failed' (no usable answer)"
-    )]
-    pub outcome: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RouteDifficultyStatsParams {
-    #[schemars(
-        description = "Model to report per-cluster outcome counters and error rate for. Omit for the cluster map alone. Optional"
-    )]
-    pub model_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreatePaymentChallengeParams {
     #[schemars(
         description = "Payment protocol: 'mpp' (Machine Payments Protocol — session-based streaming), 'x402' (Coinbase HTTP 402 — stateless one-shot), or 'native' (direct TNZO transfer)"
@@ -561,7 +437,7 @@ pub struct CreateEscrowParams {
     )]
     pub amount_wei: String,
     #[schemars(
-        description = "Release condition: 'provider_signature' | 'consumer_signature' | 'both_signatures' | 'timeout' | 'custom'"
+        description = "Release condition: 'provider_signature' | 'consumer_signature' | 'both_signatures' | 'timeout'"
     )]
     pub release_condition: String,
     #[schemars(
@@ -616,6 +492,10 @@ pub struct QuoteInferenceParams {
     pub verification: Option<String>,
     #[schemars(description = "Only this provider's address")]
     pub provider: Option<String>,
+    #[schemars(
+        description = "Order: price (cheapest first, default) or carbon (cleanest grid first, cheapest among equals; for spot work that can run anywhere)"
+    )]
+    pub order: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1078,17 +958,22 @@ pub struct QueryEventsParams {
     #[schemars(description = "Resume after this cursor (height:tx_index:event_index)")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_cursor: Option<String>,
-    #[schemars(description = "Start at this height (instead of from_cursor)")]
+    #[schemars(description = "Start at this height (instead of from_cursor); 0 for the oldest")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_height: Option<u64>,
-    #[schemars(description = "Stop at this cursor, inclusive")]
+    #[schemars(
+        description = "With neither from_cursor nor from_height: the newest events before this cursor, newest first"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_cursor: Option<String>,
+    #[schemars(description = "Stop at this cursor, inclusive (with from_cursor or from_height)")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_cursor: Option<String>,
     #[schemars(description = "Most events to return (default 100, max 1000)")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
     #[schemars(
-        description = "Also prove the page left out nothing the filter selects: the block-index entries of every block it covered (at most 256 heights a page)"
+        description = "With from_cursor or from_height, also prove the page left out nothing the filter selects: the block-index entries of every block it covered (at most 256 heights a page)"
     )]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completeness: Option<bool>,
@@ -1309,6 +1194,14 @@ pub struct VerifyInferenceCommitmentParams {
         description = "The exact prompt the committed response was generated from. Prompts are never stored with commitments — the verifier supplies it at verification time. The node re-executes prompt+output as a single prefill and compares per-step top-k logits."
     )]
     pub prompt: String,
+    #[schemars(
+        description = "On a node that did not serve the response: the commitment (the `commitment` field of get_inference_commitment's answer on the serving node). It is used only with `receipt`."
+    )]
+    pub commitment: Option<serde_json::Value>,
+    #[schemars(
+        description = "The receipt the provider signed for the response. It checks the decode, and for a supplied commitment it is what names the model and the provider: the commitment must be the one it signs."
+    )]
+    pub receipt: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1324,6 +1217,17 @@ pub struct FileInferenceChallengeParams {
     #[serde(default)]
     #[schemars(description = "Optional free-text reason for the dispute.")]
     pub reason: Option<String>,
+    #[schemars(
+        description = "The provider's signed inference receipt for the challenged response."
+    )]
+    pub receipt: serde_json::Value,
+    #[schemars(
+        description = "What the engine was given: {kind: \"prompt\", prompt} for a raw completion, or {kind: \"chat\", messages, render: {tools, enable_thinking, reasoning_effort}, media} for a chat turn. Must be what the receipt's input_commitment commits to; served only to the drawn seats."
+    )]
+    pub inputs: serde_json::Value,
+    #[serde(default)]
+    #[schemars(description = "The commitment itself, when this node did not serve the response.")]
+    pub commitment: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2387,7 +2291,7 @@ pub struct AccessChallengeOutput {
     /// The challenge bytes, base64url without padding.
     pub challenge: String,
     /// What the device signs, hex.
-    pub device_digest: String,
+    pub device_message: String,
     /// Seconds until the challenge lapses.
     pub expires_in: u64,
 }
@@ -3030,17 +2934,6 @@ pub struct SupplyMetricsOutput {
     pub emission_breakdown: EmissionBreakdown,
 }
 
-/// What the adaptive burn would change, and the metrics it read.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct BurnRecommendationOutput {
-    pub action: String,
-    pub is_alarm: bool,
-    pub magnitude_bps: i32,
-    pub above_proposal_floor: bool,
-    pub deviation_bps: i32,
-    pub basis: SupplyMetricsOutput,
-}
-
 /// This node's OAuth 2.1 authorization-server metadata.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OAuthDiscoveryOutput {
@@ -3286,8 +3179,9 @@ pub struct DaMemberOutput {
 /// The data-availability committee as this node sees it.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DaCommitteeOutput {
-    /// `0x` hex.
-    pub local_address: String,
+    /// This node's validator address, `0x` hex; absent while this node is not
+    /// a member.
+    pub local_address: Option<String>,
     pub count: u64,
     pub members: Vec<DaMemberOutput>,
 }
@@ -3324,6 +3218,9 @@ pub struct DaBlobsOutput {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ValidatorEntryOutput {
     pub address: String,
+    /// Root id of the operator behind the account as the chain derives it;
+    /// null when the account has no identity on chain.
+    pub operator: Option<String>,
     /// Hex.
     pub ml_dsa_pubkey: String,
     /// Hex.
@@ -3338,6 +3235,9 @@ pub struct ValidatorEntryOutput {
     pub activated_at_epoch: Option<u64>,
     pub exited_at_epoch: Option<u64>,
     pub jailed_until_epoch: Option<u64>,
+    /// For a jailed validator: when the jail ends, the command that proposes
+    /// an earlier return, and where to write.
+    pub jailed_remedy: Option<String>,
     /// Hex.
     pub tee_attestation_hash: Option<String>,
     pub metadata_uri: String,
@@ -3349,6 +3249,8 @@ pub struct ValidatorEntryOutput {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ValidatorsOutput {
     pub count: u64,
+    /// The machines of the listing and the operators behind them.
+    pub operators: crate::operator_counts::OperatorCounts,
     pub validators: Vec<ValidatorEntryOutput>,
 }
 
@@ -3394,6 +3296,11 @@ pub struct RpcMethodsOutput {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SnapshotSummaryOutput {
     pub height: u64,
+    /// Height of the block that commits the state root: the
+    /// `--checkpoint-height` a joining node passes to restore this snapshot.
+    pub checkpoint_height: u64,
+    /// Hash of that block (hex, `0x`-prefixed): the `--checkpoint-hash`.
+    pub checkpoint_hash: String,
     pub state_root: String,
     /// The manifest's blob hash.
     pub manifest_blob: String,
@@ -3495,25 +3402,6 @@ pub struct ConnectivityOutput {
     /// Paths opened by hole punching.
     pub punched_paths: u64,
     pub peer_relays: Vec<PeerRelayOutput>,
-}
-
-/// Where an intent routes: the model, its tier and cost, and the provider.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RouteDecisionOutput {
-    pub model_id: String,
-    /// The quality tier, lowercase.
-    pub tier: String,
-    /// Wei, decimal string.
-    pub estimated_cost: String,
-    pub alternates: Vec<String>,
-    /// The difficulty cluster the request fell in.
-    pub cluster: Option<u32>,
-    /// The cluster's expected error rate for the chosen model.
-    pub expected_error: Option<f64>,
-    /// Hex.
-    pub provider: Option<String>,
-    pub endpoint: Option<String>,
-    pub reason: String,
 }
 
 /// What the access policy decides for a caller.
@@ -3884,7 +3772,6 @@ const IROH_READONLY_TOOLS: &[&str] = &[
     "get_provenance",
     "get_economic_policy",
     "node_profile",
-    "cluster_plan",
     "list_snapshots",
     "get_snapshot_manifest",
     "query_events",
@@ -3912,13 +3799,11 @@ const IROH_READONLY_TOOLS: &[&str] = &[
     "get_sealed_model",
     "list_sealed_models",
     "model_recipient_key",
-    "get_download_progress",
     "get_provider_stats",
     "get_compute_bond",
     "get_model_stacks",
     "get_provider_pricing",
     "discover_models",
-    "route_difficulty_stats",
     // ── MoE (planning + status reads; execute/load/prepare excluded) ──
     "moe_shard_map",
     "moe_plan_dispatch",
@@ -3943,7 +3828,6 @@ const IROH_READONLY_TOOLS: &[&str] = &[
     "get_guardian_state",
     "can_transfer",
     // ── Account recovery reads ──
-    "list_guardians",
     // ── Tasks / agents / templates / capabilities (reads) ──
     "list_duties",
     "get_duty",
@@ -3997,7 +3881,6 @@ const IROH_READONLY_TOOLS: &[&str] = &[
     "list_bound_devices",
     "adaptive_burn_get_config",
     "adaptive_burn_get_metrics",
-    "adaptive_burn_get_recommendation",
     "sla_list_outstanding_probes",
     "sla_get_params",
     // ── Sites / functions / machines / apps / leases / compute / storage (reads) ──
@@ -4111,17 +3994,6 @@ async fn agent_escrow_act(
     typed_result(result)
 }
 
-/// The one path by which an MCP tool reaches node state.
-///
-/// Runs the request through [`crate::rpc::dispatch_embedded`], the same
-/// pipeline the HTTP JSON-RPC endpoint uses (access policy, rate limits,
-/// dispatch, usage accounting), carrying the inbound MCP request's
-/// `Authorization` / `DPoP` headers. A tool therefore has exactly the authority its caller
-/// would have calling the JSON-RPC method directly, never more.
-///
-/// A JSON-RPC error comes back as an MCP error with the same code, so a
-/// refusal by the access policy (`-32004`) stays distinguishable to the tool
-/// caller.
 /// Complete an unsigned request with the `Payment` transaction carrying `op`.
 fn payment_request(
     transaction: serde_json::Value,
@@ -4134,6 +4006,17 @@ fn payment_request(
     )
 }
 
+/// The one path by which an MCP tool reaches node state.
+///
+/// Runs the request through [`crate::rpc::dispatch_embedded`], the same
+/// pipeline the HTTP JSON-RPC endpoint uses (access policy, rate limits,
+/// dispatch, usage accounting), carrying the inbound MCP request's
+/// `Authorization` / `DPoP` headers. A tool therefore has exactly the authority its caller
+/// would have calling the JSON-RPC method directly, never more.
+///
+/// A JSON-RPC error comes back as an MCP error with the same code, so a
+/// refusal by the access policy (`-32004`) stays distinguishable to the tool
+/// caller.
 async fn rpc_dispatch(
     node: &Arc<TenzroNode>,
     method: &str,
@@ -4264,21 +4147,6 @@ async fn rpc_tool_typed<T: serde::de::DeserializeOwned>(
     args: serde_json::Value,
 ) -> std::result::Result<Json<Typed<T>>, ErrorData> {
     typed_result(rpc_dispatch(node, method, rpc_args(args)).await?)
-}
-
-// ─── App hosting (sites / functions / machines) params ───
-
-#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct HostingSiteRoute {
-    #[schemars(description = "Request path, e.g. /index.html or /assets/app.js")]
-    pub path: String,
-    #[schemars(description = "BLAKE3 blob hash of the asset (from iroh publishBlob)")]
-    pub blob_hash: String,
-    #[schemars(description = "MIME type served in the Content-Type header")]
-    pub content_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Byte length of the asset")]
-    pub size: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -4605,7 +4473,7 @@ impl TenzroMcpServer {
     }
 
     /// Every tool this server serves: the typed tools and the RPC mirrors.
-    fn router() -> ToolRouter<Self> {
+    pub(crate) fn router() -> ToolRouter<Self> {
         let mut router = Self::tool_router();
         add_rpc_tool_routes(&mut router);
         router
@@ -4839,14 +4707,12 @@ impl TenzroMcpServer {
     // ─── MicroNode Join ───
 
     #[tool(
-        description = "Join the Tenzro Network as a MicroNode — a zero-install full participant. \
-        Provisions a TDIP decentralized identity (DID) and a wallet bound to a key you \
-        already hold — a passkey for a person, a TPM / Secure Enclave key for an agent. \
-        Grants access to all 10 network capabilities: inference, payments, agent collaboration, \
-        MCP tools, task execution, chain queries, smart contracts, TEE services, cross-chain bridge, \
-        and governance. Works from any entry point: Claude, ClawBot, MCP, A2A, SDK, API, CLI, or app. \
-        No binary installation required; you do need a key of your own, which the node \
-        never sees the private half of."
+        description = "Provision a TDIP decentralized identity (DID) and a wallet bound to a key \
+        you already hold: a passkey for a person, a TPM / Secure Enclave key for an agent. The \
+        node never sees the private half of the key. The identity can then pay for and call the \
+        network's services from any entry point (MCP, A2A, SDK, API, CLI or app). It runs no \
+        node and takes no part in consensus: serving or validating needs a node of your own \
+        with a bond."
     )]
     async fn join_as_participant(
         &self,
@@ -4997,7 +4863,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "Price one inference request at every provider serving a model, cheapest first: each provider's announced rate card applied to the request's billable units (input_tokens, output_tokens, cached tokens, image tokens, audio/video ms, ...), plus the governed surcharge for the verification level (none, receipt, optimistic, tee). Only providers that can serve at that level are quoted. Each offer carries the provider's region and the model's live load."
+        description = "Price one inference request at every provider serving a model, cheapest first: each provider's announced rate card applied to the request's billable units (input_tokens, output_tokens, cached tokens, image tokens, audio/video ms, ...), plus the governed surcharge for the verification level (none, receipt, optimistic, tee). Only providers that can serve at that level are quoted. Each offer carries the provider's region, its grid's indicative carbon intensity and the model's live load. order=carbon puts the cleanest grid first, for spot work that can run anywhere."
     )]
     async fn quote_inference(
         &self,
@@ -5011,6 +4877,7 @@ impl TenzroMcpServer {
                 "units": params.units,
                 "verification": params.verification,
                 "provider": params.provider,
+                "order": params.order,
             }),
         )
         .await
@@ -5033,140 +4900,6 @@ impl TenzroMcpServer {
             }),
         )
         .await
-    }
-
-    #[tool(
-        description = "Discover the best model for an intent (use case + budget + quality floor + cost-quality knob) without naming a model. Returns the selected model_id, tier, estimated cost, fallback chain, the difficulty cluster the prompt landed in, that model's observed error rate in the cluster, and the winning provider's address and endpoint when the offer came from another operator. Discovery only — dispatches nothing and records no spend, though the per-DID budget gate and the wallet-balance ceiling still apply, so an unaffordable request is refused here. Use chat_by_intent to select and run in one call"
-    )]
-    async fn route_by_intent(
-        &self,
-        Parameters(p): Parameters<RouteByIntentParams>,
-    ) -> std::result::Result<Json<Typed<RouteDecisionOutput>>, ErrorData> {
-        let mut params = serde_json::json!({ "use_case": p.use_case });
-        if let Some(v) = p.budget {
-            params["budget"] = serde_json::json!(v.to_string());
-        }
-        if let Some(v) = p.optimize {
-            params["optimize"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.quality_floor {
-            params["quality_floor"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.est_input_tokens {
-            params["est_input_tokens"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.est_output_tokens {
-            params["est_output_tokens"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.payer_did {
-            params["payer_did"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.payer_address {
-            params["payer_address"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.prompt {
-            params["prompt"] = serde_json::json!(v);
-        }
-        rpc_tool_typed(&self.node, "tenzro_routeIntent", params).await
-    }
-
-    #[tool(
-        description = "Resolve an intent to a model and run the chat in one call. Selection walks the cross-model fallback chain, so the intent resolves as long as any model that satisfies it has a live offer, and dispatch is pinned to the offer that was scored — the price quoted is the price settled and the provider share goes to the address that offer named. The chosen decision is attached to the response under 'route'. Difficulty feedback for resolved and failed calls is recorded from the dispatch itself; report an escalation with record_route_outcome"
-    )]
-    async fn chat_by_intent(
-        &self,
-        Parameters(p): Parameters<ChatByIntentParams>,
-    ) -> std::result::Result<Json<Typed<ChatByIntentOutput>>, ErrorData> {
-        if p.message.is_none() && p.messages.is_none() {
-            return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Provide 'message' (simple shape) or 'messages' (rich shape)"),
-                data: None,
-            });
-        }
-        let mut params = serde_json::json!({ "use_case": p.use_case });
-        if let Some(v) = p.message {
-            params["message"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.messages {
-            params["messages"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.budget {
-            params["budget"] = serde_json::json!(v.to_string());
-        }
-        if let Some(v) = p.optimize {
-            params["optimize"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.quality_floor {
-            params["quality_floor"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.est_input_tokens {
-            params["est_input_tokens"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.est_output_tokens {
-            params["est_output_tokens"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.payer_did {
-            params["payer_did"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.payer_address {
-            params["payer_address"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.temperature {
-            params["temperature"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.max_tokens {
-            params["max_tokens"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.jurisdiction {
-            params["jurisdiction"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.jurisdiction_receipt {
-            params["jurisdiction_receipt"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.max_p95_ms {
-            params["max_p95_ms"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.continuity {
-            params["continuity"] = serde_json::json!(v);
-        }
-        if let Some(v) = p.session_id {
-            params["session_id"] = serde_json::json!(v);
-        }
-        rpc_tool_typed(&self.node, "tenzro_chatByIntent", params).await
-    }
-
-    #[tool(
-        description = "Report how a routed call turned out so per-cluster error rates reflect what happened rather than only what the catalog declares. In practice this carries 'escalated' — the outcome only the caller knows, because it means you took the answer to a stronger model; 'resolved' and 'failed' are already recorded by chat_by_intent from the dispatch itself. Reporting is advisory: retained=false means the node has no difficulty index wired, so the feedback was accepted and discarded"
-    )]
-    async fn record_route_outcome(
-        &self,
-        Parameters(p): Parameters<RecordRouteOutcomeParams>,
-    ) -> std::result::Result<Json<Typed<RouteOutcomeOutput>>, ErrorData> {
-        rpc_tool_typed(
-            &self.node,
-            "tenzro_recordRouteOutcome",
-            serde_json::json!({
-                "model_id": p.model_id,
-                "cluster": p.cluster,
-                "outcome": p.outcome,
-            }),
-        )
-        .await
-    }
-
-    #[tool(
-        description = "Read the node's difficulty index: how many prompt clusters it has discovered and how many prompts landed in each. With model_id, also returns that model's per-cluster outcome counters and error rate. An operator diagnostic — routing does not depend on it. enabled=false means the node has no embedding model loaded and routes on declared metadata alone"
-    )]
-    async fn route_difficulty_stats(
-        &self,
-        Parameters(p): Parameters<RouteDifficultyStatsParams>,
-    ) -> std::result::Result<Json<Typed<RouteDifficultyStatsOutput>>, ErrorData> {
-        let mut params = serde_json::json!({});
-        if let Some(v) = p.model_id {
-            params["model_id"] = serde_json::json!(v);
-        }
-        rpc_tool_typed(&self.node, "tenzro_routeDifficultyStats", params).await
     }
 
     #[tool(
@@ -5852,7 +5585,6 @@ impl TenzroMcpServer {
             "provider" | "provider_signature" => serde_json::json!("ProviderSignature"),
             "consumer" | "consumer_signature" => serde_json::json!("ConsumerSignature"),
             "both" | "both_signatures" => serde_json::json!("BothSignatures"),
-            "custom" => serde_json::json!({ "Custom": { "condition": "" } }),
             other => {
                 return Err(err_internal(format!(
                     "unsupported release_condition '{}'",
@@ -6406,7 +6138,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "Show this node's economic policy — how a settled payment divides, the network's default settlement asset, and the micro-settlement floor. Also reports the node's visibility and the economic mode it puts the node in: a private node keeps the whole payment, a public validating one shares with the treasury, and a public one that does not validate also pays the RPC provider validating on its behalf. Read this before paying rather than inferring the split from a receipt. Every rate is governance-set."
+        description = "Show the economic policy this node applies: the network's default settlement asset and the micro-settlement floor. Both are governance-set."
     )]
     async fn get_economic_policy(
         &self,
@@ -6421,7 +6153,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "Show the current adaptive burn-rate config — base and local fee burn bps with their treasury complements. The dial moves only via on-chain governance proposals (see adaptive_burn_get_recommendation)."
+        description = "Show the current adaptive burn-rate config — base and local fee burn bps with their treasury complements. The dial moves only via on-chain governance proposals."
     )]
     async fn adaptive_burn_get_config(
         &self,
@@ -6442,21 +6174,6 @@ impl TenzroMcpServer {
         &self,
     ) -> std::result::Result<Json<Typed<SupplyMetricsOutput>>, ErrorData> {
         let v = rpc_dispatch(&self.node, "tenzro_getSupplyMetrics", serde_json::json!({})).await?;
-        typed_result(v)
-    }
-
-    #[tool(
-        description = "Show the current adaptive-burn recommendation — action (NoChange / IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation, a supply increase the ledger refuses, so a fault / AlarmHighDeflation), magnitude bps, and whether it's above the auto-proposal floor. Pure function of metrics + targets, no side effects."
-    )]
-    async fn adaptive_burn_get_recommendation(
-        &self,
-    ) -> std::result::Result<Json<Typed<BurnRecommendationOutput>>, ErrorData> {
-        let v = rpc_dispatch(
-            &self.node,
-            "tenzro_getBurnRateRecommendation",
-            serde_json::json!({}),
-        )
-        .await?;
         typed_result(v)
     }
 
@@ -6883,7 +6600,7 @@ impl TenzroMcpServer {
     // ─── Events Tools ───
 
     #[tool(
-        description = "Query a range of the chain's events, each with its proof against a certified checkpoint. Page with the returned cursor (pass it back as from_cursor)."
+        description = "Query the chain's events, each with its proof against a certified checkpoint. With from_cursor or from_height (0 for the oldest), a range read forward: page with the returned cursor (pass it back as from_cursor). With neither, the newest events, newest first: page back with the returned before_cursor."
     )]
     async fn query_events(
         &self,
@@ -7019,7 +6736,7 @@ impl TenzroMcpServer {
     // ─── Snapshot (State Sync) ───
 
     #[tool(
-        description = "List the state snapshots this node serves over iroh for state sync. Returns `{snapshots: [{height, state_root, manifest_blob, buckets}, ...], endpoint_id}`; a joining node asks `endpoint_id` for a manifest and fetches the blobs it names."
+        description = "List the state snapshots this node serves over iroh for state sync. Returns `{snapshots: [{height, checkpoint_height, checkpoint_hash, state_root, manifest_blob, buckets}, ...], endpoint_id}`, newest first. `checkpoint_height` and `checkpoint_hash` are the join checkpoint that restores each snapshot (the block at `height + 2`, which commits its state root): a joining node passes them as `--checkpoint-height` / `--checkpoint-hash` and asks `endpoint_id` for the manifest. A checkpoint not listed here has no snapshot on this node."
     )]
     async fn list_snapshots(&self) -> std::result::Result<Json<Typed<SnapshotsOutput>>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_listSnapshots", serde_json::json!({}))
@@ -7336,6 +7053,8 @@ impl TenzroMcpServer {
             serde_json::json!({
                 "commitment_hash": params.commitment_hash,
                 "prompt": params.prompt,
+                "commitment": params.commitment,
+                "receipt": params.receipt,
             }),
         )
         .await
@@ -7344,7 +7063,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "File a challenge against a stored inference commitment. Open to any caller; the model and provider are read from the stored envelope so filings cannot misattribute. Returns the filed challenge record with its challenge_id. Mirrors tenzro_fileInferenceChallenge."
+        description = "File a challenge against an inference commitment, with the provider's signed receipt and the inputs it commits to. Open to any caller; the model and provider are read from the receipt so filings cannot misattribute. The challenge is published to every validator; the inputs are served only to the drawn seats. Returns the filed challenge record with its challenge_id. Mirrors tenzro_fileInferenceChallenge."
     )]
     async fn file_inference_challenge(
         &self,
@@ -7357,6 +7076,9 @@ impl TenzroMcpServer {
                 "commitment_hash": params.commitment_hash,
                 "challenger": params.challenger,
                 "reason": params.reason,
+                "receipt": params.receipt,
+                "inputs": params.inputs,
+                "commitment": params.commitment,
             }),
         )
         .await
@@ -8509,7 +8231,7 @@ impl TenzroMcpServer {
     // use this node.
 
     #[tool(
-        description = "Start signing in to this node. Returns a single-use challenge for `did`, bound to the DPoP key whose RFC 7638 thumbprint is `dpop_jkt`. Answer it with `issue_access_token`: a passkey signs `challenge` (webauthn.get), a hardware key signs `device_digest`."
+        description = "Start signing in to this node. Returns a single-use challenge for `did`, bound to the DPoP key whose RFC 7638 thumbprint is `dpop_jkt`. Answer it with `issue_access_token`: a passkey signs `challenge` (webauthn.get), a hardware key signs `device_message`."
     )]
     async fn access_challenge(
         &self,
@@ -9515,7 +9237,7 @@ impl ServerHandler for TenzroMcpServer {
         match proved {
             // The edge already proved this request's token; the call runs as
             // that proved request, so its proof is not spent a second time.
-            Some(p) => crate::rpc::with_proved_token(p.dpop, p.claims, call).await,
+            Some(p) => crate::rpc::with_proved_token(p.dpop, p.claims, None, call).await,
             None => call.await,
         }
     }
@@ -9592,11 +9314,23 @@ impl ServerHandler for TenzroMcpServer {
             // would be refused.
             tools.retain(|t| iroh_tool_allowed(t.name.as_ref()));
         }
+        // A list that cannot be signed is not served: a client that checks
+        // signatures would refuse it, and one that does not must not be the
+        // reason it goes out unsigned.
+        let signed = super::tool_signature::signed_fresh(tools.clone())
+            .await
+            .map_err(|e| {
+                ErrorData::internal_error(format!("the tool list cannot be signed: {e}"), None)
+            })?;
         // The list is the same for every caller on a transport; ttl 0 asks
         // clients not to reuse it across node upgrades.
-        Ok(rmcp::model::ListToolsResult::with_all_items(tools)
+        let mut result = rmcp::model::ListToolsResult::with_all_items(tools)
             .with_ttl_ms(0)
-            .with_cache_scope(rmcp::model::CacheScope::Public))
+            .with_cache_scope(rmcp::model::CacheScope::Public);
+        let mut meta = serde_json::Map::new();
+        meta.insert(super::tool_signature::META_KEY.to_string(), signed);
+        result.meta = Some(rmcp::model::MetaObject(meta));
+        Ok(result)
     }
 
     fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
@@ -9624,13 +9358,13 @@ impl ServerHandler for TenzroMcpServer {
         impl_info.title = Some("Tenzro Network MCP Server".into());
         impl_info.version = env!("CARGO_PKG_VERSION").into();
         impl_info.description = Some(
-            "AI-native blockchain node exposing wallet, identity, payments, staking, provider, bridge, model, and verification tools for the Tenzro Network"
+            "Tenzro Network node: compute of every kind (AI inference, rentable compute, storage) with wallet, identity, payments, staking, provider, bridge, model, and verification tools"
                 .into(),
         );
         impl_info.website_url = Some("https://tenzro.com".into());
         info.server_info = impl_info;
         info.instructions = Some(
-            "Tenzro Network MCP Server — interact with the Tenzro AI-native blockchain.\n\n\
+            "Tenzro Network MCP Server — interact with Tenzro, a network of compute of every kind.\n\n\
              TOOLS BY CATEGORY:\n\n\
              Wallet & Balance:\n\
              • get_balance — Query TNZO token balance\n\n\
@@ -9719,6 +9453,13 @@ impl ServerHandler for TenzroMcpServer {
              • list_role_endpoints — A role's staked operators and their published URLs\n\
              • get_provider_stats — Get provider performance metrics\n\
              • get_compute_bond — Read compute bonds and the admission minimum\n\n\
+             Storage & Compute Rental:\n\
+             • storage_status — Storage provider status\n\
+             • storage_store_object — Store a content-addressed object\n\
+             • storage_retrieve_object — Read a stored object back\n\
+             • storage_set_pricing — Set a storage provider's pricing\n\
+             • compute_list_claims — List compute claims an address has written or held\n\
+             • compute_price_feed — Providers by observed price, latency and reliability\n\n\
              Provider Config:\n\
              • get_model_stacks — Stack serving now, the next one, and when they switch\n\
              • set_provider_pricing — Set token and per-unit pricing for a provider\n\
@@ -9808,23 +9549,15 @@ fn mcp_http_service(
     )
 }
 
-/// Start the MCP server on the given address using Streamable HTTP transport
-/// Public API method for external use without shutdown signal
-pub async fn start_mcp_server(
-    listen_addr: String,
-    node: Arc<TenzroNode>,
-    web_state: Arc<WebState>,
-) -> NodeResult<()> {
-    let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-    start_mcp_server_with_shutdown(listen_addr, node, web_state, shutdown_rx).await
-}
-
-/// Start the MCP server with graceful shutdown support
+/// Start the MCP server (Streamable HTTP) with graceful shutdown support.
+/// The address it bound goes to `addr_tx` when given, so a caller that asked
+/// for port 0 learns the port.
 pub async fn start_mcp_server_with_shutdown(
     listen_addr: String,
     node: Arc<TenzroNode>,
     web_state: Arc<WebState>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    addr_tx: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
 ) -> NodeResult<()> {
     // ── OAuth 2.1 Authentication ──
     let mcp_auth_mode =
@@ -9883,7 +9616,7 @@ pub async fn start_mcp_server_with_shutdown(
         // Who and where each request came from, for the administrative
         // audit log.
         .layer(axum::middleware::from_fn_with_state(
-            (node_for_gate, crate::admin_audit::Transport::Mcp),
+            (node_for_gate.clone(), crate::admin_audit::Transport::Mcp),
             crate::admin_audit::capture_http,
         ))
         // the marker on a particular code path.
@@ -9903,10 +9636,19 @@ pub async fn start_mcp_server_with_shutdown(
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             4 * 1024 * 1024,
         ));
+    let app = crate::ip_rate_limit::public_edge(
+        app,
+        crate::rpc::governed_address_limits(&node_for_gate),
+        node_for_gate.http_surface().clone(),
+    );
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    let local_addr = listener.local_addr()?;
+    if let Some(tx) = addr_tx {
+        let _ = tx.send(local_addr);
+    }
     let tool_count = TenzroMcpServer::router().list_all().len();
-    tracing::info!(addr = %listen_addr, tools = tool_count, mode = "stateless-json", oauth = true, "MCP Server listening (endpoints: /mcp, compact listing /mcp/compact; OAuth 2.1 enabled)");
+    tracing::info!(addr = %local_addr, tools = tool_count, mode = "stateless-json", oauth = true, "MCP Server listening (endpoints: /mcp, compact listing /mcp/compact; OAuth 2.1 enabled)");
 
     axum::serve(
         listener,
@@ -10022,6 +9764,86 @@ mod tests {
         );
     }
 
+    /// A name on an unauthenticated allowlist that no tool answers to would
+    /// open whichever tool later took that name.
+    #[test]
+    fn every_unauthenticated_allowlist_entry_names_a_served_tool() {
+        let served: std::collections::BTreeSet<String> = TenzroMcpServer::router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let unserved: Vec<&str> = IROH_READONLY_TOOLS
+            .iter()
+            .chain(crate::mcp::oauth::PUBLIC_MCP_TOOLS)
+            .copied()
+            .filter(|name| !served.contains(*name))
+            .collect();
+        assert!(
+            unserved.is_empty(),
+            "allowlisted without a tool of that name: {unserved:?}"
+        );
+    }
+
+    /// Every tool an unauthenticated allowlist names reaches only open reads:
+    /// each JSON-RPC method its body calls (for an RPC mirror, the method it
+    /// mirrors) is an open method, and if its name reads as a write, one the
+    /// identity rule classifies as writing nothing durable.
+    #[test]
+    fn every_unauthenticated_allowlist_entry_reaches_only_open_reads() {
+        use crate::rpc_gates::{
+            ADMIN_METHODS, IdentityCover, OPEN_METHODS, OPEN_WRITE_IDENTITY, OPEN_WRITES,
+            OWNER_METHODS,
+        };
+        let src = include_str!("server.rs");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests {").unwrap()];
+        let known = |s: &str| {
+            ADMIN_METHODS.contains(&s) || OWNER_METHODS.contains(&s) || OPEN_METHODS.contains(&s)
+        };
+        let methods_of = |tool: &str| -> Vec<String> {
+            if let Some(m) = super::super::rpc_tools::RPC_TOOLS
+                .iter()
+                .find(|t| t.name == tool)
+            {
+                return vec![m.method.to_string()];
+            }
+            let Some(at) = src.find(&format!("\n    async fn {tool}(")) else {
+                return Vec::new();
+            };
+            let arrow = at + src[at..].find("->").unwrap();
+            let body_start = arrow + src[arrow..].find('{').unwrap();
+            let body_end = body_start + src[body_start..].find("\n    }\n").unwrap();
+            src[body_start..body_end]
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .filter(|s| known(s))
+                .map(str::to_string)
+                .collect()
+        };
+        let mut offenders = Vec::new();
+        for tool in IROH_READONLY_TOOLS
+            .iter()
+            .chain(crate::mcp::oauth::PUBLIC_MCP_TOOLS)
+        {
+            let methods = methods_of(tool);
+            let not_read = methods.iter().any(|m| {
+                let stateless = OPEN_WRITE_IDENTITY
+                    .iter()
+                    .any(|(w, cover)| w == m && *cover == IdentityCover::Stateless);
+                !OPEN_METHODS.contains(&m.as_str())
+                    || (OPEN_WRITES.iter().any(|(w, _)| w == m) && !stateless)
+            });
+            if methods.is_empty() || not_read {
+                offenders.push(format!("{tool}: {methods:?}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "allowlisted tools that reach no open read, or something other than one: {offenders:?}"
+        );
+    }
+
     /// What a code-generating harness (a "code mode" wrapper that turns the
     /// tool list into a typed API, e.g. Cloudflare's Code Mode) needs from
     /// every tool regardless of its shape: a name it can bind to a function
@@ -10064,7 +9886,6 @@ mod tests {
     const ZERO_ARGUMENT_TOOLS: &[&str] = &[
         "adaptive_burn_get_config",
         "adaptive_burn_get_metrics",
-        "adaptive_burn_get_recommendation",
         "da_committee",
         "da_list_blobs",
         "detect_tee",
@@ -10420,15 +10241,18 @@ mod tests {
             }
         }
         use crate::catalog_rpc::with_licence;
-        check::<VisionCatalogRow>(with_licence(&tenzro_model::get_vision_catalog()));
-        check::<ForecastCatalogRow>(with_licence(&tenzro_model::get_forecast_catalog()));
-        check::<SegmentationCatalogRow>(with_licence(&tenzro_model::get_segmentation_catalog()));
+        use tenzro_model::Catalog;
+        let seed = Catalog::test_seed();
+        check::<VisionCatalogRow>(with_licence(&seed, Catalog::get_vision_catalog));
+        check::<ForecastCatalogRow>(with_licence(&seed, Catalog::get_forecast_catalog));
+        check::<SegmentationCatalogRow>(with_licence(&seed, Catalog::get_segmentation_catalog));
         check::<TextSegmentationCatalogRow>(with_licence(
-            &tenzro_model::get_text_segmentation_catalog(),
+            &seed,
+            Catalog::get_text_segmentation_catalog,
         ));
-        check::<DetectionCatalogRow>(with_licence(&tenzro_model::get_detection_catalog()));
-        check::<AudioCatalogRow>(with_licence(&tenzro_model::get_audio_catalog()));
-        check::<VideoCatalogRow>(with_licence(&tenzro_model::get_video_catalog()));
+        check::<DetectionCatalogRow>(with_licence(&seed, Catalog::get_detection_catalog));
+        check::<AudioCatalogRow>(with_licence(&seed, Catalog::get_audio_catalog));
+        check::<VideoCatalogRow>(with_licence(&seed, Catalog::get_video_catalog));
     }
 
     /// Code-generating harnesses turn this tool list into a TypeScript API,
@@ -10469,6 +10293,30 @@ mod tests {
 
     /// A type that contains itself converts to one named alias that the
     /// declarations refer to, so it reads as typed rather than free-form.
+    /// The validator and provider listings declare the operator of each
+    /// entry and the operator counts of the whole listing.
+    #[cfg(feature = "mcp-output-schemas")]
+    #[test]
+    fn listings_declare_operators_beside_machines() {
+        let tools = TenzroMcpServer::router().list_all();
+        for name in [
+            "list_validators",
+            "list_active_validators",
+            "list_providers",
+        ] {
+            let tool = tools.iter().find(|t| t.name == name).expect(name);
+            let schema = serde_json::to_string(tool.output_schema.as_ref().expect(name)).unwrap();
+            for field in [
+                "\"operator\"",
+                "\"operators\"",
+                "\"distinct_operators\"",
+                "\"without_identity\"",
+            ] {
+                assert!(schema.contains(field), "{name} lacks {field}");
+            }
+        }
+    }
+
     // The typed output schemas these read are the `mcp-output-schemas` feature's.
     #[cfg(feature = "mcp-output-schemas")]
     #[test]

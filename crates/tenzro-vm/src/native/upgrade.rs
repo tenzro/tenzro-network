@@ -25,10 +25,11 @@ use sha2::{Digest, Sha256};
 use super::staking::total_bonded;
 use super::*;
 use crate::governance::{
-    ProposalAction, SECURITY_REVEAL_SLASH_BPS_PARAM, SECURITY_REVEAL_WINDOW_PARAM, SecurityBasis,
-    UPGRADE_ACTIVATION_DELAY_PARAM, UPGRADE_READINESS_BPS_PARAM, UpgradeActivation,
-    upgrade_ready_digest,
+    ActivationDigest, ProposalAction, SECURITY_REVEAL_SLASH_BPS_PARAM,
+    SECURITY_REVEAL_WINDOW_PARAM, SecurityBasis, UPGRADE_ACTIVATION_DELAY_PARAM,
+    UPGRADE_READINESS_BPS_PARAM, UpgradeActivation, UpgradePlatforms, upgrade_ready_digest,
 };
+use tenzro_types::token::PolicyUpdate;
 
 /// A validator machine's readiness: `selector || code_hash(32) || evidence`,
 /// the evidence a JSON TPM quote.
@@ -45,7 +46,15 @@ pub const GAS_SECURITY_DISCLOSURE: u64 = 60_000;
 /// Topic of the log an upgrade's activation is announced in.
 pub const UPGRADE_SCHEDULED_TOPIC: &[u8] = b"UpgradeScheduled";
 
+/// Topic of the log that lists the binaries of an upgrade built for several
+/// platforms, emitted beside [`UPGRADE_SCHEDULED_TOPIC`].
+pub const UPGRADE_PLATFORMS_TOPIC: &[u8] = b"UpgradePlatformsScheduled";
+
+/// The gate of upgrades that name a binary per platform.
+pub const PLATFORMS_GATE: &str = "feature.upgrade_platforms.activation_epoch";
+
 const ACTIVATION_KEY: &str = "upgrade_activation";
+const PLATFORMS_KEY: &str = "upgrade_platforms";
 
 /// Storage key (in the system account) of the chain's protocol version.
 pub const PROTOCOL_VERSION_KEY: &str = "network:protocol_version";
@@ -197,6 +206,53 @@ pub fn readiness(state: &dyn VmState, code_hash: &[u8]) -> Readiness {
     }
 }
 
+/// The version and binaries a protocol upgrade names: one for
+/// [`PolicyUpdate::ProtocolUpgrade`], one per platform for
+/// [`PolicyUpdate::ProtocolUpgradePlatforms`]. `None` for any other change.
+pub fn upgrade_binaries(update: &PolicyUpdate) -> Option<(&str, Vec<&[u8]>)> {
+    match update {
+        PolicyUpdate::ProtocolUpgrade { version, code_hash } => {
+            Some((version, vec![code_hash.as_slice()]))
+        }
+        PolicyUpdate::ProtocolUpgradePlatforms { version, digests } => Some((
+            version,
+            digests.iter().map(|d| d.code_hash.as_slice()).collect(),
+        )),
+        _ => None,
+    }
+}
+
+/// The readiness of an upgrade that names `binaries`, weighed by stake
+/// bonded now: every validator that signalled for any of them, counted once.
+pub fn upgrade_readiness(state: &dyn VmState, binaries: &[&[u8]]) -> Readiness {
+    let mut signals: Vec<ReadySignal> = Vec::new();
+    for code_hash in binaries {
+        for s in ready_signals(state, code_hash) {
+            if !signals.iter().any(|seen| seen.validator == s.validator) {
+                signals.push(s);
+            }
+        }
+    }
+    let ready_stake = signals
+        .iter()
+        .filter_map(|s| hex::decode(&s.validator).ok())
+        .map(|v| bonded_stake_of(state, &v))
+        .fold(0u128, u128::saturating_add);
+    Readiness {
+        ready_stake,
+        total_bonded: total_bonded(state),
+        required_bps: network_param(state, UPGRADE_READINESS_BPS_PARAM),
+        signals,
+    }
+}
+
+/// The binaries of the most recent upgrade built for several platforms, if
+/// one was scheduled. It belongs to the scheduled activation when their
+/// proposal ids match.
+pub fn read_upgrade_platforms(state: &dyn VmState) -> Option<UpgradePlatforms> {
+    funding::read_json(state, PLATFORMS_KEY)
+}
+
 /// The most recent upgrade activation, if one was scheduled.
 pub fn read_upgrade_activation(state: &dyn VmState) -> Option<UpgradeActivation> {
     funding::read_json(state, ACTIVATION_KEY)
@@ -210,38 +266,65 @@ pub fn read_security_commitment(
     funding::read_json(state, &commitment_key(proposal_id))
 }
 
-/// Refuses to enact a protocol upgrade whose binary has not reached its
-/// readiness share.
+/// Refuses to enact a protocol upgrade whose binary, or binaries together,
+/// have not reached its readiness share, or one of whose binaries lacks its
+/// builder attestations once those are in force.
 pub(super) fn require_readiness(state: &dyn VmState, action: &ProposalAction) -> Result<()> {
-    let ProposalAction::PolicyUpdate {
-        update: tenzro_types::token::PolicyUpdate::ProtocolUpgrade { code_hash, .. },
-        ..
-    } = action
-    else {
+    let ProposalAction::PolicyUpdate { update, .. } = action else {
         return Ok(());
     };
-    let r = readiness(state, code_hash);
+    let Some((_, binaries)) = upgrade_binaries(update) else {
+        return Ok(());
+    };
+    let r = upgrade_readiness(state, &binaries);
     if !r.met() {
         return Err(refuse(format!(
             "validators holding {} bps of bonded stake have quoted binary {}; {} bps must before it enacts",
             r.ready_bps(),
-            hex::encode(code_hash),
+            binaries
+                .iter()
+                .map(hex::encode)
+                .collect::<Vec<_>>()
+                .join(" or "),
             r.required_bps
         )));
     }
-    Ok(())
+    super::build_attestation::require_builders(state, &binaries)
 }
 
-/// Record an enacted upgrade's activation height and announce it.
+/// Record an enacted upgrade's activation height and announce it. An
+/// upgrade built for several platforms also records and announces its
+/// binaries; its activation names the first of them.
 pub(super) fn schedule(
     state: &mut dyn VmState,
     proposal_id: &str,
-    version: &str,
-    code_hash: &[u8],
+    update: &PolicyUpdate,
     height: u64,
     changes: &mut Vec<StateChange>,
     logs: &mut Vec<Log>,
 ) -> Result<()> {
+    let Some((version, binaries)) = upgrade_binaries(update) else {
+        return Ok(());
+    };
+    let code_hash = binaries.first().copied().unwrap_or_default();
+    if let PolicyUpdate::ProtocolUpgradePlatforms { digests, .. } = update {
+        let platforms = UpgradePlatforms {
+            proposal_id: proposal_id.to_string(),
+            digests: digests
+                .iter()
+                .map(|d| ActivationDigest {
+                    platform: d.platform.clone(),
+                    code_hash: hex::encode(&d.code_hash),
+                })
+                .collect(),
+        };
+        let blob = funding::write_json(state, PLATFORMS_KEY, &platforms, changes)?;
+        logs.push(Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![UPGRADE_PLATFORMS_TOPIC.to_vec()],
+            blob,
+        ));
+    }
     let delay = network_param(state, UPGRADE_ACTIVATION_DELAY_PARAM);
     let activation = UpgradeActivation {
         proposal_id: proposal_id.to_string(),
@@ -400,7 +483,7 @@ pub(super) fn execute_upgrade_ready(
             hex::encode(&tx.from)
         ))
     })?;
-    if is_identity_revoked(state, &did) {
+    if identity_revoked_in_force(state, &did) {
         return Err(refuse(format!("{did} is revoked")));
     }
     let admitted = funding::machine_attestation(state, &did).map_err(|e| {
@@ -488,7 +571,7 @@ pub(super) fn execute_security_disclosure(
             "{proposal_id} has not enacted; its vulnerability is revealed after"
         ))
     })?;
-    let now_ms = deterministic_now_ms(tx);
+    let now_ms = deterministic_now_ms(tx)?;
     if disclosure.is_empty() && now_ms <= reveal_by {
         return Err(refuse(format!(
             "{proposal_id}'s reveal window is open until {reveal_by}; nothing lapsed yet"

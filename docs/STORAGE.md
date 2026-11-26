@@ -8,7 +8,7 @@
 
 A node with spare disk can hold data for the network. Tenzro Storage is the protocol surface that turns that disk into a paid service: a consumer buys a storage claim for an object, validators check each hour that the provider can still return the data, and the claim pays the provider hour by hour on their verdicts.
 
-Storage is a role a node takes on, not a separate network. A node that serves AI can hold data at the same time, and the one stake that backs serving a model also backs the storage it offers. There is no second coverage budget — storage shares the compute rental one, one stake, one set of obligations. A storage provider does post the same one-time admission bond every non-validator provider posts; see [`docs/COMPUTE.md`](COMPUTE.md) section 1.1.
+Storage is a role a node takes on, not a separate network. A node that serves AI can hold data at the same time, from the same account, but the storage role is bonded separately: a storage claim names the provider's `storage` role stake, and that stake is what a storage obligation is slashed from. A storage provider also posts the one-time admission bond every non-validator provider posts; see [`docs/COMPUTE.md`](COMPUTE.md) section 1.1.
 
 This document describes the object model, the storage claim lifecycle, the possession gate, redundancy, and the RPC / CLI / SDK surfaces.
 
@@ -50,6 +50,10 @@ When an object is stored, each shard is cut into 1 KiB chunks and committed as a
 
 ---
 
+### What a volume can offer
+
+`tenzro-node volume measure --dir <DIR> --uplink-mbps <N>` measures the volume holding `DIR` (random chunk reads, one sequential read, free space) and proposes the storage classes it qualifies for. A possession probe reads a few random chunks of every object a claim holds, so for each class it reports how many objects the volume can answer a probe for inside the class's governed deadline, keeping the estimate to a quarter of the deadline for gossip and a busier disk. The operator offers classes and prices from that. The measurement only proposes: the network believes what its probes measure.
+
 ## 3. Pricing
 
 Storage is priced per byte-epoch. A provider sets its `rate_per_byte_epoch`; the hourly strike of a storage claim is that rate scaled by object size.
@@ -60,13 +64,26 @@ Each hour a storage claim pays its provider is a settlement: it pays the settlem
 
 ### Slashing and re-replication
 
-An hour in which the bond could not prove a due object is an unavailable verdict: the renter gets that hour's strike back plus a penalty from the claim's collateral, and repeated unavailable verdicts carry the compute bond's SLA slashes. The redundancy layer re-replicates the object onto a healthy provider. No node keeps a book of its own: the claim, its vault and the verdicts are consensus state.
+An hour in which the bond could not prove a due object is an unavailable verdict: the renter gets that hour's strike back plus a penalty from the claim's collateral, and repeated unavailable verdicts carry the compute bond's SLA slashes. Every hour the node that stored an object announces its shards again, under the placement constraint it was stored with, and holders self-select from the membership and standings of that moment: a shard whose holder has gone gets a new one, and one held by a provider whose record fell moves to a better one. Repair and moving between holders use the same ranking as the first placement. No node keeps a book of its own: the claim, its vault and the verdicts are consensus state.
 
 ---
+
+### Reads
+
+Reads are priced apart from keeping the object, per storage class. An owner may name the class it buys an object under (`class` on `tenzro_storageStoreObject`: `hot`, `warm` or `cold`); the provider sets what reading each class costs, in wei per gibibyte read (`read_rates` on `tenzro_storageSetPricing`, each at most the governed `feature.storage_classes.<class>_read_price_ceiling`). A read of an object stored under a priced class carries a `voucher` on a payment channel to the provider, covering the read rounded up to the next wei; vouchers are cumulative, so each read pays only its advance over the last one accepted. An object stored under no class, or under a class read at 0, reads free.
 
 ## 4. Redundancy
 
 Objects can be stored with redundancy so the loss of a single provider does not lose the data. The `redundancy` module describes how an object's shards are spread; a consumer chooses a redundancy level when the durability of the object justifies the extra cost.
+
+### Placement constraints
+
+A buyer may limit where an object's shards are held: in one of a list of countries (two-letter codes), by one of a list of operators (provider accounts), or both (`placement: { jurisdiction, operators }` on the store). A holder is judged by what it declares: the coarse region and the account its provider announcements carry. That is a locality claim the operator makes, bound to a TEE attestation only on a TEE node, not a geolocation.
+
+- The node the object is stored through must be inside the constraint, or the store is refused.
+- The object is announced with its constraint on its own gossip topic, `tenzro/storage-placement`, signed by the origin as a whole, so no relay can drop or loosen the constraint. A node that predates the topic never receives it, so it never takes a shard whose constraint it cannot honour.
+- A holder ranks for the shards only when it is inside the constraint, and ranks only candidates inside it. When fewer qualify than the redundancy count, fewer copies are made; none is made outside the constraint.
+- A holder keeps a record of what it took, and `tenzro_getStorageHoldingReceipt { object_id }` returns its receipt for the shards it holds now: the object, the shard commitments, the holder's machine DID, its operator, the region it declares, its jurisdiction claim, the digest of the constraint and the time, signed by the node's record signer.
 
 ---
 
@@ -107,24 +124,26 @@ A tenant layer (an OpenAI-shaped `/v1/files` that names files, keeps tenants apa
 
 ### RPC (market layer)
 
-The node exposes `tenzro_storageStoreObject` (returns `descriptor_digest`), `tenzro_storageRetrieveObject` (the bytes, rebuilt from shards), `tenzro_storageSetPricing` and `tenzro_storageStatus`; the store and the read-back are the operator's own. Payment is a storage compute claim, read with `tenzro_computeGetClaim` / `tenzro_computeListClaims`.
+The node exposes `tenzro_storageStoreObject` (returns `descriptor_digest`), `tenzro_storageRetrieveObject` (the bytes, rebuilt from shards), `tenzro_storageSetPricing`, `tenzro_storageStatus`, `tenzro_getStorageHoldingReceipt` and `tenzro_listStorageProviders` (the providers the node has heard announce storage, best record first: the standing shard placement favours, and whether any verdict has judged them yet); the store and the read-back are the operator's own. Payment is a storage compute claim, read with `tenzro_computeGetClaim` / `tenzro_computeListClaims`.
 
 ### CLI
 
 ```
-tenzro node storage store --object-id <id> --owner <address> --file <path>
-tenzro node storage retrieve --object-id <id> --out <path>
+tenzro node storage store --object-id <id> --owner <address> --owner-did <did> --file <path>
+tenzro node storage retrieve --object-id <id> --reader-did <did> --out <path>
 tenzro node storage status
+tenzro node storage store ... --jurisdiction DE --jurisdiction FR --operator <account>
+tenzro node storage receipts --object-id <id>
 ```
 
 ### SDKs
 
-The Rust and TypeScript SDKs expose a `storage` client mirroring the market-layer RPC surface (`storeObject` / `retrieveObject` / pricing / status). Storing is signed by the owner DID and reading by a DID the object's access policy admits, each with a DID envelope over the request.
+The Rust, TypeScript and Python SDKs each expose a storage client mirroring the RPC surface (store, retrieve, fixed byte-epoch pricing, status). Storing is signed by the owner DID and reading by a DID the object's access policy admits, each with a DID envelope over the request. The storage claim that pays for keeping an object is read through each SDK's compute client (`get_claim` / `list_claims`), where `storage_descriptor` names the object.
 
 ---
 
 ## 8. How storage relates to compute
 
-Storage and compute are two roles against one bonded stake; they differ only in the gate. Storage settles on a proof of retrievability per byte-epoch; compute settles on an availability proof per epoch. When a provider's stake no longer covers what it owes, both shed coverage through the same recheck. See [`docs/COMPUTE.md`](COMPUTE.md) for the compute side of the same substrate.
+Storage and compute are two roles, each with its own bond (the storage role stake and the compute bond); they settle through the same claims and differ in the gate. Storage settles on a proof of retrievability per byte-epoch; compute settles on an availability proof per epoch. See [`docs/COMPUTE.md`](COMPUTE.md) for the compute side of the same substrate.
 
 Not everything content-addressed on the data plane is under a storage claim. A rendered image or video is written to the producing worker's own blob store and is fetched from there by content address, which is how a requester gets bytes it can check against the hash in its receipt — but no byte-epoch is billed for it, no retrievability challenge is answered, and no redundancy is promised. A requester that wants the network to keep an output buys a storage claim for it like any other object. See [`AI.md`](AI.md) §8.

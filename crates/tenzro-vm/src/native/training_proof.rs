@@ -388,7 +388,7 @@ impl NativeExecutor {
         let gas_cost = tx.gas_price.saturating_mul(gas as u128);
         require_balance(state, &tx.from, gas_cost)?;
 
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let mut changes = Vec::new();
         let mut logs = Vec::new();
         // TNZO a settled round's release burned, declared with the result.
@@ -562,6 +562,7 @@ impl NativeExecutor {
                     report,
                     &receipt.digest(),
                     (now.max(0) / 1000) as u64,
+                    crate::native::gateway_sets::nras_jwks_for_block(state),
                 ) {
                     return Err(refuse(
                         "the TEE attestation does not verify or does not bind this receipt",

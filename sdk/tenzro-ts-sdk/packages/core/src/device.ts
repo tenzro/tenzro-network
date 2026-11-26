@@ -232,4 +232,39 @@ export class DeviceClient {
       tnzo_micro_usd: tnzoMicroUsd ?? null,
     });
   }
+
+  /** `tenzro_requestDeviceCode`: a device with no passkey or hardware key of its own asks to be signed in; returns a secret `device_code`, a `user_code` to show, `expires_in` and the poll `interval`. */
+  async requestDeviceCode(params: { dpop_jkt?: string; label?: string } = {}): Promise<any> {
+    return this.rpc.call("tenzro_requestDeviceCode", params);
+  }
+
+  /** `tenzro_pollDeviceCode`: whether the device with `device_code` is signed in (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or an access token). */
+  async pollDeviceCode(deviceCode: string): Promise<any> {
+    return this.rpc.call("tenzro_pollDeviceCode", { device_code: deviceCode });
+  }
+
+  /** `tenzro_approveDeviceCode` (operator only): answer a device waiting with `user_code`; approving needs the operator's passkey `assertion`, and without it the node answers with the challenge to sign. */
+  async approveDeviceCode(params: { user_code: string; approve: boolean; assertion?: Record<string, unknown> }): Promise<any> {
+    return this.rpc.call("tenzro_approveDeviceCode", params);
+  }
+
+  /** `tenzro_listPairedDevices` (operator only): the devices paired with this node and which one is the caller. */
+  async listPairedDevices(): Promise<any> {
+    return this.rpc.call("tenzro_listPairedDevices");
+  }
+
+  /** `tenzro_pairDevice`: with no arguments an administrator starts a pairing; with `id` reads where one stands; with `secret`, `label` and `kind` a device redeems the code. */
+  async pairDevice(params: {
+    id?: string;
+    secret?: string;
+    label?: string;
+    kind?: "phone" | "tablet" | "tv" | "car" | "browser" | "desktop";
+  } = {}): Promise<any> {
+    return this.rpc.call("tenzro_pairDevice", params);
+  }
+
+  /** `tenzro_unpairDevice` (operator only): end a paired device's access and drop its record; a paired device removes only itself. */
+  async unpairDevice(id: string): Promise<any> {
+    return this.rpc.call("tenzro_unpairDevice", { id });
+  }
 }

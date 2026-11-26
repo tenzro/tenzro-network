@@ -14,8 +14,13 @@
 //! 3. The mempool ([`tenzro_consensus::SenderRegistry`]): a transaction from
 //!    an account with no registered identity is not pooled, except the ones
 //!    that are how an identity is registered.
-//! 4. The edge: [`require_registered_caller`], for the RPC, MCP and A2A write
-//!    calls whose actor is a wallet address.
+//! 4. The edge: [`edge_admits`], for the RPC, MCP and A2A write calls that
+//!    are not transactions and that [`crate::rpc_gates::IdentityCover`] gives
+//!    to the caller's registered identity. Every surface reaches it through
+//!    [`crate::access::admit`]; a call that proves its identity inside the
+//!    call reaches it from its handler; a trust record reaches it by its
+//!    author, on the one path RPC submission and gossip share
+//!    (`trust_hooks::apply`).
 //! 5. The standing sweep ([`IdentityGate::sweep`]) closes the connections of
 //!    identities that were revoked, or never registered.
 //!
@@ -55,6 +60,8 @@ use tenzro_types::primitives::Address;
 use tenzro_types::transaction::TransactionType;
 use tenzro_vm::StateAdapter;
 use tenzro_vm::traits::VmState;
+
+use crate::node::TenzroNode;
 
 /// The `[onboarding]` table of the node config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +118,7 @@ impl RegistryView for ChainRegistry {
 
 /// The standing of the machine or human identity `did` in `state`.
 pub fn did_standing(state: &dyn VmState, did: &str) -> Standing {
-    if tenzro_vm::native::is_identity_revoked(state, did) {
+    if tenzro_vm::native::identity_revoked_in_force(state, did) {
         return Standing::Revoked;
     }
     let slot = tenzro_types::identity::identity_slot(did);
@@ -132,7 +139,7 @@ pub fn did_standing(state: &dyn VmState, did: &str) -> Standing {
 pub fn account_standing(state: &dyn VmState, address: &[u8]) -> Standing {
     match tenzro_vm::native::identity_of_wallet(state, address) {
         Some(did) => {
-            if tenzro_vm::native::is_identity_revoked(state, &did) {
+            if tenzro_vm::native::identity_revoked_in_force(state, &did) {
                 Standing::Revoked
             } else {
                 Standing::Registered
@@ -208,26 +215,121 @@ impl SenderRegistry for AuditSenders {
     }
 }
 
-/// Refuses a caller whose wallet address has no registered identity. For the
-/// RPC, MCP and A2A write calls whose actor is a wallet address; the refusal
-/// names its reason.
-pub fn require_registered_caller(
-    chain: &Arc<dyn KvStore>,
-    caller: &Address,
-) -> std::result::Result<(), String> {
+/// How the edge names a caller that carries no identity.
+const NO_IDENTITY: &str = "a caller that names no identity";
+
+/// The standing of the caller of an edge write: what the chain says about its
+/// identity, as the governed mode leaves it. A caller that names no identity
+/// has none. Neither has any caller while `ready` is false: a node whose chain
+/// has certified nothing yet cannot tell an unregistered identity from one it
+/// has not heard of.
+pub fn edge_standing(chain: &Arc<dyn KvStore>, ready: bool, caller: Option<&str>) -> Standing {
     let state = StateAdapter::with_storage(chain.clone());
-    let standing = account_standing(&state, caller.as_bytes());
-    let standing = governed(&state, standing, "edge", &caller.to_string());
-    if standing.is_registered() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{caller}: {}; register an identity first (tenzro identity register, or the onboarding \
-             request on the {} protocol)",
-            standing.refusal(),
-            String::from_utf8_lossy(tenzro_iroh::ALPN_ONBOARD)
-        ))
+    let standing = match caller {
+        Some(did) if ready => did_standing(&state, did),
+        _ => Standing::Unregistered,
+    };
+    governed(&state, standing, "edge", caller.unwrap_or(NO_IDENTITY))
+}
+
+/// What the edge does, in the node's own `mode`, with a call to `method` from
+/// a caller of `standing`: a registered caller passes; another is refused
+/// under enforce, with the reason and how to register, and admitted and
+/// logged under audit.
+pub fn edge_decision(
+    mode: GateMode,
+    method: &str,
+    caller: Option<&str>,
+    standing: Standing,
+) -> std::result::Result<(), String> {
+    if standing.is_registered() || mode == GateMode::Off {
+        return Ok(());
     }
+    let who = caller.unwrap_or(NO_IDENTITY);
+    if mode == GateMode::Audit {
+        tracing::warn!(
+            target: "tenzro_node::identity_gate",
+            method,
+            who,
+            reason = standing.refusal(),
+            action = "audit",
+            "edge: would refuse a call from a caller with no registered identity"
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{method}: {who}: {}; register an identity first (tenzro identity register, or the \
+         onboarding request on the {} protocol)",
+        standing.refusal(),
+        String::from_utf8_lossy(tenzro_iroh::ALPN_ONBOARD)
+    ))
+}
+
+/// The edge of a node's services: what it takes to judge a caller, held apart
+/// from the node so that a task can keep it.
+#[derive(Clone)]
+pub struct Edge {
+    mode: GateMode,
+    chain: Option<Arc<dyn KvStore>>,
+    consensus: Option<Arc<crate::consensus_driver::ConsensusHandle>>,
+    access: Arc<crate::access::Access>,
+    administrator: Option<String>,
+}
+
+impl Edge {
+    /// The edge of `node`.
+    pub fn of(node: &TenzroNode) -> Self {
+        Self {
+            mode: node.config().onboarding.policy.mode,
+            chain: node.storage().map(|s| s.clone() as Arc<dyn KvStore>),
+            consensus: node.consensus().cloned(),
+            access: node.access().clone(),
+            administrator: node.administrator_did(),
+        }
+    }
+
+    /// Whether `caller` may make the write `method`. The node's operator and
+    /// the admins its access policy names always may, registered or not: they
+    /// are how a node is set up before its operator is on chain. `exempt` is
+    /// for a caller the call itself has proven to be something the registry
+    /// does not list.
+    pub fn admits(
+        &self,
+        method: &str,
+        caller: Option<&str>,
+        exempt: bool,
+    ) -> std::result::Result<(), String> {
+        let administers = |did: &str| {
+            self.administrator.as_deref() == Some(did)
+                || self.access.policy().admins.iter().any(|a| a == did)
+        };
+        if self.mode == GateMode::Off || exempt || caller.is_some_and(administers) {
+            return Ok(());
+        }
+        let standing = match &self.chain {
+            Some(chain) => {
+                let certified =
+                    |c: &Arc<crate::consensus_driver::ConsensusHandle>| c.certified_height() > 0;
+                edge_standing(
+                    chain,
+                    self.consensus.as_ref().is_some_and(certified),
+                    caller,
+                )
+            }
+            None => Standing::Unregistered,
+        };
+        edge_decision(self.mode, method, caller, standing)
+    }
+}
+
+/// [`Edge::admits`] for the edge of `node`.
+pub fn edge_admits(
+    node: &TenzroNode,
+    method: &str,
+    caller: Option<&str>,
+    exempt: bool,
+) -> std::result::Result<(), String> {
+    Edge::of(node).admits(method, caller, exempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +358,50 @@ pub fn install_peer_gate(
         "identity gate on: peers without a registered identity get an onboarding session only"
     );
     Some(gate.spawn_sweeper(Duration::from_secs(cfg.sweep_secs.max(1))))
+}
+
+/// How the peer gate is set for a node, from its `[onboarding]` mode and
+/// whether it validates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateSettings {
+    /// The gate is isolated: the node dials only its boot list and the
+    /// validators' machines, and keeps gossip neighbours only among them.
+    /// Inbound connections still pass the identity gate as before.
+    pub isolate: bool,
+    /// Gossip from an unregistered neighbour is dropped.
+    pub gossip_registered_only: bool,
+}
+
+/// The gate settings for a node in `mode`: a validator in enforce mode is
+/// isolated, and every node in enforce mode drops unregistered gossip.
+pub fn gate_settings(mode: GateMode, validator: bool) -> GateSettings {
+    let enforce = mode == GateMode::Enforce;
+    GateSettings {
+        isolate: enforce && validator,
+        gossip_registered_only: enforce,
+    }
+}
+
+/// What reaches out to peers on the node's behalf (discovery sync, record
+/// fetches, relay forwarders) and can be held to the gate's dial rule.
+pub trait DialHolder {
+    /// Holds every dial to `gate`'s rule.
+    fn hold_dials_to(&self, gate: IdentityGate);
+}
+
+impl DialHolder for tenzro_iroh::IdentityTransport {
+    fn hold_dials_to(&self, gate: IdentityGate) {
+        tenzro_iroh::IdentityTransport::hold_dials_to(self, gate);
+    }
+}
+
+/// Holds `transport`'s dials to `gate` and isolates the gate when
+/// `settings` say so. Outside isolation the gate allows every dial.
+pub fn hold_dials(settings: GateSettings, gate: &IdentityGate, transport: Option<&dyn DialHolder>) {
+    if let Some(transport) = transport {
+        transport.hold_dials_to(gate.clone());
+    }
+    gate.isolate(settings.isolate);
 }
 
 /// Wires the identity registry into the mempool, in the gate's mode.
@@ -940,6 +1086,45 @@ mod tests {
         assert_eq!(empty.policy.mode, GateMode::Audit);
     }
 
+    /// A machine registered under a root, with no agent terms, stands
+    /// revoked at the peer and the mempool from the reach rule's epoch, as
+    /// it does at execution, and not before.
+    #[test]
+    fn a_revoked_roots_machine_stands_revoked_from_the_reach_rules_epoch() {
+        use tenzro_vm::native::{
+            ROOT_REVOCATION_REACH_KEY, SYSTEM_ADDRESS, begin_block_params, governed_param_key,
+        };
+        let mut state = tenzro_vm::StateAdapter::new();
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            governed_param_key(ROOT_REVOCATION_REACH_KEY).as_bytes(),
+            5u64.to_le_bytes().to_vec(),
+        );
+        let machine = "did:tenzro:machine:aa:m1";
+        let wallet = [6u8; 32];
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            tenzro_types::identity::identity_slot(machine).as_bytes(),
+            b"{}".to_vec(),
+        );
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            format!("identity_wallet:{}", hex::encode(wallet)).as_bytes(),
+            machine.as_bytes().to_vec(),
+        );
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            b"identity_revoked:did:tenzro:human:aa",
+            vec![1],
+        );
+        begin_block_params(&mut state, 4).unwrap();
+        assert_eq!(did_standing(&state, machine), Standing::Registered);
+        assert_eq!(account_standing(&state, &wallet), Standing::Registered);
+        begin_block_params(&mut state, 5).unwrap();
+        assert_eq!(did_standing(&state, machine), Standing::Revoked);
+        assert_eq!(account_standing(&state, &wallet), Standing::Revoked);
+    }
+
     #[test]
     fn an_account_is_registered_by_the_wallet_index_and_revoked_by_the_marker() {
         let chain: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
@@ -960,10 +1145,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(senders.sender_standing(&a), Standing::Registered);
-        assert!(require_registered_caller(&chain, &a).is_ok());
-        let b = Address::new([6; 32]);
-        let err = require_registered_caller(&chain, &b).unwrap_err();
+    }
+
+    /// What RegisterIdentity writes for `did`, in the chain store each view reads.
+    fn register_did(chain: &Arc<dyn KvStore>, did: &str) {
+        let slot = tenzro_types::identity::identity_slot(did);
+        let key = format!(
+            "storage:{}:{}",
+            hex::encode(tenzro_vm::native::SYSTEM_ADDRESS),
+            hex::encode(slot.as_bytes())
+        );
+        chain
+            .put(tenzro_storage::CF_STATE, key.as_bytes(), b"record")
+            .unwrap();
+    }
+
+    #[test]
+    fn the_edge_admits_a_registered_identity_and_refuses_another_with_its_reason() {
+        let chain: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let known = "did:tenzro:machine:aa";
+        let stranger = "did:tenzro:machine:cc";
+        register_did(&chain, known);
+        let decide = |mode, caller: Option<&str>, ready| {
+            let standing = edge_standing(&chain, ready, caller);
+            edge_decision(mode, "tenzro_someWrite", caller, standing)
+        };
+        assert!(decide(GateMode::Enforce, Some(known), true).is_ok());
+        let err = decide(GateMode::Enforce, Some(stranger), true).unwrap_err();
+        assert!(err.contains("tenzro_someWrite"), "{err}");
+        assert!(err.contains(stranger), "{err}");
         assert!(err.contains("no registered identity"), "{err}");
+        assert!(err.contains("register an identity first"), "{err}");
+        // A call that names no identity is a stranger's.
+        let err = decide(GateMode::Enforce, None, true).unwrap_err();
+        assert!(err.contains(NO_IDENTITY), "{err}");
+        // Audit says what it would refuse and refuses nothing; off does not ask.
+        for mode in [GateMode::Audit, GateMode::Off] {
+            assert!(decide(mode, Some(stranger), true).is_ok());
+            assert!(decide(mode, None, true).is_ok());
+        }
+        // A node whose chain has certified nothing does not believe its registry.
+        assert!(decide(GateMode::Enforce, Some(known), false).is_err());
     }
 
     #[test]
@@ -992,13 +1214,17 @@ mod tests {
         };
         // No vote: enforce.
         assert_eq!(senders.sender_standing(&stranger), Standing::Unregistered);
-        assert!(require_registered_caller(&chain, &stranger).is_err());
+        assert_eq!(
+            edge_standing(&chain, true, Some(did)),
+            Standing::Unregistered
+        );
         assert_eq!(peers.standing(did), Standing::Unregistered);
 
         for relaxed in [Mode::Audit, Mode::Off] {
             set_mode(relaxed);
             assert_eq!(senders.sender_standing(&stranger), Standing::Registered);
-            assert!(require_registered_caller(&chain, &stranger).is_ok());
+            assert_eq!(edge_standing(&chain, true, Some(did)), Standing::Registered);
+            assert_eq!(edge_standing(&chain, true, None), Standing::Registered);
             assert_eq!(peers.standing(did), Standing::Registered);
         }
 
@@ -1193,5 +1419,75 @@ mod tests {
             OnboardReply::AlreadyRegistered
         ));
         assert!(r.sink.sent.lock().is_empty());
+    }
+
+    /// A transport that records the gate it was told to hold its dials to.
+    #[derive(Default)]
+    struct HeldDials(std::sync::OnceLock<IdentityGate>);
+
+    impl DialHolder for HeldDials {
+        fn hold_dials_to(&self, gate: IdentityGate) {
+            let _ = self.0.set(gate);
+        }
+    }
+
+    impl HeldDials {
+        /// Whether the transport may dial `did`, the check its discovery
+        /// sync, record fetches and relay forwarders make.
+        fn may_dial(&self, did: &str) -> bool {
+            self.0.get().is_none_or(|g| g.may_dial(Some(did)))
+        }
+    }
+
+    const BOOT: &str = "did:tenzro:machine:boot";
+    const STRANGER: &str = "did:tenzro:machine:stranger";
+
+    /// Wires a fresh gate protecting `BOOT` for a node in `mode` the way
+    /// `install_identity_gate` does, and returns the gate and its transport.
+    fn wired(mode: GateMode, validator: bool) -> (IdentityGate, HeldDials) {
+        let gate = IdentityGate::new(OnboardingPolicy::default(), None);
+        gate.protect([BOOT.to_string()]);
+        let transport = HeldDials::default();
+        hold_dials(
+            gate_settings(mode, validator),
+            &gate,
+            Some(&transport as &dyn DialHolder),
+        );
+        (gate, transport)
+    }
+
+    #[test]
+    fn a_validator_in_enforce_mode_dials_only_its_boot_list_and_the_validators() {
+        let settings = gate_settings(GateMode::Enforce, true);
+        assert!(settings.isolate);
+        assert!(settings.gossip_registered_only);
+        let (gate, transport) = wired(GateMode::Enforce, true);
+        assert!(transport.0.get().is_some(), "the transport holds its dials");
+        assert!(!transport.may_dial(STRANGER));
+        assert!(transport.may_dial(BOOT));
+        assert!(!gate.may_dial(Some(STRANGER)));
+        assert!(!gate.may_dial(None));
+    }
+
+    #[test]
+    fn a_node_that_does_not_validate_is_not_isolated_in_enforce_mode() {
+        let settings = gate_settings(GateMode::Enforce, false);
+        assert!(!settings.isolate);
+        assert!(settings.gossip_registered_only);
+        let (gate, transport) = wired(GateMode::Enforce, false);
+        assert!(transport.may_dial(STRANGER));
+        assert!(gate.may_dial(None));
+    }
+
+    #[test]
+    fn a_validator_outside_enforce_mode_is_not_isolated() {
+        for mode in [GateMode::Audit, GateMode::Off] {
+            let settings = gate_settings(mode, true);
+            assert!(!settings.isolate, "{mode:?}");
+            assert!(!settings.gossip_registered_only, "{mode:?}");
+            let (gate, transport) = wired(mode, true);
+            assert!(transport.may_dial(STRANGER), "{mode:?}");
+            assert!(gate.may_dial(None), "{mode:?}");
+        }
     }
 }

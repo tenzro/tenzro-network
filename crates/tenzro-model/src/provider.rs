@@ -690,6 +690,14 @@ impl ProviderManager {
         }
     }
 
+    /// The address of the provider whose announcements name `machine_did`.
+    pub fn address_of_machine(&self, machine_did: &str) -> Option<Address> {
+        self.providers
+            .iter()
+            .find(|e| e.value().provider.machine_did.as_deref() == Some(machine_did))
+            .map(|e| *e.key())
+    }
+
     /// Lists all providers
     pub fn list_providers(&self) -> Vec<InferenceProvider> {
         self.providers
@@ -972,6 +980,19 @@ impl Default for ProviderManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_is_found_by_the_machine_its_announcements_name() {
+        let manager = ProviderManager::new();
+        let mut provider = create_test_provider();
+        provider.machine_did = Some("did:tenzro:machine:p".to_string());
+        manager.register_provider(provider.clone(), false).unwrap();
+        assert_eq!(
+            manager.address_of_machine("did:tenzro:machine:p"),
+            Some(provider.address)
+        );
+        assert_eq!(manager.address_of_machine("did:tenzro:machine:other"), None);
+    }
 
     #[test]
     fn test_register_and_get_provider() {

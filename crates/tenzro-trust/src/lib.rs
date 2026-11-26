@@ -62,6 +62,9 @@ pub enum TrustError {
     WrongSigner { signer: String, expected: String },
     #[error("{0}")]
     Stale(String),
+    /// The node does not take records from this author.
+    #[error("{0}")]
+    Unadmitted(String),
     #[error("file {path} does not match the manifest: {reason}")]
     FileMismatch { path: String, reason: String },
     #[error("not found: {0}")]

@@ -87,6 +87,26 @@ pub const COMPUTE_BOND_SLASHED_TOPIC: &[u8] = b"ComputeBondSlashed";
 /// Op tag of a slash in a compute-bond lifecycle log.
 pub const COMPUTE_BOND_SLASHED_OP: u8 = 4;
 
+/// Governed: largest mean absolute top-k logit difference (thousandths) a
+/// re-executed step may show and still pass.
+pub const VERIFY_LOGIT_DELTA_PARAM: &str = "inference.verification.commitment_logit_delta_milli";
+/// Genesis value of [`VERIFY_LOGIT_DELTA_PARAM`]: 0.60, above the 0.505
+/// decode-versus-prefill difference measured on CPU kernels for honest
+/// answers.
+pub const DEFAULT_VERIFY_LOGIT_DELTA_MILLI: u64 = 600;
+/// Governed: least share (bps) of a commitment's steps that must pass,
+/// counting [`VERIFY_TOLERATED_MISSES_PARAM`] failing steps as passing.
+pub const VERIFY_PASSING_BPS_PARAM: &str = "inference.verification.commitment_passing_bps";
+pub const DEFAULT_VERIFY_PASSING_BPS: u64 = 9_000;
+/// Governed: failing steps a commitment may carry beyond what
+/// [`VERIFY_PASSING_BPS_PARAM`] allows, while more steps pass than fail.
+/// Honest answers re-executed on CPU kernels missed 4 of 33, 1 of 24 and 1
+/// of 9 steps where two candidates nearly tie; under the share alone a
+/// commitment of fewer than ten steps would tolerate none.
+pub const VERIFY_TOLERATED_MISSES_PARAM: &str =
+    "inference.verification.commitment_tolerated_misses";
+pub const DEFAULT_VERIFY_TOLERATED_MISSES: u64 = 2;
+
 /// Governed: least share (bps) of optimistic answers re-executed, whatever
 /// they cost. Never zero.
 pub const SAMPLE_BPS_PARAM: &str = "inference.optimistic.sample_bps";
@@ -221,6 +241,48 @@ fn refuse(msg: impl Into<String>) -> VmError {
     VmError::InvalidTransaction(msg.into())
 }
 
+/// Gate of the rule that an inference challenge's committee windows fit
+/// inside the fault window ([`challenge_window_change_allowed`]).
+pub const CHALLENGE_WINDOWS_FIT_KEY: &str = "feature.challenge_windows_fit.activation_epoch";
+
+/// Refuse a change of the challenge commit window, the challenge reveal
+/// window or the fault window that would leave the two committee windows
+/// together longer than the fault window: a committee that used its whole
+/// time would then uphold a challenge too late for the fault it leads to
+/// to be filed. `scheduled_of` returns the other parameters' pending values,
+/// else the ones in force. Every other key passes, and so does every change
+/// while the rule is dormant.
+pub fn challenge_window_change_allowed(
+    state: &dyn VmState,
+    key: &str,
+    value: u64,
+    scheduled_of: &dyn Fn(&str) -> u64,
+) -> Result<()> {
+    let bound = [
+        super::CHALLENGE_COMMIT_WINDOW_PARAM,
+        super::CHALLENGE_REVEAL_WINDOW_PARAM,
+        WINDOW_MS_PARAM,
+    ];
+    if !bound.contains(&key) || !crate::feature_gate::is_live_now(state, CHALLENGE_WINDOWS_FIT_KEY)
+    {
+        return Ok(());
+    }
+    let get = |k: &str| if k == key { value } else { scheduled_of(k) };
+    let (commit, reveal, window) = (
+        get(super::CHALLENGE_COMMIT_WINDOW_PARAM),
+        get(super::CHALLENGE_REVEAL_WINDOW_PARAM),
+        get(WINDOW_MS_PARAM),
+    );
+    if (u128::from(commit) + u128::from(reveal)) * 1_000 > u128::from(window) {
+        return Err(refuse(format!(
+            "{} ({commit} s) plus {} ({reveal} s) may not exceed {WINDOW_MS_PARAM} ({window} ms)",
+            super::CHALLENGE_COMMIT_WINDOW_PARAM,
+            super::CHALLENGE_REVEAL_WINDOW_PARAM,
+        )));
+    }
+    Ok(())
+}
+
 fn put(state: &mut dyn VmState, key: &str, blob: Vec<u8>, changes: &mut Vec<StateChange>) {
     let prior = state.get_storage(&SYSTEM_ADDRESS, key.as_bytes());
     state.set_storage(&SYSTEM_ADDRESS, key.as_bytes(), blob.clone());
@@ -344,7 +406,7 @@ impl NativeExecutor {
             });
         }
 
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let window = network_param(state, WINDOW_MS_PARAM) as i64;
         let mut changes = Vec::new();
         let mut logs = Vec::new();
@@ -728,6 +790,47 @@ pub(crate) fn slash_compute_bond(
 mod tests {
     use super::*;
     use crate::state_adapter::StateAdapter;
+
+    #[test]
+    fn challenge_windows_must_fit_the_fault_window_once_the_rule_is_live() {
+        use super::super::{CHALLENGE_COMMIT_WINDOW_PARAM, CHALLENGE_REVEAL_WINDOW_PARAM};
+        const DAY_S: u64 = 24 * 60 * 60;
+        let genesis = |k: &str| crate::governance::genesis_param(k);
+        let check = |state: &StateAdapter, key: &str, value: u64| {
+            challenge_window_change_allowed(state, key, value, &genesis)
+        };
+
+        // Dormant: the registry bounds are all that hold a window.
+        let mut state = StateAdapter::new();
+        assert!(!crate::feature_gate::is_live_now(
+            &state,
+            CHALLENGE_WINDOWS_FIT_KEY
+        ));
+        assert!(check(&state, CHALLENGE_COMMIT_WINDOW_PARAM, 7 * DAY_S).is_ok());
+        assert!(check(&state, WINDOW_MS_PARAM, 60_000).is_ok());
+
+        // Live from epoch 0.
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            super::super::governed_param_key(CHALLENGE_WINDOWS_FIT_KEY).as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+        assert!(crate::feature_gate::is_live_now(
+            &state,
+            CHALLENGE_WINDOWS_FIT_KEY
+        ));
+        // Genesis: an hour each inside a day. The commit window may grow to
+        // what the day leaves beside the reveal hour, and no further.
+        assert!(check(&state, CHALLENGE_COMMIT_WINDOW_PARAM, 23 * 60 * 60).is_ok());
+        let over = check(&state, CHALLENGE_COMMIT_WINDOW_PARAM, 23 * 60 * 60 + 1).unwrap_err();
+        assert!(over.to_string().contains("may not exceed"), "{over}");
+        assert!(check(&state, CHALLENGE_REVEAL_WINDOW_PARAM, 7 * DAY_S).is_err());
+        // The fault window may shrink to the two hours, and no further.
+        assert!(check(&state, WINDOW_MS_PARAM, 2 * 60 * 60 * 1_000).is_ok());
+        assert!(check(&state, WINDOW_MS_PARAM, 2 * 60 * 60 * 1_000 - 1).is_err());
+        // A parameter the rule does not bind is not its business.
+        assert!(check(&state, PENALTY_PAYMENT_PARAM, 1).is_ok());
+    }
 
     const DID: &str = "did:tenzro:machine:provider";
 

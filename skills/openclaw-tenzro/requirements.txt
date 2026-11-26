@@ -1,0 +1,2 @@
+# The Tenzro Python SDK, which tools/tenzro_rpc.py calls the node through.
+tenzro @ git+https://github.com/tenzro/tenzro-sdk-python

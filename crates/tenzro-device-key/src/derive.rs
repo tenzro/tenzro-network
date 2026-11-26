@@ -56,6 +56,9 @@ pub enum DeriveBackend {
     /// The root is a TPM in another machine the operator owns; every key
     /// operation runs there (see [`crate::remote`]).
     RemoteTpm,
+    /// The HMAC key the Android Keystore holds for the hidden root label, in
+    /// StrongBox or the trusted environment (never in software).
+    AndroidKeystore,
 }
 
 impl DeriveBackend {
@@ -65,6 +68,7 @@ impl DeriveBackend {
             Self::SecureEnclave => "secure-enclave",
             Self::PasskeyPrf => "passkey-prf",
             Self::RemoteTpm => "remote-tpm",
+            Self::AndroidKeystore => "android-keystore",
         }
     }
 
@@ -74,6 +78,7 @@ impl DeriveBackend {
             Self::SecureEnclave => b"tenzro/device-key/derive/secure-enclave",
             Self::PasskeyPrf => b"tenzro/device-key/derive/passkey-prf",
             Self::RemoteTpm => b"tenzro/device-key/derive/remote-tpm",
+            Self::AndroidKeystore => b"tenzro/device-key/derive/android-keystore",
         }
     }
 }
@@ -209,6 +214,8 @@ enum Root {
     Test(Zeroizing<[u8; 32]>),
     /// Keys derived and used inside another machine's TPM.
     Remote(std::sync::Arc<dyn RemoteDerive>),
+    #[cfg(target_os = "android")]
+    Android(crate::backend_android::KeystoreKey),
 }
 
 /// Key operations carried out where the derivation root is: derived, used
@@ -275,7 +282,19 @@ impl DerivationRoot {
                 },
             })
         }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos", target_os = "ios")))]
+        #[cfg(target_os = "android")]
+        {
+            Ok(Self {
+                root: Root::Android(crate::backend_android::root_key()?),
+            })
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            windows,
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "android"
+        )))]
         {
             Err(DeviceKeyError::Enclave(
                 "deriving keys from hardware is not supported on this platform".into(),
@@ -334,6 +353,8 @@ impl DerivationRoot {
             #[cfg(feature = "test-root")]
             Root::Test(_) => DeriveBackend::Tpm,
             Root::Remote(_) => DeriveBackend::RemoteTpm,
+            #[cfg(target_os = "android")]
+            Root::Android(_) => DeriveBackend::AndroidKeystore,
         }
     }
 
@@ -363,6 +384,8 @@ impl DerivationRoot {
         let ikm: Zeroizing<[u8; 32]> = match &self.root {
             #[cfg(any(target_os = "linux", windows, test))]
             Root::Tpm(r) => r.hmac(&hardware_input(label))?,
+            #[cfg(target_os = "android")]
+            Root::Android(k) => k.hmac(&hardware_input(label))?,
             #[cfg(any(target_os = "macos", target_os = "ios", test))]
             Root::Enclave { key } => key.raw_dh(&hidden_root_point())?,
             Root::Passkey {

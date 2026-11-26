@@ -3,6 +3,7 @@
 //! This module provides a central catalog of all AI models available on Tenzro Network.
 //! It handles model registration, updates, search, and verification.
 
+use crate::catalog::{Catalog, CatalogCell};
 use crate::error::{ModelError, Result};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -39,9 +40,10 @@ const MODEL_INFO_KEY_PREFIX: &[u8] = b"info:";
 /// rows already on disk.
 ///
 /// Deployment facts are left exactly as stored.
-fn refresh_catalog_fields(mut model: ModelInfo) -> ModelInfo {
-    let Some(fresh) =
-        crate::catalog::entry(&model.model_id).and_then(|e| e.model_info(model.provider))
+fn refresh_catalog_fields(catalog: &Catalog, mut model: ModelInfo) -> ModelInfo {
+    let Some(fresh) = catalog
+        .entry(&model.model_id)
+        .and_then(|e| e.model_info(model.provider))
     else {
         // Not a catalog model (a peer's offer, an operator's
         // own GGUF): nothing to re-derive, and its stored metadata is the only
@@ -172,6 +174,8 @@ pub struct ModelRegistry {
     /// requires `accept_non_commercial`, CommercialCustom requires the
     /// model's `license_id` to be in `accepted_license_ids`.
     acceptance: AcceptancePolicy,
+    /// The node's catalog, the source of every catalog-owned field.
+    catalog: CatalogCell,
 }
 
 impl std::fmt::Debug for ModelRegistry {
@@ -188,11 +192,12 @@ impl ModelRegistry {
     ///
     /// Use [`ModelRegistry::with_storage`] for a persistent registry that
     /// survives node restarts.
-    pub fn new() -> Self {
+    pub fn new(catalog: CatalogCell) -> Self {
         Self {
             models: Arc::new(DashMap::new()),
             storage: None,
             acceptance: AcceptancePolicy::default(),
+            catalog,
         }
     }
 
@@ -205,7 +210,8 @@ impl ModelRegistry {
     ///
     /// Catalog-derived fields are re-read from the built-in catalog as each
     /// record loads — see [`refresh_catalog_fields`].
-    pub fn with_storage(storage: Arc<dyn KvStore>) -> Self {
+    pub fn with_storage(storage: Arc<dyn KvStore>, catalog: CatalogCell) -> Self {
+        let current = catalog.current();
         let models: Arc<DashMap<String, ModelInfo>> = Arc::new(DashMap::new());
 
         // Hydrate from storage: scan CF_MODELS for `info:<model_id>` records.
@@ -217,7 +223,7 @@ impl ModelRegistry {
                         Ok(Some(data)) => match serde_json::from_slice::<ModelInfo>(&data) {
                             Ok(model) => {
                                 let model_id = model.model_id.clone();
-                                models.insert(model_id, refresh_catalog_fields(model));
+                                models.insert(model_id, refresh_catalog_fields(&current, model));
                                 hydrated += 1;
                             }
                             Err(e) => {
@@ -247,7 +253,13 @@ impl ModelRegistry {
             models,
             storage: Some(storage),
             acceptance: AcceptancePolicy::default(),
+            catalog,
         }
+    }
+
+    /// The catalog this registry reads.
+    pub fn catalog(&self) -> &CatalogCell {
+        &self.catalog
     }
 
     /// Sets the operator license-acceptance policy consulted by
@@ -314,7 +326,7 @@ impl ModelRegistry {
         // same model, whose row came from `to_model_info`, tiers it `Strong`.
         // Deriving here fixes every projection at once instead of each caller
         // remembering to.
-        let model = refresh_catalog_fields(model);
+        let model = refresh_catalog_fields(&self.catalog.current(), model);
 
         // Validate model
         self.validate_model(&model)?;
@@ -385,7 +397,7 @@ impl ModelRegistry {
         // through `register_model(...).or_else(update_model)`, so a model the
         // registry already knows takes THIS path on every refresh — enriching
         // only the insert would leave every existing row stale forever.
-        let model = refresh_catalog_fields(model);
+        let model = refresh_catalog_fields(&self.catalog.current(), model);
 
         // Validate model
         self.validate_model(&model)?;
@@ -513,12 +525,6 @@ impl ModelRegistry {
     }
 }
 
-impl Default for ModelRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_register_and_get_model() {
-        let registry = ModelRegistry::new();
+        let registry = ModelRegistry::new(CatalogCell::default());
         let model = create_test_model("test-model-1");
 
         registry.register_model(model.clone()).unwrap();
@@ -539,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_registration() {
-        let registry = ModelRegistry::new();
+        let registry = ModelRegistry::new(CatalogCell::default());
         let model = create_test_model("test-model-1");
 
         registry.register_model(model.clone()).unwrap();
@@ -550,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_update_model() {
-        let registry = ModelRegistry::new();
+        let registry = ModelRegistry::new(CatalogCell::default());
         let mut model = create_test_model("test-model-1");
 
         registry.register_model(model.clone()).unwrap();
@@ -564,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_deactivate_model() {
-        let registry = ModelRegistry::new();
+        let registry = ModelRegistry::new(CatalogCell::default());
         let model = create_test_model("test-model-1");
 
         registry.register_model(model).unwrap();
@@ -576,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_search_models() {
-        let registry = ModelRegistry::new();
+        let registry = ModelRegistry::new(CatalogCell::default());
 
         let mut model1 = create_test_model("text-model");
         model1.modality = ModelModality::Text;
@@ -630,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_search_models_inclusive_modality() {
-        let registry = ModelRegistry::new();
+        let registry = ModelRegistry::new(CatalogCell::default());
 
         let mut text_model = create_test_model("text-only");
         text_model.modality = ModelModality::Text;
@@ -671,7 +677,6 @@ mod tests {
     /// tier `Cheap`, so `quality_floor=strong` could not be satisfied.
     #[test]
     fn hydration_re_reads_catalog_owned_fields() {
-        tenzro_catalog::install_test_seed();
         let mut stale = create_test_model("qwen3.6-35b-a3b-mtp");
         stale.parameters.parameter_count = None;
         stale.parameters.context_window = 1;
@@ -679,7 +684,7 @@ mod tests {
         stale.status = tenzro_types::model::ModelStatus::Active;
         let stored_hash = stale.model_hash;
 
-        let fresh = refresh_catalog_fields(stale);
+        let fresh = refresh_catalog_fields(&Catalog::test_seed(), stale);
         assert_eq!(
             fresh.parameters.parameter_count,
             Some(35_000_000_000),
@@ -701,7 +706,7 @@ mod tests {
         stored.parameters.parameter_count = Some(123);
         stored.parameters.context_window = 4096;
 
-        let after = refresh_catalog_fields(stored);
+        let after = refresh_catalog_fields(&Catalog::test_seed(), stored);
         assert_eq!(after.parameters.parameter_count, Some(123));
         assert_eq!(after.parameters.context_window, 4096);
     }

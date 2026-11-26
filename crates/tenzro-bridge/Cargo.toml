@@ -25,6 +25,7 @@ sha2 = { workspace = true }
 sha3 = { workspace = true }
 parking_lot = { workspace = true }
 k256 = { workspace = true, features = ["schnorr"] }
+loom = { version = "0.7", optional = true }
 hmac = "0.12"
 reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 base64 = "0.22"
@@ -44,6 +45,9 @@ blake2 = "0.10"
 # Exposes the Tendermint light-client fixtures (signing validators, ICS-23
 # store proofs) to other crates' tests.
 test-support = []
+# Builds the relayer nonce lane on the schedule-exploring primitives, for its
+# `loom_` tests only (`cargo test -p tenzro-bridge --features loom --lib loom_`).
+loom = ["dep:loom"]
 
 [dev-dependencies]
 bech32 = "0.11"

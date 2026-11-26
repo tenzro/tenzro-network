@@ -8,7 +8,7 @@
 //! factory was built with.
 #![no_std]
 
-use soroban_sdk::{Address, Bytes, BytesN, Env, contract, contractimpl, contracttype};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env};
 
 #[contracttype]
 #[derive(Clone)]
@@ -40,15 +40,31 @@ impl AgentAccountFactory {
 
     /// Where the account of `did` is, deployed or not.
     pub fn account_of(env: Env, did: Bytes) -> Address {
-        env.deployer().with_current_contract(salt(&env, &did)).deployed_address()
+        env.deployer()
+            .with_current_contract(salt(&env, &did))
+            .deployed_address()
     }
 
     /// Deploy the account of `did`. Anyone may.
     pub fn deploy(env: Env, did: Bytes) -> Address {
-        let wasm: BytesN<32> = env.storage().instance().get(&Key::Wasm).expect("constructed");
-        let caip2: Bytes = env.storage().instance().get(&Key::Chain).expect("constructed");
-        let client: Address = env.storage().instance().get(&Key::Client).expect("constructed");
-        env.deployer().with_current_contract(salt(&env, &did)).deploy_v2(wasm, (did, caip2, client))
+        let wasm: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&Key::Wasm)
+            .expect("constructed");
+        let caip2: Bytes = env
+            .storage()
+            .instance()
+            .get(&Key::Chain)
+            .expect("constructed");
+        let client: Address = env
+            .storage()
+            .instance()
+            .get(&Key::Client)
+            .expect("constructed");
+        env.deployer()
+            .with_current_contract(salt(&env, &did))
+            .deploy_v2(wasm, (did, caip2, client))
     }
 }
 
@@ -70,25 +86,47 @@ mod test {
     fn an_account_lands_where_tenzro_derives_it() {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
-        env.ledger().set_network_id(sha(b"Public Global Stellar Network ; September 2015"));
-        let wasm = std::fs::read(std::env::var("AGENT_ACCOUNT_WASM").expect("AGENT_ACCOUNT_WASM names the account's wasm")).unwrap();
-        let hash = env.deployer().upload_contract_wasm(Bytes::from_slice(&env, &wasm));
+        env.ledger()
+            .set_network_id(sha(b"Public Global Stellar Network ; September 2015"));
+        let wasm = std::fs::read(
+            std::env::var("AGENT_ACCOUNT_WASM")
+                .expect("AGENT_ACCOUNT_WASM names the account's wasm"),
+        )
+        .unwrap();
+        let hash = env
+            .deployer()
+            .upload_contract_wasm(Bytes::from_slice(&env, &wasm));
         // The factory at the address the shared vectors deploy from.
         let factory_id = Address::from_payload(
             &env,
-            soroban_sdk::address_payload::AddressPayload::ContractIdHash(BytesN::from_array(&env, &[0x66; 32])),
+            soroban_sdk::address_payload::AddressPayload::ContractIdHash(BytesN::from_array(
+                &env,
+                &[0x66; 32],
+            )),
         );
         let client = Address::generate(&env);
-        env.register_at(&factory_id, AgentAccountFactory, (hash, Bytes::from_slice(&env, b"stellar:pubnet"), client));
+        env.register_at(
+            &factory_id,
+            AgentAccountFactory,
+            (hash, Bytes::from_slice(&env, b"stellar:pubnet"), client),
+        );
         let f = AgentAccountFactoryClient::new(&env, &factory_id);
         let did = Bytes::from_slice(&env, DID);
         let at = f.account_of(&did);
         assert_eq!(f.deploy(&did), at);
         let v: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
-        let c = v["chains"].as_array().unwrap().iter().find(|c| c["chain"] == "stellar:pubnet").unwrap();
+        let c = v["chains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["chain"] == "stellar:pubnet")
+            .unwrap();
         let s = at.to_string();
         let mut b = [0u8; 56];
         s.copy_into_slice(&mut b);
-        assert_eq!(core::str::from_utf8(&b).unwrap(), c["account"].as_str().unwrap());
+        assert_eq!(
+            core::str::from_utf8(&b).unwrap(),
+            c["account"].as_str().unwrap()
+        );
     }
 }

@@ -78,12 +78,6 @@ fn models_dir() -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("tenzro-live-models"))
 }
 
-fn free_udp_port() -> std::net::SocketAddr {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .expect("a free loopback port")
-}
-
 struct Gateway {
     base_url: String,
     shutdown: broadcast::Sender<()>,
@@ -113,7 +107,7 @@ impl Gateway {
             dpop_bearer::write_policy(tmp.path(), &policy);
         }
         let iroh = tenzro_iroh::TenzroIrohConfig {
-            bind_addr: free_udp_port(),
+            bind_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
             ..Default::default()
         };
         // A machine identity, registered on chain: `tenzro_receipt` is a
@@ -222,6 +216,18 @@ impl Gateway {
         }
     }
 
+    async fn rpc(&self, method: &str, params: Value) -> Value {
+        reqwest::Client::new()
+            .post(&self.base_url)
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
     async fn chat(&self, body: Value) -> reqwest::Response {
         reqwest::Client::new()
             .post(format!("{}/v1/chat/completions", self.base_url))
@@ -248,9 +254,19 @@ async fn a_local_chat_completion_carries_a_tenzro_receipt_streamed_and_not() {
     // The node learns the model from a bonded publisher before anything is
     // downloaded or served.
     let publisher = Publisher::new(0x42);
-    let gw = Gateway::boot_serving(&model_id, &dir, &publisher, &shipped_entry(&model_id)).await;
-    let entry = tenzro_model::catalog::get_model_by_id(&model_id)
-        .expect("the node serves the entry its bonded publisher published");
+    let shipped = shipped_entry(&model_id);
+    let gw = Gateway::boot_serving(&model_id, &dir, &publisher, &shipped).await;
+    assert_eq!(
+        gw.rpc("tenzro_getCatalogEntry", json!({"model": model_id}))
+            .await["result"]["served"],
+        true,
+        "the node serves the entry its bonded publisher published"
+    );
+    let catalog = tenzro_model::CatalogCell::new(tenzro_model::Catalog::build([shipped]).0);
+    let entry = catalog
+        .current()
+        .get_model_by_id(&model_id)
+        .expect("a GGUF entry");
 
     let (tx, _rx) = tokio::sync::watch::channel(DownloadProgress {
         model_id: model_id.clone(),
@@ -259,7 +275,7 @@ async fn a_local_chat_completion_carries_a_tenzro_receipt_streamed_and_not() {
         downloaded_bytes: 0,
         total_bytes: 0,
     });
-    let downloader = HfDownloader::new(dir.clone());
+    let downloader = HfDownloader::new(dir.clone(), catalog);
     if !downloader.is_downloaded(&model_id) {
         downloader
             .download_model(&entry, None, SourcePolicy::HuggingFace, tx)

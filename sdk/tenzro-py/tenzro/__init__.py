@@ -20,7 +20,8 @@ capability is a subpackage over it:
   EIP-7702 set-code transactions.
 - :mod:`tenzro.inference`: streamed chat completions.
 - :mod:`tenzro.chain`: offline verification of governance receipts, ABI
-  encoding and decoding, and NFT factory calls and their results.
+  encoding and decoding, NFT factory calls and their results, storage on a
+  storage provider, and compute rental.
 """
 
 from .did_envelope import DID_ENVELOPE_CONTEXT, DidEnvelopeFields, request_binding, with_request_envelope
@@ -55,7 +56,7 @@ from .wallet import (
     composite_signature_json,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.2"
 
 __all__ = [
     "DID_ENVELOPE_CONTEXT",

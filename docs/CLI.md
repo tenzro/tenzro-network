@@ -2,7 +2,7 @@
 
 Every command `tenzro` accepts, generated from the binary.
 
-Generated from `tenzro 0.2.1` by `scripts/gen-cli-docs.sh`. Do not edit by
+Generated from `tenzro 0.2.2` by `scripts/gen-cli-docs.sh`. Do not edit by
 hand — `cargo test -p tenzro-cli` fails when this file and the binary
 disagree, and a hand edit is how they start to.
 
@@ -10,12 +10,12 @@ For how to *use* the network rather than what each flag is called, start
 with [GUIDE.md](GUIDE.md).
 
 ```
-Tenzro Network CLI — AI-Native, Agentic, Tokenized Settlement Layer
+Tenzro Network CLI — compute of every kind, settled in TNZO
 
 Usage: tenzro [OPTIONS] [COMMAND]
 
 Commands:
-  join            Join the Tenzro Network (one-click participate)
+  join            Provision this machine's identity and wallet; with --provider, set it up as a provider
   setup           Guided setup — join the network, provide, validate, or bootstrap a private network
   node            Node management commands
   wallet          Wallet management commands
@@ -34,7 +34,9 @@ Commands:
   escrow          Escrow and payment channel commands
   duty            Network duties: work the chain pays the first prover for
   dev             Start a local single-validator chain for development, keys in this machine's hardware
+  control         Serve this machine's node and its setup to the Tenzro Control apps on a local socket
   doctor          Check this machine and the network, and say how to fix what is wrong
+  do              Ask the Tenzro Assistant one thing: a slash command (`/status`, `/help`) or a question
   update          Update this machine to the newest signed C0 release (node-local fixes, CLI, performance) in one command, or one step at a time
   release         The release process: sign, check and publish the notice that tells nodes a release exists
   completions     Print shell completions: bash, zsh, fish, powershell or elvish
@@ -50,6 +52,7 @@ Commands:
   vrf             VRF proof verification — RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI
   finality        Finality: verify the latest compact certificate from genesis as a light client
   passkey         Passkey-first wallet onboarding + custody (enrollment, recovery, session keys, hardware signers)
+  recovery-kit    Recovery kit for a passkey account: a one-time code kept offline, checked and used
   machine-access  Owner-signed machine access for agents, tools and models (add, list, revoke)
   media-gen       Generative media: the media catalog and renders
   forecast        Timeseries forecasting (TimesFM 2.5, Chronos-2, TiRex-2, Toto 2.0)
@@ -76,6 +79,7 @@ Commands:
   da              Committee data availability: challenge, challenges, availability, committee, blobs, object, retention
   beacon          The chain's randomness beacon
   fee-market      The base fee of every resource market: compute, state growth, bandwidth, proof
+  estimate-gas    Estimate the gas a transaction would use
   iroh            Iroh content-addressed transport: info, endpoint-id, alpns, publish, fetch
   adaptive-burn   Adaptive-burn governance dial: config, metrics, recommendation, proposals
   settle          Settlement plans: legs on several networks, one Commit-or-Abort decision, the split fixed by the quote
@@ -88,6 +92,7 @@ Commands:
   discover        Discovery: node hardware profile
   cluster         Local-network cluster planning
   device          Devices bound to an identity, and machine ownership
+  power           Keep this machine awake while the node runs, and how to manage it remotely
   rails           Settlement rails and micropayment routing
   interaction     Interaction receipts: mirror a settlement to other chains
   status          Live resource and traffic status for this node
@@ -95,6 +100,7 @@ Commands:
   visibility      Show or set this node's visibility (public, gated or private)
   chat            Interactive chat with AI models
   hardware        Show hardware profile
+  fleet           Prove the hardware of an operator's fleet of hosts in one transaction
   info            Show network information
   version         Show version information
   help            Print this message or the help of the given subcommand(s)
@@ -117,6 +123,7 @@ Usage: tenzro access [OPTIONS] <COMMAND>
 
 Commands:
   sign-in       Sign in with this machine's hardware key and store the access token
+  challenge     Ask the node for a single-use sign-in challenge, for a client that answers it with a passkey or a hardware key of its own
   show          The access policy in force, as `access.toml`
   set           Replace the access policy with a TOML file
   preview       What the policy decides for a caller, without serving anything
@@ -166,6 +173,23 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
+```
+
+### `tenzro access challenge`
+
+```
+Ask the node for a single-use sign-in challenge, for a client that answers it with a passkey or a hardware key of its own
+
+Usage: tenzro access challenge [OPTIONS] --dpop-jkt <DPOP_JKT>
+
+Options:
+      --did <DID>            The DID of a hardware key that will sign; omit for a passkey
+  -v, --verbose              Enable verbose logging
+      --dpop-jkt <DPOP_JKT>  Thumbprint of the DPoP key the token will be bound to
+      --format <FORMAT>      Output format (text, json) [default: text]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
+      --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                 Print help
 ```
 
 ### `tenzro access preview`
@@ -250,6 +274,8 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace the key lives under: a node's `hardware_key_namespace`, to sign in as that node's identity rather than the machine's default one. The DPoP key stays this client's own
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -277,13 +303,12 @@ Adaptive-burn governance dial: config, metrics, recommendation, proposals
 Usage: tenzro adaptive-burn [OPTIONS] <COMMAND>
 
 Commands:
-  config          Show the active BurnRateConfig (base and local fee burn bps)
-  metrics         Show the latest SupplyMetricsSnapshot (circulating supply, burns, supply added: always 0, TNZO supply is fixed)
-  recommendation  Compute the recommended BurnRateRecommendation from current metrics
-  proposals       List burn-dial governance proposals, newest first
-  fee-rate        Show the TNZO/USD rate fees are priced at, its mode, and the base fee
-  economy         Show an epoch's settled value, payers, seed vs organic volume, burn vs rewards released from the pool and holder concentration
-  help            Print this message or the help of the given subcommand(s)
+  config     Show the active BurnRateConfig (base and local fee burn bps)
+  metrics    Show the latest SupplyMetricsSnapshot (circulating supply, burns, supply added: always 0, TNZO supply is fixed)
+  proposals  List burn-dial governance proposals, newest first
+  fee-rate   Show the TNZO/USD rate fees are priced at, its mode, and the base fee
+  economy    Show an epoch's settled value, payers, seed vs organic volume, burn vs rewards released from the pool and holder concentration
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose          Enable verbose logging
@@ -369,21 +394,6 @@ Options:
   -h, --help             Print help
 ```
 
-### `tenzro adaptive-burn recommendation`
-
-```
-Compute the recommended BurnRateRecommendation from current metrics
-
-Usage: tenzro adaptive-burn recommendation [OPTIONS]
-
-Options:
-      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
-  -v, --verbose          Enable verbose logging
-      --format <FORMAT>  Output format (text, json) [default: text]
-  -q, --quiet            Hide the notice about a newer release (and other optional lines)
-  -h, --help             Print help
-```
-
 ## `tenzro agent`
 
 ```
@@ -393,6 +403,7 @@ Usage: tenzro agent [OPTIONS] <COMMAND>
 
 Commands:
   terms                      Call tenzro_getAgentTerms: the agent's full consensus Terms, root kind, status and spend so far
+  terms-credential           Call tenzro_getAgentTermsCredential: the agent's Terms as an unsigned VC 2.0 credential its controller signs, with the on-behalf-of claims and registration data a payment network asks for
   flag-audit                 Call tenzro_flagAgentAudit (flag agent audit) and print the node's answer
   record-audit-session       Call tenzro_recordAgentAuditSession: report an audit session's latest line for this node to commit
   bridge-circuit             Call tenzro_getBridgeCircuit (get bridge circuit) and print the node's answer
@@ -406,7 +417,8 @@ Commands:
   pause                      Pause an agent via kill-switch (reversible). Freezes payments, allows reward distribution + stake withdrawals
   quarantine                 Quarantine an agent via kill-switch (reversible). Freezes payments, reward distribution, and stake withdrawals; stake remains intact
   lift-quarantine            Lift an agent's quarantine. Only the owner or controller the quarantine names may, signing with the wallet its identity is registered with
-  terminate                  Terminate an agent via kill-switch (irreversible). Slashes stake by `slash_bps`, optionally cascades to descendants
+  terminate                  Terminate an agent via kill-switch (irreversible). Slashes stake by `slash_bps`
+  reclaim                    Move TNZO out of an agent's wallet to the wallet of its controller, or of the successor its revoked root named
   audit                      The audit trail a node keeps of an agent's actions: fetch an entry and check it against the root committed on chain
   delegation                 Agents a human delegates with their passkey: approve terms, change them, revoke
   accounts                   The agent's account on every other chain the network configures
@@ -580,7 +592,7 @@ Options:
 ```
 Verify a pack offline against the chain's genesis anchor
 
-Usage: tenzro agent audit evidence verify [OPTIONS] --file <FILE> --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
+Usage: tenzro agent audit evidence verify [OPTIONS] --file <FILE> --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis <GENESIS>
 
 Options:
       --file <FILE>
@@ -595,8 +607,8 @@ Options:
           Genesis block hash, hex
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
-      --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
-          Root of the genesis committee, hex
+      --genesis <GENESIS>
+          Genesis file: the first committee is read from its validators
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program, hex, from the chain's governance: needed when the pack's checkpoint is certified from a handover chain proof
       --profile <PROFILE>
@@ -1116,6 +1128,34 @@ Options:
           Print help
 ```
 
+### `tenzro agent reclaim`
+
+```
+Move TNZO out of an agent's wallet to the wallet of its controller, or of the successor its revoked root named
+
+Usage: tenzro agent reclaim [OPTIONS] --controller-did <CONTROLLER_DID> --agent-did <AGENT_DID>
+
+Options:
+      --key-namespace <KEY_NAMESPACE>
+          Hardware key namespace of the signing account: the wallet the controller's (or successor's) identity is registered with, which receives the funds [default: client]
+  -v, --verbose
+          Enable verbose logging
+      --controller-did <CONTROLLER_DID>
+          The agent's controller, or the successor its revoked root named
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+      --agent-did <AGENT_DID>
+          Agent DID whose wallet is drawn from
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --amount <AMOUNT>
+          Wei to move; the whole balance when absent
+      --rpc <RPC>
+          RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help
+          Print help
+```
+
 ### `tenzro agent record-audit-session`
 
 ```
@@ -1174,7 +1214,7 @@ Options:
 ### `tenzro agent terminate`
 
 ```
-Terminate an agent via kill-switch (irreversible). Slashes stake by `slash_bps`, optionally cascades to descendants
+Terminate an agent via kill-switch (irreversible). Slashes stake by `slash_bps`
 
 Usage: tenzro agent terminate [OPTIONS] --controller <CONTROLLER> --controller-did <CONTROLLER_DID> --agent-did <AGENT_DID>
 
@@ -1198,7 +1238,7 @@ Options:
       --slash-bps <SLASH_BPS>
           Basis points of stake to slash (0..=10000) [default: 0]
       --cascade
-          Recursively terminate descendants under children:<parent_id>
+          Recorded in the kill-switch receipt. An agent has no descendants, so nothing further is terminated
       --reason-text <REASON_TEXT>
           Optional human reason text
       --rpc <RPC>
@@ -1213,6 +1253,22 @@ Options:
 Call tenzro_getAgentTerms: the agent's full consensus Terms, root kind, status and spend so far
 
 Usage: tenzro agent terms [OPTIONS] --agent-did <AGENT_DID>
+
+Options:
+      --agent-did <AGENT_DID>  agent did
+  -v, --verbose                Enable verbose logging
+      --format <FORMAT>        Output format (text, json) [default: text]
+      --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
+  -h, --help                   Print help
+```
+
+### `tenzro agent terms-credential`
+
+```
+Call tenzro_getAgentTermsCredential: the agent's Terms as an unsigned VC 2.0 credential its controller signs, with the on-behalf-of claims and registration data a payment network asks for
+
+Usage: tenzro agent terms-credential [OPTIONS] --agent-did <AGENT_DID>
 
 Options:
       --agent-did <AGENT_DID>  agent did
@@ -1641,6 +1697,7 @@ Commands:
   route                  Show one route by transport and external chain
   send                   Send TNZO to an external chain, or withdraw a deposit asset over its deposit route (signed in hardware by the holder)
   deliver                Deliver a committee-attested inbound transfer
+  deliver-message        Deliver a message to the contract its ERC-7786 gateway body names
   light-client           Relay a light-client update (bootstrap or committee handover) for a route
   ibc                    Relay an IBC message (a classic handshake step, or a packet's acknowledgement or timeout) from the Cosmos chain of an IBC route
   attest                 Build a delivery for a route's verifiers to sign from the source chain, or add a verifier's signature to one
@@ -1742,6 +1799,25 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --from-chain <FROM_CHAIN>        External chain the delivery comes from
       --delivery <DELIVERY>            The attested delivery (hex)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
+```
+
+### `tenzro bridge deliver-message`
+
+```
+Deliver a message to the contract its ERC-7786 gateway body names
+
+Usage: tenzro bridge deliver-message [OPTIONS] --adapter <ADAPTER> --from-chain <FROM_CHAIN> --delivery <DELIVERY>
+
+Options:
+      --adapter <ADAPTER>              Route transport: ccip, ibc, deposit or contract
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --from-chain <FROM_CHAIN>        External chain the message comes from
+      --delivery <DELIVERY>            The attested delivery carrying the gateway body (hex)
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --key-namespace <KEY_NAMESPACE>  The signing account's hardware key namespace [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -2166,32 +2242,24 @@ Options:
 ```
 Interactive chat with AI models
 
-Usage: tenzro chat [OPTIONS] [MODEL_ID]
+Usage: tenzro chat [OPTIONS] <MODEL_ID>
 
 Arguments:
-  [MODEL_ID]  Model ID to use. Omit to select one from `--use-case` + `--budget`
+  <MODEL_ID>  Model ID to use (`tenzro model list` names them)
 
 Options:
-      --use-case <USE_CASE>
-          Use case for intent selection when no model_id is given: chat, code, reasoning, summarize, extract, or embed
-  -v, --verbose
-          Enable verbose logging
-      --budget <BUDGET>
-          Per-request cost cap in smallest TNZO unit (decimal string) for intent selection. Only used when no model_id is given
-      --format <FORMAT>
-          Output format (text, json) [default: text]
-      --optimize <OPTIMIZE>
-          Cost-quality knob in [0.0, 1.0] for intent selection
-  -q, --quiet
-          Hide the notice about a newer release (and other optional lines)
-      --quality-floor <QUALITY_FLOOR>
-          Reject models below this tier during intent selection: cheap or strong
       --max-tokens <MAX_TOKENS>
           Maximum tokens to generate [default: 512]
+  -v, --verbose
+          Enable verbose logging
+      --format <FORMAT>
+          Output format (text, json) [default: text]
       --temperature <TEMPERATURE>
           Temperature (0.0-2.0) [default: 0.7]
       --draft-n <DRAFT_N>
           Enable Multi-Token Prediction with this draft count (1..=6). Only meaningful on models whose catalog entry declares a paired drafter (e.g. Gemma 4 12B / 31B via `gemma4-*-mtp-draft`). Unsloth recommends 2 as a starting point; optimal value is hardware-dependent
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
       --jurisdiction <JURISDICTION>
           Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. "DE,EU"), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused
       --require-jurisdiction-receipt
@@ -2365,6 +2433,25 @@ Options:
       --gas-limit <GAS_LIMIT>          Gas limit [default: 3000000]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
+```
+
+## `tenzro control`
+
+```
+Serve this machine's node and its setup to the Tenzro Control apps on a local socket
+
+Usage: tenzro control [OPTIONS]
+
+Options:
+      --node <URL>       This machine's node [default: http://127.0.0.1:8545]
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+      --remote-node      Send this user's signed-in session to a node that is not on this machine
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+      --socket <PATH>    Listen here instead of the usual place [env: TENZRO_CONTROL_SOCKET=]
+      --web [<DIR>]      Serve the web console instead of the socket, to this machine only: from DIR, or from where a release install keeps it
+      --web-port <PORT>  The web console's port on this machine [default: 8765]
+  -h, --help             Print help
 ```
 
 ## `tenzro crypto`
@@ -2922,6 +3009,23 @@ Options:
   -h, --help             Print help
 ```
 
+## `tenzro do`
+
+```
+Ask the Tenzro Assistant one thing: a slash command (`/status`, `/help`) or a question
+
+Usage: tenzro do [OPTIONS] [REQUEST]...
+
+Arguments:
+  [REQUEST]...  A slash command with its arguments, or a question
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
 ## `tenzro doctor`
 
 ```
@@ -2932,8 +3036,10 @@ Usage: tenzro doctor [OPTIONS]
 Options:
       --json             Print one JSON object for support instead of the checklist
   -v, --verbose          Enable verbose logging
+      --fix              Run the fixes this machine can make for itself, after showing them: everything that needs the operating system's permission is asked for once
       --format <FORMAT>  Output format (text, json) [default: text]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
+      --yes              With --fix, run the fixes without asking first
   -h, --help             Print help
 ```
 
@@ -3397,7 +3503,7 @@ Options:
       --expires-at <EXPIRES_AT>
           Expiry as Unix timestamp in milliseconds
       --release <RELEASE>
-          Release condition kind: timeout | provider | consumer | both | custom | stream (pays the payee per elapsed epoch: a compute rental or a standby) | executor (released by `--executor`, or by the payer, before expiry) [default: timeout]
+          Release condition kind: timeout | provider | consumer | both | stream (pays the payee per elapsed epoch: a compute rental or a standby) | executor (released by `--executor`, or by the payer, before expiry) [default: timeout]
       --executor <EXECUTOR>
           For `--release executor`: the account (32-byte hex) that may release the escrow besides the payer; the payer alone when omitted
       --rate-per-epoch <RATE_PER_EPOCH>
@@ -3523,7 +3629,7 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --payer <PAYER>                  Payer address (must match the signing key)
-      --proof <PROOF>                  Optional proof data (hex). If omitted, an empty proof is used: the release transaction signed from your own account is your authorisation, all that any kind but a custom or quorum escrow asks
+      --proof <PROOF>                  Optional proof data (hex). If omitted, an empty proof is used: the release transaction signed from your own account is your authorisation, all that any kind but a quorum escrow asks
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -3552,6 +3658,22 @@ Options:
   -h, --help                           Print help
 ```
 
+## `tenzro estimate-gas`
+
+```
+Estimate the gas a transaction would use
+
+Usage: tenzro estimate-gas [OPTIONS] --tx <TX>
+
+Options:
+      --tx <TX>          The unsigned transaction as a JSON object (`from`, `to`, `value`, and the other transaction fields), or `@file` to read it from a file
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
 ## `tenzro events`
 
 ```
@@ -3561,7 +3683,7 @@ Usage: tenzro events [OPTIONS] <COMMAND>
 
 Commands:
   subscribe  Follow the chain's events from a cursor
-  history    Query a range of the chain's events, with proofs
+  history    Query the chain's events with proofs: the newest first, or a range read forward
   verify     Verify an event from genesis, as a light client
   complete   Query a range and verify from genesis that it left nothing out
   logs       Get event logs (eth_getLogs compatible)
@@ -3580,11 +3702,11 @@ Options:
 ```
 Query a range and verify from genesis that it left nothing out
 
-Usage: tenzro events complete [OPTIONS] --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
+Usage: tenzro events complete [OPTIONS] --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis <GENESIS>
 
 Options:
       --from-height <FROM_HEIGHT>
-          Start at this height
+          Start at this height (default: the oldest held)
   -v, --verbose
           Enable verbose logging
       --format <FORMAT>
@@ -3607,10 +3729,12 @@ Options:
           Chain id
       --genesis-hash <GENESIS_HASH>
           Genesis block hash (0x-prefixed hex)
-      --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
-          Root of the genesis committee (0x-prefixed hex), from the genesis file
+      --genesis <GENESIS>
+          Genesis file: the first committee is read from its validators
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program (0x-prefixed hex), from the chain's governance: needed once the node serves a handover chain proof
+      --max-age-secs <MAX_AGE_SECS>
+          Oldest the node's latest compact certificate may be, in seconds, against this machine's clock: an older one is refused as stale [default: 3600]
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help
@@ -3620,22 +3744,23 @@ Options:
 ### `tenzro events history`
 
 ```
-Query a range of the chain's events, with proofs
+Query the chain's events with proofs: the newest first, or a range read forward
 
 Usage: tenzro events history [OPTIONS]
 
 Options:
-      --from-height <FROM_HEIGHT>  Start at this height
-  -v, --verbose                    Enable verbose logging
-      --from-cursor <FROM_CURSOR>  Resume after this cursor (height:tx_index:event_index)
-  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
-      --to-cursor <TO_CURSOR>      Stop at this cursor, inclusive
-      --types <TYPES>              Event types (comma-separated): log, transaction_included
-      --address <ADDRESS>          Filter logs by contract address (20-byte hex)
-      --limit <LIMIT>              Maximum events to return [default: 100]
-      --format <FORMAT>            Output format: json, compact [default: compact]
-      --rpc <RPC>                  RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                       Print help
+      --from-height <FROM_HEIGHT>      Read forward from this height (0 for the oldest)
+  -v, --verbose                        Enable verbose logging
+      --from-cursor <FROM_CURSOR>      Read forward after this cursor (height:tx_index:event_index)
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --to-cursor <TO_CURSOR>          Stop at this cursor, inclusive, reading forward
+      --before-cursor <BEFORE_CURSOR>  The newest events before this cursor, newest first
+      --types <TYPES>                  Event types (comma-separated): log, transaction_included
+      --address <ADDRESS>              Filter logs by contract address (20-byte hex)
+      --limit <LIMIT>                  Maximum events to return [default: 100]
+      --format <FORMAT>                Output format: json, compact [default: compact]
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 ### `tenzro events info`
@@ -3699,7 +3824,7 @@ Options:
 ```
 Verify an event from genesis, as a light client
 
-Usage: tenzro events verify [OPTIONS] --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis-committee-root <GENESIS_COMMITTEE_ROOT> <CURSOR>
+Usage: tenzro events verify [OPTIONS] --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis <GENESIS> <CURSOR>
 
 Arguments:
   <CURSOR>  The event's cursor (height:tx_index:event_index)
@@ -3713,12 +3838,14 @@ Options:
           Output format (text, json) [default: text]
       --genesis-hash <GENESIS_HASH>
           Genesis block hash (0x-prefixed hex)
-      --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
-          Root of the genesis committee (0x-prefixed hex), from the genesis file
+      --genesis <GENESIS>
+          Genesis file: the first committee is read from its validators
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program (0x-prefixed hex), from the chain's governance: needed once the node serves a handover chain proof
+      --max-age-secs <MAX_AGE_SECS>
+          Oldest the node's latest compact certificate may be, in seconds, against this machine's clock: an older one is refused as stale [default: 3600]
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help
@@ -3801,7 +3928,7 @@ Options:
 ```
 Verify the latest compact certificate from genesis, as a light client
 
-Usage: tenzro finality verify [OPTIONS] --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
+Usage: tenzro finality verify [OPTIONS] --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis <GENESIS>
 
 Options:
       --chain-id <CHAIN_ID>
@@ -3812,16 +3939,78 @@ Options:
           Output format (text, json) [default: text]
       --genesis-hash <GENESIS_HASH>
           Genesis block hash (0x-prefixed hex)
-      --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
-          Root of the genesis committee (0x-prefixed hex), from the genesis file
+      --genesis <GENESIS>
+          Genesis file: the first committee is read from its validators
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program (0x-prefixed hex), from the chain's governance: needed once the node serves a handover chain proof
+      --max-age-secs <MAX_AGE_SECS>
+          Oldest the node's latest compact certificate may be, in seconds, against this machine's clock: an older one is refused as stale [default: 3600]
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help
           Print help
+```
+
+## `tenzro fleet`
+
+```
+Prove the hardware of an operator's fleet of hosts in one transaction
+
+Usage: tenzro fleet [OPTIONS] <COMMAND>
+
+Commands:
+  evidence  On a host: write this machine's evidence for the operator's fleet proof
+  prove     As the operator: send the hosts' evidence as one hardware proof
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro fleet evidence`
+
+```
+On a host: write this machine's evidence for the operator's fleet proof
+
+Usage: tenzro fleet evidence [OPTIONS] --operator <OPERATOR> --out <OUT>
+
+Options:
+      --operator <OPERATOR>  The operator's identity (the identity of the wallet that will send the proof)
+  -v, --verbose              Enable verbose logging
+      --bind                 Include the quote that joins this host to the operator's fleet (the first proof only)
+      --format <FORMAT>      Output format (text, json) [default: text]
+      --gpu                  Include this host's GPU report; fails when the GPU gives none
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
+      --out <OUT>            Where to write the evidence
+      --rpc <RPC>            This host's node [default: http://127.0.0.1:8545]
+  -h, --help                 Print help
+```
+
+### `tenzro fleet prove`
+
+```
+As the operator: send the hosts' evidence as one hardware proof
+
+Usage: tenzro fleet prove [OPTIONS]
+
+Options:
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --host <HOST>                    A host's evidence file, as `fleet evidence` wrote it (repeat for each host)
+      --rack <RACK>                    A rack proven as one unit: <label>=<file>,<file>,... (repeat for each rack)
+      --issuers <ISSUERS>              DER certificates every GPU chain shares above its device certificate
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 ## `tenzro forecast`
@@ -4144,6 +4333,7 @@ Commands:
   release-sponsored-bond         Return a validator's matured unbonding sponsored stake to the treasury
   payouts                        List every sponsorship and grant disbursement by recipient and class, the governed caps, and the approval status of one address
   propose-approve-operator       Propose approving an operator (validator or provider) for sponsorship
+  propose-approve-validators     Propose admitting validators to register and take committee seats (or, with --withdraw, taking them off), while admission is closed
   propose-reinstate-validator    Propose returning a jailed validator to candidacy at the next epoch, ahead of the end of its jail term (slashing is not undone)
   propose-revoke-operator        Propose revoking an operator's approval
   propose-approve-grantee        Propose approving a grantee (developer, contributor or community)
@@ -4170,11 +4360,14 @@ Arguments:
   <PROPOSAL_ID>  Proposal id (64 hex)
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
 
@@ -4208,8 +4401,11 @@ Options:
       --file <FILE>                    File holding the disclosure; omit to claim the lapse
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4241,11 +4437,14 @@ Arguments:
   <PROPOSAL_ID>  Proposal id (64 hex)
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
 
@@ -4329,8 +4528,11 @@ Options:
       --resume                         Signal a resume instead of a pause
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the protocol guardian or Foundation steward account signing [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4361,7 +4563,7 @@ Show the last enacted change of a network policy
 Usage: tenzro governance policy [OPTIONS] <KIND>
 
 Arguments:
-  <KIND>  economic_policy | adaptive_burn_config | supply_targets | protocol_upgrade [possible values: economic_policy, adaptive_burn_config, supply_targets, protocol_upgrade]
+  <KIND>  economic_policy | adaptive_burn_config | supply_targets | protocol_upgrade | protocol_upgrade_platforms [possible values: economic_policy, adaptive_burn_config, supply_targets, protocol_upgrade, protocol_upgrade_platforms]
 
 Options:
       --rpc <RPC>        [default: http://127.0.0.1:8545]
@@ -4379,12 +4581,14 @@ Open a proposal (needs bonded stake)
 Usage: tenzro governance propose [OPTIONS]
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account; with --node-account, the node's `hardware_key_namespace` (omit for the machine's default node)
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --node-account                   Propose from this machine's node account, the validator account its genesis entry or registration bonded, instead of a client account
-      --action <ACTION>                The proposal action as JSON, tagged by "action", e.g. '{"action":"parameter_change","key":"...","value":1,"memo":"..."}' or '{"action":"policy_update","update":{...},"memo":"...","track":{"kind":"standard"}}'; a security fix is '"track":{"kind":"security_fix","basis":{"kind":"vulnerability","commitment":"<hex sha256>"}}'
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --action <ACTION>                The proposal action as JSON, tagged by "action", e.g. '{"action":"parameter_change","key":"...","value":1,"memo":"..."}' or '{"action":"policy_update","update":{...},"memo":"...","track":{"kind":"standard"}}'; a security fix is '"track":{"kind":"security_fix","basis":{"kind":"vulnerability","commitment":"<hex sha256>"}}'
       --file <FILE>                    Read the proposal action from a JSON file
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
@@ -4406,8 +4610,10 @@ Options:
       --summary <SUMMARY>              What the grantee builds or does
       --link <LINK>                    Link to the public statement of the criteria [default: ""]
       --memo <MEMO>                    Why, shown to voters
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
-      --node-account                   Propose from this machine's node account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4445,13 +4651,39 @@ Options:
       --memo <MEMO>
           Why, shown to voters
       --key-namespace <KEY_NAMESPACE>
-          Hardware key namespace of the signing account
+          Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
       --node-account
-          Propose from this machine's node account
+          Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>
+          The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>
+          The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>
           [default: http://127.0.0.1:8545]
   -h, --help
           Print help
+```
+
+### `tenzro governance propose-approve-validators`
+
+```
+Propose admitting validators to register and take committee seats (or, with --withdraw, taking them off), while admission is closed
+
+Usage: tenzro governance propose-approve-validators [OPTIONS] --account <ACCOUNTS> --memo <MEMO>
+
+Options:
+      --account <ACCOUNTS>             An account (64 hex) the validator registers from; repeat for each
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --withdraw                       Withdraw the approval instead of granting it
+      --memo <MEMO>                    Why, shown to voters and recorded on-chain
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 ### `tenzro governance propose-operator-running-cost`
@@ -4470,8 +4702,10 @@ Options:
       --to-epoch <TO_EPOCH>            Last hourly epoch claimed
       --amount <AMOUNT>                Amount, smallest unit
       --memo <MEMO>                    Why, shown to voters
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
-      --node-account                   Propose from this machine's node account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4494,8 +4728,10 @@ Options:
       --amount <AMOUNT>                Amount, the asset's smallest unit
       --period-exception               Use the governed per-payment headroom above the period limit
       --memo <MEMO>                    Why, shown to voters
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
-      --node-account                   Propose from this machine's node account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4514,8 +4750,10 @@ Options:
       --value <VALUE>                  The proposed value
       --memo <MEMO>                    Why, shown to voters
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
-      --node-account                   Propose from this machine's node account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4534,8 +4772,10 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
-      --node-account                   Propose from this machine's node account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4552,9 +4792,11 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
-      --node-account                   Propose from this machine's node account
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4571,9 +4813,11 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
-      --node-account                   Propose from this machine's node account
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4590,9 +4834,11 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
-      --node-account                   Propose from this machine's node account
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4611,8 +4857,10 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --memo <MEMO>                    Why, shown to voters
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account
-      --node-account                   Propose from this machine's node account
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4662,8 +4910,8 @@ Options:
           Chain id, from the genesis file
       --genesis-hash <GENESIS_HASH>
           Genesis block hash, hex
-      --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
-          Root of the genesis committee, hex
+      --genesis <GENESIS>
+          Genesis file: the first committee is read from its validators
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program, hex, from the chain's governance: needed when the receipt's checkpoint is certified from a handover chain proof
       --rpc <RPC>
@@ -4683,11 +4931,14 @@ Arguments:
   <VALIDATOR>  Validator address (64 hex)
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
 
@@ -4771,11 +5022,14 @@ Arguments:
   <PROPOSAL_ID>  Proposal id (64 hex)
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
 
@@ -4791,11 +5045,14 @@ Arguments:
   <AMOUNT>       TNZO to lock, in base units; it returns in full once the proposal is decided
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
 
@@ -4813,8 +5070,11 @@ Options:
       --holder <HOLDER>                The account that locked it (64 hex); defaults to the signing account
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -4830,12 +5090,15 @@ Arguments:
   <PROPOSAL_ID>  Proposal id (64 hex)
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace: the signing client account's (default `client`), or with --machine-root the node's `hardware_key_namespace` (default: the machine's default node)
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --validator <VALIDATOR>          Validator account whose bond the ballot carries (64 hex). The ballot is cast by the validator's root: its operator's passkey identity signs it, or, with --machine-root, the autonomous machine that is the validator approves it
-      --machine-root                   Cast the ballot as the validator's machine root: this machine's identity key (the key its machine DID derives from) approves it and the node account submits it. For a validator whose identity is this autonomous machine
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --validator <VALIDATOR>          Validator account whose bond the ballot carries (64 hex). The ballot is cast by the validator's root: its operator's passkey identity signs it, or, with --machine-root, the autonomous machine that is the validator approves it
+      --machine-root                   Cast the ballot as the validator's machine root: this machine's identity key (the key its machine DID derives from) approves it and the node account submits it. For a validator whose identity is this autonomous machine. Implies --node-account
       --yes                            Vote yes
       --no                             Vote no
       --rpc <RPC>                      [default: http://127.0.0.1:8545]
@@ -4900,6 +5163,8 @@ Commands:
   register-machine       Register a new machine identity
   register-account       Register the on-chain identity of this CLI's own account; the account pays the gas
   revoke                 Revoke an identity on its root's authority (a RevokeIdentity transaction)
+  revoke-to              Revoke a root in favour of a successor who may reclaim its agents' funds (a native call)
+  keys                   Change an identity's keys on its root's authority: record its next key, declare one compromised or revoke a delegation (a native call)
   revoke-jwt             Revoke a single JWT by its `jti` (cascades through the act-chain)
   forget                 Hard-delete a revoked identity (TDIP/GDPR Article 17 right-to-erasure)
   help                   Print this message or the help of the given subcommand(s)
@@ -4976,6 +5241,28 @@ Options:
       --format <FORMAT>                Output format (text, json) [default: text]
       --validity-secs <VALIDITY_SECS>  validity secs
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
+```
+
+### `tenzro identity keys`
+
+```
+Change an identity's keys on its root's authority: record its next key, declare one compromised or revoke a delegation (a native call)
+
+Usage: tenzro identity keys [OPTIONS] --change <CHANGE> <DID>
+
+Arguments:
+  <DID>  The identity whose keys change
+
+Options:
+      --change <CHANGE>                The change, as JSON, or a file holding it
+  -v, --verbose                        Enable verbose logging
+      --approver <APPROVER>            The approving root's DID; the DID itself when absent
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --approval <APPROVAL>            JSON file with the approving root's approval of the challenge; without it the target to approve is printed and nothing is sent
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the account that sends the transaction [default: client]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -5153,6 +5440,29 @@ Options:
   -h, --help                         Print help
 ```
 
+### `tenzro identity revoke-to`
+
+```
+Revoke a root in favour of a successor who may reclaim its agents' funds (a native call)
+
+Usage: tenzro identity revoke-to [OPTIONS] --successor <SUCCESSOR> <DID>
+
+Arguments:
+  <DID>  The root to revoke
+
+Options:
+      --successor <SUCCESSOR>          The root that takes over what the revoked root's agents hold
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --reason <REASON>                Reason recorded with the revocation; the approval covers it
+      --approval <APPROVAL>            JSON file with the root's approval of the challenge; without it the target to approve is printed and nothing is sent
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the account that sends the transaction [default: client]
+      --gas-limit <GAS_LIMIT>          Gas for the transaction; a root with many agents needs more [default: 1000000]
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
+```
+
 ### `tenzro identity rotate-to-pq`
 
 ```
@@ -5297,30 +5607,31 @@ Inference commands
 Usage: tenzro inference [OPTIONS] <COMMAND>
 
 Commands:
-  generation           Call tenzro_getGeneration (get generation) and print the node's answer
-  usage                Call tenzro_listInferenceUsage (list inference usage) and print the node's answer
-  audit-challenge      Call tenzro_auditInferenceChallenge (audit inference challenge) and print the node's answer
-  verify-receipt       Call tenzro_verifyInferenceReceipt (verify inference receipt) and print the node's answer
-  prefix-probe         Call tenzro_prefixProbe (prefix probe) and print the node's answer
-  moe-route            Call tenzro_moeRoute (moe route) and print the node's answer
-  moe-execute          Call tenzro_moeExecute (moe execute) and print the node's answer
-  moe-dispute-receipt  Re-execute a stored expert receipt and dispute it if it does not match (tenzro_moeDisputeReceipt)
-  standby-quote        Live operators holding a model on standby in a jurisdiction, cheapest first, with the account a reservation escrow must pay and the hourly fee each one advertises (tenzro_standbyQuote)
-  request              Submit an inference request
-  sponsored            Run a short inference a sponsoring agent pays for, on a node that offers it
-  router-metrics       Read the inference router's live metrics (requests routed, hedges dispatched, hedges won, deadline-exceeded requests)
-  get-commitment       Fetch a stored TOPLOC inference commitment by hash
-  verify-commitment    Re-execute a prompt against a stored commitment and report the per-step verification outcome
-  file-challenge       File a challenge against a stored inference commitment
-  get-challenge        Fetch an inference challenge by id
-  list-challenges      List inference challenges, optionally filtered by status or provider
-  commit-vote          Commit a committee vote (hidden) on an inference challenge
-  reveal-vote          Reveal a previously committed committee vote
-  finalize-challenge   Finalize an inference challenge by tallying revealed committee votes. Upheld verdicts decrement the provider's reputation and record a compute-bond failure
-  route                Select a model for an intent (use case + budget + quality floor + cost-quality knob) without naming one. Discovery only — dispatches nothing. With `--message`, discovers and runs in one call
-  record-outcome       Report how a routed call turned out, so the router's per-cluster error rates reflect what happened rather than only what the catalog declares
-  difficulty-stats     Read the node's difficulty index: cluster sizes, and per-cluster outcome counters for a model when one is named
-  help                 Print this message or the help of the given subcommand(s)
+  generation                   Call tenzro_getGeneration (get generation) and print the node's answer
+  usage                        Call tenzro_listInferenceUsage (list inference usage) and print the node's answer
+  audit-challenge              Call tenzro_auditInferenceChallenge (audit inference challenge) and print the node's answer
+  verify-receipt               Call tenzro_verifyInferenceReceipt (verify inference receipt) and print the node's answer
+  prefix-probe                 Call tenzro_prefixProbe (prefix probe) and print the node's answer
+  moe-route                    Call tenzro_moeRoute (moe route) and print the node's answer
+  moe-execute                  Call tenzro_moeExecute (moe execute) and print the node's answer
+  moe-dispute-receipt          Re-execute a stored expert receipt and dispute it if it does not match (tenzro_moeDisputeReceipt)
+  standby-quote                Live operators holding a model on standby in a jurisdiction, cheapest first, with the account a reservation escrow must pay and the hourly fee each one advertises (tenzro_standbyQuote)
+  request                      Submit an inference request
+  sponsored                    Run a short inference a sponsoring agent pays for, on a node that offers it
+  router-metrics               Read the inference router's live metrics (requests routed, hedges dispatched, hedges won, deadline-exceeded requests)
+  verify-jurisdiction-receipt  Check a jurisdiction receipt's signature and the key that made it
+  get-commitment               Fetch a stored TOPLOC inference commitment by hash
+  verify-commitment            Re-execute a prompt against a stored commitment and report the per-step verification outcome
+  file-challenge               File a challenge against a stored inference commitment
+  get-challenge                Fetch an inference challenge by id
+  list-challenges              List inference challenges, optionally filtered by status or provider
+  seat-duties                  The challenges this node holds a committee seat on
+  reexecute                    Re-execute a challenged reply as a committee seat and record the verdict
+  commit-vote                  Commit this node's seat to its recorded verdict (hidden); the verdict and salt stay on this machine until the reveal
+  reveal-vote                  Reveal the vote committed from this machine
+  finalize-challenge           Finalize an inference challenge by tallying revealed committee votes. Upheld verdicts decrement the provider's reputation and record a compute-bond failure
+  file-challenge-fault         Take a challenge its committee upheld to the chain as an inference fault against the provider's bond (operator only)
+  help                         Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose          Enable verbose logging
@@ -5348,37 +5659,19 @@ Options:
 ### `tenzro inference commit-vote`
 
 ```
-Commit a committee vote (hidden) on an inference challenge
+Commit this node's seat to its recorded verdict (hidden); the verdict and salt stay on this machine until the reveal
 
-Usage: tenzro inference commit-vote [OPTIONS] --commit-hash <COMMIT_HASH> <CHALLENGE_ID>
+Usage: tenzro inference commit-vote [OPTIONS] <CHALLENGE_ID>
 
 Arguments:
   <CHALLENGE_ID>  Challenge id (UUID)
 
 Options:
-      --commit-hash <COMMIT_HASH>  Vote commitment hash (hex)
-  -v, --verbose                    Enable verbose logging
-      --voter-rpc <VOTER_RPC>      The voting validator's own node, which signs the commit [default: http://127.0.0.1:8545]
-      --format <FORMAT>            Output format (text, json) [default: text]
-  -q, --quiet                      Hide the notice about a newer release (and other optional lines)
-      --rpc <RPC>                  RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                       Print help
-```
-
-### `tenzro inference difficulty-stats`
-
-```
-Read the node's difficulty index: cluster sizes, and per-cluster outcome counters for a model when one is named
-
-Usage: tenzro inference difficulty-stats [OPTIONS]
-
-Options:
-      --model-id <MODEL_ID>  Report per-cluster outcome counters and error rate for this model
-  -v, --verbose              Enable verbose logging
-      --format <FORMAT>      Output format (text, json) [default: text]
-  -q, --quiet                Hide the notice about a newer release (and other optional lines)
-      --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                 Print help
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -v, --verbose          Enable verbose logging
+      --rpc <RPC>        This node's RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
 ```
 
 ### `tenzro inference file-challenge`
@@ -5386,17 +5679,39 @@ Options:
 ```
 File a challenge against a stored inference commitment
 
-Usage: tenzro inference file-challenge [OPTIONS] <COMMITMENT_HASH> <CHALLENGER>
+Usage: tenzro inference file-challenge [OPTIONS] --receipt <RECEIPT> --inputs <INPUTS> <COMMITMENT_HASH> <CHALLENGER>
 
 Arguments:
   <COMMITMENT_HASH>  Commitment hash being disputed (hex, with or without 0x prefix)
   <CHALLENGER>       Challenger identity (DID or address)
 
 Options:
-      --reason <REASON>  Optional free-text reason for the dispute
+      --reason <REASON>      Optional free-text reason for the dispute
+  -v, --verbose              Enable verbose logging
+      --format <FORMAT>      Output format (text, json) [default: text]
+      --receipt <RECEIPT>    File holding the receipt the provider signed for the response
+      --inputs <INPUTS>      File holding what the engine was given, as JSON: `{"kind": "prompt", "prompt": ...}` for a raw completion or `{"kind": "chat", "messages": [...], "render": {"tools": [...], "enable_thinking": .., "reasoning_effort": ..}, "media": [...]}` for a chat turn. It must be what the receipt commits to
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
+      --envelope <ENVELOPE>  File holding the commitment envelope, when the node filed on did not serve the response
+      --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                 Print help
+```
+
+### `tenzro inference file-challenge-fault`
+
+```
+Take a challenge its committee upheld to the chain as an inference fault against the provider's bond (operator only)
+
+Usage: tenzro inference file-challenge-fault [OPTIONS] <CHALLENGE_ID> <DISPUTE>
+
+Arguments:
+  <CHALLENGE_ID>  Challenge id (UUID)
+  <DISPUTE>       File holding the answer the challenged commitment was signed into, as JSON {receipt, request, output}
+
+Options:
+      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
-      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
@@ -5553,22 +5868,22 @@ Options:
   -h, --help               Print help
 ```
 
-### `tenzro inference record-outcome`
+### `tenzro inference reexecute`
 
 ```
-Report how a routed call turned out, so the router's per-cluster error rates reflect what happened rather than only what the catalog declares
+Re-execute a challenged reply as a committee seat and record the verdict
 
-Usage: tenzro inference record-outcome [OPTIONS] --model-id <MODEL_ID> --cluster <CLUSTER> --outcome <OUTCOME>
+Usage: tenzro inference reexecute [OPTIONS] <CHALLENGE_ID>
+
+Arguments:
+  <CHALLENGE_ID>  Challenge id (UUID)
 
 Options:
-      --model-id <MODEL_ID>  The model that served the call — the routing decision's model_id
-  -v, --verbose              Enable verbose logging
-      --cluster <CLUSTER>    The difficulty cluster the request landed in — the routing decision's `cluster`
-      --outcome <OUTCOME>    How the call turned out: resolved, escalated, or failed
-  -q, --quiet                Hide the notice about a newer release (and other optional lines)
-      --format <FORMAT>      Output format (text, json) [default: text]
-      --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                 Print help
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -v, --verbose          Enable verbose logging
+      --rpc <RPC>        This node's RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
 ```
 
 ### `tenzro inference request`
@@ -5598,68 +5913,19 @@ Options:
 ### `tenzro inference reveal-vote`
 
 ```
-Reveal a previously committed committee vote
+Reveal the vote committed from this machine
 
-Usage: tenzro inference reveal-vote [OPTIONS] --salt <SALT> <CHALLENGE_ID>
+Usage: tenzro inference reveal-vote [OPTIONS] <CHALLENGE_ID>
 
 Arguments:
   <CHALLENGE_ID>  Challenge id (UUID)
 
 Options:
-  -v, --verbose                Enable verbose logging
-      --voter-rpc <VOTER_RPC>  The voting validator's own node, which signs the reveal [default: http://127.0.0.1:8545]
-      --verdict                Revealed verdict (true = did-not-verify / upholds)
-  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
-      --salt <SALT>            Reveal salt (hex) — must reproduce the earlier commit hash
-      --format <FORMAT>        Output format (text, json) [default: text]
-      --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help                   Print help
-```
-
-### `tenzro inference route`
-
-```
-Select a model for an intent (use case + budget + quality floor + cost-quality knob) without naming one. Discovery only — dispatches nothing. With `--message`, discovers and runs in one call
-
-Usage: tenzro inference route [OPTIONS] --use-case <USE_CASE>
-
-Options:
-      --use-case <USE_CASE>
-          Use case: chat, code, reasoning, summarize, extract, or embed
-  -v, --verbose
-          Enable verbose logging
-      --budget <BUDGET>
-          Per-request cost cap in smallest TNZO unit (decimal string)
-      --optimize <OPTIMIZE>
-          Cost-quality knob in [0.0, 1.0]: 0.0 cheapest acceptable, 1.0 strongest
-  -q, --quiet
-          Hide the notice about a newer release (and other optional lines)
-      --quality-floor <QUALITY_FLOOR>
-          Reject any model below this tier: cheap or strong
-      --est-input-tokens <EST_INPUT_TOKENS>
-          Estimated input tokens for cost estimation
-      --est-output-tokens <EST_OUTPUT_TOKENS>
-          Estimated output tokens for cost estimation
-      --payer-did <PAYER_DID>
-          Payer DID — enables the per-DID rolling-window budget gate
-      --payer-address <PAYER_ADDRESS>
-          Payer wallet address (hex) — the payer's on-chain TNZO balance becomes a hard ceiling, so unaffordable models are dropped
-      --prompt <PROMPT>
-          Text the model would answer. Used only to place the request in a difficulty cluster, so selection accounts for how hard the prompt is; it is not sent to any provider. Redundant with --message, which the node reads for the same purpose
-      --message <MESSAGE>
-          When set, discover a model and run this prompt in one call
-      --max-tokens <MAX_TOKENS>
-          Maximum output tokens (only used with --message) [default: 256]
-      --jurisdiction <JURISDICTION>
-          Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. "DE,EU"), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Only used with --message
-      --require-jurisdiction-receipt
-          Fail the request unless the response carries a verifiable signed jurisdiction receipt. Only used with --message
-      --format <FORMAT>
-          Output format (text, json) [default: text]
-      --rpc <RPC>
-          RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help
-          Print help
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -v, --verbose          Enable verbose logging
+      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
 ```
 
 ### `tenzro inference router-metrics`
@@ -5673,6 +5939,21 @@ Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro inference seat-duties`
+
+```
+The challenges this node holds a committee seat on
+
+Usage: tenzro inference seat-duties [OPTIONS]
+
+Options:
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -v, --verbose          Enable verbose logging
+      --rpc <RPC>        This node's RPC endpoint [default: http://127.0.0.1:8545]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
@@ -5744,8 +6025,26 @@ Arguments:
   <PROMPT>           The exact prompt the committed response was generated from
 
 Options:
-      --format <FORMAT>  Output format (text, json) [default: text]
+      --envelope <ENVELOPE>  File holding the output of `get-commitment` run against the node that served the response, for checking on a node that holds no copy. Needs `--receipt`
+  -v, --verbose              Enable verbose logging
+      --receipt <RECEIPT>    File holding the receipt the provider signed for the response. It checks the decode, and names the model and provider of an envelope
+      --format <FORMAT>      Output format (text, json) [default: text]
+  -q, --quiet                Hide the notice about a newer release (and other optional lines)
+      --rpc <RPC>            RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                 Print help
+```
+
+### `tenzro inference verify-jurisdiction-receipt`
+
+```
+Check a jurisdiction receipt's signature and the key that made it
+
+Usage: tenzro inference verify-jurisdiction-receipt [OPTIONS] --file <FILE>
+
+Options:
+      --file <FILE>      File holding the receipt as JSON
   -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
@@ -5889,6 +6188,7 @@ Usage: tenzro interaction [OPTIONS] <COMMAND>
 
 Commands:
   mirror  Record a settlement, given as its interaction record, on other chains, in parallel
+  verify  Recompute an interaction record's digest offline and check it against one you were given
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -5942,6 +6242,24 @@ Options:
 
   -h, --help
           Print help (see a summary with '-h')
+```
+
+### `tenzro interaction verify`
+
+```
+Recompute an interaction record's digest offline and check it against one you were given
+
+Usage: tenzro interaction verify [OPTIONS] <INTERACTION_JSON>
+
+Arguments:
+  <INTERACTION_JSON>  Path to the interaction record JSON
+
+Options:
+      --expect <EXPECT>  The digest the record is claimed to have (64 hex characters), as a node reported it or as it was written onto a chain
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
 ```
 
 ## `tenzro iroh`
@@ -6063,22 +6381,25 @@ Options:
 ## `tenzro join`
 
 ```
-Join the Tenzro Network (one-click participate)
+Provision this machine's identity and wallet; with --provider, set it up as a provider
 
 Usage: tenzro join [OPTIONS]
 
 Options:
-      --rpc <RPC>        RPC endpoint. Defaults to https://rpc.tenzro.com, or to the local node (http://127.0.0.1:8545) when --provider is set
-  -v, --verbose          Enable verbose logging
-      --format <FORMAT>  Output format (text, json) [default: text]
-      --name <NAME>      Display name [default: "Tenzro User"]
-      --origin <ORIGIN>  Origin hint (e.g. "cli", "sdk", "app", "mcp", "a2a") [default: cli]
-  -q, --quiet            Hide the notice about a newer release (and other optional lines)
-      --type <TYPE>      Participant type: human, agent, or bot [default: human]
-      --provider         Also become an inference provider: detect hardware, post the compute bond, register, set default pricing, and pull + serve the largest catalog model that fits this machine. Requires a running local tenzro-node (or --rpc pointing at your node)
-      --role <ROLE>      Show where your application for a staked role stands and the next step: validator, edge, tee, rpc, attestor, wallet, catalog, ai, compute or storage. Run it again at any time; it continues from wherever you are
-      --wallet <WALLET>  Wallet address to check with --role (defaults to this machine's)
-  -h, --help             Print help
+      --rpc <RPC>                RPC endpoint. Defaults to https://rpc.tenzro.com, or to the local node (http://127.0.0.1:8545) when --provider is set
+  -v, --verbose                  Enable verbose logging
+      --format <FORMAT>          Output format (text, json) [default: text]
+      --name <NAME>              Display name [default: "Tenzro User"]
+      --origin <ORIGIN>          Origin hint (e.g. "cli", "sdk", "app", "mcp", "a2a") [default: cli]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
+      --type <TYPE>              Participant type: human, agent, or bot [default: human]
+      --provider                 Also become an inference provider: detect hardware, post the compute bond, register, set default pricing, and pull + serve the largest catalog model that fits this machine. Requires a running local tenzro-node (or --rpc pointing at your node)
+      --node-account             With --provider, become a provider as this machine's node: its node account posts the bonds and its operator DID is the provider, with no new identity provisioned. On a machine with no TPM of its own the node account signs through the key holder (--tpm-key-holder and --tpm-label, or the one `tenzro setup` recorded)
+      --tpm-key-holder <SOCKET>  The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>        The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --role <ROLE>              Show where your application for a staked role stands and the next step: validator, edge, tee, rpc, attestor, wallet, catalog, ai, compute or storage. Run it again at any time; it continues from wherever you are
+      --wallet <WALLET>          Wallet address to check with --role (defaults to this machine's)
+  -h, --help                     Print help
 ```
 
 ## `tenzro machine-access`
@@ -6281,6 +6602,7 @@ Commands:
   download               Download a model from HuggingFace
   serve                  Load and serve a model locally
   stop                   Stop serving a model
+  apps                   How your own apps on this machine use the models this node serves
   delete                 Delete a downloaded model (removes all local files and caches)
   endpoints              List all model service endpoints
   endpoint               Get details of a specific model endpoint
@@ -6296,6 +6618,21 @@ Commands:
   help                   Print this message or the help of the given subcommand(s)
 
 Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro model apps`
+
+```
+How your own apps on this machine use the models this node serves
+
+Usage: tenzro model apps [OPTIONS]
+
+Options:
+      --rpc <RPC>        RPC endpoint of this machine's node [default: http://127.0.0.1:8545]
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
@@ -6349,6 +6686,7 @@ Options:
   -v, --verbose          Enable verbose logging
   -y, --yes              Skip confirmation prompt
       --format <FORMAT>  Output format (text, json) [default: text]
+      --rpc <RPC>        RPC endpoint of the node whose copy of the model is deleted too [default: http://127.0.0.1:8545]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
@@ -6769,24 +7107,32 @@ Arguments:
 
 Options:
       --rpc <RPC>
-          RPC endpoint to serve on a remote node (omit to serve locally)
+          RPC endpoint of the node that serves the model. Defaults to the local one, which this program takes as the endpoint it uses (--rpc on the command line, TENZRO_RPC, or the one `tenzro setup` saved)
+          
+          [default: http://127.0.0.1:8545]
 
   -v, --verbose
           Enable verbose logging
 
-      --cluster
-          Force a LAN cluster even when the model fits one machine. By default the node forms a cluster only when the model is too large for the biggest single member; this requests one regardless
+      --context-length <CONTEXT_LENGTH>
+          Context per request, in tokens. The node gives every concurrent request a whole context of KV cache, so this is the main lever on the memory a serve takes. Defaults to the catalog's context; never longer than it and never shorter than 2048
 
       --format <FORMAT>
           Output format (text, json)
           
           [default: text]
 
-      --force-single
-          Never form a cluster — load the whole model on this node even if it is too large for one machine (the load will fail if it does not fit)
+      --max-concurrent <MAX_CONCURRENT>
+          Most requests the node admits to this model at once. Defaults to what the node measures its hardware can take
 
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
+
+      --cluster
+          Force a LAN cluster even when the model fits one machine. By default the node forms a cluster only when the model is too large for the biggest single member; this requests one regardless
+
+      --force-single
+          Never form a cluster — load the whole model on this node even if it is too large for one machine (the load will fail if it does not fit)
 
       --public
           Announce the model; any caller may invoke it by paying your per-use price (free at 0), with no key, even on a node whose service-key gate is on. Overrides the node's visibility for this model
@@ -6809,13 +7155,9 @@ Options:
           That is usually the right trade and it is why it is the default. It is the wrong trade on a machine that is short of VRAM, on one paying for the bandwidth, or when the target is being served to sit idle most of the time — and until now there was no way to say so from here. The node has always accepted `load_drafter: false`; nothing exposed it.
           
           Models with an inline MTP head are unaffected: their speculation is trained into the target's own weights, so there is nothing separate to decline.
-          
-          Applies to a node serve — `--rpc`, or a node running locally. Drafters are loaded by the node, so a bare `model serve` that only warms weights in this process never loads one either way.
 
-      --catalog-rpc <CATALOG_RPC>
-          Node whose model catalog is read (the catalog is published data that nodes serve, not compiled into this binary)
-          
-          [default: http://127.0.0.1:8545]
+      --idle-unload <MINUTES>
+          Unload the model after this many minutes without a request. It stays served: its next request loads it again. The node allows limits within its `[memory] idle_unload_min_secs` and `idle_unload_max_secs`. Without it the model stays loaded until `tenzro model stop`
 
   -h, --help
           Print help (see a summary with '-h')
@@ -7250,6 +7592,8 @@ Commands:
   da-backends                  Call tenzro_getDaBackends (get da backends) and print the node's answer
   verify-da-pointer            Call tenzro_verifyDaPointer (verify da pointer) and print the node's answer
   verify-event-proof           Call tenzro_verifyEventProof (verify event proof) and print the node's answer
+  app-transport-info           Call tenzro_getAppTransportInfo: the URL application devices reach this node under and the certificate hashes it signed
+  app-transport-usage          Call tenzro_getAppTransportUsage: what the application transport carried
   start                        Start a Tenzro Network node
   status                       Check node status
   stop                         Stop the running node
@@ -7301,6 +7645,36 @@ Options:
   -v, --verbose          Enable verbose logging
       --format <FORMAT>  Output format (text, json) [default: text]
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro node app-transport-info`
+
+```
+Call tenzro_getAppTransportInfo: the URL application devices reach this node under and the certificate hashes it signed
+
+Usage: tenzro node app-transport-info [OPTIONS]
+
+Options:
+      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro node app-transport-usage`
+
+```
+Call tenzro_getAppTransportUsage: what the application transport carried
+
+Usage: tenzro node app-transport-usage [OPTIONS]
+
+Options:
+      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
 ```
@@ -7778,7 +8152,7 @@ Start a Tenzro Network node
 Usage: tenzro node start [OPTIONS]
 
 Options:
-      --roles <ROLES>        Comma-separated node roles. One stake backs every role. Tokens: validator, ai, storage, tee, user. Examples: "validator", "validator,storage,ai", "storage" [default: user]
+      --roles <ROLES>        Comma-separated node roles. Each role is bonded separately from the same account. Tokens: validator, ai, storage, tee, user. Examples: "validator", "validator,storage,ai", "storage" [default: user]
   -v, --verbose              Enable verbose logging
       --config <CONFIG>      Path to configuration file
       --format <FORMAT>      Output format (text, json) [default: text]
@@ -7879,6 +8253,8 @@ Commands:
   retrieve     Rebuild a stored object from its shards and write its bytes to a file
   set-pricing  Switch the provider to network-dynamic byte-epoch pricing
   status       Show this node's storage-provider state (rate, object count)
+  receipts     Show this node's signed receipt for the shards it holds of an object stored under a placement constraint
+  providers    List the storage providers this node knows, with their placement and pricing
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -7888,21 +8264,55 @@ Options:
   -h, --help             Print help
 ```
 
+#### `tenzro node storage providers`
+
+```
+List the storage providers this node knows, with their placement and pricing
+
+Usage: tenzro node storage providers [OPTIONS]
+
+Options:
+      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+#### `tenzro node storage receipts`
+
+```
+Show this node's signed receipt for the shards it holds of an object stored under a placement constraint
+
+Usage: tenzro node storage receipts [OPTIONS] --object-id <OBJECT_ID>
+
+Options:
+      --object-id <OBJECT_ID>  Object id
+  -v, --verbose                Enable verbose logging
+      --format <FORMAT>        Output format (text, json) [default: text]
+      --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
+  -h, --help                   Print help
+```
+
 #### `tenzro node storage retrieve`
 
 ```
 Rebuild a stored object from its shards and write its bytes to a file
 
-Usage: tenzro node storage retrieve [OPTIONS] --object-id <OBJECT_ID> --out <OUT>
+Usage: tenzro node storage retrieve [OPTIONS] --object-id <OBJECT_ID> --out <OUT> --reader-did <READER_DID>
 
 Options:
-      --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
-  -v, --verbose                Enable verbose logging
-      --format <FORMAT>        Output format (text, json) [default: text]
-      --object-id <OBJECT_ID>  Logical object id it was stored under
-      --out <OUT>              Where the bytes are written
-  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
-  -h, --help                   Print help
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --object-id <OBJECT_ID>          Logical object id it was stored under
+      --out <OUT>                      Where the bytes are written
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --reader-did <READER_DID>        DID reading the object, which its access policy must admit; it signs this request
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace holding the key `--reader-did` resolves to [default: client]
+      --voucher <FILE>                 JSON file holding a channel voucher to the node that pays for the read, when the object's class is priced
+  -h, --help                           Print help
 ```
 
 #### `tenzro node storage set-pricing`
@@ -7913,12 +8323,15 @@ Switch the provider to network-dynamic byte-epoch pricing
 Usage: tenzro node storage set-pricing [OPTIONS] --rate <RATE>
 
 Options:
-      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
-  -v, --verbose          Enable verbose logging
-      --format <FORMAT>  Output format (text, json) [default: text]
-      --rate <RATE>      Fixed byte-epoch rate (wei)
-  -q, --quiet            Hide the notice about a newer release (and other optional lines)
-  -h, --help             Print help
+      --rpc <RPC>              RPC endpoint [default: http://127.0.0.1:8545]
+  -v, --verbose                Enable verbose logging
+      --format <FORMAT>        Output format (text, json) [default: text]
+      --rate <RATE>            Fixed byte-epoch rate (wei)
+  -q, --quiet                  Hide the notice about a newer release (and other optional lines)
+      --read-hot <READ_HOT>    What reading a hot object costs, wei per GiB
+      --read-warm <READ_WARM>  What reading a warm object costs, wei per GiB
+      --read-cold <READ_COLD>  What reading a cold object costs, wei per GiB
+  -h, --help                   Print help
 ```
 
 #### `tenzro node storage status`
@@ -7941,7 +8354,7 @@ Options:
 ```
 Erasure-code an object and publish its shards over the transport
 
-Usage: tenzro node storage store [OPTIONS] --object-id <OBJECT_ID> --owner <OWNER> --file <FILE>
+Usage: tenzro node storage store [OPTIONS] --object-id <OBJECT_ID> --owner <OWNER> --file <FILE> --owner-did <OWNER_DID>
 
 Options:
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
@@ -7953,6 +8366,11 @@ Options:
       --file <FILE>                    Path to the file whose bytes are stored
       --data-shards <DATA_SHARDS>      Data shards (default 4) [default: 4]
       --parity-shards <PARITY_SHARDS>  Parity shards (default 2) [default: 2]
+      --owner-did <OWNER_DID>          DID that owns the object: only it may read the object back, and it signs this request
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace holding the key `--owner-did` resolves to [default: client]
+      --jurisdiction <JURISDICTION>    Country (two-letter code) a holder must declare; repeat for several. This node must be in one
+      --operator <OPERATORS>           Operator account (hex) that must run a holder; repeat for several. This node must be run by one
+      --class <CLASS>                  Storage class the object is bought under (hot, warm or cold); it prices the object's reads [possible values: hot, warm, cold]
   -h, --help                           Print help
 ```
 
@@ -7997,10 +8415,12 @@ Engine releases: check for, verify and install a signed release, or publish one
 Usage: tenzro node upgrade [OPTIONS] <COMMAND>
 
 Commands:
-  check    Show the releases the node reports and whether one is newer than it runs
-  apply    Verify a downloaded binary against a signed release and install it
-  publish  Hash node binaries, sign a release with your hardware key and submit it
-  help     Print this message or the help of the given subcommand(s)
+  check         Show the releases the node reports and whether one is newer than it runs
+  apply         Verify a downloaded binary against a signed release and install it
+  publish       Hash node binaries, sign a release with your hardware key and submit it
+  attest-build  Attest on chain, as a bonded builder, the binary you rebuilt from a release's source
+  plan          Order the restarts of validators so the rest keep certifying with a spare
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose          Enable verbose logging
@@ -8028,6 +8448,25 @@ Options:
   -h, --help                     Print help
 ```
 
+#### `tenzro node upgrade attest-build`
+
+```
+Attest on chain, as a bonded builder, the binary you rebuilt from a release's source
+
+Usage: tenzro node upgrade attest-build [OPTIONS] --version <VERSION> --platform <PLATFORM> --file <FILE>
+
+Options:
+  -v, --verbose                        Enable verbose logging
+      --version <VERSION>              The release that was rebuilt, `major.minor.patch`
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --platform <PLATFORM>            The target triple it was built for, such as `x86_64-unknown-linux-gnu`
+      --file <FILE>                    The binary the rebuild produced
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the bonded builder's client account [default: client]
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
+```
+
 #### `tenzro node upgrade check`
 
 ```
@@ -8041,6 +8480,24 @@ Options:
       --format <FORMAT>  Output format (text, json) [default: text]
   -q, --quiet            Hide the notice about a newer release (and other optional lines)
   -h, --help             Print help
+```
+
+#### `tenzro node upgrade plan`
+
+```
+Order the restarts of validators so the rest keep certifying with a spare
+
+Usage: tenzro node upgrade plan [OPTIONS] --validators <VALIDATORS> [NAMES]...
+
+Arguments:
+  [NAMES]...  The validators to restart; every live one when none is named
+
+Options:
+  -v, --verbose                  Enable verbose logging
+      --validators <VALIDATORS>  One validator per line: name, stake in whole TNZO, live (1 or 0), separated by whitespace; lines starting with # are ignored. The file the pre-stop check reads
+      --format <FORMAT>          Output format (text, json) [default: text]
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
+  -h, --help                     Print help
 ```
 
 #### `tenzro node upgrade publish`
@@ -8141,12 +8598,13 @@ Passkey-first wallet onboarding + custody (enrollment, recovery, session keys, h
 Usage: tenzro passkey [OPTIONS] <COMMAND>
 
 Commands:
-  login     Create a passkey account via the browser (gcloud-style login)
-  enroll    Enroll a passkey-bound smart account from pre-acquired ceremony output
-  keystore  Show an account's keystore from consensus state
-  resolve   Find the accounts whose keystore links a passkey credential id
-  update    Send a keystore change (link or unlink a passkey, policy, recovery signers, recovery) approved by the account's passkeys, paying its fee from this machine's client account
-  help      Print this message or the help of the given subcommand(s)
+  login        Create a passkey account via the browser (gcloud-style login)
+  enroll       Enroll a passkey-bound smart account from pre-acquired ceremony output
+  keystore     Show an account's keystore from consensus state
+  signing-key  Show the keys a P-256 key signs with for an account, as a block judges a signature by it
+  resolve      Find the accounts whose keystore links a passkey credential id
+  update       Send a keystore change (link or unlink a passkey, policy, recovery signers, recovery) approved by the account's passkeys, paying its fee from this machine's client account
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose          Enable verbose logging
@@ -8242,6 +8700,24 @@ Options:
   -h, --help             Print help
 ```
 
+### `tenzro passkey signing-key`
+
+```
+Show the keys a P-256 key signs with for an account, as a block judges a signature by it
+
+Usage: tenzro passkey signing-key [OPTIONS] <PUBLIC_KEY> <ACCOUNT>
+
+Arguments:
+  <PUBLIC_KEY>  The P-256 public key, `x || y`, hex
+  <ACCOUNT>     The account it would sign for, hex
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
 ### `tenzro passkey update`
 
 ```
@@ -8272,6 +8748,7 @@ Commands:
   verify          Verify a payment credential
   settle          Settle a payment on-chain
   record          Show a payment's consensus record
+  resolve         Resolve a payment stated without a rail to the settlement plan leg that carries it
   history         List consensus payment records from the event index
   settlements     List the paid calls a node served or routed, with how each settled
   statement       An account's statement of the payment legs paid to it (as operator, reseller or platform), verifiable against the chain
@@ -8477,6 +8954,22 @@ Options:
           RPC endpoint of one of the agent's serving nodes [default: http://127.0.0.1:8545]
   -h, --help
           Print help
+```
+
+### `tenzro payment resolve`
+
+```
+Resolve a payment stated without a rail to the settlement plan leg that carries it
+
+Usage: tenzro payment resolve [OPTIONS] --request <REQUEST>
+
+Options:
+      --request <REQUEST>  JSON file with the request
+  -v, --verbose            Enable verbose logging
+      --format <FORMAT>    Output format (text, json) [default: text]
+      --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
+  -q, --quiet              Hide the notice about a newer release (and other optional lines)
+  -h, --help               Print help
 ```
 
 ### `tenzro payment retry-leg`
@@ -8686,6 +9179,56 @@ Options:
           Print help
 ```
 
+## `tenzro power`
+
+```
+Keep this machine awake while the node runs, and how to manage it remotely
+
+Usage: tenzro power [OPTIONS] <COMMAND>
+
+Commands:
+  keep-awake  Hold the machine awake while the node runs, on mains power only (on), stop (off), or show (status)
+  remote      Print the one-time steps for remote login and wake-on-LAN. Changes nothing
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro power keep-awake`
+
+```
+Hold the machine awake while the node runs, on mains power only (on), stop (off), or show (status)
+
+Usage: tenzro power keep-awake [OPTIONS] <ACTION>
+
+Arguments:
+  <ACTION>  [possible values: on, off, status]
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro power remote`
+
+```
+Print the one-time steps for remote login and wake-on-LAN. Changes nothing
+
+Usage: tenzro power remote [OPTIONS]
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
 ## `tenzro pq-hybrid`
 
 ```
@@ -8779,7 +9322,7 @@ Options:
 ```
 Verify offline where a trained model came from: its trainer's signed receipt, every round on chain, each milestone released, from the chain's genesis anchor alone
 
-Usage: tenzro provenance model [OPTIONS] --file <FILE> --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
+Usage: tenzro provenance model [OPTIONS] --file <FILE> --chain-id <CHAIN_ID> --genesis-hash <GENESIS_HASH> --genesis <GENESIS>
 
 Options:
       --file <FILE>
@@ -8794,8 +9337,8 @@ Options:
           Genesis block hash, hex
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
-      --genesis-committee-root <GENESIS_COMMITTEE_ROOT>
-          Root of the genesis committee, hex
+      --genesis <GENESIS>
+          Genesis file: the first committee is read from its validators
       --handover-program <HANDOVER_PROGRAM>
           Image id of the handover program, hex, when the pack's checkpoint is certified from a handover chain proof
       --weights <WEIGHTS>
@@ -8812,6 +9355,7 @@ Provider management commands
 Usage: tenzro provider [OPTIONS] <COMMAND>
 
 Commands:
+  sla-energy          Call tenzro_slaGetEnergy (sla get energy) and print the node's answer
   sla-params          Call tenzro_slaGetParams (sla get params) and print the node's answer
   sla-probe           Call tenzro_slaIssueProbe (sla issue probe) and print the node's answer
   sla-probes          Call tenzro_slaListOutstandingProbes (sla list outstanding probes) and print the node's answer
@@ -8825,8 +9369,11 @@ Commands:
   quote               Price one request at every provider serving a model, cheapest first
   scorecard           Show a provider's standing, price cards, and settled volume and latency
   statement           A provider's settlement statement for a window, by UTC day or month
+  invoice             What an account paid each payee over a window, from the same settlement records
   pricing             Provider pricing management
   bond                Compute bond (admission collateral) management
+  pause               Say this provider stops serving, from the next hour: hours it is away and owes to no held claim are not judged
+  resume              Say this provider serves again, from the next hour
   help                Print this message or the help of the given subcommand(s)
 
 Options:
@@ -8865,16 +9412,19 @@ Options:
 ```
 Release the vault back to the provider once the cooldown has elapsed
 
-Usage: tenzro provider bond finalize [OPTIONS] --did <DID> --address <ADDRESS>
+Usage: tenzro provider bond finalize [OPTIONS] --did <DID>
 
 Options:
-      --did <DID>          Provider DID
-  -v, --verbose            Enable verbose logging
-      --address <ADDRESS>  Provider wallet address (32-byte hex; must match the bond's payout address)
-      --format <FORMAT>    Output format (text, json) [default: text]
-  -q, --quiet              Hide the notice about a newer release (and other optional lines)
-      --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help               Print help
+      --did <DID>                      Provider DID
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 #### `tenzro provider bond get`
@@ -8898,17 +9448,20 @@ Options:
 ```
 Top up an existing bond
 
-Usage: tenzro provider bond increase [OPTIONS] --did <DID> --address <ADDRESS> --amount <AMOUNT>
+Usage: tenzro provider bond increase [OPTIONS] --did <DID> --amount <AMOUNT>
 
 Options:
-      --did <DID>          Provider DID
-  -v, --verbose            Enable verbose logging
-      --address <ADDRESS>  Provider wallet address (32-byte hex; must match the bond's payout address)
-      --format <FORMAT>    Output format (text, json) [default: text]
-      --amount <AMOUNT>    Additional amount in TNZO
-  -q, --quiet              Hide the notice about a newer release (and other optional lines)
-      --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help               Print help
+      --did <DID>                      Provider DID
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --amount <AMOUNT>                Additional amount in TNZO
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 #### `tenzro provider bond list`
@@ -8946,17 +9499,20 @@ Options:
 ```
 Post a new compute bond
 
-Usage: tenzro provider bond post [OPTIONS] --did <DID> --address <ADDRESS> --amount <AMOUNT>
+Usage: tenzro provider bond post [OPTIONS] --did <DID> --amount <AMOUNT>
 
 Options:
-      --did <DID>          Provider DID (e.g. did:tenzro:machine:...)
-  -v, --verbose            Enable verbose logging
-      --address <ADDRESS>  Provider wallet address (32-byte hex; with or without 0x)
-      --format <FORMAT>    Output format (text, json) [default: text]
-      --amount <AMOUNT>    Bond amount in TNZO (decimal, e.g. "100" for 100 TNZO)
-  -q, --quiet              Hide the notice about a newer release (and other optional lines)
-      --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help               Print help
+      --did <DID>                      Provider DID (e.g. did:tenzro:machine:...)
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --amount <AMOUNT>                Bond amount in TNZO (decimal, e.g. "100" for 100 TNZO)
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 #### `tenzro provider bond withdraw`
@@ -8964,16 +9520,19 @@ Options:
 ```
 Initiate withdrawal, starting the cooldown
 
-Usage: tenzro provider bond withdraw [OPTIONS] --did <DID> --address <ADDRESS>
+Usage: tenzro provider bond withdraw [OPTIONS] --did <DID>
 
 Options:
-      --did <DID>          Provider DID
-  -v, --verbose            Enable verbose logging
-      --address <ADDRESS>  Provider wallet address (32-byte hex; must match the bond's payout address)
-      --format <FORMAT>    Output format (text, json) [default: text]
-  -q, --quiet              Hide the notice about a newer release (and other optional lines)
-      --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
-  -h, --help               Print help
+      --did <DID>                      Provider DID
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 ### `tenzro provider compute-claim`
@@ -9028,6 +9587,30 @@ Options:
   -h, --help                           Print help
 ```
 
+### `tenzro provider invoice`
+
+```
+What an account paid each payee over a window, from the same settlement records
+
+Usage: tenzro provider invoice [OPTIONS] --payer <PAYER> --payee <PAYEES> --from <FROM> --to <TO>
+
+Options:
+      --payer <PAYER>            The paying account's address
+  -v, --verbose                  Enable verbose logging
+      --payee <PAYEES>           A payee's account address. Repeat for each
+      --from <FROM>              Start of the window, inclusive: a UTC date (YYYY-MM-DD) or unix milliseconds
+  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
+      --to <TO>                  End of the window, exclusive: a UTC date (YYYY-MM-DD) or unix milliseconds
+      --period <PERIOD>          Period the invoice is cut into: day or month [default: day]
+      --format <FORMAT>          Output format: json or csv [default: json]
+      --lines                    With csv, one row per call instead of the summary rows
+      --verify                   Recompute the invoice from chain data and exit non-zero on any difference
+      --verify-rpc <VERIFY_RPC>  Node to read the chain from when verifying [default: --rpc]
+      --rpc <RPC>                RPC endpoint of the node that recorded the payees' settlements [default: http://127.0.0.1:8545]
+      --also-rpc <ALSO_RPC>      Another node the payees served through; its lines join the invoice. Repeat for each
+  -h, --help                     Print help
+```
+
 ### `tenzro provider list`
 
 ```
@@ -9058,6 +9641,26 @@ Options:
       --rpc <RPC>          RPC endpoint [default: http://127.0.0.1:8545]
   -q, --quiet              Hide the notice about a newer release (and other optional lines)
   -h, --help               Print help
+```
+
+### `tenzro provider pause`
+
+```
+Say this provider stops serving, from the next hour: hours it is away and owes to no held claim are not judged
+
+Usage: tenzro provider pause [OPTIONS] --did <DID>
+
+Options:
+      --did <DID>                      Provider DID the compute bond is posted under
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
 ```
 
 ### `tenzro provider pricing`
@@ -9167,6 +9770,27 @@ Options:
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --verification <VERIFICATION>    Verification level: none, receipt, optimistic or tee [default: none]
       --provider <PROVIDER>            Only this provider (address)
+      --order <ORDER>                  Order: price (cheapest first) or carbon (cleanest grid first, for spot work that can run anywhere) [default: price]
+      --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
+```
+
+### `tenzro provider resume`
+
+```
+Say this provider serves again, from the next hour
+
+Usage: tenzro provider resume [OPTIONS] --did <DID>
+
+Options:
+      --did <DID>                      Provider DID the compute bond is posted under
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -9180,6 +9804,21 @@ Usage: tenzro provider scorecard [OPTIONS] <PROVIDER>
 
 Arguments:
   <PROVIDER>  The provider's account address
+
+Options:
+      --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro provider sla-energy`
+
+```
+Call tenzro_slaGetEnergy (sla get energy) and print the node's answer
+
+Usage: tenzro provider sla-energy [OPTIONS]
 
 Options:
       --rpc <RPC>        RPC endpoint [default: http://127.0.0.1:8545]
@@ -9359,6 +9998,91 @@ Options:
           Print help
 ```
 
+## `tenzro recovery-kit`
+
+```
+Recovery kit for a passkey account: a one-time code kept offline, checked and used
+
+Usage: tenzro recovery-kit [OPTIONS] <COMMAND>
+
+Commands:
+  create  Make a kit for an account: a new recovery code and the change that arms it
+  verify  Check a kit against its manifest and, with --rpc, against the chain
+  claim   From a kit and a new passkey, write the two changes that recover the account
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
+### `tenzro recovery-kit claim`
+
+```
+From a kit and a new passkey, write the two changes that recover the account
+
+Usage: tenzro recovery-kit claim [OPTIONS] --credential <CREDENTIAL> --previous-commitment <PREVIOUS_COMMITMENT> <DIR>
+
+Arguments:
+  <DIR>  The kit directory
+
+Options:
+      --credential <CREDENTIAL>
+          The new passkey as JSON (rp_id, credential_id, public_key, aaguid, backup_eligible, backup_state, label), or a file holding it
+  -v, --verbose
+          Enable verbose logging
+      --format <FORMAT>
+          Output format (text, json) [default: text]
+      --previous-commitment <PREVIOUS_COMMITMENT>
+          Hex commitment of the account's keystore on chain now (`tenzro passkey keystore <account>`): the changes are made against it, and setting the kit's code moved it from the one the kit recorded
+      --out <OUT>
+          Where to write claim.json and reveal.json; the current directory when omitted [default: .]
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+  -h, --help
+          Print help
+```
+
+### `tenzro recovery-kit create`
+
+```
+Make a kit for an account: a new recovery code and the change that arms it
+
+Usage: tenzro recovery-kit create [OPTIONS] --out <OUT> <ACCOUNT>
+
+Arguments:
+  <ACCOUNT>  The passkey account, hex
+
+Options:
+      --out <OUT>                      The directory to write the kit into; it must be empty or absent
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --key-namespace <KEY_NAMESPACE>  Key namespace of this machine's hardware key that signs the manifest [default: default]
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --rpc <RPC>                      [default: http://127.0.0.1:8545]
+  -h, --help                           Print help
+```
+
+### `tenzro recovery-kit verify`
+
+```
+Check a kit against its manifest and, with --rpc, against the chain
+
+Usage: tenzro recovery-kit verify [OPTIONS] <DIR>
+
+Arguments:
+  <DIR>  The kit directory
+
+Options:
+      --rpc <RPC>        A node to compare the kit with the chain; without it only the kit's own files are checked
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
+```
+
 ## `tenzro registry`
 
 ```
@@ -9519,15 +10243,16 @@ Arguments:
   [NOTICE]  The unsigned notice, JSON. `issued_ms` and `expires_ms` of 0 are filled (now, and 30 days on)
 
 Options:
-      --out <OUT>                Write the signed notice here
-  -v, --verbose                  Enable verbose logging
-      --format <FORMAT>          Output format (text, json) [default: text]
-      --prepare <PREPARE>        Release signing run, step 1: write `payload.json` and `notice.msg` (the bytes the release key signs) into this directory
-      --finish <FINISH>          Release signing run, step 2: the directory `--prepare` wrote; attach `--signature`
-  -q, --quiet                    Hide the notice about a newer release (and other optional lines)
-      --signature <SIGNATURE>    The signature the release signing run made over `notice.msg`: a file holding hex or base64 of an ECDSA P-256 signature (raw or DER)
-      --public-key <PUBLIC_KEY>  The release public key, PEM (`tenzro-release.pub`)
-  -h, --help                     Print help
+      --out <OUT>                      Write the signed notice here
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --prepare <PREPARE>              Release signing run, step 1: write `payload.json` and `notice.msg` (the bytes the release key signs) into this directory
+      --finish <FINISH>                Release signing run, step 2: the directory `--prepare` wrote; attach `--signature`
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --signature <SIGNATURE>          The signature the release signing run made over `notice.msg`: a file holding hex or base64 of an ECDSA P-256 signature (raw or DER)
+      --public-key <PUBLIC_KEY>        The release public key, PEM (`tenzro-release.pub`)
+      --artifact <PLATFORM:NAME=PATH>  Something the release ships, as `<platform>:<name>=<path>`; its digest goes into the notice so that what is installed can check itself. `<name>` is `tenzro`, `tenzro-node` or `tenzro-tui`; `<platform>` is `<arch>-<os>`, or `any` for what every platform shares. A file's digest is its SHA-256; a directory's is the hash of its sorted file list. Repeatable. It replaces any `artifacts` the notice file names: the digests are of the files given here
+  -h, --help                           Print help
 ```
 
 #### `tenzro release notice verify`
@@ -10198,13 +10923,13 @@ Options:
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
       --mode <MODE>
-          Participation mode on the public network. A shorthand for `--roles`: `consume` selects no serving role, `provide` selects the AI provider role, `validate` selects the validator role. `--roles` wins when both are given, since it says strictly more [possible values: consume, provide, validate]
+          Role on the public network. A shorthand for `--roles`: `provide` selects the AI provider role, `validate` selects the validator role. `--roles` wins when both are given, since it says strictly more [possible values: provide, validate]
       --machine-name <MACHINE_NAME>
           Machine name — a label of 3-63 characters, `[a-z0-9-]`, not starting or ending with a hyphen
       --visibility <VISIBILITY>
           Whether this node is reachable from the public internet, or stays reachable only on the local network [possible values: public, private]
       --operator <OPERATOR>
-          How the node is operated: `self` (a human holds the passkey and approves actions), `autonomous` (the machine answers for itself via its TPM 2.0 or Secure Enclave) or `agentic` (an AI agent operates the node under a delegation from a human passkey). Without it an interactive run asks [possible values: self, autonomous, agentic]
+          How the node is operated: `self` (a human holds the passkey and approves actions), `autonomous` (the machine answers for itself via its TPM 2.0 or Secure Enclave, or another machine's TPM through the key holder) or `agentic` (an AI agent operates the node under a delegation from a human passkey). Without it an interactive run asks [possible values: self, autonomous, agentic]
       --delegator <DELEGATOR>
           Who delegates to the agent in `--operator agentic`: a `did:tenzro:human:` identity or a 0x account
       --delegation-scopes <DELEGATION_SCOPES>
@@ -10215,6 +10940,8 @@ Options:
           Hours until the agent's delegation expires [default: 24]
       --restart
           Discard the saved place of an unfinished setup and start over
+      --part-time
+          This machine does not stay on (a laptop, a machine set to sleep): setup then proposes following the chain rather than a role. Asked when setup runs interactively
       --roles <ROLES>
           Comma-separated roles this node serves, e.g. `validator,ai,storage`
       --access <ACCESS>
@@ -10237,6 +10964,8 @@ Options:
           Create this machine's TPM keys with `tenzro-node tpm provision` without asking, when the preflight finds they are missing. Without this flag the wizard asks, and a non-interactive run stops and prints the command. Implied by --apply
       --apply
           After setup, install the node as a service, start it, and follow it until it has synced. On Linux this runs `sudo` for the systemd unit; on macOS it loads a launch agent. Interactive runs are asked instead
+      --keep-awake
+          With --apply, also keep this machine awake while the node runs, on mains power only (`tenzro power keep-awake`). Interactive runs are asked, and the answer defaults to no
       --yes
           Non-interactive: accept defaults, take everything else from flags
       --plain
@@ -10479,7 +11208,10 @@ Options:
       --pq-proof <PQ_PROOF>            For attestor with a bridge signer: the ML-DSA-65 key's signature (hex) over the same bridge signer digest, context `tenzro/bridge/signer/ml-dsa-65`
       --accelerators <ACCELERATORS>    Accelerator classes pledged, for compute (integrated, consumer, workstation, datacentre)
       --terabytes <TERABYTES>          Whole terabytes pledged, for storage
-      --key-namespace <KEY_NAMESPACE>  The staking account's hardware key namespace [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -10496,8 +11228,11 @@ Options:
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
       --url <URL>                      Public https URL of your own edge in front of the role, or "" to clear
-      --key-namespace <KEY_NAMESPACE>  The staking account's hardware key namespace [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -10561,8 +11296,11 @@ Options:
   -v, --verbose                        Enable verbose logging
       --amount <AMOUNT>                Amount: TNZO (`100`, `100 TNZO`) or wei with its suffix (`100wei`)
       --format <FORMAT>                Output format (text, json) [default: text]
-      --key-namespace <KEY_NAMESPACE>  The staking account's hardware key namespace [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -10596,8 +11334,11 @@ Options:
       --role <ROLE>                    Role
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --key-namespace <KEY_NAMESPACE>  The staking account's hardware key namespace [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -11944,6 +12685,7 @@ Commands:
   notices     Turn release banners on or off
   boot-check  Count a node start against the open update trial; the node unit runs this before the node
   verify      Probe the restarted node for the health window; mark the release good or roll it back
+  make-delta  Write the delta package that rebuilds a release file from the one it replaces (for publishers)
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -11954,11 +12696,11 @@ Options:
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
       --channel <CHANNEL>
-          The release channel: an https URL, or a local directory holding timestamp.json, targets.json and the files [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+          The release channel: `stable`, `security` or `beta`; an https URL; or a local directory holding timestamp.json, targets.json and the files (spell a directory named like a channel as `./<name>`) [env: TENZRO_UPDATE_CHANNEL=] [default: stable]
       --trusted-keys <TRUSTED_KEYS>
           JSON file of trusted keys; default `<data-dir>/update/trusted-keys.json`, else the built-in root
       --platform <PLATFORM>
-          Platform to fetch, `<arch>-<os>`; defaults to this machine's
+          Platform to fetch, `<arch>-<os>` or `<arch>-<os>-<build kind>`; defaults to this machine's and the installed build kind
       --data-dir <DATA_DIR>
           Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
       --install-dir <INSTALL_DIR>
@@ -11988,7 +12730,7 @@ Usage: tenzro update apply [OPTIONS]
 
 Options:
       --channel <CHANNEL>
-          The release channel: an https URL, or a local directory holding timestamp.json, targets.json and the files [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+          The release channel: `stable`, `security` or `beta`; an https URL; or a local directory holding timestamp.json, targets.json and the files (spell a directory named like a channel as `./<name>`) [env: TENZRO_UPDATE_CHANNEL=] [default: stable]
   -v, --verbose
           Enable verbose logging
       --format <FORMAT>
@@ -11996,7 +12738,7 @@ Options:
       --trusted-keys <TRUSTED_KEYS>
           JSON file of trusted keys; default `<data-dir>/update/trusted-keys.json`, else the built-in root
       --platform <PLATFORM>
-          Platform to fetch, `<arch>-<os>`; defaults to this machine's
+          Platform to fetch, `<arch>-<os>` or `<arch>-<os>-<build kind>`; defaults to this machine's and the installed build kind
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
       --data-dir <DATA_DIR>
@@ -12035,14 +12777,32 @@ Ask the release channel whether a newer C0 update exists
 Usage: tenzro update check [OPTIONS]
 
 Options:
-      --channel <CHANNEL>            The release channel: an https URL, or a local directory holding timestamp.json, targets.json and the files [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+      --channel <CHANNEL>            The release channel: `stable`, `security` or `beta`; an https URL; or a local directory holding timestamp.json, targets.json and the files (spell a directory named like a channel as `./<name>`) [env: TENZRO_UPDATE_CHANNEL=] [default: stable]
   -v, --verbose                      Enable verbose logging
       --format <FORMAT>              Output format (text, json) [default: text]
       --trusted-keys <TRUSTED_KEYS>  JSON file of trusted keys; default `<data-dir>/update/trusted-keys.json`, else the built-in root
-      --platform <PLATFORM>          Platform to fetch, `<arch>-<os>`; defaults to this machine's
+      --platform <PLATFORM>          Platform to fetch, `<arch>-<os>` or `<arch>-<os>-<build kind>`; defaults to this machine's and the installed build kind
   -q, --quiet                        Hide the notice about a newer release (and other optional lines)
       --data-dir <DATA_DIR>          Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+      --install-dir <INSTALL_DIR>    The install directory whose release is compared with the channel's; defaults to where this `tenzro` runs from
   -h, --help                         Print help
+```
+
+### `tenzro update make-delta`
+
+```
+Write the delta package that rebuilds a release file from the one it replaces (for publishers)
+
+Usage: tenzro update make-delta [OPTIONS] --base <BASE> --target <TARGET> --out <OUT>
+
+Options:
+      --base <BASE>      The file the delta applies to: the binary of the earlier release
+  -v, --verbose          Enable verbose logging
+      --format <FORMAT>  Output format (text, json) [default: text]
+      --target <TARGET>  The file the delta rebuilds: the binary of the new release
+      --out <OUT>        Where to write the delta
+  -q, --quiet            Hide the notice about a newer release (and other optional lines)
+  -h, --help             Print help
 ```
 
 ### `tenzro update notice`
@@ -12055,7 +12815,7 @@ Usage: tenzro update notice [OPTIONS]
 Options:
       --refresh              Ask the release channel (and, failing that, a node) for a newer notice first
   -v, --verbose              Enable verbose logging
-      --channel <CHANNEL>    The release channel to ask: an https URL or a local directory [env: TENZRO_UPDATE_CHANNEL=] [default: https://downloads.tenzro.com/update/stable]
+      --channel <CHANNEL>    The release channel to ask: `stable`, `security` or `beta`, an https URL, or a local directory [env: TENZRO_UPDATE_CHANNEL=] [default: stable]
       --format <FORMAT>      Output format (text, json) [default: text]
       --json                 Print the notice as one JSON object
   -q, --quiet                Hide the notice about a newer release (and other optional lines)
@@ -12074,11 +12834,14 @@ Arguments:
   [STATE]  `on` or `off`: whether banners and status lines about new releases show [possible values: on, off]
 
 Options:
-      --data-dir <DATA_DIR>  Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
-  -v, --verbose              Enable verbose logging
-      --format <FORMAT>      Output format (text, json) [default: text]
-  -q, --quiet                Hide the notice about a newer release (and other optional lines)
-  -h, --help                 Print help
+      --auto-install <AUTO_INSTALL>    `on` or `off`: whether a verified newer release installs by itself. A node that serves a staked role still stages only and is restarted by its operator, so this never restarts a validator on its own [possible values: on, off]
+  -v, --verbose                        Enable verbose logging
+      --format <FORMAT>                Output format (text, json) [default: text]
+      --stagger-hours <STAGGER_HOURS>  Hours an ordinary release's automatic install is spread over across machines; this machine's turn in it is derived from its identity. 0 installs at once. A security release is never staggered
+      --install-hours <INSTALL_HOURS>  The hours (UTC) in which an automatic install may start, `<start>-<end>` (`2-5`, or `22-1` across midnight), or `any`. A security release ignores them
+  -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --data-dir <DATA_DIR>            Node data directory, where the update state is kept [env: TENZRO_DATA_DIR=]
+  -h, --help                           Print help
 ```
 
 ### `tenzro update rollback`
@@ -12223,7 +12986,7 @@ Options:
       --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
       --format <FORMAT>                Output format (text, json) [default: text]
-      --node-account                   Sign as this machine's node account: the account a validator of the genesis set, or one its node registered itself, is bonded under
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
       --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
       --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
@@ -12258,11 +13021,14 @@ Add to this validator's self-stake (signed IncreaseValidatorStake)
 Usage: tenzro validator increase-stake [OPTIONS] --additional <ADDITIONAL>
 
 Options:
-      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing account [default: client]
+      --key-namespace <KEY_NAMESPACE>  Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose                        Enable verbose logging
-      --additional <ADDITIONAL>        Additional self-stake: TNZO (`500`, `500 TNZO`) or wei with its suffix. Only ever adds; reducing a stake is unbonding, which has its own path and delay
       --format <FORMAT>                Output format (text, json) [default: text]
+      --node-account                   Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet                          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>        The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>              The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --additional <ADDITIONAL>        Additional self-stake: TNZO (`500`, `500 TNZO`) or wei with its suffix. Only ever adds; reducing a stake is unbonding, which has its own path and delay
       --rpc <RPC>                      RPC endpoint [default: http://127.0.0.1:8545]
   -h, --help                           Print help
 ```
@@ -12324,21 +13090,27 @@ Usage: tenzro validator register [OPTIONS] --ml-dsa-public-key <ML_DSA_PUBLIC_KE
 
 Options:
       --key-namespace <KEY_NAMESPACE>
-          Hardware key namespace of the signing account [default: client]
+          Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose
           Enable verbose logging
       --format <FORMAT>
           Output format (text, json) [default: text]
+      --node-account
+          Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
+  -q, --quiet
+          Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>
+          The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>
+          The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --ml-dsa-public-key <ML_DSA_PUBLIC_KEY>
           1952-byte ML-DSA-65 verifying key of the hardware consensus key (hex), as printed by `tenzro validator keys`
       --p256-public-key <P256_PUBLIC_KEY>
           65-byte uncompressed P-256 key, the classical half of the same composite key (hex)
-  -q, --quiet
-          Hide the notice about a newer release (and other optional lines)
       --node-key <NODE_KEY>
           32-byte Ed25519 node key of the node that runs the validator (hex), as printed by `tenzro validator keys`
       --proof-of-possession <PROOF_OF_POSSESSION>
-          Composite proof of possession the hardware signed over `from`, both key halves and the node key (hex), as printed by `tenzro validator keys`. Registration is refused without a valid one
+          Composite proof of possession the hardware signed over the sending account, both key halves and the node key (hex), as printed by `tenzro validator keys` (which binds it to the node account). Registration is refused without a valid one
       --node-key-proof <NODE_KEY_PROOF>
           The node key's Ed25519 signature over the same registration (hex), as printed by `tenzro validator keys`
       --vrf-key <VRF_KEY>
@@ -12384,15 +13156,21 @@ Usage: tenzro validator update-metadata [OPTIONS]
 
 Options:
       --key-namespace <KEY_NAMESPACE>
-          Hardware key namespace of the signing account [default: client]
+          Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
   -v, --verbose
           Enable verbose logging
       --format <FORMAT>
           Output format (text, json) [default: text]
-      --metadata-uri <METADATA_URI>
-          New off-chain pointer (≤256 bytes); omit to skip
+      --node-account
+          Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>
+          The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>
+          The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
+      --metadata-uri <METADATA_URI>
+          New off-chain pointer (≤256 bytes); omit to skip
       --tee-attestation-hash <TEE_ATTESTATION_HASH>
           New 32-byte SHA-256 TEE attestation commitment (hex); omit to skip
       --rpc <RPC>
@@ -12862,9 +13640,15 @@ Options:
       --format <FORMAT>
           Output format (text, json) [default: text]
       --key-namespace <KEY_NAMESPACE>
-          The signing account's hardware key namespace (a-z, 0-9, '-', '_'). Each namespace is its own account [default: client]
+          Hardware key namespace of the signing client account (default `client`); with `--node-account`, the node's `hardware_key_namespace` (default: the machine's default node)
+      --node-account
+          Sign and pay as this machine's node account (the account a node earns into and is bonded under) instead of a client account
   -q, --quiet
           Hide the notice about a newer release (and other optional lines)
+      --tpm-key-holder <SOCKET>
+          The node's key holder socket (`tenzro-node tpm key-holder`), when the node's keys are in another machine's TPM [env: TENZRO_TPM_KEY_HOLDER=]
+      --tpm-label <LABEL>
+          The key label the provider enrolled for this machine [env: TENZRO_TPM_LABEL=]
       --rpc <RPC>
           RPC endpoint [default: http://127.0.0.1:8545]
       --confirm-address <CONFIRM_ADDRESS>

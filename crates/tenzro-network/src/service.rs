@@ -18,6 +18,8 @@ pub enum IdentityRoot {
     /// A TPM in another machine the operator owns, reached through a
     /// provider. A weaker tier than a TPM in this machine.
     TpmDelegated,
+    /// The Android Keystore, in StrongBox or the trusted environment.
+    AndroidKeystore,
 }
 
 impl IdentityRoot {
@@ -27,6 +29,7 @@ impl IdentityRoot {
             Self::Tpm => "tpm",
             Self::SecureEnclave => "secure-enclave",
             Self::TpmDelegated => "tpm-delegated",
+            Self::AndroidKeystore => "android-keystore",
         }
     }
 }
@@ -98,6 +101,9 @@ impl TenzroNetworkService {
                 tenzro_device_key::HardwareBackend::Tpm => IdentityRoot::Tpm,
                 tenzro_device_key::HardwareBackend::SecureEnclave => IdentityRoot::SecureEnclave,
                 tenzro_device_key::HardwareBackend::RemoteTpm => IdentityRoot::TpmDelegated,
+                tenzro_device_key::HardwareBackend::AndroidKeystore => {
+                    IdentityRoot::AndroidKeystore
+                }
             });
         }
 
@@ -152,6 +158,19 @@ impl TenzroNetworkService {
         self.metrics.clone()
     }
 
+    /// Puts the endpoint's path measurements on `/metrics`: hole punches,
+    /// direct connections, the relays' share of the traffic and the time to
+    /// a direct path. `report` is called once per scrape.
+    pub fn report_paths(
+        &self,
+        report: impl Fn() -> tenzro_iroh::PathReport + Send + Sync + 'static,
+    ) {
+        self.metrics_registry
+            .lock()
+            .sub_registry_with_prefix("tenzro_network")
+            .register_collector(Box::new(crate::path_metrics::PathMetrics::new(report)));
+    }
+
     /// Returns the shared metrics registry — useful for callers that need
     /// to register additional metric families or serialize the registry to
     /// the Prometheus text format.
@@ -175,6 +194,12 @@ impl TenzroNetworkService {
     /// `tenzro/status`, the topic every node joins. Zero before it is joined.
     pub fn peer_count(&self) -> usize {
         self.gossip.neighbour_count("tenzro/status").unwrap_or(0)
+    }
+
+    /// Publishes `message` on `topic` unless this node has already seen the
+    /// same message byte for byte. Returns whether it was published.
+    pub async fn broadcast_unseen(&self, topic: &str, message: NetworkMessage) -> Result<bool> {
+        self.gossip.broadcast_unseen(topic, message).await
     }
 
     /// Subscribes to a topic whose messages this node judges before they are

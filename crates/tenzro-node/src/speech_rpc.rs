@@ -55,10 +55,12 @@ pub(crate) async fn handle_load(
 ) -> Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    if let Some(omni) = tenzro_model::get_omni_model_by_id(&model_id) {
+    if let Some(omni) = node.catalog().get_omni_model_by_id(&model_id) {
         return load_omni(node, &p, model_id, omni).await;
     }
-    let entry = tenzro_model::get_tts_model_by_id(&model_id)
+    let entry = node
+        .catalog()
+        .get_tts_model_by_id(&model_id)
         .ok_or_else(|| not_in_catalog("speech", &model_id))?;
     let (bundle_dir, provenance) = fetch_catalog_bundle(
         node,
@@ -216,7 +218,9 @@ async fn speak_here(
         .and_then(Value::as_str)
         .ok_or_else(|| missing_param("input"))?
         .to_string();
-    let entry = tenzro_model::get_tts_model_by_id(model_id)
+    let entry = node
+        .catalog()
+        .get_tts_model_by_id(model_id)
         .ok_or_else(|| not_in_catalog("speech", model_id))?;
     let speaker_reference = match p.get("ref_audio").and_then(Value::as_str) {
         None => None,
@@ -290,7 +294,7 @@ async fn speak_here(
     let units = BillableUnits::default()
         .with_characters(u32::try_from(characters).unwrap_or(u32::MAX))
         .with_audio_out_ms(speech.duration_ms);
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         p,
         model_id,
@@ -320,6 +324,7 @@ async fn speak_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), json!(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok((speech, out))
 }

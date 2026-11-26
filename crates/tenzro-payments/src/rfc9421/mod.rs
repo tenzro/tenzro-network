@@ -14,6 +14,7 @@ pub mod agent;
 pub mod nonce;
 pub mod registry;
 pub mod signature;
+pub mod tap;
 
 pub use nonce::NonceCache;
 pub use registry::{AgentPublicKeyInfo, AgentRegistryClient, TenzroAgentRegistry};

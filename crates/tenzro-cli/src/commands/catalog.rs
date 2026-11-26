@@ -43,8 +43,8 @@ impl CatalogCommand {
     }
 }
 
-/// Install the catalog the node at `rpc` serves as this process's catalog.
-pub async fn install_from(rpc: &str) -> Result<()> {
+/// Install the catalog the node at `rpc` serves in `cell`.
+pub async fn install_from(rpc: &str, cell: &tenzro_catalog::CatalogCell) -> Result<()> {
     let res: Value = RpcClient::new(rpc)
         .call("tenzro_listCatalog", json!({}))
         .await
@@ -63,7 +63,7 @@ pub async fn install_from(rpc: &str) -> Result<()> {
             .unwrap_or("no trusted publisher has published a model");
         output::print_warning(&format!("the catalog of {rpc} is empty: {note}"));
     }
-    tenzro_catalog::store::install(catalog);
+    cell.install(catalog);
     Ok(())
 }
 

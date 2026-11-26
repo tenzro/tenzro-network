@@ -190,9 +190,135 @@ pub enum HpkeError {
     ZeroSharedSecret,
 }
 
+/// Seals `secret` to the P-256 key `pk_r` (`0x04 || x || y`): DHKEM(P-256)
+/// with a fresh ephemeral key, the base-mode key schedule under `info`, and
+/// ChaCha20-Poly1305 with the encapsulated key as associated data. Returns
+/// `enc || ciphertext`. Only the holder of `pk_r`'s private half opens it,
+/// through [`open_from_p256`]; a key that only does ECDH can.
+pub(crate) fn seal_to_p256(
+    pk_r: &[u8],
+    secret: &[u8],
+    info: &[u8],
+) -> std::result::Result<Vec<u8>, String> {
+    use chacha20poly1305::ChaCha20Poly1305;
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    if secret.is_empty() {
+        return Err("empty secret".into());
+    }
+    let eph = <p256::ecdh::EphemeralSecret as p256::elliptic_curve::Generate>::generate();
+    let enc = eph.public_key().to_sec1_bytes().to_vec();
+    let pk_point = p256::PublicKey::from_sec1_bytes(pk_r)
+        .map_err(|_| "malformed recipient key".to_string())?;
+    let dh = eph.diffie_hellman(&pk_point);
+    let mut kem_context = Vec::with_capacity(enc.len() + pk_r.len());
+    kem_context.extend_from_slice(&enc);
+    kem_context.extend_from_slice(pk_r);
+    let shared = extract_and_expand(
+        KemId::DhkemP256,
+        dh.raw_secret_bytes().as_slice(),
+        &kem_context,
+    )
+    .map_err(|e| e.to_string())?;
+    let (key, nonce) =
+        key_schedule_base(KemId::DhkemP256, &shared, info).map_err(|e| e.to_string())?;
+    let ct = ChaCha20Poly1305::new((&*key).into())
+        .encrypt(
+            (&*nonce).into(),
+            Payload {
+                msg: secret,
+                aad: &enc,
+            },
+        )
+        .map_err(|_| "AEAD seal failed".to_string())?;
+    let mut out = enc;
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Opens what [`seal_to_p256`] sealed to `pk_r` under `info`. `ecdh` is the
+/// recipient's raw ECDH with the sender's ephemeral key (`0x04 || x || y`):
+/// the x-coordinate of the shared point, computed where the private key is.
+pub(crate) fn open_from_p256<E>(
+    ciphertext: &[u8],
+    pk_r: &[u8],
+    info: &[u8],
+    ecdh: impl FnOnce(&[u8; 65]) -> std::result::Result<Zeroizing<[u8; 32]>, E>,
+) -> std::result::Result<Zeroizing<Vec<u8>>, OpenError<E>> {
+    use chacha20poly1305::ChaCha20Poly1305;
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    if ciphertext.len() <= 65 || ciphertext[0] != 0x04 {
+        return Err(OpenError::Malformed);
+    }
+    let (enc, ct) = ciphertext.split_at(65);
+    let mut peer = [0u8; 65];
+    peer.copy_from_slice(enc);
+    let z = ecdh(&peer).map_err(OpenError::Ecdh)?;
+    let mut kem_context = Vec::with_capacity(enc.len() + pk_r.len());
+    kem_context.extend_from_slice(enc);
+    kem_context.extend_from_slice(pk_r);
+    let shared = extract_and_expand(KemId::DhkemP256, z.as_slice(), &kem_context)
+        .map_err(|e| OpenError::Schedule(e.to_string()))?;
+    let (key, nonce) = key_schedule_base(KemId::DhkemP256, &shared, info)
+        .map_err(|e| OpenError::Schedule(e.to_string()))?;
+    ChaCha20Poly1305::new((&*key).into())
+        .decrypt((&*nonce).into(), Payload { msg: ct, aad: enc })
+        .map(Zeroizing::new)
+        .map_err(|_| OpenError::Tampered)
+}
+
+/// Why [`open_from_p256`] could not open a ciphertext.
+#[derive(Debug)]
+pub(crate) enum OpenError<E> {
+    /// Not `enc || ciphertext` with an uncompressed point first.
+    Malformed,
+    /// The recipient's ECDH failed.
+    Ecdh(E),
+    /// The key schedule failed.
+    Schedule(String),
+    /// The AEAD did not open: tampered, or sealed to another key.
+    Tampered,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_sealed_to_a_p256_key_opens_only_with_that_key_and_info() {
+        let sk = p256::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let pk = sk.public_key().to_sec1_bytes().to_vec();
+        let ecdh = |sk: &p256::SecretKey| {
+            let sk = sk.clone();
+            move |peer: &[u8; 65]| -> std::result::Result<Zeroizing<[u8; 32]>, ()> {
+                let peer = p256::PublicKey::from_sec1_bytes(peer).map_err(drop)?;
+                let shared = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), peer.as_affine());
+                let mut z = [0u8; 32];
+                z.copy_from_slice(shared.raw_secret_bytes().as_slice());
+                Ok(Zeroizing::new(z))
+            }
+        };
+        let ct = seal_to_p256(&pk, b"node secret", b"info/v1").unwrap();
+        assert_eq!(
+            &*open_from_p256(&ct, &pk, b"info/v1", ecdh(&sk)).unwrap(),
+            b"node secret"
+        );
+        assert!(matches!(
+            open_from_p256(&ct, &pk, b"info/v2", ecdh(&sk)),
+            Err(OpenError::Tampered)
+        ));
+        let other = p256::SecretKey::from_slice(&[9u8; 32]).unwrap();
+        assert!(matches!(
+            open_from_p256(&ct, &pk, b"info/v1", ecdh(&other)),
+            Err(OpenError::Tampered)
+        ));
+        let mut cut = ct.clone();
+        cut[0] = 0x02;
+        assert!(matches!(
+            open_from_p256(&cut, &pk, b"info/v1", ecdh(&sk)),
+            Err(OpenError::Malformed)
+        ));
+        assert!(seal_to_p256(&pk, b"", b"info/v1").is_err());
+    }
 
     /// RFC 9180 Appendix A.5 — DHKEM(P-256, HKDF-SHA256), HKDF-SHA256,
     /// ChaCha20Poly1305. Validating the KDF chain against the published vector

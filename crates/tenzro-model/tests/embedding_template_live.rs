@@ -13,18 +13,21 @@
 
 use tenzro_model::{
     ArtifactSpec, DownloadProgress, DownloadState, EmbedRole, HfArtifactDownloader, SourcePolicy,
-    TextEmbedConfig, TextEmbeddingRuntime, TextEncoderFamily, get_text_embedding_model_by_id,
+    TextEmbedConfig, TextEmbeddingRuntime, TextEncoderFamily,
 };
+use tenzro_model::{Catalog, CatalogCell};
 
 #[tokio::test]
-#[ignore]
+#[ignore = "downloads the embedding model; scripts/model-weight-tests.sh runs it"]
 async fn qwen3_embedding_query_and_document_produce_different_vectors() {
-    tenzro_catalog::install_test_seed();
-    let entry = get_text_embedding_model_by_id("qwen3-embedding-0.6b")
+    let catalog = CatalogCell::new(Catalog::test_seed());
+    let entry = catalog
+        .current()
+        .get_text_embedding_model_by_id("qwen3-embedding-0.6b")
         .expect("qwen3-embedding-0.6b must be in the catalog");
 
     let tmp = tempfile::tempdir().expect("tmpdir");
-    let downloader = HfArtifactDownloader::new(tmp.path().to_path_buf());
+    let downloader = HfArtifactDownloader::new(tmp.path().to_path_buf(), catalog);
 
     let mut files = vec![entry.hf_filename.clone()];
     files.extend(entry.external_data_filenames.iter().cloned());

@@ -18,11 +18,18 @@
 //! [`RelayLimits::client_bytes_per_second`]. A committee that stalls and has
 //! every validator retry through the relay cannot grow it without limit.
 //!
+//! Who may use the relay is [`RelayAdmission`]'s to say once the node installs
+//! its identity gate: a registered machine, an app device signed in to this
+//! node, or a machine inside its onboarding session (so joining keeps
+//! working), judged by the gate as for any onboarding protocol and only logged
+//! while the gate audits. Before the gate is installed every client is let in.
+//!
 //! The listener speaks plain HTTP on the address the operator binds it to.
 //! Exposing it, and terminating TLS for the URL the operator publishes, is
 //! the operator's choice outside the node; nodes that do not run the role
 //! need no inbound port at all, since they reach relays outbound.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -34,12 +41,16 @@ use http::{Method, Request, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::service::Service;
+use iroh::EndpointId;
 use iroh_relay::KeyCache;
 use iroh_relay::server::http_server::{
     BytesBody, Handlers, HyperError, RelayService, RelayServiceWithNotify,
 };
 use iroh_relay::server::streams::MaybeTlsStream;
-use iroh_relay::server::{AllowAll, ClientRateLimit, Metrics};
+use iroh_relay::server::{
+    Access, AccessControl, ClientRateLimit, ClientRequest, ConnectionId, Metrics,
+};
+use parking_lot::Mutex;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -47,6 +58,7 @@ use url::Url;
 
 use crate::discovery::DiscoveryStore;
 use crate::error::{IrohError, IrohResult};
+use crate::identity_gate::{Admit, IdentityGate};
 use crate::identity_record::{EndpointRecord, RecordScope};
 
 /// Milliseconds since the Unix epoch.
@@ -128,6 +140,135 @@ impl Service<Request<Incoming>> for RelayHttp {
     }
 }
 
+/// The name a relay client is judged under by the identity gate: an
+/// onboarding protocol, so a machine that is joining reaches the relay inside
+/// its onboarding session.
+pub const RELAY_CLIENT: &[u8] = b"tenzro/relay-client";
+
+/// App devices signed in to this node, which the relay lets in on the
+/// credential in their request.
+pub trait RelayDevices: Send + Sync + 'static {
+    /// The identity a signed-in device's request names, when it carries a
+    /// valid credential of this node: an `Authorization: DPoP <token>` and a
+    /// `DPoP` proof header, or `token` and `dpop` query parameters.
+    fn signed_in(&self, uri: &http::Uri, headers: &http::HeaderMap) -> Option<String>;
+}
+
+struct Installed {
+    gate: IdentityGate,
+    discovery: Arc<DiscoveryStore>,
+    devices: Option<(Arc<dyn RelayDevices>, u32)>,
+}
+
+#[derive(Default)]
+struct AdmissionInner {
+    installed: std::sync::OnceLock<Installed>,
+    /// Devices' connections, to count each identity's.
+    devices: Mutex<HashMap<ConnectionId, String>>,
+    per_identity: Mutex<HashMap<String, u32>>,
+}
+
+/// Decides who may use the relay. Lets everyone in until [`Self::install`].
+#[derive(Clone, Default)]
+pub struct RelayAdmission {
+    inner: Arc<AdmissionInner>,
+}
+
+impl std::fmt::Debug for RelayAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelayAdmission")
+    }
+}
+
+impl RelayAdmission {
+    /// Judges relay clients by `gate`, naming machines by the records
+    /// `discovery` holds, and lets in the app devices `devices` vouches for,
+    /// at most `per_identity` connections for one identity. Once only.
+    pub fn install(
+        &self,
+        gate: IdentityGate,
+        discovery: Arc<DiscoveryStore>,
+        devices: Option<(Arc<dyn RelayDevices>, u32)>,
+    ) {
+        let _ = self.inner.installed.set(Installed {
+            gate,
+            discovery,
+            devices,
+        });
+    }
+
+    /// The decision for a client: pure of the relay, so it is tested with
+    /// plain values.
+    pub fn decide(
+        &self,
+        now_ms: u64,
+        endpoint: EndpointId,
+        connection: ConnectionId,
+        uri: &http::Uri,
+        headers: &http::HeaderMap,
+    ) -> Access {
+        let Some(installed) = self.inner.installed.get() else {
+            return Access::Allow;
+        };
+        if let Some((devices, per_identity)) = &installed.devices
+            && let Some(did) = devices.signed_in(uri, headers)
+        {
+            let mut counts = self.inner.per_identity.lock();
+            let count = counts.entry(did.clone()).or_insert(0);
+            if *count >= *per_identity {
+                return Access::Deny {
+                    reason: Some(format!("{did} holds as many relay connections as it may")),
+                };
+            }
+            *count += 1;
+            self.inner.devices.lock().insert(connection, did);
+            return Access::Allow;
+        }
+        let did = installed
+            .discovery
+            .naming(endpoint)
+            .map(|record| record.machine_did());
+        match installed
+            .gate
+            .evaluate(now_ms, endpoint, did.as_deref(), None, RELAY_CLIENT)
+        {
+            Admit::Allow | Admit::Onboarding { .. } => Access::Allow,
+            Admit::Refuse { reason, .. } => Access::Deny {
+                reason: Some(reason),
+            },
+        }
+    }
+
+    fn left(&self, connection: ConnectionId) {
+        let Some(did) = self.inner.devices.lock().remove(&connection) else {
+            return;
+        };
+        let mut counts = self.inner.per_identity.lock();
+        if let Some(count) = counts.get_mut(&did) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&did);
+            }
+        }
+    }
+}
+
+impl AccessControl for RelayAdmission {
+    async fn on_connect(&self, request: &ClientRequest) -> Access {
+        self.decide(
+            now_ms(),
+            request.endpoint_id(),
+            request.connection_id(),
+            request.uri(),
+            request.headers(),
+        )
+    }
+
+    fn on_disconnect(&self, _endpoint: EndpointId, connection: ConnectionId) {
+        self.left(connection);
+    }
+}
+
 /// A running relay: the listener task and the relay service it feeds.
 pub struct RelayServer {
     local_addr: SocketAddr,
@@ -186,6 +327,7 @@ impl RelayServer {
         store: Arc<DiscoveryStore>,
         operator: String,
         limits: RelayLimits,
+        admission: RelayAdmission,
     ) -> IrohResult<Self> {
         if !bind_addr.ip().is_loopback() {
             return Err(IrohError::Unauthorized(format!(
@@ -200,7 +342,7 @@ impl RelayServer {
             http::HeaderMap::new(),
             limits.rate_limit(),
             KeyCache::new(4096),
-            Arc::new(AllowAll),
+            Arc::new(admission),
             metrics.clone(),
         );
         let accept_service = service.clone();
@@ -279,6 +421,18 @@ pub fn identity_url(relay: &Url) -> Url {
     let mut url = relay.clone();
     if let Ok(mut segments) = url.path_segments_mut() {
         segments.pop_if_empty().push("identity");
+    }
+    url
+}
+
+/// Where the relay at `relay` takes relay clients: the URL a signed-in
+/// device's DPoP proof names.
+pub fn client_url(relay: &Url) -> Url {
+    let mut url = relay.clone();
+    if let Ok(mut segments) = url.path_segments_mut() {
+        segments
+            .pop_if_empty()
+            .push(iroh_relay::http::RELAY_PATH.trim_start_matches('/'));
     }
     url
 }
@@ -398,6 +552,7 @@ mod tests {
             Arc::new(DiscoveryStore::new()),
             String::new(),
             RelayLimits::default(),
+            RelayAdmission::default(),
         )
         .await;
         assert!(refused.is_err(), "an off-loopback relay bind is refused");
@@ -406,6 +561,7 @@ mod tests {
             Arc::new(DiscoveryStore::new()),
             String::new(),
             RelayLimits::default(),
+            RelayAdmission::default(),
         )
         .await
         .unwrap();
@@ -422,6 +578,7 @@ mod tests {
             Arc::new(DiscoveryStore::new()),
             String::new(),
             RelayLimits::default(),
+            RelayAdmission::default(),
         )
         .await
         .unwrap();
@@ -465,14 +622,16 @@ mod tests {
             Arc::new(DiscoveryStore::new()),
             String::new(),
             limits,
+            RelayAdmission::default(),
         )
         .await
         .unwrap();
         let addr = server.local_addr();
         let open = |_| tokio::net::TcpStream::connect(addr);
+        // The listener takes connections in the order they arrived and gives
+        // each its place as it takes it, so the first two hold both places.
         let first = open(0).await.unwrap();
         let mut second = open(1).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
         let mut third = open(2).await.unwrap();
         let mut buf = [0u8; 1];
         // The third is closed at once: a read sees the end of the stream.
@@ -488,18 +647,166 @@ mod tests {
                 .is_err()
         );
         // Once one ends, a new one is served.
+        // The place comes back once the relay has seen the end, so a new
+        // connection is tried until one is served, for at most ten seconds.
         drop(first);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let mut fourth = open(3).await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), fourth.read(&mut buf))
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let served = loop {
+            let mut fourth = open(3).await.unwrap();
+            if tokio::time::timeout(Duration::from_millis(300), fourth.read(&mut buf))
                 .await
-                .is_err(),
-            "a freed slot serves again"
-        );
+                .is_err()
+            {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+        };
+        assert!(served, "a freed slot serves again");
         assert!(
             limits.rate_limit().is_some(),
             "every client is read at a bounded rate"
+        );
+    }
+
+    // -- admission ---------------------------------------------------------
+
+    const MIN: u64 = 60_000;
+
+    /// A registry that knows nobody.
+    struct Nobody;
+
+    impl crate::identity_gate::RegistryView for Nobody {
+        fn standing(&self, _did: &str) -> tenzro_onboarding_types::onboarding::Standing {
+            tenzro_onboarding_types::onboarding::Standing::Unregistered
+        }
+    }
+
+    /// Vouches for a request whose authorization is `DPoP good-<did>`.
+    struct Tokens;
+
+    impl RelayDevices for Tokens {
+        fn signed_in(&self, _uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
+            let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
+            value.strip_prefix("DPoP good-").map(str::to_string)
+        }
+    }
+
+    fn endpoint(n: u8) -> EndpointId {
+        iroh::SecretKey::from_bytes(&[n; 32]).public()
+    }
+
+    fn connection(n: u8) -> (ConnectionId, http::Uri, http::HeaderMap) {
+        let (parts, ()) = http::Request::new(()).into_parts();
+        let request = ClientRequest::new(
+            endpoint(n),
+            iroh_relay::http::ProtocolVersion::default(),
+            parts,
+        );
+        (
+            request.connection_id(),
+            request.uri().clone(),
+            request.headers().clone(),
+        )
+    }
+
+    fn installed(
+        mode: tenzro_onboarding_types::onboarding::GateMode,
+        per_identity: u32,
+    ) -> (RelayAdmission, IdentityGate) {
+        let gate = IdentityGate::new(
+            tenzro_onboarding_types::onboarding::OnboardingPolicy {
+                mode,
+                ..Default::default()
+            },
+            None,
+        );
+        gate.install_registry(Arc::new(Nobody));
+        let admission = RelayAdmission::default();
+        admission.install(
+            gate.clone(),
+            Arc::new(DiscoveryStore::new()),
+            Some((Arc::new(Tokens), per_identity)),
+        );
+        (admission, gate)
+    }
+
+    #[test]
+    fn before_the_gate_is_installed_everyone_uses_the_relay() {
+        let admission = RelayAdmission::default();
+        let (id, uri, headers) = connection(1);
+        assert_eq!(
+            admission.decide(0, endpoint(1), id, &uri, &headers),
+            Access::Allow
+        );
+    }
+
+    #[test]
+    fn a_joining_machine_uses_the_relay_for_its_onboarding_window_only_when_enforced() {
+        let (admission, _gate) =
+            installed(tenzro_onboarding_types::onboarding::GateMode::Enforce, 2);
+        let (id, uri, headers) = connection(1);
+        assert_eq!(
+            admission.decide(0, endpoint(1), id, &uri, &headers),
+            Access::Allow
+        );
+        let (id, uri, headers) = connection(1);
+        assert!(matches!(
+            admission.decide(31 * MIN, endpoint(1), id, &uri, &headers),
+            Access::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn in_audit_the_relay_refuses_nobody_and_logs_what_it_would_have() {
+        let (admission, gate) = installed(tenzro_onboarding_types::onboarding::GateMode::Audit, 2);
+        let (id, uri, headers) = connection(1);
+        assert_eq!(
+            admission.decide(0, endpoint(1), id, &uri, &headers),
+            Access::Allow
+        );
+        let (id, uri, headers) = connection(1);
+        assert_eq!(
+            admission.decide(31 * MIN, endpoint(1), id, &uri, &headers),
+            Access::Allow
+        );
+        assert!(
+            gate.recent_refusals()
+                .iter()
+                .any(|r| r.action == "audit" && r.alpn == "tenzro/relay-client"),
+            "the refusal it would have made is logged"
+        );
+    }
+
+    #[test]
+    fn a_signed_in_device_holds_at_most_its_identitys_relay_connections() {
+        let (admission, _gate) =
+            installed(tenzro_onboarding_types::onboarding::GateMode::Enforce, 1);
+        let device = |n: u8| {
+            let (id, uri, mut headers) = connection(n);
+            headers.insert(
+                http::header::AUTHORIZATION,
+                "DPoP good-did:tenzro:human:a".parse().unwrap(),
+            );
+            (id, uri, headers)
+        };
+        let (first, uri, headers) = device(1);
+        // Long after any onboarding window: a device is let in on its token.
+        assert_eq!(
+            admission.decide(99 * MIN, endpoint(1), first, &uri, &headers),
+            Access::Allow
+        );
+        let (second, uri, headers) = device(2);
+        assert!(matches!(
+            admission.decide(99 * MIN, endpoint(2), second, &uri, &headers),
+            Access::Deny { .. }
+        ));
+        admission.left(first);
+        let (third, uri, headers) = device(3);
+        assert_eq!(
+            admission.decide(99 * MIN, endpoint(3), third, &uri, &headers),
+            Access::Allow
         );
     }
 }

@@ -93,6 +93,33 @@ pub struct VmTransaction {
     /// EIP-2930 access list of a typed EVM transaction: addresses and their
     /// storage keys, charged in intrinsic gas and warm from the start.
     pub access_list: Vec<([u8; 20], Vec<[u8; 32]>)>,
+
+    /// The fee payer the signed transaction's memo names, if it names one.
+    /// Read only once the fee payer rule is live
+    /// ([`crate::ledger::FEE_PAYER_GATE`]); before, the sender pays.
+    pub fee_payer: Option<VmFeePayer>,
+}
+
+/// What a signed transaction's memo says about who pays its fee, as far as
+/// it can be checked without chain state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VmFeePayer {
+    /// The memo carries the consent of `account`: `public_key` names the
+    /// account, and the P-256 leg of `signature` verified over `digest`, the
+    /// consent digest of this transaction, under the fee-payer context.
+    /// Execution owes the ML-DSA-65 leg against the key the account enrolled.
+    Consented {
+        /// The fee payer's account.
+        account: Vec<u8>,
+        /// The fee payer's P-256 public key (`x || y`).
+        public_key: Vec<u8>,
+        /// The fee payer's signature.
+        signature: tenzro_crypto::composite::CompositeSignature,
+        /// The digest it signed.
+        digest: Vec<u8>,
+    },
+    /// The memo names a fee payer and its consent does not stand; why.
+    Refused(String),
 }
 
 impl VmTransaction {
@@ -127,7 +154,20 @@ impl VmTransaction {
             block_base_fee: None,
             authorization_list: Vec::new(),
             access_list: Vec::new(),
+            fee_payer: None,
         }
+    }
+
+    /// Attach what the signed transaction's memo says about its fee payer.
+    pub fn with_fee_payer(mut self, fee_payer: VmFeePayer) -> Self {
+        self.fee_payer = Some(fee_payer);
+        self
+    }
+
+    /// The most gas fee the transaction can owe: its gas limit at its gas
+    /// price.
+    pub fn max_gas_fee(&self) -> u128 {
+        self.gas_price.saturating_mul(u128::from(self.gas_limit))
     }
 
     /// Attach the EIP-7702 authorization list of a set-code transaction.
@@ -443,7 +483,7 @@ impl ContractCall {
 /// Result of a contract call
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallResult {
-    /// Return data
+    /// Return data, or the revert data of a call that reverted
     pub output: Vec<u8>,
 
     /// Gas used
@@ -471,97 +511,6 @@ impl CallResult {
     pub fn failed(gas_used: u64, revert_reason: String) -> Self {
         Self {
             output: Vec::new(),
-            gas_used,
-            success: false,
-            revert_reason: Some(revert_reason),
-        }
-    }
-}
-
-/// Contract deployment parameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContractDeployment {
-    /// Deployer address
-    pub deployer: Vec<u8>,
-
-    /// Contract bytecode
-    pub code: Vec<u8>,
-
-    /// Constructor arguments
-    pub constructor_args: Vec<u8>,
-
-    /// Value to send with deployment
-    pub value: u128,
-
-    /// Gas limit
-    pub gas_limit: u64,
-
-    /// Gas price
-    pub gas_price: u128,
-
-    /// Deployment nonce
-    pub nonce: u64,
-
-    /// VM type
-    pub vm_type: VmType,
-}
-
-impl ContractDeployment {
-    /// Create a new contract deployment
-    pub fn new(
-        deployer: Vec<u8>,
-        code: Vec<u8>,
-        constructor_args: Vec<u8>,
-        value: u128,
-        gas_limit: u64,
-        gas_price: u128,
-        nonce: u64,
-        vm_type: VmType,
-    ) -> Self {
-        Self {
-            deployer,
-            code,
-            constructor_args,
-            value,
-            gas_limit,
-            gas_price,
-            nonce,
-            vm_type,
-        }
-    }
-}
-
-/// Result of contract deployment
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeployResult {
-    /// Deployed contract address
-    pub address: Vec<u8>,
-
-    /// Gas used
-    pub gas_used: u64,
-
-    /// Whether deployment succeeded
-    pub success: bool,
-
-    /// Revert reason (if deployment failed)
-    pub revert_reason: Option<String>,
-}
-
-impl DeployResult {
-    /// Create a successful deployment result
-    pub fn success(address: Vec<u8>, gas_used: u64) -> Self {
-        Self {
-            address,
-            gas_used,
-            success: true,
-            revert_reason: None,
-        }
-    }
-
-    /// Create a failed deployment result
-    pub fn failed(gas_used: u64, revert_reason: String) -> Self {
-        Self {
-            address: Vec::new(),
             gas_used,
             success: false,
             revert_reason: Some(revert_reason),

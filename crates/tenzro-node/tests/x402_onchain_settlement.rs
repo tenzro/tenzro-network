@@ -22,6 +22,7 @@
 //! - a hash-locked escrow pays a sealed delivery's seller only against the
 //!   content key, which a wrong key cannot stand in for.
 
+mod hybrid_account;
 #[path = "passkey_holder/mod.rs"]
 mod passkey_holder;
 
@@ -192,16 +193,17 @@ fn fund(node: &TenzroNode, a: &Address, amount: u128) {
     state.commit().expect("commit funded balance");
 }
 
-/// A payer holding its own hardware-style P-256 key.
+/// A payer holding its own hybrid key.
 struct Payer {
     signer: TestHybridSigner,
 }
 
 impl Payer {
-    fn new() -> Self {
-        Self {
-            signer: TestHybridSigner::random(),
-        }
+    /// A payer whose ML-DSA-65 key is enrolled on `node`, as every account's is.
+    fn new(node: &TenzroNode) -> Self {
+        let signer = hybrid_account::fresh_signer();
+        hybrid_account::enroll(node, &signer);
+        Self { signer }
     }
 
     fn public_key(&self) -> Vec<u8> {
@@ -283,7 +285,7 @@ async fn x402_challenge(node: &TenzroNode, amount: u128) -> tenzro_payments::Pay
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn a_signed_payment_settles_on_chain_with_the_network_share() {
     let h = start_node().await;
-    let payer = Payer::new();
+    let payer = Payer::new(&h.node);
     fund(&h.node, &payer.address(), AMOUNT * 2);
     let treasury = tenzro_types::network_treasury_address();
     let treasury_before = balance(&h.node, &treasury);
@@ -379,8 +381,8 @@ async fn a_signed_payment_settles_on_chain_with_the_network_share() {
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn a_credential_signed_by_one_key_cannot_debit_another_account() {
     let h = start_node().await;
-    let victim = Payer::new();
-    let attacker = Payer::new();
+    let victim = Payer::new(&h.node);
+    let attacker = Payer::new(&h.node);
     fund(&h.node, &victim.address(), AMOUNT * 2);
     let ch = x402_challenge(&h.node, AMOUNT).await;
     let mut cred =
@@ -399,8 +401,8 @@ async fn a_credential_signed_by_one_key_cannot_debit_another_account() {
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn a_directly_submitted_settlement_with_a_forged_authorization_reverts() {
     let h = start_node().await;
-    let victim = Payer::new();
-    let attacker = Payer::new();
+    let victim = Payer::new(&h.node);
+    let attacker = Payer::new(&h.node);
     fund(&h.node, &victim.address(), AMOUNT * 2);
     fund(&h.node, &attacker.address(), ONE_TNZO);
 
@@ -449,7 +451,7 @@ async fn a_directly_submitted_settlement_with_a_forged_authorization_reverts() {
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn a_payer_who_cannot_cover_the_amount_gets_no_receipt() {
     let h = start_node().await;
-    let payer = Payer::new();
+    let payer = Payer::new(&h.node);
     fund(&h.node, &payer.address(), AMOUNT / 2);
     let ch = x402_challenge(&h.node, AMOUNT).await;
     let cred = sign_credential(&ch, "x402", "", &payer.signer, AMOUNT, AMOUNT).expect("cred");
@@ -466,7 +468,7 @@ async fn a_payer_who_cannot_cover_the_amount_gets_no_receipt() {
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn concurrent_submissions_of_one_credential_settle_once() {
     let h = start_node().await;
-    let payer = Payer::new();
+    let payer = Payer::new(&h.node);
     fund(&h.node, &payer.address(), AMOUNT * 5);
     let ch = x402_challenge(&h.node, AMOUNT).await;
     let cred = sign_credential(&ch, "x402", "", &payer.signer, AMOUNT, AMOUNT).expect("cred");
@@ -501,7 +503,7 @@ async fn concurrent_submissions_of_one_credential_settle_once() {
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn a_session_voucher_is_accepted_and_claimed_from_the_payers_escrow() {
     let h = start_node().await;
-    let payer = Payer::new();
+    let payer = Payer::new(&h.node);
     fund(&h.node, &payer.address(), AMOUNT * 2);
     let payee_before = balance(&h.node, &payee());
 
@@ -594,7 +596,7 @@ async fn a_session_voucher_is_accepted_and_claimed_from_the_payers_escrow() {
     // The claim is what the session charged, never more than the voucher.
     assert!(due.amount > 0 && due.amount <= cumulative);
     let claimed = due.amount;
-    let claimer = Payer::new();
+    let claimer = Payer::new(&h.node);
     fund(&h.node, &claimer.address(), ONE_TNZO);
     let claim = claimer.submit(
         &h.node,
@@ -636,8 +638,8 @@ async fn a_session_voucher_is_accepted_and_claimed_from_the_payers_escrow() {
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn a_hash_locked_delivery_pays_the_seller_exactly_when_the_key_is_published() {
     let h = start_node().await;
-    let buyer = Payer::new();
-    let seller = Payer::new();
+    let buyer = Payer::new(&h.node);
+    let seller = Payer::new(&h.node);
     fund(&h.node, &buyer.address(), AMOUNT * 2);
     fund(&h.node, &seller.address(), ONE_TNZO);
     let seller_before = balance(&h.node, &seller.address());
@@ -652,7 +654,7 @@ async fn a_hash_locked_delivery_pays_the_seller_exactly_when_the_key_is_publishe
         &hex::encode(&seller.address().as_bytes()[..20]),
         1_000,
         &tenzro_crypto::batch::ImmediateRecordSigner::new(std::sync::Arc::new(
-            tenzro_crypto::composite::testing::TestHybridSigner::random(),
+            hybrid_account::fresh_signer(),
         )),
     )
     .expect("seal");
@@ -674,7 +676,7 @@ async fn a_hash_locked_delivery_pays_the_seller_exactly_when_the_key_is_publishe
     let escrow_id = escrow_id_for(&buyer.address(), 0);
 
     // A wrong key does not open the lock.
-    let probe = Payer::new();
+    let probe = Payer::new(&h.node);
     fund(&h.node, &probe.address(), ONE_TNZO);
     let wrong = probe.submit(
         &h.node,
@@ -734,7 +736,7 @@ async fn a_sealed_delivery_is_redeemed_only_against_both_escrows_and_pays_the_ne
     let seller = Address::new([0x51; 32]);
     let h = start_node_paying(&seller).await;
     let treasury = tenzro_types::network_treasury_address();
-    let buyer = Payer::new();
+    let buyer = Payer::new(&h.node);
     fund(&h.node, &buyer.address(), AMOUNT * 2);
 
     // The node seals a priced response.
@@ -822,7 +824,7 @@ async fn a_payment_resold_on_a_node_pays_the_operator_its_price_and_the_reseller
         PaymentBinding, ResellerLeg, payment_authorization_preimage_with_resellers,
     };
     let h = start_node().await;
-    let payer = Payer::new();
+    let payer = Payer::new(&h.node);
     let operator = Address::new([0x5a; 32]);
     let reseller = Address::new([0x5b; 32]);
     fund(&h.node, &payer.address(), AMOUNT * 2);
@@ -927,6 +929,7 @@ fn passkey_sd_jwt(signer: &passkey_holder::PasskeyHolder, claims: serde_json::Va
     body.insert("_sd_alg".into(), "sha-256".into());
     let mut h = serde_json::Map::new();
     h.insert("alg".into(), "ES256".into());
+    h.insert("typ".into(), "dc+sd-jwt".into());
     h.insert(
         "jwk".into(),
         tenzro_payments::ap2::jwk_of(&signer.verifying_key()),
@@ -1018,7 +1021,7 @@ async fn an_agent_pays_a_ucp_checkout_under_real_ap2_mandates() {
 
     // The agent: an identity listing the key it pays with, and Terms on
     // chain naming the controller.
-    let payer = Payer::new();
+    let payer = Payer::new(&h.node);
     fund(&h.node, &payer.address(), AMOUNT * 2);
     let registry = h.node.identity_registry().expect("identity registry");
     registry.upsert_identity_for_test(tenzro_identity::TenzroIdentity {
@@ -1249,6 +1252,131 @@ async fn an_agent_pays_a_ucp_checkout_under_real_ap2_mandates() {
     let _ = web.await;
 }
 
+/// An agent checks out paid work over ACP against the node itself: the
+/// session's total settles on the ledger through the node's facilitator, and
+/// a payment its payer cannot cover is declined with nothing moved.
+#[tokio::test]
+#[ignore = "needs a hardware consensus key; run by scripts/tests/hardware-key-gate.sh on a software TPM, never on the machine's own key"]
+async fn an_agent_pays_an_acp_checkout_session_on_the_ledger() {
+    use tenzro_payments::acp::ACP_API_VERSION;
+    use tenzro_payments::x402::X402PaymentRequirement;
+    use tenzro_payments::x402::wire::{challenge_from_requirement, payload_for_credential};
+
+    const MODEL: &str = "acp-model";
+    const PER_TOKEN: u128 = 1_000_000_000_000_000;
+    let h = start_node_paying(&payee()).await;
+    h.node
+        .served_models
+        .insert(MODEL.to_string(), Some(tenzro_types::Visibility::Public));
+    h.node.provider_pricing.write().models.insert(
+        MODEL.to_string(),
+        tenzro_types::price_card::RateCard {
+            denom: tenzro_types::price_card::Denom::Wei,
+            lines: [(
+                "output_tokens".to_string(),
+                tenzro_types::price_card::Rate::per(PER_TOKEN, 0),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    );
+    let payer = Payer::new(&h.node);
+    fund(&h.node, &payer.address(), AMOUNT * 2);
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free port")
+        .port();
+    let state =
+        std::sync::Arc::new(tenzro_node::web::handlers::WebState::new().with_node(h.node.clone()));
+    let (web_stop, web_rx) = broadcast::channel::<()>(1);
+    let web = tokio::spawn(
+        tenzro_node::web::WebServer::new(format!("127.0.0.1:{port}"))
+            .with_state_arc(state)
+            .start_with_shutdown(web_rx),
+    );
+    let base = format!("http://127.0.0.1:{port}/acp");
+    let client = reqwest::Client::new();
+    let post = |path: String, body: serde_json::Value| {
+        let client = client.clone();
+        let url = format!("{base}{path}");
+        async move {
+            for _ in 0..50 {
+                let req = client
+                    .post(&url)
+                    .header("authorization", "Bearer agent")
+                    .header("api-version", ACP_API_VERSION)
+                    .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+                    .json(&body);
+                if let Ok(r) = req.send().await {
+                    let status = r.status().as_u16();
+                    return (
+                        status,
+                        r.json::<serde_json::Value>().await.unwrap_or_default(),
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            panic!("the web surface did not answer at {url}");
+        }
+    };
+
+    let (status, session) = post(
+        "/checkout_sessions".into(),
+        serde_json::json!({ "currency": "TNZO", "capabilities": {},
+            "line_items": [{ "id": "l1", "item": { "id": format!("{MODEL}/output_tokens") }, "quantity": 2000 }] }),
+    )
+    .await;
+    assert_eq!(status, 201, "{session}");
+    assert_eq!(session["status"], "ready_for_payment", "{session}");
+    let id = session["id"].as_str().expect("session id").to_string();
+    let total = 2000 * PER_TOKEN;
+    let requirement: X402PaymentRequirement = serde_json::from_value(
+        session
+            .pointer("/capabilities/payment/handlers/0/config/requirement")
+            .cloned()
+            .expect("the session names its x402 requirement"),
+    )
+    .expect("the requirement");
+    assert_eq!(requirement.amount_u128().unwrap(), total);
+    let challenge =
+        challenge_from_requirement(&requirement, "/acp/checkout_sessions").expect("challenge");
+    let complete = |signer: &Payer| {
+        let credential = sign_credential(&challenge, "x402", "", &signer.signer, total, total)
+            .expect("credential");
+        let payload = payload_for_credential(&challenge, &credential).expect("payload");
+        serde_json::json!({ "payment_data": { "handler_id": "tenzro",
+            "instrument": { "type": "x402", "credential": payload } } })
+    };
+    let path = format!("/checkout_sessions/{id}/complete");
+
+    // A payer with no balance is declined and the session stays open.
+    let broke = Payer::new(&h.node);
+    let (status, declined) = post(path.clone(), complete(&broke)).await;
+    assert_eq!(status, 402, "{declined}");
+    assert_eq!(
+        declined["messages"][0]["code"], "payment_declined",
+        "{declined}"
+    );
+    assert_eq!(balance(&h.node, &payer.address()), AMOUNT * 2);
+
+    let payee_before = balance(&h.node, &payee());
+    let (status, done) = post(path, complete(&payer)).await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["status"], "completed", "{done}");
+    let tx = done["order"]["payment"]["transaction"]
+        .as_str()
+        .expect("the order names its settlement");
+    assert!(executed(&h.node, tx).await, "the settlement executed");
+    assert_eq!(balance(&h.node, &payer.address()), AMOUNT * 2 - total);
+    let fee = governed_settlement_fee(&h.node, total);
+    assert_eq!(balance(&h.node, &payee()), payee_before + total - fee);
+
+    let _ = web_stop.send(());
+    let _ = web.await;
+}
+
 /// Call `name` on the MCP endpoint at `url` and return the JSON-RPC response.
 async fn mcp_call(url: &str, name: &str, arguments: serde_json::Value) -> serde_json::Value {
     let params = serde_json::json!({
@@ -1283,7 +1411,7 @@ async fn mcp_call(url: &str, name: &str, arguments: serde_json::Value) -> serde_
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn a_paid_tool_called_through_the_compact_listing_is_charged_once() {
     let h = start_node().await;
-    let payer = Payer::new();
+    let payer = Payer::new(&h.node);
     fund(&h.node, &payer.address(), AMOUNT * 2);
     let payee_before = balance(&h.node, &payee());
 

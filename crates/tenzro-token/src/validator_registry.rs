@@ -98,6 +98,24 @@ pub const VALIDATOR_INDEX_KEY: &str = "validator:index";
 /// Storage key for the registry config.
 pub const VALIDATOR_CONFIG_KEY: &str = "validator:config";
 
+/// Where a validator's operator writes about admission or a jail.
+pub const VALIDATOR_CONTACT: &str = "team@tenzro.com";
+
+/// What the operator of the jailed validator at `address` can do: when the
+/// jail ends by itself, the command that proposes an earlier return, and
+/// where to write.
+pub fn jailed_remedy(address: &Address, jailed_until_epoch: Option<u64>) -> String {
+    let term = jailed_until_epoch
+        .map(|epoch| format!("It returns as a candidate at epoch {epoch}. "))
+        .unwrap_or_default();
+    format!(
+        "{term}Governance can return it sooner: propose that with `tenzro governance \
+         propose-reinstate-validator --account {} --memo <why>`, or write to \
+         {VALIDATOR_CONTACT}. A slash is not undone.",
+        hex::encode(address.as_bytes())
+    )
+}
+
 /// Column family used for registry persistence. Co-located with staking under
 /// the unified token storage.
 const REGISTRY_CF: &str = tenzro_storage::CF_TOKENS;
@@ -115,6 +133,9 @@ struct UndoRecord {
 const UNDO_PREFIX: &str = "valreg_undo:";
 /// The last sequence number given to an undo record.
 const UNDO_SEQ_KEY: &str = "valreg_undo_seq";
+/// Present once undo records of a change that never committed were discarded
+/// without being put back: the registry may hold that change.
+const UNVERIFIED_KEY: &str = "valreg_unverified";
 const PENDING_KEY_PREFIX: &str = "valreg_pending_key:";
 /// Prefix of the epoch from which a seated key's scheme was no longer
 /// admitted.
@@ -252,13 +273,20 @@ pub enum ValidatorRegistryStatus {
     /// until a governance proposal reinstates it, then returns as a
     /// `Candidate` ([`ValidatorRegistry::release_jailed`]).
     Jailed,
+    /// Slashed for misbehaviour, with the penalty applied, and still seated
+    /// because the active set without it would not hold the launch
+    /// arithmetic ([`ValidatorRegistry::jail_deferred`]). It becomes `Jailed`
+    /// at the first epoch boundary where the set without it holds, and at
+    /// the epoch in `jailed_until_epoch` regardless
+    /// ([`ValidatorRegistry::settle_pending_jails`]).
+    JailedPending,
 }
 
 impl ValidatorRegistryStatus {
     /// Returns true when the validator is counted toward the active set total
     /// for churn-cap calculations.
     pub fn counts_toward_active(&self) -> bool {
-        matches!(self, Self::Active | Self::PendingExit)
+        matches!(self, Self::Active | Self::PendingExit | Self::JailedPending)
     }
 }
 
@@ -425,6 +453,20 @@ pub struct InactivityPolicy {
     pub keep_active_at_least: usize,
 }
 
+/// When the removal of a slashed validator waits. Both values come from the
+/// chain: the cap is a governed parameter and the absent validators are the
+/// ones the certified participation record counts as having missed the last
+/// epoch, so every node decides alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredRemoval {
+    /// Epochs after the slash at which the validator is removed whatever the
+    /// set then looks like. `0` removes it at the next epoch boundary.
+    pub cap_epochs: u64,
+    /// Validators that signed nothing in the last certified epoch: they do
+    /// not count as live when the remaining set is judged.
+    pub absent: std::collections::HashSet<Address>,
+}
+
 /// Result of an epoch-boundary transition computed by
 /// [`ValidatorRegistry::compute_epoch_transition`].
 ///
@@ -520,6 +562,11 @@ pub struct ValidatorRegistry {
     entries: DashMap<Address, ValidatorRegistryEntry>,
     /// Mutable configuration.
     config: parking_lot::RwLock<ValidatorRegistryConfig>,
+    /// Whether a voluntary exit is held while it would leave the seated set
+    /// below the launch arithmetic: the node sets it at every boundary from
+    /// the governed activation epoch of `feature.exit_hold`. It is not
+    /// stored; a registry starts without the hold.
+    hold_unsafe_exits: std::sync::atomic::AtomicBool,
     /// Optional persistent storage backend.
     storage: Option<Arc<dyn tenzro_storage::KvStore>>,
     /// Consensus keys waiting for the next epoch boundary: (ML-DSA leg,
@@ -539,6 +586,7 @@ impl ValidatorRegistry {
         Self {
             entries: DashMap::new(),
             config: parking_lot::RwLock::new(ValidatorRegistryConfig::default()),
+            hold_unsafe_exits: std::sync::atomic::AtomicBool::new(false),
             storage: None,
             pending_keys: DashMap::new(),
             unadmitted_since: DashMap::new(),
@@ -552,6 +600,7 @@ impl ValidatorRegistry {
         let registry = Self {
             entries: DashMap::new(),
             config: parking_lot::RwLock::new(ValidatorRegistryConfig::default()),
+            hold_unsafe_exits: std::sync::atomic::AtomicBool::new(false),
             storage: Some(storage),
             pending_keys: DashMap::new(),
             unadmitted_since: DashMap::new(),
@@ -993,6 +1042,41 @@ impl ValidatorRegistry {
         Ok(tags.len())
     }
 
+    /// Records that the registry may hold a change that never committed. A
+    /// node does not start on a registry so marked until it has compared it
+    /// with the chain ([`Self::clear_unverified`]).
+    pub fn mark_unverified(&self) -> std::result::Result<(), String> {
+        match &self.storage {
+            Some(storage) => storage
+                .put(REGISTRY_CF, UNVERIFIED_KEY.as_bytes(), &[1])
+                .map_err(|e| format!("marking the registry unverified: {e}")),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the registry is marked as possibly holding a change that
+    /// never committed.
+    pub fn is_unverified(&self) -> std::result::Result<bool, String> {
+        match &self.storage {
+            Some(storage) => storage
+                .get(REGISTRY_CF, UNVERIFIED_KEY.as_bytes())
+                .map(|v| v.is_some())
+                .map_err(|e| format!("reading the registry's unverified mark: {e}")),
+            None => Ok(false),
+        }
+    }
+
+    /// Removes the mark [`Self::mark_unverified`] set, once the registry has
+    /// been found equal to the one the chain committed.
+    pub fn clear_unverified(&self) -> std::result::Result<(), String> {
+        match &self.storage {
+            Some(storage) => storage
+                .delete(REGISTRY_CF, UNVERIFIED_KEY.as_bytes())
+                .map_err(|e| format!("clearing the registry's unverified mark: {e}")),
+            None => Ok(()),
+        }
+    }
+
     /// Removes the undo record kept under `tag`.
     pub fn clear_undo(&self, tag: &str) {
         self.put_side(format!("{UNDO_PREFIX}{tag}"), None);
@@ -1103,6 +1187,13 @@ impl ValidatorRegistry {
     /// boundary applies, if any.
     pub fn pending_key(&self, address: &Address) -> Option<(Vec<u8>, Vec<u8>)> {
         self.pending_keys.get(address).map(|e| e.value().clone())
+    }
+
+    /// Turns the hold on voluntary exits that would break the launch
+    /// arithmetic on or off for the coming boundary.
+    pub fn set_hold_unsafe_exits(&self, on: bool) {
+        self.hold_unsafe_exits
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Returns the current registry config.
@@ -1469,8 +1560,17 @@ impl ValidatorRegistry {
 
     /// Records a request to exit. Moves `Active → PendingExit`. The actual
     /// state machine advance to `Exited` happens at the next epoch boundary
-    /// in `compute_epoch_transition`.
+    /// in `compute_epoch_transition`, which holds an exit that would leave the
+    /// seated set below the launch arithmetic.
     pub fn request_exit(&self, address: &Address) -> Result<()> {
+        self.begin_exit(address, None)
+    }
+
+    /// Moves a validator to `PendingExit`. `ejected_at` is the epoch of an
+    /// ejection for inactivity while the exit hold is on: the entry carries it
+    /// in `exited_at_epoch` until it exits, and an ejected validator is never
+    /// held (a validator that is gone must not stay counted).
+    fn begin_exit(&self, address: &Address, ejected_at: Option<u64>) -> Result<()> {
         let mut entry = self
             .entries
             .get_mut(address)
@@ -1493,12 +1593,16 @@ impl ValidatorRegistry {
                     address, entry.status
                 )));
             }
-            ValidatorRegistryStatus::Jailed => {
+            ValidatorRegistryStatus::Jailed | ValidatorRegistryStatus::JailedPending => {
                 return Err(TokenError::InvalidParameter(format!(
-                    "validator {} is jailed; exit forbidden until governance restores",
-                    address
+                    "validator {} is jailed and cannot exit while jailed. {}",
+                    address,
+                    jailed_remedy(address, entry.jailed_until_epoch)
                 )));
             }
+        }
+        if ejected_at.is_some() {
+            entry.exited_at_epoch = ejected_at;
         }
         let snapshot = entry.clone();
         drop(entry);
@@ -1525,6 +1629,107 @@ impl ValidatorRegistry {
         tenzro_types::launch_rule::all_live_set_accepted(&self.stakes_without(leaving))
     }
 
+    /// Whether the `Active` validators other than `leaving` hold the launch
+    /// arithmetic by stake when the ones in `absent` are not live: at least
+    /// the launch minimum of members, the live ones able to certify, and
+    /// still able to after the live one with the most stake is lost.
+    fn remaining_set_holds(
+        &self,
+        leaving: &Address,
+        absent: &std::collections::HashSet<Address>,
+    ) -> bool {
+        let (mut members, mut total, mut live, mut largest_live) = (0usize, 0u128, 0u128, 0u128);
+        for e in self.entries.iter() {
+            let v = e.value();
+            if v.status != ValidatorRegistryStatus::Active || &v.address == leaving {
+                continue;
+            }
+            let power = tenzro_types::launch_rule::voting_power(v.self_stake);
+            members += 1;
+            total = total.saturating_add(power);
+            if !absent.contains(&v.address) {
+                live = live.saturating_add(power);
+                largest_live = largest_live.max(power);
+            }
+        }
+        members >= tenzro_types::launch_rule::MIN_LAUNCH_VALIDATORS
+            && total > 0
+            && tenzro_types::launch_rule::above_two_thirds(live, total)
+            && tenzro_types::launch_rule::above_two_thirds(live - largest_live, total)
+    }
+
+    /// Jails a slashed validator, unless the active set without it would not
+    /// hold the launch arithmetic: then it keeps its seat as `JailedPending`
+    /// until [`settle_pending_jails`](Self::settle_pending_jails) finds a set
+    /// that holds without it, or the cap in `policy` runs out. The penalty
+    /// is not this function's: it has been applied by the time it is called.
+    /// A halted chain cannot repair itself, so a seat held by a punished
+    /// validator is kept in preference to a set that one more failure
+    /// stops. Returns whether the removal was deferred.
+    pub fn jail_deferred(
+        &self,
+        address: &Address,
+        current_epoch: u64,
+        policy: &DeferredRemoval,
+    ) -> Result<bool> {
+        let status = self
+            .entries
+            .get(address)
+            .map(|e| e.status)
+            .ok_or_else(|| TokenError::NotFound(format!("validator {}", address)))?;
+        match status {
+            ValidatorRegistryStatus::JailedPending => return Ok(true),
+            ValidatorRegistryStatus::Active
+                if !self.remaining_set_holds(address, &policy.absent) => {}
+            _ => return self.jail(address, current_epoch).map(|()| false),
+        }
+        let snapshot = {
+            let mut entry = self
+                .entries
+                .get_mut(address)
+                .ok_or_else(|| TokenError::NotFound(format!("validator {}", address)))?;
+            entry.status = ValidatorRegistryStatus::JailedPending;
+            entry.jailed_until_epoch = Some(current_epoch.saturating_add(policy.cap_epochs));
+            entry.updated_at = Timestamp::now();
+            entry.clone()
+        };
+        self.persist_entry(&snapshot);
+        warn!(
+            "Validator {} slashed at epoch {} keeps its seat: the active set without it does not hold the launch arithmetic; it is removed when one does, and at epoch {} regardless",
+            address,
+            current_epoch,
+            current_epoch.saturating_add(policy.cap_epochs)
+        );
+        Ok(true)
+    }
+
+    /// At the start of `epoch`, jails every `JailedPending` validator whose
+    /// removal no longer costs the set its launch arithmetic, or whose cap
+    /// has run out. They are taken in address order and each is judged
+    /// against the set as the ones before it left it. Returns the validators
+    /// jailed.
+    pub fn settle_pending_jails(
+        &self,
+        epoch: u64,
+        absent: &std::collections::HashSet<Address>,
+    ) -> Vec<Address> {
+        let mut pending: Vec<(Address, Option<u64>)> = self
+            .entries
+            .iter()
+            .filter(|e| e.value().status == ValidatorRegistryStatus::JailedPending)
+            .map(|e| (e.value().address, e.value().jailed_until_epoch))
+            .collect();
+        pending.sort_unstable_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut jailed = Vec::new();
+        for (addr, until) in pending {
+            let due = until.is_none_or(|u| epoch >= u);
+            if (due || self.remaining_set_holds(&addr, absent)) && self.jail(&addr, epoch).is_ok() {
+                jailed.push(addr);
+            }
+        }
+        jailed
+    }
+
     /// Moves validators that have been absent for too long from `Active` to
     /// `PendingExit`, so a validator that is gone cannot hold the quorum
     /// threshold above what the live set can reach.
@@ -1546,6 +1751,7 @@ impl ValidatorRegistry {
         &self,
         policy: &InactivityPolicy,
         missed_epochs: &std::collections::HashMap<Address, u64>,
+        epoch: u64,
     ) -> Vec<Address> {
         if policy.max_missed_epochs == 0 {
             return Vec::new();
@@ -1576,7 +1782,11 @@ impl ValidatorRegistry {
             if !self.set_without_is_accepted(&addr) {
                 continue;
             }
-            if self.request_exit(&addr).is_ok() {
+            let marker = self
+                .hold_unsafe_exits
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then_some(epoch);
+            if self.begin_exit(&addr, marker).is_ok() {
                 remaining -= 1;
                 warn!(
                     "Validator {} moved to exit after {} epochs without a certified signature",
@@ -1647,8 +1857,10 @@ impl ValidatorRegistry {
         drop(entry);
         self.persist_entry(&snapshot);
         warn!(
-            "Validator {} jailed at epoch {} for {} epochs unless governance reinstates it sooner",
-            address, current_epoch, term
+            "Validator {} jailed at epoch {}. {}",
+            address,
+            current_epoch,
+            jailed_remedy(address, snapshot.jailed_until_epoch)
         );
         // A slash removes a counted validator and is not refused: keeping an
         // equivocator seated is worse. It can still leave the set without the
@@ -1724,18 +1936,22 @@ impl ValidatorRegistry {
     /// those movements to `EpochManager`'s `pending_validators` /
     /// `pending_removals` queues.
     pub fn compute_epoch_transition(&self, new_epoch: u64) -> EpochTransitionPlan {
-        self.compute_epoch_transition_with(new_epoch, &|_| true)
+        self.compute_epoch_transition_with(new_epoch, &|_| true, None)
     }
 
     /// [`Self::compute_epoch_transition`], applying first the key rotations
     /// requested since the last boundary, then unseating validators whose
     /// key governance no longer admits once [`RETIRED_SCHEME_GRACE_EPOCHS`]
     /// have passed; `admitted` judges a key by its ML-DSA leg. A candidate
-    /// whose key is not admitted is not activated.
+    /// whose key is not admitted is not activated. With `max_active`, no
+    /// candidate is activated while the active set holds that many; a seated
+    /// validator is never removed for it, and the waiting candidates keep
+    /// their order (stake, then registration, then address).
     pub fn compute_epoch_transition_with(
         &self,
         new_epoch: u64,
         admitted: &dyn Fn(&[u8]) -> bool,
+        max_active: Option<usize>,
     ) -> EpochTransitionPlan {
         let (act_budget, exit_budget) = self.churn_budgets();
         let mut plan = EpochTransitionPlan::default();
@@ -1814,6 +2030,54 @@ impl ValidatorRegistry {
         }
         activating.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         exiting.sort_unstable_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        // A voluntary exit is held while it would leave the seated set below
+        // the launch arithmetic: those validators stay `PendingExit`, still
+        // counted, until a replacement is seated. A set that already fails
+        // the rule holds nobody back, or its members could never leave.
+        let seated: Vec<(Address, u128)> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.value().status,
+                    ValidatorRegistryStatus::Active | ValidatorRegistryStatus::PendingExit
+                )
+            })
+            .map(|e| {
+                (
+                    e.value().address,
+                    tenzro_types::launch_rule::voting_power(e.value().self_stake),
+                )
+            })
+            .collect();
+        let accepted_without = |gone: &[Address]| {
+            let stakes: Vec<u128> = seated
+                .iter()
+                .filter(|(a, _)| !gone.contains(a))
+                .map(|(_, v)| *v)
+                .collect();
+            tenzro_types::launch_rule::all_live_set_accepted(&stakes)
+        };
+        let mut held = Vec::new();
+        if self
+            .hold_unsafe_exits
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && accepted_without(&[])
+        {
+            let mut gone = Vec::new();
+            for (addr, _) in &exiting {
+                gone.push(*addr);
+                let ejected = self
+                    .entries
+                    .get(addr)
+                    .is_some_and(|e| e.exited_at_epoch.is_some());
+                if !ejected && !accepted_without(&gone) {
+                    gone.pop();
+                    held.push(*addr);
+                }
+            }
+        }
+        exiting.retain(|(a, _)| !held.contains(a));
         let mut spent = 0u128;
         let mut taken = 0usize;
         for (_, stake) in &exiting {
@@ -1824,11 +2088,8 @@ impl ValidatorRegistry {
             spent = next;
             taken += 1;
         }
-        let deferred: Vec<Address> = exiting
-            .split_off(taken)
-            .into_iter()
-            .map(|(a, _)| a)
-            .collect();
+        let mut deferred = held;
+        deferred.extend(exiting.split_off(taken).into_iter().map(|(a, _)| a));
 
         for addr in activating {
             if let Some(mut entry) = self.entries.get_mut(&addr) {
@@ -1886,7 +2147,15 @@ impl ValidatorRegistry {
                 .then(a.0.as_bytes().cmp(b.0.as_bytes()))
         });
 
-        for (addr, _, _) in candidates.into_iter().take(act_budget as usize) {
+        let room = max_active.map_or(usize::MAX, |cap| {
+            let seated = self
+                .entries
+                .iter()
+                .filter(|e| e.value().status == ValidatorRegistryStatus::Active)
+                .count();
+            cap.saturating_sub(seated)
+        });
+        for (addr, _, _) in candidates.into_iter().take((act_budget as usize).min(room)) {
             if let Some(mut entry) = self.entries.get_mut(&addr) {
                 entry.status = ValidatorRegistryStatus::PendingActive;
                 entry.updated_at = Timestamp::now();
@@ -2184,6 +2453,64 @@ mod tests {
         a
     }
 
+    /// A cap on the active set activates candidates only into free seats, in
+    /// stake order, and never unseats a validator already active.
+    #[test]
+    fn candidates_wait_while_the_active_set_is_at_its_cap() {
+        let reg = ValidatorRegistry::new();
+        for b in 1..=3 {
+            active(&reg, b);
+        }
+        let (ck, pk, nk) = make_keys();
+        let small = make_address(20);
+        reg.register_candidate(
+            small,
+            ck,
+            pk,
+            nk,
+            small,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            2,
+            String::new(),
+        )
+        .unwrap();
+        let (ck, pk, nk) = make_keys();
+        let large = make_address(21);
+        reg.register_candidate(
+            large,
+            ck,
+            pk,
+            nk,
+            large,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE * 2,
+            2,
+            String::new(),
+        )
+        .unwrap();
+        let status = |a: &Address| reg.get(a).unwrap().status;
+
+        // At the cap: nobody moves in, nobody is unseated.
+        let plan = reg.compute_epoch_transition_with(3, &|_| true, Some(3));
+        assert!(plan.activations.is_empty(), "{plan:?}");
+        assert_eq!(reg.list_active().len(), 3);
+
+        // One seat more: the larger stake takes it, the other keeps waiting.
+        reg.compute_epoch_transition_with(4, &|_| true, Some(4));
+        reg.compute_epoch_transition_with(5, &|_| true, Some(4));
+        assert_eq!(status(&large), ValidatorRegistryStatus::Active);
+        assert_eq!(status(&small), ValidatorRegistryStatus::Candidate);
+
+        // A cap below the set seats no one and removes no one.
+        reg.compute_epoch_transition_with(6, &|_| true, Some(1));
+        assert_eq!(reg.list_active().len(), 4);
+        assert_eq!(status(&small), ValidatorRegistryStatus::Candidate);
+
+        // Without a cap the waiting candidate is activated.
+        reg.compute_epoch_transition_with(7, &|_| true, None);
+        reg.compute_epoch_transition_with(8, &|_| true, None);
+        assert_eq!(status(&small), ValidatorRegistryStatus::Active);
+    }
+
     /// A seated validator replaces its consensus key at the next epoch
     /// boundary and keeps its seat: no exit, no re-registration.
     #[test]
@@ -2214,26 +2541,26 @@ mod tests {
         let a = active(&reg, 8);
         let old = reg.get(&a).unwrap().ml_dsa_pubkey;
         let admitted = |ml: &[u8]| ml != old.as_slice();
-        let plan = reg.compute_epoch_transition_with(3, &admitted);
+        let plan = reg.compute_epoch_transition_with(3, &admitted, None);
         assert!(plan.unseated.is_empty(), "the grace epoch");
         assert_eq!(reg.get(&a).unwrap().status, ValidatorRegistryStatus::Active);
-        let plan = reg.compute_epoch_transition_with(4, &admitted);
+        let plan = reg.compute_epoch_transition_with(4, &admitted, None);
         assert_eq!(plan.unseated, vec![a]);
         assert_eq!(
             reg.get(&a).unwrap().status,
             ValidatorRegistryStatus::Candidate
         );
-        let plan = reg.compute_epoch_transition_with(5, &admitted);
+        let plan = reg.compute_epoch_transition_with(5, &admitted, None);
         assert!(
             !plan.activations.contains(&a),
             "a retired key is not activated"
         );
         reg.request_key_rotation(&a, vec![0x22u8; 2594], vec![0x04u8; 97])
             .unwrap();
-        let plan = reg.compute_epoch_transition_with(6, &admitted);
+        let plan = reg.compute_epoch_transition_with(6, &admitted, None);
         assert_eq!(plan.key_rotations, vec![a]);
         assert_eq!(plan.activations, vec![a]);
-        reg.compute_epoch_transition_with(7, &admitted);
+        reg.compute_epoch_transition_with(7, &admitted, None);
         assert_eq!(reg.get(&a).unwrap().status, ValidatorRegistryStatus::Active);
     }
 
@@ -2430,7 +2757,7 @@ mod tests {
             keep_active_at_least: 1,
         };
         let missed = std::collections::HashMap::from([(a[0], 2), (a[1], 3), (a[2], 0)]);
-        assert_eq!(reg.eject_inactive(&policy, &missed), vec![a[1]]);
+        assert_eq!(reg.eject_inactive(&policy, &missed, 1), vec![a[1]]);
         assert_eq!(
             reg.get(&a[1]).unwrap().status,
             ValidatorRegistryStatus::PendingExit
@@ -2449,7 +2776,7 @@ mod tests {
             keep_active_at_least: 1,
         };
         let missed = std::collections::HashMap::from([(a[0], 1000)]);
-        assert!(reg.eject_inactive(&policy, &missed).is_empty());
+        assert!(reg.eject_inactive(&policy, &missed, 1).is_empty());
     }
 
     #[test]
@@ -2468,7 +2795,7 @@ mod tests {
             (a[4], 5),
             (a[5], 5),
         ]);
-        assert_eq!(reg.eject_inactive(&policy, &missed), vec![a[1]]);
+        assert_eq!(reg.eject_inactive(&policy, &missed, 1), vec![a[1]]);
     }
 
     fn registry_with_stakes(stakes: &[u128]) -> (ValidatorRegistry, Vec<Address>) {
@@ -2487,6 +2814,131 @@ mod tests {
         (reg, addrs)
     }
 
+    fn waits(cap_epochs: u64, absent: &[Address]) -> DeferredRemoval {
+        DeferredRemoval {
+            cap_epochs,
+            absent: absent.iter().copied().collect(),
+        }
+    }
+
+    /// Four validators and one of them slashed: the three that remain are
+    /// below the launch minimum, so it keeps its seat, still counted in the
+    /// active set, until a replacement is active; then the next boundary
+    /// jails it for the full term.
+    #[test]
+    fn a_slashed_validator_the_set_cannot_lose_keeps_its_seat_until_a_replacement_is_active() {
+        let (reg, a) = active_registry(4);
+        assert!(reg.jail_deferred(&a[0], 10, &waits(50, &[])).unwrap());
+        let held = reg.get(&a[0]).unwrap();
+        assert_eq!(held.status, ValidatorRegistryStatus::JailedPending);
+        assert_eq!(held.jailed_until_epoch, Some(60));
+        assert!(held.status.counts_toward_active());
+        assert_eq!(reg.active_set_size(), 4);
+        // Slashed again while it waits: nothing changes.
+        assert!(reg.jail_deferred(&a[0], 11, &waits(50, &[])).unwrap());
+        assert_eq!(reg.get(&a[0]).unwrap().jailed_until_epoch, Some(60));
+        assert!(reg.request_exit(&a[0]).is_err());
+        assert!(reg.settle_pending_jails(11, &Default::default()).is_empty());
+
+        let (ck, pk, nk) = make_keys();
+        let replacement = make_address(9);
+        reg.register_candidate(
+            replacement,
+            ck,
+            pk,
+            nk,
+            replacement,
+            DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+            11,
+            String::new(),
+        )
+        .unwrap();
+        for e in 12..=14 {
+            reg.compute_epoch_transition(e);
+        }
+        assert_eq!(
+            reg.get(&replacement).unwrap().status,
+            ValidatorRegistryStatus::Active
+        );
+        assert_eq!(
+            reg.settle_pending_jails(15, &Default::default()),
+            vec![a[0]]
+        );
+        let jailed = reg.get(&a[0]).unwrap();
+        assert_eq!(jailed.status, ValidatorRegistryStatus::Jailed);
+        assert_eq!(jailed.exited_at_epoch, Some(15));
+        assert_eq!(
+            jailed.jailed_until_epoch,
+            Some(15 + DEFAULT_JAIL_TERM_EPOCHS)
+        );
+        assert!(reg.settle_pending_jails(16, &Default::default()).is_empty());
+    }
+
+    /// Nothing replaces it: at the cap it leaves regardless.
+    #[test]
+    fn a_seat_kept_after_a_slash_is_given_up_at_the_cap_whatever_the_set() {
+        let (reg, a) = active_registry(4);
+        assert!(reg.jail_deferred(&a[0], 10, &waits(3, &[])).unwrap());
+        assert!(reg.settle_pending_jails(11, &Default::default()).is_empty());
+        assert!(reg.settle_pending_jails(12, &Default::default()).is_empty());
+        assert_eq!(
+            reg.settle_pending_jails(13, &Default::default()),
+            vec![a[0]]
+        );
+        assert_eq!(
+            reg.get(&a[0]).unwrap().status,
+            ValidatorRegistryStatus::Jailed
+        );
+    }
+
+    /// A set that holds the launch arithmetic without the slashed validator
+    /// loses it at once, as before the rule.
+    #[test]
+    fn a_slashed_validator_the_set_can_lose_is_jailed_at_once() {
+        let (reg, a) = active_registry(5);
+        assert!(!reg.jail_deferred(&a[0], 10, &waits(50, &[])).unwrap());
+        let jailed = reg.get(&a[0]).unwrap();
+        assert_eq!(jailed.status, ValidatorRegistryStatus::Jailed);
+        assert_eq!(
+            jailed.jailed_until_epoch,
+            Some(10 + DEFAULT_JAIL_TERM_EPOCHS)
+        );
+        assert_eq!(reg.active_set_size(), 4);
+    }
+
+    /// A member that signed nothing in the last epoch does not count as live
+    /// when the remaining set is judged. Seven validators with one absent:
+    /// six remain, five live, and the loss of one more leaves four of six,
+    /// which is no quorum, so the slashed one waits. Eight with one absent
+    /// have that spare and jail at once. When the absent member is back, the
+    /// boundary jails the one that waited.
+    #[test]
+    fn an_absent_member_counts_against_the_set_that_would_remain() {
+        let (reg, a) = active_registry(8);
+        assert!(!reg.jail_deferred(&a[0], 10, &waits(50, &[a[1]])).unwrap());
+
+        let (reg, a) = active_registry(7);
+        assert!(reg.jail_deferred(&a[0], 10, &waits(50, &[a[1]])).unwrap());
+        let absent: std::collections::HashSet<Address> = [a[1]].into_iter().collect();
+        assert!(reg.settle_pending_jails(11, &absent).is_empty());
+        assert_eq!(
+            reg.settle_pending_jails(12, &Default::default()),
+            vec![a[0]]
+        );
+    }
+
+    /// A second slashed validator is judged against the set without the
+    /// first: neither is counted as remaining for the other.
+    #[test]
+    fn two_slashed_validators_are_not_counted_as_remaining_for_each_other() {
+        let (reg, a) = active_registry(5);
+        assert!(!reg.jail_deferred(&a[0], 10, &waits(50, &[])).unwrap());
+        // Four remain; without the second, three.
+        assert!(reg.jail_deferred(&a[1], 10, &waits(50, &[])).unwrap());
+        assert_eq!(reg.active_set_size(), 4);
+        assert!(reg.settle_pending_jails(11, &Default::default()).is_empty());
+    }
+
     /// Counterexample from the membership model (bug 1): with a floor below
     /// the launch minimum, validators absent one after another used to shrink
     /// an accepted set of 5 to 3, which has no spare.
@@ -2498,7 +2950,7 @@ mod tests {
             keep_active_at_least: 1, // a floor far below the launch minimum
         };
         let missed: std::collections::HashMap<_, _> = a.iter().map(|x| (*x, 9)).collect();
-        let ejected = reg.eject_inactive(&policy, &missed);
+        let ejected = reg.eject_inactive(&policy, &missed, 1);
         assert_eq!(ejected.len(), 1, "5 accepted members lose one, not more");
         let left: Vec<_> = a
             .iter()
@@ -2524,7 +2976,7 @@ mod tests {
             .enumerate()
             .map(|(i, x)| (*x, 10 - i as u64))
             .collect();
-        reg.eject_inactive(&policy, &missed);
+        reg.eject_inactive(&policy, &missed, 1);
         let stakes: Vec<u128> = a
             .iter()
             .filter(|x| reg.get(x).unwrap().status == ValidatorRegistryStatus::Active)
@@ -2548,7 +3000,7 @@ mod tests {
             keep_active_at_least: 1,
         };
         let missed = std::collections::HashMap::from([(a[0], 9), (a[4], 5)]);
-        let ejected = reg.eject_inactive(&policy, &missed);
+        let ejected = reg.eject_inactive(&policy, &missed, 1);
         assert_eq!(ejected, vec![a[4]]);
         assert_eq!(
             reg.get(&a[0]).unwrap().status,
@@ -2565,7 +3017,7 @@ mod tests {
             keep_active_at_least: 1,
         };
         let missed: std::collections::HashMap<_, _> = a.iter().map(|x| (*x, 9)).collect();
-        assert!(reg.eject_inactive(&policy, &missed).is_empty());
+        assert!(reg.eject_inactive(&policy, &missed, 1).is_empty());
     }
 
     /// With one more validator than the governed floor, exactly one goes.
@@ -2577,7 +3029,7 @@ mod tests {
             keep_active_at_least: 5,
         };
         let missed: std::collections::HashMap<_, _> = a.iter().map(|x| (*x, 9)).collect();
-        assert_eq!(reg.eject_inactive(&policy, &missed).len(), 1);
+        assert_eq!(reg.eject_inactive(&policy, &missed, 1).len(), 1);
     }
 
     /// A registry whose validators hold no stake has no voting power: the
@@ -2590,7 +3042,7 @@ mod tests {
             keep_active_at_least: 1,
         };
         let missed: std::collections::HashMap<_, _> = a.iter().map(|x| (*x, 9)).collect();
-        assert!(reg.eject_inactive(&policy, &missed).is_empty());
+        assert!(reg.eject_inactive(&policy, &missed, 1).is_empty());
     }
 
     #[test]
@@ -2609,6 +3061,132 @@ mod tests {
         assert!(!reg.set_without_is_accepted(&a[0])); // 3 members: below the minimum
         let (reg7, b) = active_registry(7);
         assert!(reg7.set_without_is_accepted(&b[0]));
+    }
+
+    /// Voluntary exits wait while they would leave the seated set below the
+    /// launch arithmetic; the stake stays counted until the set can spare them.
+    #[test]
+    fn exits_that_would_break_the_launch_rule_are_held() {
+        let (reg, a) = active_registry(7);
+        reg.set_hold_unsafe_exits(true);
+        for addr in a.iter().take(4) {
+            reg.request_exit(addr).unwrap();
+        }
+        for epoch in 10..20 {
+            reg.compute_epoch_transition(epoch);
+        }
+        let seated: Vec<u128> = a
+            .iter()
+            .filter_map(|x| reg.get(x))
+            .filter(|e| e.status != ValidatorRegistryStatus::Exited)
+            .map(|e| tenzro_types::launch_rule::voting_power(e.self_stake))
+            .collect();
+        assert!(
+            tenzro_types::launch_rule::all_live_set_accepted(&seated),
+            "{} validators are still seated",
+            seated.len()
+        );
+        assert!(seated.len() < 7, "the exits the rule allows still go");
+    }
+
+    fn exited_among(reg: &ValidatorRegistry, a: &[Address]) -> Vec<Address> {
+        a.iter()
+            .filter(|x| {
+                reg.get(x)
+                    .is_some_and(|e| e.status == ValidatorRegistryStatus::Exited)
+            })
+            .copied()
+            .collect()
+    }
+
+    /// The exits the hold lets through are the first ones in address order,
+    /// the same on every registry.
+    #[test]
+    fn the_held_exits_are_the_later_addresses_and_the_same_everywhere() {
+        let run = || {
+            let (reg, a) = active_registry(7);
+            reg.set_hold_unsafe_exits(true);
+            for addr in a.iter().take(4) {
+                reg.request_exit(addr).unwrap();
+            }
+            for epoch in 10..20 {
+                reg.compute_epoch_transition(epoch);
+            }
+            (exited_among(&reg, &a), a)
+        };
+        let (first, a) = run();
+        let (second, _) = run();
+        assert_eq!(first, second);
+        assert!(!first.is_empty() && first.len() < 4);
+        assert_eq!(first, a[..first.len()].to_vec());
+    }
+
+    /// A set that already fails the rule holds nobody back, or its members
+    /// could never leave.
+    #[test]
+    fn a_set_that_already_fails_the_rule_holds_no_exit() {
+        let (reg, a) = active_registry(3);
+        reg.set_hold_unsafe_exits(true);
+        reg.request_exit(&a[0]).unwrap();
+        for epoch in 10..14 {
+            reg.compute_epoch_transition(epoch);
+        }
+        assert_eq!(exited_among(&reg, &a), vec![a[0]]);
+    }
+
+    /// A validator ejected for inactivity leaves even where a voluntary exit
+    /// would be held: a validator that is gone must not stay counted.
+    #[test]
+    fn an_ejected_validator_leaves_despite_the_hold() {
+        let (reg, a) = active_registry(7);
+        reg.set_hold_unsafe_exits(true);
+        let policy = InactivityPolicy {
+            max_missed_epochs: 1,
+            keep_active_at_least: 1,
+        };
+        let missed: std::collections::HashMap<_, _> = [(a[6], 9)].into_iter().collect();
+        assert_eq!(reg.eject_inactive(&policy, &missed, 5), vec![a[6]]);
+        for addr in a.iter().take(4) {
+            reg.request_exit(addr).unwrap();
+        }
+        for epoch in 10..20 {
+            reg.compute_epoch_transition(epoch);
+        }
+        assert!(exited_among(&reg, &a).contains(&a[6]));
+    }
+
+    /// Turning the hold off again lets every requested exit complete.
+    #[test]
+    fn a_hold_switched_off_again_holds_nothing() {
+        let (reg, a) = active_registry(7);
+        reg.set_hold_unsafe_exits(true);
+        reg.set_hold_unsafe_exits(false);
+        for addr in a.iter().take(4) {
+            reg.request_exit(addr).unwrap();
+        }
+        for epoch in 10..20 {
+            reg.compute_epoch_transition(epoch);
+        }
+        assert_eq!(exited_among(&reg, &a).len(), 4);
+    }
+
+    /// Without the hold (the gate not yet in force) every requested exit
+    /// completes as before.
+    #[test]
+    fn without_the_hold_every_requested_exit_completes() {
+        let (reg, a) = active_registry(7);
+        for addr in a.iter().take(4) {
+            reg.request_exit(addr).unwrap();
+        }
+        for epoch in 10..20 {
+            reg.compute_epoch_transition(epoch);
+        }
+        let exited = a
+            .iter()
+            .filter_map(|x| reg.get(x))
+            .filter(|e| e.status == ValidatorRegistryStatus::Exited)
+            .count();
+        assert_eq!(exited, 4);
     }
 
     #[test]
@@ -2711,6 +3289,22 @@ mod tests {
             (e.exited_at_epoch, e.jailed_until_epoch),
             (Some(2), Some(12))
         );
+    }
+
+    #[test]
+    fn a_jailed_validator_is_told_the_contact_and_the_reinstate_command() {
+        let (reg, a) = jailed_registry(10);
+        let command = format!(
+            "tenzro governance propose-reinstate-validator --account {}",
+            hex::encode(a.as_bytes())
+        );
+        let remedy = jailed_remedy(&a, reg.get(&a).unwrap().jailed_until_epoch);
+        assert!(remedy.contains("epoch 12"), "{remedy}");
+        let refused = reg.request_exit(&a).unwrap_err().to_string();
+        for text in [&remedy, &refused] {
+            assert!(text.contains(VALIDATOR_CONTACT), "{text}");
+            assert!(text.contains(&command), "{text}");
+        }
     }
 
     #[test]
@@ -3317,16 +3911,16 @@ mod tests {
                 String::new(),
             )
         };
-        assert_eq!(seed(&reg).unwrap(), true);
-        assert_eq!(seed(&reg).unwrap(), false, "present and active");
+        assert!(seed(&reg).unwrap());
+        assert!(!seed(&reg).unwrap(), "present and active");
         reg.request_key_rotation(&a, vec![5u8; 1952], vec![4u8; 65])
             .unwrap();
-        assert_eq!(seed(&reg).unwrap(), false, "with a rotation waiting");
+        assert!(!seed(&reg).unwrap(), "with a rotation waiting");
         reg.request_exit(&a).unwrap();
-        assert_eq!(seed(&reg).unwrap(), false, "leaving");
+        assert!(!seed(&reg).unwrap(), "leaving");
         reg.compute_epoch_transition(1);
         assert_eq!(reg.get(&a).unwrap().status, ValidatorRegistryStatus::Exited);
-        assert_eq!(seed(&reg).unwrap(), false, "exited");
+        assert!(!seed(&reg).unwrap(), "exited");
     }
 
     /// A sequence counter that is not a number stops the write of a record

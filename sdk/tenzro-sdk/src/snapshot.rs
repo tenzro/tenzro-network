@@ -70,6 +70,11 @@ impl SnapshotClient {
 pub struct SnapshotSummary {
     /// Height of the committed state.
     pub height: u64,
+    /// Height of the block that commits the state root: the
+    /// `--checkpoint-height` a joining node passes to restore this snapshot.
+    pub checkpoint_height: u64,
+    /// Hash of that block (hex, `0x`-prefixed): the `--checkpoint-hash`.
+    pub checkpoint_hash: String,
     /// State root at that height.
     pub state_root: String,
     /// BLAKE3 hash (hex) of the manifest blob.

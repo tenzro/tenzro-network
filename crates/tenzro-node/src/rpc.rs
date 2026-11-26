@@ -30,14 +30,8 @@ use tenzro_model::hf_download::{
     ArtifactSpec, DownloadProgress, DownloadState, HfArtifactDownloader,
 };
 use tenzro_model::{
-    ChatMessage as ModelChatMessage, GenerationConfig, OnnxTextEmbeddingEntry,
-    ToolDefinition as RuntimeToolDefinition, get_audio_catalog, get_audio_model_by_id,
-    get_detection_catalog, get_detection_model_by_id, get_embed_catalog, get_embed_model_by_id,
-    get_forecast_catalog, get_forecast_model_by_id, get_model_by_id, get_model_catalog,
-    get_segmentation_catalog, get_segmentation_model_by_id, get_text_embedding_catalog,
-    get_text_embedding_model_by_id, get_text_segmentation_catalog,
-    get_text_segmentation_model_by_id, get_video_catalog, get_vision_catalog,
-    get_vision_model_by_id,
+    Catalog, ChatMessage as ModelChatMessage, GenerationConfig, OnnxTextEmbeddingEntry,
+    ToolDefinition as RuntimeToolDefinition,
 };
 #[cfg(feature = "inference")]
 use tenzro_model::{
@@ -224,8 +218,12 @@ impl RpcServer {
         // restart are driven again.
         crate::network_legs::resume(&self.node);
 
-        // Exactly the configured browser origins, or none.
-        let cors = crate::http_surface::cors_layer(&self.node.config().cors_allowed_origins);
+        // The configured browser origins, and the pages pairing admits.
+        let paging = self.node.clone();
+        let cors = crate::http_surface::cors_layer_with(
+            &self.node.config().cors_allowed_origins,
+            move |origin| crate::pairing_rpc::cors_admits(&paging, origin),
+        );
 
         // Open routes (always accessible without payment)
         let node_state = self.node.clone();
@@ -484,17 +482,42 @@ async fn handle_rpc_get(State(node): State<Arc<TenzroNode>>) -> impl IntoRespons
     let status = node.status().await;
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": {
-                "node": "tenzro",
-                "version": "0.1.0",
-                "status": status.state,
-                "block_height": status.block_height,
-                "peer_count": status.peer_count,
-            }
-        })),
+        Json(rpc_get_body(
+            &status.state,
+            status.block_height,
+            status.peer_count,
+        )),
     )
+}
+
+/// The body of the GET health answer: this binary's version and where the
+/// node stands.
+fn rpc_get_body(state: &str, block_height: u64, peer_count: u64) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "node": "tenzro",
+            "version": crate::VERSION,
+            "status": state,
+            "block_height": block_height,
+            "peer_count": peer_count,
+        }
+    })
+}
+
+#[cfg(test)]
+mod rpc_get_tests {
+    use super::*;
+
+    #[test]
+    fn the_get_health_answer_states_the_version_of_this_binary() {
+        let body = rpc_get_body("running", 7, 3);
+        assert_eq!(body["result"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["result"]["node"], "tenzro");
+        assert_eq!(body["result"]["status"], "running");
+        assert_eq!(body["result"]["block_height"], 7);
+        assert_eq!(body["result"]["peer_count"], 3);
+    }
 }
 
 /// Per-request authentication context extracted from HTTP headers.
@@ -570,6 +593,53 @@ async fn handle_rpc_post(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    answer_rpc_post(&node, &headers, scheme, None, payload).await
+}
+
+#[cfg(feature = "paired-devices")]
+/// Handle POST requests on the paired-device listener: the same dispatch and
+/// the same gates, for the methods that listener serves. It terminates TLS
+/// itself, so a caller always dialled `https`.
+async fn handle_paired_device_post(
+    State(node): State<Arc<TenzroNode>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let served = Some(crate::paired_listener::SERVED_METHODS);
+    answer_rpc_post(&node, &headers, "https", served, payload).await
+}
+
+/// The refusal for a method outside `served`, when a listener serves a fixed
+/// list: the answer an undispatched method gets.
+fn unserved(served: Option<&[&str]>, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+    if served?.contains(&request.method.as_str()) {
+        return None;
+    }
+    Some(JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id: request.id.clone(),
+        result: None,
+        error: Some(JsonRpcError {
+            code: -32601,
+            message: format!("Method not found: {}", request.method),
+            data: None,
+        }),
+    })
+}
+
+/// Answers one JSON-RPC POST, single or batch, from a caller who dialled
+/// `scheme`. With `served`, only those methods are dispatched.
+async fn answer_rpc_post(
+    node: &Arc<TenzroNode>,
+    headers: &HeaderMap,
+    scheme: &str,
+    served: Option<&[&str]>,
+    payload: Value,
+) -> (StatusCode, Json<Value>) {
     // Reconstruct the `htu` for DPoP verification from the request as the
     // *client* saw it, per RFC 9449 §4.3.
     //
@@ -587,21 +657,17 @@ async fn handle_rpc_post(
     // scheme through a reverse proxy. Falling back to the configured address
     // keeps behaviour defined for a request that arrives without `Host`
     // (HTTP/1.0), which cannot be DPoP-authenticated anyway.
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
     let authority = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(|h| h.to_string())
         .unwrap_or_else(|| node.config().rpc_addr.to_string());
     let http_uri = format!("{scheme}://{authority}/");
-    let auth_ctx = AuthContext::from_headers(&headers, "POST", &http_uri);
+    let auth_ctx = AuthContext::from_headers(headers, "POST", &http_uri);
 
     // Support batch requests (JSON array)
     if let Some(batch) = payload.as_array() {
-        if let Some(refusal) = batch_refusal(&node, batch.len()) {
+        if let Some(refusal) = batch_refusal(node, batch.len()) {
             return (StatusCode::OK, Json(refusal));
         }
         let mut responses = Vec::new();
@@ -609,7 +675,10 @@ async fn handle_rpc_post(
             match serde_json::from_value::<JsonRpcRequest>(item.clone()) {
                 Ok(request) => {
                     debug!("RPC batch request: {}", request.method);
-                    let response = admit_and_run(&node, Surface::Rpc, request, &auth_ctx).await;
+                    let response = match unserved(served, &request) {
+                        Some(refusal) => refusal,
+                        None => admit_and_run(node, Surface::Rpc, request, &auth_ctx).await,
+                    };
                     responses.push(serde_json::to_value(response).unwrap_or(Value::Null));
                 }
                 Err(e) => {
@@ -636,7 +705,10 @@ async fn handle_rpc_post(
     match serde_json::from_value::<JsonRpcRequest>(payload) {
         Ok(request) => {
             debug!("RPC request: {}", request.method);
-            let response = admit_and_run(&node, Surface::Rpc, request, &auth_ctx).await;
+            let response = match unserved(served, &request) {
+                Some(refusal) => refusal,
+                None => admit_and_run(node, Surface::Rpc, request, &auth_ctx).await,
+            };
             (
                 StatusCode::OK,
                 Json(serde_json::to_value(response).unwrap()),
@@ -660,6 +732,40 @@ async fn handle_rpc_post(
             )
         }
     }
+}
+
+#[cfg(feature = "paired-devices")]
+/// Body ceiling on the paired-device listener: a sign-in, a pairing or a read.
+const PAIRED_DEVICE_BODY_LIMIT: usize = 64 * 1024;
+
+#[cfg(feature = "paired-devices")]
+/// What the paired-device listener serves: the JSON-RPC root for its method
+/// list and the signed publication of its certificates, under the request
+/// origin capture, host check and per-address floor of the RPC listener.
+pub(crate) fn paired_device_routes(node: &Arc<TenzroNode>) -> Router {
+    Router::new()
+        .route("/", post(handle_paired_device_post))
+        .route("/certificates", get(crate::paired_listener::certificates))
+        .with_state(node.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(
+            PAIRED_DEVICE_BODY_LIMIT,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            (node.clone(), crate::admin_audit::Transport::Http),
+            crate::admin_audit::capture_http,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            node.http_surface().clone(),
+            crate::http_surface::require_known_host,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            crate::ip_rate_limit::IpRateLimiter::governed(
+                governed_address_limits(node),
+                node.http_surface().clone(),
+                crate::ip_rate_limit::Answer::JsonRpc,
+            ),
+            crate::ip_rate_limit::ip_rate_limit,
+        ))
 }
 
 /// Record a loaded multi-modal model as served.
@@ -903,8 +1009,16 @@ async fn admit_and_run(
     request: JsonRpcRequest,
     auth_ctx: &AuthContext,
 ) -> JsonRpcResponse {
+    if let Err(error) = crate::pairing_rpc::origin_admits(node, &request.method) {
+        return JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: None,
+            error: Some(error),
+        };
+    }
     if node.admin_audit().audits(&request.method) {
-        let claims = crate::access::proved_token(node, auth_ctx);
+        let claims = crate::access::proved_token_of(node, auth_ctx, &request.method);
         return crate::admin_audit::run_audited(node, surface, request, auth_ctx, claims).await;
     }
     match pre_dispatch(node, surface, &request, auth_ctx).await {
@@ -965,6 +1079,19 @@ pub(crate) fn inference_admission_refusal(
         // else is refused rather than served free, as JSON-RPC has no x402
         // round trip.
         tenzro_payments::middleware::InferenceAccess::NeedPayment => {
+            // A ledger `payment` pays for itself too, once the checks its
+            // settlement runs pass for the price this call is quoted at.
+            if let Some(refusal) =
+                payment_refusal(node, request, admission.quoted_price(surface, caller_did))
+            {
+                return refusal.map(|reason| JsonRpcError {
+                    code: -32001,
+                    message: format!("the payment would not pay for this call: {reason}"),
+                    data: Some(serde_json::json!({
+                        "code": tenzro_payments::middleware::refusal_code(402),
+                    })),
+                });
+            }
             match voucher_refusal(node, request) {
                 Some(None) => None,
                 Some(Some(reason)) => Some(JsonRpcError {
@@ -1015,6 +1142,47 @@ fn voucher_refusal(node: &Arc<TenzroNode>, request: &JsonRpcRequest) -> Option<O
             tenzro_payments::gateway::RailOutcome::Pending { reference: why }
             | tenzro_payments::gateway::RailOutcome::Failed { reason: why } => Err(why),
         }
+    })();
+    Some(refusal.err())
+}
+
+/// For a request carrying a ledger `payment`: `Some(None)` when it would
+/// settle a charge of `quoted` to the call's payee ([`voucher_payee`]) now,
+/// by the same checks its settlement runs
+/// ([`crate::ledger_payment::check_payable`]), and the payment is then held
+/// for this call, which settles `quoted`; `Some(Some(why))` when it would
+/// not: it also carries a channel voucher, `quoted` is below the network's
+/// micro-settlement floor, or another call holds its payment id. `None` when
+/// the request carries no payment.
+fn payment_refusal(
+    node: &Arc<TenzroNode>,
+    request: &JsonRpcRequest,
+    quoted: u128,
+) -> Option<Option<String>> {
+    let params = request.params.as_ref()?;
+    let value = params.get("payment")?;
+    let refusal = (|| -> std::result::Result<(), String> {
+        if params.get("channel_voucher").is_some() {
+            return Err(BOTH_PAYMENTS.to_string());
+        }
+        let floor = node.economic_policy().micro_settlement_floor;
+        if quoted < floor {
+            return Err(format!(
+                "this call is priced at {quoted}, below the network's micro-settlement floor \
+                 of {floor}: pay it with a `channel_voucher`"
+            ));
+        }
+        let payment = crate::ledger_payment::parse_payment(value).map_err(|e| e.message)?;
+        let payee = voucher_payee(node, request)?;
+        crate::ledger_payment::check_payable(
+            node,
+            &payment,
+            payee,
+            quoted,
+            node.declared_platform_fee(),
+        )
+        .map_err(|e| e.message)?;
+        node.admitted_payments().admit(&payment.payment_id, quoted)
     })();
     Some(refusal.err())
 }
@@ -1207,14 +1375,6 @@ async fn dispatch_embedded_single(
 /// pass it on.
 /// Normalize JSON-RPC `params` so handlers can always read named fields.
 ///
-/// JSON-RPC 2.0 allows either positional (array) or named (object) params.
-/// Most SDKs that wrap a single object argument send it positionally as
-/// `[{...}]`, but our handlers historically read named fields via
-/// `params.get("foo")`. Without this normalization, calls like
-/// `tenzro_registerAgent` with array-wrapped params fail with misleading
-/// "Missing X" errors even though the field is present inside the array's
-/// first element. This helper unwraps the single-element-array case so the
-/// rest of the handler tree only has to support the object form.
 /// Map a runtime `ModelError` to a caller-safe message.
 ///
 /// The `Display` impl of several `ModelError` variants embeds internal
@@ -1423,6 +1583,7 @@ async fn dispatch_request(
         // read-only reflectors for outstanding probes + manager parameters.
         "tenzro_slaIssueProbe" => handle_sla_issue_probe(node, request.params).await,
         "tenzro_slaListOutstandingProbes" => handle_sla_list_outstanding_probes(node).await,
+        "tenzro_slaGetEnergy" => handle_sla_get_energy(node).await,
         "tenzro_slaGetParams" => handle_sla_get_params(node).await,
         "tenzro_slaVerdict" => handle_sla_verdict(node, request.params).await,
 
@@ -1527,17 +1688,18 @@ async fn dispatch_request(
             crate::device_rpc::handle_transfer_machine_ownership(node, request.params.clone()).await
         }
         "tenzro_getSupplyMetrics" => handle_get_supply_metrics(node).await,
-        "tenzro_getBurnRateRecommendation" => handle_get_burn_rate_recommendation(node).await,
 
         // Work-gated rewards and vesting, read from consensus state. Claims
         // and vesting releases are `Funding` transactions (`claim_rewards`,
         // `release_vesting`) signed by the earner.
         "tenzro_getRewardSchedule" => handle_get_reward_schedule(node),
+        "tenzro_getRpcProviderLeg" => handle_get_rpc_provider_leg(node, request.params),
         "tenzro_getRewardEpoch" => handle_get_reward_epoch(node, request.params),
         "tenzro_getFeeRate" => handle_get_fee_rate(node, request.params).await,
         "tenzro_getEconomyMetrics" => handle_get_economy_metrics(node, request.params),
         "tenzro_listRewardCoupons" => handle_list_reward_coupons(node, request.params),
         "tenzro_getHardwareLevel" => handle_get_hardware_level(node, request.params),
+        "tenzro_fleetHostEvidence" => handle_fleet_host_evidence(node, request.params).await,
         "tenzro_getVesting" => handle_get_vesting(node, request.params),
 
         "tenzro_openPaymentChannel" => crate::payment_channels::open(node, request.params).await,
@@ -1579,14 +1741,27 @@ async fn dispatch_request(
         "tenzro_commitChallengeVote" => handle_commit_challenge_vote(node, request.params).await,
         "tenzro_revealChallengeVote" => handle_reveal_challenge_vote(node, request.params).await,
         "tenzro_finalizeChallenge" => handle_finalize_challenge(node, request.params).await,
+        "tenzro_fileChallengeFault" => handle_file_challenge_fault(node, request.params).await,
         "tenzro_signChallengeVote" => {
             crate::challenge_rpc::handle_sign_challenge_vote(node, request.params).await
+        }
+        "tenzro_getChallengeInputs" => {
+            crate::challenge_rpc::handle_challenge_inputs(node, request.params).await
+        }
+        "tenzro_reexecuteChallenge" => {
+            crate::challenge_rpc::handle_reexecute_challenge(node, request.params).await
+        }
+        "tenzro_listSeatDuties" => {
+            crate::challenge_rpc::handle_list_seat_duties(node, request.params).await
         }
         "tenzro_auditInferenceChallenge" => {
             crate::challenge_rpc::handle_audit_challenge(node, request.params).await
         }
         "tenzro_verifyInferenceReceipt" => {
             crate::verifiable_inference::handle_verify_receipt(node, request.params)
+        }
+        "tenzro_verifyJurisdictionReceipt" => {
+            crate::root_signatures::handle_verify_jurisdiction_receipt(node, request.params)
         }
 
         // Agent methods
@@ -1603,6 +1778,7 @@ async fn dispatch_request(
         "tenzro_getAgentQuarantine" => {
             crate::agent_audit::handle_get_quarantine(node, request.params).await
         }
+        "tenzro_resolvePaymentIntent" => handle_resolve_payment_intent(request.params),
         "tenzro_resolveAgentKey" => {
             crate::agent_http_signature::handle_resolve(node, request.params).await
         }
@@ -1645,6 +1821,9 @@ async fn dispatch_request(
 
         // Identity methods (TDIP)
         "tenzro_registerIdentity" => handle_register_identity(node, request.params).await,
+        "tenzro_recordExecutionReceipt" => {
+            handle_record_execution_receipt(node, request.params).await
+        }
         "tenzro_registerMachineIdentity" => {
             handle_register_machine_identity(node, request.params).await
         }
@@ -1655,6 +1834,13 @@ async fn dispatch_request(
         // reaching it, so a caller holding any one of its five identifiers
         // can get the others without knowing which surface to ask.
         "tenzro_nodeDidDocument" => handle_node_did_document(node).await,
+        // Where application devices reach the node, and what it carried.
+        #[cfg(feature = "app-transport")]
+        "tenzro_getAppTransportInfo" => crate::app_transport::rpc::handle_info(node).await,
+        #[cfg(feature = "app-transport")]
+        "tenzro_getAppTransportUsage" => {
+            crate::app_transport::rpc::handle_usage(node, caller).await
+        }
         "tenzro_resolveIdentity" => handle_resolve_identity(node, request.params).await,
         "tenzro_listIdentities" => handle_list_identities(node).await,
         // `tenzro_updateIdentity` is the did:tenzro spec §3.3 name for a
@@ -1713,6 +1899,7 @@ async fn dispatch_request(
 
         "tenzro_peerCount" => handle_peer_count(node).await,
         "tenzro_syncing" => handle_syncing(node).await,
+        "tenzro_listConditions" => handle_list_conditions(node).await,
         "tenzro_getNetworkStats" => handle_get_network_stats(node).await,
         "tenzro_getFinalizedBlock" => handle_get_finalized_block(node).await,
         "tenzro_getFinality" => handle_get_finality(node).await,
@@ -1728,6 +1915,12 @@ async fn dispatch_request(
         "tenzro_getHandoverChain" => handle_get_handover_chain(node, request.params).await,
         "tenzro_exportConfig" => handle_export_config(node).await,
         "tenzro_gracefulExit" => handle_graceful_exit(node, request.params).await,
+        "tenzro_restartNode" => handle_restart_node(node, request.params, caller).await,
+        "tenzro_installUpdate" => handle_install_update(node, request.params, caller).await,
+        "tenzro_submitApproval" => crate::conditions::submit_approval(node, request.params).await,
+        "tenzro_acknowledgeCondition" => {
+            crate::conditions::acknowledge_condition(node, request.params).await
+        }
         "tenzro_listSnapshots" => crate::state_rpc::list_snapshots(node).await,
         "tenzro_getSnapshotManifest" => {
             crate::state_rpc::get_snapshot_manifest(node, request.params).await
@@ -1897,6 +2090,9 @@ async fn dispatch_request(
         "tenzro_getKeystore" => {
             crate::keystore_rpc::handle_get_keystore(node, request.params).await
         }
+        "tenzro_getAccountSigningKey" => {
+            crate::keystore_rpc::handle_get_account_signing_key(node, request.params).await
+        }
         "tenzro_resolveCredential" => {
             crate::keystore_rpc::handle_resolve_credential(node, request.params).await
         }
@@ -1912,6 +2108,12 @@ async fn dispatch_request(
         // drift from what the dispatcher actually serves.
         "tenzro_listRpcMethods" => {
             crate::rpc_gateway::handle_list_rpc_methods(request.params).await
+        }
+        "tenzro_getStorageHoldingReceipt" => {
+            crate::storage_placement::handle_holding_receipt(node, request.params).await
+        }
+        "tenzro_listStorageProviders" => {
+            crate::storage_placement::handle_list_storage_providers(node).await
         }
         "tenzro_storageStatus" => handle_storage_status(node).await,
         "tenzro_computePriceFeed" => handle_compute_price_feed(node, request.params).await,
@@ -1945,23 +2147,15 @@ async fn dispatch_request(
         "tenzro_listSealedModels" => handle_list_sealed_models(node).await,
         "tenzro_modelRecipientKey" => handle_model_recipient_key(node).await,
         "tenzro_chat" => handle_chat(node, request.params, caller).await,
-        // Intent routing (model selection tier). `routeIntent` is discovery
-        // only — returns the chosen model and fallback chain without dispatch
-        // or spend. `chatByIntent` resolves the intent, then dispatches through
-        // the same chat path as a named-model request.
-        "tenzro_routeIntent" => handle_route_intent(node, request.params).await,
-        "tenzro_chatByIntent" => handle_chat_by_intent(node, request.params).await,
         "tenzro_prefixProbe" => {
             crate::prefix_probe::handle_prefix_probe(node, request.params).await
         }
-        "tenzro_recordRouteOutcome" => handle_record_route_outcome(node, request.params).await,
-        "tenzro_routeDifficultyStats" => handle_route_difficulty_stats(node, request.params).await,
         // Timeseries forecasting (ONNX runtime)
         #[cfg(feature = "inference")]
         "tenzro_loadForecastModel" => handle_load_forecast_model(node, request.params).await,
         #[cfg(feature = "inference")]
         "tenzro_unloadForecastModel" => handle_unload_forecast_model(node, request.params).await,
-        "tenzro_listForecastCatalog" => handle_list_forecast_catalog().await,
+        "tenzro_listForecastCatalog" => handle_list_forecast_catalog(node).await,
         "tenzro_forecast" => handle_forecast(node, request.params).await,
         // Vision encoders (ONNX runtime)
         #[cfg(feature = "inference")]
@@ -1971,7 +2165,7 @@ async fn dispatch_request(
         "tenzro_imageEmbed" => handle_image_embed(node, request.params).await,
         #[cfg(feature = "inference")]
         "tenzro_imageTextSimilarity" => handle_image_text_similarity(node, request.params).await,
-        "tenzro_listVisionCatalog" => handle_list_vision_catalog().await,
+        "tenzro_listVisionCatalog" => handle_list_vision_catalog(node).await,
         // Embeddings: ONNX text encoders, and pooled embedders on the Praecise engine
         #[cfg(feature = "inference")]
         "tenzro_loadTextEmbeddingModel" => {
@@ -1981,14 +2175,14 @@ async fn dispatch_request(
         "tenzro_unloadTextEmbeddingModel" => {
             handle_unload_text_embedding_model(node, request.params).await
         }
-        "tenzro_listTextEmbeddingCatalog" => handle_list_text_embedding_catalog().await,
+        "tenzro_listTextEmbeddingCatalog" => handle_list_text_embedding_catalog(node).await,
         "tenzro_textEmbed" => handle_text_embed(node, request.params).await,
         // Rerankers (Praecise engine, in process)
         #[cfg(feature = "inference")]
         "tenzro_loadRerankModel" => crate::rerank_rpc::handle_load(node, request.params).await,
         #[cfg(feature = "inference")]
         "tenzro_unloadRerankModel" => crate::rerank_rpc::handle_unload(node, request.params).await,
-        "tenzro_listRerankCatalog" => crate::rerank_rpc::handle_catalog().await,
+        "tenzro_listRerankCatalog" => crate::rerank_rpc::handle_catalog(node).await,
         "tenzro_rerank" => crate::rerank_rpc::handle_rerank(node, request.params).await,
         // Decision models (Praecise engine, in process)
         #[cfg(feature = "inference")]
@@ -1997,7 +2191,7 @@ async fn dispatch_request(
         "tenzro_unloadDecisionModel" => {
             crate::decision_rpc::handle_unload(node, request.params).await
         }
-        "tenzro_listDecisionCatalog" => crate::decision_rpc::handle_catalog().await,
+        "tenzro_listDecisionCatalog" => crate::decision_rpc::handle_catalog(node).await,
         "tenzro_decide" => crate::decision_rpc::handle_decide(node, request.params).await,
         // LoRA training (Praecise engine, in process, CUDA)
         #[cfg(feature = "inference")]
@@ -2027,7 +2221,7 @@ async fn dispatch_request(
         "tenzro_unloadSegmentationModel" => {
             handle_unload_segmentation_model(node, request.params).await
         }
-        "tenzro_listSegmentationCatalog" => handle_list_segmentation_catalog().await,
+        "tenzro_listSegmentationCatalog" => handle_list_segmentation_catalog(node).await,
         "tenzro_segment" => handle_segment(node, request.params).await,
         // Text-promptable segmentation (ONNX runtime — SAM 3 / SAM 3.1)
         #[cfg(feature = "inference")]
@@ -2038,21 +2232,21 @@ async fn dispatch_request(
         "tenzro_unloadTextSegmentationModel" => {
             handle_unload_text_segmentation_model(node, request.params).await
         }
-        "tenzro_listTextSegmentationCatalog" => handle_list_text_segmentation_catalog().await,
+        "tenzro_listTextSegmentationCatalog" => handle_list_text_segmentation_catalog(node).await,
         "tenzro_textSegment" => handle_text_segment(node, request.params).await,
         // Object detection (ONNX runtime — RF-DETR, D-FINE)
         #[cfg(feature = "inference")]
         "tenzro_loadDetectionModel" => handle_load_detection_model(node, request.params).await,
         #[cfg(feature = "inference")]
         "tenzro_unloadDetectionModel" => handle_unload_detection_model(node, request.params).await,
-        "tenzro_listDetectionCatalog" => handle_list_detection_catalog().await,
+        "tenzro_listDetectionCatalog" => handle_list_detection_catalog(node).await,
         "tenzro_detect" => handle_detect(node, request.params).await,
         // Audio ASR (ONNX runtime — Moonshine, Whisper, Parakeet, Canary, Distil-Whisper)
         #[cfg(feature = "inference")]
         "tenzro_loadAudioModel" => handle_load_audio_model(node, request.params).await,
         #[cfg(feature = "inference")]
         "tenzro_unloadAudioModel" => handle_unload_audio_model(node, request.params).await,
-        "tenzro_listAudioCatalog" => handle_list_audio_catalog().await,
+        "tenzro_listAudioCatalog" => handle_list_audio_catalog(node).await,
         "tenzro_transcribe" => handle_transcribe(node, request.params).await,
         // Video encoders (ONNX runtime — V-JEPA 2 catalog; loader pending per-model ONNX export)
         #[cfg(feature = "inference")]
@@ -2063,10 +2257,10 @@ async fn dispatch_request(
         "tenzro_loadMediaModel" => crate::media_models::handle_load(node, request.params).await,
         #[cfg(feature = "inference")]
         "tenzro_unloadMediaModel" => crate::media_models::handle_unload(node, request.params).await,
-        "tenzro_listVideoCatalog" => handle_list_video_catalog().await,
+        "tenzro_listVideoCatalog" => handle_list_video_catalog(node).await,
         "tenzro_videoEmbed" => handle_video_embed(node, request.params).await,
         // Generative image, video and audio rendered by this node's media models
-        "tenzro_mediaGen_listCatalog" => handle_media_gen_list_catalog().await,
+        "tenzro_mediaGen_listCatalog" => handle_media_gen_list_catalog(node).await,
         "tenzro_mediaGen_render" => crate::media_verify::handle_render(node, request.params).await,
         "tenzro_deleteModel" => handle_delete_model(node, request.params).await,
         "tenzro_pruneModelRegistry" => handle_prune_model_registry(node).await,
@@ -2156,6 +2350,9 @@ async fn dispatch_request(
 
         // Agent payment methods (machine-DID-keyed runtime spending policy + service payments)
         "tenzro_getAgentTerms" => handle_get_agent_terms(node, request.params).await,
+        "tenzro_getAgentTermsCredential" => {
+            handle_get_agent_terms_credential(node, request.params).await
+        }
 
         // Settlement preferences — what asset a payee is paid in.
         "tenzro_setSettlementPreference" => {
@@ -2207,6 +2404,7 @@ async fn dispatch_request(
         "tenzro_getSigningPayload" => {
             handle_transaction_signing_payload(node, request.params).await
         }
+        "tenzro_estimateGas" => handle_tenzro_estimate_gas(node, request.params).await,
         "eth_getBlockByNumber" => handle_get_block_by_number(node, request.params).await,
         "eth_getBlockByHash" => handle_get_block_by_hash(node, request.params).await,
         "eth_getBlockReceipts" => handle_get_block_receipts(node, request.params).await,
@@ -2325,6 +2523,7 @@ async fn dispatch_request(
         // Additional methods (MCP parity)
         "tenzro_verifyPayment" => crate::payment_rpc::verify(node, request.params).await,
         "tenzro_verifyZkProof" => crate::zk_rpc::handle_verify_zk_proof(node, request.params).await,
+        "tenzro_sendZkProof" => crate::zk_rpc::handle_send_zk_proof(node, request.params).await,
         "tenzro_getZkAttestation" => handle_get_zk_attestation(node, request.params).await,
         "tenzro_verifyVrfProof" => handle_verify_vrf_proof(node, request.params).await,
 
@@ -2406,7 +2605,7 @@ async fn dispatch_request(
             crate::rpc_integrations::handle_moe_replication_policy().await
         }
         "tenzro_moeCatalogShape" => {
-            crate::rpc_integrations::handle_moe_catalog_shape(request.params).await
+            crate::rpc_integrations::handle_moe_catalog_shape(node, request.params).await
         }
         // The light build runs no model, so the calls that need one here refuse.
         #[cfg(not(feature = "inference"))]
@@ -2451,7 +2650,7 @@ async fn dispatch_request(
             crate::moe::handle_moe_dispute_receipt(node, request.params).await
         }
         "tenzro_modelMetadata" => {
-            crate::rpc_integrations::handle_model_metadata(request.params).await
+            crate::rpc_integrations::handle_model_metadata(node, request.params).await
         }
         "tenzro_accessChallenge" => crate::access::handle_challenge(node, request.params).await,
         "tenzro_issueAccessToken" => crate::access::handle_issue(node, request.params).await,
@@ -2459,6 +2658,22 @@ async fn dispatch_request(
             crate::access::handle_revoke(node, request.params, caller).await
         }
         "tenzro_listAccessTokens" => crate::access::handle_list(node, caller).await,
+        "tenzro_pairDevice" => {
+            crate::pairing_rpc::handle_pair_device(node, request.params, caller).await
+        }
+        "tenzro_listPairedDevices" => {
+            crate::pairing_rpc::handle_list_paired_devices(node, caller).await
+        }
+        "tenzro_requestDeviceCode" => {
+            crate::device_code::handle_request(node, request.params).await
+        }
+        "tenzro_approveDeviceCode" => {
+            crate::device_code::handle_approve(node, request.params, caller).await
+        }
+        "tenzro_pollDeviceCode" => crate::device_code::handle_poll(node, request.params).await,
+        "tenzro_unpairDevice" => {
+            crate::pairing_rpc::handle_unpair_device(node, request.params, caller).await
+        }
         "tenzro_listAdminAudit" => crate::admin_audit::handle_list(node, request.params).await,
         "tenzro_verifyAdminAudit" => crate::admin_audit::handle_verify(node).await,
         "tenzro_getAccessPolicy" => crate::access::handle_get_policy(node, caller).await,
@@ -3142,8 +3357,9 @@ pub(crate) async fn handle_get_transaction(
 ///
 /// Everything a founding validator entry needs: the account, the two public
 /// halves of the hardware consensus key, the node key, and both keys' proofs
-/// of possession over the registration. A node without a TPM 2.0 or Secure
-/// Enclave has no entry to give.
+/// of possession over the registration. A node with no hardware consensus key
+/// (its own TPM 2.0 or Secure Enclave, or another machine's TPM through the
+/// key holder) has no entry to give.
 async fn handle_validator_public_keys(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -3608,7 +3824,7 @@ async fn handle_list_models(
     }
     list_models_modality_ok(params.as_ref())?;
 
-    let catalog = get_model_catalog();
+    let catalog = node.catalog().get_model_catalog();
     let hf_downloader = node.hf_downloader.as_ref();
 
     // Get network models from model registry (registered by remote providers)
@@ -3711,7 +3927,7 @@ async fn handle_list_models(
                 "quantization": entry.quantization,
                 "size_bytes": entry.size_bytes,
                 "min_ram_gb": entry.min_ram_gb,
-                "license": tenzro_model::catalog::entry(&entry.id).map(|e| e.licence.name),
+                "license": node.catalog().entry(&entry.id).map(|e| e.licence.name.clone()),
                 "description": entry.description,
                 "hf_repo": entry.hf_repo,
                 "downloaded": is_downloaded,
@@ -3784,11 +4000,14 @@ pub(crate) enum SettlementOutcome {
         reference: String,
         amount_wei: u128,
         provider: Address,
+        /// The escrow's payer, when the escrow could be read.
+        payer: Option<Address>,
     },
     /// Paid on the ledger by a `PayerSettle` the payer authorized.
     Ledger {
         charge: crate::ledger_payment::LedgerCharge,
         provider: Address,
+        payer: Address,
     },
     /// No settlement was attempted: zero cost, no payment offered, or the
     /// serving node has no billing wallet configured.
@@ -3796,6 +4015,15 @@ pub(crate) enum SettlementOutcome {
 }
 
 impl SettlementOutcome {
+    /// The account that paid, when one did and it is known.
+    pub(crate) fn payer(&self) -> Option<&Address> {
+        match self {
+            SettlementOutcome::Channel { payer, .. } => payer.as_ref(),
+            SettlementOutcome::Ledger { payer, .. } => Some(payer),
+            SettlementOutcome::NotApplicable => None,
+        }
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         let hex_addr = |a: &Address| format!("0x{}", hex::encode(a.as_bytes()));
         match self {
@@ -3803,18 +4031,25 @@ impl SettlementOutcome {
                 reference,
                 amount_wei,
                 provider,
+                payer,
             } => serde_json::json!({
                 "status": "settled",
                 "via": "channel",
                 "reference": reference,
                 "amount_wei": amount_wei.to_string(),
                 "provider": hex_addr(provider),
+                "payer": payer.as_ref().map(hex_addr),
             }),
-            SettlementOutcome::Ledger { charge, provider } => {
+            SettlementOutcome::Ledger {
+                charge,
+                provider,
+                payer,
+            } => {
                 let mut v = charge.to_json();
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("via".to_string(), Value::from("ledger"));
                     obj.insert("provider".to_string(), Value::from(hex_addr(provider)));
+                    obj.insert("payer".to_string(), Value::from(hex_addr(payer)));
                 }
                 v
             }
@@ -3947,6 +4182,31 @@ fn network_offer_cost(
     }
 }
 
+/// A chat call refused because its pinned jurisdiction is not met.
+pub const JURISDICTION_UNMET: i32 = -32024;
+
+/// A charge refused because it is below the network's micro-settlement floor.
+pub const BELOW_SETTLEMENT_FLOOR: i32 = -32026;
+
+/// The refusal of a charge of `cost_wei` below the micro-settlement `floor`,
+/// or `None` when it is at or above the floor.
+fn below_settlement_floor(cost_wei: u128, floor: u128) -> Option<JsonRpcError> {
+    (cost_wei < floor).then(|| JsonRpcError {
+        code: BELOW_SETTLEMENT_FLOOR,
+        message: format!(
+            "This call metered {cost_wei}, below the network's micro-settlement floor of \
+             {floor}. A charge smaller than the cost of moving it settles through a \
+             payment channel rather than its own transaction: fund an escrow, open a \
+             channel on it and pass a signed `channel_voucher`."
+        ),
+        data: Some(serde_json::json!({
+            "cost_wei": cost_wei.to_string(),
+            "micro_settlement_floor": floor.to_string(),
+            "remedy": "open_channel",
+        })),
+    })
+}
+
 /// Pays the peer that served a proxied OpenAI-shape completion.
 ///
 /// The OpenAI request schema carries no payer field, so the forwarded request
@@ -4020,6 +4280,13 @@ pub(crate) async fn settle_inference_cost(
     units: &tenzro_types::model::BillableUnits,
     cost_wei: u128,
 ) -> std::result::Result<SettlementOutcome, JsonRpcError> {
+    if payment.is_some() && channel_voucher.is_some() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: BOTH_PAYMENTS.to_string(),
+            data: None,
+        });
+    }
     if cost_wei == 0 {
         return Ok(SettlementOutcome::NotApplicable);
     }
@@ -4079,6 +4346,7 @@ pub(crate) async fn settle_inference_cost(
             reference,
             amount_wei: cost_wei,
             provider: payee,
+            payer,
         });
     }
 
@@ -4086,27 +4354,20 @@ pub(crate) async fn settle_inference_cost(
         return Ok(SettlementOutcome::NotApplicable);
     };
     let payment = crate::ledger_payment::parse_payment(payment)?;
+    // A payment admitted to pay for this call settles the charge admission
+    // checked it for, which already cleared the floor below.
+    let admitted = node.admitted_payments().charge(&payment.payment_id);
+    let cost_wei = admitted.unwrap_or(cost_wei);
 
     // A charge worth less than the gas to move it must not become its own
     // on-chain transaction. Below the governance-set floor the payer settles
     // through a micropayment channel, the path taken above, so the charge is
     // still metered exactly, it is just not moved on its own.
-    let floor = node.economic_policy().micro_settlement_floor;
-    if cost_wei < floor {
-        return Err(JsonRpcError {
-            code: -32024,
-            message: format!(
-                "This call metered {cost_wei}, below the network's micro-settlement floor of \
-                 {floor}. A charge smaller than the cost of moving it settles through a \
-                 payment channel rather than its own transaction: fund an escrow, open a \
-                 channel on it and pass a signed `channel_voucher`."
-            ),
-            data: Some(serde_json::json!({
-                "cost_wei": cost_wei.to_string(),
-                "micro_settlement_floor": floor.to_string(),
-                "remedy": "open_channel",
-            })),
-        });
+    if admitted.is_none()
+        && let Some(refusal) =
+            below_settlement_floor(cost_wei, node.economic_policy().micro_settlement_floor)
+    {
+        return Err(refusal);
     }
     let Some(provider) = payee else {
         return Ok(SettlementOutcome::NotApplicable);
@@ -4144,8 +4405,16 @@ pub(crate) async fn settle_inference_cost(
         },
     )
     .await;
-    Ok(SettlementOutcome::Ledger { charge, provider })
+    Ok(SettlementOutcome::Ledger {
+        charge,
+        provider,
+        payer: payment.payer,
+    })
 }
+
+/// The refusal of a call that carries both a ledger `payment` and a
+/// `channel_voucher`: either pays for a call, never both.
+const BOTH_PAYMENTS: &str = "a call is paid by a ledger `payment` or a `channel_voucher`, not both";
 
 #[cfg(feature = "inference")]
 async fn handle_inference_request(
@@ -4625,8 +4894,10 @@ async fn handle_da_availability(
 }
 
 /// `tenzro_daCommittee` — the current DA committee snapshot: every member's
-/// index and address, whether it is this node, and its availability score when
-/// it has been challenged.
+/// index and address, whether it is this node (the member whose registered
+/// machine key is this node's identity key), and its availability score when
+/// it has been challenged. `local_address` is null while this node is not a
+/// member.
 async fn handle_da_committee(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
     let backend = require_da_committee(node)?;
     let store = backend.custody_store();
@@ -4639,14 +4910,14 @@ async fn handle_da_committee(node: &Arc<TenzroNode>) -> std::result::Result<Valu
             serde_json::json!({
                 "index": m.index,
                 "address": format!("0x{}", hex::encode(m.address.as_bytes())),
-                "is_local": m.address == local,
+                "is_local": Some(m.address) == local,
                 "availability": store.get_availability(&m.address).map(|s| availability_score_to_json(&s)),
             })
         })
         .collect();
 
     Ok(serde_json::json!({
-        "local_address": format!("0x{}", hex::encode(local.as_bytes())),
+        "local_address": local.map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
         "count": members.len(),
         "members": members,
     }))
@@ -4800,37 +5071,29 @@ async fn handle_iroh_list_alpns(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let _ = iroh_resolver_or_err(node)?;
-    // The shared router binds these ALPNs at bind time (see the resolver's
-    // `bind_with_jsonrpc`): iroh-blobs (data plane) plus the JSON-RPC ALPNs
-    // for A2A, MCP, MoE, and inference. All are registered whenever the
-    // resolver is present — the JSON-RPC ones via bind-time trampolines that
-    // main.rs later fills with the node-backed dispatchers.
-    let mut alpns = vec![serde_json::json!({
-        "alpn": "iroh-blobs",
-        "description": "iroh-blobs BLAKE3 content-addressed transport",
-    })];
-    if node.iroh_a2a_dispatcher.is_some() {
-        alpns.push(serde_json::json!({
-            "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_A2A).to_string(),
-            "description": "A2A JSON-RPC 2.0 over iroh (mirrors POST /a2a)",
-        }));
-    }
-    if node.iroh_mcp_handler.is_some() {
-        alpns.push(serde_json::json!({
-            "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_MCP).to_string(),
-            "description": "MCP JSON-RPC over iroh (mirrors the MCP server)",
-        }));
-    }
-    alpns.push(serde_json::json!({
-        "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_MOE).to_string(),
-        "description": "Mixture-of-experts expert dispatch over iroh",
-    }));
-    if node.iroh_infer_dispatcher.is_some() {
-        alpns.push(serde_json::json!({
-            "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_INFER).to_string(),
-            "description": "Inference JSON-RPC over iroh (mirrors tenzro_chat)",
-        }));
-    }
+    let alpns: Vec<Value> = node
+        .iroh_alpns()
+        .into_iter()
+        .map(|alpn| {
+            let description = match alpn.as_bytes() {
+                b"iroh-blobs" => "iroh-blobs BLAKE3 content-addressed transport",
+                a if a == tenzro_iroh::ALPN_A2A_PQ => {
+                    "A2A JSON-RPC 2.0 over iroh (mirrors POST /a2a)"
+                }
+                a if a == tenzro_iroh::ALPN_MCP_PQ => {
+                    "MCP JSON-RPC over iroh (mirrors the MCP server)"
+                }
+                a if a == tenzro_iroh::ALPN_MOE_PQ => {
+                    "Mixture-of-experts expert dispatch over iroh"
+                }
+                a if a == tenzro_iroh::ALPN_INFER => {
+                    "Inference JSON-RPC over iroh (mirrors tenzro_chat)"
+                }
+                _ => "",
+            };
+            serde_json::json!({ "alpn": alpn, "description": description })
+        })
+        .collect();
     Ok(serde_json::json!({ "alpns": alpns }))
 }
 
@@ -4857,17 +5120,7 @@ async fn handle_iroh_get_info(node: &Arc<TenzroNode>) -> std::result::Result<Val
         ),
         None => (Vec::new(), Vec::new()),
     };
-    let mut alpns = vec!["iroh-blobs"];
-    if node.iroh_a2a_dispatcher.is_some() {
-        alpns.push("tenzro/a2a");
-    }
-    if node.iroh_mcp_handler.is_some() {
-        alpns.push("tenzro/mcp");
-    }
-    alpns.push("tenzro/moe");
-    if node.iroh_infer_dispatcher.is_some() {
-        alpns.push("tenzro/infer");
-    }
+    let alpns = node.iroh_alpns();
     Ok(serde_json::json!({
         "endpoint_id": id.to_string(),
         "endpoint_id_hex": hex::encode(id.as_bytes()),
@@ -4886,6 +5139,15 @@ pub(crate) async fn handle_iroh_publish_blob(
 ) -> std::result::Result<Value, JsonRpcError> {
     use base64::Engine as _;
     use tenzro_iroh::IrohResolver as _;
+    // A published blob stays in the store until it is released, so it is
+    // refused like any other non-essential write once the volume is short.
+    if let Some(message) = node.disk_guard().refusal("blob publish") {
+        return Err(JsonRpcError {
+            code: -32000,
+            message,
+            data: None,
+        });
+    }
     let resolver = iroh_resolver_or_err(node)?;
     let params = params.ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -4991,19 +5253,112 @@ async fn handle_iroh_resolve_tenzro_uri(
     handle_iroh_fetch_blob(node, params).await
 }
 
-// ---- Static site hosting RPCs ----------------------------------------------
-//
-// Site content is uploaded as iroh blobs via `tenzro_iroh_publishBlob`; the
-// manifest published here maps URL paths to those blob hashes. The Web API
-// serves it on the site's own hostname (an alias or a verified custom
-// domain). Every mutation is authorised by the owner's DID envelope.
+/// Key, in `CF_SETTLEMENTS`, of an external execution receipt this node
+/// recorded, by the receipt's SHA-256.
+fn execution_receipt_key(digest: &str) -> String {
+    format!("exec_receipt:{digest}")
+}
+
+/// `tenzro_recordExecutionReceipt { agent_did, platform, receipt, units?,
+/// did_envelope }`: record a receipt an outside platform gave an agent for
+/// work it ran there, signed by the agent's DID envelope over the request.
+/// The node enters the receipt's SHA-256 (never the receipt) in the agent's
+/// signed audit log, which the epoch's audit commit fixes on chain, and
+/// records it once: the same receipt sent again returns the first record
+/// with `first: false`, so whoever meters from these records counts each
+/// receipt once.
+async fn handle_record_execution_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use sha2::{Digest, Sha256};
+    let bad = |m: &str| JsonRpcError {
+        code: -32602,
+        message: m.to_string(),
+        data: None,
+    };
+    let internal = |m: String| JsonRpcError {
+        code: -32603,
+        message: m,
+        data: None,
+    };
+    let params = params.ok_or_else(|| bad("Missing params"))?;
+    let field = |k: &str| {
+        params
+            .get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    let agent_did = field("agent_did").ok_or_else(|| bad("agent_did is required"))?;
+    let platform = field("platform").ok_or_else(|| bad("platform is required"))?;
+    let receipt = field("receipt").ok_or_else(|| bad("receipt is required"))?;
+    require_did_owner(
+        node,
+        &params,
+        agent_did,
+        "tenzro_recordExecutionReceipt",
+        &tenzro_identity::envelope::request_binding(&params),
+    )
+    .await?;
+    let digest = hex::encode(Sha256::digest(receipt.as_bytes()));
+    let store = node
+        .storage()
+        .cloned()
+        .ok_or_else(|| internal("this node keeps no records".into()))?;
+    let key = execution_receipt_key(&digest);
+    if let Some(bytes) = store
+        .get(CF_SETTLEMENTS, key.as_bytes())
+        .map_err(|e| internal(e.to_string()))?
+    {
+        let mut first: Value =
+            serde_json::from_slice(&bytes).map_err(|e| internal(e.to_string()))?;
+        first["first"] = Value::Bool(false);
+        return Ok(first);
+    }
+    let signer = crate::tool_call_record::admit(node).map_err(internal)?;
+    let units = params.get("units").cloned().unwrap_or(Value::Null);
+    let args = serde_json::to_vec(&serde_json::json!({ "platform": platform, "units": units }))
+        .map_err(|e| internal(e.to_string()))?;
+    let entry = crate::tool_call_record::record(
+        node,
+        signer.as_ref(),
+        crate::tool_call_record::Call {
+            surface: crate::tool_call_record::Surface::External,
+            agent: agent_did,
+            tool: &format!("receipt:{platform}"),
+            args: &args,
+            outcome: tenzro_types::agent_audit::ActionOutcome::Allowed,
+            result: Some(digest.as_bytes()),
+            approval: None,
+            principal: crate::tool_call_record::principal_of(node, agent_did),
+        },
+    )
+    .map_err(internal)?;
+    let record = serde_json::json!({
+        "receipt_digest": digest,
+        "agent_did": agent_did,
+        "platform": platform,
+        "units": units,
+        "audit_entry": entry,
+        "recorded_at_ms": chrono::Utc::now().timestamp_millis(),
+    });
+    store
+        .put(
+            CF_SETTLEMENTS,
+            key.as_bytes(),
+            &serde_json::to_vec(&record).map_err(|e| internal(e.to_string()))?,
+        )
+        .map_err(|e| internal(e.to_string()))?;
+    let mut out = record;
+    out["first"] = Value::Bool(true);
+    Ok(out)
+}
 
 /// Verify that the caller controls `owner_did` by checking a signed DID
 /// envelope supplied in the `did_envelope` param (the hex header-value from
 /// `TenzroDidEnvelope::to_header_value`). The envelope's `did` must equal
-/// `owner_did` and the signature must validate. Mutating site operations
-/// (publish / remove) are owner-authenticated this way so a caller cannot act
-/// under another identity's `owner_did`.
+/// `owner_did` and the signature must validate, so a caller cannot act under
+/// another identity's `owner_did`.
 pub(crate) async fn require_did_owner(
     node: &Arc<TenzroNode>,
     params: &Value,
@@ -5414,6 +5769,8 @@ async fn handle_sla_issue_probe(
         "provider_did": probe.provider_did,
         "epoch": probe.epoch,
         "round": probe.round,
+        "beacon_round": probe.beacon.map(|b| b.round),
+        "beacon_mix": probe.beacon.map(|b| format!("0x{}", hex::encode(b.mix))),
         "challenge_nonce": format!("0x{}", nonce_hex),
         "deadline_ms": probe.deadline_ms,
         "vrf_pubkey": format!("0x{}", hex::encode(probe.vrf_pubkey)),
@@ -5423,7 +5780,9 @@ async fn handle_sla_issue_probe(
 /// `tenzro_slaVerdict` — the SLA verdict validators committed on chain for a
 /// provider's bond and epoch. Params: `provider_did`, `epoch` (hours since
 /// the Unix epoch). `null` until attesters holding two thirds of bonded stake
-/// have spoken.
+/// have spoken. `measured_capacity` is the stake-weighted median of what
+/// their probes measured, in the unit of the work the subject is probed
+/// with, or `null` when its probes measure none.
 async fn handle_sla_verdict(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -5463,6 +5822,7 @@ async fn handle_sla_verdict(
                 "up_stake": v.up_stake.to_string(),
                 "down_stake": v.down_stake.to_string(),
                 "attesters": v.attesters,
+                "measured_capacity": v.measured_capacity,
             }),
             None => Value::Null,
         },
@@ -5515,6 +5875,34 @@ async fn handle_sla_get_params(node: &Arc<TenzroNode>) -> std::result::Result<Va
     }))
 }
 
+/// `tenzro_slaGetEnergy` — what SLA challenges cost the bonded compute
+/// fleet in energy at the probe cadence in force, with the fleet counted by
+/// declared readiness tier. Joule figures are decimal strings.
+async fn handle_sla_get_energy(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let chain = chain_state(node)?;
+    let report = tenzro_vm::native::energy_report(&chain);
+    Ok(serde_json::json!({
+        "probe_interval_ms": report.probe_interval_ms,
+        "probes_per_unit_per_day": report.probes_per_unit_per_day,
+        "wake_rule_live": report.wake_rule_live,
+        "challenge_share_bps": report.challenge_share_bps,
+        "budget_bps": report.budget_bps,
+        "within_budget": report.within_budget,
+        "units": report.units,
+        "fleet_joules_per_day": report.fleet_joules_per_day.to_string(),
+        "challenge_joules_per_day": report.challenge_joules_per_day.to_string(),
+        "tiers": report.tiers.iter().map(|t| serde_json::json!({
+            "tier": t.tier,
+            "units": t.units,
+            "burst_rounds_between": t.burst_rounds_between,
+            "challenge_joules_per_unit_per_day": t.challenge_joules_per_unit_per_day.to_string(),
+            "idle_joules_per_unit_per_day": t.idle_joules_per_unit_per_day.to_string(),
+            "fleet_joules_per_day": t.fleet_joules_per_day.to_string(),
+            "challenge_joules_per_day": t.challenge_joules_per_day.to_string(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 /// Render a `ValidatorRegistryEntry` as JSON (consumed by all three read RPCs).
 fn validator_registry_entry_to_json(
     entry: &tenzro_token::validator_registry::ValidatorRegistryEntry,
@@ -5531,9 +5919,49 @@ fn validator_registry_entry_to_json(
         "activated_at_epoch": entry.activated_at_epoch,
         "exited_at_epoch": entry.exited_at_epoch,
         "jailed_until_epoch": entry.jailed_until_epoch,
+        "jailed_remedy": (entry.status
+            == tenzro_token::validator_registry::ValidatorRegistryStatus::Jailed)
+            .then(|| {
+                tenzro_token::validator_registry::jailed_remedy(
+                    &entry.address,
+                    entry.jailed_until_epoch,
+                )
+            }),
         "tee_attestation_hash": entry.tee_attestation_hash.map(hex::encode),
         "metadata_uri": entry.metadata_uri,
         "updated_at": entry.updated_at.0,
+    })
+}
+
+/// A validator listing: the entries, each with the root id of the operator
+/// behind its account (`operator`, null when the account has no identity on
+/// chain), and the operators behind the whole listing beside its count.
+fn validator_listing(
+    node: &Arc<TenzroNode>,
+    entries: &[tenzro_token::validator_registry::ValidatorRegistryEntry],
+) -> Value {
+    let chain = chain_state_of(node);
+    let operators: Vec<Option<String>> = entries
+        .iter()
+        .map(|e| {
+            chain
+                .as_ref()
+                .and_then(|c| crate::operator_counts::operator_of_account(c, e.address.as_bytes()))
+        })
+        .collect();
+    let validators: Vec<Value> = entries
+        .iter()
+        .zip(&operators)
+        .map(|(entry, operator)| {
+            let mut v = validator_registry_entry_to_json(entry);
+            v["operator"] = serde_json::json!(operator);
+            v
+        })
+        .collect();
+    serde_json::json!({
+        "count": entries.len(),
+        "operators": crate::operator_counts::count(operators.iter().map(Option::as_deref)),
+        "validators": validators,
     })
 }
 
@@ -5613,10 +6041,7 @@ async fn handle_list_validators(
         entries
     };
 
-    Ok(serde_json::json!({
-        "count": filtered.len(),
-        "validators": filtered.iter().map(validator_registry_entry_to_json).collect::<Vec<_>>(),
-    }))
+    Ok(validator_listing(node, &filtered))
 }
 
 /// `tenzro_listActiveValidators` — list only the currently `Active`
@@ -5631,10 +6056,7 @@ async fn handle_list_active_validators(
         data: None,
     })?;
     let actives = registry.list_active();
-    Ok(serde_json::json!({
-        "count": actives.len(),
-        "validators": actives.iter().map(validator_registry_entry_to_json).collect::<Vec<_>>(),
-    }))
+    Ok(validator_listing(node, &actives))
 }
 
 /// `tenzro_getAccountContention` — read the rolling Block-STM contention
@@ -5944,9 +6366,6 @@ fn supply_metrics_to_json(snapshot: &tenzro_token::adaptive_burn::SupplyMetricsS
     })
 }
 
-/// `tenzro_getEconomicPolicy` — the rates this node is currently applying.
-///
-/// Open, and deliberately so: what a payment will cost and how it will divide
 /// `tenzro_settlementNetworks` — the rails a payment can settle on, and which
 /// one a given charge should take.
 ///
@@ -6033,50 +6452,16 @@ async fn handle_settlement_networks(
     Ok(out)
 }
 
-/// is not privileged information, and a caller who cannot read it before paying
-/// has to take the operator's word for the receipt afterwards.
+/// `tenzro_getEconomicPolicy` — the governance-set economic policy this node is
+/// currently applying: the default conversion of an inbound asset and the
+/// micro-settlement floor.
+///
+/// Open, and deliberately so: it is not privileged information, and a caller
+/// who cannot read it before paying has to take the operator's word for it.
 async fn handle_get_economic_policy(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    use tenzro_types::economics::{NodeEconomicMode, PayeeRole};
-
-    let policy = node.economic_policy();
-    let validating = node.runtime_roles.read().is_validator();
-
-    // The mode this node settles under, so a caller can see why a service
-    // divides the way it does rather than inferring it.
-    let visibility = node.visibility();
-    let mode = NodeEconomicMode::resolve(visibility.is_announced(), validating);
-    let shares: Vec<Value> = mode
-        .payees()
-        .iter()
-        .map(|role| {
-            serde_json::json!({
-                "role": role.as_str(),
-                "bps": policy.share_bps(mode, *role),
-            })
-        })
-        .collect();
-
-    Ok(serde_json::json!({
-        "policy": policy,
-        "validating": validating,
-        "rpc_provider_payee": node
-            .rpc_provider_payee()
-            .map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
-        "visibility": visibility.as_str(),
-        "mode": mode.as_str(),
-        "shares": shares,
-        // Reported so a caller can check that whatever they are quoted divides
-        // into shares that sum to the whole, on the capability they are using.
-        "operator_share_bps_by_mode": {
-            "private": policy.share_bps(NodeEconomicMode::Private, PayeeRole::Operator),
-            "public_validating": policy
-                .share_bps(NodeEconomicMode::PublicValidating, PayeeRole::Operator),
-            "public_delegated": policy
-                .share_bps(NodeEconomicMode::PublicDelegated, PayeeRole::Operator),
-        },
-    }))
+    Ok(serde_json::json!({ "policy": node.economic_policy() }))
 }
 
 async fn handle_get_burn_rate_config(
@@ -6124,28 +6509,6 @@ async fn handle_get_supply_metrics(
     })?;
 
     Ok(supply_metrics_to_json(&manager.latest_metrics()))
-}
-
-async fn handle_get_burn_rate_recommendation(
-    node: &Arc<TenzroNode>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let manager = node.burn_rate_manager().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Adaptive burn manager not initialized".to_string(),
-        data: None,
-    })?;
-
-    let rec = manager.current_recommendation();
-    let metrics = manager.latest_metrics();
-
-    Ok(serde_json::json!({
-        "action": rec.action.as_str(),
-        "is_alarm": rec.action.is_alarm(),
-        "magnitude_bps": rec.magnitude_bps,
-        "above_proposal_floor": rec.above_proposal_floor,
-        "deviation_bps": rec.deviation_bps,
-        "basis": supply_metrics_to_json(&metrics),
-    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -6244,6 +6607,11 @@ fn handle_get_reward_epoch(
             data: None,
         })?;
     let chain = chain_state(node)?;
+    let validators: Vec<_> = node
+        .validator_registry()
+        .map(|r| r.list_active().into_iter().map(|e| e.address).collect())
+        .unwrap_or_default();
+    let reward_root = reward_root_readiness(&chain, &validators, crate::calendar::now_ms() as i64);
     let summary = tenzro_vm::native::read_epoch_summary(&chain, epoch)
         .map_err(reward_state_error)?
         .ok_or_else(|| JsonRpcError {
@@ -6262,7 +6630,49 @@ fn handle_get_reward_epoch(
         "coupon_count": summary.coupon_count,
         "closed_at": summary.closed_at.as_millis(),
         "level_bonus": summary.level_bonus.to_string(),
+        "reward_root": reward_root,
     }))
+}
+
+/// Whether each active validator's work, and every account's work recorded
+/// so far in the open epoch (validator, provider and ecosystem), would still
+/// earn a coupon under the reward-root rule
+/// ([`tenzro_vm::native::reward_root`]), and why not where it would not. The
+/// rule's vote waits until `all_matched` is true.
+fn reward_root_readiness(
+    chain: &dyn tenzro_vm::traits::VmState,
+    validators: &[tenzro_types::primitives::Address],
+    now_ms: i64,
+) -> Value {
+    let rows: Vec<Value> = validators
+        .iter()
+        .map(|a| {
+            let verdict = tenzro_vm::native::reward_root::may_earn(chain, a.as_bytes(), now_ms);
+            serde_json::json!({
+                "address": a.to_string(),
+                "matched": verdict.is_ok(),
+                "reason": verdict.err(),
+            })
+        })
+        .collect();
+    let work: Vec<Value> = tenzro_vm::native::reward_root::pending_verdicts(chain, now_ms)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(address, bucket, verdict)| {
+            serde_json::json!({
+                "address": address.to_string(),
+                "bucket": bucket,
+                "matched": verdict.is_ok(),
+                "reason": verdict.err(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "live": tenzro_vm::feature_gate::is_live_now(chain, tenzro_vm::native::reward_root::KEY),
+        "all_matched": rows.iter().chain(work.iter()).all(|r| r["matched"] == true),
+        "validators": rows,
+        "open_epoch_work": work,
+    })
 }
 
 /// `tenzro_getFeeRate` — the TNZO/USD rate fees are priced at, where it came
@@ -6496,6 +6906,37 @@ fn handle_list_reward_coupons(
     }))
 }
 
+/// `tenzro_fleetHostEvidence { operator, bind?, gpu? }`: this machine's
+/// evidence for the fleet hardware proof `operator` sends this reward epoch
+/// (see `hardware_possession::fleet_host_evidence`). Nothing is submitted.
+async fn handle_fleet_host_evidence(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let field = |name: &str| params.as_ref().and_then(|p| p.get(name));
+    let operator = field("operator")
+        .and_then(Value::as_str)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing operator".to_string(),
+            data: None,
+        })?;
+    let flag = |name: &str| field(name).and_then(Value::as_bool).unwrap_or(false);
+    let host =
+        crate::hardware_possession::fleet_host_evidence(node, operator, flag("bind"), flag("gpu"))
+            .await
+            .map_err(|message| JsonRpcError {
+                code: -32000,
+                message,
+                data: None,
+            })?;
+    serde_json::to_value(host).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: e.to_string(),
+        data: None,
+    })
+}
+
 /// An address's hardware security level and hardware type: the record the
 /// last reward epoch close wrote (what its bonus was paid on), and the level
 /// derived now from the attestation evidence in consensus state (what a
@@ -6518,8 +6959,8 @@ fn handle_get_hardware_level(
     )?;
     let chain = chain_state(node)?;
     let now_ms = crate::calendar::now_ms();
-    let (current, did, device) =
-        tenzro_vm::native::hardware_level::derive(&chain, address.as_bytes(), now_ms as i64);
+    let (current, did, device, unproven) =
+        tenzro_vm::native::hardware_level::explain(&chain, address.as_bytes(), now_ms as i64);
     let recorded = tenzro_vm::native::hardware_level::read_record(&chain, address.as_bytes());
     Ok(serde_json::json!({
         "address": format!("0x{}", hex::encode(address.as_bytes())),
@@ -6527,6 +6968,42 @@ fn handle_get_hardware_level(
         "current": current,
         "device_id": device,
         "recorded": recorded,
+        "unproven": unproven,
+    }))
+}
+
+/// The validator an address names as its RPC provider, the governed leg it
+/// would pay that validator, whether the leg is in force, and what the leg
+/// has paid the address as a validator, from consensus state.
+fn handle_get_rpc_provider_leg(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let address = parse_address(
+        params
+            .as_ref()
+            .and_then(|p| p.get("address"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing address".to_string(),
+                data: None,
+            })?,
+    )?;
+    let chain = chain_state(node)?;
+    let gate = tenzro_vm::native::rpc_provider_leg::GATE;
+    Ok(serde_json::json!({
+        "address": format!("0x{}", hex::encode(address.as_bytes())),
+        "provider": tenzro_vm::native::rpc_provider_of(&chain, address.as_bytes())
+            .map(|p| format!("0x{}", hex::encode(p))),
+        "leg_bps": tenzro_vm::native::network_param(
+            &chain,
+            tenzro_vm::native::rpc_provider_leg::RATE_PARAM,
+        ),
+        "in_force": tenzro_vm::feature_gate::is_live_now(&chain, gate),
+        "activation_epoch": tenzro_vm::native::network_param(&chain, gate),
+        "paid_as_provider": tenzro_vm::native::rpc_provider_leg_paid(&chain, address.as_bytes())
+            .to_string(),
     }))
 }
 
@@ -6662,13 +7139,13 @@ async fn handle_get_generation(
         data: None,
     })?;
 
-    Ok(generation_stats_json(&record))
+    Ok(generation_stats_json(node, &record))
 }
 
 /// Shape one usage record as generation stats. Shared by the JSON-RPC handler
 /// and the `/tenzro/generation` route so both report the same fields under the
 /// same names.
-fn generation_stats_json(record: &tenzro_model::UsageRecord) -> Value {
+fn generation_stats_json(node: &TenzroNode, record: &tenzro_model::UsageRecord) -> Value {
     let units = &record.units;
     let tokens_per_second = if record.latency_ms > 0 {
         Some(units.output_tokens() as f64 / (record.latency_ms as f64 / 1000.0))
@@ -6694,6 +7171,12 @@ fn generation_stats_json(record: &tenzro_model::UsageRecord) -> Value {
 
     // Every unit the call was metered on, as the receipt states it.
     stats["units"] = crate::rpc::units_to_json(units);
+    // Who paid, when the call was settled here.
+    if let Some(paid) = crate::usage_payer::read(node, &record.record_id) {
+        for field in ["payer", "payer_did", "principal_chain"] {
+            stats[field] = paid[field].clone();
+        }
+    }
 
     stats
 }
@@ -6929,6 +7412,161 @@ async fn handle_update_identity(
 // An agent's consensus Terms and what it has spent against them.
 // ----------------------------------------------------------------------------
 
+/// `tenzro_getAgentTermsCredential { agent_did }`: a delegated agent's Terms
+/// as an unsigned VC 2.0 credential its controller signs, the claims of an
+/// OAuth on-behalf-of token and the agent registration data a payment
+/// network asks for (`crate::agent_terms_credential`). `null` when the agent
+/// has no Terms on chain.
+async fn handle_get_agent_terms_credential(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let agent_did = params
+        .as_ref()
+        .and_then(|p| p.get("agent_did"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing agent_did".to_string(),
+            data: None,
+        })?;
+    let chain = chain_state(node)?;
+    Ok(tenzro_vm::native::read_agent_terms(&chain, agent_did)
+        .map(|stored| crate::agent_terms_credential::documents(agent_did, &stored))
+        .unwrap_or(Value::Null))
+}
+
+/// `tenzro_resolvePaymentIntent { usd_e6, payee, accepts, means, amounts }`:
+/// the settlement plan leg that carries a payment stated without a rail
+/// (`tenzro_payments::rail_intent`). `accepts` is the payee's rails, preferred
+/// first: `{rail: "tenzro", asset?}`, `{rail: "remote", adapter, chain, asset,
+/// recipient}` or `{rail: "instruction", kind: "iso20022"|"card", currency,
+/// attestor?}`; `means` is what the payer can fund (`tenzro`: asset ids or
+/// `"TNZO"`, `remote`: `[chain, asset]` pairs, `instruction`: `[kind,
+/// currency]` pairs); `amounts[i]` is the amount, in the rail's units, the
+/// caller prices `accepts[i]` at, or null. Optional `instruction_digest` and
+/// `reserve` complete a bank or card leg. Stateless.
+fn handle_resolve_payment_intent(
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_payments::rail_intent::{
+        AcceptedRail, InstructionParts, PayerMeans, RailIntent, resolve,
+    };
+    use tenzro_types::settlement::RailKind;
+    let bad = |m: String| JsonRpcError {
+        code: -32602,
+        message: m,
+        data: None,
+    };
+    let p = params.ok_or_else(|| bad("missing params".into()))?;
+    let hex32 = |v: &Value, what: &str| -> std::result::Result<[u8; 32], JsonRpcError> {
+        v.as_str()
+            .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .ok_or_else(|| bad(format!("{what} is not 32 bytes of hex")))
+    };
+    let tenzro_asset = |v: &Value| -> std::result::Result<Option<[u8; 32]>, JsonRpcError> {
+        match v.as_str() {
+            None => Ok(None),
+            Some(s) if s.eq_ignore_ascii_case("TNZO") => Ok(None),
+            Some(_) => hex32(v, "asset").map(Some),
+        }
+    };
+    let rail_kind = |v: &Value| -> std::result::Result<RailKind, JsonRpcError> {
+        serde_json::from_value(v.clone()).map_err(|_| bad("kind is iso20022 or card".into()))
+    };
+    let usd_e6 = p
+        .get("usd_e6")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| bad("usd_e6 is required".into()))?;
+    let payee = tenzro_types::primitives::Address::new(hex32(&p["payee"], "payee")?);
+    let mut accepts = Vec::new();
+    for a in p
+        .get("accepts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        accepts.push(match a.get("rail").and_then(Value::as_str) {
+            Some("tenzro") => AcceptedRail::Tenzro {
+                asset: tenzro_asset(&a["asset"])?,
+            },
+            Some("remote") => AcceptedRail::Remote {
+                adapter: serde_json::from_value(a["adapter"].clone())
+                    .map_err(|_| bad("adapter is not a route transport".into()))?,
+                chain: a["chain"]
+                    .as_str()
+                    .ok_or_else(|| bad("chain is required".into()))?
+                    .to_string(),
+                asset: hex32(&a["asset"], "asset")?,
+                recipient: hex32(&a["recipient"], "recipient")?,
+            },
+            Some("instruction") => AcceptedRail::Instruction {
+                rail: rail_kind(&a["kind"])?,
+                currency: a["currency"]
+                    .as_str()
+                    .ok_or_else(|| bad("currency is required".into()))?
+                    .to_string(),
+                attestor: match a.get("attestor").filter(|v| !v.is_null()) {
+                    Some(v) => Some(tenzro_types::primitives::Address::new(hex32(
+                        v, "attestor",
+                    )?)),
+                    None => None,
+                },
+            },
+            _ => return Err(bad("rail is tenzro, remote or instruction".into())),
+        });
+    }
+    let m = &p["means"];
+    let mut means = PayerMeans::default();
+    for v in m["tenzro"].as_array().into_iter().flatten() {
+        means.tenzro.push(tenzro_asset(v)?);
+    }
+    for v in m["remote"].as_array().into_iter().flatten() {
+        let chain = v[0]
+            .as_str()
+            .ok_or_else(|| bad("remote is [chain, asset]".into()))?;
+        means
+            .remote
+            .push((chain.to_string(), hex32(&v[1], "asset")?));
+    }
+    for v in m["instruction"].as_array().into_iter().flatten() {
+        let currency = v[1]
+            .as_str()
+            .ok_or_else(|| bad("instruction is [kind, currency]".into()))?;
+        means
+            .instruction
+            .push((rail_kind(&v[0])?, currency.to_string()));
+    }
+    let amounts: Vec<Option<u128>> = p["amounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| v.as_str().and_then(|s| s.parse().ok()))
+        .collect();
+    let instruction = InstructionParts {
+        instruction_digest: match p.get("instruction_digest").filter(|v| !v.is_null()) {
+            Some(v) => hex32(v, "instruction_digest")?,
+            None => [0; 32],
+        },
+        reserve: p["reserve"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+    };
+    let intent = RailIntent {
+        usd_e6,
+        payee,
+        accepts,
+    };
+    let amount_for = |rail: &AcceptedRail, _usd: u64| {
+        let i = intent.accepts.iter().position(|r| r == rail)?;
+        amounts.get(i).copied().flatten()
+    };
+    let leg = resolve(&intent, &means, &amount_for, instruction).map_err(|e| bad(e.to_string()))?;
+    serde_json::to_value(leg).map_err(|e| bad(e.to_string()))
+}
+
 /// `tenzro_getAgentTerms`: a delegated agent's full Terms as chain state
 /// records them, the kind of root that approved them, its status (revoked
 /// once it or its root is revoked), and what it
@@ -6956,8 +7594,9 @@ async fn handle_get_agent_terms(
     let scope = &terms.delegation_scope;
     // Revoked by its root or by governance, directly or through the root
     // that delegated it (a root revocation reaches every agent it
-    // delegated), or by the kill switch.
-    let identity_revoked = tenzro_vm::native::is_identity_revoked(&chain, agent_did)
+    // delegated), or by the kill switch. Read with the check execution
+    // applies, so the flag follows the reach rule once it is live.
+    let identity_revoked = tenzro_vm::native::identity_revoked_in_force(&chain, agent_did)
         || tenzro_vm::native::is_identity_revoked(&chain, &stored.terms.controller_did);
     let status = match tenzro_vm::native::agent_audit::read_agent_quarantine(&chain, agent_did) {
         _ if identity_revoked => "revoked",
@@ -7137,7 +7776,7 @@ async fn handle_get_checkpoint_certificate(
 
 /// `tenzro_getCompactCertificate [index]` — the compact certificate with
 /// `index`, or the latest, and the session certificates its slots name, as
-/// hex bincode (`tenzro_consensus::compact::CompactCertificate`,
+/// hex bincode (`tenzro_light::compact::CompactCertificate`,
 /// `Vec<tenzro_consensus::SessionCertificate>`).
 async fn handle_get_compact_certificate(
     node: &Arc<TenzroNode>,
@@ -7281,12 +7920,26 @@ pub(crate) async fn handle_node_info(
             "tpm".into(),
             tenzro_device_key::tpm_health().unwrap_or(Value::Null),
         );
-        // The binary version, its hash and the update state the node states
-        // in its signed endpoint record.
+        // For a node whose key is held in another machine's TPM: whether
+        // the operator's grant stands or the node waits for a new one.
+        #[cfg(unix)]
         map.insert(
-            "update".into(),
-            crate::update_advert::status_json(node.config().data_dir.clone()).await,
+            "key_grant".into(),
+            crate::tpm_key_holder::running_grant()
+                .map(|g| g.json())
+                .unwrap_or(Value::Null),
         );
+        // The binary version, its hash and the update state the node states
+        // in its signed endpoint record, and how validator stake divides
+        // over the versions the validators' machines state.
+        let mut update = crate::update_advert::status_json(node.config().data_dir.clone()).await;
+        if let (Some(u), Some(network)) = (
+            update.as_object_mut(),
+            crate::update_advert::network_stake(node),
+        ) {
+            u.insert("network".into(), network.to_json());
+        }
+        map.insert("update".into(), update);
         // The wallet this node is paid at: payment channels, escrows and
         // inference bills name it as the payee.
         map.insert(
@@ -7304,38 +7957,36 @@ async fn handle_peer_count(node: &Arc<TenzroNode>) -> std::result::Result<Value,
     Ok(serde_json::json!(format!("0x{:x}", status.peer_count)))
 }
 
+/// `tenzro_syncing`: whether this node follows the network. One state
+/// (starting, catching up, following, stalled) with the reason when it is
+/// not following, this node's height, the highest height it heard from the
+/// network and how long ago, the gap now and a little earlier, and the time
+/// since its last import. A node that heard from nobody is never following.
 async fn handle_syncing(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
-    let status = node.status().await;
-    let local_tip = status.block_height;
+    serde_json::to_value(node.follow_state().await).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("follow state: {e}"),
+        data: None,
+    })
+}
 
-    // Threshold: only report syncing when network_tip outpaces local_tip by
-    // more than this many blocks. Absorbs gossip jitter so a node that just
-    // produced block N doesn't briefly report `syncing: true` while a peer's
-    // status from block N-1 is still in flight.
-    const SYNC_LAG_THRESHOLD: u64 = 2;
-
-    // Robust network-tip estimate: median of fresh peer heights, capped
-    // at local_tip + MAX_TIP_LEAD. The median filter tolerates a
-    // minority of peers reporting bogus heights, and the cap prevents
-    // an attacker who controls a majority within the 60s freshness
-    // window from dragging the node into a multi-day fake sync. None ⇒
-    // no fresh peers (single-node or network silence) ⇒ we report
-    // syncing:false because there is nothing to compare against.
-    let network_tip = node.network_tip_capped(local_tip).unwrap_or(local_tip);
-    let highest_block = local_tip.max(network_tip);
-
-    let is_syncing = network_tip > local_tip + SYNC_LAG_THRESHOLD;
-
-    if is_syncing {
-        Ok(serde_json::json!({
-            "syncing": true,
-            "startingBlock": "0x0",
-            "currentBlock": format!("0x{:x}", local_tip),
-            "highestBlock": format!("0x{:x}", highest_block),
-        }))
-    } else {
-        Ok(serde_json::json!(false))
-    }
+/// `tenzro_listConditions`: what on this node is open and needs its
+/// operator's attention, the most severe first. Each condition has an `id`
+/// that stays the same while it is open, a `kind` (`node`, `follow`,
+/// `health`, `quorum`, `update`, `stake`, `role`, `doctor`, `requirement`,
+/// `key_grant`), a
+/// `code` naming the finding, a `severity` (`info`, `warning`, `critical`), a
+/// `title`, a `detail`, the time it began (`since`, RFC 3339) and the
+/// operator's acknowledgement (`ack`, or `null`). An empty list means nothing
+/// is open. Admin class: a condition that asks carries its passkey challenge.
+async fn handle_list_conditions(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    serde_json::to_value(crate::conditions::observe(node).await).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("conditions: {e}"),
+        data: None,
+    })
 }
 
 /// `tenzro_getNetworkStats` — snapshot of network-layer counters and gauges
@@ -7380,6 +8031,39 @@ async fn handle_graceful_exit(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
+    let StoodDown {
+        waited_secs,
+        was_leader_at_start,
+        was_leader_at_exit,
+        force,
+    } = stand_down(node, params).await;
+
+    // The event loop stops on this event, and whoever runs the node ends
+    // with it (`TenzroNode::event_loop_stopped`): the binary drains its
+    // servers for 5 s, an embedding handle likewise.
+    request_stop(node.event_sender())?;
+
+    Ok(serde_json::json!({
+        "accepted": true,
+        "waited_secs": waited_secs,
+        "was_leader_at_start": was_leader_at_start,
+        "was_leader_at_exit": was_leader_at_exit,
+        "force": force,
+    }))
+}
+
+/// How a node left its place among the leaders before it stops.
+struct StoodDown {
+    waited_secs: u64,
+    was_leader_at_start: bool,
+    was_leader_at_exit: bool,
+    force: bool,
+}
+
+/// Waits until this replica leads none of the rounds its leader schedule
+/// looks ahead over, for at most `max_wait_secs` (default 60), or not at all
+/// with `force`.
+async fn stand_down(node: &Arc<TenzroNode>, params: Option<Value>) -> StoodDown {
     let params = params.unwrap_or(Value::Null);
     let max_wait_secs = params
         .get("max_wait_secs")
@@ -7402,7 +8086,7 @@ async fn handle_graceful_exit(
                 tracing::warn!(
                     elapsed_secs = started.elapsed().as_secs(),
                     max_wait_secs,
-                    "graceful_exit: timeout waiting for leader rotation, proceeding anyway"
+                    "stand-down: timeout waiting for leader rotation, proceeding anyway"
                 );
                 break;
             }
@@ -7410,34 +8094,91 @@ async fn handle_graceful_exit(
         }
     }
 
-    let was_leader_at_exit = consensus.map(|c| c.leads_soon()).unwrap_or(false);
-    let waited_secs = started.elapsed().as_secs();
+    StoodDown {
+        waited_secs: started.elapsed().as_secs(),
+        was_leader_at_start,
+        was_leader_at_exit: consensus.map(|c| c.leads_soon()).unwrap_or(false),
+        force,
+    }
+}
 
-    // Trigger the existing shutdown path. The event loop closes,
-    // main.rs's tokio::select! exits, and the 5s drain runs.
-    if let Some(event_tx) = node.event_sender() {
-        if let Err(e) = event_tx.try_send(crate::event_loop::NodeEvent::Shutdown) {
-            return Err(JsonRpcError {
-                code: -32603,
-                message: format!("failed to enqueue Shutdown event: {}", e),
-                data: None,
-            });
-        }
-    } else {
+/// `tenzro_restartNode`: the node stands down as for a graceful exit, drains
+/// and ends with the status its service starts it again on. Refused when no
+/// service runs this node, since nothing would start it again.
+///
+/// Params (all optional): `max_wait_secs` and `force`, as for
+/// `tenzro_gracefulExit`, and from a paired device the operator's
+/// `assertion` ([`crate::pairing_rpc::operator_consent`]). Returns
+/// `{ ok, service, waited_secs }` before the process ends.
+async fn handle_restart_node(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    caller: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    crate::pairing_rpc::operator_consent(node, "tenzro_restartNode", caller, params.as_ref())?;
+    let service = crate::restart::service().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "No service runs this node, so nothing would start it again. Restart it on the machine it runs on."
+            .to_string(),
+        data: None,
+    })?;
+    if let Some(message) = too_soon_to_restart(node.metrics().get_metrics().uptime_secs) {
         return Err(JsonRpcError {
-            code: -32603,
-            message: "node event sender unavailable".to_string(),
+            code: -32003,
+            message,
             data: None,
         });
     }
-
+    let stood_down = stand_down(node, params).await;
+    node.restart.notify_one();
     Ok(serde_json::json!({
-        "accepted": true,
-        "waited_secs": waited_secs,
-        "was_leader_at_start": was_leader_at_start,
-        "was_leader_at_exit": was_leader_at_exit,
-        "force": force,
+        "ok": true,
+        "service": service,
+        "waited_secs": stood_down.waited_secs,
     }))
+}
+
+/// How long a node runs before `tenzro_restartNode` restarts it again, so a
+/// caller repeating the call cannot keep it from serving.
+const RESTART_AFTER_SECS: u64 = 300;
+
+/// Why a node up `up_secs` is not restarted yet, if it is not.
+fn too_soon_to_restart(up_secs: u64) -> Option<String> {
+    (up_secs < RESTART_AFTER_SECS).then(|| {
+        format!(
+            "This node started {up_secs} s ago; it is restarted again once it has run \
+             {RESTART_AFTER_SECS} s."
+        )
+    })
+}
+
+/// `tenzro_installUpdate`: starts the installed updater for the newest
+/// verified release, the same run an armed automatic install starts. The
+/// updater stages the release and restarts only a node with no staked role;
+/// a staked node runs the new release after `tenzro_restartNode`. From a
+/// paired device it takes the operator's `assertion`
+/// ([`crate::pairing_rpc::operator_consent`]). Returns `{ ok, version }` once
+/// the updater is started, not when it is done.
+async fn handle_install_update(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+    caller: Option<&str>,
+) -> std::result::Result<Value, JsonRpcError> {
+    crate::pairing_rpc::operator_consent(node, "tenzro_installUpdate", caller, params.as_ref())?;
+    let hub = crate::update_notice::hub(&node.config().data_dir);
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let version = crate::update_notice::install(
+        &hub,
+        now_ms,
+        None,
+        crate::update_notice::updater_beside_node(),
+    )
+    .map_err(|message| JsonRpcError {
+        code: -32603,
+        message,
+        data: None,
+    })?;
+    Ok(serde_json::json!({ "ok": true, "version": version }))
 }
 
 /// `tenzro_setDraining` — toggle the consensus drain flag. While draining,
@@ -8271,6 +9012,13 @@ fn unsigned_transaction(
         TransactionType::Transfer { amount: value }
     };
 
+    // The memo, when the signer set one. It is part of the signed preimage,
+    // and it is where a fee payer's consent travels.
+    let memo = params
+        .get("memo")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
     // Build the transaction. If a timestamp is supplied we use it verbatim so
     // that client-side and server-side hashes match bit-for-bit.
     let tx = tenzro_types::Transaction {
@@ -8286,7 +9034,7 @@ fn unsigned_transaction(
             None => tenzro_types::primitives::Timestamp::now(),
         },
         valid_until: tenzro_types::primitives::Timestamp::new(valid_until_ms as i64),
-        memo: None,
+        memo,
     };
     Ok(tx)
 }
@@ -8330,6 +9078,64 @@ async fn handle_transaction_signing_payload(
             "digest": digest,
         }),
     })
+}
+
+/// `tenzro_estimateGas`: the gas limit a transaction needs, from the params
+/// `tenzro_getSigningPayload` takes (the unsigned transaction, as the params
+/// or as their only element), estimated by
+/// the VM that runs it against the latest state. A native transaction is
+/// estimated at what its kind is charged; an EVM one is not, so a caller
+/// estimates that with `eth_estimateGas`.
+async fn handle_tenzro_estimate_gas(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let params = match params {
+        Value::Array(mut items) if items.len() == 1 => items.remove(0),
+        other => other,
+    };
+    let tx = unsigned_transaction(node, &params)?;
+    let runtime = node.vm_runtime().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "this node runs no VM".to_string(),
+        data: None,
+    })?;
+    let height = crate::eth_block_param::block_height(node, None).await?;
+    let state = crate::eth_block_param::state_at(node, height)?;
+    let gas = native_gas_estimate(runtime, &state, tx).await?;
+    Ok(Value::String(format!("0x{gas:x}")))
+}
+
+/// The gas `tx` needs, estimated by the native executor against `state`.
+/// Refuses a transaction that runs in the EVM or the SVM.
+async fn native_gas_estimate(
+    runtime: &tenzro_vm::MultiVmRuntime,
+    state: &dyn tenzro_vm::traits::VmState,
+    tx: tenzro_types::Transaction,
+) -> std::result::Result<u64, JsonRpcError> {
+    let signed = tenzro_types::SignedTransaction::new(tx, Vec::new(), Default::default());
+    let vm_tx = crate::event_loop::vm_transaction(&signed);
+    if vm_tx.vm_type != tenzro_vm::VmType::Tenzro {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "not a native transaction: estimate an EVM transaction with eth_estimateGas"
+                .to_string(),
+            data: None,
+        });
+    }
+    runtime
+        .estimate_gas(&vm_tx, state)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("cannot estimate: {e}"),
+            data: None,
+        })
 }
 
 /// Which pre-signed transactions a submission method admits.
@@ -8632,7 +9438,9 @@ fn revocation_refused(e: tenzro_vm::VmError) -> JsonRpcError {
 /// to the event loop for gossip. Every submission method ends here.
 /// The per-address request limits as governed in chain state, or their
 /// genesis values on a node without chain state.
-fn governed_address_limits(node: &Arc<TenzroNode>) -> crate::ip_rate_limit::LimitsSource {
+pub(crate) fn governed_address_limits(
+    node: &Arc<TenzroNode>,
+) -> crate::ip_rate_limit::LimitsSource {
     use tenzro_vm::governance as g;
     let storage = node.storage().cloned();
     Arc::new(move || {
@@ -8653,6 +9461,22 @@ fn governed_address_limits(node: &Arc<TenzroNode>) -> crate::ip_rate_limit::Limi
             burst: read(g::RPC_ADDRESS_BURST_PARAM),
             identity_checks_per_sec: read(g::RPC_IDENTITY_CHECKS_PARAM),
         }
+    })
+}
+
+/// Why `tx` is too large for the network to carry, if it is: no peer hears
+/// one whose gossip message passes the gossip limit. The mempool refuses
+/// one larger than a batch part, a bound no transaction under this one
+/// reaches at the network's batch bound.
+fn too_large_to_carry(tx: &SignedTransaction) -> Option<String> {
+    let gossip = NetworkMessage::new(MessagePayload::Transaction(tx.clone()))
+        .to_bytes()
+        .map_or(usize::MAX, |b| b.len());
+    (gossip > tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE).then(|| {
+        format!(
+            "transaction's gossip message is {gossip} bytes; the network carries at most {}",
+            tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE
+        )
     })
 }
 
@@ -8677,7 +9501,43 @@ pub(crate) async fn admit_transaction(
             });
         }
     }
+    if let Some(why) = too_large_to_carry(&signed_tx) {
+        warn!(target: "rpc", tx_hash = %tx_hash, %why, "transaction submission: refused for its size");
+        return Err(JsonRpcError {
+            code: -32000,
+            message: why,
+            data: None,
+        });
+    }
     if let Some(consensus) = node.consensus() {
+        // Another transaction of this sender already waits at this nonce (a
+        // validator's own record, say): this one could never execute. Say
+        // so, and name the nonce to sign at, instead of admitting it to fail.
+        let sender = signed_tx.transaction.from;
+        let nonce = signed_tx.transaction.nonce.0;
+        if consensus
+            .mempool()
+            .nonce_held_by_other(&sender, nonce, &tx_hash)
+        {
+            let next = consensus.mempool().next_nonce(&sender, || {
+                use tenzro_vm::traits::VmState as _;
+                node.storage()
+                    .map(|st| {
+                        tenzro_vm::StateAdapter::with_storage(
+                            st.clone() as Arc<dyn tenzro_storage::KvStore>
+                        )
+                        .get_nonce(sender.as_bytes())
+                    })
+                    .unwrap_or(nonce)
+            });
+            return Err(JsonRpcError {
+                code: -32013,
+                message: format!(
+                    "nonce {nonce} of this account is held by another pending transaction; the next free nonce is {next}"
+                ),
+                data: Some(serde_json::json!({ "nonceHeld": nonce, "nextNonce": next })),
+            });
+        }
         match consensus.mempool().add_transaction(signed_tx.clone()) {
             Ok(()) => {
                 debug!(
@@ -10859,16 +11719,35 @@ async fn handle_set_role(
             message,
             data: None,
         })?;
+    // A role taken up here uses the runtime built for it at startup, as one
+    // taken up when its bond lands does; one this node cannot have is
+    // refused, naming what is missing.
+    if let Some(message) = crate::role_bonds::unbuildable(
+        &new_roles,
+        crate::engine_roles::check(&new_roles, node.config().connector.is_some()),
+        node.storage_runtime.is_some(),
+    ) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message,
+            data: None,
+        });
+    }
     crate::role_bonds::check(node, &new_roles).map_err(|message| JsonRpcError {
         code: -32003,
         message,
         data: None,
     })?;
 
+    // The operator's choice replaces whatever waited for a bond. The storage
+    // runtime's flag changes under the same lock as the roles, so the two
+    // never disagree.
+    node.roles_awaiting_bond.lock().clear();
     let previous_roles = {
         let mut roles_lock = node.runtime_roles.write();
         let prev = roles_lock.clone();
         *roles_lock = new_roles.clone();
+        node.follow_served_roles(&new_roles);
         prev
     };
 
@@ -11134,6 +12013,11 @@ async fn handle_storage_store_object(
 ) -> std::result::Result<Value, JsonRpcError> {
     use base64::Engine as _;
     let runtime = require_storage_runtime(node)?;
+    runtime.admit_new_object().map_err(|message| JsonRpcError {
+        code: -32004,
+        message,
+        data: None,
+    })?;
     if params.is_none() {
         return Err(JsonRpcError {
             code: -32602,
@@ -11237,6 +12121,35 @@ async fn handle_storage_store_object(
         ),
     };
 
+    // A buyer's placement constraint binds this node first: an origin
+    // outside it would hold every shard where the buyer said none may be.
+    let placement = crate::storage_placement::constraint_param(&params)?;
+    if let Some(c) = &placement {
+        let (region, operator) = crate::storage_placement::own_placement(node);
+        if !c.admits(region.as_deref(), &operator) {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: "this node is outside the placement constraint: store the object \
+                          through a node in one of its countries, run by one of its operators"
+                    .to_string(),
+                data: None,
+            });
+        }
+    }
+    // The class the owner buys the object under, if any: it prices reads.
+    let read_class = match params.get("class") {
+        Some(Value::Null) | None => None,
+        Some(c) => Some(
+            c.as_str()
+                .and_then(tenzro_vm::native::storage_class::StorageClass::from_tier)
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "'class' must be hot, warm or cold".to_string(),
+                    data: None,
+                })?,
+        ),
+    };
+
     let descriptor = runtime
         .store_object(
             object_id.clone(),
@@ -11257,7 +12170,20 @@ async fn handle_storage_store_object(
     // self-select as replica holders (HRW placement). Each holder pins the
     // shards it owns under its own membership view; view skew self-heals via
     // the blob heartbeat re-announcing whatever landed locally.
-    broadcast_shard_replication(node, &descriptor);
+    broadcast_shard_replication(node, &descriptor, placement.as_ref());
+    if let Some(class) = read_class {
+        runtime.set_read_class(&object_id, class);
+    }
+    // Repair announces the object again under the same constraint.
+    if let (Some(constraint), Some(store)) = (placement.as_ref(), node.storage())
+        && let Err(e) = crate::storage_placement::record_origin_constraint(
+            store.as_ref(),
+            &object_id,
+            constraint,
+        )
+    {
+        tracing::warn!(object_id = %object_id, error = %e, "Could not keep a placement constraint");
+    }
 
     // A renter pays for keeping the object through a storage compute claim
     // that commits this digest.
@@ -11310,10 +12236,36 @@ async fn handle_storage_retrieve_object(
                 data: None,
             },
         })?;
+    // A read of an object stored under a priced class is paid with a
+    // voucher on a channel to this node, for the advance the read costs.
+    let charge = runtime.read_charge(object_id, bytes.len() as u64);
+    let paid = if charge == 0 {
+        None
+    } else {
+        let voucher = params.get("voucher").ok_or_else(|| JsonRpcError {
+            code: -32402,
+            message: format!(
+                "reading this object costs {charge} wei: pass 'voucher', a channel voucher to this \
+                 node covering it"
+            ),
+            data: Some(serde_json::json!({ "charge_wei": charge.to_string() })),
+        })?;
+        let voucher = crate::payment_channels::voucher_from(voucher)?;
+        let payee = node.operator_payee().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "this node has no payee address to be paid at".to_string(),
+            data: None,
+        })?;
+        Some(crate::payment_channels::pay_with_voucher(
+            node, &voucher, &payee, charge,
+        )?)
+    };
     Ok(serde_json::json!({
         "object_id": object_id,
         "size_bytes": bytes.len(),
         "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "charge_wei": charge.to_string(),
+        "payment": paid,
     }))
 }
 
@@ -11353,12 +12305,15 @@ async fn storage_reader(
 }
 
 /// Builds and gossips a signed `ShardReplicationMessage` for a just-stored
-/// object. No-op unless the node has an iroh resolver, a hardware identity, and
-/// a network handle. Each entry carries the shard's BLAKE3 blob hash (parsed
-/// from its `tenzro://blob/...` URI) plus its SHA-256 commitment.
-fn broadcast_shard_replication(
+/// object, or under a buyer's `placement` constraint a signed
+/// `ConstrainedShardReplicationMessage` on its own topic. No-op unless the
+/// node has an iroh resolver, a hardware identity, and a network handle. Each
+/// entry carries the shard's BLAKE3 blob hash (parsed from its
+/// `tenzro://blob/...` URI) plus its SHA-256 commitment.
+pub(crate) fn broadcast_shard_replication(
     node: &Arc<TenzroNode>,
     descriptor: &tenzro_storage_provider::ObjectDescriptor,
+    placement: Option<&tenzro_storage_provider::PlacementConstraint>,
 ) {
     let (Some(resolver), Some(signer), Some(network)) = (
         node.iroh_resolver(),
@@ -11402,6 +12357,36 @@ fn broadcast_shard_replication(
         machine_did: String::new(),
         signature: None,
     };
+    if let Some(c) = placement {
+        let mut constrained = tenzro_network::ConstrainedShardReplicationMessage {
+            replication: req,
+            jurisdiction: c.jurisdiction.clone(),
+            operators: c.operators.clone(),
+            machine_did: String::new(),
+            signature: None,
+        };
+        let msg = tenzro_network::SignedAnnouncement::sign(
+            &mut constrained,
+            signer.machine_did(),
+            signer.signer(),
+        )
+        .and_then(|()| constrained.to_network_message());
+        match msg {
+            Ok(msg) => {
+                let net = network.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = net
+                        .broadcast(tenzro_network::STORAGE_PLACEMENT_TOPIC, msg)
+                        .await
+                    {
+                        tracing::debug!(error = %e, "Failed to broadcast constrained shard replication");
+                    }
+                });
+            }
+            Err(e) => tracing::warn!(error = %e, "Skipping constrained shard replication"),
+        }
+        return;
+    }
     if let Err(e) =
         tenzro_network::SignedAnnouncement::sign(&mut req, signer.machine_did(), signer.signer())
     {
@@ -11454,11 +12439,53 @@ async fn handle_storage_set_pricing(
         message: "set 'rate', the fixed byte-epoch rate in wei".to_string(),
         data: None,
     })?;
+    if let Some(rates) = params.get("read_rates").filter(|r| !r.is_null()) {
+        let chain = chain_state(node)?;
+        let mut set = runtime.read_rates();
+        for (i, class) in tenzro_vm::native::storage_class::StorageClass::ALL
+            .iter()
+            .enumerate()
+        {
+            let Some(rate) = parse_u128_amount(rates, class.tier()) else {
+                continue;
+            };
+            let ceiling = u128::from(tenzro_vm::native::network_param(
+                &chain,
+                class.read_price_ceiling_param(),
+            ));
+            if rate > ceiling {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "a {} read rate of {rate} wei per GiB is above the governed ceiling of \
+                         {ceiling}",
+                        class.tier()
+                    ),
+                    data: None,
+                });
+            }
+            set[i] = rate;
+        }
+        runtime.set_read_rates(set);
+    }
     runtime.set_fixed_rate(rate);
     Ok(serde_json::json!({
         "mode": "fixed",
         "effective_rate_wei": runtime.effective_rate().to_string(),
+        "read_rates_wei_per_gib": read_rates_json(&runtime.read_rates()),
     }))
+}
+
+/// Read rates by class name, as decimal strings.
+fn read_rates_json(rates: &[u128; 3]) -> Value {
+    let mut out = serde_json::Map::new();
+    for (class, rate) in tenzro_vm::native::storage_class::StorageClass::ALL
+        .iter()
+        .zip(rates)
+    {
+        out.insert(class.tier().to_string(), Value::String(rate.to_string()));
+    }
+    Value::Object(out)
 }
 
 /// `tenzro_storageStatus` — summary of this node's storage-provider state.
@@ -11467,6 +12494,7 @@ async fn handle_storage_status(node: &Arc<TenzroNode>) -> std::result::Result<Va
     Ok(serde_json::json!({
         "is_storage_provider": true,
         "effective_rate_wei": runtime.effective_rate().to_string(),
+        "read_rates_wei_per_gib": read_rates_json(&runtime.read_rates()),
         "object_count": runtime.store().object_count(),
     }))
 }
@@ -11595,7 +12623,11 @@ async fn handle_compute_get_claim(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
     let claim_id = params
         .get("claim_id")
         .and_then(|v| v.as_str())
@@ -11621,7 +12653,11 @@ async fn handle_compute_list_claims(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
     let party = parse_hex_address_param(&params, "party")?;
     let limit = params
         .get("limit")
@@ -11854,6 +12890,7 @@ pub(crate) async fn handle_serve_model(
         data: None,
     })?;
     refuse_out_of_process_serving(&params)?;
+    let idle_unload_secs = requested_idle_limit(&params, &node.config().memory)?;
 
     let model_id = params
         .get("model_id")
@@ -11863,13 +12900,20 @@ pub(crate) async fn handle_serve_model(
             message: "Missing 'model_id' parameter".to_string(),
             data: None,
         })?;
-
     // Look up model in catalog
-    let catalog_entry = tenzro_model::catalog::entry(model_id).ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: format!("Model '{}' not found in catalog", model_id),
-        data: None,
-    })?;
+    let catalog_entry = node
+        .catalog()
+        .entry(model_id)
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: format!("Model '{}' not found in catalog", model_id),
+            data: None,
+        })?;
+    // A catalog model, so the lock is keyed by a real id. A stop of this
+    // model waits for this serve; the announcement made in the background
+    // takes the lock again (below).
+    let _lifecycle = node.model_lifecycle(model_id).await;
     let entry = catalog_entry.gguf().cloned().ok_or_else(|| JsonRpcError {
         code: -32000,
         message: format!("Model '{}' is not a GGUF language model", model_id),
@@ -11908,9 +12952,11 @@ pub(crate) async fn handle_serve_model(
         let operator_concurrency = params
             .get("max_concurrent")
             .and_then(|v| v.as_u64())
-            .map(|n| (n as u32).clamp(1, tenzro_model::load::MAX_CONCURRENT_CEILING));
+            .map(|n| n.min(u64::from(tenzro_model::load::MAX_CONCURRENT_CEILING)) as u32)
+            .map(|n| n.max(1));
         let instance_id =
             restore_serving_state(node, model_id, &entry, visibility, operator_concurrency).await;
+        record_idle_limit(node, model_id, idle_unload_secs);
         return Ok(serde_json::json!({
             "success": true,
             "model_id": model_id,
@@ -11962,69 +13008,6 @@ pub(crate) async fn handle_serve_model(
     };
     let gguf_path = resolved.to_string_lossy().to_string();
 
-    // Verify-before-load gate: before loading the GGUF (single-box or
-    // clustered), check its files against the catalog's pins and the model's
-    // verified manifests. Fail-closed on mismatch; a model no verified
-    // manifest lists loads and is reported unverified.
-    let (provenance_name, files) =
-        crate::trust_hooks::gguf_files(model_id, std::path::Path::new(&gguf_path));
-    let provenance = crate::trust_hooks::verify_before_load(node, &provenance_name, files).await?;
-    attest_verified_load(node, model_id, &provenance).await;
-
-    model_runtime
-        .load_model_with_context(
-            model_id,
-            std::path::Path::new(&gguf_path),
-            Some(entry.context_length),
-        )
-        .await
-        .map_err(|e| {
-            // Nothing was served, so a stop recorded on disk still stands.
-            if node.is_offloaded(model_id) {
-                model_runtime.hold_stopped(model_id);
-            }
-            JsonRpcError {
-                code: -32000,
-                message: format!("Failed to load model: {}", e),
-                data: None,
-            }
-        })?;
-
-    // Tell the lifecycle the model is resident.
-    //
-    // An explicit serve loads outside `admit_inference`, which is the only
-    // other place that reconciles. Without this the model stays invisible to
-    // the lifecycle until the first request arrives, with two consequences:
-    // `tenzro_modelLifecycle` reports a warm model as cold, and — worse —
-    // `evict_candidate` cannot see it, so a node whose memory is entirely
-    // occupied by explicitly-served models finds nothing to reclaim and
-    // refuses to warm anything new despite having plenty to give back.
-    node.lifecycle().adopt_if_loaded(model_id);
-
-    // Speculative-decoding drafter: auto-load when the catalog pairs one with
-    // this model. Opt out with `"load_drafter": false`. Never blocks or fails
-    // the serve — the drafter arrives asynchronously when it needs a download.
-    let mtp_status = if params
-        .get("load_drafter")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
-    {
-        node.autoload_drafter(model_id, &entry).await
-    } else {
-        "disabled"
-    };
-
-    // Visibility override: "public" and "gated" announce the model (gated as
-    // key-required); "private" keeps the model service registered locally but
-    // skips every network announcement (registration gossip, heartbeat,
-    // provider-announcement served list). Without the parameter the model
-    // follows the node's visibility.
-    let visibility_override = crate::visibility_rpc::visibility_override(&params)?;
-
-    // Mark model as served, in memory and on disk.
-    record_served_model(node, model_id, visibility_override);
-    let visibility = tenzro_types::Visibility::resolve(visibility_override, node.visibility());
-
     // Estimate max concurrent requests based on hardware.
     //
     // The profile is populated by `participate` /
@@ -12075,7 +13058,8 @@ pub(crate) async fn handle_serve_model(
     let operator_concurrency = params
         .get("max_concurrent")
         .and_then(|v| v.as_u64())
-        .map(|n| (n as u32).clamp(1, tenzro_model::load::MAX_CONCURRENT_CEILING));
+        .map(|n| n.min(u64::from(tenzro_model::load::MAX_CONCURRENT_CEILING)) as u32)
+        .map(|n| n.max(1));
 
     let max_concurrent = match operator_concurrency {
         Some(n) => {
@@ -12115,6 +13099,73 @@ pub(crate) async fn handle_serve_model(
     // capacity, piling behind one mutex, and the autotuner reporting goodput
     // under its floor while "0% of slots are in use".
     let max_concurrent = max_concurrent.min(node.serving_capacity_cap(&entry)).max(1);
+
+    // Verify-before-load gate: before loading the GGUF (single-box or
+    // clustered), check its files against the catalog's pins and the model's
+    // verified manifests. Fail-closed on mismatch; a model no verified
+    // manifest lists loads and is reported unverified.
+    let (provenance_name, files) =
+        crate::trust_hooks::gguf_files(&node.catalog(), model_id, std::path::Path::new(&gguf_path));
+    let provenance = crate::trust_hooks::verify_before_load(node, &provenance_name, files).await?;
+    attest_verified_load(node, model_id, &provenance).await;
+
+    // The engine opens as many slots as requests are admitted at once.
+    model_runtime.set_slots(model_id, max_concurrent as usize);
+    model_runtime
+        .load_model_with_context(
+            model_id,
+            std::path::Path::new(&gguf_path),
+            Some(requested_context(&params, entry.context_length)),
+        )
+        .await
+        .map_err(|e| {
+            // Nothing was served, so a stop recorded on disk still stands.
+            if node.is_offloaded(model_id) {
+                model_runtime.hold_stopped(model_id);
+            }
+            JsonRpcError {
+                code: -32000,
+                message: format!("Failed to load model: {}", e),
+                data: None,
+            }
+        })?;
+
+    // Tell the lifecycle the model is resident.
+    //
+    // An explicit serve loads outside `admit_inference`, which is the only
+    // other place that reconciles. Without this the model stays invisible to
+    // the lifecycle until the first request arrives, with two consequences:
+    // `tenzro_modelLifecycle` reports a warm model as cold, and — worse —
+    // `evict_candidate` cannot see it, so a node whose memory is entirely
+    // occupied by explicitly-served models finds nothing to reclaim and
+    // refuses to warm anything new despite having plenty to give back.
+    node.lifecycle().adopt_if_loaded(model_id);
+
+    // Speculative-decoding drafter: auto-load when the catalog pairs one with
+    // this model. Opt out with `"load_drafter": false`. Never blocks or fails
+    // the serve — the drafter arrives asynchronously when it needs a download.
+    let mtp_status = if params
+        .get("load_drafter")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
+        node.autoload_drafter(model_id, &entry).await
+    } else {
+        "disabled"
+    };
+
+    // Visibility override: "public" and "gated" announce the model (gated as
+    // key-required); "private" keeps the model service registered locally but
+    // skips every network announcement (registration gossip, heartbeat,
+    // provider-announcement served list). Without the parameter the model
+    // follows the node's visibility.
+    let visibility_override = crate::visibility_rpc::visibility_override(&params)?;
+
+    // Mark model as served, in memory and on disk.
+    record_served_model(node, model_id, visibility_override);
+    record_idle_limit(node, model_id, idle_unload_secs);
+    let visibility = tenzro_types::Visibility::resolve(visibility_override, node.visibility());
+
     node.load_tracker.register_model(model_id, max_concurrent);
 
     // Register the model service instance. Peers reach it by this node's
@@ -12193,6 +13244,9 @@ pub(crate) async fn handle_serve_model(
         let provider_address_hex = provider_wallet
             .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
             .unwrap_or_default();
+        // Nothing is announced under an account peers would not take as
+        // this machine's.
+        let announce = announce.filter(|_| node.may_announce_as(&provider_address_hex));
         let visibility_c = visibility.as_str().to_string();
         let model_id_c = model_id.to_string();
         let gguf_path_c = gguf_path.clone();
@@ -12201,8 +13255,11 @@ pub(crate) async fn handle_serve_model(
         // store so the gossiped `tenzro://blob/<blake3>` URI resolves. All
         // snapshotted here — the identity-registry read holds a parking_lot
         // guard and must not cross the spawn.
-        let (provenance_name, served_files) =
-            crate::trust_hooks::gguf_files(model_id, std::path::Path::new(&gguf_path));
+        let (provenance_name, served_files) = crate::trust_hooks::gguf_files(
+            &node.catalog(),
+            model_id,
+            std::path::Path::new(&gguf_path),
+        );
         let iroh_resolver = node.iroh_resolver().cloned();
         let node_c = node.clone();
         tokio::spawn(async move {
@@ -12292,8 +13349,8 @@ pub(crate) async fn handle_serve_model(
                 // `file_record` to hash — so it takes one of the fallback arms
                 // and never touches the row. The model then sits `Online` in
                 // the service list and `Inactive` in the registry: served, but
-                // invisible to `tenzro_routeIntent`, which reports "no Text
-                // model fits budget/quality" while the model is plainly loaded.
+                // invisible to the router, which reports "no Text model fits
+                // budget/quality" while the model is plainly loaded.
                 //
                 // Publication of integrity metadata is a separate concern and
                 // still requires the hash; this only restores routability.
@@ -12359,7 +13416,7 @@ pub(crate) async fn handle_serve_model(
                 return;
             };
             let mut reg = tenzro_network::ModelRegistrationMessage {
-                model_id: model_id_c,
+                model_id: model_id_c.clone(),
                 name: entry.name.clone(),
                 description: entry.description.clone(),
                 modality: "text".to_string(),
@@ -12390,6 +13447,15 @@ pub(crate) async fn handle_serve_model(
                 return;
             }
             let broadcast_msg = NetworkMessage::new(MessagePayload::ModelRegistration(reg));
+            // A stop that ran while the weights were hashed has withdrawn the
+            // model: it is not announced after its withdrawal. Under the lock
+            // a stop runs wholly before this check or wholly after the
+            // announcement.
+            let _lifecycle = node_c.model_lifecycle(&model_id_c).await;
+            if !node_c.served_models.contains_key(&model_id_c) {
+                tracing::info!(model_id = %model_id_c, "model stopped before its announcement; not announced");
+                return;
+            }
             if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
                 tracing::warn!(error = %e, "Failed to broadcast model serving announcement");
             }
@@ -12469,6 +13535,9 @@ pub(crate) async fn handle_stop_model(
         });
     };
     let model_id = resolved.as_str();
+    // A serve of this model still in flight finishes, announcement included,
+    // before the stop withdraws it.
+    let _lifecycle = node.model_lifecycle(model_id).await;
 
     // First, before anything that can fail partway.
     //
@@ -12478,6 +13547,7 @@ pub(crate) async fn handle_stop_model(
     // back. Writing the decision first means a node that dies mid-stop still
     // knows the operator said stop.
     node.record_offload(model_id, "operator stopped the model");
+    node.lifecycle().set_idle_limit(model_id, None);
 
     // Stop in the runtime: from here every load of this model is refused, and
     // a load already running (a request that found the model cold) discards
@@ -12524,14 +13594,15 @@ pub(crate) async fn handle_stop_model(
     // keys entries by `model_id:provider`) and be signed, or peers reject it
     // as unauthenticated and never evict the entry. Private models were never
     // announced, so no withdrawal is broadcast for them.
+    let provider_address = node
+        .operator_payee()
+        .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
+        .unwrap_or_default();
     if removed_visibility.is_announced()
+        && node.may_announce_as(&provider_address)
         && let Some(network) = node.network()
     {
         let network = network.clone();
-        let provider_address = node
-            .operator_payee()
-            .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
-            .unwrap_or_default();
         let signer = node.announce_identity();
         let model_id_c = model_id.to_string();
         tokio::spawn(async move {
@@ -13122,8 +14193,10 @@ async fn handle_load_forecast_model(
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let entry =
-        get_forecast_model_by_id(&model_id).ok_or_else(|| not_in_catalog("forecast", &model_id))?;
+    let entry = node
+        .catalog()
+        .get_forecast_model_by_id(&model_id)
+        .ok_or_else(|| not_in_catalog("forecast", &model_id))?;
     let result = download_and_load_forecast(node, entry).await?;
     record_multimodal_visibility(node, "tenzro_loadForecastModel", &p, &model_id)?;
     Ok(result)
@@ -13194,9 +14267,11 @@ async fn handle_unload_forecast_model(
 }
 
 /// `tenzro_listForecastCatalog`: return the curated ONNX forecast (timeseries) catalog.
-async fn handle_list_forecast_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_forecast_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "models": crate::catalog_rpc::with_licence(&get_forecast_catalog()),
+        "models": crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_forecast_catalog),
     }))
 }
 
@@ -13339,7 +14414,7 @@ async fn forecast_here(
     let bytes_in = (history_len * std::mem::size_of::<f32>()) as u64;
     let bytes_out = (emitted * std::mem::size_of::<f32>()) as u64;
     let latency_ms = result.generation_time_ms;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -13369,6 +14444,7 @@ async fn forecast_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -13397,8 +14473,10 @@ async fn handle_load_vision_model(
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let entry =
-        get_vision_model_by_id(&model_id).ok_or_else(|| not_in_catalog("vision", &model_id))?;
+    let entry = node
+        .catalog()
+        .get_vision_model_by_id(&model_id)
+        .ok_or_else(|| not_in_catalog("vision", &model_id))?;
     let (bundle_dir, provenance) = fetch_catalog_bundle(
         node,
         &model_id,
@@ -13510,7 +14588,7 @@ async fn image_embed_here(
     let units = tenzro_types::model::BillableUnits::default().with_image_tokens(image_tokens);
     let bytes_out = (result.embedding.len() * std::mem::size_of::<f32>()) as u64;
     let latency_ms = result.generation_time_ms;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -13540,6 +14618,7 @@ async fn image_embed_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -13588,9 +14667,11 @@ async fn handle_image_text_similarity(
 }
 
 /// `tenzro_listVisionCatalog`: return the curated ONNX vision encoder catalog.
-async fn handle_list_vision_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_vision_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "models": crate::catalog_rpc::with_licence(&get_vision_catalog()),
+        "models": crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_vision_catalog),
     }))
 }
 
@@ -13614,10 +14695,12 @@ async fn handle_load_text_embedding_model(
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let result = if let Some(entry) = get_embed_model_by_id(&model_id) {
+    let result = if let Some(entry) = node.catalog().get_embed_model_by_id(&model_id) {
         download_and_load_praecise_embedder(node, entry).await?
     } else {
-        let entry = get_text_embedding_model_by_id(&model_id)
+        let entry = node
+            .catalog()
+            .get_text_embedding_model_by_id(&model_id)
             .ok_or_else(|| not_in_catalog("text-embedding", &model_id))?;
         download_and_load_text_embedding(node, entry).await?
     };
@@ -13633,7 +14716,7 @@ pub(crate) fn artifact_downloader(
     node: &Arc<TenzroNode>,
     models_dir: std::path::PathBuf,
 ) -> HfArtifactDownloader {
-    let downloader = HfArtifactDownloader::new(models_dir)
+    let downloader = HfArtifactDownloader::new(models_dir, node.catalog_cell().clone())
         .with_accepted_licences(node.config().model_licensing.accepted_license_ids.clone());
     match node.iroh_resolver() {
         Some(resolver) => downloader.with_blob_fetcher(
@@ -13984,7 +15067,9 @@ async fn handle_unload_text_embedding_model(
 /// `tenzro_listTextEmbeddingCatalog`: the catalog's embedders, each with the
 /// engine it runs on (`onnx-text-embedding`, or `embed` for a pooled embedder
 /// on the Praecise engine).
-async fn handle_list_text_embedding_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_text_embedding_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     fn tag(engine: &str, mut rows: Vec<Value>) -> Vec<Value> {
         for row in &mut rows {
             if let Some(obj) = row.as_object_mut() {
@@ -13993,13 +15078,14 @@ async fn handle_list_text_embedding_catalog() -> std::result::Result<Value, Json
         }
         rows
     }
+    let catalog = node.catalog();
     let mut models = tag(
         "onnx-text-embedding",
-        crate::catalog_rpc::with_licence(&get_text_embedding_catalog()),
+        crate::catalog_rpc::with_licence(&catalog, Catalog::get_text_embedding_catalog),
     );
     models.extend(tag(
         "embed",
-        crate::catalog_rpc::with_licence(&get_embed_catalog()),
+        crate::catalog_rpc::with_licence(&catalog, Catalog::get_embed_catalog),
     ));
     Ok(serde_json::json!({ "models": models }))
 }
@@ -14100,7 +15186,7 @@ async fn text_embed_here(
     let bytes_out = (result.embeddings.iter().map(|e| e.len()).sum::<usize>()
         * std::mem::size_of::<f32>()) as u64;
     let latency_ms = result.generation_time_ms;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -14130,6 +15216,7 @@ async fn text_embed_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -14152,7 +15239,9 @@ async fn handle_load_segmentation_model(
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let entry = get_segmentation_model_by_id(&model_id)
+    let entry = node
+        .catalog()
+        .get_segmentation_model_by_id(&model_id)
         .ok_or_else(|| not_in_catalog("segmentation", &model_id))?;
     let family = parse_sam_family(&entry.family)?;
     let (bundle_dir, provenance) = fetch_catalog_bundle(
@@ -14200,9 +15289,11 @@ async fn handle_unload_segmentation_model(
     Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
 }
 
-async fn handle_list_segmentation_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_segmentation_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "models": crate::catalog_rpc::with_licence(&get_segmentation_catalog()),
+        "models": crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_segmentation_catalog),
     }))
 }
 
@@ -14272,7 +15363,7 @@ async fn segment_here(
         .with_image_tokens(image_tokens);
     let bytes_out = result.masks.iter().map(|m| m.mask.len() as u64).sum();
     let latency_ms = result.generation_time_ms;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -14302,6 +15393,7 @@ async fn segment_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -14322,7 +15414,9 @@ async fn handle_load_text_segmentation_model(
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let entry = get_text_segmentation_model_by_id(&model_id)
+    let entry = node
+        .catalog()
+        .get_text_segmentation_model_by_id(&model_id)
         .ok_or_else(|| not_in_catalog("text-segmentation", &model_id))?;
     let files = vec![
         entry.image_encoder_filename.clone(),
@@ -14367,9 +15461,11 @@ async fn handle_unload_text_segmentation_model(
     Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
 }
 
-async fn handle_list_text_segmentation_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_text_segmentation_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "models": crate::catalog_rpc::with_licence(&get_text_segmentation_catalog()),
+        "models": crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_text_segmentation_catalog),
     }))
 }
 
@@ -14469,7 +15565,7 @@ async fn text_segment_here(
         .map(|s| s.mask.len() as u64)
         .sum();
     let latency_ms = result.generation_time_ms;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -14499,6 +15595,7 @@ async fn text_segment_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -14521,7 +15618,9 @@ async fn handle_load_detection_model(
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let entry = get_detection_model_by_id(&model_id)
+    let entry = node
+        .catalog()
+        .get_detection_model_by_id(&model_id)
         .ok_or_else(|| not_in_catalog("detection", &model_id))?;
     let family = parse_detr_family(&entry.family)?;
     let (bundle_dir, provenance) = fetch_catalog_bundle(
@@ -14567,9 +15666,11 @@ async fn handle_unload_detection_model(
     Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
 }
 
-async fn handle_list_detection_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_detection_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "models": crate::catalog_rpc::with_licence(&get_detection_catalog()),
+        "models": crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_detection_catalog),
     }))
 }
 
@@ -14642,7 +15743,7 @@ async fn detect_here(node: &Arc<TenzroNode>, p: Value) -> std::result::Result<Va
         data: None,
     })?;
     let bytes_out = out.to_string().len() as u64;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -14666,6 +15767,7 @@ async fn detect_here(node: &Arc<TenzroNode>, p: Value) -> std::result::Result<Va
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -14689,8 +15791,10 @@ async fn handle_load_audio_model(
 ) -> std::result::Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let entry =
-        get_audio_model_by_id(&model_id).ok_or_else(|| not_in_catalog("audio", &model_id))?;
+    let entry = node
+        .catalog()
+        .get_audio_model_by_id(&model_id)
+        .ok_or_else(|| not_in_catalog("audio", &model_id))?;
     let unusable = |what: &str| JsonRpcError {
         code: -32602,
         message: format!(
@@ -14815,9 +15919,11 @@ async fn handle_unload_audio_model(
     Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
 }
 
-async fn handle_list_audio_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_audio_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "models": crate::catalog_rpc::with_licence(&get_audio_catalog()),
+        "models": crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_audio_catalog),
     }))
 }
 
@@ -14894,7 +16000,7 @@ async fn transcribe_here(
     let units = tenzro_types::model::BillableUnits::default().with_audio_ms(result.audio_ms);
     let bytes_out = result.text.len() as u64;
     let latency_ms = result.generation_time_ms;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -14924,6 +16030,7 @@ async fn transcribe_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -15008,9 +16115,11 @@ async fn handle_unload_video_model(
     Ok(serde_json::json!({ "model_id": model_id, "removed": removed }))
 }
 
-async fn handle_list_video_catalog() -> std::result::Result<Value, JsonRpcError> {
+async fn handle_list_video_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "models": crate::catalog_rpc::with_licence(&get_video_catalog()),
+        "models": crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_video_catalog),
     }))
 }
 
@@ -15083,7 +16192,7 @@ async fn video_embed_here(
         .with_frames(result.frames_consumed);
     let bytes_out = (result.embedding.len() * std::mem::size_of::<f32>()) as u64;
     let latency_ms = result.generation_time_ms;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -15113,6 +16222,7 @@ async fn video_embed_here(
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }
@@ -15184,11 +16294,12 @@ async fn handle_fabric_profile(
 /// Includes `supports_voice_cloning` per checkpoint so an operator can see
 /// which carry the capability before turning it on.
 async fn handle_list_tts_catalog(
-    _node: &Arc<TenzroNode>,
+    node: &Arc<TenzroNode>,
     _params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     Ok(Value::Array(crate::catalog_rpc::with_licence(
-        &tenzro_model::get_tts_catalog(),
+        &node.catalog(),
+        Catalog::get_tts_catalog,
     )))
 }
 
@@ -15257,6 +16368,27 @@ fn local_gguf_kv_shape(node: &Arc<TenzroNode>, model_id: &str) -> (Option<u64>, 
             (None, None)
         }
     }
+}
+
+/// The figures a serve's footprint is computed from, read from the GGUF
+/// header of the weights on disk: KV bytes per token, the fixed recurrent
+/// state of a sequence and, for a model with recurrent layers, one prompt
+/// checkpoint of that size. `None` when the model is not on disk or its
+/// header omits the attention dimensions.
+fn local_gguf_figures(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    weights_bytes: u64,
+) -> Option<tenzro_model::serve_memory::ModelFigures> {
+    let path = node.hf_downloader.as_ref()?.resolve_local_gguf(model_id)?;
+    let shape = tenzro_model::gguf_shape::read_model_shape(&path).ok()?;
+    let state = shape.recurrent_state_bytes;
+    Some(tenzro_model::serve_memory::ModelFigures {
+        weights_bytes,
+        kv_bytes_per_token: shape.kv_cache_bytes(1)?.saturating_sub(state),
+        sequence_state_bytes: state,
+        checkpoint_bytes: state,
+    })
 }
 
 /// Free bytes on the filesystem holding `path`.
@@ -15341,23 +16473,118 @@ async fn handle_memory_budget(
     })
 }
 
+/// Context per sequence a serve or its preview asks for: the caller's
+/// `context_length`, no longer than the catalog's `catalog_context` and no
+/// shorter than [`MIN_SERVE_CONTEXT`]; the catalog's when not given.
+/// The idle limit a serve asks for (`idle_unload_secs`), refused outside the
+/// node's `[memory]` bounds. Without the parameter the model has no limit.
+#[cfg(feature = "inference")]
+fn requested_idle_limit(
+    params: &Value,
+    memory: &crate::config::MemoryConfig,
+) -> std::result::Result<Option<u64>, JsonRpcError> {
+    let Some(value) = params.get("idle_unload_secs") else {
+        return Ok(None);
+    };
+    let bounds = memory.idle_unload_min_secs..=memory.idle_unload_max_secs;
+    match value.as_u64() {
+        Some(secs) if bounds.contains(&secs) => Ok(Some(secs)),
+        _ => Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "'idle_unload_secs' must be a whole number of seconds from {} to {} on this node",
+                bounds.start(),
+                bounds.end()
+            ),
+            data: None,
+        }),
+    }
+}
+
+/// Keeps the idle limit a serve set, in the lifecycle and in the model's
+/// served record, so it holds across a restart. A serve without one clears it.
+#[cfg(feature = "inference")]
+fn record_idle_limit(node: &Arc<TenzroNode>, model_id: &str, secs: Option<u64>) {
+    node.lifecycle()
+        .set_idle_limit(model_id, secs.map(std::time::Duration::from_secs));
+    let Some(storage) = node.storage() else {
+        return;
+    };
+    let key = format!("served:{model_id}");
+    let Some(mut record) = storage
+        .get(CF_MODELS, key.as_bytes())
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return;
+    };
+    set_idle_field(&mut record, secs);
+    let stored = serde_json::to_vec(&record)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            storage
+                .put(CF_MODELS, key.as_bytes(), &bytes)
+                .map_err(|e| e.to_string())
+        });
+    if let Err(e) = stored {
+        tracing::warn!(model_id = %model_id, error = %e, "Failed to persist the idle limit");
+    }
+}
+
+/// Writes or removes `idle_unload_secs` in a served record and leaves every
+/// other field as it is.
+#[cfg(feature = "inference")]
+fn set_idle_field(record: &mut Value, secs: Option<u64>) {
+    let Some(obj) = record.as_object_mut() else {
+        return;
+    };
+    match secs {
+        Some(secs) => obj.insert("idle_unload_secs".into(), serde_json::json!(secs)),
+        None => obj.remove("idle_unload_secs"),
+    };
+}
+
+/// The idle limit kept in a served record.
+pub(crate) fn persisted_idle_limit(record: &Value) -> Option<std::time::Duration> {
+    record
+        .get("idle_unload_secs")?
+        .as_u64()
+        .map(std::time::Duration::from_secs)
+}
+
+fn requested_context(params: &Value, catalog_context: u32) -> u32 {
+    params
+        .get("context_length")
+        .and_then(|v| v.as_u64())
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        .map(|n| n.clamp(MIN_SERVE_CONTEXT.min(catalog_context), catalog_context))
+        .unwrap_or(catalog_context)
+}
+
+/// Shortest context per sequence a serve may ask for.
+const MIN_SERVE_CONTEXT: u32 = 2048;
+
 async fn handle_preview_serve(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     use tenzro_model::serve_advisor::{ResourceSnapshot, ServeRequest, plan};
 
-    let p = params.ok_or_else(|| missing_param("model_id"))?;
-    let model_id = p
+    let params = params.ok_or_else(|| missing_param("model_id"))?;
+    let model_id = params
         .get("model_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing_param("model_id"))?;
 
-    let entry = get_model_by_id(model_id).ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: format!("Model '{model_id}' not found in catalog"),
-        data: None,
-    })?;
+    let entry = node
+        .catalog()
+        .get_model_by_id(model_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: format!("Model '{model_id}' not found in catalog"),
+            data: None,
+        })?;
 
     // Requested precision, defaulting to whatever the catalog pins. Resolved
     // against the repo so the weight figure is the real one for that tier
@@ -15366,7 +16593,7 @@ async fn handle_preview_serve(
         tenzro_model::quant::QuantTier::parse(&entry.quantization).unwrap_or_default();
     let mut weights_bytes = entry.size_bytes;
     let mut tier = current_tier;
-    if let Some(q) = p.get("quant").and_then(|v| v.as_str()) {
+    if let Some(q) = params.get("quant").and_then(|v| v.as_str()) {
         let wanted = tenzro_model::quant::QuantTier::parse(q).ok_or_else(|| JsonRpcError {
             code: -32602,
             message: format!("unknown quantization '{q}'"),
@@ -15380,12 +16607,8 @@ async fn handle_preview_serve(
         }
     }
 
-    let context_length = p
-        .get("context_length")
-        .and_then(|v| v.as_u64())
-        .map(|n| (n as u32).min(entry.context_length))
-        .unwrap_or(entry.context_length);
-    let max_concurrent = p
+    let context_length = requested_context(&params, entry.context_length);
+    let max_concurrent = params
         .get("max_concurrent")
         .and_then(|v| v.as_u64())
         .map(|n| n as u32)
@@ -15443,7 +16666,36 @@ async fn handle_preview_serve(
         message: format!("failed to serialize plan: {e}"),
         data: None,
     })?;
+    // What the batching engine would allocate, by the rule a serve is
+    // admitted against: every slot a whole context, as many slots as its KV
+    // budget holds. Present when the weights are on disk to read the shape.
+    let engine = local_gguf_figures(node, model_id, weights_bytes).map(|figures| {
+        let drafted = if entry.mtp_kind == tenzro_model::MtpKind::None {
+            0
+        } else {
+            entry.mtp_default_draft_n.unwrap_or(4)
+        };
+        let budgets = tenzro_model::serve_memory::EngineBudgets::resolve(
+            budget
+                .machine_available_bytes
+                .saturating_sub(figures.weights_bytes),
+            budget.total_bytes,
+        );
+        let allocation =
+            tenzro_model::serve_memory::allocation(&figures, context_length, drafted, &budgets);
+        serde_json::json!({
+            "slots": allocation.slots,
+            "weights_bytes": allocation.weights_bytes,
+            "kv_cache_bytes": allocation.kv_cache_bytes,
+            "sequence_state_bytes": allocation.sequence_state_bytes,
+            "checkpoint_bytes": allocation.checkpoint_bytes,
+            "compute_bytes": allocation.compute_bytes,
+            "total_bytes": allocation.total_bytes(),
+            "fits": allocation.total_bytes() <= snapshot.resident_available_bytes,
+        })
+    });
     if let Some(obj) = value.as_object_mut() {
+        obj.insert("engine".into(), engine.unwrap_or(Value::Null));
         obj.insert("model_id".into(), serde_json::json!(model_id));
         obj.insert("quantization".into(), serde_json::json!(tier.canonical()));
         obj.insert("context_length".into(), serde_json::json!(context_length));
@@ -15568,11 +16820,12 @@ fn spot_requested(params: &Value) -> bool {
 
 /// The class a chat request admits under. Chat requests are never
 /// batch-classified by shape — only a caller's explicit `spot` choice moves
-/// one off the never-shed interactive path.
+/// one off the never-shed interactive path, onto the spot class that yields
+/// its slot to an interactive request.
 #[cfg(feature = "inference")]
 fn qos_class(spot: bool) -> tenzro_model::traffic::QosClass {
     if spot {
-        tenzro_model::traffic::QosClass::Batch
+        tenzro_model::traffic::QosClass::Spot
     } else {
         tenzro_model::traffic::QosClass::Interactive
     }
@@ -15581,6 +16834,26 @@ fn qos_class(spot: bool) -> tenzro_model::traffic::QosClass {
 #[cfg(feature = "inference")]
 fn request_shape(prompt_text: &str, max_tokens: u64) -> tenzro_model::traffic::Shape {
     tenzro_model::traffic::Shape::new(est_tokens_of(prompt_text), max_tokens.max(1))
+}
+
+#[cfg(test)]
+mod settlement_floor_tests {
+    use super::*;
+
+    /// A charge below the floor is refused with its own code, not the code
+    /// of an unmet jurisdiction pin, and says how to pay instead.
+    #[test]
+    fn a_charge_below_the_floor_has_its_own_code() {
+        assert_ne!(BELOW_SETTLEMENT_FLOOR, JURISDICTION_UNMET);
+        let e = below_settlement_floor(9, 10).expect("refused");
+        assert_eq!(e.code, BELOW_SETTLEMENT_FLOOR);
+        assert_eq!(e.code, -32026);
+        let data = e.data.expect("data");
+        assert_eq!(data["remedy"], "open_channel");
+        assert_eq!(data["cost_wei"], "9");
+        assert_eq!(data["micro_settlement_floor"], "10");
+        assert!(below_settlement_floor(10, 10).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -15603,7 +16876,7 @@ mod spot_tier_request_tests {
             qos_class(false),
             tenzro_model::traffic::QosClass::Interactive
         );
-        assert_eq!(qos_class(true), tenzro_model::traffic::QosClass::Batch);
+        assert_eq!(qos_class(true), tenzro_model::traffic::QosClass::Spot);
     }
 }
 
@@ -15737,628 +17010,6 @@ pub(crate) async fn handle_chat(
     result
 }
 
-/// Parses a [`RouteIntent`] from RPC params. Shared by `tenzro_routeIntent`
-/// (discovery) and `tenzro_chatByIntent` (dispatch).
-///
-/// Fields: `use_case` (required, one of `chat`/`code`/`reasoning`/`summarize`/
-/// `extract`/`embed`), `budget` (optional u128 per-request cap in smallest TNZO
-/// unit; absent means no per-request cap), `optimize` (optional f32 in
-/// `[0.0, 1.0]`, cost↔quality knob), `locality` (optional `any`/`local_only`;
-/// `local_only` refuses any candidate this node does not serve itself, and
-/// fails rather than falling back to the network), `quality_floor` (optional
-/// `cheap`/
-/// `strong`), `est_input_tokens` / `est_output_tokens` (optional u64 cost-
-/// estimation inputs), `payer_did` (optional; enables the per-DID budget gate),
-/// `prompt` (optional; places the request in a difficulty cluster),
-/// `jurisdiction` (optional pin; a candidate whose provider declares no
-/// satisfying jurisdiction is dropped and an unmet pin is refused),
-/// `max_p95_ms` (optional p95 latency target). When
-/// `prompt` is absent it is derived from the chat params, so
-/// `tenzro_chatByIntent` gets difficulty scoring without the caller repeating
-/// the text.
-fn parse_route_intent(
-    params: &Value,
-) -> std::result::Result<tenzro_model::routing::intent::RouteIntent, JsonRpcError> {
-    use tenzro_model::routing::intent::{Budget, QualityTier, RouteIntent, UseCase};
-
-    let valid_use_cases = UseCase::ALL.join("|");
-    let use_case_str = params
-        .get("use_case")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: format!("Missing 'use_case' ({valid_use_cases})"),
-            data: None,
-        })?;
-    let use_case = UseCase::parse(use_case_str).ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: format!("Unknown use_case '{use_case_str}' (expected one of {valid_use_cases})"),
-        data: None,
-    })?;
-
-    // Budget: accept a JSON number or decimal string (u128 exceeds JSON's safe
-    // integer range), or absence → no per-request cap.
-    let budget = match params.get("budget") {
-        None | Some(Value::Null) => Budget::None,
-        Some(v) => {
-            let cap = if let Some(n) = v.as_u64() {
-                n as u128
-            } else if let Some(s) = v.as_str() {
-                s.parse::<u128>().map_err(|_| JsonRpcError {
-                    code: -32602,
-                    message: format!("Invalid 'budget' value '{s}' (expected unsigned integer)"),
-                    data: None,
-                })?
-            } else {
-                return Err(JsonRpcError {
-                    code: -32602,
-                    message: "Invalid 'budget' (expected unsigned integer or decimal string)"
-                        .to_string(),
-                    data: None,
-                });
-            };
-            Budget::PerRequestTnzo(cap)
-        }
-    };
-
-    let mut intent = RouteIntent::new(use_case, budget);
-
-    if let Some(o) = params.get("optimize").and_then(|v| v.as_f64()) {
-        intent = intent.with_optimize(o as f32);
-    }
-
-    // `locality`: "any" (default) or "local_only".
-    //
-    // The one constraint an application needs to promise its users that their
-    // prompts never leave their own machine. `budget` was the only thing
-    // standing in for it — a zero cap happens to exclude paid remote offers —
-    // but that is a cost constraint doing a privacy constraint's job, and a
-    // free provider satisfies it while still receiving the prompt.
-    //
-    // An unrecognised value is an error rather than a fallback to `any`: a
-    // caller who misspells this must not silently get the permissive behaviour
-    // they were trying to opt out of.
-    if let Some(loc_str) = params.get("locality").and_then(|v| v.as_str()) {
-        match loc_str {
-            "any" => {}
-            "local_only" => intent.locality = tenzro_model::routing::intent::Locality::LocalOnly,
-            other => {
-                return Err(JsonRpcError {
-                    code: -32602,
-                    message: format!("Unknown locality '{other}' (expected any|local_only)"),
-                    data: None,
-                });
-            }
-        }
-    }
-
-    if let Some(floor_str) = params.get("quality_floor").and_then(|v| v.as_str()) {
-        let floor = match floor_str.trim().to_lowercase().as_str() {
-            "cheap" => QualityTier::Cheap,
-            "strong" => QualityTier::Strong,
-            other => {
-                return Err(JsonRpcError {
-                    code: -32602,
-                    message: format!("Unknown quality_floor '{other}' (expected cheap|strong)"),
-                    data: None,
-                });
-            }
-        };
-        intent = intent.with_quality_floor(floor);
-    }
-
-    let in_tok = params.get("est_input_tokens").and_then(|v| v.as_u64());
-    let out_tok = params.get("est_output_tokens").and_then(|v| v.as_u64());
-    if in_tok.is_some() || out_tok.is_some() {
-        let cur_in = intent.est_input_tokens;
-        let cur_out = intent.est_output_tokens;
-        intent = intent.with_tokens(in_tok.unwrap_or(cur_in), out_tok.unwrap_or(cur_out));
-    }
-
-    if let Some(did) = params.get("payer_did").and_then(|v| v.as_str()) {
-        intent = intent.with_payer_did(did);
-    }
-
-    if let Some(addr_str) = params.get("payer_address").and_then(|v| v.as_str()) {
-        intent = intent.with_payer_address(parse_address(addr_str)?);
-    }
-
-    if let Some(prompt) = extract_route_prompt(params) {
-        intent = intent.with_prompt(prompt);
-    }
-
-    if let Some(prefix) = extract_affinity_prefix(params) {
-        intent = intent.with_affinity_prefix(prefix);
-    }
-
-    if let Some(pin) = params
-        .get("jurisdiction")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        intent = intent.with_jurisdiction(pin);
-    }
-
-    if let Some(v) = params.get("max_p95_ms") {
-        let target = v.as_u64().filter(|t| *t > 0).ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "max_p95_ms must be a positive integer (milliseconds)".to_string(),
-            data: None,
-        })?;
-        intent = intent.with_max_p95_ms(target);
-    }
-
-    Ok(intent)
-}
-
-/// The continuity an intent asks for, as the `session` a chat request
-/// carries: `continuity` (`none` / `standby` / `hot_successor`) with a
-/// `session_id`. Above `none` the intent must pin a jurisdiction, since the
-/// successor and every KV delta stay inside it.
-fn intent_session(params: &Value) -> std::result::Result<Option<Value>, JsonRpcError> {
-    let bad = |m: &str| JsonRpcError {
-        code: -32602,
-        message: m.to_string(),
-        data: None,
-    };
-    let Some(level) = params.get("continuity") else {
-        return Ok(None);
-    };
-    let level: crate::continuity::ContinuityLevel = serde_json::from_value(level.clone())
-        .map_err(|_| bad("continuity must be one of none, standby, hot_successor"))?;
-    if !level.needs_successor() {
-        return Ok(None);
-    }
-    if params
-        .get("jurisdiction")
-        .and_then(|v| v.as_str())
-        .is_none_or(|j| j.trim().is_empty())
-    {
-        return Err(bad("continuity above none needs a jurisdiction"));
-    }
-    let id = params
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| bad("continuity above none needs a session_id"))?;
-    Ok(Some(serde_json::json!({ "id": id, "continuity": level })))
-}
-
-/// Pulls the bytes used for cache-affinity matching.
-///
-/// This deliberately differs from [`extract_route_prompt`], which returns only
-/// the last user turn. The two answer different questions — clustering wants
-/// the turn being asked, affinity wants the shared prefix — and conflating
-/// them made affinity permanently score zero, because the rolling hash is
-/// position dependent from byte 0.
-///
-/// **This must reproduce, byte for byte, what a serving node records as warm.**
-/// That is `warm_prompt_bytes(chat_messages)` — the contents joined by `\n` —
-/// over the `chat_messages` the chat handlers build, which is *not* simply the
-/// `messages` array:
-///
-/// - the `system` param is a **separate** field and is **prepended** as its own
-///   message, so it occupies run 0. Omitting it shifts every run and guarantees
-///   a zero match — and the system prompt is usually the largest shared prefix
-///   in the conversation, i.e. the entire point of the feature.
-/// - message content is flattened with [`render_blocks_as_text`], which renders
-///   thinking and tool blocks with markup, not just the `text` fields.
-///
-/// Any divergence here silently returns every match to zero rather than failing
-/// loudly, so both facts are reproduced by calling the same helpers the chat
-/// path calls rather than by re-deriving them.
-fn extract_affinity_prefix(params: &Value) -> Option<String> {
-    let system: Option<tenzro_types::model::SystemPrompt> = params
-        .get("system")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
-    let messages: Vec<tenzro_types::model::RichChatMessage> = params
-        .get("messages")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let mut parts: Vec<String> = Vec::with_capacity(messages.len() + 1);
-    if let Some(sys) = &system {
-        parts.push(sys.as_text());
-    }
-    for m in &messages {
-        parts.push(render_blocks_as_text(&m.content));
-    }
-
-    let joined = parts.join("\n");
-    (!joined.trim().is_empty()).then_some(joined)
-}
-
-/// Pulls the text used for difficulty clustering out of the params: an explicit
-/// `prompt`, else the simple shape's `message`, else the last user turn of the
-/// rich shape's `messages`. The last user turn is what the model is being asked
-/// to answer; earlier turns are context and would blur the placement.
-///
-/// A rich turn's content is either a string or a block list; the block list's
-/// text blocks are joined, so a turn that carries image blocks alongside its
-/// text still places in a cluster on that text.
-fn extract_route_prompt(params: &Value) -> Option<String> {
-    if let Some(p) = params.get("prompt").and_then(|v| v.as_str())
-        && !p.trim().is_empty()
-    {
-        return Some(p.to_string());
-    }
-    if let Some(m) = params.get("message").and_then(|v| v.as_str())
-        && !m.trim().is_empty()
-    {
-        return Some(m.to_string());
-    }
-    params
-        .get("messages")
-        .and_then(|v| v.as_array())
-        .and_then(|turns| {
-            turns
-                .iter()
-                .rev()
-                .find(|t| t.get("role").and_then(|r| r.as_str()) == Some("user"))
-                .or_else(|| turns.last())
-        })
-        .and_then(|t| t.get("content"))
-        .and_then(|c| match c {
-            Value::String(s) => Some(s.clone()),
-            Value::Array(blocks) => Some(
-                blocks
-                    .iter()
-                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            _ => None,
-        })
-        .filter(|c| !c.trim().is_empty())
-}
-
-/// Serializes a [`RouteDecision`] to the JSON-RPC result shape.
-///
-/// `cluster` is the difficulty cluster the prompt landed in; callers echo it
-/// back to `tenzro_recordRouteOutcome` so the observation lands on the right
-/// cluster. `expected_error` is the chosen model's observed adverse-outcome rate
-/// in that cluster, and is present only when the cluster has observations —
-/// absent means the decision was made on declared metadata alone.
-///
-/// `provider` and `endpoint` are present when the winner is a live offer another
-/// provider is announcing on the network: the offer names the address that serves
-/// the call and takes the provider share. They are absent for a winner from this
-/// node's own catalog, where the serving operator is resolved at dispatch time.
-fn route_decision_to_json(d: &tenzro_model::routing::intent::RouteDecision) -> Value {
-    serde_json::json!({
-        "model_id": d.model_id,
-        "tier": format!("{:?}", d.tier).to_lowercase(),
-        "estimated_cost": d.estimated_cost.to_string(),
-        "alternates": d.alternates,
-        "cluster": d.cluster,
-        "expected_error": d.expected_error,
-        "provider": d.provider.map(|p| hex::encode(p.as_bytes())),
-        "endpoint": d.endpoint,
-        "reason": d.reason,
-    })
-}
-
-/// `tenzro_routeIntent` — runs the model-selection pipeline and returns the
-/// chosen model, tier, estimated cost, fallback chain, and a selection trace.
-/// Discovery only: no provider is dialed, no spend is recorded, and the per-DID
-/// budget gate is still consulted (so an over-budget DID sees the rejection at
-/// discovery time rather than at dispatch).
-async fn handle_route_intent(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let intent = parse_route_intent(&params)?;
-    let intent = crate::verifiable_inference::apply_to_intent(node, intent, &params)?;
-    intent_session(&params)?;
-    let intent = crate::prefix_probe::probe_for_intent(
-        node,
-        intent,
-        crate::prefix_probe::request_salt(params.get("cache_salt").and_then(|v| v.as_str()), None),
-    )
-    .await;
-
-    let meta = node.inference_router().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "Inference router not initialized on this node".to_string(),
-        data: None,
-    })?;
-
-    match meta.route_intent(&intent).await {
-        Ok(decision) => Ok(route_decision_to_json(&decision)),
-        Err(tenzro_model::ModelError::NoProvidersAvailable(m)) => Err(JsonRpcError {
-            code: -32004,
-            message: m,
-            data: None,
-        }),
-        Err(e) => Err(JsonRpcError {
-            code: -32000,
-            message: e.to_string(),
-            data: None,
-        }),
-    }
-}
-
-/// `tenzro_chatByIntent` — resolves an intent to a model *and* to the operator
-/// that serves it, then dispatches the chat through the same path as a
-/// named-model request. Selection walks the cross-model fallback chain, so an
-/// intent resolves as long as any model that satisfies it has a live offer.
-///
-/// Both the resolved `model_id` and the winning provider are injected into the
-/// chat params, which pins dispatch to the offer that was scored: the price the
-/// decision quoted is the price settled, and the provider share goes to the
-/// address that offer named. The `RouteDecision` is attached to the response
-/// under `route`.
-///
-/// Params are the union of `parse_route_intent`'s intent fields and
-/// `tenzro_chat`'s chat fields (`message` for the simple shape or `messages`
-/// for the rich shape). A caller-supplied `model_id` or `provider` is
-/// overwritten — intent routing is authoritative.
-pub(crate) async fn handle_chat_by_intent(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let mut params = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let intent = parse_route_intent(&params)?;
-    let intent = crate::verifiable_inference::apply_to_intent(node, intent, &params)?;
-    let intent = crate::prefix_probe::probe_for_intent(
-        node,
-        intent,
-        crate::prefix_probe::request_salt(params.get("cache_salt").and_then(|v| v.as_str()), None),
-    )
-    .await;
-
-    // The requester is who the inference router prices and rate-limits
-    // against. `payer_address` when the caller declared one, else the address
-    // the call bills to — the same wallet either way for a well-formed request.
-    //
-    // Absent means anonymous, which is a legitimate way to call this. Present
-    // but unreadable is not: it used to fall through to the zero address, so a
-    // caller who named themselves was silently priced and rate-limited as
-    // anonymous, pooled with every other malformed caller.
-    let requester = match intent.payer_address {
-        Some(payer) => payer,
-        None => match params.get("caller_address").and_then(|v| v.as_str()) {
-            Some(s) => {
-                tenzro_types::primitives::Address::from_hex(s).map_err(|e| JsonRpcError {
-                    code: -32602,
-                    message: format!("Invalid caller_address: {}", e),
-                    data: None,
-                })?
-            }
-            None => tenzro_types::primitives::Address::default(),
-        },
-    };
-
-    let (model_id, provider, decision) = {
-        let meta = node.inference_router().ok_or_else(|| JsonRpcError {
-            code: -32603,
-            message: "Inference router not initialized on this node".to_string(),
-            data: None,
-        })?;
-        match meta.route_and_select(&intent, requester).await {
-            Ok(selected) => selected,
-            Err(tenzro_model::ModelError::NoProvidersAvailable(m)) => {
-                return Err(JsonRpcError {
-                    code: -32004,
-                    message: m,
-                    data: None,
-                });
-            }
-            Err(e) => {
-                return Err(JsonRpcError {
-                    code: -32000,
-                    message: e.to_string(),
-                    data: None,
-                });
-            }
-        }
-    };
-
-    // Inject the resolved model and the winning provider, dropping any caller-
-    // supplied model so intent routing is authoritative.
-    let session = intent_session(&params)?;
-    if let Value::Object(ref mut map) = params {
-        map.insert("model_id".to_string(), Value::String(model_id.clone()));
-        map.remove("model");
-        if let Some(session) = session {
-            map.insert("session".to_string(), session);
-        }
-        map.insert(
-            "provider".to_string(),
-            Value::String(format!("0x{}", hex::encode(provider.as_bytes()))),
-        );
-    }
-
-    let chat = handle_chat(node, Some(params), None).await;
-
-    // Close the difficulty loop from the dispatch itself. Whether the call
-    // succeeded is observed here, not reported by the caller, so it cannot be
-    // spoofed. `escalated` is the one outcome only the caller can know, and it
-    // arrives through `tenzro_recordRouteOutcome`.
-    if let Some(cluster) = decision.cluster
-        && let Some(meta) = node.inference_router()
-    {
-        let observed = match &chat {
-            Ok(_) => tenzro_model::difficulty::RouteOutcome::Resolved,
-            Err(_) => tenzro_model::difficulty::RouteOutcome::Failed,
-        };
-        // Records against the model that was dispatched, not the one the decision
-        // named — selection walks the fallback chain, so those differ whenever the
-        // top-scored model had no live offer.
-        if let Err(e) = meta.record_outcome(&model_id, cluster, observed) {
-            debug!(error = %e, "route outcome not recorded");
-        }
-    }
-
-    let mut result = chat?;
-    if let Value::Object(ref mut map) = result {
-        map.insert("route".to_string(), route_decision_to_json(&decision));
-    }
-    Ok(result)
-}
-
-/// `tenzro_recordRouteOutcome` — reports how a routed call turned out, so the
-/// intent tier's per-cluster error rates reflect what actually happened rather
-/// than only what the catalog declares.
-///
-/// Params: `model_id` (required), `cluster` (required, the `cluster` from the
-/// routing decision), `outcome` (required, one of `resolved` / `escalated` /
-/// `failed`).
-///
-/// `retained: false` means the node has no difficulty index wired, so the
-/// feedback was accepted and discarded. That is not an error — reporting is
-/// advisory, and a node without an embedding model routes on declared metadata.
-async fn handle_record_route_outcome(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-
-    let model_id = params
-        .get("model_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing 'model_id'".to_string(),
-            data: None,
-        })?;
-
-    let cluster = params
-        .get("cluster")
-        .and_then(|v| v.as_u64())
-        .and_then(|c| u32::try_from(c).ok())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing or out-of-range 'cluster' (expected the cluster id from the routing decision)"
-                .to_string(),
-            data: None,
-        })?;
-
-    let valid = tenzro_model::difficulty::RouteOutcome::ALL.join("|");
-    let outcome_str = params
-        .get("outcome")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: format!("Missing 'outcome' ({valid})"),
-            data: None,
-        })?;
-    let outcome =
-        tenzro_model::difficulty::RouteOutcome::parse(outcome_str).ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: format!("Unknown outcome '{outcome_str}' (expected one of {valid})"),
-            data: None,
-        })?;
-
-    let meta = node.inference_router().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "Inference router not initialized on this node".to_string(),
-        data: None,
-    })?;
-
-    let retained = meta
-        .record_outcome(model_id, cluster, outcome)
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: e.to_string(),
-            data: None,
-        })?;
-
-    Ok(serde_json::json!({
-        "retained": retained,
-        "model_id": model_id,
-        "cluster": cluster,
-        "outcome": outcome.as_str(),
-    }))
-}
-
-/// `tenzro_routeDifficultyStats` — read-only view of the node's difficulty
-/// index: how many clusters it has discovered, how big each one is, and the
-/// per-cluster outcome counters for a model when `model_id` is supplied.
-///
-/// Centroids are not returned; they are high-dimensional vectors of no use to a
-/// caller and would dominate the response.
-async fn handle_route_difficulty_stats(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let meta = node.inference_router().ok_or_else(|| JsonRpcError {
-        code: -32603,
-        message: "Inference router not initialized on this node".to_string(),
-        data: None,
-    })?;
-
-    let Some(index) = meta.difficulty_index() else {
-        return Ok(serde_json::json!({
-            "enabled": false,
-            "cluster_count": 0,
-            "clusters": [],
-        }));
-    };
-
-    let map = index.map_snapshot();
-    let clusters: Vec<Value> = map
-        .counts
-        .iter()
-        .enumerate()
-        .map(|(id, count)| serde_json::json!({ "cluster": id, "prompts": count }))
-        .collect();
-
-    let mut result = serde_json::json!({
-        "enabled": true,
-        "cluster_count": index.cluster_count(),
-        "capacity": map.capacity,
-        "embedding_dim": map.dim,
-        "split_threshold": map.split_threshold,
-        "clusters": clusters,
-    });
-
-    if let Some(model_id) = params
-        .as_ref()
-        .and_then(|p| p.get("model_id"))
-        .and_then(|v| v.as_str())
-    {
-        let per_cluster: Vec<Value> = index
-            .model_stats(model_id)
-            .map(|stats| {
-                stats
-                    .clusters
-                    .iter()
-                    .map(|(cluster, counts)| {
-                        serde_json::json!({
-                            "cluster": cluster,
-                            "resolved": counts.resolved,
-                            "escalated": counts.escalated,
-                            "failed": counts.failed,
-                            "error_rate": counts.error_rate(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Value::Object(ref mut map) = result {
-            map.insert("model_id".to_string(), Value::String(model_id.to_string()));
-            map.insert("model_clusters".to_string(), Value::Array(per_cluster));
-        }
-    }
-
-    Ok(result)
-}
-
 /// The hardware identity key registered for the machine DID a network-served
 /// model's announcement was signed as (pinned first-seen in the
 /// `ModelAnnouncement` consumer). `None` when the model was not discovered via
@@ -16431,30 +17082,56 @@ fn verify_forwarded_provenance(
     }
 }
 
+/// What a forwarded inference response says about its locality, and what
+/// this node holds to check it against.
+pub(crate) struct ForwardedJurisdiction<'a> {
+    pub value: Option<&'a Value>,
+    pub request_input: &'a [u8],
+    pub output: &'a [u8],
+    pub model_id: &'a str,
+    pub registered_pubkey: Option<&'a tenzro_crypto::composite::CompositePublicKey>,
+    pub jurisdiction_pin: Option<&'a str>,
+    pub provider_label: &'a str,
+}
+
 /// Verify a `tenzro_jurisdiction` receipt attached to a forwarded inference
 /// response: request/response hash binding, model-id binding, registered-key
-/// binding when an announcement pubkey is pinned, the receipt signature, and
-/// — when the caller pinned a jurisdiction — that the claimed locality
-/// satisfies the pin. Returns the receipt when it verifies; logs and returns
-/// `None` otherwise so the invalid stamp is stripped rather than passed on.
+/// binding when an announcement pubkey is pinned, the receipt signature (a
+/// receipt signed with the provider's identity key against this node's chain
+/// state), and — when the caller pinned a jurisdiction — that the claimed
+/// locality satisfies the pin. Returns the receipt when it verifies; logs and
+/// returns `None` otherwise so the invalid stamp is stripped rather than
+/// passed on.
 pub(crate) fn verify_forwarded_jurisdiction(
-    value: Option<&Value>,
-    request_input: &[u8],
-    output: &[u8],
-    model_id: &str,
-    registered_pubkey: Option<&tenzro_crypto::composite::CompositePublicKey>,
-    jurisdiction_pin: Option<&str>,
-    provider_label: &str,
+    node: &TenzroNode,
+    forwarded: ForwardedJurisdiction<'_>,
 ) -> Option<tenzro_types::JurisdictionReceipt> {
+    let ForwardedJurisdiction {
+        value,
+        request_input,
+        output,
+        model_id,
+        registered_pubkey,
+        jurisdiction_pin,
+        provider_label,
+    } = forwarded;
     let value = value.filter(|v| !v.is_null())?;
     match serde_json::from_value::<tenzro_types::JurisdictionReceipt>(value.clone()) {
         Ok(receipt) => {
+            let chain = crate::root_signatures::chain_keys(node.storage());
             let verdict = tenzro_model::verify_response_receipt(
                 &receipt,
                 request_input,
                 output,
                 model_id,
                 registered_pubkey,
+                chain
+                    .as_ref()
+                    .map(|(resolver, params)| tenzro_model::IdentityKeyCheck {
+                        resolver: resolver.as_ref(),
+                        now_ms: tenzro_crypto::session::now_ms(),
+                        params: *params,
+                    }),
             )
             .and_then(|()| match jurisdiction_pin {
                 Some(pin) => tenzro_model::check_receipt_satisfies_pin(&receipt, pin),
@@ -16493,8 +17170,9 @@ pub(crate) fn sign_local_jurisdiction(
     request_input: &[u8],
     output: &[u8],
 ) -> Option<tenzro_types::JurisdictionReceipt> {
-    let signer = node.jurisdiction_signer()?;
     let claim = node.jurisdiction_claim()?;
+    let signer = crate::root_signatures::identity_key_jurisdiction_signer(node)
+        .or_else(|| node.jurisdiction_signer().cloned())?;
     match signer.sign(
         request_input,
         output,
@@ -16659,7 +17337,7 @@ pub(crate) fn local_claim_satisfies_pin(node: &Arc<TenzroNode>, pin: &str) -> bo
 
 fn jurisdiction_pin_rpc_error(pin: &str) -> JsonRpcError {
     JsonRpcError {
-        code: -32024,
+        code: JURISDICTION_UNMET,
         message: format!(
             "This node does not satisfy jurisdiction pin '{}' — no matching locality claim declared",
             pin
@@ -16709,10 +17387,14 @@ fn store_local_commitment(
     let manager = node.challenge_manager()?;
     let provider = local_provider_did();
     match manager.store_commitment(model_id, &provider, commitment) {
+        // The whole commitment rides the answer: a node that forwarded it
+        // hands it to witnesses verifying the answer without asking the
+        // provider for it again.
         Ok(hash) => Some(serde_json::json!({
             "hash": hash,
             "k": commitment.k,
             "steps": commitment.steps.len(),
+            "commitment": commitment,
         })),
         Err(e) => {
             tracing::warn!(model = %model_id,
@@ -16755,6 +17437,7 @@ pub(crate) fn record_local_generation(
     bytes_out: u64,
     cost_wei: u128,
     latency_ms: u64,
+    payer: Option<crate::usage_payer::Payer>,
 ) {
     let Some(tracker) = node.usage_tracker() else {
         return;
@@ -16777,11 +17460,16 @@ pub(crate) fn record_local_generation(
         cost,
         latency_ms,
     )
-    .with_record_id(completion_id.to_string());
+    .with_record_id(completion_id.to_string())
+    .with_payer(payer.as_ref().and_then(crate::usage_payer::Payer::label));
 
     if let Err(e) = tracker.record_usage(record) {
         tracing::warn!(model = %model_id, completion_id = %completion_id,
             "Failed to record local generation usage: {}", e);
+        return;
+    }
+    if let Some(payer) = &payer {
+        crate::usage_payer::record(node, completion_id, payer);
     }
 }
 
@@ -16846,8 +17534,8 @@ pub(crate) fn price_served_tokens(
 /// usage aggregate that reward metering reads at epoch close. Factored out so a
 /// newly added modality cannot serve for free by forgetting one of the three.
 ///
-/// Returns the metered cost and the settlement outcome for the handler to merge
-/// into its response.
+/// Returns the metered cost, the settlement outcome and the id the call is
+/// recorded under, for the handler to merge into its response.
 pub(crate) async fn bill_local_units(
     node: &Arc<TenzroNode>,
     params: &Value,
@@ -16856,7 +17544,7 @@ pub(crate) async fn bill_local_units(
     bytes_in: u64,
     bytes_out: u64,
     latency_ms: u64,
-) -> std::result::Result<(u128, SettlementOutcome), JsonRpcError> {
+) -> std::result::Result<(u128, SettlementOutcome, String), JsonRpcError> {
     let cost_wei = price_local_units(node, model_id, &units)?;
     let settlement = settle_inference_cost(
         node,
@@ -16869,17 +17557,19 @@ pub(crate) async fn bill_local_units(
         cost_wei,
     )
     .await?;
+    let generation_id = uuid::Uuid::new_v4().to_string();
     record_local_generation(
         node,
         model_id,
-        &uuid::Uuid::new_v4().to_string(),
+        &generation_id,
         units,
         bytes_in,
         bytes_out,
         cost_wei,
         latency_ms,
+        crate::usage_payer::Payer::from_settlement(&settlement),
     );
-    Ok((cost_wei, settlement))
+    Ok((cost_wei, settlement, generation_id))
 }
 
 /// Work units for one generative-media render, in the shape the rate card
@@ -16928,12 +17618,32 @@ fn challenge_to_json(c: &crate::inference_challenge::InferenceChallenge) -> Valu
     serde_json::to_value(c).unwrap_or(Value::Null)
 }
 
+/// The hash of the block at `height`, once this node holds it certified.
+pub(crate) async fn certified_block_hash(
+    node: &TenzroNode,
+    height: u64,
+) -> Option<tenzro_types::primitives::Hash> {
+    use tenzro_storage::BlockStore;
+    use tenzro_storage::block_store::BlockStoreImpl;
+    if height > node.consensus().map(|c| c.certified_height()).unwrap_or(0) {
+        return None;
+    }
+    let block_store = BlockStoreImpl::new(node.storage()?.clone()).ok()?;
+    block_store
+        .get_block_by_height(tenzro_types::primitives::BlockHeight(height))
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.hash())
+}
+
 /// Finalized-block hash used as the grinding-resistant seed for challenge
-/// committee selection. Reads the block at the current finalized height;
-/// falls back to genesis when no higher block is available yet.
+/// committee selection, with its height. Reads the block at the current
+/// finalized height; falls back to genesis when no higher block is available
+/// yet.
 async fn challenge_chain_entropy(
     node: &Arc<TenzroNode>,
-) -> std::result::Result<tenzro_types::primitives::Hash, JsonRpcError> {
+) -> std::result::Result<(tenzro_types::primitives::Hash, u64), JsonRpcError> {
     use tenzro_storage::BlockStore;
     use tenzro_storage::block_store::BlockStoreImpl;
     let storage = node.storage().ok_or_else(|| JsonRpcError {
@@ -16950,7 +17660,7 @@ async fn challenge_chain_entropy(
         node.consensus().map(|c| c.certified_height()).unwrap_or(0),
     );
     if let Ok(Some(block)) = block_store.get_block_by_height(height).await {
-        return Ok(block.hash());
+        return Ok((block.hash(), height.0));
     }
     // Fall back to genesis if the finalized block isn't materialized.
     block_store
@@ -16958,7 +17668,7 @@ async fn challenge_chain_entropy(
         .await
         .ok()
         .flatten()
-        .map(|b| b.hash())
+        .map(|b| (b.hash(), 0))
         .ok_or_else(|| JsonRpcError {
             code: -32000,
             message: "No finalized block available for committee entropy".to_string(),
@@ -16968,8 +17678,8 @@ async fn challenge_chain_entropy(
 
 /// Snapshot the active validator set, with stakes and consensus keys, as
 /// challenge-committee candidates.
-fn challenge_committee_candidates(
-    node: &Arc<TenzroNode>,
+pub(crate) fn challenge_committee_candidates(
+    node: &TenzroNode,
 ) -> std::result::Result<Vec<crate::inference_challenge::CommitteeCandidate>, JsonRpcError> {
     let registry = node.validator_registry().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -16986,6 +17696,75 @@ fn challenge_committee_candidates(
             consensus_pubkey: e.p256_pubkey.clone(),
         })
         .collect())
+}
+
+/// The generation config of a `tenzro_chat` frame for `model_id`, read from
+/// its params. A witness verifying an answer to the frame builds the same
+/// config, so it renders the same prompt the provider was given.
+pub(crate) fn chat_frame_config(
+    node: &Arc<TenzroNode>,
+    params: &Value,
+    model_id: &str,
+    verifiable: bool,
+) -> std::result::Result<GenerationConfig, JsonRpcError> {
+    let temperature = params
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.7);
+    tenzro_types::validation::validate_temperature(temperature).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+        data: None,
+    })?;
+
+    let max_tokens = params
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(512);
+    tenzro_types::validation::validate_numeric_bound(
+        max_tokens,
+        "max_tokens",
+        tenzro_types::validation::MAX_INFERENCE_TOKENS,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+        data: None,
+    })?;
+
+    let mut config = GenerationConfig {
+        temperature,
+        top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
+        max_tokens: max_tokens as u32,
+        repeat_penalty: params
+            .get("repeat_penalty")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.1) as f32,
+        // Optional Multi-Token-Prediction draft count (1..=6). When set
+        // and the target's catalog entry pairs a drafter, the runtime
+        // attempts speculative decoding; otherwise returns a structured
+        // `MtpUnavailable` error.
+        // An explicit `draft_n` wins; otherwise fall back to the depth the
+        // catalog measured for this model. Without the fallback a caller that
+        // omits the field silently loses speculative decoding, which is the
+        // whole reason `mtp_default_draft_n` exists.
+        draft_n: params
+            .get("draft_n")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| (1..=16).contains(n))
+            .or_else(|| {
+                node.catalog()
+                    .get_model_by_id(model_id)
+                    .and_then(|e| e.mtp_default_draft_n)
+                    .filter(|n| (1..=16).contains(n))
+            }),
+        commitment_k: verifiable.then_some(tenzro_model::DEFAULT_COMMITMENT_K),
+        ..GenerationConfig::default()
+    };
+    apply_sampling_params(&mut config, params);
+
+    Ok(config)
 }
 
 /// `tenzro_getInferenceCommitment` — fetch a stored TOPLOC commitment by
@@ -17033,8 +17812,15 @@ async fn handle_get_inference_commitment(
 /// `tenzro_verifyInferenceCommitment` — re-execute a committed inference
 /// as a single prefill on this node and fuzzy-compare the recomputed
 /// logits against the commitment (TOPLOC check). The caller supplies the
-/// original prompt — it is never stored. Requires the model loaded
-/// locally in serial mode with the same weights the provider used.
+/// original `prompt` — it is never stored — or the `tenzro_chat` `request`
+/// the answer was served for, which this node renders as its chat path does;
+/// and, on a node other than the one that served the response, the
+/// `commitment` with the `receipt` its provider signed over it; model,
+/// provider and time are then taken from the receipt. Requires the model
+/// loaded locally, on the serial or the batch engine, with the same weights
+/// the provider used. With a `receipt_nonce` the verdict comes back under
+/// this node's signed receipt: how a validator asks a witness about a
+/// disputed answer.
 #[cfg(feature = "inference")]
 async fn handle_verify_inference_commitment(
     node: &Arc<TenzroNode>,
@@ -17054,64 +17840,176 @@ async fn handle_verify_inference_commitment(
             message: "Missing commitment_hash".to_string(),
             data: None,
         })?;
-    let prompt = params
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing prompt (the verifier supplies the original prompt)".to_string(),
-            data: None,
-        })?;
-    let manager = challenge_manager_or_err(node)?;
-    let stored = manager
-        .get_commitment(hash)
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Commitment lookup failed: {e}"),
-            data: None,
-        })?
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: format!("No stored commitment with hash {hash}"),
-            data: None,
-        })?;
-    // With the provider's signed receipt, the decode itself is checked too:
-    // each emitted token must be the one the signed sampler picks from the
-    // committed logits.
-    let decode = match params.get("receipt").filter(|v| !v.is_null()) {
-        Some(v) => {
-            let receipt: crate::inference_receipt::InferenceReceipt =
-                serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+    let prompt = params.get("prompt").and_then(|v| v.as_str());
+    let request = params.get("request").filter(|v| !v.is_null());
+    let receipt = match params.get("receipt").filter(|v| !v.is_null()) {
+        Some(v) => Some(
+            serde_json::from_value::<crate::inference_receipt::InferenceReceipt>(v.clone())
+                .map_err(|e| JsonRpcError {
                     code: -32602,
                     message: format!("receipt does not parse: {e}"),
                     data: None,
-                })?;
-            let registered = crate::identity_bootstrap::registered_identity_key(
-                &node.identity_registry_slot(),
-                &stored.provider,
-            )
+                })?,
+        ),
+        None => None,
+    };
+    let registered_key = |did: &str| {
+        crate::identity_bootstrap::registered_identity_key(&node.identity_registry_slot(), did)
             .ok_or_else(|| JsonRpcError {
                 code: -32602,
-                message: format!(
-                    "receipt refused: {} has no registered identity key",
-                    stored.provider
-                ),
+                message: format!("receipt refused: {did} has no registered identity key"),
+                data: None,
+            })
+    };
+    let manager = challenge_manager_or_err(node)?;
+    let held = manager.get_commitment(hash).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Commitment lookup failed: {e}"),
+        data: None,
+    })?;
+    // A node that did not serve the response holds no copy: the caller hands
+    // it the commitment with the receipt its provider signed over it, and
+    // only what that signature binds is taken from them.
+    let stored = match held {
+        Some(stored) => stored,
+        None => {
+            let commitment = params
+                .get("commitment")
+                .filter(|v| !v.is_null())
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "No stored commitment with hash {hash}; pass the commitment and the \
+                         provider's signed receipt"
+                    ),
+                    data: None,
+                })?;
+            let commitment: tenzro_model::toploc::InferenceCommitment =
+                serde_json::from_value(commitment.clone()).map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("commitment does not parse: {e}"),
+                    data: None,
+                })?;
+            let receipt = receipt.as_ref().ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "a commitment this node did not store needs the provider's signed \
+                          receipt"
+                    .to_string(),
                 data: None,
             })?;
-            Some(
-                crate::decode_check::check_receipted_decode(
-                    &receipt,
-                    &stored.provider,
-                    &registered,
-                    &stored.commitment,
-                )
-                .map_err(|e| JsonRpcError {
-                    code: -32602,
-                    message: format!("receipt refused: {e}"),
-                    data: None,
-                })?,
+            crate::inference_challenge::supplied_commitment(
+                hash,
+                commitment,
+                receipt,
+                &registered_key(&receipt.machine_did)?,
             )
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Commitment refused: {e}"),
+                data: None,
+            })?
         }
+    };
+    let prompt = match (prompt, request) {
+        (Some(p), _) => p.to_string(),
+        (None, Some(request)) => {
+            let runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
+                code: -32000,
+                message: "Model runtime not initialized".to_string(),
+                data: None,
+            })?;
+            chat_request_prompt(node, runtime, &stored.model_id, request).await?
+        }
+        (None, None) => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "Missing prompt or request (the verifier supplies what was served)"
+                    .to_string(),
+                data: None,
+            });
+        }
+    };
+    let units = tenzro_types::model::BillableUnits::tokens(
+        stored.commitment.prompt_tokens,
+        stored.commitment.steps.len() as u32,
+    );
+    let checked = check_commitment(node, stored, receipt.as_ref(), &prompt).await?;
+    let mut out = serde_json::json!({
+        "commitment_hash": hash,
+        "model_id": checked.model_id,
+        "provider": checked.provider,
+        // The logits must match the model and, when a receipt makes the
+        // decode checkable, the tokens must follow from them.
+        "pass": checked.pass(),
+        "steps_total": checked.outcome.steps_total,
+        "steps_passed": checked.outcome.steps_passed,
+        "failing_steps": checked.outcome.failing_steps,
+        "decode": checked.decode,
+    });
+    if params.get("receipt_nonce").is_some() {
+        crate::verifiable_inference::attach_task_receipt(
+            node,
+            &params,
+            &checked.model_id,
+            crate::optimistic::VERIFY_COMMITMENT_TASK,
+            tenzro_types::inference_verification::VerificationLevel::Receipt,
+            units,
+            &mut out,
+        )
+        .await?;
+    }
+    Ok(out)
+}
+
+/// A commitment re-executed on this node.
+pub(crate) struct CheckedCommitment {
+    pub(crate) model_id: String,
+    pub(crate) provider: String,
+    pub(crate) outcome: tenzro_model::toploc::VerificationOutcome,
+    pub(crate) decode: Option<crate::decode_check::DecodeCheck>,
+}
+
+impl CheckedCommitment {
+    /// The logits match the model and, when a receipt makes the decode
+    /// checkable, the tokens follow from them.
+    pub(crate) fn pass(&self) -> bool {
+        self.outcome.pass && self.decode.as_ref().and_then(|d| d.pass) != Some(false)
+    }
+}
+
+/// Re-executes `prompt` through the model `stored` names and compares the
+/// logits with its commitment. With the provider's signed receipt the decode
+/// itself is checked too: each emitted token must be the one the signed
+/// sampler picks from the committed logits.
+#[cfg(feature = "inference")]
+pub(crate) async fn check_commitment(
+    node: &Arc<TenzroNode>,
+    stored: crate::inference_challenge::StoredCommitment,
+    receipt: Option<&crate::inference_receipt::InferenceReceipt>,
+    prompt: &str,
+) -> std::result::Result<CheckedCommitment, JsonRpcError> {
+    let registered_key = |did: &str| {
+        crate::identity_bootstrap::registered_identity_key(&node.identity_registry_slot(), did)
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("receipt refused: {did} has no registered identity key"),
+                data: None,
+            })
+    };
+    let decode = match receipt {
+        Some(receipt) => Some(
+            crate::decode_check::check_receipted_decode(
+                receipt,
+                &stored.provider,
+                &registered_key(&stored.provider)?,
+                &stored.commitment,
+            )
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("receipt refused: {e}"),
+                data: None,
+            })?,
+        ),
         None => None,
     };
     let runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
@@ -17120,26 +18018,78 @@ async fn handle_verify_inference_commitment(
         data: None,
     })?;
     let outcome = runtime
-        .verify_inference_commitment(&stored.model_id, prompt, stored.commitment)
+        .verify_inference_commitment(
+            &stored.model_id,
+            prompt,
+            stored.commitment,
+            crate::inference_challenge::governed_verify_tolerance(chain_state_of(node).as_ref()),
+        )
         .await
         .map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Verification failed: {e}"),
             data: None,
         })?;
-    let decode_pass = decode.as_ref().and_then(|d| d.pass);
-    Ok(serde_json::json!({
-        "commitment_hash": hash,
-        "model_id": stored.model_id,
-        "provider": stored.provider,
-        // The logits must match the model and, when a receipt makes the
-        // decode checkable, the tokens must follow from them.
-        "pass": outcome.pass && decode_pass != Some(false),
-        "steps_total": outcome.steps_total,
-        "steps_passed": outcome.steps_passed,
-        "failing_steps": outcome.failing_steps,
-        "decode": decode,
-    }))
+    Ok(CheckedCommitment {
+        model_id: stored.model_id,
+        provider: stored.provider,
+        outcome,
+        decode,
+    })
+}
+
+/// A build without the model engine cannot re-execute a prompt, so it
+/// checks no commitment.
+#[cfg(not(feature = "inference"))]
+pub(crate) async fn check_commitment(
+    _node: &Arc<TenzroNode>,
+    _stored: crate::inference_challenge::StoredCommitment,
+    _receipt: Option<&crate::inference_receipt::InferenceReceipt>,
+    _prompt: &str,
+) -> std::result::Result<CheckedCommitment, JsonRpcError> {
+    Err(JsonRpcError {
+        code: -32000,
+        message: "this build has no model runtime to re-execute the prompt".to_string(),
+        data: None,
+    })
+}
+
+/// The prompt a `tenzro_chat` frame `request` was served from on `model_id`:
+/// its message rendered under the config the frame's params give, as the
+/// chat path renders it. Any other request shape is refused: a verifier that
+/// cannot rebuild the exact prompt can say nothing about the answer.
+#[cfg(feature = "inference")]
+async fn chat_request_prompt(
+    node: &Arc<TenzroNode>,
+    runtime: &tenzro_model::ModelRuntime,
+    model_id: &str,
+    request: &Value,
+) -> std::result::Result<String, JsonRpcError> {
+    let refuse = |message: String| JsonRpcError {
+        code: -32602,
+        message,
+        data: None,
+    };
+    if request.get("method").and_then(Value::as_str) != Some("tenzro_chat") {
+        return Err(refuse(
+            "only a tenzro_chat frame is verified from its request".to_string(),
+        ));
+    }
+    let frame = request.get("params").unwrap_or(&Value::Null);
+    let message = frame
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| refuse("the tenzro_chat frame carries no message".to_string()))?;
+    let config = chat_frame_config(node, frame, model_id, true)?;
+    let messages = vec![ModelChatMessage {
+        role: "user".to_string(),
+        content: message.to_string(),
+        ..Default::default()
+    }];
+    runtime
+        .chat_prompt(model_id, &messages, &[], &config)
+        .await
+        .map_err(|e| refuse(format!("the request does not render: {e}")))
 }
 
 /// `tenzro_fileInferenceChallenge` — open a dispute against a stored
@@ -17147,6 +18097,9 @@ async fn handle_verify_inference_commitment(
 /// filing cannot misattribute. Filing draws a deterministic stake-weighted
 /// committee from the active validator set (seeded by the finalized block
 /// hash) and opens the commit phase — no operator decides the verdict.
+/// The provider's signed receipt and the inputs it commits to come with the
+/// filing; the challenge is published to every validator, and the inputs are
+/// served only to its seats.
 async fn handle_file_inference_challenge(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -17174,7 +18127,101 @@ async fn handle_file_inference_challenge(
             data: None,
         })?;
     let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    let bad = |message: String| JsonRpcError {
+        code: -32602,
+        message,
+        data: None,
+    };
+    let receipt: crate::inference_receipt::InferenceReceipt = params
+        .get("receipt")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| bad("Missing receipt (the provider's signed receipt)".to_string()))
+        .and_then(|v| {
+            serde_json::from_value(v.clone())
+                .map_err(|e| bad(format!("receipt does not parse: {e}")))
+        })?;
+    let inputs: crate::inference_challenge::ChallengeInputs = params
+        .get("inputs")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| {
+            bad(
+                "Missing inputs (what the engine was given, for the seats to re-execute)"
+                    .to_string(),
+            )
+        })
+        .and_then(|v| {
+            serde_json::from_value(v.clone()).map_err(|e| bad(format!("inputs do not parse: {e}")))
+        })?;
+    if !crate::challenge_notice::joins_topic(node) {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "file challenges on a validator or model-provider node: this node does not \
+                      carry the challenge topic, so no seat would hear of it"
+                .to_string(),
+            data: None,
+        });
+    }
+    let holder_rpc = crate::exposure::rpc_url(node.config())
+        .filter(|u| crate::exposure::check_public_https(u).is_ok())
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "this node publishes no public https RPC URL, so seats could not fetch the \
+                      inputs from it"
+                .to_string(),
+            data: None,
+        })?;
     let manager = challenge_manager_or_err(node)?;
+    let provider_key = crate::identity_bootstrap::registered_identity_key(
+        &node.identity_registry_slot(),
+        &receipt.machine_did,
+    )
+    .ok_or_else(|| {
+        bad(format!(
+            "receipt refused: {} has no registered identity key",
+            receipt.machine_did
+        ))
+    })?;
+    receipt
+        .verify_signature(&provider_key)
+        .map_err(|e| bad(format!("receipt refused: {e}")))?;
+    // A commitment this node did not serve is taken from the caller, bound
+    // by the receipt.
+    let commitment = match manager.get_commitment(hash).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Commitment lookup failed: {e}"),
+        data: None,
+    })? {
+        Some(stored) => stored.commitment,
+        None => {
+            let commitment: tenzro_model::toploc::InferenceCommitment = params
+                .get("commitment")
+                .filter(|v| !v.is_null())
+                .ok_or_else(|| {
+                    bad(format!(
+                        "No stored commitment with hash {hash}; pass the commitment"
+                    ))
+                })
+                .and_then(|v| {
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| bad(format!("commitment does not parse: {e}")))
+                })?;
+            let stored = crate::inference_challenge::supplied_commitment(
+                hash,
+                commitment,
+                &receipt,
+                &provider_key,
+            )
+            .map_err(|e| bad(format!("Commitment refused: {e}")))?;
+            manager
+                .store_commitment(&stored.model_id, &stored.provider, &stored.commitment)
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Commitment store failed: {e}"),
+                    data: None,
+                })?;
+            stored.commitment
+        }
+    };
 
     // Draw the committee: active validators, seeded by finalized-block entropy.
     let candidates = challenge_committee_candidates(node)?;
@@ -17185,15 +18232,21 @@ async fn handle_file_inference_challenge(
             data: None,
         });
     }
-    let entropy = challenge_chain_entropy(node).await?;
+    let (entropy, entropy_height) = challenge_chain_entropy(node).await?;
     // The committee is drawn inside `file`, keyed on the commitment hash and
     // this entropy, with the provider's own key excluded.
     let challenge = manager
         .file(
-            hash,
-            challenger,
-            reason,
-            entropy,
+            crate::inference_challenge::Filing {
+                commitment_hash: hash,
+                challenger,
+                reason,
+                receipt,
+                inputs,
+                chain_entropy: entropy,
+                entropy_height,
+                holder_rpc,
+            },
             &candidates,
             crate::inference_challenge::ChallengeWindows::governed(chain_state_of(node).as_ref()),
             crate::inference_challenge::now_secs(),
@@ -17203,6 +18256,15 @@ async fn handle_file_inference_challenge(
             message: format!("Challenge filing rejected: {e}"),
             data: None,
         })?;
+    // Every validator learns of it: the seats are drawn from all of them.
+    crate::challenge_notice::publish(
+        node,
+        &crate::challenge_notice::ChallengeGossip::Filed {
+            challenge: Box::new(challenge.clone()),
+            commitment,
+        },
+    )
+    .await;
     Ok(challenge_to_json(&challenge))
 }
 
@@ -17269,6 +18331,16 @@ async fn handle_commit_challenge_vote(
             message: format!("Vote commit rejected: {e}"),
             data: None,
         })?;
+    crate::challenge_notice::publish(
+        node,
+        &crate::challenge_notice::ChallengeGossip::Commit {
+            challenge_id: id.to_string(),
+            voter: voter.to_string(),
+            commit_hash: commit_hash.to_string(),
+            signature: signature.to_string(),
+        },
+    )
+    .await;
     Ok(challenge_to_json(&updated))
 }
 
@@ -17345,6 +18417,17 @@ async fn handle_reveal_challenge_vote(
             message: format!("Vote reveal rejected: {e}"),
             data: None,
         })?;
+    crate::challenge_notice::publish(
+        node,
+        &crate::challenge_notice::ChallengeGossip::Reveal {
+            challenge_id: id.to_string(),
+            voter: voter.to_string(),
+            verdict,
+            salt: hex::encode(&salt),
+            signature: signature.to_string(),
+        },
+    )
+    .await;
     Ok(challenge_to_json(&updated))
 }
 
@@ -17415,10 +18498,10 @@ async fn handle_list_inference_challenges(
 /// reveal window has elapsed to close a challenge that never reached an
 /// uphold quorum (the provider prevails).
 ///
-/// An upheld challenge fires the existing provider penalty paths — the
-/// `ProviderManager` call-failure reputation decrement — rather than a new
-/// slashing mechanism. It is best-effort: a provider unknown to this node's
-/// registries still gets the on-record upheld verdict.
+/// An upheld challenge counts one failed call against the provider in this
+/// node's own routing, once ([`counts_against_provider`]). It reaches the
+/// provider's bond through the chain, by the operator's
+/// `tenzro_fileChallengeFault`.
 async fn handle_finalize_challenge(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -17437,6 +18520,9 @@ async fn handle_finalize_challenge(
             data: None,
         })?;
     let manager = challenge_manager_or_err(node)?;
+    // A challenge is resolved once: a later call reads the outcome back and
+    // counts nothing against the provider again.
+    let already_resolved = manager.get(id).is_some_and(|c| c.status.is_terminal());
     let resolved = manager
         .finalize(id, crate::inference_challenge::now_secs())
         .map_err(|e| JsonRpcError {
@@ -17445,29 +18531,22 @@ async fn handle_finalize_challenge(
             data: None,
         })?;
 
-    let upheld = matches!(
-        resolved.status,
-        crate::inference_challenge::ChallengeStatus::Upheld
-    );
-
     let mut reputation_penalized = false;
-    if upheld {
-        // Reputation: the stored provider string is the announce-signer
-        // pubkey hex, which is also the provider's registry address.
-        if let Ok(addr) =
-            tenzro_types::primitives::Address::from_hex(resolved.provider.trim_start_matches("0x"))
-        {
-            if let Some(pm) = node.provider_manager() {
+    if counts_against_provider(already_resolved, resolved.status)
+        && let Some(pm) = node.provider_manager()
+    {
+        // A commitment names its provider by machine DID, or for an older
+        // record by the address it announced from.
+        match provider_address(pm, &resolved.provider) {
+            Some(addr) => {
                 pm.record_call_failure(&addr);
                 reputation_penalized = true;
             }
-        } else {
-            tracing::warn!(
+            None => tracing::warn!(
                 challenge = %id,
                 provider = %resolved.provider,
-                "Upheld challenge provider string is not a parseable address; \
-                 penalty paths skipped"
-            );
+                "upheld challenge names a provider this node does not know; nothing counted"
+            ),
         }
     }
 
@@ -17479,6 +18558,72 @@ async fn handle_finalize_challenge(
         );
     }
     Ok(out)
+}
+
+/// The address `provider` is known by in `pm`: the provider whose
+/// announcements name that machine DID, or the address itself.
+fn provider_address(
+    pm: &tenzro_model::ProviderManager,
+    provider: &str,
+) -> Option<tenzro_types::primitives::Address> {
+    pm.address_of_machine(provider).or_else(|| {
+        tenzro_types::primitives::Address::from_hex(provider.trim_start_matches("0x")).ok()
+    })
+}
+
+/// Whether finalizing a challenge counts a failed call against its provider:
+/// only the call that resolves it upheld. One that finds it already resolved
+/// reads the outcome back and counts nothing again.
+fn counts_against_provider(
+    was_resolved: bool,
+    status: crate::inference_challenge::ChallengeStatus,
+) -> bool {
+    !was_resolved && status == crate::inference_challenge::ChallengeStatus::Upheld
+}
+
+/// `tenzro_fileChallengeFault { challenge_id, dispute }` (operator only):
+/// take a challenge its committee upheld to the chain. `dispute` is the
+/// answer the challenged commitment was signed into (`{receipt, request,
+/// output}`); the node files the inference fault for it from its own
+/// validator account, which validators judge like any other and an upheld
+/// one pays for out of the provider's bond. A fault already on chain is not
+/// filed again; the reply names it either way.
+async fn handle_file_challenge_fault(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let invalid = |message: String| JsonRpcError {
+        code: -32602,
+        message,
+        data: None,
+    };
+    let params = params.ok_or_else(|| invalid("Missing params".to_string()))?;
+    let id = params
+        .get("challenge_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("Missing challenge_id".to_string()))?;
+    let dispute = params
+        .get("dispute")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| invalid("Missing dispute".to_string()))?;
+    let challenge = challenge_manager_or_err(node)?
+        .get(id)
+        .ok_or_else(|| invalid(format!("unknown challenge {id}")))?;
+    if challenge.status != crate::inference_challenge::ChallengeStatus::Upheld {
+        return Err(invalid(format!(
+            "challenge {id} was not upheld by its committee"
+        )));
+    }
+    let answer = crate::optimistic::challenged_answer(&challenge.commitment_hash, dispute)
+        .map_err(|e| invalid(format!("dispute refused: {e}")))?;
+    let fault_id = crate::optimistic::file_challenged_fault(node, &answer)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("the fault was not filed: {e}"),
+            data: None,
+        })?;
+    Ok(serde_json::json!({ "challenge_id": id, "fault_id": fault_id }))
 }
 
 /// Sign a locally-generated inference output with the node's provenance
@@ -17584,6 +18729,11 @@ pub(crate) fn network_offer(
             match node.network_providers.get(&reg.iroh_endpoint_id) {
                 Some(p) => {
                     let cap = &p.announcement.capacity;
+                    // No node writes this announced field, so it reads 0
+                    // and every candidate ranks last on latency alike. The
+                    // latency this node measures per provider is not used
+                    // here: it differs from node to node, and the ranking is
+                    // the same on every node.
                     let latency = p.announcement.network_profile.latency_ms_to_peers;
                     (
                         crate::offer_ranking::OfferRank::room(
@@ -17642,22 +18792,26 @@ pub(crate) fn network_offer(
 async fn forward_network_chat(
     node: &Arc<TenzroNode>,
     endpoint_id: &str,
+    provider: &Address,
     provider_name: &str,
     forward_body: &Value,
     credential: &crate::forward_billing::ProviderCredential,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let body = crate::infer::call_provider(node, endpoint_id, forward_body, credential)
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to reach provider {provider_name}: {e}"),
-            data: None,
-        })?;
-    serde_json::from_slice(&body).map_err(|e| JsonRpcError {
+    let (body, head_ms) =
+        crate::infer::call_provider_timed(node, endpoint_id, forward_body, credential)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to reach provider {provider_name}: {e}"),
+                data: None,
+            })?;
+    let answer: Value = serde_json::from_slice(&body).map_err(|e| JsonRpcError {
         code: -32000,
         message: format!("Failed to parse provider response: {e}"),
         data: None,
-    })
+    })?;
+    crate::infer::record_answer_latency(node, provider, &answer, head_ms);
+    Ok(answer)
 }
 
 /// The offer a `tenzro_chat` with these params is served from: a service
@@ -17800,62 +18954,13 @@ async fn handle_chat_simple(
         model_query.to_string()
     };
 
-    // Parse optional generation config
-    let temperature = params
-        .get("temperature")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.7);
-    tenzro_types::validation::validate_temperature(temperature).map_err(|e| JsonRpcError {
-        code: -32602,
-        message: e.to_string(),
-        data: None,
-    })?;
-
-    let max_tokens = params
-        .get("max_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(512);
-    tenzro_types::validation::validate_numeric_bound(
-        max_tokens,
-        "max_tokens",
-        tenzro_types::validation::MAX_INFERENCE_TOKENS,
-    )
-    .map_err(|e| JsonRpcError {
-        code: -32602,
-        message: e.to_string(),
-        data: None,
-    })?;
-
-    let mut config = GenerationConfig {
-        temperature,
-        top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
-        max_tokens: max_tokens as u32,
-        repeat_penalty: params
-            .get("repeat_penalty")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(1.1) as f32,
-        // Optional Multi-Token-Prediction draft count (1..=6). When set
-        // and the target's catalog entry pairs a drafter, the runtime
-        // attempts speculative decoding; otherwise returns a structured
-        // `MtpUnavailable` error.
-        // An explicit `draft_n` wins; otherwise fall back to the depth the
-        // catalog measured for this model. Without the fallback a caller that
-        // omits the field silently loses speculative decoding, which is the
-        // whole reason `mtp_default_draft_n` exists.
-        draft_n: params
-            .get("draft_n")
-            .and_then(|v| v.as_u64())
-            .and_then(|n| u8::try_from(n).ok())
-            .filter(|n| (1..=16).contains(n))
-            .or_else(|| {
-                tenzro_model::get_model_by_id(&model_id)
-                    .and_then(|e| e.mtp_default_draft_n)
-                    .filter(|n| (1..=16).contains(n))
-            }),
-        commitment_k: verifiable.then_some(tenzro_model::DEFAULT_COMMITMENT_K),
-        ..GenerationConfig::default()
-    };
-    apply_sampling_params(&mut config, &params);
+    // An optimistic answer carries a decode commitment: a witness verifies
+    // it against the provider's own emitted tokens rather than comparing a
+    // regeneration, which a near tie breaks differently on other hardware.
+    let verifiable = verifiable
+        || verification == tenzro_types::inference_verification::VerificationLevel::Optimistic;
+    let config = chat_frame_config(node, &params, &model_id, verifiable)?;
+    let max_tokens = u64::from(config.max_tokens);
 
     // Optional jurisdiction pin + receipt strictness (locality routing).
     let (jurisdiction_pin, jurisdiction_receipt_required) = parse_jurisdiction_params(&params);
@@ -17893,12 +18998,20 @@ async fn handle_chat_simple(
             // attainability, warm/cold state (warming in the background rather
             // than on this socket), and the memory ledger. Held for the whole
             // response so the model cannot be evicted mid-generation.
+            // A reservation the caller pays for admits it on the never-shed
+            // path with a reserved share, `spot` or not.
+            let reserved =
+                crate::standby_reservation::reserved_caller(node, &params, &model_id, caller)?;
             let mut serving_permit = admit_local_inference_as(
                 node,
                 &model_id,
-                qos_class(spot),
+                if reserved.is_some() {
+                    tenzro_model::traffic::QosClass::Interactive
+                } else {
+                    qos_class(spot)
+                },
                 request_shape(message, max_tokens),
-                fair_caller(caller),
+                reserved.unwrap_or_else(|| fair_caller(caller)),
             )
             .await?;
             // Serving weights load lazily on first use.
@@ -17933,17 +19046,28 @@ async fn handle_chat_simple(
                 ..Default::default()
             }];
 
-            let result = model_runtime
-                .generate_chat(&model_id, &chat_messages, &config)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(model = %model_id, error = %e, "Local inference failed");
-                    JsonRpcError {
-                        code: -32000,
-                        message: sanitize_model_error(&e),
-                        data: None,
-                    }
-                })?;
+            // A spot request stops at its next token once an interactive
+            // request needs its slot, and is billed for what it produced.
+            let result = match serving_permit.yield_flag() {
+                Some(flag) => {
+                    model_runtime
+                        .generate_chat_yielding(&model_id, &chat_messages, &config, flag)
+                        .await
+                }
+                None => {
+                    model_runtime
+                        .generate_chat(&model_id, &chat_messages, &config)
+                        .await
+                }
+            }
+            .map_err(|e| {
+                tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                JsonRpcError {
+                    code: -32000,
+                    message: sanitize_model_error(&e),
+                    data: None,
+                }
+            })?;
             // What it actually cost, so the next ETA quoted for this model is
             // based on this generation rather than the seed rates.
             serving_permit.record(u64::from(result.output_tokens), None);
@@ -18009,7 +19133,7 @@ async fn handle_chat_simple(
             );
             if jurisdiction_receipt_required && jurisdiction.is_none() {
                 return Err(JsonRpcError {
-                    code: -32024,
+                    code: JURISDICTION_UNMET,
                     message: "jurisdiction_receipt=required but this node has no jurisdiction claim or signer"
                         .to_string(),
                     data: None,
@@ -18025,6 +19149,7 @@ async fn handle_chat_simple(
                     nonce: params.get("receipt_nonce").and_then(|v| v.as_str()),
                     input_commitment: crate::inference_receipt::input_commitment(
                         &chat_messages,
+                        &crate::inference_receipt::RenderSettings::of(&[], &config),
                         &[],
                     ),
                     output_hash: crate::inference_receipt::output_hash(
@@ -18056,6 +19181,10 @@ async fn handle_chat_simple(
                 // token pair above.
                 "units": units_to_json(&units),
                 "tier": if spot { "spot" } else { "standard" },
+                // A spot answer cut short because an interactive request
+                // needed the slot: the units and receipt cover what was
+                // produced, and the caller may resend the rest.
+                "preempted": serving_permit.yielded(),
                 "generation_time_ms": result.generation_time_ms,
                 "tokens_per_second": result.tokens_per_second,
                 "cost_wei": cost_wei.to_string(),
@@ -18118,6 +19247,7 @@ async fn handle_chat_simple(
         let body: Value = forward_network_chat(
             node,
             &svc.iroh_endpoint_id,
+            &svc.provider_address,
             &svc.provider_name,
             &forward_body,
             &crate::forward_billing::ProviderCredential::from_params(&params),
@@ -18155,6 +19285,7 @@ async fn handle_chat_simple(
             },
         }
         .billable(
+            &node.catalog(),
             Some(forwarded_units(rpc_result)),
             rpc_result.get("tenzro_receipt"),
             &crate::inference_receipt::output_hash(
@@ -18202,17 +19333,20 @@ async fn handle_chat_simple(
         // pin is this gateway's own promise to the caller, not something it
         // can leave to the provider's discretion to honor.
         let jurisdiction = verify_forwarded_jurisdiction(
-            rpc_result.get("tenzro_jurisdiction"),
-            message.as_bytes(),
-            output.as_bytes(),
-            &model_id,
-            pinned.as_ref(),
-            jurisdiction_pin.as_deref(),
-            &svc.provider_name,
+            node,
+            ForwardedJurisdiction {
+                value: rpc_result.get("tenzro_jurisdiction"),
+                request_input: message.as_bytes(),
+                output: output.as_bytes(),
+                model_id: &model_id,
+                registered_pubkey: pinned.as_ref(),
+                jurisdiction_pin: jurisdiction_pin.as_deref(),
+                provider_label: &svc.provider_name,
+            },
         );
         if (jurisdiction_receipt_required || jurisdiction_pin.is_some()) && jurisdiction.is_none() {
             return Err(JsonRpcError {
-                code: -32024,
+                code: JURISDICTION_UNMET,
                 message: format!(
                     "Provider {} did not return a verifiable jurisdiction receipt",
                     svc.provider_name
@@ -18255,12 +19389,14 @@ async fn handle_chat_simple(
                 .and_then(|v| v.as_str())
                 .and_then(|s| tenzro_types::primitives::Address::from_hex(s).ok())
         {
+            let commitment = crate::optimistic::answer_commitment(&body, &receipt);
             crate::optimistic::spawn_check(
                 node.clone(),
                 crate::optimistic::ServedAnswer {
                     receipt,
                     request: forward_body.clone(),
                     output: crate::optimistic::Answer::Chat(answer),
+                    commitment,
                 },
                 caller,
                 cost_wei,
@@ -18491,7 +19627,8 @@ async fn handle_chat_rich(
             .and_then(|n| u8::try_from(n).ok())
             .filter(|n| (1..=16).contains(n))
             .or_else(|| {
-                tenzro_model::get_model_by_id(&model_id)
+                node.catalog()
+                    .get_model_by_id(&model_id)
                     .and_then(|e| e.mtp_default_draft_n)
                     .filter(|n| (1..=16).contains(n))
             }),
@@ -18529,12 +19666,20 @@ async fn handle_chat_rich(
             // attainability, warm/cold state (warming in the background rather
             // than on this socket), and the memory ledger. Held for the whole
             // response so the model cannot be evicted mid-generation.
+            // A reservation the caller pays for admits it on the never-shed
+            // path with a reserved share, `spot` or not.
+            let reserved =
+                crate::standby_reservation::reserved_caller(node, &params, &model_id, caller)?;
             let mut serving_permit = admit_local_inference_as(
                 node,
                 &model_id,
-                qos_class(spot),
+                if reserved.is_some() {
+                    tenzro_model::traffic::QosClass::Interactive
+                } else {
+                    qos_class(spot)
+                },
                 request_shape(&request_input_text, u64::from(max_tokens)),
-                fair_caller(caller),
+                reserved.unwrap_or_else(|| fair_caller(caller)),
             )
             .await?;
             // Serving weights load lazily on first use.
@@ -18755,17 +19900,26 @@ async fn handle_chat_rich(
                     r.generation_time_ms,
                 )
             } else {
-                let r = model_runtime
-                    .generate_chat(&model_id, &chat_messages, &config)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!(model = %model_id, error = %e, "Local inference failed");
-                        JsonRpcError {
-                            code: -32000,
-                            message: sanitize_model_error(&e),
-                            data: None,
-                        }
-                    })?;
+                let r = match serving_permit.yield_flag() {
+                    Some(flag) => {
+                        model_runtime
+                            .generate_chat_yielding(&model_id, &chat_messages, &config, flag)
+                            .await
+                    }
+                    None => {
+                        model_runtime
+                            .generate_chat(&model_id, &chat_messages, &config)
+                            .await
+                    }
+                }
+                .map_err(|e| {
+                    tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                    JsonRpcError {
+                        code: -32000,
+                        message: sanitize_model_error(&e),
+                        data: None,
+                    }
+                })?;
                 let stop = if r.output_tokens >= max_tokens {
                     "max_tokens".to_string()
                 } else {
@@ -18832,7 +19986,7 @@ async fn handle_chat_rich(
             );
             if jurisdiction_receipt_required && jurisdiction.is_none() {
                 return Err(JsonRpcError {
-                    code: -32024,
+                    code: JURISDICTION_UNMET,
                     message: "jurisdiction_receipt=required but this node has no jurisdiction claim or signer"
                         .to_string(),
                     data: None,
@@ -18891,6 +20045,7 @@ async fn handle_chat_rich(
                     nonce: params.get("receipt_nonce").and_then(|v| v.as_str()),
                     input_commitment: crate::inference_receipt::input_commitment(
                         &chat_messages,
+                        &crate::inference_receipt::RenderSettings::of(&runtime_tools, &config),
                         &media,
                     ),
                     output_hash: crate::forward_billing::rich_output_hash(Some(&content)),
@@ -18916,6 +20071,10 @@ async fn handle_chat_rich(
                 // full billable breakdown a forwarding node meters against.
                 "units": units_to_json(&units),
                 "tier": if spot { "spot" } else { "standard" },
+                // A spot answer cut short because an interactive request
+                // needed the slot: the units and receipt cover what was
+                // produced, and the caller may resend the rest.
+                "preempted": serving_permit.yielded(),
                 "cost_wei": cost_wei.to_string(),
                 "settlement": settlement.to_json(),
                 "location": "local",
@@ -19017,6 +20176,7 @@ async fn handle_chat_rich(
         let body: Value = forward_network_chat(
             node,
             &svc.iroh_endpoint_id,
+            &svc.provider_address,
             &svc.provider_name,
             &forward_body,
             &crate::forward_billing::ProviderCredential::from_params(&params),
@@ -19046,17 +20206,20 @@ async fn handle_chat_rich(
                 .unwrap_or_default();
             let pinned = pinned_identity_key(node, &model_id, &svc.provider_name);
             let jurisdiction = verify_forwarded_jurisdiction(
-                out.get("tenzro_jurisdiction"),
-                request_input_text.as_bytes(),
-                output_text.as_bytes(),
-                &model_id,
-                pinned.as_ref(),
-                jurisdiction_pin.as_deref(),
-                &svc.provider_name,
+                node,
+                ForwardedJurisdiction {
+                    value: out.get("tenzro_jurisdiction"),
+                    request_input: request_input_text.as_bytes(),
+                    output: output_text.as_bytes(),
+                    model_id: &model_id,
+                    registered_pubkey: pinned.as_ref(),
+                    jurisdiction_pin: jurisdiction_pin.as_deref(),
+                    provider_label: &svc.provider_name,
+                },
             );
             if jurisdiction_receipt_required && jurisdiction.is_none() {
                 return Err(JsonRpcError {
-                    code: -32024,
+                    code: JURISDICTION_UNMET,
                     message: format!(
                         "Provider {} did not return a verifiable jurisdiction receipt (jurisdiction_receipt=required)",
                         svc.provider_name
@@ -19088,6 +20251,7 @@ async fn handle_chat_rich(
                 },
             }
             .billable(
+                &node.catalog(),
                 Some(forwarded_rich_units(&out)),
                 out.get("tenzro_receipt"),
                 &crate::forward_billing::rich_output_hash(out.get("content")),
@@ -19115,12 +20279,14 @@ async fn handle_chat_rich(
                     .and_then(|v| v.as_str())
                     .and_then(|s| tenzro_types::primitives::Address::from_hex(s).ok())
             {
+                let commitment = crate::optimistic::answer_commitment(&out, &receipt);
                 crate::optimistic::spawn_check(
                     node.clone(),
                     crate::optimistic::ServedAnswer {
                         receipt,
                         request: forward_body.clone(),
                         output: crate::optimistic::Answer::Chat(answer),
+                        commitment,
                     },
                     caller,
                     cost_wei,
@@ -19391,14 +20557,18 @@ async fn handle_delete_model(
         let _ = runtime.unload_model(model_id).await;
     }
 
-    // Delete the GGUF file from disk
-    if let Some(hf_dl) = &node.hf_downloader {
-        hf_dl.delete_model(model_id).map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to delete model file: {}", e),
-            data: None,
-        })?;
-    }
+    // Delete the model's files and release the blob store's copies of them
+    let blobs_released = match &node.hf_downloader {
+        Some(hf_dl) => hf_dl
+            .delete_model(model_id)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("Failed to delete model file: {}", e),
+                data: None,
+            })?,
+        None => 0,
+    };
 
     // Remove from downloads, served models, and service registry
     node.model_downloads.remove(model_id);
@@ -19409,6 +20579,7 @@ async fn handle_delete_model(
         "success": true,
         "model_id": model_id,
         "status": "deleted",
+        "blobs_released": blobs_released,
     }))
 }
 
@@ -19639,6 +20810,19 @@ impl OpenAIChatRequest {
         Ok(plan)
     }
 
+    /// The settings the turn renders under besides its messages: the
+    /// validated tools and the thinking switch and effort as sent.
+    pub(crate) fn render_settings(
+        &self,
+    ) -> std::result::Result<crate::inference_receipt::RenderSettings, crate::openai_tools::ToolError>
+    {
+        Ok(crate::inference_receipt::RenderSettings {
+            tools: self.tool_plan()?.map(|p| p.definitions).unwrap_or_default(),
+            enable_thinking: self.enable_thinking(),
+            reasoning_effort: self.reasoning_effort.map(|e| e.to_string()),
+        })
+    }
+
     /// The thinking switch as the caller expressed it, top-level spelling
     /// winning over `chat_template_kwargs`; `None` when neither was sent.
     fn enable_thinking(&self) -> Option<bool> {
@@ -19802,7 +20986,7 @@ fn model_context_limits(node: &Arc<TenzroNode>, model_id: &str) -> (Option<u32>,
             Some(info.parameters.max_output_tokens),
         );
     }
-    if let Some(entry) = tenzro_model::get_model_by_id(model_id) {
+    if let Some(entry) = node.catalog().get_model_by_id(model_id) {
         return (Some(entry.context_length), None);
     }
     (None, None)
@@ -19953,7 +21137,9 @@ fn openai_data_policy() -> Value {
 /// provenance signing reflects whether this node has a provenance signer
 /// bound (local responses carry a signed `tenzro_contentProvenance` manifest).
 fn openai_model_features(node: &Arc<TenzroNode>, model_id: &str, local: bool) -> Value {
-    let mtp_capable = tenzro_model::get_model_by_id(model_id)
+    let mtp_capable = node
+        .catalog()
+        .get_model_by_id(model_id)
         .is_some_and(|e| e.mtp_kind != tenzro_model::MtpKind::None);
     serde_json::json!({
         "streaming": true,
@@ -19975,8 +21161,8 @@ fn openai_model_features(node: &Arc<TenzroNode>, model_id: &str, local: bool) ->
 /// int4/int8/fp16/bf16/fp32 vocabulary aggregators expect. Tags without an
 /// unambiguous bit-width equivalent (Q5/Q6 k-quants, IQ variants) yield
 /// `Value::Null` — over- or under-stating precision is worse than omitting.
-fn quantization_label(model_id: &str) -> Value {
-    let Some(entry) = tenzro_model::get_model_by_id(model_id) else {
+fn quantization_label(node: &TenzroNode, model_id: &str) -> Value {
+    let Some(entry) = node.catalog().get_model_by_id(model_id) else {
         return Value::Null;
     };
     let tag = entry.quantization.to_ascii_uppercase();
@@ -20031,7 +21217,7 @@ fn openai_model_entry(
         "parameters": svc.parameters,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "quantization": quantization_label(&svc.model_id),
+        "quantization": quantization_label(node, &svc.model_id),
         "context_length": context_length,
         "max_output_tokens": max_output_tokens,
         "pricing": openai_pricing(node, &svc.pricing),
@@ -20069,7 +21255,7 @@ fn openai_model_entry_from_registration(
         "parameters": reg.parameters,
         "input_modalities": ["text"],
         "output_modalities": ["text"],
-        "quantization": quantization_label(&reg.model_id),
+        "quantization": quantization_label(node, &reg.model_id),
         "context_length": context_length,
         "max_output_tokens": Value::Null,
         "pricing": openai_pricing(node, &reg.pricing),
@@ -20194,7 +21380,9 @@ async fn handle_openai_generation(
     };
 
     match tracker.get_record(&query.id) {
-        Some(record) => (StatusCode::OK, Json(generation_stats_json(&record))).into_response(),
+        Some(record) => {
+            (StatusCode::OK, Json(generation_stats_json(&node, &record))).into_response()
+        }
         None => json_error_response(
             StatusCode::NOT_FOUND,
             &format!("No recorded generation for id '{}'", query.id),
@@ -20456,10 +21644,12 @@ fn resolve_chat_offer(
 
 async fn handle_openai_chat_completions(
     State(node): State<Arc<TenzroNode>>,
+    paid: Option<axum::Extension<tenzro_payments::middleware::PaidBy>>,
     headers: HeaderMap,
     Json(request): Json<OpenAIChatRequest>,
 ) -> Response {
-    openai_chat_completions_inner(node, headers, request).await
+    let payer = paid.and_then(|p| crate::usage_payer::Payer::from_gate(&p.0));
+    crate::usage_payer::paid_by(payer, openai_chat_completions_inner(node, headers, request)).await
 }
 
 /// The in-process inference implementation behind `/v1/chat/completions`.
@@ -20493,6 +21683,9 @@ async fn openai_chat_completions_scoped(
     headers: HeaderMap,
     request: OpenAIChatRequest,
 ) -> Response {
+    // Who paid at the payment gate, for the usage receipt of what this
+    // request serves; read now, while the request's scope holds it.
+    let paid_by = crate::usage_payer::current();
     let stream_requested = request.stream.unwrap_or(false);
 
     // One completion per request. Refusing a higher count is the honest
@@ -20885,6 +22078,7 @@ async fn openai_chat_completions_scoped(
                     .as_secs();
                 let model_id_clone = model_id.clone();
                 let node_clone = node.clone();
+                let paid_by_stream = paid_by.clone();
 
                 // Open a cursor for resume. Live emission below records each
                 // chunk into the cursor in addition to yielding to the
@@ -20947,8 +22141,17 @@ async fn openai_chat_completions_scoped(
                 // way, so a caller that asked for a stream still gets one.
                 let receipt_sampling =
                     crate::inference_receipt::SamplingParams::from_config(&config);
-                let receipt_input =
-                    crate::inference_receipt::input_commitment(&chat_messages, &media);
+                let receipt_input = crate::inference_receipt::input_commitment(
+                    &chat_messages,
+                    &crate::inference_receipt::RenderSettings::of(
+                        tool_plan
+                            .as_ref()
+                            .map(|p| p.definitions.as_slice())
+                            .unwrap_or_default(),
+                        &config,
+                    ),
+                    &media,
+                );
                 let receipt_nonce = request.receipt_nonce.clone();
                 let gen_model_id = model_id.clone();
                 let gen_handle = tokio::spawn(tenzro_model::prefix_affinity::inherit(
@@ -21139,6 +22342,8 @@ async fn openai_chat_completions_scoped(
                             result.text.len() as u64,
                             cost_wei,
                             result.generation_time_ms,
+                            // Paid at the payment gate, not settled here.
+                            paid_by_stream.clone(),
                         );
 
                         // Final chunk: `finish_reason` plus the token counts, cost
@@ -21358,6 +22563,13 @@ async fn openai_chat_completions_scoped(
                                 nonce: request.receipt_nonce.as_deref(),
                                 input_commitment: crate::inference_receipt::input_commitment(
                                     &chat_messages,
+                                    &crate::inference_receipt::RenderSettings::of(
+                                        tool_plan
+                                            .as_ref()
+                                            .map(|p| p.definitions.as_slice())
+                                            .unwrap_or_default(),
+                                        &config,
+                                    ),
                                     &media,
                                 ),
                                 output_hash: crate::inference_receipt::output_hash(
@@ -21395,6 +22607,8 @@ async fn openai_chat_completions_scoped(
                             result.text.len() as u64,
                             cost_wei,
                             result.generation_time_ms,
+                            // Paid at the payment gate, not settled here.
+                            paid_by.clone(),
                         );
 
                         // `reasoning_content` beside the answer, in the field
@@ -21662,6 +22876,7 @@ async fn openai_chat_completions_scoped(
                     // closure so the peer leg is priced against what routing
                     // scored once the served token counts arrive.
                     let settle_node = node.clone();
+                    let billing_catalog = node.catalog();
                     let settle_pricing = svc.pricing.clone();
                     let settle_model = svc.model_id.clone();
                     // SLO metrics handle. Captured into the stream
@@ -21710,6 +22925,9 @@ async fn openai_chat_completions_scoped(
                         // deliver, that's the contract violation we
                         // penalize).
                         let mut got_any_chunk = false;
+                        // Time from sending the request to the provider's
+                        // first streamed bytes: the latency recorded for it.
+                        let mut first_byte_ms: Option<u64> = None;
                         // Served units as reported by the provider in its
                         // terminal usage frame, per provider that served.
                         // `None` means the upstream reported none and the peer
@@ -21745,6 +22963,7 @@ async fn openai_chat_completions_scoped(
                                     if !got_any_chunk {
                                         // First-token observation.
                                         let ttft = now.duration_since(request_start).as_secs_f64();
+                                        first_byte_ms = Some((ttft * 1000.0) as u64);
                                         slo.record_first_token(&slo_provider, &slo_model, ttft);
                                         event_bus.publish(
                                             tenzro_events::TenzroEvent::InferenceStreamFirstToken {
@@ -21938,6 +23157,7 @@ async fn openai_chat_completions_scoped(
                                     "Re-prefill failover: continuing {} on {} after {} dropped",
                                     audit_model_id, alt_addr, stream_provider_addr
                                 );
+                                let cont_started = std::time::Instant::now();
                                 if let Ok(cont_resp) = crate::infer::open_provider(
                                     &failover_node,
                                     &alt_endpoint,
@@ -21964,9 +23184,13 @@ async fn openai_chat_completions_scoped(
                                         crate::forward_billing::StreamedOutput::default();
                                     let mut cont_response_bytes: u64 = 0;
                                     let mut cont_emitted = false;
+                                    let mut cont_first_byte_ms: Option<u64> = None;
                                     while let Some(cev) = cont_bs.next().await {
                                         match cev {
                                             HeartbeatedChunk::Chunk(Ok(bytes)) => {
+                                                cont_first_byte_ms.get_or_insert_with(|| {
+                                                    cont_started.elapsed().as_millis() as u64
+                                                });
                                                 cont_response_bytes += bytes.len() as u64;
                                                 cont_buf.push_str(
                                                     &String::from_utf8_lossy(&bytes)
@@ -22024,14 +23248,16 @@ async fn openai_chat_completions_scoped(
                                         }
                                     }
                                     // Penalize the continuation provider
-                                    // only if it also failed; a clean
-                                    // continuation resets its counter.
+                                    // only if it also failed.
                                     if let Some(pm) = &stream_provider_manager {
-                                        if cont_dropped {
-                                            pm.record_stream_failure(&alt_addr);
-                                        } else {
-                                            pm.record_success(&alt_addr, 0);
-                                        }
+                                        crate::infer::record_stream_leg(
+                                            pm,
+                                            &alt_addr,
+                                            crate::infer::stream_leg(
+                                                cont_dropped,
+                                                cont_first_byte_ms,
+                                            ),
+                                        );
                                     }
                                     if cont_emitted {
                                         let leg = crate::forward_billing::ForwardLeg {
@@ -22045,6 +23271,7 @@ async fn openai_chat_completions_scoped(
                                             },
                                         };
                                         let (units, _) = leg.billable(
+                                            &billing_catalog,
                                             cont_served_units,
                                             cont_streamed.receipt.as_ref(),
                                             &cont_streamed.output_hash(),
@@ -22062,17 +23289,13 @@ async fn openai_chat_completions_scoped(
                                     }
                                 }
                             }
-                        } else if got_any_chunk {
-                            // Successful stream completion — reset the
-                            // consecutive-stream-failure counter via the
-                            // metrics record_success path with zero
-                            // latency contribution (latency was already
-                            // recorded per-token at the runtime side for
-                            // local models; for proxied streams we don't
-                            // observe per-token timing, so 0 is the
-                            // honest value).
+                        } else if let Some(ms) = first_byte_ms {
+                            // Successful stream completion: reset the
+                            // consecutive-stream-failure counter and record
+                            // the provider's latency as this node saw it,
+                            // the time to its first streamed bytes.
                             if let Some(pm) = &stream_provider_manager {
-                                pm.record_success(&stream_provider_addr, 0);
+                                pm.record_success(&stream_provider_addr, ms);
                             }
                             slo.record_stream_completed(&slo_provider, &slo_model, true);
                         }
@@ -22094,6 +23317,7 @@ async fn openai_chat_completions_scoped(
                                 },
                             };
                             let (units, _) = leg.billable(
+                                &billing_catalog,
                                 served_units,
                                 streamed.receipt.as_ref(),
                                 &streamed.output_hash(),
@@ -22127,10 +23351,13 @@ async fn openai_chat_completions_scoped(
                                 );
                                 crate::optimistic::spawn_check(
                                     settle_node.clone(),
+                                    // A stream carries no commitment: its
+                                    // answer is not checked.
                                     crate::optimistic::ServedAnswer {
                                         receipt,
                                         request: request.clone(),
                                         output: crate::optimistic::Answer::Chat(streamed.output()),
+                                        commitment: None,
                                     },
                                     payee,
                                     cost,
@@ -22169,6 +23396,7 @@ async fn openai_chat_completions_scoped(
             match forward_network_chat(
                 &node,
                 &svc.iroh_endpoint_id,
+                &svc.provider_address,
                 &svc.provider_name,
                 &forward_body,
                 &provider_cred,
@@ -22215,13 +23443,16 @@ async fn openai_chat_completions_scoped(
                     // pinned a jurisdiction: this gateway enforces its
                     // caller's pin itself rather than trust the provider to.
                     let jurisdiction = verify_forwarded_jurisdiction(
-                        body.get("tenzro_jurisdiction"),
-                        request_input_text.as_bytes(),
-                        content.as_bytes(),
-                        &svc.model_id,
-                        pinned.as_ref(),
-                        jurisdiction_pin.as_deref(),
-                        &svc.provider_name,
+                        &node,
+                        ForwardedJurisdiction {
+                            value: body.get("tenzro_jurisdiction"),
+                            request_input: request_input_text.as_bytes(),
+                            output: content.as_bytes(),
+                            model_id: &svc.model_id,
+                            registered_pubkey: pinned.as_ref(),
+                            jurisdiction_pin: jurisdiction_pin.as_deref(),
+                            provider_label: &svc.provider_name,
+                        },
                     );
                     if jurisdiction_pin.is_some() && jurisdiction.is_none() {
                         return json_error_response(
@@ -22276,6 +23507,7 @@ async fn openai_chat_completions_scoped(
                         },
                     };
                     let (units, _) = leg.billable(
+                        &node.catalog(),
                         crate::streaming::usage_units(&body),
                         body.get("tenzro_receipt"),
                         &crate::forward_billing::completion_output_hash(&body),
@@ -22333,12 +23565,14 @@ async fn openai_chat_completions_scoped(
                         && let Some((receipt, output)) = crate::optimistic::parse_answer(&body)
                         && let Some(payee) = node.operator_payee()
                     {
+                        let commitment = crate::optimistic::answer_commitment(&body, &receipt);
                         crate::optimistic::spawn_check(
                             node.clone(),
                             crate::optimistic::ServedAnswer {
                                 receipt,
                                 request: forward_body.clone(),
                                 output: crate::optimistic::Answer::Chat(output),
+                                commitment,
                             },
                             payee,
                             cost,
@@ -22374,8 +23608,18 @@ async fn openai_chat_completions_scoped(
 /// without a second definition to keep in step.
 async fn handle_openai_responses(
     State(node): State<Arc<TenzroNode>>,
+    paid: Option<axum::Extension<tenzro_payments::middleware::PaidBy>>,
     headers: HeaderMap,
     Json(request): Json<crate::openai_responses::ResponsesRequest>,
+) -> Response {
+    let payer = paid.and_then(|p| crate::usage_payer::Payer::from_gate(&p.0));
+    crate::usage_payer::paid_by(payer, openai_responses_inner(node, headers, request)).await
+}
+
+async fn openai_responses_inner(
+    node: Arc<TenzroNode>,
+    headers: HeaderMap,
+    request: crate::openai_responses::ResponsesRequest,
 ) -> Response {
     use crate::openai_responses::{ResponseStreamFramer, drain_sse_frames, from_chat_completion};
 
@@ -22406,7 +23650,7 @@ async fn handle_openai_responses(
         }
     };
 
-    let upstream = handle_openai_chat_completions(State(node), headers, Json(chat_request)).await;
+    let upstream = openai_chat_completions_inner(node, headers, chat_request).await;
     let (parts, body) = upstream.into_parts();
     if !parts.status.is_success() {
         // Already the OpenAI error envelope — the Responses surface uses the
@@ -23409,35 +24653,52 @@ fn parse_u128_amount(params: &Value, key: &str) -> Option<u128> {
     v.as_u64().map(|n| n as u128)
 }
 
+/// Asks the node's event loop to stop, through `events`, its sender. The
+/// loop then ends as a requested stop, and whoever runs the node drains it
+/// and exits with success (`TenzroNode::event_loop_stopped`).
+fn request_stop(
+    events: Option<&tokio::sync::mpsc::Sender<crate::event_loop::NodeEvent>>,
+) -> std::result::Result<(), JsonRpcError> {
+    let events = events.ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "node event sender unavailable".to_string(),
+        data: None,
+    })?;
+    events
+        .try_send(crate::event_loop::NodeEvent::Shutdown)
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("failed to enqueue Shutdown event: {e}"),
+            data: None,
+        })
+}
+
+/// `tenzro_shutdown`: stops the node at once, the way `tenzro_gracefulExit`
+/// with `force` does, without waiting for this replica to stop leading.
 async fn handle_shutdown(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
     info!("Shutdown requested via RPC");
-
-    // We can't call node.stop() since it requires &mut self and we have &Arc.
-    // Instead, signal shutdown via the node's state to trigger graceful shutdown.
-    // The actual shutdown is handled by the main event loop checking state.
-    {
-        let state = node.state.read();
-        if *state != crate::node::NodeState::Running {
-            return Err(JsonRpcError {
-                code: -32000,
-                message: format!("Node is not running (state: {:?})", *state),
-                data: None,
-            });
-        }
-    }
-
-    // Set state to Stopping — the main loop will detect this and shut down
-    {
-        let mut state = node.state.write();
-        *state = crate::node::NodeState::Stopping;
-    }
-
-    info!("Node state set to Stopping — graceful shutdown initiated");
-
+    request_stop(node.event_sender())?;
     Ok(serde_json::json!({
         "status": "shutdown_initiated",
         "message": "Node is shutting down gracefully",
     }))
+}
+
+#[cfg(test)]
+mod request_stop_tests {
+    use super::request_stop;
+    use crate::event_loop::NodeEvent;
+
+    /// A stop request puts the Shutdown event on the event loop's queue, the
+    /// event a requested stop ends the loop on; without an event loop it is
+    /// refused.
+    #[tokio::test]
+    async fn a_stop_request_sends_the_shutdown_event() {
+        let (events, mut queue) = tokio::sync::mpsc::channel(1);
+        request_stop(Some(&events)).unwrap();
+        assert!(matches!(queue.recv().await, Some(NodeEvent::Shutdown)));
+        assert!(request_stop(None).is_err());
+    }
 }
 
 async fn handle_net_listening(_node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
@@ -25193,7 +26454,7 @@ async fn handle_discover_models(
     // peers have announced nothing. So discovery answered "0 models" on a node
     // actively serving one, while `listModels` on the same node listed 107 and
     // named the served one. Two catalogues, two answers, one node.
-    let catalog = get_model_catalog();
+    let catalog = node.catalog().get_model_catalog();
 
     // What THIS node actually offers. `served_models` is the map the admission
     // gate consults, so it is the only set whose membership means a request
@@ -25825,20 +27086,6 @@ fn decode_hex_param(hex_str: &str) -> std::result::Result<Vec<u8>, JsonRpcError>
     })
 }
 
-/// Helper: extract params, unwrapping array-style [{}] into the inner object
-fn unwrap_params(params: Option<Value>) -> std::result::Result<Value, JsonRpcError> {
-    let p = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    if let Some(arr) = p.as_array() {
-        Ok(arr.first().cloned().unwrap_or(p))
-    } else {
-        Ok(p)
-    }
-}
-
 // ============================================================================
 // GROUP 1: Crypto handlers (9 methods)
 // ============================================================================
@@ -25876,7 +27123,11 @@ async fn handle_verify_signature(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
     let missing = |name: &str| JsonRpcError {
         code: -32602,
         message: format!("Missing {name}"),
@@ -25933,13 +27184,13 @@ tokio::task_local! {
     /// The access token a request already proved, with the DPoP proof it was
     /// proved by. A DPoP proof is single-use, so a request is validated once,
     /// at its edge, and every later layer of the same request reads this.
-    static PROVED: (String, tenzro_auth::AuthClaims);
+    static PROVED: (String, tenzro_auth::AuthClaims, Option<&'static str>);
 }
 
 /// The claims of the access token this request's edge proved, if it proved
 /// one.
 pub(crate) fn proved_claims() -> Option<tenzro_auth::AuthClaims> {
-    PROVED.try_with(|(_, claims)| claims.clone()).ok()
+    PROVED.try_with(|(_, claims, _)| claims.clone()).ok()
 }
 
 /// The access token a request's edge proved, kept on the HTTP request for
@@ -25951,13 +27202,15 @@ pub(crate) struct ProvedToken {
     pub claims: tenzro_auth::AuthClaims,
 }
 
-/// Run `fut` as a request whose access token `dpop` proved `claims`.
+/// Run `fut` as a request whose access token `dpop` proved `claims`: a
+/// plain token, or with `purpose` one pairing issued for that purpose alone.
 pub(crate) async fn with_proved_token<F: std::future::Future>(
     dpop: String,
     claims: tenzro_auth::AuthClaims,
+    purpose: Option<&'static str>,
     fut: F,
 ) -> F::Output {
-    PROVED.scope((dpop, claims), fut).await
+    PROVED.scope((dpop, claims, purpose), fut).await
 }
 
 /// Validate a request's DPoP-bound access token: signature, expiry,
@@ -25967,6 +27220,20 @@ pub(crate) async fn with_proved_token<F: std::future::Future>(
 pub(crate) fn validate_access_token(
     node: &Arc<TenzroNode>,
     auth_ctx: &AuthContext,
+) -> std::result::Result<
+    Option<(Arc<tenzro_auth::AuthEngine>, tenzro_auth::AuthClaims)>,
+    JsonRpcError,
+> {
+    validate_access_token_for(node, auth_ctx, None)
+}
+
+/// [`validate_access_token`], accepting as well a token this node issued for
+/// `purpose` alone. Every other path refuses such a token as it refuses one
+/// issued for another audience.
+pub(crate) fn validate_access_token_for(
+    node: &Arc<TenzroNode>,
+    auth_ctx: &AuthContext,
+    purpose: Option<&str>,
 ) -> std::result::Result<
     Option<(Arc<tenzro_auth::AuthEngine>, tenzro_auth::AuthClaims)>,
     JsonRpcError,
@@ -26012,9 +27279,12 @@ pub(crate) fn validate_access_token(
             });
         }
     };
-    if let Ok(Some(claims)) =
-        PROVED.try_with(|(proof, claims)| (*proof == dpop_header).then(|| claims.clone()))
-    {
+    // A proof verified once on entry is not verified again, for the call it
+    // was made for: a token issued for one purpose serves that purpose only.
+    if let Ok(Some(claims)) = PROVED.try_with(|(proof, claims, issued_for)| {
+        (*proof == dpop_header && issued_for.is_none_or(|issued| Some(issued) == purpose))
+            .then(|| claims.clone())
+    }) {
         return Ok(Some((engine, claims)));
     }
 
@@ -26043,7 +27313,11 @@ pub(crate) fn validate_access_token(
         signed_input: &signed_input,
         signature: &signature,
     };
-    match engine.validate_jwt(&jwt, Some(dpop_validation)) {
+    let validated = match purpose {
+        Some(purpose) => engine.validate_jwt_or_purpose(purpose, &jwt, Some(dpop_validation)),
+        None => engine.validate_jwt(&jwt, Some(dpop_validation)),
+    };
+    match validated {
         Ok(claims) => Ok(Some((engine, claims))),
         Err(e) => Err(JsonRpcError {
             code: -32001,
@@ -26102,7 +27376,7 @@ pub(crate) async fn authenticate_bearer(
             crate::agent_delegation::check_agent_token(node, &bearer_did, jkt, Some(intent))
         })
     };
-    if let Err(why) = checked {
+    if let Err(why) = crate::agent_guardrails::counted(checked) {
         return AuthOutcome::AuthError(JsonRpcError {
             code: -32003,
             message: why,
@@ -26246,8 +27520,10 @@ async fn handle_list_tee_providers(
 }
 /// `tenzro_mediaGen_listCatalog`: the generative-media pipelines in this
 /// node's catalog, each with its licence and whether it is gated.
-async fn handle_media_gen_list_catalog() -> std::result::Result<Value, JsonRpcError> {
-    let models = crate::catalog_rpc::with_licence(&tenzro_model::get_media_gen_catalog());
+async fn handle_media_gen_list_catalog(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let models = crate::catalog_rpc::with_licence(&node.catalog(), Catalog::get_media_gen_catalog);
     Ok(serde_json::json!({ "count": models.len(), "models": models }))
 }
 
@@ -26463,6 +27739,51 @@ mod params_normalization_tests {
     use super::*;
 
     #[test]
+    fn an_upheld_challenges_provider_is_found_by_its_machine_did() {
+        let pm = tenzro_model::ProviderManager::new();
+        let address = tenzro_types::primitives::Address([7u8; 32]);
+        pm.upsert_from_announcement(
+            address,
+            "p".into(),
+            Vec::new(),
+            Default::default(),
+            Default::default(),
+            tenzro_types::model::ProviderStatus::Active,
+            false,
+            Some("did:tenzro:machine:p".into()),
+            None,
+        );
+        assert_eq!(provider_address(&pm, "did:tenzro:machine:p"), Some(address));
+        assert_eq!(
+            provider_address(&pm, &format!("0x{}", hex::encode(address.as_bytes()))),
+            Some(address)
+        );
+        assert_eq!(provider_address(&pm, "did:tenzro:machine:unknown"), None);
+    }
+
+    #[test]
+    fn only_the_call_that_upholds_a_challenge_counts_against_its_provider() {
+        use crate::inference_challenge::ChallengeStatus as S;
+        assert!(counts_against_provider(false, S::Upheld));
+        // A second finalize finds it resolved already: nothing more counts.
+        assert!(!counts_against_provider(true, S::Upheld));
+        for status in [S::Dismissed, S::VotingCommit, S::VotingReveal] {
+            assert!(!counts_against_provider(false, status), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_serve_context_is_the_callers_within_the_catalog_and_the_floor() {
+        let ask = |n: u64| serde_json::json!({ "context_length": n });
+        assert_eq!(requested_context(&serde_json::json!({}), 262_144), 262_144);
+        assert_eq!(requested_context(&ask(32_768), 262_144), 32_768);
+        assert_eq!(requested_context(&ask(1_000_000), 262_144), 262_144);
+        assert_eq!(requested_context(&ask(512), 262_144), MIN_SERVE_CONTEXT);
+        // A model whose whole context is shorter than the floor keeps it.
+        assert_eq!(requested_context(&ask(512), 1_024), 1_024);
+    }
+
+    #[test]
     fn unwraps_single_object_array_into_named_params() {
         // SDK pattern: json!([{"name": "alice", "creator": "0x..."}])
         let positional = serde_json::json!([{"name": "alice", "creator": "0x01"}]);
@@ -26609,12 +27930,18 @@ mod onnx_runtime_rpc_tests {
         assert_eq!(e.code, -32010);
     }
 
-    // ── catalog handler (no node state required) ──────────────────────
+    // ── catalog handler ─────────────────────────────────────────────────
 
     #[tokio::test]
     async fn list_vision_catalog_returns_seven_models() {
-        tenzro_catalog::install_test_seed();
-        let r = handle_list_vision_catalog().await.unwrap();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..crate::config::NodeConfig::default()
+        };
+        let node = Arc::new(TenzroNode::new(config).await.expect("node"));
+        node.catalog_cell().install(Catalog::test_seed());
+        let r = handle_list_vision_catalog(&node).await.unwrap();
         let models = r["models"].as_array().unwrap();
         assert!(models.len() >= 7);
     }
@@ -26877,110 +28204,6 @@ mod tee_custody_gate_tests {
     }
 }
 
-#[cfg(test)]
-mod affinity_prefix_tests {
-    use super::{extract_affinity_prefix, extract_route_prompt, render_blocks_as_text};
-    use serde_json::json;
-    use tenzro_types::model::{RichChatMessage, SystemPrompt};
-
-    /// Rebuild exactly what the chat handlers hand the runtime, then join it
-    /// the way `ModelRuntime::warm_prompt_bytes` does. This is the byte string
-    /// a serving node records as warm, so it is what the router must hash.
-    ///
-    /// Deliberately reconstructed from the same helpers rather than hardcoded:
-    /// a hardcoded expectation would keep passing if `render_blocks_as_text`
-    /// changed, which is one of the two ways these sides silently drifted apart.
-    fn what_the_provider_warms(params: &serde_json::Value) -> String {
-        let system: Option<SystemPrompt> = params
-            .get("system")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let messages: Vec<RichChatMessage> = params
-            .get("messages")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let mut contents: Vec<String> = Vec::new();
-        if let Some(sys) = &system {
-            contents.push(sys.as_text());
-        }
-        for m in &messages {
-            contents.push(render_blocks_as_text(&m.content));
-        }
-        contents.join("\n")
-    }
-
-    /// The router's affinity bytes must equal the provider's warm bytes. Any
-    /// divergence silently scores every match zero instead of failing, which
-    /// is exactly how this stayed broken through two separate fixes: first the
-    /// router hashed only the last user turn, then it hashed the messages
-    /// array while the provider prepends the `system` param as its own turn.
-    #[test]
-    fn affinity_bytes_match_what_the_provider_warms() {
-        let params = json!({
-            "system": "You are a careful assistant. Cite sources.",
-            "messages": [
-                { "role": "user", "content": "explain rolling hashes" },
-                { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "recall FNV" },
-                    { "type": "text", "text": "A rolling hash chains state." }
-                ]},
-                { "role": "user", "content": "now compare to a radix tree" }
-            ]
-        });
-
-        let router = extract_affinity_prefix(&params).expect("affinity prefix");
-        assert_eq!(router, what_the_provider_warms(&params));
-
-        // The system prompt must be present and first — it is usually the
-        // largest shared prefix, and the rolling hash is position dependent,
-        // so losing it from run 0 shifts every subsequent run.
-        assert!(
-            router.starts_with("You are a careful assistant."),
-            "{router}"
-        );
-
-        // Block markup must survive: rendering only `text` fields would drop
-        // the thinking block and change the byte stream.
-        assert!(
-            router.contains("<thinking>recall FNV</thinking>"),
-            "{router}"
-        );
-    }
-
-    /// The clustering prompt and the affinity prefix answer different
-    /// questions and must not be conflated — conflating them is the original
-    /// bug, and this pins them apart.
-    #[test]
-    fn clustering_prompt_is_not_the_affinity_prefix() {
-        let params = json!({
-            "system": "sys",
-            "messages": [
-                { "role": "user", "content": "first turn" },
-                { "role": "user", "content": "latest turn" }
-            ]
-        });
-        assert_eq!(
-            extract_route_prompt(&params).as_deref(),
-            Some("latest turn")
-        );
-        assert_eq!(
-            extract_affinity_prefix(&params).as_deref(),
-            Some("sys\nfirst turn\nlatest turn")
-        );
-    }
-
-    /// A request with no conversation contributes no affinity key rather than
-    /// an empty-string one, so selection falls back instead of matching noise.
-    #[test]
-    fn absent_conversation_yields_no_prefix() {
-        assert_eq!(extract_affinity_prefix(&json!({})), None);
-        assert_eq!(
-            extract_affinity_prefix(&json!({"messages": [{"role":"user","content":"   "}]})),
-            None
-        );
-    }
-}
-
 #[cfg(all(test, feature = "inference"))]
 mod model_load_tests {
     use super::*;
@@ -26991,7 +28214,6 @@ mod model_load_tests {
     const CLIP: &str = "clip-vit-b32";
 
     async fn node() -> (Arc<TenzroNode>, tempfile::TempDir) {
-        tenzro_catalog::install_test_seed();
         let tmp = tempfile::tempdir().expect("temp dir");
         // Each test stages bundles in its own model store; the shared store
         // under the user's home is never touched.
@@ -27002,13 +28224,18 @@ mod model_load_tests {
         };
         let mut node = TenzroNode::new(config).await.expect("node");
         node.init_storage().await.expect("storage");
+        // This node runs no catalog sync, so the seed it serves stays put.
+        node.catalog_cell().install(Catalog::test_seed());
         (Arc::new(node), tmp)
     }
 
     /// Puts the catalog entry's file where the fetch finds its bundle complete,
     /// so the load runs offline through the same path a fetch takes.
     fn stage_bundle(node: &TenzroNode, model_id: &str) {
-        let entry = get_vision_model_by_id(model_id).expect("seeded vision entry");
+        let entry = node
+            .catalog()
+            .get_vision_model_by_id(model_id)
+            .expect("seeded vision entry");
         let file = node
             .config()
             .effective_models_dir()
@@ -27030,25 +28257,53 @@ mod model_load_tests {
             .map(|b| serde_json::from_slice(&b).expect("json"))
     }
 
-    async fn load_gated(node: &Arc<TenzroNode>) {
+    /// Loads the encoder gated, and returns whether it loaded. A machine with
+    /// a GPU this build cannot drive (an NVIDIA GPU without the `cuda`
+    /// feature, an AMD GPU without `rocm`) refuses every ONNX load by design
+    /// rather than running it on the CPU, and so does a build whose ONNX
+    /// Runtime is loaded at run time and is not installed. There the refusal is asserted, the
+    /// test reports a `SKIP-UNSUPPORTED:` line naming it, which the release
+    /// gate lists, and it returns `false` so the test ends.
+    async fn load_gated(node: &Arc<TenzroNode>, test: &str) -> bool {
         stage_bundle(node, CLIP);
-        let out = handle_load_vision_model(
+        let loaded = handle_load_vision_model(
             node,
             Some(serde_json::json!({ "model_id": CLIP, "visibility": "gated" })),
         )
-        .await
-        .expect("loads by catalog id");
+        .await;
+        let refusal = tenzro_model::onnx_session::runtime_unavailable().or_else(|| {
+            tenzro_model::onnx_session::verify_accelerators()
+                .err()
+                .map(|e| e.to_string())
+        });
+        if let Some(refused) = refusal {
+            let error = loaded.expect_err("a build that cannot drive this GPU loads no ONNX model");
+            assert_eq!(error.code, -32011, "{error:?}");
+            eprintln!(
+                "SKIP-UNSUPPORTED: {test}: this build runs no ONNX model on this machine: {refused}"
+            );
+            return false;
+        }
+        let out = loaded.expect("loads by catalog id");
         assert_eq!(out["loaded"], true);
         // Shapes come from the catalog entry, not the caller.
-        let entry = get_vision_model_by_id(CLIP).expect("seeded");
+        let entry = node.catalog().get_vision_model_by_id(CLIP).expect("seeded");
         assert_eq!(out["input_size"], entry.input_size);
         assert_eq!(out["embedding_dim"], entry.embedding_dim);
+        true
     }
 
     #[tokio::test]
     async fn a_vision_model_loads_by_catalog_id_with_its_visibility() {
         let (node, _tmp) = node().await;
-        load_gated(&node).await;
+        if !load_gated(
+            &node,
+            "a_vision_model_loads_by_catalog_id_with_its_visibility",
+        )
+        .await
+        {
+            return;
+        }
         assert!(node.vision_runtime.is_loaded(CLIP));
         assert_eq!(served(&node, CLIP), Some(Some(Visibility::Gated)));
     }
@@ -27087,7 +28342,9 @@ mod model_load_tests {
     #[tokio::test]
     async fn a_restart_restores_the_model_still_gated() {
         let (node, _tmp) = node().await;
-        load_gated(&node).await;
+        if !load_gated(&node, "a_restart_restores_the_model_still_gated").await {
+            return;
+        }
 
         let rec = record(&node, CLIP).expect("persisted");
         assert_eq!(rec["runtime"], "tenzro_loadVisionModel");
@@ -27112,7 +28369,9 @@ mod model_load_tests {
     #[tokio::test]
     async fn an_unloaded_model_is_not_restored() {
         let (node, _tmp) = node().await;
-        load_gated(&node).await;
+        if !load_gated(&node, "an_unloaded_model_is_not_restored").await {
+            return;
+        }
         handle_unload_vision_model(&node, Some(serde_json::json!({ "model_id": CLIP })))
             .await
             .expect("unloads");
@@ -27128,7 +28387,14 @@ mod model_load_tests {
     #[tokio::test]
     async fn the_loaded_listing_shows_every_type_with_its_visibility() {
         let (node, _tmp) = node().await;
-        load_gated(&node).await;
+        if !load_gated(
+            &node,
+            "the_loaded_listing_shows_every_type_with_its_visibility",
+        )
+        .await
+        {
+            return;
+        }
         node.detection_runtime
             .register("det", Arc::new(tenzro_model::StubDetector))
             .expect("register");
@@ -27325,6 +28591,228 @@ mod served_record_tests {
 }
 
 #[cfg(test)]
+mod operator_call_tests {
+    use super::*;
+
+    async fn node() -> (Arc<TenzroNode>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..crate::config::NodeConfig::default()
+        };
+        let node = TenzroNode::new(config).await.expect("node");
+        (Arc::new(node), tmp)
+    }
+
+    #[test]
+    fn a_node_just_started_is_not_restarted_again() {
+        assert_eq!(
+            too_soon_to_restart(0).as_deref(),
+            Some("This node started 0 s ago; it is restarted again once it has run 300 s.")
+        );
+        assert!(too_soon_to_restart(299).is_some());
+        assert_eq!(too_soon_to_restart(300), None);
+    }
+
+    /// No service started the test process, so nothing would start the node
+    /// again: the restart is refused and the node is not asked to end.
+    #[tokio::test]
+    async fn a_node_no_service_runs_refuses_a_restart() {
+        let (node, _tmp) = node().await;
+        let refused = handle_restart_node(&node, None, None).await.unwrap_err();
+        assert_eq!(
+            refused.message,
+            "No service runs this node, so nothing would start it again. Restart it on the machine it runs on."
+        );
+        let asked = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            node.restart.notified(),
+        )
+        .await;
+        assert!(asked.is_err(), "a refused restart ends nothing");
+    }
+
+    /// A caller that administers nothing here, which the gate admits only as
+    /// a paired device, restarts the node or installs an update only with the
+    /// operator's passkey on that call: without it the call is refused with a
+    /// challenge to sign, and an assertion that does not verify spends it.
+    #[tokio::test]
+    async fn a_paired_device_restarts_or_installs_only_with_the_operators_passkey() {
+        use base64::Engine as _;
+        let (node, _tmp) = node().await;
+        let device = Some("did:tenzro:human:00000000-0000-4000-8000-00000000000a");
+        let restart = handle_restart_node(&node, None, device).await.unwrap_err();
+        let install = handle_install_update(&node, None, device)
+            .await
+            .unwrap_err();
+        for refused in [&restart, &install] {
+            assert_eq!(refused.code, -32004, "{}", refused.message);
+            let data = refused.data.as_ref().expect("a challenge to sign");
+            let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(data["challenge"].as_str().expect("challenge"))
+                .expect("base64url");
+            assert_eq!(challenge.len(), 32);
+        }
+        let forged = serde_json::json!({ "assertion": {
+            "credential_id": "AA",
+            "authenticator_data": "AA",
+            "client_data_json": "AA",
+            "signature": "AA",
+        }});
+        let refused = handle_restart_node(&node, Some(forged.clone()), device)
+            .await
+            .unwrap_err();
+        assert!(refused.data.is_none(), "{}", refused.message);
+        let again = handle_restart_node(&node, Some(forged), device)
+            .await
+            .unwrap_err();
+        assert!(
+            again.message.starts_with("no challenge is waiting"),
+            "{}",
+            again.message
+        );
+        let asked = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            node.restart.notified(),
+        )
+        .await;
+        assert!(asked.is_err(), "a refused restart ends nothing");
+    }
+
+    #[tokio::test]
+    async fn an_install_with_no_newer_release_known_is_refused() {
+        let (node, _tmp) = node().await;
+        let refused = handle_install_update(&node, None, None).await.unwrap_err();
+        assert_eq!(
+            refused.message,
+            "No release newer than the one running is known to this node."
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_a_condition_that_is_not_open_is_refused() {
+        let (node, _tmp) = node().await;
+        for approve in [false, true] {
+            let params = serde_json::json!({"condition_id": "update:9.9.9", "approve": approve});
+            let refused = crate::conditions::submit_approval(&node, Some(params))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, -32602);
+            assert_eq!(
+                refused.message,
+                "No open condition has the id update:9.9.9."
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_names_no_condition_is_an_invalid_params_error() {
+        let (node, _tmp) = node().await;
+        let refused = crate::conditions::submit_approval(&node, None)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, -32602);
+    }
+
+    /// The conditions carry passkey challenges, the relying party and the
+    /// key holder's state, and an acknowledgement is the operator's word: a
+    /// caller that did not sign in reaches neither.
+    #[tokio::test]
+    async fn a_caller_that_did_not_sign_in_reaches_no_condition_call() {
+        let (node, _tmp) = node().await;
+        for method in [
+            "tenzro_listConditions",
+            "tenzro_acknowledgeCondition",
+            "tenzro_submitApproval",
+        ] {
+            let refused = crate::access::admit(
+                &node,
+                tenzro_types::node_access::Surface::Rpc,
+                method,
+                None,
+                crate::access::Caller {
+                    did: None,
+                    ip: None,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(refused.code, -32004, "{method}");
+            assert_eq!(
+                refused.message, "sign in as this node's operator",
+                "{method}"
+            );
+        }
+    }
+
+    /// The newest page pages back with `before_cursor`; a range read
+    /// forward takes the start, the end and the completeness proof. Neither
+    /// takes the other's parameters.
+    #[tokio::test]
+    async fn the_newest_page_and_a_forward_range_take_their_own_parameters() {
+        let (node, _tmp) = node().await;
+        for params in [
+            serde_json::json!({"to_cursor": "9:0:0"}),
+            serde_json::json!({"completeness": true}),
+            serde_json::json!({"before_cursor": "9:0:0", "completeness": true}),
+        ] {
+            let refused = crate::event_index::query(&node, Some(params.clone()))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, -32602, "{params}");
+            assert!(
+                refused
+                    .message
+                    .starts_with("'to_cursor' and 'completeness'"),
+                "{params}"
+            );
+        }
+        for params in [
+            serde_json::json!({"from_height": 0, "before_cursor": "9:0:0"}),
+            serde_json::json!({"from_cursor": "3:0:0", "before_cursor": "9:0:0"}),
+        ] {
+            let refused = crate::event_index::query(&node, Some(params.clone()))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, -32602, "{params}");
+            assert!(
+                refused.message.starts_with("'before_cursor' pages back"),
+                "{params}"
+            );
+        }
+    }
+
+    /// A first page of events carries the node's account of its conditions
+    /// only to a caller that may read them.
+    #[tokio::test]
+    async fn a_caller_that_did_not_sign_in_gets_no_node_events() {
+        let (node, _tmp) = node().await;
+        assert!(!crate::event_index::reads_conditions(&node));
+    }
+
+    #[tokio::test]
+    async fn an_acknowledgement_without_a_reason_or_storage_is_refused() {
+        let (node, _tmp) = node().await;
+        for reason in ["", "   ", &"x".repeat(501)] {
+            let refused = crate::conditions::acknowledge_condition(
+                &node,
+                Some(serde_json::json!({"id": "follow", "since": "2027-01-15T08:00:00Z", "reason": reason})),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refused.code, -32602);
+            assert_eq!(refused.message, "A reason is 1 to 500 characters.");
+        }
+        let refused = crate::conditions::acknowledge_condition(
+            &node,
+            Some(serde_json::json!({"id": "follow", "since": "2027-01-15T08:00:00Z", "reason": "known"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.message, "Storage not initialized");
+    }
+}
+
+#[cfg(test)]
 mod response_format_refusal_tests {
     use super::*;
 
@@ -27399,7 +28887,8 @@ mod response_format_refusal_tests {
         }))
         .expect("request");
         let response =
-            handle_openai_chat_completions(State(node), HeaderMap::new(), Json(request)).await;
+            handle_openai_chat_completions(State(node), None, HeaderMap::new(), Json(request))
+                .await;
         assert_refused(response).await;
     }
 
@@ -27419,7 +28908,8 @@ mod response_format_refusal_tests {
             let request: crate::openai_responses::ResponsesRequest =
                 serde_json::from_value(body).expect("request");
             let response =
-                handle_openai_responses(State(node.clone()), HeaderMap::new(), Json(request)).await;
+                handle_openai_responses(State(node.clone()), None, HeaderMap::new(), Json(request))
+                    .await;
             assert_refused(response).await;
         }
     }
@@ -27589,6 +29079,200 @@ mod inference_admission_params_tests {
             refusal.message
         );
     }
+
+    /// The operator's per-use price in these tests: above the default
+    /// micro-settlement floor.
+    const PRICE: u128 = 20_000_000_000_000;
+
+    /// A node whose `m` is served by a provider it forwards to at `price` a
+    /// call, a payer funded on its chain, and a frame paying that provider
+    /// from the payer's signed authorization with `ceiling`, signed for
+    /// `payee`.
+    async fn paid_frame(
+        payee_signed: Option<Address>,
+        ceiling: u128,
+        price: u128,
+    ) -> (tempfile::TempDir, Arc<TenzroNode>, JsonRpcRequest) {
+        use tenzro_crypto::composite::{HybridSigner, SignatureContext};
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            models_dir: Some(tmp.path().join("models")),
+            rpc_addr: "0.0.0.0:8545".to_string(),
+            // The operator's per-use price: a public model is paid for.
+            payments: crate::config::PaymentsConfig {
+                default_amount: price,
+                ..Default::default()
+            },
+            ..crate::config::NodeConfig::default()
+        };
+        let mut node = TenzroNode::new(config).await.expect("node");
+        node.init_storage().await.expect("storage");
+        let node = Arc::new(node);
+        *node.node_visibility.write() = Visibility::Public;
+        let provider = Address::new([0x7a; 32]);
+        node.network_models.insert(
+            "m".to_string(),
+            crate::node::NetworkModelEntry {
+                registration: tenzro_network::ModelRegistrationMessage {
+                    model_id: "m".to_string(),
+                    provider: format!("0x{}", hex::encode(provider.as_bytes())),
+                    iroh_endpoint_id: "remote-endpoint".to_string(),
+                    ttl_secs: 600,
+                    ..Default::default()
+                },
+                last_seen: std::time::Instant::now(),
+            },
+        );
+        let payer = tenzro_crypto::composite::testing::TestHybridSigner::hybrid(43);
+        {
+            use tenzro_vm::traits::VmState as _;
+            let mut state = tenzro_vm::StateAdapter::with_storage(node.storage().unwrap().clone());
+            state.set_balance(payer.address().as_bytes(), u128::MAX / 4);
+            // A payment authorization needs the payer's enrolled ML-DSA-65 leg.
+            tenzro_vm::account_keys::set_enrolled_pq_key(
+                &mut state,
+                &payer.public_key().p256,
+                payer.public_key().pq.clone().unwrap(),
+                &mut Vec::new(),
+            );
+            state.commit().unwrap();
+        }
+        let binding = tenzro_types::payment_authorization::PaymentBinding {
+            request_digest: [1; 32],
+            ..Default::default()
+        };
+        let preimage = tenzro_types::payment_authorization::payment_authorization_preimage(
+            node.chain_id(),
+            "frame-1",
+            &payer.address(),
+            &payee_signed.unwrap_or(provider),
+            ceiling,
+            "TNZO",
+            &binding,
+        );
+        let authorization = tenzro_types::payment_authorization::PaymentAuthorization {
+            public_key: payer.public_key().p256.clone(),
+            signature: payer
+                .sign(SignatureContext::PaymentAuthorization, &preimage)
+                .unwrap(),
+            max_amount: ceiling,
+            asset: "TNZO".to_string(),
+            binding,
+            resellers: Vec::new(),
+        };
+        let call = request(serde_json::json!({
+            "model_id": "m",
+            "message": "hi",
+            "payment": {
+                "payer": format!("0x{}", hex::encode(payer.address().as_bytes())),
+                "payment_id": "frame-1",
+                "authorization": authorization,
+            },
+        }));
+        (tmp, node, call)
+    }
+
+    /// Where a call must be paid for, a frame carrying a payer's ledger
+    /// authorization that would settle the quoted price to the serving
+    /// provider pays for itself and is admitted.
+    #[tokio::test]
+    async fn a_frame_carrying_a_valid_ledger_payment_is_admitted() {
+        let (_tmp, node, call) = paid_frame(None, u128::MAX / 8, PRICE).await;
+        let quoted = crate::inference_admission::NodeInferenceAdmission::for_node(&node)
+            .quoted_price(Surface::Rpc, None);
+        assert_eq!(quoted, PRICE, "the call must be paid for");
+        assert!(inference_admission_refusal(&node, Surface::Rpc, &call, None).is_none());
+        // The call it was admitted for settles the quoted price.
+        assert_eq!(node.admitted_payments().charge("frame-1"), Some(PRICE));
+    }
+
+    /// A payment id pays for one call: a second frame carrying it while the
+    /// first holds it is refused before anything is served.
+    #[tokio::test]
+    async fn a_payment_pays_for_one_call_only() {
+        let (_tmp, node, call) = paid_frame(None, u128::MAX / 8, PRICE).await;
+        assert!(inference_admission_refusal(&node, Surface::Rpc, &call, None).is_none());
+        let refusal = inference_admission_refusal(&node, Surface::Rpc, &call, None)
+            .expect("the same payment again");
+        assert!(
+            refusal.message.contains("already pays for another call"),
+            "{}",
+            refusal.message
+        );
+    }
+
+    /// A frame carrying both a ledger payment and a channel voucher is
+    /// refused before it is served and at settlement: either pays, never
+    /// both.
+    #[tokio::test]
+    async fn a_frame_carrying_a_payment_and_a_voucher_is_refused() {
+        let (_tmp, node, mut call) = paid_frame(None, u128::MAX / 8, PRICE).await;
+        let params = call.params.as_mut().unwrap();
+        params["channel_voucher"] = serde_json::json!({});
+        let refusal = inference_admission_refusal(&node, Surface::Rpc, &call, None)
+            .expect("both a payment and a voucher");
+        assert!(
+            refusal.message.contains(BOTH_PAYMENTS),
+            "{}",
+            refusal.message
+        );
+        assert_eq!(node.admitted_payments().charge("frame-1"), None);
+
+        let params = call.params.as_ref().unwrap();
+        let Err(settled) = settle_inference_cost(
+            &node,
+            params.get("payment"),
+            params.get("channel_voucher"),
+            None,
+            "m",
+            &tenzro_types::model::BillableUnits::default(),
+            PRICE,
+        )
+        .await
+        else {
+            panic!("a call carrying both a payment and a voucher settled");
+        };
+        assert_eq!(settled.message, BOTH_PAYMENTS);
+    }
+
+    /// A call priced below the network's micro-settlement floor cannot be
+    /// paid by its own ledger settlement, so its payment is refused before
+    /// the call is served.
+    #[tokio::test]
+    async fn a_payment_for_a_call_priced_below_the_floor_is_refused() {
+        let (_tmp, node, call) = paid_frame(None, u128::MAX / 8, 1_000).await;
+        let refusal =
+            inference_admission_refusal(&node, Surface::Rpc, &call, None).expect("below the floor");
+        assert!(
+            refusal.message.contains("micro-settlement floor"),
+            "{}",
+            refusal.message
+        );
+    }
+
+    /// A payment signed for another payee, or with a ceiling below the quoted
+    /// price, is refused with the reason, before anything is served.
+    #[tokio::test]
+    async fn a_frame_whose_payment_would_not_settle_is_refused_with_the_reason() {
+        let (_tmp, node, call) =
+            paid_frame(Some(Address::new([0x55; 32])), u128::MAX / 8, PRICE).await;
+        let refusal = inference_admission_refusal(&node, Surface::Rpc, &call, None)
+            .expect("signed for another payee");
+        assert!(
+            refusal
+                .message
+                .starts_with("the payment would not pay for this call"),
+            "{}",
+            refusal.message
+        );
+        assert!(refusal.message.contains("signature"), "{}", refusal.message);
+
+        let (_tmp, node, call) = paid_frame(None, 0, PRICE).await;
+        let refusal = inference_admission_refusal(&node, Surface::Rpc, &call, None)
+            .expect("a ceiling below the price");
+        assert!(refusal.message.contains("ceiling"), "{}", refusal.message);
+    }
 }
 
 #[cfg(all(test, feature = "inference"))]
@@ -27654,6 +29338,59 @@ mod stop_and_serve_tests {
 
     const MODEL: &str = "qwen3-4b";
 
+    /// A native transaction requested as the SDKs request one is
+    /// estimated at what its kind is charged: an escrow claim of three
+    /// vouchers at three vouchers' charge, not a plain transfer.
+    #[tokio::test]
+    async fn the_native_estimate_rpc_estimates_a_claim_by_its_vouchers() {
+        use tenzro_types::payment_authorization::{EscrowClaim, EscrowVoucher};
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..crate::config::NodeConfig::default()
+        };
+        let node = Arc::new(TenzroNode::new(config).await.expect("node"));
+        let claims: Vec<EscrowClaim> = (0..3u8)
+            .map(|i| EscrowClaim {
+                voucher: EscrowVoucher {
+                    escrow_id: [i; 32],
+                    cumulative_amount: 1,
+                    binding: [0u8; 32],
+                    public_key: vec![4u8; 65],
+                    signature: Default::default(),
+                    agent: None,
+                    attribution: None,
+                },
+                amount: 1,
+            })
+            .collect();
+        let request = serde_json::json!({
+            "from": format!("0x{}", hex::encode([1u8; 32])),
+            "nonce": 0,
+            "gas_price": 1_000_000_000u64,
+            "timestamp": 1_800_000_000_000u64,
+            "valid_until": 1_800_000_600_000u64,
+            "tx_type": TransactionType::ClaimEscrow { claims },
+        });
+        let tx = unsigned_transaction(&node, &request).expect("the request parses");
+        let runtime = tenzro_vm::MultiVmRuntime::new(tenzro_vm::VmConfig::default())
+            .await
+            .unwrap();
+        let state = tenzro_vm::StateAdapter::new();
+        assert_eq!(
+            native_gas_estimate(&runtime, &state, tx).await.unwrap(),
+            3 * 55_000
+        );
+
+        let mut call = request.clone();
+        call["tx_type"] = serde_json::json!(TransactionType::ContractDeploy {
+            code: vec![0x00],
+            args: Vec::new(),
+        });
+        let evm = unsigned_transaction(&node, &call).expect("the request parses");
+        assert!(native_gas_estimate(&runtime, &state, evm).await.is_err());
+    }
+
     async fn node_with_runtime(tmp: &std::path::Path) -> Arc<TenzroNode> {
         let config = crate::config::NodeConfig {
             data_dir: tmp.to_path_buf(),
@@ -27663,7 +29400,7 @@ mod stop_and_serve_tests {
         let mut node = TenzroNode::new(config).await.expect("node");
         node.init_storage().await.expect("storage");
         node.model_runtime = Some(Arc::new(
-            tenzro_model::ModelRuntime::new().expect("runtime"),
+            tenzro_model::ModelRuntime::new(node.catalog_cell().clone()).expect("runtime"),
         ));
         Arc::new(node)
     }
@@ -27751,6 +29488,61 @@ mod stop_and_serve_tests {
 
 #[cfg(test)]
 mod slow_request_real_path_tests {
+    /// The reward-root readiness read names each active validator that would
+    /// lose its coupons under the rule, with the reason, so the vote can wait
+    /// until every one is matched.
+    #[test]
+    fn reward_root_readiness_names_each_validator_that_would_not_earn() {
+        use tenzro_vm::traits::VmState as _;
+        let mut chain = tenzro_vm::StateAdapter::new();
+        let ready = tenzro_types::primitives::Address::new([1; 32]);
+        let bare = tenzro_types::primitives::Address::new([2; 32]);
+        let human = "did:tenzro:human:hh";
+        chain.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_types::identity::identity_slot(human).as_bytes(),
+            serde_json::to_vec(&tenzro_types::identity::RegisterIdentityPayload {
+                did: human.into(),
+                identity_type: "human".into(),
+                display_name: String::new(),
+                controller_pubkey: Vec::new(),
+                key_type: "p256".into(),
+                wallet_id: String::new(),
+                wallet_address: ready,
+                pq_verifying_key: Vec::new(),
+                metadata: Default::default(),
+                proof: tenzro_types::identity::RegistrationProof::Hardware {
+                    signature: tenzro_types::account_signature::CompositeSignature::classical(
+                        tenzro_types::account_signature::ClassicalProof::Raw {
+                            signature: Vec::new(),
+                        },
+                    ),
+                },
+            })
+            .unwrap(),
+        );
+        chain.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            format!("identity_wallet:{}", hex::encode(ready.as_bytes())).as_bytes(),
+            human.as_bytes().to_vec(),
+        );
+        let out = super::reward_root_readiness(&chain, &[ready, bare], 0);
+        assert_eq!(out["live"], false);
+        assert_eq!(out["all_matched"], false, "{out}");
+        assert_eq!(out["validators"][0]["matched"], true, "{out}");
+        assert_eq!(out["validators"][1]["matched"], false);
+        assert!(
+            out["validators"][1]["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("no registered identity")),
+            "{out}"
+        );
+        assert_eq!(
+            super::reward_root_readiness(&chain, &[ready], 0)["all_matched"],
+            true
+        );
+    }
+
     use super::*;
 
     /// A fast method through the real `handle_request` logs no slow-request
@@ -27771,5 +29563,257 @@ mod slow_request_real_path_tests {
         let response = handle_request(&node, request, &AuthContext::default(), None).await;
         assert!(response.error.is_none(), "{:?}", response.error);
         assert!(!log.text().contains("slow RPC request"), "{}", log.text());
+    }
+
+    /// A lone object wrapped in an array reaches a handler exactly as the
+    /// object does: dispatch unwraps it before any handler reads a field.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lone_object_in_an_array_is_read_as_the_object() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let config = crate::config::NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..crate::config::NodeConfig::default()
+        };
+        let node = Arc::new(TenzroNode::new(config).await.expect("node"));
+        let fields =
+            serde_json::json!({ "public_key": "00", "message_hex": "00", "signature": {} });
+        let mut answers = Vec::new();
+        for params in [fields.clone(), serde_json::json!([fields])] {
+            let request: JsonRpcRequest = serde_json::from_value(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tenzro_verifySignature", "params": params
+            }))
+            .expect("request");
+            let response = handle_request(&node, request, &AuthContext::default(), None).await;
+            let error = response.error.expect("a malformed signature is refused");
+            assert!(!error.message.starts_with("Missing"), "{}", error.message);
+            answers.push((error.code, error.message));
+        }
+        assert_eq!(answers[0], answers[1]);
+    }
+}
+
+#[cfg(test)]
+mod size_admission_tests {
+    use super::*;
+
+    fn transfer_with_memo(memo: usize) -> SignedTransaction {
+        use tenzro_crypto::composite::HybridSigner as _;
+        let signer = tenzro_crypto::composite::testing::TestHybridSigner::p256_only(1);
+        let mut tx = tenzro_types::transaction::Transaction::new(
+            tenzro_types::primitives::ChainId::from(1),
+            tenzro_types::primitives::Address::default(),
+            tenzro_types::primitives::Address::default(),
+            tenzro_types::primitives::Nonce::from(0),
+            tenzro_types::transaction::TransactionType::Transfer { amount: 1 },
+            21_000,
+            1_000_000_000,
+        );
+        tx.memo = Some("m".repeat(memo));
+        let sig = signer
+            .sign(
+                tenzro_crypto::composite::SignatureContext::Transaction,
+                tx.hash().as_bytes(),
+            )
+            .unwrap();
+        SignedTransaction::new(tx, signer.public_key().p256.clone(), sig)
+    }
+
+    /// The largest checkpoint record the type admits, signed as a
+    /// validator account signs it, is the largest transaction the network
+    /// carries: it fits a gossip message and a part, and a certificate one
+    /// byte longer is refused by the type and would no longer travel.
+    #[test]
+    fn the_largest_checkpoint_record_travels_and_one_byte_more_does_not() {
+        use tenzro_crypto::composite::HybridSigner as _;
+        let signer = tenzro_crypto::composite::testing::TestHybridSigner::hybrid(1);
+        let record = |bytes: usize| {
+            let tx = tenzro_types::transaction::Transaction::new(
+                tenzro_types::primitives::ChainId::from(1),
+                tenzro_types::primitives::Address::new(signer.public_key().account_slot()),
+                tenzro_types::primitives::Address::default(),
+                tenzro_types::primitives::Nonce::from(u64::MAX),
+                tenzro_types::transaction::TransactionType::RecordCheckpointSigners {
+                    certificate: vec![7; bytes],
+                },
+                100_000,
+                u64::MAX,
+            );
+            let sig = signer
+                .sign(
+                    tenzro_crypto::composite::SignatureContext::Transaction,
+                    tx.hash().as_bytes(),
+                )
+                .unwrap();
+            let signed = SignedTransaction::new(tx, signer.public_key().p256.clone(), sig);
+            (signed.validate(), signed)
+        };
+        let part = tenzro_consensus::batch::part_budget(
+            tenzro_consensus::ConsensusConfig::default().batch_max_bytes,
+        );
+        let largest = tenzro_types::transaction::MAX_CHECKPOINT_RECORD_BYTES;
+        let (accepted, tx) = record(largest);
+        let size = bincode::serialized_size(&tx).unwrap() as usize;
+        assert_eq!(accepted, Ok(()), "the type admits its own cap");
+        assert!(size <= part, "the largest record fits a part");
+        assert_eq!(
+            too_large_to_carry(&tx),
+            None,
+            "and travels in a gossip message"
+        );
+        let (accepted, tx) = record(largest + 1);
+        assert_eq!(
+            accepted,
+            Err("certificate must be 1 to 1044865 bytes"),
+            "one byte more is refused by the type"
+        );
+        assert_eq!(bincode::serialized_size(&tx).unwrap() as usize, size + 1);
+        assert!(
+            too_large_to_carry(&tx).is_some(),
+            "one byte more no longer travels in a gossip message"
+        );
+    }
+
+    /// A submission whose gossip message would pass the gossip limit is
+    /// refused, saying so, and one that fits a part's bound is taken; a
+    /// small one passes.
+    #[test]
+    fn a_transaction_the_network_cannot_carry_is_refused_at_submission() {
+        assert_eq!(too_large_to_carry(&transfer_with_memo(10)), None);
+        let why = too_large_to_carry(&transfer_with_memo(tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE))
+            .expect("a transaction past the gossip limit is refused");
+        assert!(why.contains("gossip message"), "{why}");
+        let carried = tenzro_consensus::batch::part_budget(
+            tenzro_consensus::ConsensusConfig::default().batch_max_bytes,
+        );
+        let largest = (0..)
+            .map(|k| 1_000_000 + k * 1_000)
+            .take_while(|&m| too_large_to_carry(&transfer_with_memo(m)).is_none())
+            .last()
+            .unwrap();
+        assert!(
+            bincode::serialized_size(&transfer_with_memo(largest)).unwrap() as usize <= carried,
+            "a transaction the gossip limit admits fits a part"
+        );
+    }
+}
+
+#[cfg(test)]
+mod validator_entry_json_tests {
+    use super::validator_registry_entry_to_json;
+    use tenzro_token::validator_registry::{
+        ValidatorRegistryEntry, ValidatorRegistryStatus, ValidatorTier, jailed_remedy,
+    };
+    use tenzro_types::primitives::{Address, Timestamp};
+
+    fn entry(
+        status: ValidatorRegistryStatus,
+        jailed_until_epoch: Option<u64>,
+    ) -> ValidatorRegistryEntry {
+        ValidatorRegistryEntry {
+            address: Address::new([7; 32]),
+            ml_dsa_pubkey: Vec::new(),
+            p256_pubkey: Vec::new(),
+            node_key: [0; 32],
+            withdrawal_address: Address::new([8; 32]),
+            self_stake: 0,
+            tier: ValidatorTier::Staked,
+            status,
+            registered_at_epoch: 0,
+            activated_at_epoch: None,
+            exited_at_epoch: None,
+            jailed_until_epoch,
+            tee_attestation_hash: None,
+            metadata_uri: String::new(),
+            updated_at: Timestamp(0),
+        }
+    }
+
+    /// The validator-state read tells a jailed validator's operator the
+    /// remedy, naming the account in the 64-hex form the reinstate command
+    /// takes, and says nothing of one for a validator that is not jailed.
+    #[test]
+    fn a_jailed_entry_carries_the_remedy_and_an_active_one_does_not() {
+        let jailed =
+            validator_registry_entry_to_json(&entry(ValidatorRegistryStatus::Jailed, Some(12)));
+        let remedy = jailed["jailed_remedy"]
+            .as_str()
+            .expect("a jailed entry names its remedy");
+        assert_eq!(remedy, jailed_remedy(&Address::new([7; 32]), Some(12)));
+        assert!(
+            remedy.contains(&format!("--account {}", "07".repeat(32))),
+            "{remedy}"
+        );
+
+        let active =
+            validator_registry_entry_to_json(&entry(ValidatorRegistryStatus::Active, None));
+        assert!(active["jailed_remedy"].is_null(), "{active}");
+    }
+}
+
+#[cfg(all(test, feature = "inference"))]
+mod idle_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_serve_sets_an_idle_limit_only_within_the_node_bounds() {
+        let memory = crate::config::MemoryConfig::default();
+        let asked = |secs: Value| {
+            requested_idle_limit(&serde_json::json!({ "idle_unload_secs": secs }), &memory)
+        };
+        assert_eq!(
+            requested_idle_limit(&serde_json::json!({ "model_id": "m" }), &memory).unwrap(),
+            None
+        );
+        assert_eq!(asked(serde_json::json!(1800)).unwrap(), Some(1800));
+        assert_eq!(
+            asked(serde_json::json!(memory.idle_unload_min_secs)).unwrap(),
+            Some(300)
+        );
+        assert_eq!(
+            asked(serde_json::json!(memory.idle_unload_max_secs)).unwrap(),
+            Some(86_400)
+        );
+        for refused in [
+            serde_json::json!(299),
+            serde_json::json!(86_401),
+            serde_json::json!(-5),
+            serde_json::json!(1.5),
+            serde_json::json!("1800"),
+            Value::Null,
+        ] {
+            assert_eq!(asked(refused).unwrap_err().code, -32602);
+        }
+    }
+
+    #[test]
+    fn the_idle_limit_is_kept_in_the_served_record_beside_its_other_fields() {
+        let mut record = serde_json::json!({ "model_id": "m", "runtime": "onnx" });
+        assert_eq!(persisted_idle_limit(&record), None);
+        set_idle_field(&mut record, Some(1800));
+        assert_eq!(
+            persisted_idle_limit(&record),
+            Some(std::time::Duration::from_secs(1800))
+        );
+        set_idle_field(&mut record, None);
+        assert_eq!(persisted_idle_limit(&record), None);
+        assert_eq!(
+            record,
+            serde_json::json!({ "model_id": "m", "runtime": "onnx" })
+        );
+    }
+}
+
+#[cfg(test)]
+mod client_version_tests {
+    /// `web3_clientVersion`, the banner and `tenzro-node --version` all read
+    /// the package version; the 0.2.1 archives built from the workspace
+    /// version reported 0.2.0 here, which the package version now prevents.
+    #[tokio::test]
+    async fn web3_client_version_reports_the_package_version() {
+        let v = super::handle_web3_client_version().await.unwrap();
+        let v = v.as_str().unwrap();
+        assert_eq!(v, format!("Tenzro/{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(env!("CARGO_PKG_VERSION"), crate::VERSION);
+        assert_ne!(env!("CARGO_PKG_VERSION"), "0.2.0", "{v}");
     }
 }

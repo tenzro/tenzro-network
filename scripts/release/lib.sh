@@ -41,6 +41,17 @@ release_network_profile() { # source-tree staging-dir
     echo "network profiles shipped: $n"
 }
 
+# The web console `tenzro control --web` serves, at share/console beside bin/ (the
+# CLI looks at <dir of the running tenzro>/../share/console). Taken from
+# apps/tenzro-control/web of the source tree; a release without it is refused.
+release_console() { # source-tree staging-dir
+    local src=$1/apps/tenzro-control/web stage=$2
+    [ -f "$src/index.html" ] || { echo "REFUSING: no web console at apps/tenzro-control/web to ship" >&2; return 1; }
+    mkdir -p "$stage/share/console"
+    cp -R "$src/." "$stage/share/console/"
+    echo "web console shipped: $(find "$stage/share/console" -type f | wc -l) files"
+}
+
 # Deterministic tar.gz of a staging directory: sorted names, fixed owner, the
 # commit time on every entry, no gzip timestamp.
 release_pack() { # staging-dir out.tar.gz epoch

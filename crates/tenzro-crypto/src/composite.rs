@@ -56,6 +56,9 @@ pub const LABEL_MLDSA65_P256: &[u8] = b"COMPSIG-MLDSA65-ECDSA-P256-SHA512";
 pub enum SignatureContext {
     /// A ledger transaction (`Transaction::hash()` is the message).
     Transaction,
+    /// A fee payer's consent to pay one ledger transaction's fee
+    /// ([`crate::fee_payer::consent_digest`] is the message).
+    FeePayer,
     /// A signed revocation entry (identity, HTTP signing key, or shared
     /// payment token) broadcast on the revocation topic.
     IdentityRevocation,
@@ -122,6 +125,12 @@ pub enum SignatureContext {
     /// A node identity's checkpoint over the head of its administrative
     /// audit log.
     AdminAuditCheckpoint,
+    /// The ML-DSA-65 leg of an A2A task call's envelope.
+    A2aEnvelope,
+    /// A request, proof, capability or receipt of a store-and-forward
+    /// mailbox (`tenzro-mailbox`), so no signature over an arbitrary message
+    /// can stand in for one.
+    Mailbox,
 }
 
 impl SignatureContext {
@@ -129,6 +138,7 @@ impl SignatureContext {
     pub const fn as_bytes(self) -> &'static [u8] {
         match self {
             Self::Transaction => b"tenzro/tx",
+            Self::FeePayer => b"tenzro/tx/fee-payer",
             Self::IdentityRevocation => b"tenzro/identity/revocation",
             Self::Credential => b"tenzro/credential",
             Self::AgentMessage => b"tenzro/agent/message",
@@ -160,6 +170,8 @@ impl SignatureContext {
             Self::BatchRoot => b"tenzro/session/batch-root",
             Self::ReceiptKeyBinding => b"tenzro/trust/receipt-key-binding",
             Self::AdminAuditCheckpoint => b"tenzro/node/admin-audit-checkpoint",
+            Self::A2aEnvelope => b"tenzro/a2a/envelope",
+            Self::Mailbox => b"tenzro/mailbox",
         }
     }
 }
@@ -931,6 +943,12 @@ mod tests {
         let other = passkey_sign(&signer, "example.org", "https://example.org", 0x05, tx, MSG);
         verify_classical_component_for("example.org", &key, tx, MSG, &other).unwrap();
         assert!(verify_classical_component_for("tenzro.com", &key, tx, MSG, &other).is_err());
+        // A transaction signed in an Android app verifies under neither: no
+        // list of related origins applies here.
+        let app = format!("android:apk-key-hash:{}", "A".repeat(43));
+        let in_app = passkey_sign(&signer, "tenzro.com", &app, 0x05, tx, MSG);
+        assert!(verify_classical_component_for("tenzro.com", &key, tx, MSG, &in_app).is_err());
+        assert!(verify_classical_component(&key, tx, MSG, &in_app).is_err());
     }
 
     #[test]

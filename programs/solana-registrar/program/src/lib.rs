@@ -45,7 +45,7 @@
 //! system_program, mpl_core_program, registry_program, instructions_sysvar]`.
 
 use solana_program::{
-    account_info::{AccountInfo, next_account_info},
+    account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
     hash::hashv,
     instruction::{AccountMeta, Instruction},
@@ -53,7 +53,7 @@ use solana_program::{
     program_error::ProgramError,
     pubkey::Pubkey,
     rent::Rent,
-    sysvar::{Sysvar, instructions as ix_sysvar},
+    sysvar::{instructions as ix_sysvar, Sysvar},
 };
 use solana_system_interface::{instruction as system_instruction, program as system_program};
 
@@ -548,6 +548,9 @@ mod tests {
         data.push(b'x');
         assert!(parse(&data).is_ok());
         data.push(0);
-        assert!(matches!(parse(&data), Err(RegistrarError::BadInstructionData)));
+        assert!(matches!(
+            parse(&data),
+            Err(RegistrarError::BadInstructionData)
+        ));
     }
 }

@@ -48,8 +48,8 @@ pub struct AccessChallenge {
     pub challenge_id: String,
     /// The challenge a passkey signs (`webauthn.get`), base64url.
     pub challenge: String,
-    /// The digest a hardware key signs, hex.
-    pub device_digest: String,
+    /// The message a hardware key signs, hex.
+    pub device_message: String,
     /// Seconds the challenge stays answerable.
     pub expires_in: u64,
 }
@@ -71,11 +71,11 @@ pub enum SignInProof {
         /// The assertion signature.
         signature: String,
     },
-    /// A hardware-key signature over `device_digest`, fields hex.
+    /// A hardware-key signature over `device_message`, fields hex.
     Device {
         /// The key the DID derives from, or one registered on it.
         public_key: String,
-        /// ECDSA P-256 `r || s` over SHA-256 of the digest, or Ed25519.
+        /// ECDSA P-256 `r || s` over SHA-256 of the message, or Ed25519 over the message.
         signature: String,
     },
 }

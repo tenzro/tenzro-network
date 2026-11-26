@@ -46,6 +46,8 @@ gossip_topics! {
     training => "tenzro/training",
     training_syncer => "tenzro/training/syncer",
     sla => "tenzro/sla",
+    sla_beacon => "tenzro/sla/beacon",
+
     compute_observations => "tenzro/compute-observations",
 }
 
@@ -232,8 +234,20 @@ mod discovery {
     /// A cluster member on the local segment is found by its machine identity
     /// and checked against the operator-signed membership list, with no
     /// external network.
+    ///
+    /// Multicast DNS listens on every interface, and a test binary that does
+    /// makes Windows and macOS ask the user to let it through the firewall,
+    /// once for every new build. The test therefore runs only where
+    /// `TENZRO_TEST_MULTICAST=1` is set (row K of scripts/genesis-gate.sh
+    /// sets it) and reports a `SKIP-UNSUPPORTED:` line otherwise.
     #[tokio::test(flavor = "multi_thread")]
     async fn lan_cluster_member_discovered_locally() {
+        if std::env::var("TENZRO_TEST_MULTICAST").as_deref() != Ok("1") {
+            eprintln!(
+                "SKIP-UNSUPPORTED: lan_cluster_member_discovered_locally: TENZRO_TEST_MULTICAST is not 1"
+            );
+            return;
+        }
         let cluster = cluster().await;
         let (operator, listener_key, member_key, stranger) =
             (Key::new(1), Key::new(2), Key::new(3), Key::new(4));
@@ -295,9 +309,14 @@ mod discovery {
                 rejected = true;
             }
         }
-        let (did, sighting) = verified.expect("the member was never found on the local network");
+        let (did, sighting) = verified.expect(
+            "the member was never found on the local network; a host firewall that drops multicast DNS coming back to this host (UDP 5353 to 224.0.0.251, docs/NETWORK.md) keeps every announcement from arriving",
+        );
         assert_eq!(did, member_key.machine_did());
-        assert!(rejected, "the impostor was never seen");
+        assert!(
+            rejected,
+            "the impostor was never seen; a host firewall that drops multicast DNS coming back to this host (UDP 5353 to 224.0.0.251, docs/NETWORK.md) keeps every announcement from arriving"
+        );
 
         // The sighting carries what a dial needs: the member's address on the
         // segment, with no relay or record.
@@ -447,7 +466,7 @@ mod acceptance {
         // set names: the record is kept, and certifies nothing here.
         let own = stranger.identity();
         let outsider = with_relays(
-            base_builder().portmapper_config(iroh::endpoint::PortmapperConfig::Disabled),
+            tenzro_iroh::identity_transport::on_loopback(base_builder()),
             own.transport.relays(),
             Some(own.transport.store().clone()),
         )

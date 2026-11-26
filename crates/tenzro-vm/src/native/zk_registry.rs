@@ -136,6 +136,55 @@ pub(super) fn execute_zk_attest(
     .with_proof_gas(gas))
 }
 
+/// Record the proof `commitment` of `statement` in `system` where the
+/// ZK_VERIFY precompile reads it: the proof is marked attested and the
+/// statement counts `system` once among the systems that proved it. The
+/// writes of a ZK verdict that reached its quorum; `AttestZkProof` keeps its
+/// own, in [`execute_zk_attest`].
+pub(super) fn record(
+    state: &mut dyn VmState,
+    commitment: &[u8; 32],
+    statement: &[u8; 32],
+    system: &str,
+) -> Vec<StateChange> {
+    let slot = zk_attestation_slot(commitment);
+    let previous = state.get_storage(&PRECOMPILE_ZK_VERIFY, &slot);
+    let mut marker = [0u8; 32];
+    marker[31] = 1;
+    state.set_storage(&PRECOMPILE_ZK_VERIFY, &slot, marker.to_vec());
+    let mut changes = vec![StateChange::new(
+        PRECOMPILE_ZK_VERIFY.to_vec(),
+        slot.to_vec(),
+        previous,
+        Some(marker.to_vec()),
+    )];
+
+    // Count the proof systems that have proven this statement, once each.
+    let system_slot = zk_statement_system_slot(statement, system);
+    let seen = state
+        .get_storage(&PRECOMPILE_ZK_VERIFY, &system_slot)
+        .is_some_and(|v| v.iter().any(|b| *b != 0));
+    if !seen {
+        state.set_storage(&PRECOMPILE_ZK_VERIFY, &system_slot, marker.to_vec());
+        let count_slot = zk_statement_count_slot(statement);
+        let before = state.get_storage(&PRECOMPILE_ZK_VERIFY, &count_slot);
+        let mut count = [0u8; 32];
+        if let Some(v) = before.as_ref().filter(|v| v.len() == 32) {
+            count.copy_from_slice(v);
+        }
+        let n = crate::evm::precompile_host::word_to_u128(&count) + 1;
+        let after = crate::evm::precompile_host::u128_to_word(n);
+        state.set_storage(&PRECOMPILE_ZK_VERIFY, &count_slot, after.to_vec());
+        changes.push(StateChange::new(
+            PRECOMPILE_ZK_VERIFY.to_vec(),
+            count_slot.to_vec(),
+            before,
+            Some(after.to_vec()),
+        ));
+    }
+    changes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

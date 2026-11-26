@@ -222,6 +222,31 @@ fn colluding_providers_are_measured_against_their_baseline() {
 }
 
 #[test]
+fn a_majority_that_keeps_its_skew_cannot_hold_the_rate_off_the_market() {
+    let days = 30;
+    let spec = Adversary::PlaybookTrigger {
+        start_day: 1,
+        run_days: days - 1,
+        // A stake majority the honest side can still outvote: with the cartel
+        // at 2/3 of the stake the honest side is under the 33.34% quorum, and
+        // a majority that abstains blocks every governance proposal.
+        cartel: 13,
+        skew_bps: -5_000,
+        keep_skew: true,
+    };
+    let o = run_with(spec, days, true);
+    let held = o.detail["days_rate_held"];
+    let gap = o.detail["final_rate_gap"];
+    // Governance puts its own rate in force once the hold has not brought
+    // the reports back, so the hold ends and fees are priced at the market.
+    assert!(held < f64::from(days) * 0.6, "{:?}", o.detail);
+    // Governance moves its rate in proposals of several days each, so on a
+    // falling price its rate trails the market; it must end closer to the
+    // market than the rate was at its worst.
+    assert!(gap < o.detail["rate_max_deviation"], "{:?}", o.detail);
+}
+
+#[test]
 fn a_playbook_trigger_reports_whether_the_rate_was_held() {
     let spec = Adversary::PlaybookTrigger {
         start_day: 1,

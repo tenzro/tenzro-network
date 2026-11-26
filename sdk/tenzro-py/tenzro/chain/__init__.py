@@ -1,4 +1,4 @@
-"""Chain state verified offline (governance receipts against a certified state root), ABI encoding, and NFTs on the factory precompile."""
+"""Chain state verified offline (governance receipts against a certified state root), ABI encoding, NFTs on the factory precompile, storage on a storage provider, and compute rental (bonds, claims, the price feed and renting)."""
 
 
 from .abi import (
@@ -11,12 +11,26 @@ from .abi import (
     function_selector,
     parse_signature,
 )
+from .compute import (
+    SLA_EPOCH_MS,
+    ClaimStateTag,
+    ComputeBond,
+    ComputeBondParams,
+    ComputeClaim,
+    ComputeClaimList,
+    ComputeClient,
+    PriceFeed,
+    PriceFeedEntry,
+    RentRequest,
+    WireU128,
+    rent_transaction,
+)
 from .governance import (
     EMPTY,
-    GovernanceReceiptError,
-    GovernanceReceiptReport,
     STEM_LEN,
     SYSTEM_ADDRESS_HEX,
+    GovernanceReceiptError,
+    GovernanceReceiptReport,
     parameter_change_proposal,
     reinstate_validator_proposal,
     system_slot_tree_key,
@@ -40,8 +54,24 @@ from .nft import (
     nft_decode,
     nft_transaction,
 )
+from .storage import StorageClient, StorageStatus, StoredObject
 
 __all__ = [
+    "SLA_EPOCH_MS",
+    "ClaimStateTag",
+    "ComputeBond",
+    "ComputeBondParams",
+    "ComputeClaim",
+    "ComputeClaimList",
+    "ComputeClient",
+    "PriceFeed",
+    "PriceFeedEntry",
+    "RentRequest",
+    "StorageClient",
+    "StorageStatus",
+    "StoredObject",
+    "WireU128",
+    "rent_transaction",
     "NFT_FACTORY_ADDRESS",
     "NFT_MAX_BATCH",
     "NFT_MAX_ID",

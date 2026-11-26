@@ -271,6 +271,8 @@ pub(crate) async fn handle_issue(
         .get("did")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("Missing did"))?;
+    crate::identity_gate::edge_admits(node, "tenzro_issueKyaCredential", Some(did), false)
+        .map_err(refused)?;
     let validity = params
         .get("validity_secs")
         .and_then(Value::as_i64)

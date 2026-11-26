@@ -291,10 +291,7 @@ impl TenzroClient {
             chain_id: parse_hex_u64(&chain_hex)?,
             block_height: field("block_height")?,
             peer_count: field("peer_count")? as u32,
-            syncing: syncing
-                .get("syncing")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
+            syncing: not_following(&syncing),
         })
     }
 
@@ -442,10 +439,18 @@ impl TenzroClient {
     }
 
     #[cfg(feature = "chain")]
-    /// Creates a storage client for decentralized object storage and streaming
-    /// storage deals (targets a node serving the `storage` role).
+    /// Creates a storage client: objects erasure-coded across providers,
+    /// priced per byte-epoch and held to proofs of retrievability (targets a
+    /// node serving the `storage` role).
     pub fn storage(&self) -> crate::storage::StorageClient {
         crate::storage::StorageClient::new(self.rpc.clone())
+    }
+
+    #[cfg(feature = "chain")]
+    /// Creates a compute client: provider bonds, compute claims, the observed
+    /// price feed and renting capacity as a stream escrow.
+    pub fn compute(&self) -> crate::compute::ComputeClient {
+        crate::compute::ComputeClient::new(self.rpc.clone())
     }
 
     #[cfg(feature = "chain")]
@@ -626,6 +631,16 @@ impl TenzroClient {
         crate::discovery::DiscoveryClient::new(self.rpc.clone())
     }
 
+    /// A light client trusting `anchor`'s committee, reading through this
+    /// client's node connection (feature `light`, preview).
+    #[cfg(feature = "light")]
+    pub async fn light_client(
+        &self,
+        anchor: &crate::light::TrustAnchor,
+    ) -> SdkResult<crate::light::LightClient> {
+        crate::light::LightClient::new(self.rpc.clone(), anchor).await
+    }
+
     #[cfg(feature = "chain")]
     /// Creates an event client for querying and subscribing to on-chain events
     pub fn events(&self) -> EventClient {
@@ -726,16 +741,14 @@ impl TenzroClient {
             .await
     }
 
-    /// Checks if the node is syncing
+    /// Whether the node is not following the network: starting, catching
+    /// up or stalled, as `tenzro_syncing` reports its state.
     pub async fn syncing(&self) -> SdkResult<bool> {
         let result: serde_json::Value = self
             .rpc
             .call("tenzro_syncing", serde_json::json!([]))
             .await?;
-        Ok(result
-            .get("syncing")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false))
+        Ok(not_following(&result))
     }
 
     /// Gets the finalized block height
@@ -806,8 +819,9 @@ impl TenzroClient {
             .await
     }
 
-    /// A provider's standing, announced price cards, and settled count,
-    /// value and latency over 24 hours and 7 days
+    /// A provider's standing, the work consensus verified for it, settled
+    /// revenue on chain, announced price cards, warm models, and the node's
+    /// settled count, value and latency over 24 hours and 7 days
     pub async fn get_provider_scorecard(&self, provider: &str) -> SdkResult<serde_json::Value> {
         self.rpc
             .call(
@@ -932,7 +946,7 @@ pub struct BlockInfo {
 /// hash, timestamp (millis), proposer, and the rest without committing to a
 /// fixed schema. Use `next_height` and `more_available` to drive pagination:
 ///
-/// ```ignore
+/// ```text
 /// let mut cur = 0u64;
 /// loop {
 ///     let r = client.get_block_range(cur, cur + 255, Some(256)).await?;
@@ -1020,4 +1034,9 @@ fn parse_hex_u64(hex_str: &str) -> SdkResult<u64> {
     let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     u64::from_str_radix(stripped, 16)
         .map_err(|e| SdkError::RpcError(format!("Failed to parse hex '{}': {}", hex_str, e)))
+}
+
+/// Whether a `tenzro_syncing` answer names any state but `following`.
+fn not_following(answer: &serde_json::Value) -> bool {
+    answer.get("state").and_then(serde_json::Value::as_str) != Some("following")
 }

@@ -202,18 +202,10 @@ async fn chain(
     (store, last)
 }
 
-fn free_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 /// A node's iroh endpoint on loopback with a blob store under `root`.
 async fn endpoint(root: &Path, dial_only: bool) -> Arc<IrohBackedResolver> {
     let mut cfg = TenzroIrohConfig::with_data_dir(root.to_path_buf());
-    cfg.bind_addr = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    cfg.bind_addr = SocketAddr::from(([127, 0, 0, 1], 0));
     cfg.port_mapping = false;
     let cfg = if dial_only { cfg.dial_only() } else { cfg };
     IrohBackedResolver::bind_with_config(&cfg, None)

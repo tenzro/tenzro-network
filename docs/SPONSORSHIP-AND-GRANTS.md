@@ -97,6 +97,21 @@ All start at zero, so nothing flows until governance sets them.
 Every payout also counts against the treasury outflow caps: 2% of the balance
 per proposal and 3% in any 30 days.
 
+### Founder-affiliated recipients (ships off)
+
+Once governance sets `feature.affiliated_share.activation_epoch`, a
+`set_affiliation` proposal marks an account as affiliated with the network's
+founders, or clears the mark; a recipient cannot mark itself. Sponsorship and
+grants paid to marked accounts are counted per 365-day period beside the
+period's total, in TNZO and in USD, and `tenzro_getTreasuryPayouts` publishes
+them under `affiliated` (paid, total, share and the marked accounts).
+
+The cap binds. A payout to a marked account that would lift the period's
+affiliated share above `feature.affiliated_share.max_bps` (genesis 2500) is
+refused: the proposal or release that carried it fails and nothing is paid
+or recorded. It can pay once payouts to other recipients have widened the
+period's total.
+
 ## Applying
 
 A new operator cannot file the approval themselves: the proposal needs a

@@ -14,7 +14,17 @@
 #      two-host reproducibility record for the commit (reproduce.sh).
 #   3. Check the dist directory: SHA256SUMS must verify and matrix.json must
 #      name one commit, the one given.
-#   4. For each artifact, and for SHA256SUMS itself: SHA-256 and BLAKE3 digests, an SPDX SBOM of the
+#   4. The `tenzro update` channel of the release (scripts/release/update-channel.py):
+#      both binaries of every archive under its platform, the targets
+#      document and, when an archive keeps libraries beside its binaries,
+#      the libraries document, both signed by the same key, in
+#      <dist-dir>/update-channel. The
+#      release is named by UPDATE_RELEASE (major.minor.patch), the targets
+#      document numbered by UPDATE_MANIFEST_VERSION, classed by UPDATE_CLASS
+#      (C0, C1 or C2) and described by UPDATE_DESCRIPTION (one line). The
+#      timestamp document is signed afterwards with the timestamp key and
+#      again before it expires (docs/UPDATE-MANIFEST.md).
+#   5. For each artifact, and for SHA256SUMS itself: SHA-256 and BLAKE3 digests, an SPDX SBOM of the
 #      source tree and lockfile it was built from, an in-toto SLSA v1
 #      provenance statement naming the artifact by both digests and the source
 #      commit, and signatures over the artifact and the statement.
@@ -40,13 +50,16 @@ DIST=${2:?usage: release.sh <ref> <dist-dir>}
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
-for tool in cargo-deny cargo-audit cargo-vet syft cosign b3sum sha256sum git jq; do
+for tool in cargo-deny cargo-audit cargo-vet syft cosign b3sum sha256sum git jq python3 openssl; do
     command -v "$tool" >/dev/null || { echo "REFUSING: $tool not found"; exit 1; }
 done
 case "${RELEASE_SIGNING_KEY:-}" in
     pkcs11:*) ;;
     *) echo "REFUSING: RELEASE_SIGNING_KEY must be a pkcs11: URI for a hardware-held key"; exit 1 ;;
 esac
+for v in UPDATE_RELEASE UPDATE_MANIFEST_VERSION UPDATE_CLASS UPDATE_DESCRIPTION; do
+    [ -n "${!v:-}" ] || { echo "REFUSING: $v is not set (the update channel of the release needs it)"; exit 1; }
+done
 
 commit=$(git rev-parse --verify "$REF^{commit}")
 origin=$(git config --get remote.origin.url || echo "unknown")
@@ -72,6 +85,28 @@ finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 sign_flags=(--yes --key "$RELEASE_SIGNING_KEY" --tlog-upload=false --use-signing-config=false --new-bundle-format=false)
 cosign sign-blob "${sign_flags[@]}" \
     --output-signature "$DIST/SHA256SUMS.sig" "$DIST/SHA256SUMS"
+
+echo "=== update channel ==="
+channel="$DIST/update-channel"
+python3 -I scripts/release/update-channel.py targets --dist "$DIST" --channel "$channel" \
+    --release "$UPDATE_RELEASE" --version "$UPDATE_MANIFEST_VERSION" --class "$UPDATE_CLASS" \
+    --description "$UPDATE_DESCRIPTION"
+cosign sign-blob "${sign_flags[@]}" \
+    --output-signature "$channel/targets.sig" "$channel/targets.tosign"
+cosign public-key --key "$RELEASE_SIGNING_KEY" > "$channel/targets.pub"
+python3 -I scripts/release/update-channel.py seal --channel "$channel" --doc targets \
+    --public-key "$channel/targets.pub" --signature "$channel/targets.sig"
+if [ -f "$channel/libraries.tosign" ]; then
+    cosign sign-blob "${sign_flags[@]}" \
+        --output-signature "$channel/libraries.sig" "$channel/libraries.tosign"
+    python3 -I scripts/release/update-channel.py seal --channel "$channel" --doc libraries \
+        --public-key "$channel/targets.pub" --signature "$channel/libraries.sig"
+fi
+rm -f "$channel/targets.sig" "$channel/libraries.sig" "$channel/targets.pub"
+echo "next: sign the timestamp with the timestamp key:"
+echo "  python3 scripts/release/update-channel.py timestamp --channel $channel --version <n>"
+echo "  cosign sign-blob ... --key <timestamp key> --output-signature ts.sig $channel/timestamp.tosign"
+echo "  python3 scripts/release/update-channel.py seal --channel $channel --doc timestamp --public-key <timestamp.pub> --signature ts.sig"
 
 echo "=== SBOM ==="
 src=$(mktemp -d)

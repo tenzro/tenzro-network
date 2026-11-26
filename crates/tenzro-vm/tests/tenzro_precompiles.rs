@@ -67,6 +67,7 @@ fn evm_tx(from: [u8; 20], to: [u8; 20], data: Vec<u8>, nonce: u64, height: u64) 
         VmType::Evm,
         CHAIN,
     )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     .with_block_height(height)
     .with_block_timestamp_ms(BLOCK_MS + (height as i64 - BLOCK as i64) * 1000)
 }
@@ -139,6 +140,7 @@ async fn evm_fee_is_exactly_gas_times_price_and_no_beneficiary_is_credited() {
         VmType::Evm,
         CHAIN,
     )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     .with_block_height(BLOCK);
     let r = rt.execute_transaction(&tx, &mut state).await.unwrap();
     assert!(r.success);
@@ -568,7 +570,8 @@ async fn attest_zk_proof_refuses_a_proof_that_does_not_verify() {
         0,
         VmType::Tenzro,
         CHAIN,
-    );
+    )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
     let r = rt.execute_transaction(&tx, &mut state).await;
     assert!(r.is_err() || !r.unwrap().success);
     assert!(!tenzro_vm::precompiles::zk_commitment_attested(
@@ -671,7 +674,8 @@ async fn spl_transfer_to_an_evm_account_is_visible_through_wtnzo() {
         0,
         VmType::Svm,
         CHAIN,
-    );
+    )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
     let r = rt.execute_transaction(&tx, &mut state).await.unwrap();
     assert!(r.success, "{:?}", r.revert_reason);
     let after = sum(&state, &[&svm_signer, &BOB]);
@@ -721,7 +725,8 @@ async fn spl_transfer_from_someone_elses_account_is_refused() {
         0,
         VmType::Svm,
         CHAIN,
-    );
+    )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
     let r = rt.execute_transaction(&tx, &mut state).await.unwrap();
     assert!(!r.success);
     assert_eq!(state.get_balance(&victim), TEN_TNZO);
@@ -744,7 +749,8 @@ async fn spl_transfer_to_self_costs_only_the_fee() {
         0,
         VmType::Svm,
         CHAIN,
-    );
+    )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
     let r = rt.execute_transaction(&tx, &mut state).await.unwrap();
     assert!(r.success, "{:?}", r.revert_reason);
     assert_eq!(
@@ -812,7 +818,7 @@ async fn token_factory_ledger_lives_in_state_and_binds_the_sender() {
 
 #[tokio::test]
 async fn erc7943_views_and_the_erc20_facade_share_the_factory_ledger() {
-    use tenzro_vm::evm::token_factory::{ERC7943_FUNCTIONS, interface_id};
+    use tenzro_vm::evm::token_factory::{ERC7943_DRAFT_FUNCTIONS, interface_id};
     let rt = runtime().await;
     let mut state = funded();
     let name = dyn_bytes(b"Gold");
@@ -910,7 +916,7 @@ async fn erc7943_views_and_the_erc20_facade_share_the_factory_ledger() {
     );
 
     // ERC-165 discovery of the ERC-7943 interface, on the facade and the factory.
-    let mut iface = interface_id(&ERC7943_FUNCTIONS).to_vec();
+    let mut iface = interface_id(&ERC7943_DRAFT_FUNCTIONS).to_vec();
     iface.resize(32, 0);
     for at in [facade, PRECOMPILE_TOKEN_FACTORY] {
         let out = rt
@@ -999,4 +1005,269 @@ async fn erc7943_views_and_the_erc20_facade_share_the_factory_ledger() {
         .unwrap()
         .output;
     assert_eq!(frozen, word(0));
+}
+
+#[tokio::test]
+async fn erc7943_facade_matches_the_final_interface() {
+    use tenzro_types::token_policy::{Authority, PowerManifest};
+    use tenzro_vm::evm::precompile_host::{slot_key, state_write_blob};
+    use tenzro_vm::evm::token_factory::{ERC7943_FUNCTIONS, facade_address, interface_id};
+    // The interface id the standard assigns to its fungible interface.
+    const FUNGIBLE_INTERFACE_ID: [u8; 4] = [0x3e, 0xdb, 0xb4, 0xc4];
+    assert_eq!(interface_id(&ERC7943_FUNCTIONS), FUNGIBLE_INTERFACE_ID);
+
+    let rt = runtime().await;
+    let mut state = funded();
+    let name = dyn_bytes(b"Gold");
+    let mut args = word(128);
+    args.extend(word(128 + name.len() as u128));
+    args.extend(word(18));
+    args.extend(word(1_000));
+    args.extend(name);
+    args.extend(dyn_bytes(b"GLD"));
+    let r = send(
+        &rt,
+        &mut state,
+        ALICE,
+        PRECOMPILE_TOKEN_FACTORY,
+        call_data(sel("createToken(string,string,uint8,uint256)"), &[args]),
+    )
+    .await;
+    assert!(r.success, "{:?}", r.revert_reason);
+    let token: [u8; 32] = r.output.clone().try_into().unwrap();
+    let facade = facade_address(&token);
+
+    // Give the issuer the freeze and force powers alone.
+    let mut record = tenzro_vm::token_ledger::read_token(&state, &token).unwrap();
+    record.powers = PowerManifest {
+        freeze: Authority::Issuer,
+        force: Authority::Issuer,
+        ..PowerManifest::NONE
+    };
+    state_write_blob(
+        &mut state,
+        &PRECOMPILE_TOKEN_FACTORY,
+        slot_key(b"token/record", &[&token]),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+
+    let view = |data: Vec<u8>| {
+        ContractCall::new(
+            ALICE.to_vec(),
+            facade.to_vec(),
+            data,
+            0,
+            GAS_LIMIT,
+            VmType::Evm,
+        )
+    };
+    let mut iface = FUNGIBLE_INTERFACE_ID.to_vec();
+    iface.resize(32, 0);
+    let supports = view(call_data(sel("supportsInterface(bytes4)"), &[iface]));
+
+    // Dormant: the interface served so far, and a freeze within the balance.
+    assert_eq!(rt.call(&supports, &state).await.unwrap().output, word(0));
+    let out = rt
+        .call(
+            &view(call_data(sel("canTransact(address)"), &[addr_word(&BOB)])),
+            &state,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.output, word(1));
+    for f in ["canSend(address)", "canReceive(address)"] {
+        let out = rt
+            .call(&view(call_data(sel(f), &[addr_word(&BOB)])), &state)
+            .await
+            .unwrap();
+        assert!(!out.success, "{f} is not served while dormant");
+    }
+    let r = send(
+        &rt,
+        &mut state,
+        ALICE,
+        facade,
+        call_data(
+            sel("setFrozenTokens(address,uint256)"),
+            &[addr_word(&ALICE), word(1_200)],
+        ),
+    )
+    .await;
+    assert!(
+        !r.success,
+        "a freeze above the balance is refused while dormant"
+    );
+    let r = send(
+        &rt,
+        &mut state,
+        ALICE,
+        facade,
+        call_data(
+            sel("setFrozenTokens(address,uint256)"),
+            &[addr_word(&ALICE), word(10)],
+        ),
+    )
+    .await;
+    assert!(r.success, "{:?}", r.revert_reason);
+    assert!(
+        r.logs.iter().all(|l| l.address != facade.to_vec()),
+        "a facade logs no ERC-7943 event while dormant"
+    );
+
+    // Live from epoch 0.
+    state.set_storage(
+        &tenzro_vm::native::SYSTEM_ADDRESS,
+        tenzro_vm::native::governed_param_key(tenzro_vm::token_ledger::ERC7943_FINAL_KEY)
+            .as_bytes(),
+        0u64.to_le_bytes().to_vec(),
+    );
+    assert_eq!(rt.call(&supports, &state).await.unwrap().output, word(1));
+    for f in ["canSend(address)", "canReceive(address)"] {
+        let out = rt
+            .call(&view(call_data(sel(f), &[addr_word(&BOB)])), &state)
+            .await
+            .unwrap();
+        assert!(out.success, "{f}");
+        assert_eq!(out.output, word(1), "{f}");
+    }
+    let out = rt
+        .call(
+            &view(call_data(sel("canTransact(address)"), &[addr_word(&BOB)])),
+            &state,
+        )
+        .await
+        .unwrap();
+    assert!(!out.success, "the draft's canTransact is not served");
+
+    let topic = |sig: &str| -> Vec<u8> {
+        use sha3::Digest;
+        sha3::Keccak256::digest(sig.as_bytes()).to_vec()
+    };
+    let indexed = |who: &[u8; 20]| addr_word(who);
+
+    // A freeze above the balance is accepted and read back as set.
+    let r = send(
+        &rt,
+        &mut state,
+        ALICE,
+        facade,
+        call_data(
+            sel("setFrozenTokens(address,uint256)"),
+            &[addr_word(&ALICE), word(1_200)],
+        ),
+    )
+    .await;
+    assert!(r.success, "{:?}", r.revert_reason);
+    let from_facade: Vec<_> = r
+        .logs
+        .iter()
+        .filter(|l| l.address == facade.to_vec())
+        .collect();
+    assert_eq!(from_facade.len(), 1);
+    assert_eq!(
+        from_facade[0].topics,
+        vec![topic("Frozen(address,uint256)"), indexed(&ALICE)]
+    );
+    assert_eq!(from_facade[0].data, word(1_200));
+    let frozen = view(call_data(
+        sel("getFrozenTokens(address)"),
+        &[addr_word(&ALICE)],
+    ));
+    assert_eq!(rt.call(&frozen, &state).await.unwrap().output, word(1_200));
+    let can = rt
+        .call(
+            &view(call_data(
+                sel("canTransfer(address,address,uint256)"),
+                &[addr_word(&ALICE), addr_word(&BOB), word(1)],
+            )),
+            &state,
+        )
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(can, word(0), "nothing is unfrozen");
+
+    // A forced transfer out of the frozen part: Frozen with the new amount,
+    // then the ERC-20 Transfer, then ForcedTransfer, all from the facade.
+    let r = send(
+        &rt,
+        &mut state,
+        ALICE,
+        facade,
+        call_data(
+            sel("forcedTransfer(address,address,uint256)"),
+            &[addr_word(&ALICE), addr_word(&BOB), word(300)],
+        ),
+    )
+    .await;
+    assert!(r.success, "{:?}", r.revert_reason);
+    let from_facade: Vec<_> = r
+        .logs
+        .iter()
+        .filter(|l| l.address == facade.to_vec())
+        .collect();
+    assert_eq!(from_facade.len(), 3);
+    assert_eq!(
+        from_facade[0].topics,
+        vec![topic("Frozen(address,uint256)"), indexed(&ALICE)]
+    );
+    assert_eq!(from_facade[0].data, word(900));
+    assert_eq!(
+        from_facade[1].topics,
+        vec![
+            topic("Transfer(address,address,uint256)"),
+            indexed(&ALICE),
+            indexed(&BOB)
+        ]
+    );
+    assert_eq!(from_facade[1].data, word(300));
+    assert_eq!(
+        from_facade[2].topics,
+        vec![
+            topic("ForcedTransfer(address,address,uint256)"),
+            indexed(&ALICE),
+            indexed(&BOB)
+        ]
+    );
+    assert_eq!(from_facade[2].data, word(300));
+    assert_eq!(rt.call(&frozen, &state).await.unwrap().output, word(900));
+
+    // A transfer within the balance but into its frozen part reverts with
+    // the standard's error; one above the whole balance does not.
+    let transfer = |amount: u128| {
+        call_data(
+            sel("transfer(address,uint256)"),
+            &[addr_word(&BOB), word(amount)],
+        )
+    };
+    let r = send(&rt, &mut state, ALICE, facade, transfer(1)).await;
+    assert!(!r.success, "a transfer into the frozen part went through");
+    // A transaction's result keeps no revert data; a read-only call of the
+    // same transfer returns it.
+    let mut shortfall = sel("ERC7943InsufficientUnfrozenBalance(address,uint256,uint256)").to_vec();
+    shortfall.extend(addr_word(&ALICE));
+    shortfall.extend(word(1));
+    shortfall.extend(word(0));
+    let refused = rt.call(&view(transfer(1)), &state).await.unwrap();
+    assert!(!refused.success);
+    assert_eq!(refused.output, shortfall, "{:?}", refused.revert_reason);
+    let r = send(&rt, &mut state, ALICE, facade, transfer(800)).await;
+    assert!(!r.success);
+    let above = rt.call(&view(transfer(800)), &state).await.unwrap();
+    assert!(!above.success);
+    assert!(!above.output.starts_with(&shortfall[..4]));
+    let r = send(
+        &rt,
+        &mut state,
+        ALICE,
+        facade,
+        call_data(
+            sel("setFrozenTokens(address,uint256)"),
+            &[addr_word(&ALICE), word(200)],
+        ),
+    )
+    .await;
+    assert!(r.success, "{:?}", r.revert_reason);
+    let r = send(&rt, &mut state, ALICE, facade, transfer(500)).await;
+    assert!(r.success, "the unfrozen part moves: {:?}", r.revert_reason);
 }

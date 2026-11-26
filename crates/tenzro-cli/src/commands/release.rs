@@ -78,6 +78,34 @@ pub struct SignCmd {
     /// The release public key, PEM (`tenzro-release.pub`).
     #[arg(long)]
     public_key: Option<PathBuf>,
+    /// Something the release ships, as `<platform>:<name>=<path>`; its digest goes into the notice so
+    /// that what is installed can check itself. `<name>` is `tenzro`, `tenzro-node` or `tenzro-tui`;
+    /// `<platform>` is `<arch>-<os>`, or `any` for what every platform shares. A file's digest is its
+    /// SHA-256; a directory's is the hash of its sorted file list. Repeatable. It replaces any
+    /// `artifacts` the notice file names: the digests are of the files given here.
+    #[arg(
+        long = "artifact",
+        value_name = "PLATFORM:NAME=PATH",
+        conflicts_with = "finish"
+    )]
+    artifacts: Vec<String>,
+}
+
+/// The notice entry for one `--artifact <platform>:<name>=<path>`.
+fn artifact_entry(spec: &str) -> Result<notice::Artifact> {
+    let (label, path) = spec
+        .split_once('=')
+        .with_context(|| format!("--artifact {spec}: expected <platform>:<name>=<path>"))?;
+    let (platform, name) = label
+        .split_once(':')
+        .with_context(|| format!("--artifact {spec}: expected <platform>:<name>=<path>"))?;
+    let sha256 = notice::artifact_digest(std::path::Path::new(path))
+        .with_context(|| format!("--artifact {spec}: digest of {path}"))?;
+    Ok(notice::Artifact {
+        platform: platform.to_string(),
+        name: name.to_string(),
+        sha256,
+    })
 }
 
 impl SignCmd {
@@ -109,6 +137,13 @@ impl SignCmd {
         }
         if n.expires_ms == 0 {
             n.expires_ms = n.issued_ms + 30 * 24 * 3600 * 1000;
+        }
+        if !self.artifacts.is_empty() {
+            n.artifacts = self
+                .artifacts
+                .iter()
+                .map(|spec| artifact_entry(spec))
+                .collect::<Result<_>>()?;
         }
         n.check_shape()?;
         let payload = serde_json::to_vec(&n)?;
@@ -224,6 +259,9 @@ impl VerifyCmd {
                 .collect::<Vec<_>>()
                 .join(", "),
         );
+        for a in &n.artifacts {
+            output::print_field(&format!("{} on {}", a.name, a.platform), &a.sha256);
+        }
         output::print_field("Expires (unix ms)", &n.expires_ms.to_string());
         Ok(())
     }
@@ -325,6 +363,50 @@ mod tests {
             finish: None,
             signature: None,
             public_key: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_signing_run_states_the_digests_of_the_files_the_release_ships() {
+        let d = tempfile::tempdir().unwrap();
+        let node = d.path().join("tenzro-node");
+        std::fs::write(&node, b"the node binary").unwrap();
+        let bundle = d.path().join("console");
+        std::fs::create_dir_all(bundle.join("lib")).unwrap();
+        std::fs::write(bundle.join("cli.js"), b"1").unwrap();
+        std::fs::write(bundle.join("lib/a.js"), b"2").unwrap();
+        let work = d.path().join("work");
+        let with = |artifacts: Vec<String>| SignCmd {
+            prepare: Some(work.clone()),
+            artifacts,
+            ..sign_args(d.path())
+        };
+        with(vec![
+            format!("x86_64-linux:tenzro-node={}", node.display()),
+            format!("any:tenzro-tui={}", bundle.display()),
+        ])
+        .execute()
+        .unwrap();
+        let n: Notice =
+            serde_json::from_slice(&std::fs::read(work.join("payload.json")).unwrap()).unwrap();
+        assert_eq!(
+            n.artifact_digest("x86_64-linux", "tenzro-node"),
+            Some(hex::encode(Sha256::digest(b"the node binary")).as_str())
+        );
+        assert_eq!(
+            n.artifact_digest("aarch64-macos", "tenzro-tui"),
+            Some(notice::bundle_digest(&bundle).unwrap().as_str())
+        );
+        // A name the notice does not know, a file that is not there and a
+        // malformed entry each stop the run.
+        for bad in [
+            format!("x86_64-linux:installer={}", node.display()),
+            format!("x86_64-linux:tenzro={}", d.path().join("missing").display()),
+            "x86_64-linux:tenzro".to_string(),
+            format!("tenzro={}", node.display()),
+        ] {
+            assert!(with(vec![bad.clone()]).execute().is_err(), "{bad}");
         }
     }
 

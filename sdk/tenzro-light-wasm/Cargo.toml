@@ -1,0 +1,38 @@
+[package]
+name = "tenzro-light-wasm"
+version = "0.2.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Tenzro light client for JavaScript and TypeScript: the tenzro-light checks compiled to WebAssembly, the transport supplied by the caller (preview)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Compact certificates (a STARK per checkpoint); on by default like tenzro-light.
+default = ["compact"]
+compact = ["tenzro-light/compact"]
+
+[dependencies]
+tenzro-light = { workspace = true, default-features = false }
+serde_json = { workspace = true }
+hex = { workspace = true }
+# Pinned: the wasm-bindgen CLI that writes the JavaScript glue must be this
+# exact version.
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "=0.4.80"
+js-sys = "=0.3.107"
+
+# tenzro-crypto (through the identity key types) brings getrandom 0.2, 0.3 and
+# 0.4, none of which has a browser source unless this feature is on (the
+# `getrandom_backend` cfg in .cargo/config.toml selects it for 0.3 and 0.4).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[lints]
+workspace = true

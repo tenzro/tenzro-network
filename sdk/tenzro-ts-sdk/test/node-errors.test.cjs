@@ -44,3 +44,17 @@ test("other node errors keep their code and data and are not the light build", a
   const { e: notFound } = await callAgainst({ code: -32004, message: "no escrow 0x01" });
   assert.equal(notFound.isLightBuild, false);
 });
+
+test("the settlement floor and an unmet jurisdiction are told apart", async () => {
+  const { e: floor } = await callAgainst({
+    code: -32026,
+    message: "This call metered 9, below the network's micro-settlement floor of 10.",
+    data: { cost_wei: "9", micro_settlement_floor: "10", remedy: "open_channel" },
+  });
+  assert.equal(floor.isBelowSettlementFloor, true);
+  assert.equal(floor.isJurisdictionUnmet, false);
+  assert.equal(floor.data.remedy, "open_channel");
+  const { e: pin } = await callAgainst({ code: -32024, message: "This node does not satisfy jurisdiction pin 'DE'" });
+  assert.equal(pin.isJurisdictionUnmet, true);
+  assert.equal(pin.isBelowSettlementFloor, false);
+});

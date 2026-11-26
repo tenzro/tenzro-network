@@ -33,12 +33,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use chacha20poly1305::ChaCha20Poly1305;
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use zeroize::Zeroizing;
 
-use crate::hpke::{KemId, extract_and_expand, key_schedule_base};
 use crate::tpm_exec::{self, Class};
 use crate::tpm_provision::{
     IDENTITY_KEY_LABEL, IdentitySlot, NOT_PROVISIONED, default_dir, find_identity_slot,
@@ -219,12 +217,15 @@ impl TpmDevice {
             .map(|c| Self(Arc::new(c)))
     }
 
-    /// Send one command and read its whole response.
+    /// Send one command and read its whole response. The TPM is shared with
+    /// every other process on the machine through the resource manager: when
+    /// it answers that it did not run the command for now (retry, yielded,
+    /// testing), the command is sent again after a growing pause.
     pub fn submit(&mut self, command: &[u8]) -> Result<Vec<u8>> {
         let c = self.0.clone();
         let cmd = command.to_vec();
         tpm_exec::global().run(&command_name(command), Class::of(command), move || {
-            c.exchange(&cmd)
+            resend_while_busy(|| c.exchange(&cmd), std::thread::sleep)
         })
     }
 
@@ -601,30 +602,95 @@ impl Shared {
         role: KeyRole,
         op: impl Fn(&mut TpmDevice, u32, &PublicArea) -> Result<R>,
     ) -> Result<R> {
+        let started = Instant::now();
         let slot = if role == KeyRole::Signing {
             &self.signing
         } else {
             &self.agreement
         };
         let mut kept = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let waited = started.elapsed();
         let mut fresh = false;
-        loop {
+        let result = loop {
             if kept.is_none() {
-                *kept = Some((self.load)(&self.label, role)?);
+                match (self.load)(&self.label, role) {
+                    Ok(k) => *kept = Some(k),
+                    Err(e) => break Err(e),
+                }
                 fresh = true;
             }
             let k = kept.as_mut().expect("kept above");
             match op(&mut k.dev, k.handle, &k.public) {
-                Ok(r) => return Ok(r),
-                Err(e @ DeviceKeyError::Tpm(_)) => return Err(e),
+                Ok(r) => break Ok(r),
+                Err(e @ DeviceKeyError::Tpm(_)) => break Err(e),
                 Err(e) if fresh => {
                     *kept = None;
-                    return Err(e);
+                    break Err(e);
                 }
                 Err(_) => *kept = None,
             }
+        };
+        report_if_slow(
+            &self.label,
+            role,
+            waited,
+            started.elapsed(),
+            fresh,
+            SLOW_TPM,
+        );
+        result
+    }
+}
+
+/// A TPM key operation that takes longer than this, waiting for the device
+/// included, is logged: the same bound as a slow RPC call, which a slow
+/// signature makes.
+const SLOW_TPM: Duration = Duration::from_millis(500);
+
+/// Logs one warning when an operation on `label`'s `role` key took longer
+/// than `threshold` in all (`total`), with how long it waited for the device
+/// (`waited`) and whether the key had to be loaded first (`loaded`). Returns
+/// whether it logged. It only measures: nothing about the operation changes.
+fn report_if_slow(
+    label: &str,
+    role: KeyRole,
+    waited: Duration,
+    total: Duration,
+    loaded: bool,
+    threshold: Duration,
+) -> bool {
+    if total <= threshold {
+        return false;
+    }
+    tracing::warn!(
+        key = label,
+        role = role_tag(role),
+        duration_ms = total.as_millis() as u64,
+        waited_ms = waited.as_millis() as u64,
+        loaded,
+        threshold_ms = threshold.as_millis() as u64,
+        "slow TPM operation"
+    );
+    true
+}
+
+/// Pauses before each resend of a command the TPM did not run for now.
+const BUSY_PAUSES_MS: [u64; 4] = [20, 80, 320, 1_280];
+
+/// Runs `exchange` until the TPM answers with anything but "not now", at
+/// most once more per pause, and returns that answer.
+fn resend_while_busy(
+    mut exchange: impl FnMut() -> Result<Vec<u8>>,
+    mut pause: impl FnMut(std::time::Duration),
+) -> Result<Vec<u8>> {
+    for ms in BUSY_PAUSES_MS {
+        let resp = exchange()?;
+        match tpm_wire::response_code(&resp) {
+            Some(code) if tpm_wire::try_again(code) => pause(std::time::Duration::from_millis(ms)),
+            _ => return Ok(resp),
         }
     }
+    exchange()
 }
 
 /// Every key this process has opened, by namespaced label.
@@ -661,75 +727,39 @@ impl DeviceKey for TpmKey {
     }
 
     fn wrap_secret(&self, secret: &[u8]) -> Result<Vec<u8>> {
-        if secret.is_empty() {
-            return Err(tpm_err("wrap_secret: empty secret"));
-        }
         let pk_r = self.0.with_key(KeyRole::Agreement, |_, _, public| {
             public
                 .p256_sec1()
                 .ok_or_else(|| tpm_err("agreement key is not P-256"))
         })?;
-
-        let eph = <p256::ecdh::EphemeralSecret as p256::elliptic_curve::Generate>::generate();
-        let enc = eph.public_key().to_sec1_bytes().to_vec();
-        let pk_point = p256::PublicKey::from_sec1_bytes(&pk_r)
-            .map_err(|_| tpm_err("wrap_secret: malformed recipient key"))?;
-        let dh = eph.diffie_hellman(&pk_point);
-
-        let mut kem_context = Vec::with_capacity(enc.len() + pk_r.len());
-        kem_context.extend_from_slice(&enc);
-        kem_context.extend_from_slice(&pk_r);
-        let shared = extract_and_expand(
-            KemId::DhkemP256,
-            dh.raw_secret_bytes().as_slice(),
-            &kem_context,
-        )
-        .map_err(|e| tpm_err(format!("wrap_secret: {e}")))?;
-        let (key, nonce) = key_schedule_base(KemId::DhkemP256, &shared, WRAP_INFO)
-            .map_err(|e| tpm_err(format!("wrap_secret: {e}")))?;
-        let ct = ChaCha20Poly1305::new((&*key).into())
-            .encrypt(
-                (&*nonce).into(),
-                Payload {
-                    msg: secret,
-                    aad: &enc,
-                },
-            )
-            .map_err(|_| tpm_err("wrap_secret: AEAD seal failed"))?;
-
-        let mut out = enc;
-        out.extend_from_slice(&ct);
-        Ok(out)
+        crate::hpke::seal_to_p256(&pk_r, secret, WRAP_INFO)
+            .map_err(|e| tpm_err(format!("wrap_secret: {e}")))
     }
 
     fn unwrap_secret(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        if ciphertext.len() <= 65 || ciphertext[0] != 0x04 {
-            return Err(tpm_err("unwrap_secret: malformed ciphertext"));
-        }
-        let (enc, ct) = ciphertext.split_at(65);
-        let mut peer_x = [0u8; 32];
-        let mut peer_y = [0u8; 32];
-        peer_x.copy_from_slice(&enc[1..33]);
-        peer_y.copy_from_slice(&enc[33..65]);
-
-        let (pk_r, z) = self.0.with_key(KeyRole::Agreement, |dev, handle, public| {
-            let pk_r = public
+        use crate::hpke::OpenError;
+        let pk_r = self.0.with_key(KeyRole::Agreement, |_, _, public| {
+            public
                 .p256_sec1()
-                .ok_or_else(|| tpm_err("agreement key is not P-256"))?;
-            Ok((pk_r, Zeroizing::new(dev.ecdh(handle, &peer_x, &peer_y)?)))
+                .ok_or_else(|| tpm_err("agreement key is not P-256"))
         })?;
-
-        let mut kem_context = Vec::with_capacity(enc.len() + pk_r.len());
-        kem_context.extend_from_slice(enc);
-        kem_context.extend_from_slice(&pk_r);
-        let shared = extract_and_expand(KemId::DhkemP256, z.as_slice(), &kem_context)
-            .map_err(|e| tpm_err(format!("unwrap_secret: {e}")))?;
-        let (key, nonce) = key_schedule_base(KemId::DhkemP256, &shared, WRAP_INFO)
-            .map_err(|e| tpm_err(format!("unwrap_secret: {e}")))?;
-        ChaCha20Poly1305::new((&*key).into())
-            .decrypt((&*nonce).into(), Payload { msg: ct, aad: enc })
-            .map(Zeroizing::new)
-            .map_err(|_| tpm_err("unwrap_secret: AEAD open failed (tampered or wrong key)"))
+        crate::hpke::open_from_p256(ciphertext, &pk_r, WRAP_INFO, |peer| {
+            let mut peer_x = [0u8; 32];
+            let mut peer_y = [0u8; 32];
+            peer_x.copy_from_slice(&peer[1..33]);
+            peer_y.copy_from_slice(&peer[33..65]);
+            self.0.with_key(KeyRole::Agreement, |dev, handle, _| {
+                Ok(Zeroizing::new(dev.ecdh(handle, &peer_x, &peer_y)?))
+            })
+        })
+        .map_err(|e| match e {
+            OpenError::Malformed => tpm_err("unwrap_secret: malformed ciphertext"),
+            OpenError::Ecdh(e) => e,
+            OpenError::Schedule(e) => tpm_err(format!("unwrap_secret: {e}")),
+            OpenError::Tampered => {
+                tpm_err("unwrap_secret: AEAD open failed (tampered or wrong key)")
+            }
+        })
     }
 }
 
@@ -1038,6 +1068,97 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An operation past the bound is reported, waiting included; one within
+    /// it, or exactly at it, is not.
+    #[test]
+    fn a_tpm_operation_past_the_bound_is_reported() {
+        let ms = Duration::from_millis;
+        assert!(!report_if_slow(
+            "k",
+            KeyRole::Signing,
+            ms(0),
+            ms(120),
+            false,
+            SLOW_TPM
+        ));
+        assert!(!report_if_slow(
+            "k",
+            KeyRole::Signing,
+            ms(0),
+            SLOW_TPM,
+            false,
+            SLOW_TPM
+        ));
+        assert!(report_if_slow(
+            "k",
+            KeyRole::Signing,
+            ms(0),
+            ms(501),
+            false,
+            SLOW_TPM
+        ));
+        // A long wait for the device is what makes it slow.
+        assert!(report_if_slow(
+            "k",
+            KeyRole::Agreement,
+            ms(900),
+            ms(950),
+            true,
+            SLOW_TPM
+        ));
+    }
+
+    fn answer(code: u32) -> Vec<u8> {
+        let mut r = vec![0x80, 0x01, 0, 0, 0, 10];
+        r.extend_from_slice(&code.to_be_bytes());
+        r
+    }
+
+    /// Another process's command holding the chip is not a failure: the
+    /// command is sent again until the chip runs it.
+    #[test]
+    fn a_command_the_tpm_did_not_run_for_now_is_sent_again() {
+        let mut answers = vec![answer(0x922), answer(0x908), answer(0x90A), answer(0)].into_iter();
+        let mut pauses = Vec::new();
+        let resp = resend_while_busy(|| Ok(answers.next().unwrap()), |d| pauses.push(d)).unwrap();
+        assert_eq!(tpm_wire::response_code(&resp), Some(0));
+        assert_eq!(pauses.len(), 3);
+        assert!(pauses.windows(2).all(|w| w[0] < w[1]), "the pause grows");
+    }
+
+    /// A chip that stays busy is given up on, and its last answer returned.
+    #[test]
+    fn a_tpm_that_stays_busy_is_given_up_on() {
+        let calls = AtomicUsize::new(0);
+        let resp = resend_while_busy(
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(answer(0x922))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(tpm_wire::response_code(&resp), Some(0x922));
+        assert_eq!(calls.load(Ordering::SeqCst), BUSY_PAUSES_MS.len() + 1);
+    }
+
+    /// A refusal, or a failure to reach the chip, is returned at once.
+    #[test]
+    fn a_refusal_is_not_sent_again() {
+        let calls = AtomicUsize::new(0);
+        let resp = resend_while_busy(
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(answer(0x98E))
+            },
+            |_| panic!("no pause for a refusal"),
+        )
+        .unwrap();
+        assert_eq!(tpm_wire::response_code(&resp), Some(0x98E));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(resend_while_busy(|| Err(tpm_err("gone")), |_| panic!("no pause")).is_err());
+    }
 
     #[test]
     fn empty_label_is_refused() {

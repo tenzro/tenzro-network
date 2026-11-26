@@ -42,6 +42,7 @@ export {
   RECOVERY_APPROVAL_SIGNATURE_CONTEXT,
 } from "./keystore";
 export type {
+  AccountSigningKey,
   KeystoreAnchor,
   KeystoreApproval,
   KeystoreCredential,
@@ -128,6 +129,38 @@ export type {
 export { HardwareKeySigner, openHardwareSigner } from "./hardware-signer";
 export type { HardwareAttestation, OpenHardwareSignerOptions } from "./hardware-signer";
 export { HardwareDpopProver, jwkThumbprint } from "./dpop";
+export {
+  AppSession,
+  FrameReader,
+  MAX_FRAME_BYTES,
+  WELCOME_PQ_CONTEXT,
+  appTransportInfo,
+  appTransportUsage,
+  encodeFrame,
+  publicationPreimage,
+  signInHtu,
+  verifyPublication,
+  verifyWelcome,
+  welcomePreimage,
+} from "./app-transport";
+export type {
+  AppStream,
+  AppTransportCounts,
+  AppTransportInfo,
+  AppTransportUsage,
+  BidiStream,
+  CertificateHash,
+  CertificatePublication,
+  ConnectOptions,
+  Frame,
+  IncomingStream,
+  MlDsaVerifier,
+  PinnedHash,
+  PublicationExpectation,
+  WebTransportFactory,
+  WebTransportLike,
+  WelcomeKeys,
+} from "./app-transport";
 export { DiscoveryClient, encodeF32Base64, decodeF32Base64 } from "./discovery";
 export { DeviceClient } from "./device";
 export type {
@@ -272,6 +305,7 @@ export type {
 export type {
   StakingRole,
   StakeCapacity,
+  OperatorCounts,
   RoleStake,
   RoleStakes,
   WalletProviderStatus,
@@ -307,6 +341,16 @@ export type {
 } from "./auth";
 export type { DecodedAction, TransactionEffects, NetworkStats, UpgradeReadiness } from "./types";
 export { parseExact, stringifyExact } from "./exact-json";
+export {
+  DEFAULT_TOOL_LIST_MAX_AGE_MS,
+  TOOLS_SIGNATURE_META_KEY,
+  checkToolList,
+  listTools,
+  machineDidOfKey,
+  toolListSignedPayload,
+  verifyToolList,
+} from "./mcp-tools";
+export type { SignedToolList, ToolList, ToolListCheck, ToolListFreshness } from "./mcp-tools";
 export { checkMandateConstraints, MandateRefusal } from "./ap2";
 export type { MandatePayment } from "./ap2";
 

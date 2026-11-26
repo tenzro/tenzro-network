@@ -582,6 +582,26 @@ mod tests {
         assert_eq!(s.accepted_cumulative, 150);
     }
 
+    #[test]
+    fn a_voucher_replayed_for_a_second_charge_is_refused() {
+        // A paid read accepts a voucher for exactly its charge; the same
+        // voucher shown again for the next read covers nothing new.
+        let (m, pk) = setup(1_000);
+        let read = voucher(&pk, 100);
+        assert!(matches!(
+            m.accept_voucher(&read, &PAYEE, 100).unwrap(),
+            RailOutcome::Settled { .. }
+        ));
+        assert!(matches!(
+            m.accept_voucher(&read, &PAYEE, 100).unwrap(),
+            RailOutcome::Failed { .. }
+        ));
+        assert!(matches!(
+            m.accept_voucher(&voucher(&pk, 200), &PAYEE, 100).unwrap(),
+            RailOutcome::Settled { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn a_voucher_cannot_go_backwards_or_exceed_the_cap() {
         let (m, pk) = setup(1_000);

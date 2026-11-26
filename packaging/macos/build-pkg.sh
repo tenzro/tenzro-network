@@ -5,8 +5,18 @@
 #   build-pkg.sh <tenzro-node-macos-aarch64-metal.tar.gz> <tenzro-node-macos-x86_64-cpu.tar.gz> <out-dir>
 #
 # One tenzro-<version>-macos.pkg holds both payloads and installs the one that
-# matches the Mac (Apple silicon: Metal build; Intel: CPU build). It is unsigned.
+# matches the Mac (Apple silicon: Metal build; Intel: CPU build).
 # Environment: TENZRO_VERSION (default: the version of the node), PUBLIC_COMMIT, RELEASE_COMMIT.
+#
+# Signing turns on once an identity exists, and is off until then:
+#   TENZRO_MACOS_INSTALLER_IDENTITY  a "Developer ID Installer" identity in the keychain. Set, the
+#                             package is signed with a secure timestamp and its signature is checked
+#                             before the script reports success; unset, it is unsigned and says so.
+#   TENZRO_MACOS_NOTARY_PROFILE  a notarytool keychain profile: the signed package is notarised and
+#                             stapled.
+# The programs inside are the exact bytes of the release archives, which the macOS release build
+# signs with Developer ID before their digests are taken (scripts/release/build-macos.sh), so the
+# release digests hold for them.
 set -euo pipefail
 [ "$(uname -s)" = Darwin ] || { echo "REFUSING: pkgbuild and productbuild only run on macOS" >&2; exit 1; }
 arm=${1:?usage: build-pkg.sh <aarch64-metal.tar.gz> <x86_64-cpu.tar.gz> <out-dir>}
@@ -47,6 +57,8 @@ public_source_commit=$public_commit
 packaging_commit=$packaging_commit
 EOF
     install -m755 "$here/app/Tenzro" "$root/Applications/Tenzro.app/Contents/MacOS/Tenzro"
+    [ -d "$src/control/Tenzro Control.app" ] || { echo "REFUSING: $archive has no control/Tenzro Control.app" >&2; exit 1; }
+    ditto "$src/control/Tenzro Control.app" "$root/Applications/Tenzro Control.app"
     sed "s/@VERSION@/$version/g" "$here/app/Info.plist" > "$root/Applications/Tenzro.app/Contents/Info.plist"
     # Minimum macOS version the programs were built for.
     otool -l "$src/bin/tenzro-node" | awk '/LC_BUILD_VERSION/ {f=1} f && /minos/ {print $2; exit}' > "$w/minos-$flavour"
@@ -66,5 +78,21 @@ mkdir -p "$w/resources"
 cp "$here/resources/welcome.html" "$here/resources/conclusion.html" "$w/resources/"
 cp "$repo/LICENSE" "$w/resources/license.txt"
 sed "s/@VERSION@/$version/g; s/@MINOS@/$minos/g" "$here/distribution.xml.in" > "$w/distribution.xml"
-productbuild --distribution "$w/distribution.xml" --resources "$w/resources" --package-path "$w/components" "$out/tenzro-$version-macos.pkg" >/dev/null
-echo "built $out/tenzro-$version-macos.pkg (minimum macOS $minos)"
+pkg=$out/tenzro-$version-macos.pkg
+sign=()
+[ -z "${TENZRO_MACOS_INSTALLER_IDENTITY:-}" ] || sign=(--sign "$TENZRO_MACOS_INSTALLER_IDENTITY" --timestamp)
+productbuild --distribution "$w/distribution.xml" --resources "$w/resources" --package-path "$w/components" ${sign[@]+"${sign[@]}"} "$pkg" >/dev/null
+if [ ${#sign[@]} -eq 0 ]; then
+    [ -z "${TENZRO_MACOS_NOTARY_PROFILE:-}" ] || { rm -f "$pkg"; echo "REFUSING: notarising needs a signed package (TENZRO_MACOS_INSTALLER_IDENTITY)" >&2; exit 1; }
+    echo "built $pkg (minimum macOS $minos), unsigned: TENZRO_MACOS_INSTALLER_IDENTITY is not set"
+    exit 0
+fi
+pkgutil --check-signature "$pkg" | grep -q 'Status: signed' \
+    || { rm -f "$pkg"; echo "REFUSING: $pkg did not come out signed by $TENZRO_MACOS_INSTALLER_IDENTITY" >&2; exit 1; }
+if [ -n "${TENZRO_MACOS_NOTARY_PROFILE:-}" ]; then
+    xcrun notarytool submit "$pkg" --keychain-profile "$TENZRO_MACOS_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$pkg"
+    echo "built $pkg (minimum macOS $minos), signed by $TENZRO_MACOS_INSTALLER_IDENTITY, notarised and stapled"
+else
+    echo "built $pkg (minimum macOS $minos), signed by $TENZRO_MACOS_INSTALLER_IDENTITY"
+fi

@@ -382,6 +382,7 @@ pub(super) fn mark_revoked(
     changes: &mut Vec<StateChange>,
     logs: &mut Vec<Log>,
 ) -> Result<()> {
+    super::agent_cap::note_retiring(state, agent_did, changes)?;
     let record = AgentQuarantine {
         controller_did: controller_did.to_string(),
         by,
@@ -427,6 +428,12 @@ pub(super) fn lift(
     if q.revoked {
         return Err(refuse(format!(
             "{} was revoked by its controller; a revocation is not lifted",
+            p.agent_did
+        )));
+    }
+    if super::identity_succession::agent_successor(state, &p.agent_did).is_some() {
+        return Err(refuse(format!(
+            "{}'s root was revoked in favour of a successor; the agent does not act again",
             p.agent_did
         )));
     }

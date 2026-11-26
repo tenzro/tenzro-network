@@ -286,9 +286,10 @@ async fn served(url: &str, model: &str) -> Value {
 }
 
 #[tokio::test]
+#[ignore = "starts a node, which needs this machine\'s hardware identity key; scripts/hardware-key-tests.sh runs it"]
 async fn a_published_entry_is_served_at_once_and_only_from_a_named_publisher() {
     let _serial = SERIAL.lock().await;
-    let (url, _shutdown, _tmp, _node) = setup().await;
+    let (url, _shutdown, _tmp, node) = setup().await;
     let publisher = Key::new(PUBLISHER);
     let stranger = Key::new(OTHER_PUBLISHER);
 
@@ -317,7 +318,7 @@ async fn a_published_entry_is_served_at_once_and_only_from_a_named_publisher() {
     .await);
     let e = err(&served(&url, "m-stranger").await);
     assert!(e.contains("not in this node's catalog"), "{e}");
-    assert!(tenzro_model::catalog::get_model_by_id("m-stranger").is_none());
+    assert!(node.catalog().get_model_by_id("m-stranger").is_none());
 
     // A newly published model is served without a restart, through every
     // reader of the catalog.
@@ -339,7 +340,7 @@ async fn a_published_entry_is_served_at_once_and_only_from_a_named_publisher() {
             .map(|e| e["model"]["spec"]["id"].as_str().unwrap().to_string())
             .collect();
     assert_eq!(ids, ["m-early", "m-new"]);
-    assert!(tenzro_model::catalog::get_model_by_id("m-new").is_some());
+    assert!(node.catalog().get_model_by_id("m-new").is_some());
 
     // An older sequence cannot replace an entry; a withdrawal removes it.
     assert!(
@@ -359,6 +360,7 @@ async fn a_published_entry_is_served_at_once_and_only_from_a_named_publisher() {
 }
 
 #[tokio::test]
+#[ignore = "starts a node, which needs this machine\'s hardware identity key; scripts/hardware-key-tests.sh runs it"]
 async fn two_named_publishers_that_disagree_serve_neither_version() {
     let _serial = SERIAL.lock().await;
     let (a, b) = (Key::new(PUBLISHER), Key::new(OTHER_PUBLISHER));
@@ -408,6 +410,7 @@ async fn two_named_publishers_that_disagree_serve_neither_version() {
 }
 
 #[tokio::test]
+#[ignore = "starts a node, which needs this machine\'s hardware identity key; scripts/hardware-key-tests.sh runs it"]
 async fn weights_that_differ_from_the_published_hash_refuse_the_load() {
     let _serial = SERIAL.lock().await;
     let (url, _shutdown, tmp, _node) = setup().await;
@@ -451,6 +454,7 @@ async fn weights_that_differ_from_the_published_hash_refuse_the_load() {
 }
 
 #[tokio::test]
+#[ignore = "starts a node, which needs this machine\'s hardware identity key; scripts/hardware-key-tests.sh runs it"]
 async fn a_gated_model_is_refused_before_any_download() {
     let _serial = SERIAL.lock().await;
     let (url, _shutdown, tmp, _node) = setup().await;
@@ -513,6 +517,7 @@ async fn a_gated_model_is_refused_before_any_download() {
 }
 
 #[tokio::test]
+#[ignore = "starts a node, which needs this machine\'s hardware identity key; scripts/hardware-key-tests.sh runs it"]
 async fn a_non_commercial_model_is_never_charged() {
     let _serial = SERIAL.lock().await;
     let (url, _shutdown, _tmp, node) = setup().await;
@@ -579,6 +584,7 @@ fn release(publisher: &Key, version: &str, sha: char) -> Value {
 }
 
 #[tokio::test]
+#[ignore = "starts a node, which needs this machine\'s hardware identity key; scripts/hardware-key-tests.sh runs it"]
 async fn an_engine_release_is_reported_only_from_a_named_publisher_and_never_installed() {
     let _serial = SERIAL.lock().await;
     let (url, _shutdown, _tmp, _node) = setup().await;
@@ -630,6 +636,7 @@ async fn an_engine_release_is_reported_only_from_a_named_publisher_and_never_ins
 /// bond never is. An operator that names publishers narrows the bonded
 /// publishers to those.
 #[tokio::test]
+#[ignore = "starts a node, which needs this machine\'s hardware identity key; scripts/hardware-key-tests.sh runs it"]
 async fn a_bonded_publisher_is_served_and_named_publishers_only_narrow() {
     let _serial = SERIAL.lock().await;
     let machine = Key::new(PUBLISHER);

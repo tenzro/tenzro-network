@@ -38,6 +38,30 @@ enum Legs {
 }
 
 /// This boot's session key.
+///
+/// It has no way out of the process: no `Serialize`, no `Clone` and no `Debug`, so nothing can write it,
+/// copy it or print it. These doctests keep it so. The first compiles, to show the probe works on a type
+/// that does serialise; the others must not compile.
+///
+/// ```
+/// fn serialises<T: serde::Serialize + Clone + std::fmt::Debug>() {}
+/// serialises::<tenzro_consensus::SessionCertificate>();
+/// ```
+///
+/// ```compile_fail
+/// fn serialises<T: serde::Serialize>() {}
+/// serialises::<tenzro_consensus::session::SessionKey>();
+/// ```
+///
+/// ```compile_fail
+/// fn copies<T: Clone>() {}
+/// copies::<tenzro_consensus::session::SessionKey>();
+/// ```
+///
+/// ```compile_fail
+/// fn prints<T: std::fmt::Debug>() {}
+/// prints::<tenzro_consensus::session::SessionKey>();
+/// ```
 pub struct SessionKey {
     legs: Legs,
     public: ValidatorPublicKey,
@@ -168,6 +192,52 @@ pub fn sign_certificate(
 
 #[cfg(test)]
 mod tests {
+    /// The session key lives in memory only: nothing may be able to write it
+    /// out. Its type implements neither `Serialize`, `Clone` nor `Debug`, so no
+    /// serialiser, copy or log line can carry it.
+    #[test]
+    fn nothing_serialises_copies_or_prints_the_session_key() {
+        use std::marker::PhantomData;
+        struct Probe<T>(PhantomData<T>);
+        trait Without {
+            fn serialises(&self) -> bool {
+                false
+            }
+            fn clones(&self) -> bool {
+                false
+            }
+            fn prints(&self) -> bool {
+                false
+            }
+        }
+        impl<T> Without for Probe<T> {}
+        impl<T: serde::Serialize> Probe<T> {
+            fn serialises(&self) -> bool {
+                true
+            }
+        }
+        impl<T: Clone> Probe<T> {
+            fn clones(&self) -> bool {
+                true
+            }
+        }
+        impl<T: std::fmt::Debug> Probe<T> {
+            fn prints(&self) -> bool {
+                true
+            }
+        }
+        let probe = Probe::<SessionKey>(PhantomData);
+        assert!(
+            !probe.serialises(),
+            "SessionKey must not implement Serialize"
+        );
+        assert!(!probe.clones(), "SessionKey must not implement Clone");
+        assert!(!probe.prints(), "SessionKey must not implement Debug");
+        // The probe itself works: a type that does implement them is seen.
+        let control = Probe::<String>(PhantomData);
+        assert!(control.serialises() && control.clones() && control.prints());
+    }
+
     use super::*;
     use crate::validator_key::test_signer::SoftwareTestSigner;
 

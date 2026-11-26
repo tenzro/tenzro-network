@@ -28,7 +28,7 @@
 // of validators that each passed `check_stop` against the same state (stage
 // scripts that run side by side, none seeing the others' stop).
 //
-// Invariants (named per run in check.sh):
+// Invariants (check.sh, step 7, names the ones each instance is held to):
 //   noHalt         the set can certify
 //   survivesOneDown with at most one counted validator down the set certifies
 //   recoverable    restarting every validator that has not been lost

@@ -36,7 +36,7 @@ use commands::{
 #[derive(Debug, Parser)]
 #[command(name = "tenzro")]
 #[command(version)]
-#[command(about = "Tenzro Network CLI — AI-Native, Agentic, Tokenized Settlement Layer", long_about = None)]
+#[command(about = "Tenzro Network CLI — compute of every kind, settled in TNZO", long_about = None)]
 struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]
@@ -72,7 +72,7 @@ struct CompletionsCmd {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Join the Tenzro Network (one-click participate)
+    /// Provision this machine's identity and wallet; with --provider, set it up as a provider
     Join(JoinCmd),
 
     /// Guided setup — join the network, provide, validate, or bootstrap a private network
@@ -145,8 +145,14 @@ enum Command {
     /// Start a local single-validator chain for development, keys in this machine's hardware
     Dev(commands::dev::DevCmd),
 
+    /// Serve this machine's node and its setup to the Tenzro Control apps on a local socket
+    Control(commands::control::ControlCmd),
+
     /// Check this machine and the network, and say how to fix what is wrong
     Doctor(commands::doctor::DoctorCmd),
+
+    /// Ask the Tenzro Assistant one thing: a slash command (`/status`, `/help`) or a question
+    Do(commands::do_cmd::DoCmd),
 
     /// Update this machine to the newest signed C0 release (node-local fixes, CLI, performance) in one command, or one step at a time
     Update(commands::UpdateCmd),
@@ -204,6 +210,10 @@ enum Command {
     /// Passkey-first wallet onboarding + custody (enrollment, recovery, session keys, hardware signers)
     #[command(subcommand)]
     Passkey(commands::passkey::PasskeyCommand),
+
+    /// Recovery kit for a passkey account: a one-time code kept offline, checked and used
+    #[command(subcommand)]
+    RecoveryKit(commands::recovery_kit::RecoveryKitCommand),
 
     /// Owner-signed machine access for agents, tools and models (add, list, revoke)
     #[command(subcommand)]
@@ -305,6 +315,8 @@ enum Command {
 
     /// The base fee of every resource market: compute, state growth, bandwidth, proof
     FeeMarket(commands::fee_market::FeeMarketCmd),
+    /// Estimate the gas a transaction would use
+    EstimateGas(commands::fee_market::EstimateGasCmd),
 
     /// Iroh content-addressed transport: info, endpoint-id, alpns, publish, fetch
     #[command(subcommand)]
@@ -354,6 +366,10 @@ enum Command {
     #[command(subcommand)]
     Device(DeviceCommand),
 
+    /// Keep this machine awake while the node runs, and how to manage it remotely
+    #[command(subcommand)]
+    Power(commands::power::PowerCommand),
+
     /// Settlement rails and micropayment routing
     #[command(subcommand)]
     Rails(RailsCommand),
@@ -379,6 +395,10 @@ enum Command {
     /// Show hardware profile
     Hardware(HardwareCmd),
 
+    /// Prove the hardware of an operator's fleet of hosts in one transaction
+    #[command(subcommand)]
+    Fleet(commands::fleet::FleetCommand),
+
     /// Show network information
     Info(InfoCmd),
 
@@ -397,26 +417,8 @@ struct HardwareCmd {
 /// Interactive chat with AI models
 #[derive(Debug, Parser)]
 struct ChatCmd {
-    /// Model ID to use. Omit to select one from `--use-case` + `--budget`.
-    model_id: Option<String>,
-
-    /// Use case for intent selection when no model_id is given:
-    /// chat, code, reasoning, summarize, extract, or embed.
-    #[arg(long)]
-    use_case: Option<String>,
-
-    /// Per-request cost cap in smallest TNZO unit (decimal string) for
-    /// intent selection. Only used when no model_id is given.
-    #[arg(long)]
-    budget: Option<String>,
-
-    /// Cost-quality knob in [0.0, 1.0] for intent selection.
-    #[arg(long)]
-    optimize: Option<f32>,
-
-    /// Reject models below this tier during intent selection: cheap or strong.
-    #[arg(long)]
-    quality_floor: Option<String>,
+    /// Model ID to use (`tenzro model list` names them).
+    model_id: String,
 
     /// Maximum tokens to generate
     #[arg(long, default_value = "512")]
@@ -479,11 +481,20 @@ fn main() {
     // locked-down child, which must lock itself down before any thread:
     // so before the async runtime starts.
     tenzro_model::parse_jail::enter_if_requested();
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(anyhow::Error::from)
-        .and_then(|rt| rt.block_on(cli_main()));
+    // Every TLS connection this command makes uses aws-lc-rs, the provider with
+    // the X25519MLKEM768 hybrid key exchange, never one another dependency
+    // compiled in.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("no TLS provider is installed before main");
+    let result = tenzro_cli::stack::run_on_large_stack(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(tenzro_cli::stack::WORKER_STACK_BYTES)
+            .build()
+            .map_err(anyhow::Error::from)
+            .and_then(|rt| rt.block_on(cli_main()))
+    });
     if let Err(e) = result {
         output::apply_color_policy();
         eprintln!("{}", report_error(&e));
@@ -510,6 +521,9 @@ fn report_error(e: &anyhow::Error) -> String {
 async fn cli_main() -> Result<()> {
     use std::io::IsTerminal as _;
     let cli = Cli::parse();
+    // Every path the CLI uses hangs off the Tenzro root; refuse here, naming the
+    // variable to set, when it cannot be found.
+    tenzro_types::paths::try_tenzro_home()?;
     output::apply_color_policy();
     tenzro_cli::endpoint::set_global(cli.rpc.clone());
 
@@ -536,7 +550,12 @@ async fn cli_main() -> Result<()> {
         .unwrap_or(false);
     if !matches!(
         command,
-        Command::Version(_) | Command::Completions(_) | Command::Doctor(_) | Command::Tpm(_)
+        Command::Version(_)
+            | Command::Completions(_)
+            | Command::Control(_)
+            | Command::Doctor(_)
+            | Command::Tpm(_)
+            | Command::Do(_)
     ) && !cli.verbose
         && !no_banner
         && std::io::stdout().is_terminal()
@@ -550,6 +569,7 @@ async fn cli_main() -> Result<()> {
         command,
         Command::Version(_)
             | Command::Completions(_)
+            | Command::Control(_)
             | Command::Doctor(_)
             | Command::Status(_)
             | Command::Update(_)
@@ -581,7 +601,9 @@ async fn cli_main() -> Result<()> {
         Command::Escrow(cmd) => cmd.execute().await?,
         Command::Duty(cmd) => cmd.execute().await?,
         Command::Dev(cmd) => cmd.execute().await?,
+        Command::Control(cmd) => cmd.execute().await?,
         Command::Doctor(cmd) => cmd.execute().await?,
+        Command::Do(cmd) => cmd.execute(json_output).await?,
         Command::Update(cmd) => cmd.execute().await?,
         Command::Release(cmd) => cmd.execute()?,
         Command::Tpm(cmd) => cmd.execute().await?,
@@ -605,6 +627,7 @@ async fn cli_main() -> Result<()> {
         Command::Vrf(cmd) => cmd.execute().await?,
         Command::Finality(cmd) => cmd.execute().await?,
         Command::Passkey(cmd) => cmd.execute(None).await?,
+        Command::RecoveryKit(cmd) => cmd.execute().await?,
         Command::MachineAccess(cmd) => cmd.execute().await?,
         Command::MediaGen(cmd) => cmd.execute().await?,
         Command::Forecast(cmd) => cmd.execute().await?,
@@ -631,6 +654,7 @@ async fn cli_main() -> Result<()> {
         Command::Da(cmd) => cmd.execute().await?,
         Command::Beacon(cmd) => cmd.execute().await?,
         Command::FeeMarket(cmd) => cmd.execute().await?,
+        Command::EstimateGas(cmd) => cmd.execute().await?,
         Command::Iroh(cmd) => cmd.execute().await?,
         Command::AdaptiveBurn(cmd) => cmd.execute().await?,
         Command::Settle(cmd) => cmd.execute().await?,
@@ -643,6 +667,7 @@ async fn cli_main() -> Result<()> {
         Command::Discover(cmd) => cmd.execute().await?,
         Command::Cluster(cmd) => cmd.execute().await?,
         Command::Device(cmd) => cmd.execute().await?,
+        Command::Power(cmd) => cmd.execute().await?,
         Command::Rails(cmd) => cmd.execute().await?,
         Command::Interaction(cmd) => cmd.execute().await?,
         Command::Status(cmd) => cmd.execute().await?,
@@ -650,6 +675,7 @@ async fn cli_main() -> Result<()> {
         Command::Visibility(cmd) => cmd.execute().await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,
+        Command::Fleet(cmd) => cmd.execute().await?,
         Command::Info(cmd) => execute_info(cmd).await?,
         Command::Version(cmd) => execute_version(cmd)?,
     }
@@ -733,8 +759,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     use std::io::{self, Write};
     use std::sync::Arc;
     use tenzro_model::{
-        ChatMessage as ModelChatMessage, GenerationConfig, HfDownloader, ModelRuntime,
-        get_model_by_id,
+        CatalogCell, ChatMessage as ModelChatMessage, GenerationConfig, HfDownloader, ModelRuntime,
     };
 
     // Initialize model runtime and downloader
@@ -749,58 +774,16 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         tenzro_types::paths::identity_chat_history_dir(&tenzro_cli::keystore::active_did());
     let _ = std::fs::create_dir_all(&history_dir);
 
-    let runtime = Arc::new(ModelRuntime::new()?);
-    let downloader = HfDownloader::new(models_dir);
+    // Filled with the node's catalog below, before anything reads it.
+    let catalog = CatalogCell::default();
+    let runtime = Arc::new(ModelRuntime::new(catalog.clone())?);
+    let downloader = HfDownloader::new(models_dir, catalog.clone());
 
-    // Resolve the model: an explicit model_id wins; otherwise select one from
-    // the stated intent (use_case + budget + quality_floor + optimize) via the
-    // node's inference router, so callers can chat without naming a model.
-    let model_id: String = match &cmd.model_id {
-        Some(m) if !m.trim().is_empty() => m.clone(),
-        _ => {
-            let use_case = cmd.use_case.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "provide a model_id or --use-case (chat|code|reasoning|research|summarize|extract|embed)"
-                )
-            })?;
-            let mut params = serde_json::Map::new();
-            params.insert(
-                "use_case".to_string(),
-                serde_json::Value::String(use_case.to_string()),
-            );
-            if let Some(b) = &cmd.budget {
-                params.insert("budget".to_string(), serde_json::Value::String(b.clone()));
-            }
-            if let Some(o) = cmd.optimize {
-                params.insert("optimize".to_string(), serde_json::json!(o));
-            }
-            if let Some(q) = &cmd.quality_floor {
-                params.insert(
-                    "quality_floor".to_string(),
-                    serde_json::Value::String(q.clone()),
-                );
-            }
-
-            let rpc = rpc::RpcClient::new(&cmd.rpc);
-            let spinner = output::create_spinner("Selecting a model for the intent...");
-            let decision: serde_json::Value = rpc
-                .call("tenzro_routeIntent", serde_json::Value::Object(params))
-                .await
-                .map_err(|e| anyhow::anyhow!("calling tenzro_routeIntent: {e}"))?;
-            spinner.finish_and_clear();
-
-            let selected = decision
-                .get("model_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("intent router returned no model"))?
-                .to_string();
-            output::print_field("Selected model", &selected);
-            if let Some(reason) = decision.get("reason").and_then(|v| v.as_str()) {
-                output::print_field("Reason", reason);
-            }
-            selected
-        }
-    };
+    let model_id = cmd.model_id.trim().to_string();
+    anyhow::ensure!(
+        !model_id.is_empty(),
+        "name a model: tenzro model list shows the ids"
+    );
 
     // Determine inference source: local model or network.
     // Jurisdiction pins are enforced by the serving node against its
@@ -809,10 +792,10 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     let jurisdiction_pinned = cmd.jurisdiction.is_some() || cmd.require_jurisdiction_receipt;
     // Whether this machine can run the model locally is decided by the
     // catalog the node serves.
-    commands::catalog::install_from(&cmd.rpc).await?;
+    commands::catalog::install_from(&cmd.rpc, &catalog).await?;
     let use_local = if jurisdiction_pinned {
         false
-    } else if let Some(entry) = get_model_by_id(&model_id) {
+    } else if let Some(entry) = catalog.current().get_model_by_id(&model_id) {
         let gguf_path = downloader.model_path(&model_id);
         /*
          * Does the NODE already hold this model? Then do not load a second copy.
@@ -1509,37 +1492,27 @@ async fn execute_info(cmd: InfoCmd) -> Result<()> {
     Ok(())
 }
 
+/// What `tenzro version --detailed` states: only what this binary knows of
+/// itself. The versions of the node it talks to and of the crates it was built
+/// from are not this binary's to state.
+fn version_fields() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("Version", env!("CARGO_PKG_VERSION")),
+        ("Authors", env!("CARGO_PKG_AUTHORS")),
+        ("Homepage", env!("CARGO_PKG_HOMEPAGE")),
+        ("Repository", env!("CARGO_PKG_REPOSITORY")),
+        ("License", env!("CARGO_PKG_LICENSE")),
+    ]
+}
+
 /// Execute version command
 fn execute_version(cmd: VersionCmd) -> Result<()> {
     if cmd.detailed {
         output::print_header("Tenzro Network CLI");
         println!();
-        output::print_field("Version", env!("CARGO_PKG_VERSION"));
-        output::print_field("Git Commit", option_env!("GIT_HASH").unwrap_or("unknown"));
-        output::print_field("Build Date", option_env!("BUILD_DATE").unwrap_or("unknown"));
-        output::print_field(
-            "Rust Version",
-            option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown"),
-        );
-        println!();
-        output::print_field("Authors", env!("CARGO_PKG_AUTHORS"));
-        output::print_field(
-            "Homepage",
-            option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://tenzro.com"),
-        );
-        output::print_field("Repository", env!("CARGO_PKG_REPOSITORY"));
-        output::print_field("License", env!("CARGO_PKG_LICENSE"));
-        println!();
-
-        println!(
-            "{}Components:{}",
-            output::colors::bold(),
-            output::colors::reset()
-        );
-        output::print_field("  tenzro-types", env!("CARGO_PKG_VERSION"));
-        output::print_field("  tenzro-crypto", env!("CARGO_PKG_VERSION"));
-        output::print_field("  tenzro-wallet", env!("CARGO_PKG_VERSION"));
-        output::print_field("  tenzro-node", env!("CARGO_PKG_VERSION"));
+        for (label, value) in version_fields() {
+            output::print_field(label, value);
+        }
     } else {
         println!("tenzro {}", env!("CARGO_PKG_VERSION"));
     }
@@ -1727,9 +1700,15 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
             // Signed in hardware as this machine's client account and
             // submitted pre-signed; the node never signs for it. The recipient
             // and amount checks of `tenzro wallet send` apply here too.
-            let result =
-                tenzro_cli::commands::wallet::send_tnzo(rpc, "client", &to, &amount, None, None)
-                    .await?;
+            let result = tenzro_cli::commands::wallet::send_tnzo(
+                rpc,
+                &tenzro_cli::keystore::SigningAccount::default(),
+                &to,
+                &amount,
+                None,
+                None,
+            )
+            .await?;
             tenzro_cli::commands::wallet::report_transfer(rpc, &result, true).await?;
         }
         2 => {
@@ -2038,7 +2017,7 @@ async fn security_menu(rpc: &rpc::RpcClient) -> Result<()> {
         }
         2 => {
             output::print_info(
-                "Use the full CLI: tenzro zk prove --circuit <name> --inputs <json>",
+                "Use the full CLI: echo <witness hex> | tenzro zk prove --circuit-id <identity|settlement> --binding <hex> > bundle.json",
             );
         }
         _ => {}
@@ -2157,6 +2136,22 @@ mod tests {
     fn verify_cli() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    /// help of the top command and of a subcommand of a group.
+    /// help of the top command and of a command three levels down.
+    #[test]
+    fn the_command_tree_parses_on_the_command_thread() {
+        let outcomes = tenzro_cli::stack::run_on_large_stack(|| {
+            [
+                vec!["tenzro", "--help"],
+                vec!["tenzro", "auth", "dpop-proof", "--help"],
+            ]
+            .map(|args| Cli::try_parse_from(args).map(|_| ()).map_err(|e| e.kind()))
+        });
+        for outcome in outcomes {
+            assert_eq!(outcome, Err(clap::error::ErrorKind::DisplayHelp));
+        }
     }
 
     /// The commands the sponsorship application prints are real subcommands
@@ -2352,11 +2347,28 @@ mod first_run_tests {
         Cli::command().debug_assert();
     }
 
+    /// The detailed version states nothing this binary does not know: no
+    /// build fact the build never sets, no other component's version.
+    #[test]
+    fn the_detailed_version_states_only_this_binary() {
+        let fields = super::version_fields();
+        assert_eq!(fields[0], ("Version", env!("CARGO_PKG_VERSION")));
+        for (label, value) in &fields {
+            assert!(
+                !value.is_empty() && *value != "unknown",
+                "{label} is {value:?}"
+            );
+            assert!(
+                !label.contains("tenzro-"),
+                "{label} names another component"
+            );
+        }
+    }
+
     #[test]
     fn version_is_the_release() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.1");
         let v = Cli::command().render_version();
-        assert!(v.contains("0.2.1"), "{v}");
+        assert!(v.contains(env!("CARGO_PKG_VERSION")), "{v}");
     }
 
     #[test]

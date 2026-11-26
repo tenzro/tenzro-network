@@ -233,6 +233,9 @@ fn candidates(
             })
         })
         .collect();
+    if super::rpc_provider_approval::gate_live(state) {
+        out.retain(|c| super::rpc_provider_approval::is_approved(state, &c.rpc_provider));
+    }
     out.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.account.cmp(&b.account)));
     out
 }
@@ -1165,6 +1168,48 @@ mod tests {
     /// Stake bonded, or a signer declared, once the beacon value a draw
     /// uses is known is not drawn: nobody can pick seats by bonding against
     /// a known mix.
+    #[tokio::test]
+    async fn a_verifier_on_an_unapproved_rpc_provider_is_not_drawn_once_the_gate_is_live() {
+        use super::super::rpc_provider_approval as approvals;
+        let ex = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let floor = tenzro_types::constants::MIN_ATTESTOR_STAKE;
+        let keys: Vec<SigningKey> = (1..=5).map(key).collect();
+        for (i, sk) in keys.iter().enumerate() {
+            bond(
+                &ex,
+                &mut state,
+                &[i as u8 + 1; 32],
+                sk,
+                &format!("rpc-{i}"),
+                floor,
+            )
+            .await;
+        }
+        install(&mut state);
+        super::super::beacon::record_for_test(&mut state, T0 + 10);
+        for i in 0..3 {
+            approvals::approve_for_test(&mut state, &format!("rpc-{i}"));
+        }
+        super::super::set_governed_param_for_test(
+            &mut state,
+            approvals::RPC_PROVIDER_APPROVAL_GATE,
+            0,
+        );
+        draw_op(&ex, &mut state, T0 + 20).await.unwrap();
+        let drawn = read_bridge_route(&state, BridgeRouteAdapter::Contract, "sui").unwrap();
+        let approved: Vec<String> = (1u8..=3).map(|i| hex::encode([i; 32])).collect();
+        assert_eq!(drawn.verifiers.members.len(), 3);
+        assert!(
+            drawn
+                .verifiers
+                .members
+                .iter()
+                .all(|m| approved.contains(&m.operator)),
+            "a seat went to a verifier on an unapproved RPC provider"
+        );
+    }
+
     #[tokio::test]
     async fn a_bond_made_after_the_draws_beacon_value_is_not_drawn() {
         let ex = NativeExecutor::new(VmConfig::default()).unwrap();

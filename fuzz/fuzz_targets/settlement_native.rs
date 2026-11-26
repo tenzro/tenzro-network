@@ -13,7 +13,9 @@ use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
 use tenzro_vm::native::SELECTOR_SETTLEMENT_PLAN;
-use tenzro_vm::{NativeExecutor, StateAdapter, VmConfig, VmExecutor, VmState, VmTransaction, VmType};
+use tenzro_vm::{
+    NativeExecutor, StateAdapter, VmConfig, VmExecutor, VmState, VmTransaction, VmType,
+};
 
 const PAYER: [u8; 20] = [0x11; 20];
 const FUNDS: u128 = 1_000_000_000_000_000_000_000;
@@ -63,7 +65,11 @@ fuzz_target!(|data: &[u8]| {
         }
         _ => {
             state.revert_transaction();
-            assert_eq!(state.get_balance(&PAYER), FUNDS, "a refused call moved value");
+            assert_eq!(
+                state.get_balance(&PAYER),
+                FUNDS,
+                "a refused call moved value"
+            );
         }
     }
 });

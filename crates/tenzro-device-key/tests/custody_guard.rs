@@ -57,11 +57,6 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "compiled only under cfg(test) (lib.rs gates the module)",
     ),
     (
-        "crates/tenzro-node/src/validator_net_tests.rs",
-        "Ed25519SignerImpl::generate(",
-        "compiled only under cfg(test) (lib.rs gates the module); a test validator node key",
-    ),
-    (
         "crates/tenzro-node/src/validator_admission_tests.rs",
         "",
         "compiled only under cfg(test) (lib.rs gates the module)",

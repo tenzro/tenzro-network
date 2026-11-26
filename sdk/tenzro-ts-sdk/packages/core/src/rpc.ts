@@ -488,6 +488,20 @@ export class RpcCallError extends Error {
     const d = this.data as { build?: unknown } | null | undefined;
     return this.code === -32004 && typeof d === "object" && d !== null && d.build === "light";
   }
+
+  /** True when no serving node meets the call's jurisdiction pin (code -32024). */
+  get isJurisdictionUnmet(): boolean {
+    return this.code === -32024;
+  }
+
+  /**
+   * True when the call metered less than the network's micro-settlement floor
+   * (code -32026): it cannot settle as its own transaction. Open a payment
+   * channel and pass a signed `channel_voucher` instead.
+   */
+  get isBelowSettlementFloor(): boolean {
+    return this.code === -32026;
+  }
 }
 
 /** The process environment where one exists (Node), else `undefined`. */

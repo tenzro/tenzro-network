@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-tenzro.com-blue)](https://tenzro.com/docs/sdk)
 
-The official Tenzro SDK for TypeScript: a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, payments, agents and settlement. It runs in Node.js 18+, browsers and edge runtimes.
+The official Tenzro SDK for TypeScript: a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, storage, compute claims, payments, agents and settlement. It runs in Node.js 18+, browsers and edge runtimes.
 
 ## Compatibility
 
@@ -28,12 +28,12 @@ one package per capability, each installable on its own:
 | Package | What it holds |
 | --- | --- |
 | `@tenzro/core` | `RpcClient` with discovery and by-name calls, configuration, `ApiError`, types, access and sign-in (DPoP, HTTP signatures, OAuth), the `HybridSigner` interface with the hardware and passkey signers, wallets, `TypedTxClient` and every transaction builder, `SseDecoder` |
-| `@tenzro/payments` | x402 payers and the publisher gate (`web`), MPP, Permit2, funding, purchases |
+| `@tenzro/payments` | x402 payers and the publisher gate (`web`), MPP, Permit2, funding, ledger payments in any accepted asset (`ledger-pay`) |
 | `@tenzro/settlement` | escrow, the split engine, settlement plans |
 | `@tenzro/agents` | delegated agents: Terms, agent wallets and bonds, payments, governance, lifecycle |
 | `@tenzro/bridge` | bridge routes and fees, EIP-7702, agents' accounts on other chains |
 | `@tenzro/inference` | models, chat streams, multimodal and media generation, providers, training, the model catalog |
-| `@tenzro/chain` | tokens, staking, validators, governance, contracts, TEE, ZK, storage and files, events with proofs, quotas |
+| `@tenzro/chain` | tokens, staking, validators, governance, contracts, TEE, ZK, storage and files, compute rental, data availability, events with proofs, quotas |
 
 Every capability depends on `@tenzro/core` and on nothing else, except
 `@tenzro/agents`, which pays through `@tenzro/payments`; the core depends on no
@@ -142,15 +142,51 @@ const quarantine = await client.agent.getQuarantine("did:tenzro:agent:...");
 
 ## Inference and settlement
 
-`client.inference` lists the models the network serves (`listModels`), routes
-a request by intent (`routeIntent`, `chatByIntent`) and runs one
-(`request`); `client.streaming` streams chat completions (below), and
+`client.inference` lists the models the network serves (`listModels`) and
+runs a request (`request`); `client.streaming` streams chat completions (below), and
 `client.provider` covers serving models as a provider. Every paid call
 settles on chain: `client.settlement` reads payments and escrows and settles
 a payment, `client.settle` builds settlement plans across chains and reads a
 plan, its decision and each leg's receipt (`getPlan`, `getDecision`,
 `getLegReceipt`, `listPlans`), and `client.payment` handles x402 and MPP
 payments. The publisher gate and the payers are in `@tenzro/payments`.
+
+## Storage and compute
+
+`client.storage` stores and reads back objects on a node serving the
+`storage` role (`storeObject`, `retrieveObject`, `status`). The provider
+erasure-codes each object across shards and prices storage at a fixed rate
+per byte-epoch (`setFixedRate`). Storage is held to proofs of retrievability:
+a renter pays through a storage compute claim that commits the object's
+`descriptor_digest`, and each hour the claim pays the provider only if
+validators found its bond available, which requires a possession proof of the
+object.
+
+`client.compute` covers compute rental. Rental is held to availability proofs
+and billed per epoch: validators probe every bonded provider and freeze one
+SLA verdict per provider and hour, and an hour judged unavailable is never
+paid. `bondParams`, `getBond` and `listBonds` read provider bonds;
+`getClaim` and `listClaims` read compute claims (a storage claim carries
+`storage_descriptor`); `priceFeed` reads what validators observed providers
+charge. `rent` signs a `CreateEscrow` with stream release to the provider's
+bonded address (`rentTransaction` builds it unsigned); the provider draws
+accrued epochs with `ClaimEscrowStream` and the renter stops the rental with
+`RefundEscrow`.
+
+```typescript
+const bond = await client.compute.getBond("did:tenzro:machine:<provider>");
+if (bond) {
+  // Three hours at 2 TNZO an hour, streamed per hour.
+  await client.compute.rent(signer, {
+    providerAddress: bond.provider_address,
+    ratePerEpoch: 2_000_000_000_000_000_000n,
+    epochs: 3,
+  });
+}
+```
+
+`client.da` reads the data-availability committee, the blobs its members hold
+slivers of and the possession challenges that score them.
 
 ## Governance
 
@@ -296,6 +332,15 @@ the node hands back.
 Each envelope is bound to the method name and to that call's parameters, so one
 produced for a given action cannot be replayed as another.
 
+## Differences from the Rust SDK
+
+The two SDKs bind the same node methods and have the same error helpers; `scripts/sdk-parity.py` checks this against the [JSON-RPC reference](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md). These are the methods it finds unbound on purpose:
+
+- `eth_*`: the Ethereum JSON-RPC methods the node serves for EVM wallets and libraries. Use an Ethereum library (ethers, viem, alloy) on the same endpoint; the SDKs call an `eth_` method only where they need one (gas price, fee history).
+- `net_*`: Ethereum network methods, likewise; the SDKs read peers and sync state through `tenzro_` methods.
+- `web3_sha3`: Keccak-256 of the given bytes, computed locally by any Ethereum library.
+- `tenzro_getHandoverChain`: read by the light client (`tenzro-light`) to follow the committee from epoch to epoch; the SDKs do not follow the handover chain yet.
+
 ## Reference
 
 [API.md](API.md) lists every class and function the package exports, with each method's signature, parameters, result, errors and the JSON-RPC method it calls. It is generated from the source (`npm run docs`), and `npm test` fails when it is out of date. The RPC methods themselves are documented in the [JSON-RPC reference](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md).
@@ -305,7 +350,6 @@ produced for a given action cannot be replayed as another.
 ```bash
 npx tsx examples/local-node.ts              # chain id, a balance and a transfer dry run on one node
 npx tsx examples/quickstart.ts              # read the chain, run inference, send TNZO with a hardware key
-npx tsx examples/intent-routing.ts          # route an intent to a model, or run by intent
 ```
 
 `npm test` typechecks every example against the current source.

@@ -17,6 +17,8 @@ pub enum PaymentCommand {
     Settle(PaymentSettleCmd),
     /// Show a payment's consensus record
     Record(PaymentRecordCmd),
+    /// Resolve a payment stated without a rail to the settlement plan leg that carries it
+    Resolve(PaymentResolveCmd),
     /// List consensus payment records from the event index
     History(PaymentHistoryCmd),
     /// List the paid calls a node served or routed, with how each settled
@@ -53,6 +55,7 @@ impl PaymentCommand {
             Self::Verify(cmd) => cmd.execute().await,
             Self::Settle(cmd) => cmd.execute().await,
             Self::Record(cmd) => cmd.execute().await,
+            Self::Resolve(cmd) => cmd.execute().await,
             Self::History(cmd) => cmd.execute().await,
             Self::Settlements(cmd) => cmd.execute().await,
             Self::Statement(cmd) => cmd.execute().await,
@@ -446,6 +449,37 @@ impl PaymentRecordCmd {
             output::print_error("No payment is recorded there.");
             return Ok(());
         }
+        output::print_json(&result)
+    }
+}
+
+/// Resolve a payment stated without a rail to the settlement plan leg that
+/// carries it on the payee's first rail the payer can fund. The request is
+/// JSON: `usd_e6`, `payee`, `accepts` (the payee's rails, preferred first),
+/// `means` (what the payer can fund) and `amounts` (the price on each
+/// accepted rail, or null), and for a bank or card leg `instruction_digest`
+/// and `reserve`. Nothing is sent to the chain.
+#[derive(Debug, Parser)]
+pub struct PaymentResolveCmd {
+    /// JSON file with the request
+    #[arg(long)]
+    request: std::path::PathBuf,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl PaymentResolveCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        use anyhow::Context;
+        let text = std::fs::read_to_string(&self.request)
+            .with_context(|| format!("cannot read {}", self.request.display()))?;
+        let params: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("{} is not JSON", self.request.display()))?;
+        let result: serde_json::Value = RpcClient::new(&self.rpc)
+            .call("tenzro_resolvePaymentIntent", params)
+            .await?;
         output::print_json(&result)
     }
 }

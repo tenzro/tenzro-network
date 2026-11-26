@@ -57,9 +57,9 @@ ctx=$(mktemp -d)
 trap 'rm -rf "$ctx"' EXIT
 tar -xzf "$archive" -C "$ctx"
 mv "$ctx/$name" "$ctx/archive"
-mkdir -p "$ctx/archive/lib"
-# Only the shared libraries the node loads go into the image.
-find "$ctx/archive/lib" -mindepth 1 -maxdepth 1 ! -name 'libonnxruntime*' -exec rm -rf {} +
+# The ONNX Runtime providers the CUDA node loads from its own folder (none in other builds).
+mkdir -p "$ctx/archive/providers"
+for f in "$ctx/archive/bin"/libonnxruntime_providers_*.so; do [ -e "$f" ] && mv "$f" "$ctx/archive/providers/"; done
 cp "$repo/scripts/release/image/Dockerfile" "$repo/scripts/release/image/entrypoint.sh" "$ctx/"
 
 tag="tenzro-node:$RELEASE-$short-$FLAVOUR-$platform"

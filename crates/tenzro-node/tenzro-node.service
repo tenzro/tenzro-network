@@ -90,9 +90,12 @@ LimitNOFILE=65536
 # else on the box is being squeezed.
 MemoryMin=1G
 
-# Restart policy
+# Restart policy. A restart the operator asks for (tenzro_restartNode) ends the
+# node with status 75: a clean end, and one that starts it again.
 Restart=on-failure
 RestartSec=10s
+SuccessExitStatus=75
+RestartForceExitStatus=75
 
 # Logging
 StandardOutput=journal

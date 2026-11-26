@@ -51,6 +51,13 @@ pub const ALPN_AGENT_KEY: &[u8] = b"tenzro/agent-key";
 /// an agent it serves.
 pub const ALPN_AGENT_TOKEN: &[u8] = b"tenzro/agent-token";
 
+/// ALPN on which a provider answers an SLA probe a validator sends it
+/// directly, timed on the validator's clock without the gossip delay.
+pub const ALPN_SLA: &[u8] = b"tenzro/sla-probe";
+
+/// Largest SLA probe a provider reads: a probe names its work, not data.
+pub const MAX_SLA_REQUEST: usize = 64 * 1024;
+
 /// ALPN on which a node designated as an inference session's successor
 /// accepts its assignment and the session's sealed KV-cache deltas.
 pub const ALPN_KV_CHECKPOINT: &[u8] = b"tenzro/kv-checkpoint";
@@ -371,12 +378,10 @@ pub async fn request(
     alpn: &[u8],
     request: &[u8],
 ) -> IrohResult<Response> {
-    let conn = endpoint
-        .connect(remote, alpn)
+    let conn = crate::bounded::connect(endpoint, remote, alpn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("connect: {e}")))?;
-    let (mut send, mut recv) = conn
-        .open_bi()
+    let (mut send, mut recv) = crate::bounded::open_bi(&conn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("open stream: {e}")))?;
     let len = u32::try_from(request.len()).map_err(|_| {
@@ -402,6 +407,10 @@ pub async fn request(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
     use iroh::endpoint::presets;
@@ -461,14 +470,20 @@ mod tests {
     }
 
     async fn pair(handler: Arc<dyn RequestHandler>, max: usize) -> (Router, Endpoint) {
-        let server = Endpoint::builder(presets::Minimal).bind().await.unwrap();
+        let server = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         let router = Router::builder(server)
             .accept(
                 ALPN_INFER,
                 RequestProtocol::new("infer", handler, max, test_limits()),
             )
             .spawn();
-        let client = Endpoint::builder(presets::Minimal).bind().await.unwrap();
+        let client = crate::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
         (router, client)
     }
 
@@ -568,10 +583,20 @@ mod tests {
             reset >= 64 - 8,
             "only {reset} of 64 stalled streams were refused"
         );
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let resp = request(&client, router.endpoint().addr(), ALPN_INFER, b"go")
-            .await
-            .unwrap();
+        // The share comes back once the server has cut the stalled streams
+        // off; until then a new request is refused, so it is tried again
+        // until one is served, for at most ten seconds.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let resp = loop {
+            match request(&client, router.endpoint().addr(), ALPN_INFER, b"go").await {
+                Ok(resp) => break resp,
+                Err(e) if tokio::time::Instant::now() < deadline => {
+                    tracing::debug!(error = %e, "refused while the stalled streams are held");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("no request served once the stalled streams were cut off: {e}"),
+            }
+        };
         assert_eq!(resp.status, 201);
     }
 }

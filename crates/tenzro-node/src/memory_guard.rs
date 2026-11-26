@@ -81,13 +81,62 @@ impl Reclaimer for IdleModels {
                 if lifecycle.is_pinned(&id) || !lifecycle.begin_evict(&id) {
                     continue;
                 }
-                match runtime.unload_model(&id).await {
-                    Ok(()) => lifecycle.finish_evict(&id),
-                    Err(_) => lifecycle.finish_warm(&id, std::time::Duration::ZERO),
-                }
+                let _ = unload_marked(&runtime, &lifecycle, &id).await;
             }
         });
         0
+    }
+}
+
+/// Unloads a model the lifecycle has marked with `begin_evict`. The model
+/// stays served: its next request loads it again. A failed unload leaves the
+/// model resident, so it goes back to warm rather than being recorded cold.
+#[cfg(feature = "inference")]
+pub(crate) async fn unload_marked(
+    runtime: &tenzro_model::runtime::ModelRuntime,
+    lifecycle: &tenzro_model::lifecycle::ModelLifecycle,
+    model_id: &str,
+) -> std::result::Result<(), String> {
+    match runtime.unload_model(model_id).await {
+        Ok(()) => {
+            lifecycle.finish_evict(model_id);
+            Ok(())
+        }
+        Err(e) => {
+            lifecycle.finish_warm(model_id, std::time::Duration::ZERO);
+            Err(format!("failed to unload {model_id}: {e}"))
+        }
+    }
+}
+
+/// How often served models are checked against their idle limits.
+#[cfg(feature = "inference")]
+const IDLE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Unloads each served model that has gone longer than the idle limit its
+/// operator set at serve time without a request. Runs for the node's life.
+#[cfg(feature = "inference")]
+pub(crate) async fn unload_past_idle_limits(
+    runtime: Arc<tenzro_model::runtime::ModelRuntime>,
+    lifecycle: Arc<tenzro_model::lifecycle::ModelLifecycle>,
+) {
+    let mut every = tokio::time::interval(IDLE_CHECK_EVERY);
+    loop {
+        every.tick().await;
+        for id in lifecycle.idle_expired() {
+            if !lifecycle.begin_evict(&id) {
+                continue;
+            }
+            match unload_marked(&runtime, &lifecycle, &id).await {
+                Ok(()) => tracing::info!(
+                    model_id = %id,
+                    "Unloaded a model idle past its limit; its next request loads it again"
+                ),
+                Err(e) => {
+                    tracing::warn!(model_id = %id, error = %e, "Could not unload an idle model")
+                }
+            }
+        }
     }
 }
 

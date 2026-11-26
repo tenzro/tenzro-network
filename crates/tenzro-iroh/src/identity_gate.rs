@@ -31,6 +31,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, WeakConnectionHandle};
@@ -60,11 +61,56 @@ pub const ONBOARDING_REFUSED: u32 = 8;
 /// Most refusals the gate remembers for inspection.
 const RECENT_REFUSALS: usize = 256;
 
+/// How often the gate logs the refusals of one peer on one protocol: the
+/// first at once, then at most one line per interval, naming how many it
+/// left out. A peer that redials what it is refused would otherwise fill
+/// the log with one line per attempt.
+const REFUSAL_LOG_INTERVAL_MS: u64 = 60_000;
+
+/// Most peer and protocol pairs whose refusal lines are paced at once; past
+/// it, the pair logged longest ago is forgotten.
+const PACED_REFUSALS: usize = 1_024;
+
+/// When the gate last logged a refusal of each peer on each protocol, and
+/// how many refusals of it it has left out since.
+#[derive(Default)]
+struct RefusalPacing {
+    last: HashMap<(String, String), (u64, u64)>,
+}
+
+impl RefusalPacing {
+    /// Whether a refusal of `peer` on `alpn` at `at_ms` is logged, with how
+    /// many refusals of that pair were left out since the last line.
+    fn admit(&mut self, peer: &str, alpn: &str, at_ms: u64) -> Option<u64> {
+        let key = (peer.to_string(), alpn.to_string());
+        if let Some((logged, left_out)) = self.last.get_mut(&key) {
+            if at_ms.saturating_sub(*logged) < REFUSAL_LOG_INTERVAL_MS {
+                *left_out += 1;
+                return None;
+            }
+            let skipped = *left_out;
+            (*logged, *left_out) = (at_ms, 0);
+            return Some(skipped);
+        }
+        if self.last.len() >= PACED_REFUSALS
+            && let Some(oldest) = self
+                .last
+                .iter()
+                .min_by_key(|(_, (logged, _))| *logged)
+                .map(|(k, _)| k.clone())
+        {
+            self.last.remove(&oldest);
+        }
+        self.last.insert(key, (at_ms, 0));
+        Some(0)
+    }
+}
+
 /// What a protocol is open to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlpnAccess {
-    /// Open to an onboarding session: sync enough to learn the registry, and
-    /// the registration request.
+    /// Open to an onboarding session: sync enough to learn the registry, the
+    /// files of a retained state snapshot, and the registration request.
     Onboarding,
     /// Only to a registered identity.
     Registered,
@@ -76,10 +122,17 @@ pub enum AlpnAccess {
 pub fn alpn_access(alpn: &[u8]) -> AlpnAccess {
     if alpn == ALPN_DISCOVERY
         || alpn == crate::state_sync::ALPN_STATE_SYNC
+        || alpn == crate::state_sync::ALPN_STATE_SYNC_ANCHOR
+        || alpn == crate::zk_proof::ALPN_ZK_PROOF
         || alpn == crate::block_sync::ALPN_BLOCK_SYNC
         || alpn == crate::gossip::ALPN_GOSSIP
         || alpn == crate::paths::ALPN_PUNCH
         || alpn == ALPN_ONBOARD
+        // Using this node's relay: a joining machine needs it to be reached.
+        || alpn == crate::relay::RELAY_CLIENT
+        // Blobs: the blob provider serves an onboarding peer nothing but the
+        // files of a retained state snapshot (see `licence_gate`).
+        || alpn == iroh_blobs::ALPN
     {
         AlpnAccess::Onboarding
     } else {
@@ -168,8 +221,10 @@ struct Inner {
     discovery: Option<Arc<DiscoveryStore>>,
     ledger: Mutex<OnboardingLedger>,
     protected: RwLock<HashSet<String>>,
+    isolated: AtomicBool,
     live: Mutex<HashMap<usize, Live>>,
     refusals: Mutex<VecDeque<RefusalRecord>>,
+    refusal_log: Mutex<RefusalPacing>,
 }
 
 /// The identity gate of one endpoint.
@@ -224,8 +279,10 @@ impl IdentityGate {
                 registry: RwLock::new(None),
                 discovery,
                 protected: RwLock::new(HashSet::new()),
+                isolated: AtomicBool::new(false),
                 live: Mutex::new(HashMap::new()),
                 refusals: Mutex::new(VecDeque::new()),
+                refusal_log: Mutex::new(RefusalPacing::default()),
             }),
         }
     }
@@ -263,6 +320,22 @@ impl IdentityGate {
                 .discovery
                 .as_ref()
                 .is_some_and(|d| d.in_epoch_set(did))
+    }
+
+    /// Holds this node to the identities it protects for every peer it
+    /// reaches out to: with `on`, discovery sync, relay forwarders and gossip
+    /// neighbours are limited to the boot list and the validators' machines
+    /// ([`Self::may_dial`]). A validator in enforce mode is isolated so.
+    pub fn isolate(&self, on: bool) {
+        self.inner.isolated.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether this node may dial, sync with or keep as a gossip neighbour
+    /// the peer whose record names the machine `did` (`None`: no record
+    /// names the peer). Always true unless the node is isolated
+    /// ([`Self::isolate`]); then only for an identity it protects.
+    pub fn may_dial(&self, did: Option<&str>) -> bool {
+        !self.inner.isolated.load(Ordering::Relaxed) || did.is_some_and(|d| self.protects(d))
     }
 
     /// The address prefix `endpoint` is currently connected from, when it
@@ -335,16 +408,35 @@ impl IdentityGate {
         }
     }
 
+    /// Whether `endpoint` is a registered identity, or the gate refuses
+    /// nothing (off, or only auditing). A peer for which this is false holds
+    /// an onboarding session at most.
+    pub fn holds_full_access(&self, endpoint: Option<EndpointId>) -> bool {
+        if !self.is_active() || self.policy().mode == GateMode::Audit {
+            return true;
+        }
+        let did = endpoint.and_then(|e| self.name_of(e));
+        self.standing_of(did.as_deref()) == Standing::Registered
+    }
+
     fn remember(&self, record: RefusalRecord) {
-        tracing::warn!(
-            target: "tenzro_iroh::identity_gate",
-            peer = %record.peer,
-            did = ?record.did,
-            alpn = %record.alpn,
-            action = record.action,
-            reason = %record.reason,
-            "identity gate"
-        );
+        let logged = self
+            .inner
+            .refusal_log
+            .lock()
+            .admit(&record.peer, &record.alpn, record.at_ms);
+        if let Some(left_out) = logged {
+            tracing::warn!(
+                target: "tenzro_iroh::identity_gate",
+                peer = %record.peer,
+                did = ?record.did,
+                alpn = %record.alpn,
+                action = record.action,
+                reason = %record.reason,
+                left_out,
+                "identity gate"
+            );
+        }
         let mut q = self.inner.refusals.lock();
         if q.len() >= RECENT_REFUSALS {
             q.pop_front();
@@ -628,6 +720,10 @@ fn humanise(ms: u64) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
     use crate::connection_limits::{ConnectionGate, ConnectionLimits, GatedRouter};
@@ -694,20 +790,26 @@ mod tests {
         for open in [
             ALPN_DISCOVERY,
             crate::state_sync::ALPN_STATE_SYNC,
+            crate::state_sync::ALPN_STATE_SYNC_ANCHOR,
+            crate::zk_proof::ALPN_ZK_PROOF,
             crate::block_sync::ALPN_BLOCK_SYNC,
             crate::gossip::ALPN_GOSSIP,
             crate::paths::ALPN_PUNCH,
             ALPN_ONBOARD,
+            iroh_blobs::ALPN,
+            crate::relay::RELAY_CLIENT,
         ] {
             assert_eq!(alpn_access(open), AlpnAccess::Onboarding, "{open:?}");
         }
         // Everything that transacts, serves, stakes or speaks for an agent.
         for closed in [
+            crate::app_stream::ALPN_APP_STREAM,
             crate::consensus::ALPN_CONSENSUS,
             crate::request::ALPN_DA_COMMITTEE,
             crate::request::ALPN_AGENT_KEY,
             crate::request::ALPN_AGENT_TOKEN,
             crate::request::ALPN_KV_CHECKPOINT,
+            crate::request::ALPN_SLA,
             crate::request::ALPN_INFER,
             crate::jsonrpc::ALPN_A2A,
             crate::jsonrpc::ALPN_A2A_PQ,
@@ -716,7 +818,6 @@ mod tests {
             crate::jsonrpc::ALPN_MOE,
             crate::jsonrpc::ALPN_MOE_PQ,
             crate::paths::ALPN_PEER_RELAY,
-            iroh_blobs::ALPN,
             b"tenzro/some-protocol-added-later",
         ] {
             assert_eq!(alpn_access(closed), AlpnAccess::Registered, "{closed:?}");
@@ -734,17 +835,24 @@ mod tests {
             gate.evaluate(0, peer(1), None, None, crate::consensus::ALPN_CONSENSUS),
             Admit::Allow
         );
+        assert!(gate.holds_full_access(Some(peer(1))));
     }
 
     #[test]
     fn an_unregistered_peer_is_refused_every_gated_protocol_with_its_reason_logged() {
         let gate = gate_with(Arc::new(Registry::default()), GateMode::Enforce);
+        assert!(!gate.holds_full_access(Some(peer(1))));
+        assert!(!gate.holds_full_access(None));
+        // A gate that only audits refuses nothing, here as everywhere.
+        assert!(
+            gate_with(Arc::new(Registry::default()), GateMode::Audit)
+                .holds_full_access(Some(peer(1)))
+        );
         for alpn in [
             crate::request::ALPN_INFER,
             crate::jsonrpc::ALPN_MCP_PQ,
             crate::jsonrpc::ALPN_A2A_PQ,
             crate::request::ALPN_DA_COMMITTEE,
-            iroh_blobs::ALPN,
         ] {
             let v = gate.evaluate(0, peer(1), Some(DID_A), None, alpn);
             let Admit::Refuse { code, reason } = v else {
@@ -754,7 +862,7 @@ mod tests {
             assert!(reason.contains("no registered identity"), "{reason}");
         }
         let log = gate.recent_refusals();
-        assert_eq!(log.len(), 5);
+        assert_eq!(log.len(), 4);
         assert!(
             log.iter()
                 .all(|r| r.action == "refused" && r.did.as_deref() == Some(DID_A))
@@ -937,10 +1045,12 @@ mod tests {
 
     async fn rig(mode: GateMode, policy: impl FnOnce(&mut OnboardingPolicy)) -> Rig {
         let limits = ConnectionLimits::default();
-        let server = crate::identity_transport::base_builder_with(&limits)
-            .bind()
-            .await
-            .unwrap();
+        let server = crate::identity_transport::on_loopback(
+            crate::identity_transport::base_builder_with(&limits, false),
+        )
+        .bind()
+        .await
+        .unwrap();
         let store = Arc::new(DiscoveryStore::new());
         let registry = Arc::new(Registry::default());
         let mut p = OnboardingPolicy {
@@ -967,10 +1077,11 @@ mod tests {
     }
 
     async fn dial(rig: &Rig, alpn: &[u8]) -> (Endpoint, Connection) {
-        let client = crate::identity_transport::base_builder()
-            .bind()
-            .await
-            .unwrap();
+        let client =
+            crate::identity_transport::on_loopback(crate::identity_transport::base_builder())
+                .bind()
+                .await
+                .unwrap();
         let conn = client.connect(rig.server.addr(), alpn).await.unwrap();
         (client, conn)
     }
@@ -1004,6 +1115,20 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(16)).await,
             Ok(Ok(reply)) if reply == b"ping"
         )
+    }
+
+    /// Whether the gate comes to hold `n` sessions within ten seconds: a
+    /// closed connection reaches the gate's ledger only once the server has
+    /// seen the close.
+    async fn sessions_reach(gate: &IdentityGate, n: usize) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while gate.open_sessions() != n {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        true
     }
 
     async fn closed_with(conn: &Connection) -> Option<u32> {
@@ -1169,8 +1294,10 @@ mod tests {
         assert_eq!(rig.gate.open_sessions(), 1);
         assert!(echoes(&b).await, "the second connection is still served");
         b.close(0u32.into(), b"done");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(rig.gate.open_sessions(), 0);
+        assert!(
+            sessions_reach(&rig.gate, 0).await,
+            "the session ends with its last connection"
+        );
         let (_c3, next) = dial(&rig, OPEN_ALPN).await;
         assert!(echoes(&next).await);
     }
@@ -1188,8 +1315,38 @@ mod tests {
         let (_c3, c) = dial(&rig, OPEN_ALPN).await;
         assert_eq!(closed_with(&c).await, Some(ONBOARDING_REFUSED));
         a.close(0u32.into(), b"done");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            sessions_reach(&rig.gate, 1).await,
+            "a closed session gives its place back"
+        );
         let (_c4, d) = dial(&rig, OPEN_ALPN).await;
         assert!(echoes(&d).await);
+    }
+
+    /// A peer redialling what it is refused gets one log line per interval
+    /// on each protocol, the next naming how many were left out; another
+    /// peer or protocol is logged at once, and the pacing holds a bounded
+    /// number of pairs.
+    #[test]
+    fn refusals_of_one_peer_are_logged_once_per_interval() {
+        let mut pacing = RefusalPacing::default();
+        assert_eq!(pacing.admit("a", "tenzro/consensus", 0), Some(0));
+        for t in 1..=5 {
+            assert_eq!(pacing.admit("a", "tenzro/consensus", t * 1_000), None);
+        }
+        assert_eq!(pacing.admit("a", "tenzro/mcp/3", 6_000), Some(0));
+        assert_eq!(pacing.admit("b", "tenzro/consensus", 6_000), Some(0));
+        assert_eq!(
+            pacing.admit("a", "tenzro/consensus", REFUSAL_LOG_INTERVAL_MS),
+            Some(5)
+        );
+        assert_eq!(
+            pacing.admit("a", "tenzro/consensus", REFUSAL_LOG_INTERVAL_MS + 1),
+            None
+        );
+        for p in 0..(2 * PACED_REFUSALS) {
+            pacing.admit(&p.to_string(), "tenzro/consensus", 0);
+        }
+        assert_eq!(pacing.last.len(), PACED_REFUSALS);
     }
 }

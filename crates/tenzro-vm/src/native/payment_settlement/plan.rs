@@ -99,6 +99,76 @@ pub fn settlement_plan_gas(op: &PlanOp) -> u64 {
 /// Gas per byte of leg evidence a proof verification reads.
 pub const GAS_PER_EVIDENCE_BYTE: u64 = 16;
 
+/// Gate: first epoch whose plans fix their treasury line when they open.
+/// From it, a plan whose remainder goes to a named provider records the
+/// treasury-leg rate of that provider's work class in force at open, and its
+/// commit takes the leg from the provider's credit at that rate; a later
+/// change of the governed rate does not reach a plan already open. Before
+/// it, a plan pays no treasury leg.
+pub const TREASURY_LINE_KEY: &str = "feature.plan_treasury_line.activation_epoch";
+
+/// The treasury line a plan fixed at open, at `plan_treasury_line:<plan_id>`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TreasuryLine {
+    /// The split line that takes the remainder, the one the leg comes from.
+    pub line: usize,
+    /// The treasury-leg rate in force at open, bps of that line's credit.
+    pub bps: u64,
+    /// What the commit took, TNZO base units; zero until it commits.
+    #[serde(with = "tenzro_types::primitives::u128_serde")]
+    pub charged: u128,
+}
+
+fn treasury_line_key(plan_id: &[u8; 32]) -> String {
+    format!("plan_treasury_line:{}", hex::encode(plan_id))
+}
+
+/// The treasury line plan `plan_id` fixed at open, if it fixed one.
+pub fn read_treasury_line(state: &dyn VmState, plan_id: &[u8; 32]) -> Option<TreasuryLine> {
+    read_json(state, &treasury_line_key(plan_id))
+}
+
+/// While [`TREASURY_LINE_KEY`] is live, records the treasury line of a plan
+/// opening with `split`, whose lines are paid to `paid`: the rate of the
+/// remainder recipient's work class, when that recipient is named and is a
+/// provider and the rate is above zero.
+fn fix_treasury_line(
+    state: &mut dyn VmState,
+    plan_id: &[u8; 32],
+    split: &SplitRule,
+    paid: &[Address],
+    changes: &mut Vec<StateChange>,
+) -> Result<()> {
+    if !crate::feature_gate::is_live_now(state, TREASURY_LINE_KEY) {
+        return Ok(());
+    }
+    let Some(line) = split
+        .lines
+        .iter()
+        .position(|l| l.basis == tenzro_types::split::SplitBasis::Remainder)
+    else {
+        return Ok(());
+    };
+    if split.lines[line].recipient == SplitRecipient::LegSubmitter {
+        return Ok(());
+    }
+    let Some(class) = super::super::rewards::provider_class(state, paid[line].as_bytes(), false)
+    else {
+        return Ok(());
+    };
+    let bps = economy::treasury_leg_bps(state, class);
+    if bps == 0 {
+        return Ok(());
+    }
+    let fixed = TreasuryLine {
+        line,
+        bps,
+        charged: 0,
+    };
+    write_json(state, &treasury_line_key(plan_id), &fixed, changes)?;
+    Ok(())
+}
+
 fn plan_key(plan_id: &[u8; 32]) -> String {
     format!("plan:{}", hex::encode(plan_id))
 }
@@ -790,16 +860,46 @@ pub(in crate::native) fn settled_party(
     let receipt = read_leg_receipt(state, leg_id).filter(|r| r.committed)?;
     let plan = read_plan(state, &receipt.plan_id)?;
     let decision = plan.decision.as_ref()?;
+    let fixed = read_treasury_line(state, &receipt.plan_id);
     let credited = match &decision.allocation {
         Some(a) => decision
             .recipients
             .iter()
             .zip(&a.credits)
-            .filter(|(r, _)| *r == account)
-            .fold(0u128, |t, (_, c)| t.saturating_add(*c)),
+            .enumerate()
+            .filter(|(_, (r, _))| *r == account)
+            .fold(0u128, |t, (i, (_, c))| {
+                let leg = fixed
+                    .as_ref()
+                    .filter(|f| f.line == i)
+                    .map_or(0, |f| f.charged);
+                let primary = plan
+                    .split
+                    .lines
+                    .get(i)
+                    .is_some_and(|l| l.basis == tenzro_types::split::SplitBasis::Remainder);
+                let rpc = if primary {
+                    plan_rpc_leg(state, &plan.plan_id)
+                } else {
+                    0
+                };
+                t.saturating_add(c.saturating_sub(leg).saturating_sub(rpc))
+            }),
         None => 0,
     };
     (plan.opened_by == *account || credited > 0).then_some((receipt.plan_id, credited))
+}
+
+fn rpc_leg_key(plan_id: &[u8; 32]) -> String {
+    format!("plan_rpc_leg:{}", hex::encode(plan_id))
+}
+
+/// What committed plan `plan_id`'s primary line paid the RPC-provider leg,
+/// TNZO base units; zero when it paid none.
+pub fn plan_rpc_leg(state: &dyn VmState, plan_id: &[u8; 32]) -> u128 {
+    super::super::funding::read_json::<String>(state, &rpc_leg_key(plan_id))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Block time, ms, at which plan `plan_id` was decided; `None` while it is
@@ -999,11 +1099,55 @@ fn commit(
                 plan.funded
             )));
         }
+        // A treasury line fixed at open comes out of its line's credit at
+        // the rate fixed then; the division itself stays the split engine's.
+        let mut credits = alloc.credits.clone();
+        let mut leg = 0u128;
+        if let Some(mut fixed) = read_treasury_line(state, &plan.plan_id)
+            && let Some(credit) = credits.get_mut(fixed.line)
+        {
+            leg = tenzro_types::split::bps_of(*credit, u128::from(fixed.bps));
+            *credit -= leg;
+            fixed.charged = leg;
+            write_json(state, &treasury_line_key(&plan.plan_id), &fixed, changes)?;
+        }
+        let primary_line = plan
+            .split
+            .lines
+            .iter()
+            .position(|l| l.basis == tenzro_types::split::SplitBasis::Remainder);
         // The vault pays every line; the fee's treasury and insurance parts
-        // are credited by the fee step and its burn part leaves supply.
-        for (to, amount) in paid_to.iter().zip(&alloc.credits) {
-            if *amount > 0 {
-                move_balance(state, vault.as_bytes(), to.as_bytes(), *amount, changes)?;
+        // and the treasury leg are credited by the fee step, and the fee's
+        // burn part leaves supply. The primary line pays the RPC-provider
+        // leg out of its credit.
+        for (i, (to, amount)) in paid_to.iter().zip(&credits).enumerate() {
+            let rpc = if Some(i) == primary_line {
+                super::super::rpc_provider_leg::pay_from(
+                    state,
+                    vault.as_bytes(),
+                    to.as_bytes(),
+                    *amount,
+                    changes,
+                )?
+            } else {
+                0
+            };
+            if rpc > 0 {
+                super::super::funding::write_json(
+                    state,
+                    &rpc_leg_key(&plan.plan_id),
+                    &rpc.to_string(),
+                    changes,
+                )?;
+            }
+            if *amount > rpc {
+                move_balance(
+                    state,
+                    vault.as_bytes(),
+                    to.as_bytes(),
+                    *amount - rpc,
+                    changes,
+                )?;
             }
         }
         // Each relayer is repaid the network fee it carried a proof for.
@@ -1013,22 +1157,17 @@ fn commit(
             }
         }
         let rest = state.get_balance(vault.as_bytes());
-        state.set_balance(vault.as_bytes(), rest - alloc.fee.fee);
+        let kept = alloc.fee.fee + leg;
+        state.set_balance(vault.as_bytes(), rest - kept);
         changes.push(StateChange::new(
             vault.as_bytes().to_vec(),
             b"balance".to_vec(),
             Some(rest.to_le_bytes().to_vec()),
-            Some((rest - alloc.fee.fee).to_le_bytes().to_vec()),
+            Some((rest - kept).to_le_bytes().to_vec()),
         ));
         // One settlement, recorded against the line that takes the remainder
         // (the primary payee).
-        let primary = plan
-            .split
-            .lines
-            .iter()
-            .position(|l| l.basis == tenzro_types::split::SplitBasis::Remainder)
-            .map(|i| paid_to[i])
-            .unwrap_or(plan.opened_by);
+        let primary = primary_line.map(|i| paid_to[i]).unwrap_or(plan.opened_by);
         // The plan's payees report their provider work; the creators the
         // payer attributed it to earn here.
         economy::record_fee(
@@ -1037,12 +1176,13 @@ fn commit(
             primary.as_bytes(),
             plan.funded,
             &alloc.fee,
-            0,
+            leg,
             &economy::Earning {
                 provider: None,
                 payer_agent: plan.agent_did.clone(),
                 attribution: plan.attribution.clone(),
                 network_share_paid: false,
+                paid_at_ms: None,
             },
             changes,
         )?;
@@ -1632,7 +1772,7 @@ impl NativeExecutor {
             Some((balance - cost).to_le_bytes().to_vec()),
         )];
         let mut logs = Vec::new();
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let now_ms = now.max(0) as u64;
         let sender = Address::from_bytes(&tx.from)
             .ok_or_else(|| refuse("a plan is sent from a 32-byte account"))?;
@@ -1814,6 +1954,7 @@ impl NativeExecutor {
                         "split_hash": hex::encode(split.hash()),
                     }),
                 )?);
+                fix_treasury_line(state, &id, split, &paid, &mut changes)?;
                 let burned = advance(
                     state,
                     ctx,
@@ -2250,6 +2391,49 @@ mod tests {
         }
     }
 
+    /// Once the RPC-provider leg is live, a plan whose primary payee named a
+    /// bonded validator pays it the leg out of the primary line; the other
+    /// lines are untouched, and what the primary is reported to have settled
+    /// is what it received.
+    #[tokio::test]
+    async fn a_plans_primary_line_pays_the_rpc_provider_leg() {
+        use crate::native::rpc_provider_leg;
+        let (publisher, payee) = (Address::new([2; 32]), Address::new([1; 32]));
+        let validator = Address::new([0x66; 32]);
+        let gross = 100 * TNZO;
+        let mut plain = Book::new();
+        plain
+            .send(&PAYER, open(1, vec![native(gross)], T0 + 60_000), T0)
+            .await
+            .unwrap();
+
+        let mut b = Book::new();
+        crate::native::staking::add_bond(&mut b.state, validator.as_bytes(), TNZO, 0).unwrap();
+        crate::native::set_governed_param_for_test(&mut b.state, rpc_provider_leg::GATE, 0);
+        let naming = tenzro_native_ops::rpc_provider::RpcProviderOp {
+            provider: validator.as_bytes().to_vec(),
+        };
+        rpc_provider_leg::apply(
+            &mut b.state,
+            payee.as_bytes(),
+            &tenzro_native_ops::encode(&naming),
+        )
+        .unwrap();
+        let id = b
+            .send(&PAYER, open(1, vec![native(gross)], T0 + 60_000), T0)
+            .await
+            .unwrap();
+        let leg = plan_rpc_leg(&b.state, &id);
+        assert!(leg > 0);
+        assert_eq!(b.balance(&validator), leg);
+        assert_eq!(b.balance(&payee) + leg, plain.balance(&payee));
+        assert_eq!(b.balance(&publisher), plain.balance(&publisher));
+        let reported = settled_party(&b.state, &tenzro_types::settlement::leg_id(&id, 0), &payee)
+            .unwrap()
+            .1;
+        assert_eq!(reported, b.balance(&payee));
+    }
+
     /// One rule, one engine: a direct payment, an escrow release and a plan
     /// leg of the same gross divide it identically.
     #[tokio::test]
@@ -2478,10 +2662,22 @@ mod tests {
     /// Pay 100 TNZO from `PAYER` to `provider` through a plan, with each
     /// (account, DID) of `bind` registered, report it as `provider`'s work
     /// and close the epoch: (the fee paid, the provider reward issued).
-    async fn reward_for_one_plan(bind: &[(Address, &str)], provider: Address) -> (u128, u128) {
+    /// `registered_only` puts the registered-identities rule in force.
+    async fn reward_for_one_plan(
+        bind: &[(Address, &str)],
+        provider: Address,
+        registered_only: bool,
+    ) -> (u128, u128) {
         use crate::native::rewards;
         let validator = Address::new([0x55; 32]);
         let mut b = Book::new();
+        if registered_only {
+            crate::native::set_genesis_param(
+                &mut b.state,
+                rewards::SETTLED_WORK_REGISTERED_GATE,
+                0,
+            );
+        }
         for (addr, did) in bind {
             b.state.set_storage(
                 &SYSTEM_ADDRESS,
@@ -2701,9 +2897,12 @@ mod tests {
                 "did:tenzro:machine:device1:agent-a",
             ),
         ] {
-            let (_, minted) =
-                reward_for_one_plan(&[(payer, payer_did), (provider, provider_did)], provider)
-                    .await;
+            let (_, minted) = reward_for_one_plan(
+                &[(payer, payer_did), (provider, provider_did)],
+                provider,
+                false,
+            )
+            .await;
             assert_eq!(
                 minted, 0,
                 "{payer_did} paying {provider_did} minted {minted}"
@@ -2715,12 +2914,225 @@ mod tests {
                 (provider, "did:tenzro:machine:alice:agent-b"),
             ],
             provider,
+            false,
         )
         .await;
         assert_eq!(
             minted,
             fee * u128::from(crate::native::rewards::DEFAULT_PROVIDER_REWARD_COST_BPS) / 10_000
         );
+    }
+
+    /// Once its gate is live, a plan earns its payee provider reward only
+    /// when payer and payee are both registered identities: an account with
+    /// no identity paying a registered provider, or a registered payer paying
+    /// an account with none, issues nothing. Before the gate a payer with no
+    /// identity counts as a party of its own, as it always did.
+    #[tokio::test]
+    async fn a_plan_with_an_unregistered_side_earns_no_provider_reward_once_live() {
+        let provider = Address::new([1; 32]);
+        let payer = Address::new(PAYER);
+        let binds = [
+            vec![(provider, "did:tenzro:human:carol")],
+            vec![(payer, "did:tenzro:human:bob")],
+            vec![],
+        ];
+        for bind in &binds {
+            let (fee, minted) = reward_for_one_plan(bind, provider, true).await;
+            assert!(fee > 0);
+            assert_eq!(minted, 0, "{bind:?} minted {minted}");
+        }
+        // Before the gate a registered provider paid by an account with no
+        // identity earns as from any other party.
+        let (fee, minted) = reward_for_one_plan(&binds[0], provider, false).await;
+        assert_eq!(
+            minted,
+            fee * u128::from(crate::native::rewards::DEFAULT_PROVIDER_REWARD_COST_BPS) / 10_000
+        );
+        // Two registered identities of different roots earn either way.
+        let both = [
+            (payer, "did:tenzro:human:bob"),
+            (provider, "did:tenzro:human:carol"),
+        ];
+        let (fee, minted) = reward_for_one_plan(&both, provider, true).await;
+        assert_eq!(
+            minted,
+            fee * u128::from(crate::native::rewards::DEFAULT_PROVIDER_REWARD_COST_BPS) / 10_000
+        );
+    }
+
+    /// A plan paying `provider`, bonded as a TEE provider, `value` TNZO,
+    /// opened at `T0` and committed in its opening transaction, with the TEE
+    /// treasury leg at `leg_bps` and the plan treasury line live from epoch
+    /// `live_from`. Returns the book, the plan id and the provider's balance.
+    async fn plan_to_tee_provider(
+        live_from: u64,
+        leg_bps: u64,
+        value: u128,
+    ) -> (Book, [u8; 32], u128) {
+        let provider = Address::new([1; 32]);
+        let mut b = Book::new();
+        crate::native::role_stake::bond_role_for_test(
+            &mut b.state,
+            provider.as_bytes(),
+            NetworkRole::TeeProvider,
+            10_000_000 * TNZO,
+        );
+        for (key, v) in [
+            (TREASURY_LINE_KEY, live_from),
+            (economy::TREASURY_LEG_TEE_PARAM, leg_bps),
+        ] {
+            b.state.set_storage(
+                &SYSTEM_ADDRESS,
+                crate::native::governed_param_key(key).as_bytes(),
+                v.to_le_bytes().to_vec(),
+            );
+        }
+        let split = pay_to(provider);
+        let op = PlanOp::Open {
+            nonce: 1,
+            quote_digest: [9; 32],
+            split_hash: split.hash(),
+            split,
+            legs: vec![native(value)],
+            decide_deadline_ms: (T0 + 60_000) as u64,
+            agent: None,
+            attribution: None,
+        };
+        let id = b.send(&PAYER, op, T0).await.unwrap();
+        let held = b.balance(&provider);
+        (b, id, held)
+    }
+
+    /// While its gate is dormant a plan pays no treasury leg and records no
+    /// line, whatever the governed leg rate is.
+    #[tokio::test]
+    async fn a_dormant_treasury_line_leaves_a_plan_as_it_was() {
+        let (b, id, held) =
+            plan_to_tee_provider(crate::feature_gate::NEVER, 2_500, 100 * TNZO).await;
+        let (_, _, plain) = plan_to_tee_provider(crate::feature_gate::NEVER, 0, 100 * TNZO).await;
+        assert!(read_treasury_line(&b.state, &id).is_none());
+        let alloc = read_decision(&b.state, &id).unwrap().allocation.unwrap();
+        assert_eq!(held, alloc.credits[0]);
+        assert_eq!(held, plain);
+    }
+
+    /// Live, a plan fixes the leg rate of its provider's class at open and
+    /// its commit takes that share of the provider's credit for the
+    /// treasury; the vault keeps nothing and the value is conserved.
+    #[tokio::test]
+    async fn a_live_treasury_line_takes_the_rate_fixed_at_open() {
+        let treasury = crate::native::derive_treasury_address();
+        let (b, id, held) = plan_to_tee_provider(0, 2_500, 100 * TNZO).await;
+        let (plain_book, _, _) =
+            plan_to_tee_provider(crate::feature_gate::NEVER, 2_500, 100 * TNZO).await;
+        let line = read_treasury_line(&b.state, &id).unwrap();
+        assert_eq!((line.line, line.bps), (0, 2_500));
+        let alloc = read_decision(&b.state, &id).unwrap().allocation.unwrap();
+        assert_eq!(line.charged, alloc.credits[0] / 4);
+        assert_eq!(held, alloc.credits[0] - line.charged);
+        assert_eq!(
+            b.state.get_balance(treasury.as_bytes()),
+            plain_book.state.get_balance(treasury.as_bytes()) + line.charged
+        );
+        assert_eq!(b.state.get_balance(plan_vault_address(&id).as_bytes()), 0);
+        // What the provider can report as settled work is what it was paid.
+        let reported = settled_party(
+            &b.state,
+            &tenzro_types::settlement::leg_id(&id, 0),
+            &Address::new([1; 32]),
+        )
+        .unwrap()
+        .1;
+        assert_eq!(reported, held);
+    }
+
+    /// Live, a governed change of the leg rate after a plan opened does not
+    /// reach it: the commit takes the rate the plan fixed at open.
+    #[tokio::test]
+    async fn a_rate_change_after_open_does_not_reach_an_open_plan() {
+        let provider = Address::new([1; 32]);
+        let mut b = Book::new();
+        crate::native::role_stake::bond_role_for_test(
+            &mut b.state,
+            provider.as_bytes(),
+            NetworkRole::TeeProvider,
+            10_000_000 * TNZO,
+        );
+        let set = |b: &mut Book, key: &str, v: u64| {
+            b.state.set_storage(
+                &SYSTEM_ADDRESS,
+                crate::native::governed_param_key(key).as_bytes(),
+                v.to_le_bytes().to_vec(),
+            )
+        };
+        set(&mut b, TREASURY_LINE_KEY, 0);
+        set(&mut b, economy::TREASURY_LEG_TEE_PARAM, 2_500);
+        let PlanOp::Open { legs, .. } = open(
+            1,
+            vec![native(TNZO), hash_locked(LATE), remote_lock(5)],
+            T0 + 600_000,
+        ) else {
+            unreachable!()
+        };
+        let split = pay_to(provider);
+        let op = PlanOp::Open {
+            nonce: 1,
+            quote_digest: [9; 32],
+            split_hash: split.hash(),
+            split,
+            legs,
+            decide_deadline_ms: (T0 + 600_000) as u64,
+            agent: None,
+            attribution: None,
+        };
+        let id = b.send(&PAYER, op, T0).await.unwrap();
+        assert_eq!(read_plan(&b.state, &id).unwrap().status, PlanStatus::Open);
+        set(&mut b, economy::TREASURY_LEG_TEE_PARAM, 9_000);
+        seed_evidence(&mut b, &id, 1, LegClass::Proven);
+        seed_evidence(&mut b, &id, 2, LegClass::Attested);
+        let reveal = PlanOp::ProveLeg {
+            plan_id: id,
+            index: 1,
+            evidence: SECRET.to_vec(),
+            network_fee: 0,
+        };
+        b.send(&[5; 32], reveal, T0 + 1_000).await.unwrap();
+        let decision = read_decision(&b.state, &id).unwrap();
+        assert!(decision.commit);
+        let line = read_treasury_line(&b.state, &id).unwrap();
+        assert_eq!(line.bps, 2_500);
+        let credit = decision.allocation.unwrap().credits[0];
+        assert_eq!(line.charged, credit / 4);
+        assert_eq!(b.balance(&provider), credit - line.charged);
+        assert_eq!(b.balance(&plan_vault_address(&id)), 0);
+    }
+
+    /// Live, a line is fixed only for a named provider with a rate above
+    /// zero: a payee that holds no provider bond gets none.
+    #[tokio::test]
+    async fn a_live_treasury_line_needs_a_provider_and_a_rate() {
+        let (b, id, _) = plan_to_tee_provider(0, 0, 100 * TNZO).await;
+        assert!(read_treasury_line(&b.state, &id).is_none());
+        let mut b = Book::new();
+        b.state.set_storage(
+            &SYSTEM_ADDRESS,
+            crate::native::governed_param_key(TREASURY_LINE_KEY).as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+        let split = pay_to(Address::new([2; 32]));
+        let op = PlanOp::Open {
+            nonce: 1,
+            quote_digest: [9; 32],
+            split_hash: split.hash(),
+            split,
+            legs: vec![native(100 * TNZO)],
+            decide_deadline_ms: (T0 + 60_000) as u64,
+            agent: None,
+            attribution: None,
+        };
+        let id = b.send(&PAYER, op, T0).await.unwrap();
+        assert!(read_treasury_line(&b.state, &id).is_none());
     }
 
     /// A provider paid by another party earns provider reward weight of the
@@ -2794,6 +3206,91 @@ mod tests {
             coupons[0].amount,
             fee * u128::from(rewards::DEFAULT_PROVIDER_REWARD_COST_BPS) / 10_000
         );
+    }
+
+    /// The availability reward's paid-activity requirement counts provider
+    /// work, and a plan paid by an identity of the provider's own root
+    /// records none: paying oneself does not make an operator eligible,
+    /// while the same plan paid by another root's identity counts for the
+    /// weight its fee earns.
+    #[tokio::test]
+    async fn a_self_paid_plan_is_not_paid_activity() {
+        use crate::native::{availability_reward, rewards};
+        let validator = Address::new([0x55; 32]);
+        let provider = Address::new([1; 32]);
+        for (payer_did, own) in [
+            ("did:tenzro:machine:alice:agent-a", true),
+            ("did:tenzro:machine:bob:agent-a", false),
+        ] {
+            let mut b = Book::new();
+            crate::native::set_genesis_param(
+                &mut b.state,
+                availability_reward::AVAILABILITY_PAID_ACTIVITY_GATE,
+                0,
+            );
+            for (addr, did) in [
+                (Address::new(PAYER), payer_did),
+                (provider, "did:tenzro:machine:alice:agent-b"),
+            ] {
+                b.state.set_storage(
+                    &SYSTEM_ADDRESS,
+                    crate::native::identity_wallet_index_key(addr.as_bytes()).as_bytes(),
+                    did.as_bytes().to_vec(),
+                );
+            }
+            b.state.set_storage(
+                &SYSTEM_ADDRESS,
+                rewards::REWARD_SCHEDULE_KEY.as_bytes(),
+                rewards::genesis_reward_schedule(86_400_000).unwrap(),
+            );
+            rewards::begin_block(&mut b.state, 0, &validator, T0).unwrap();
+            let split = pay_to(provider);
+            let op = PlanOp::Open {
+                nonce: 1,
+                quote_digest: [9; 32],
+                split_hash: split.hash(),
+                split,
+                legs: vec![native(100 * TNZO)],
+                decide_deadline_ms: (T0 + 60_000) as u64,
+                agent: None,
+                attribution: None,
+            };
+            let id = b.send(&PAYER, op, T0).await.unwrap();
+            let fee = read_decision(&b.state, &id)
+                .unwrap()
+                .allocation
+                .unwrap()
+                .fee
+                .fee;
+            let report = crate::funding::FundingOp::ReportSettledWork {
+                legs: vec![tenzro_types::settlement::leg_id(&id, 0)],
+            };
+            let reported = b
+                .run(
+                    provider.as_bytes(),
+                    super::super::super::funding::SELECTOR_FUNDING,
+                    serde_json::to_vec(&report).unwrap(),
+                    T0 + 1,
+                )
+                .await;
+            let earned = rewards::provider_work_since(&b.state, &provider, 0).unwrap();
+            let met =
+                availability_reward::paid_activity_met(&b.state, provider.as_bytes()).unwrap();
+            if own {
+                assert!(reported.is_err());
+                assert_eq!(earned, 0);
+                assert!(!met);
+            } else {
+                reported.unwrap();
+                assert_eq!(
+                    earned,
+                    fee * u128::from(rewards::DEFAULT_PROVIDER_REWARD_COST_BPS) / 10_000
+                );
+                let least =
+                    u128::from(availability_reward::DEFAULT_AVAILABILITY_REWARD_MIN_PAID_WORK);
+                assert_eq!(met, earned >= least);
+            }
+        }
     }
 
     #[tokio::test]
@@ -2986,6 +3483,7 @@ mod tests {
             token_pool: route.local_endpoint,
             token: route.remote_token,
             amount,
+            finality: tenzro_bridge::route::finality::WAIT_FOR_FINALITY,
         };
         let packet = outbound_packet(&route, &message, (T0 / 1000) as u64 + 600).unwrap();
         let out_key = tenzro_bridge::route::state::outbound_key(&route, 1);

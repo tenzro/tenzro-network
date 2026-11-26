@@ -100,6 +100,15 @@ impl ZkClient {
             .await
     }
 
+    /// Hands a proof envelope (bincode `tenzro_zk::Proof`, hex) to every
+    /// validator of the current committee, each of which verifies it and
+    /// attests it (`tenzro_sendZkProof`).
+    pub async fn send_proof(&self, proof: &str) -> SdkResult<serde_json::Value> {
+        self.rpc
+            .call("tenzro_sendZkProof", serde_json::json!({ "proof": proof }))
+            .await
+    }
+
     /// The circuits the node proves and verifies, with their proof systems
     /// (`tenzro_listCircuits`).
     pub async fn list_circuits(&self) -> SdkResult<Vec<CircuitInfo>> {

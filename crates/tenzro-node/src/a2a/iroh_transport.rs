@@ -79,7 +79,11 @@ mod tests {
 
     async fn dispatcher() -> (IrohA2aDispatcher, Arc<A2aState>, tempfile::TempDir) {
         let (node, tmp) = crate::bare_node().await;
-        let state = super::super::server::build_a2a_state(node, Arc::new(WebState::new()));
+        let state = super::super::server::build_a2a_state(
+            node,
+            Arc::new(WebState::new()),
+            Some(crate::a2a::did_envelope::tests::TEST_AUDIENCE.to_string()),
+        );
         (IrohA2aDispatcher::new(state.clone()), state, tmp)
     }
 
@@ -165,37 +169,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_task_that_does_not_exist_is_an_error_not_an_empty_answer() {
+    async fn a_task_read_without_the_did_envelope_is_refused() {
         let (d, _state, _tmp) = dispatcher().await;
-        let reply = call(
-            &d,
-            br#"{"jsonrpc":"2.0","method":"GetTask","params":{"id":"missing"},"id":9}"#,
-        )
-        .await;
-        assert!(reply["error"].is_object(), "{reply}");
-        assert_eq!(reply["id"], 9);
+        for body in [
+            &br#"{"jsonrpc":"2.0","method":"GetTask","params":{"id":"missing"},"id":9}"#[..],
+            br#"{"jsonrpc":"2.0","method":"ListTasks","params":{},"id":9}"#,
+            br#"{"jsonrpc":"2.0","method":"ListTasks","id":9}"#,
+        ] {
+            let reply = call(&d, body).await;
+            assert_eq!(code(&reply), -32050, "{reply}");
+            assert!(reply["result"].is_null(), "{reply}");
+            assert_eq!(reply["id"], 9);
+        }
     }
 
-    /// A2A over a real iroh pair: the framed request reaches the dispatcher
-    /// and the framed reply comes back, for the read methods and for a
-    /// state-changing one that is refused for want of the DID envelope.
+    /// A2A over a real iroh pair, two clients of one node: the framed
+    /// request reaches the dispatcher and the framed reply comes back; each
+    /// client opens a task and lists and gets only its own, and a read or a
+    /// message without the DID envelope is refused.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a2a_methods_are_reachable_over_a_real_iroh_pair() {
+    async fn over_iroh_a_client_reads_only_its_own_tasks_and_an_unsigned_call_is_refused() {
+        use super::super::server::tests::{listed_ids, signed_body, two_clients};
         use tenzro_iroh::identity_transport::base_builder;
         use tenzro_iroh::limits::AdmissionLimits;
         use tenzro_iroh::{ALPN_A2A, JsonRpcProtocol};
 
-        let (d, state, _tmp) = dispatcher().await;
-        let server = base_builder().bind().await.unwrap();
+        let (state, alice, bob, _tmp) = two_clients().await;
+        let d = IrohA2aDispatcher::new(state.clone());
+        let server = tenzro_iroh::identity_transport::on_loopback(base_builder())
+            .bind()
+            .await
+            .unwrap();
         let router = iroh::protocol::Router::builder(server.clone())
             .accept(
                 ALPN_A2A,
                 JsonRpcProtocol::a2a(Arc::new(d), AdmissionLimits::default()),
             )
             .spawn();
-        let client = base_builder().bind().await.unwrap();
+        let client = tenzro_iroh::identity_transport::on_loopback(base_builder())
+            .bind()
+            .await
+            .unwrap();
 
-        let ask = |body: &'static str| {
+        let ask = |body: serde_json::Value| {
             let client = client.clone();
             let addr = server.addr();
             async move {
@@ -203,27 +219,80 @@ mod tests {
                     &client,
                     addr,
                     ALPN_A2A,
-                    Bytes::from_static(body.as_bytes()),
+                    Bytes::from(serde_json::to_vec(&body).unwrap()),
                 )
                 .await
                 .expect("a framed reply");
                 serde_json::from_slice::<serde_json::Value>(&out).expect("a JSON-RPC reply")
             }
         };
+        let message = |text: &str| {
+            serde_json::json!({
+                "message": {"messageId": "m1", "role": "ROLE_USER", "parts": [{"text": text}]}
+            })
+        };
 
-        let list = ask(r#"{"jsonrpc":"2.0","method":"ListTasks","params":{},"id":1}"#).await;
-        assert_eq!(list["result"]["totalSize"], 0, "{list}");
-
-        let missing =
-            ask(r#"{"jsonrpc":"2.0","method":"GetTask","params":{"id":"nope"},"id":2}"#).await;
-        assert!(missing["error"].is_object(), "{missing}");
-
-        let send = ask(
-            r#"{"jsonrpc":"2.0","method":"SendMessage","params":{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"hi"}]}},"id":3}"#,
-        )
+        let a = ask(signed_body(
+            &alice,
+            "SendMessage",
+            message("what is the node status? alice-private-question"),
+        ))
         .await;
-        assert_eq!(code(&send), -32050, "{send}");
-        assert_eq!(state.task_manager.task_count(), 0);
+        let a_id = a["result"]["task"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{a}"))
+            .to_string();
+        let b = ask(signed_body(
+            &bob,
+            "SendMessage",
+            message("what is the node status? bob-private-question"),
+        ))
+        .await;
+        let b_id = b["result"]["task"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{b}"))
+            .to_string();
+
+        let mine = ask(signed_body(&alice, "ListTasks", serde_json::json!({}))).await;
+        assert_eq!(listed_ids(&mine), std::slice::from_ref(&a_id), "{mine}");
+        assert!(!mine.to_string().contains("bob-private-question"), "{mine}");
+        let theirs = ask(signed_body(
+            &bob,
+            "ListTasks",
+            serde_json::json!({ "includeArtifacts": true }),
+        ))
+        .await;
+        assert_eq!(listed_ids(&theirs), std::slice::from_ref(&b_id), "{theirs}");
+        assert!(
+            !theirs.to_string().contains("alice-private-question"),
+            "{theirs}"
+        );
+
+        let own = ask(signed_body(
+            &bob,
+            "GetTask",
+            serde_json::json!({ "id": b_id }),
+        ))
+        .await;
+        assert_eq!(own["result"]["id"], b_id.as_str(), "{own}");
+        let other = ask(signed_body(
+            &bob,
+            "GetTask",
+            serde_json::json!({ "id": a_id }),
+        ))
+        .await;
+        assert_eq!(code(&other), -32001, "{other}");
+        assert!(!other.to_string().contains("alice-private-question"));
+
+        for body in [
+            serde_json::json!({"jsonrpc":"2.0","method":"ListTasks","params":{},"id":1}),
+            serde_json::json!({"jsonrpc":"2.0","method":"GetTask","params":{"id":a_id},"id":2}),
+            serde_json::json!({"jsonrpc":"2.0","method":"SendMessage","params":message("hi"),"id":3}),
+        ] {
+            let unsigned = ask(body).await;
+            assert_eq!(code(&unsigned), -32050, "{unsigned}");
+        }
+        assert_eq!(state.task_manager.task_count(), 2);
 
         router.shutdown().await.unwrap();
     }

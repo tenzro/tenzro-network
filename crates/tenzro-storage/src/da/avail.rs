@@ -7,10 +7,10 @@
 //! abstracts over the underlying substrate JSON-RPC:
 //!
 //! - `POST /v2/submit`                     — submit a data payload, returns
-//!     `{ "block_number": N, "block_hash": "0x...", "hash": "0x...",
-//!        "index": K }`
+//!   `{ "block_number": N, "block_hash": "0x...", "hash": "0x...",
+//!   "index": K }`
 //! - `GET  /v2/blocks/{block_number}/data?fields=data` — fetch the submitted
-//!     payloads from a block (filterable by extrinsic index)
+//!   payloads from a block (filterable by extrinsic index)
 //! - `GET  /v2/status`                     — liveness + sync status
 //!
 //! The light client also performs KZG-based data-availability sampling
@@ -22,23 +22,23 @@
 //! # Wire model
 //!
 //! - `submit(namespace, payload)` — POSTs the payload as JSON
-//!     `{"data": "<base64>"}` to `/v2/submit`. Avail responds with the
-//!     `block_number`, `block_hash`, `hash` (data hash), and `index`
-//!     (extrinsic position). The locator is `"{block_number}:{index}"` UTF-8
-//!     bytes — sufficient to recover the payload via the block-data endpoint.
-//!     `commitment_kzg` carries the 32-byte `hash` (data hash) Avail returns,
-//!     and `attestation_root` carries the `block_hash` so a verifier can
-//!     cross-check the data root against the canonical block header.
+//!   `{"data": "<base64>"}` to `/v2/submit`. Avail responds with the
+//!   `block_number`, `block_hash`, `hash` (data hash), and `index`
+//!   (extrinsic position). The locator is `"{block_number}:{index}"` UTF-8
+//!   bytes — sufficient to recover the payload via the block-data endpoint.
+//!   `commitment_kzg` carries the 32-byte `hash` (data hash) Avail returns,
+//!   and `attestation_root` carries the `block_hash` so a verifier can
+//!   cross-check the data root against the canonical block header.
 //!
 //! - `fetch(pointer)` — parses the `{block_number}:{index}` locator and GETs
-//!     `/v2/blocks/{block_number}/data?fields=data&decode=true`, then walks
-//!     the `data_transactions` array to pluck the entry at the matching index.
-//!     Avail returns the payload base64-encoded; we decode before returning.
+//!   `/v2/blocks/{block_number}/data?fields=data&decode=true`, then walks
+//!   the `data_transactions` array to pluck the entry at the matching index.
+//!   Avail returns the payload base64-encoded; we decode before returning.
 //!
 //! - `verify_availability(pointer)` — re-fetches the block data via the
-//!     same endpoint and confirms the index resolves. The light client's
-//!     local DA-sampling guarantees attest availability at submission time;
-//!     this method is the cheap "still there" probe.
+//!   same endpoint and confirms the index resolves. The light client's
+//!   local DA-sampling guarantees attest availability at submission time;
+//!   this method is the cheap "still there" probe.
 //!
 //! # Dual commitment model
 //!

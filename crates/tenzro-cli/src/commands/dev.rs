@@ -18,8 +18,7 @@ use crate::output;
 /// Why `tenzro dev` refuses on a machine without a hardware key store.
 pub const NEEDS_HARDWARE: &str = "tenzro dev keeps every key in this machine's hardware key store \
      (a TPM 2.0 on Linux or Windows, the Secure Enclave on macOS), and none was found. \
-     Keys are never held in software or in files. Use a machine with a TPM 2.0 or a Mac, \
-     or use the public network with a passkey: tenzro setup --path network";
+     Keys are never held in software or in files. Use a machine with a TPM 2.0 or a Mac.";
 
 /// Start a local single-validator chain for development
 #[derive(Debug, Parser)]

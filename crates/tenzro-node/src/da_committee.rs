@@ -118,9 +118,27 @@ pub enum DaCommitteeError {
     /// A challenge named a committee index that is not in the current set.
     #[error("no committee member at index {0}")]
     NoSuchMember(usize),
+    /// A blob too large for its slivers to fit one store request each.
+    #[error("blob of {len} bytes exceeds the {max} bytes a committee of {n} can store")]
+    BlobTooLarge { len: usize, max: usize, n: usize },
 }
 
 type Result<T> = std::result::Result<T, DaCommitteeError>;
+
+/// Room a store request needs beyond its sliver bytes: the Merkle proofs of
+/// both slivers and the request framing.
+const STORE_REQUEST_OVERHEAD: usize = 64 * 1024;
+
+/// Largest blob a committee of `shape` can store: every member's sliver
+/// pair, with its proofs and framing, fits one store request of at most
+/// [`MAX_STORE_REQUEST`](tenzro_iroh::MAX_STORE_REQUEST) bytes. A sliver pair
+/// is `rows + cols` symbols of a blob split into `rows * cols`.
+pub fn max_blob_len(shape: CommitteeShape) -> usize {
+    let symbols_per_pair = shape.rows() + shape.cols();
+    let max_symbol_len =
+        (tenzro_iroh::MAX_STORE_REQUEST - STORE_REQUEST_OVERHEAD) / symbols_per_pair;
+    max_symbol_len * shape.rows() * shape.cols()
+}
 
 /// One validator's view within the committee: its canonical index, on-chain
 /// address, and the hardware identity key its attestations are rooted in.
@@ -135,6 +153,13 @@ pub struct CommitteeMember {
     /// when the member's machine identity has no registered key: such a
     /// member cannot attest.
     pub public_key: Option<CompositePublicKey>,
+}
+
+impl CommitteeMember {
+    /// Whether `identity` is this member's registered machine key.
+    pub fn is_key(&self, identity: &CompositePublicKey) -> bool {
+        self.public_key.as_ref() == Some(identity)
+    }
 }
 
 /// Snapshot of the active validator committee. The backend calls this once per
@@ -381,10 +406,14 @@ impl AvailabilityCertificate {
     }
 }
 
-/// A committee member's address: the ledger account of its hardware identity
-/// key, the account a validator registers and stakes from.
-pub fn committee_address(identity: &CompositePublicKey) -> Address {
-    Address::new(identity.account_slot())
+/// This node's member of `members`: the one whose registered machine key is
+/// `identity`, the node's hardware identity key. A validator's ledger account
+/// is not derived from that key, so the member is found by key, not address.
+pub fn local_member(
+    members: &[CommitteeMember],
+    identity: &CompositePublicKey,
+) -> Option<CommitteeMember> {
+    members.iter().find(|m| m.is_key(identity)).cloned()
 }
 
 /// Canonical message a member signs to attest sliver custody: the blob
@@ -745,7 +774,6 @@ impl Default for DaCommitteeStore {
 /// slivers and self-heals.
 pub struct DaCommitteeBackend {
     local: Arc<dyn RecordSigner>,
-    local_address: Address,
     committee: Arc<dyn CommitteeView>,
     surface: Arc<dyn DaCommitteeSurface>,
     store: Arc<DaCommitteeStore>,
@@ -771,18 +799,16 @@ pub struct CertifiedObject {
 impl DaCommitteeBackend {
     /// Construct a backend. `local` is the node's session signer, certified
     /// by its hardware identity key; it signs the local node's own attestation
-    /// when it holds a sliver. The node's committee address is the ledger
-    /// account of that identity key ([`committee_address`]).
+    /// when it holds a sliver. The node's member of the committee is the one
+    /// its identity key is registered for ([`local_member`]).
     pub fn new(
         local: Arc<dyn RecordSigner>,
         committee: Arc<dyn CommitteeView>,
         surface: Arc<dyn DaCommitteeSurface>,
         store: Arc<DaCommitteeStore>,
     ) -> Result<Self> {
-        let local_address = committee_address(local.identity());
         Ok(Self {
             local,
-            local_address,
             committee,
             surface,
             store,
@@ -812,20 +838,26 @@ impl DaCommitteeBackend {
         Timestamp::now().0
     }
 
-    /// Sign the local node's attestation for `commitment`.
-    fn sign_local_attestation(&self, commitment: &Hash) -> Result<MemberAttestation> {
-        let msg = attestation_message(commitment, &self.local_address);
+    /// Whether `member` is this node.
+    fn is_local(&self, member: &CommitteeMember) -> bool {
+        member.is_key(self.local.identity())
+    }
+
+    /// Sign the local node's attestation for `commitment` as `member`, this
+    /// node's seat in the committee.
+    fn sign_local_attestation(
+        &self,
+        commitment: &Hash,
+        member: &CommitteeMember,
+    ) -> Result<MemberAttestation> {
+        let msg = attestation_message(commitment, &member.address);
         let signature = self
             .local
             .sign_record(&msg)
             .map_err(|e| DaCommitteeError::Signing(e.to_string()))?;
-        // The local index in the committee (if present) is resolved by the
-        // caller who owns the member list; store a sentinel here and let the
-        // caller patch the index. Kept as a separate helper so both the local
-        // and remote attestation paths funnel through one signature routine.
         Ok(MemberAttestation {
-            index: usize::MAX,
-            address: self.local_address,
+            index: member.index,
+            address: member.address,
             signature,
         })
     }
@@ -857,9 +889,10 @@ impl DaCommitteeBackend {
         self.committee.members()
     }
 
-    /// This node's committee address.
-    pub fn local_address(&self) -> Address {
-        self.local_address
+    /// This node's validator address in the current committee; `None`
+    /// while this node is not a member.
+    pub fn local_address(&self) -> Option<Address> {
+        local_member(&self.committee.members(), self.local.identity()).map(|m| m.address)
     }
 
     /// Issue a possession challenge against committee member `target_index`
@@ -895,7 +928,7 @@ impl DaCommitteeBackend {
         rand::rngs::OsRng.fill_bytes(&mut nonce);
         let issued_at_ms = Self::now_ms();
 
-        let outcome = if member.address == self.local_address {
+        let outcome = if self.is_local(member) {
             // Self-audit: verify our own custody directly (no wire hop, no
             // signature — we would be signing to ourselves).
             match self.store.get_sliver(commitment) {
@@ -979,7 +1012,7 @@ impl DaCommitteeBackend {
         // same (index, address) slot in the live set — are fair targets.
         let targets: Vec<&CommitteeMember> = members
             .iter()
-            .filter(|m| m.address != self.local_address)
+            .filter(|m| !self.is_local(m))
             .filter(|m| {
                 cert.attestations
                     .iter()
@@ -1118,6 +1151,16 @@ impl DaCommitteeBackend {
         let n = members.len();
         let shape = CommitteeShape::from_committee_size(n)
             .map_err(|_| DaCommitteeError::CommitteeTooSmall(n))?;
+        // Refuse before encoding: every member would refuse its sliver, and
+        // the encoding alone holds several copies of the blob in memory.
+        let max = max_blob_len(shape);
+        if payload.len() > max {
+            return Err(DaCommitteeError::BlobTooLarge {
+                len: payload.len(),
+                max,
+                n,
+            });
+        }
 
         let encoded: EncodedBlob =
             redstuff::encode(payload, shape).map_err(|e| DaCommitteeError::Core(e.to_string()))?;
@@ -1131,7 +1174,7 @@ impl DaCommitteeBackend {
         for member in &members {
             // A member index maps 1:1 to the encoded sliver at that index.
             let sliver = &encoded.slivers[member.index];
-            if member.address == self.local_address {
+            if self.is_local(member) {
                 // Local custody + self-attestation.
                 self.store.put_sliver(StoredSliver {
                     shape,
@@ -1140,9 +1183,7 @@ impl DaCommitteeBackend {
                     commitment,
                     sliver: sliver.clone(),
                 })?;
-                let mut att = self.sign_local_attestation(&commitment)?;
-                att.index = member.index;
-                attestations.push(att);
+                attestations.push(self.sign_local_attestation(&commitment, member)?);
                 continue;
             }
             let store_fut = self.surface.store_sliver(
@@ -1237,7 +1278,7 @@ impl DaCommitteeBackend {
             if collected.iter().any(|s| s.node_index == member.index) {
                 continue;
             }
-            let sliver = if member.address == self.local_address {
+            let sliver = if self.is_local(member) {
                 self.store.get_sliver(&commitment).map(|s| s.sliver)
             } else {
                 match tokio::time::timeout(
@@ -1301,7 +1342,7 @@ impl DaCommitteeBackend {
         // No local cert: probe members. The first sliver whose self-consistent
         // proof reproduces `commitment` teaches us the shape/length.
         for member in members {
-            let sliver = if member.address == self.local_address {
+            let sliver = if self.is_local(member) {
                 self.store
                     .get_sliver(commitment)
                     .map(|s| (s.shape, s.blob_len, s.symbol_len, s.sliver))
@@ -1374,7 +1415,7 @@ impl DaCommitteeBackend {
             return;
         }
         for member in members {
-            if member.address == self.local_address {
+            if self.is_local(member) {
                 if self.store.get_sliver(commitment).is_none() {
                     let _ = self.store.put_sliver(StoredSliver {
                         shape,
@@ -1443,7 +1484,7 @@ impl DaCommitteeBackend {
         let quorum = shape.quorum();
         let mut held = 0usize;
         for member in &members {
-            let present = if member.address == self.local_address {
+            let present = if self.is_local(member) {
                 self.store.get_sliver(&commitment).is_some()
             } else {
                 matches!(
@@ -1470,7 +1511,7 @@ impl DaCommitteeBackend {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tenzro_crypto::batch::ImmediateRecordSigner;
     use tenzro_crypto::composite::HybridSigner;
@@ -1485,8 +1526,13 @@ mod tests {
         TestHybridSigner::p256_only(seed)
     }
 
+    /// A validator's ledger account. It is not derived from the member's
+    /// identity key: a node finds its own seat by key, never by address.
     fn member_address(seed: u8) -> Address {
-        committee_address(identity_of(seed).public_key())
+        let mut account = [0u8; 32];
+        account[0] = 0xa0;
+        account[1] = seed;
+        Address::new(account)
     }
 
     fn session_of(seed: u8) -> ImmediateRecordSigner {
@@ -1499,13 +1545,13 @@ mod tests {
 
     /// A static committee view for tests: `n` validators with test identity
     /// keys.
-    struct StaticCommittee {
+    pub(crate) struct StaticCommittee {
         members: Vec<CommitteeMember>,
         keypairs: Vec<u8>,
     }
 
     impl StaticCommittee {
-        fn new(n: usize) -> Self {
+        pub(crate) fn new(n: usize) -> Self {
             let mut members = Vec::with_capacity(n);
             let mut keypairs = Vec::with_capacity(n);
             for index in 0..n {
@@ -1530,7 +1576,7 @@ mod tests {
     /// In-memory mesh surface: every member (except the writer, which stores
     /// locally) holds a `DaCommitteeStore`, signs with its own keypair, and can
     /// be selectively made non-responsive to model faults.
-    struct MeshSurface {
+    pub(crate) struct MeshSurface {
         stores: Vec<Arc<DaCommitteeStore>>,
         signers: Vec<ImmediateRecordSigner>,
         addresses: Vec<Address>,
@@ -1540,7 +1586,7 @@ mod tests {
     }
 
     impl MeshSurface {
-        fn new(committee: &StaticCommittee, offline: &[usize]) -> Self {
+        pub(crate) fn new(committee: &StaticCommittee, offline: &[usize]) -> Self {
             let n = committee.members.len();
             let mut stores = Vec::with_capacity(n);
             let mut signers = Vec::with_capacity(n);
@@ -1694,7 +1740,7 @@ mod tests {
     }
 
     /// Build a backend whose local node is committee member 0.
-    fn backend_for(
+    pub(crate) fn backend_for(
         committee: &StaticCommittee,
         surface: Arc<dyn DaCommitteeSurface>,
     ) -> DaCommitteeBackend {
@@ -1742,6 +1788,26 @@ mod tests {
 
         let fetched = backend.fetch(&pointer).await.unwrap();
         assert_eq!(fetched, payload);
+    }
+
+    /// A blob whose slivers would not fit one store request each is refused
+    /// before it is encoded; the largest blob that fits is stored.
+    #[tokio::test]
+    async fn submit_refuses_a_blob_too_large_for_one_store_request() {
+        let committee = StaticCommittee::new(4); // n=4, f=1: the largest slivers
+        let surface = Arc::new(MeshSurface::new(&committee, &[]));
+        let backend = backend_for(&committee, surface);
+        let max = max_blob_len(CommitteeShape::from_committee_size(4).unwrap());
+
+        let err = backend
+            .submit(b"ns", &vec![3u8; max + 1])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+
+        let payload = vec![5u8; max];
+        let pointer = backend.submit(b"ns", &payload).await.unwrap();
+        assert_eq!(backend.fetch(&pointer).await.unwrap(), payload);
     }
 
     #[tokio::test]
@@ -2045,7 +2111,7 @@ mod tests {
         // Fair targeting: only attesters are challenged, and attesters stored
         // + verified their slivers, so an honest mesh always passes.
         assert_eq!(record.outcome, ChallengeOutcome::Passed);
-        assert_ne!(record.target_address, backend.local_address());
+        assert_ne!(Some(record.target_address), backend.local_address());
         let cert = backend.store.get_cert(&commitment).unwrap();
         assert!(
             cert.attestations
@@ -2153,10 +2219,28 @@ mod tests {
     }
 
     #[test]
+    fn a_node_finds_its_seat_by_identity_key_not_by_account() {
+        let committee = StaticCommittee::new(4);
+        let surface = Arc::new(MeshSurface::new(&committee, &[]));
+        let backend = backend_for(&committee, surface);
+        // The validator account is not the identity key's own account.
+        assert_ne!(
+            member_address(1),
+            Address::new(identity_of(1).public_key().account_slot())
+        );
+        assert_eq!(backend.local_address(), Some(member_address(1)));
+        assert_eq!(
+            local_member(&committee.members, identity_of(3).public_key()).map(|m| m.index),
+            Some(2)
+        );
+        assert!(local_member(&committee.members, identity_of(9).public_key()).is_none());
+    }
+
+    #[test]
     fn a_batch_signed_attestation_verifies_and_a_wrong_commitment_does_not() {
         use crate::batch_signing::test_support::Immediate;
         let signer = Immediate::new(31);
-        let address = committee_address(signer.identity());
+        let address = member_address(31);
         let member = CommitteeMember {
             index: 0,
             address,

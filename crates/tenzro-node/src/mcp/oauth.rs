@@ -493,7 +493,10 @@ pub(crate) fn registered_genesis_key(
 /// from, whose key `genesis_key` recalls), the assertion must be a
 /// `webauthn.get` over exactly this challenge for this node's relying party
 /// with user verification, and the account's owner must be a registered,
-/// active human identity. Any linked passkey signs in as that owner.
+/// active human identity. Any linked passkey signs in as that owner. The
+/// assertion is made on the relying party's site or, for a passkey of this
+/// node's relying party, in an Android app whose origin the node's policy
+/// lists.
 ///
 /// The ML-DSA-65 leg is required: it must verify over the challenge under
 /// the account-owner context against the ML-DSA-65 key enrolled for the
@@ -508,6 +511,99 @@ pub fn verify_passkey_login(
     genesis_key: impl Fn(&[u8]) -> Option<Vec<u8>>,
     identity_pq_key: impl Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<String, String> {
+    verify_login(
+        validator,
+        challenge,
+        login,
+        PqLeg::Required,
+        is_active_human,
+        genesis_key,
+        identity_pq_key,
+    )
+    .map(|(did, _)| did)
+}
+
+/// [`verify_passkey_login`] for a sign-in whose token opens only the calls of
+/// a paired device: the ML-DSA-65 leg is verified when the login carries one
+/// and may be left out. Returns the DID and whether the leg came with it.
+pub fn verify_passkey_login_for_pairing(
+    validator: &tenzro_vm::WebAuthnValidator,
+    challenge: &[u8; 32],
+    login: &PasskeyLogin<'_>,
+    is_active_human: impl Fn(&str) -> bool,
+    genesis_key: impl Fn(&[u8]) -> Option<Vec<u8>>,
+    identity_pq_key: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(String, bool), String> {
+    verify_login(
+        validator,
+        challenge,
+        login,
+        PqLeg::WhenPresent,
+        is_active_human,
+        genesis_key,
+        identity_pq_key,
+    )
+}
+
+/// Most accounts tried for one credential in a login that names none.
+const MAX_ACCOUNTS_PER_CREDENTIAL: usize = 8;
+
+/// [`verify_passkey_login_for_pairing`] for a login that names no account
+/// (`login.account_address` is not read): the accounts whose keystore links
+/// the credential on `rp_id` are tried in turn, and the first whose passkey
+/// verifies the assertion signs in. Which accounts link a credential is
+/// learnt only through an assertion that verifies; every failure reads the
+/// same.
+pub fn verify_passkey_login_by_credential(
+    validator: &tenzro_vm::WebAuthnValidator,
+    challenge: &[u8; 32],
+    rp_id: &str,
+    login: &PasskeyLogin<'_>,
+    is_active_human: impl Fn(&str) -> bool,
+    identity_pq_key: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(String, bool), String> {
+    let refused = || "that passkey signs in no identity on this node".to_string();
+    let credential_id = URL_SAFE_NO_PAD
+        .decode(login.credential_id_b64.trim_end_matches('='))
+        .map_err(|_| "credential_id is not base64url".to_string())?;
+    let accounts =
+        tenzro_vm::keystore::resolve_credential(&validator.state(), rp_id, &credential_id);
+    for account in accounts.iter().take(MAX_ACCOUNTS_PER_CREDENTIAL) {
+        let named = PasskeyLogin {
+            account_address: account,
+            ..*login
+        };
+        if let Ok(signed_in) = verify_login(
+            validator,
+            challenge,
+            &named,
+            PqLeg::WhenPresent,
+            &is_active_human,
+            |_: &[u8]| None,
+            &identity_pq_key,
+        ) {
+            return Ok(signed_in);
+        }
+    }
+    Err(refused())
+}
+
+/// Whether a passkey login must carry its ML-DSA-65 leg.
+#[derive(Clone, Copy)]
+enum PqLeg {
+    Required,
+    WhenPresent,
+}
+
+fn verify_login(
+    validator: &tenzro_vm::WebAuthnValidator,
+    challenge: &[u8; 32],
+    login: &PasskeyLogin<'_>,
+    pq: PqLeg,
+    is_active_human: impl Fn(&str) -> bool,
+    genesis_key: impl Fn(&[u8]) -> Option<Vec<u8>>,
+    identity_pq_key: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(String, bool), String> {
     let b64 = |field: &str, v: &str| -> Result<Vec<u8>, String> {
         URL_SAFE_NO_PAD
             .decode(v.trim_end_matches('='))
@@ -543,13 +639,28 @@ pub fn verify_passkey_login(
         signature: b64("signature", login.signature_b64)?,
         user_handle: None,
     };
+    // An Android app reports the hash of its signing certificate as its
+    // origin. A passkey linked under this node's relying party signs in from
+    // the app origins the node's policy lists; a web origin listed there is
+    // not handed on, so a login from one stays refused.
+    let app_origins = match validator.relying_party() {
+        tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
+            rp_id,
+            related_origins,
+        } if *rp_id == key.rp_id => related_origins
+            .iter()
+            .filter(|origin| tenzro_crypto::webauthn::is_android_app_origin(origin))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    };
     tenzro_crypto::webauthn::verify_webauthn_assertion_require_uv(
         &assertion,
         &xy,
         &URL_SAFE_NO_PAD.encode(challenge),
         &tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
             rp_id: key.rp_id.clone(),
-            related_origins: Vec::new(),
+            related_origins: app_origins,
         },
         tenzro_crypto::webauthn::WebAuthnCeremonyType::Get,
     )
@@ -557,9 +668,38 @@ pub fn verify_passkey_login(
 
     // Every passkey linked to the account signs in as the account's owner.
     let did = keystore.owner_did.clone();
+    let post_quantum = !matches!((pq, login.ml_dsa_signature_hex), (PqLeg::WhenPresent, None));
+    if post_quantum {
+        verify_pq_leg(
+            validator,
+            challenge,
+            login,
+            &key.public_key,
+            &did,
+            identity_pq_key,
+        )?;
+    }
+    if !is_active_human(&did) {
+        return Err(format!(
+            "{did} is not an active human identity on this node"
+        ));
+    }
+    Ok((did, post_quantum))
+}
+
+/// The ML-DSA-65 leg of a passkey login: over the challenge, under the
+/// account-owner context, against the key enrolled for the passkey.
+fn verify_pq_leg(
+    validator: &tenzro_vm::WebAuthnValidator,
+    challenge: &[u8; 32],
+    login: &PasskeyLogin<'_>,
+    passkey: &[u8],
+    did: &str,
+    identity_pq_key: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(), String> {
     let pq_key = validator
-        .enrolled_pq_key(&key.public_key)
-        .or_else(|| identity_pq_key(&did).filter(|k| !k.is_empty()))
+        .enrolled_pq_key(passkey)
+        .or_else(|| identity_pq_key(did).filter(|k| !k.is_empty()))
         .ok_or_else(|| {
             "this passkey has no ML-DSA-65 key enrolled; enrol one with the passkey before signing in"
                 .to_string()
@@ -576,13 +716,8 @@ pub fn verify_passkey_login(
         Some(&pq_sig),
         tenzro_crypto::composite::PqPolicy::Required,
     )
-    .map_err(|e| format!("ML-DSA-65 signature rejected: {e}"))?;
-    if !is_active_human(&did) {
-        return Err(format!(
-            "{did} is not an active human identity on this node"
-        ));
-    }
-    Ok(did)
+    .map(|_| ())
+    .map_err(|e| format!("ML-DSA-65 signature rejected: {e}"))
 }
 
 /// POST /authorize — the user's decision. `approve` must carry a passkey
@@ -1007,7 +1142,7 @@ fn authenticate_bearer(
 // ─── Bearer Auth Middleware ──────────────────────────────────────────────────
 
 /// Read-only MCP tools that do not require authentication.
-const PUBLIC_MCP_TOOLS: &[&str] = &[
+pub(super) const PUBLIC_MCP_TOOLS: &[&str] = &[
     // Network & status
     "get_node_status",
     "get_block",
@@ -1023,16 +1158,12 @@ const PUBLIC_MCP_TOOLS: &[&str] = &[
     // Model discovery
     "list_models",
     "list_model_endpoints",
-    "get_download_progress",
     // Provenance (read-only)
     "get_provenance",
-    // Bridge info
-    "get_bridge_routes",
-    "list_bridge_adapters",
-    // deBridge read-only
-    "debridge_search_tokens",
-    "debridge_get_chains",
-    "debridge_get_instructions",
+    // Bridge routes: mirrors of the open reads tenzro_getBridgeRoute and
+    // tenzro_listBridgeRoutes
+    "get_bridge_route",
+    "list_bridge_routes",
     // Staking & governance queries
     "get_provider_stats",
     "get_model_stacks",
@@ -1046,9 +1177,6 @@ const PUBLIC_MCP_TOOLS: &[&str] = &[
     "get_treasury_payouts",
     "get_guardian_state",
     "can_transfer",
-    // Task & agent browsing
-    "list_agent_templates",
-    "get_agent_template",
     // Verification
     "verify_zk_proof",
     "get_zk_attestation",
@@ -1086,8 +1214,9 @@ fn is_public_mcp_request(body: &[u8]) -> bool {
 /// Which `/mcp` calls require a Bearer JWT, from `TENZRO_MCP_AUTH`:
 ///
 /// - `tiered` (the default when unset) — public-read tools open, every
-///   other call requires a Bearer JWT issued for this `/mcp` resource
-/// - `full` — every call requires one
+///   other call requires a Bearer JWT issued for this `/mcp` resource or
+///   a DPoP-bound access token from the node's sign-in
+/// - `full` — every call requires one of the two
 ///
 /// Any other value is a configuration error and the MCP server does not start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1145,8 +1274,6 @@ pub async fn bearer_auth_check(
         http_uri: crate::inference_admission::auth_context(&oauth_state.node, &req).http_uri,
     };
 
-    let full = auth_mode == McpAuthMode::Full;
-
     let (parts, body) = req.into_parts();
     let body_bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
         Ok(b) => b,
@@ -1158,7 +1285,8 @@ pub async fn bearer_auth_check(
                 .into_response();
         }
     };
-    if !full && is_public_mcp_request(&body_bytes) {
+    let proved = parts.extensions.get::<crate::rpc::ProvedToken>().is_some();
+    if passes_without_bearer(auth_mode, &body_bytes, proved) {
         let req = Request::from_parts(parts, axum::body::Body::from(body_bytes));
         return crate::mcp::server::MCP_REQUEST_HEADERS
             .scope(mcp_headers, next.run(req))
@@ -1174,8 +1302,8 @@ pub async fn bearer_auth_check(
     let Some(token) = token else {
         return unauthorized_response(
             &oauth_state,
-            "This call requires authentication. Obtain a token through this server's \
-             /authorize flow.",
+            "This call requires authentication: a DPoP-bound access token from this \
+             node's sign-in, or a token from this server's /authorize flow.",
         );
     };
     match validate_bearer_jwt(&oauth_state, &token) {
@@ -1188,6 +1316,16 @@ pub async fn bearer_auth_check(
         }
         Err(reason) => unauthorized_response(&oauth_state, &reason),
     }
+}
+
+/// Whether a `/mcp` request goes on without this server's Bearer JWT: a
+/// public call outside `full` mode, or a request whose DPoP-bound access
+/// token [`crate::inference_admission::identify_caller`] has already checked
+/// against its proof. The tools behind take their caller from that token,
+/// as the JSON-RPC endpoint does, so the operator-class tools the access
+/// policy admits it to are reachable with it on `/mcp` and `/mcp/compact`.
+fn passes_without_bearer(auth_mode: McpAuthMode, body: &[u8], proved: bool) -> bool {
+    proved || (auth_mode != McpAuthMode::Full && is_public_mcp_request(body))
 }
 
 /// Validate a Bearer JWT for this server's `/mcp` resource.
@@ -1469,6 +1607,50 @@ fn oauth_error(error: &str, description: &str) -> Response {
 mod tests {
     use super::*;
 
+    /// On the compact listing a `call` is public exactly when the tool it
+    /// names is: wrapping an owner-only tool in `call` does not get it past
+    /// the token check.
+    #[test]
+    fn a_compact_call_is_public_only_when_the_tool_it_names_is() {
+        let call = |tool: &str, arguments: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments },
+            }))
+            .unwrap()
+        };
+        let wrapped = |tool: &str| call("call", serde_json::json!({ "name": tool }));
+        assert!(PUBLIC_MCP_TOOLS.contains(&"resolve_did"));
+        assert!(!PUBLIC_MCP_TOOLS.contains(&"list_admin_audit"));
+
+        assert!(is_public_mcp_request(&call(
+            "search",
+            serde_json::json!({ "query": "admin audit" })
+        )));
+        assert!(is_public_mcp_request(&wrapped("resolve_did")));
+        assert!(!is_public_mcp_request(&wrapped("list_admin_audit")));
+        assert!(!is_public_mcp_request(&wrapped("no_such_tool")));
+        // A `call` that names no tool, or nests another `call`, is not public.
+        assert!(!is_public_mcp_request(&call("call", serde_json::json!({}))));
+        assert!(!is_public_mcp_request(&call(
+            "call",
+            serde_json::Value::Null
+        )));
+        assert!(!is_public_mcp_request(&wrapped("call")));
+        assert!(!is_public_mcp_request(&wrapped("search")));
+        // The direct forms agree.
+        assert!(is_public_mcp_request(&call(
+            "resolve_did",
+            serde_json::json!({})
+        )));
+        assert!(!is_public_mcp_request(&call(
+            "list_admin_audit",
+            serde_json::json!({})
+        )));
+    }
+
     #[test]
     fn an_unknown_mcp_auth_mode_is_refused() {
         assert_eq!(McpAuthMode::parse(None), Ok(McpAuthMode::Tiered));
@@ -1477,6 +1659,40 @@ mod tests {
         let err = McpAuthMode::parse(Some("ful")).unwrap_err();
         assert!(err.contains("not recognised"), "{err}");
         assert!(McpAuthMode::parse(Some("")).is_err());
+    }
+
+    /// A DPoP-bound access token the node verified carries a call past the
+    /// Bearer layer in either mode, on `/mcp` and on a compact `call`; with
+    /// no verified token only a public call in tiered mode goes on.
+    #[test]
+    fn a_verified_dpop_token_passes_the_bearer_layer() {
+        let tool_call = |name: &str, arguments: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": name, "arguments": arguments },
+            }))
+            .unwrap()
+        };
+        let owner = tool_call("list_admin_audit", serde_json::json!({ "params": {} }));
+        let compact_owner = tool_call(
+            "call",
+            serde_json::json!({ "name": "list_admin_audit", "arguments": { "params": {} } }),
+        );
+        let public = tool_call("get_node_status", serde_json::json!({}));
+        for mode in [McpAuthMode::Tiered, McpAuthMode::Full] {
+            assert!(passes_without_bearer(mode, &owner, true), "{mode:?}");
+            assert!(
+                passes_without_bearer(mode, &compact_owner, true),
+                "{mode:?}"
+            );
+            assert!(!passes_without_bearer(mode, &owner, false), "{mode:?}");
+            assert!(
+                !passes_without_bearer(mode, &compact_owner, false),
+                "{mode:?}"
+            );
+        }
+        assert!(passes_without_bearer(McpAuthMode::Tiered, &public, false));
+        assert!(!passes_without_bearer(McpAuthMode::Full, &public, false));
     }
     use tenzro_crypto::p256::{P256KeyPair, P256Signer};
     use tenzro_crypto::webauthn::{WebAuthnRelyingParty, webauthn_signed_hash};
@@ -1495,6 +1711,15 @@ mod tests {
 
     impl TestPasskey {
         fn enroll(validator: &tenzro_vm::WebAuthnValidator, seed: u8) -> Self {
+            Self::enroll_under(
+                validator,
+                seed,
+                &relying_party_id(validator.relying_party()),
+            )
+        }
+
+        /// A passkey of the relying party `rp_id`, enrolled on `validator`.
+        fn enroll_under(validator: &tenzro_vm::WebAuthnValidator, seed: u8, rp_id: &str) -> Self {
             let keypair = P256KeyPair::generate();
             let xy = keypair.public_key_bytes();
             let account = vec![seed; 20];
@@ -1506,7 +1731,7 @@ mod tests {
                 salt: 0,
                 version: 1,
                 credentials: vec![tenzro_types::keystore::KeystoreCredential {
-                    rp_id: relying_party_id(validator.relying_party()),
+                    rp_id: rp_id.to_string(),
                     credential_id: credential_id.clone(),
                     public_key: xy.to_vec(),
                     aaguid: vec![0; 16],
@@ -1568,6 +1793,18 @@ mod tests {
                     (format!("https://{rp_id}"), rp_id.clone())
                 }
             };
+            self.assert_from(&origin, &rp_id, challenge, flags)
+        }
+
+        /// Assertion over `challenge` scoped to `rp_id`, as a client at
+        /// `origin` reports it.
+        fn assert_from(
+            &self,
+            origin: &str,
+            rp_id: &str,
+            challenge: &[u8; 32],
+            flags: u8,
+        ) -> (String, String, String, String) {
             let cdj = serde_json::json!({
                 "type": "webauthn.get",
                 "challenge": URL_SAFE_NO_PAD.encode(challenge),
@@ -1630,6 +1867,88 @@ mod tests {
         )
         .expect("login");
         assert_eq!(did, pk.did());
+    }
+
+    /// A node whose policy lists `listed` beside its relying party.
+    fn validator_listing(listed: &[&str]) -> tenzro_vm::WebAuthnValidator {
+        tenzro_vm::WebAuthnValidator::new(
+            [7u8; 20],
+            WebAuthnRelyingParty::RegistrableDomain {
+                rp_id: "tenzro.com".to_string(),
+                related_origins: listed.iter().map(|origin| origin.to_string()).collect(),
+            },
+        )
+    }
+
+    /// The origin an Android app signed with the certificate whose SHA-256
+    /// is 32 bytes of `byte` reports.
+    fn app_origin(byte: u8) -> String {
+        format!(
+            "android:apk-key-hash:{}",
+            URL_SAFE_NO_PAD.encode([byte; 32])
+        )
+    }
+
+    /// Whether `pk` signs in to `v` with an assertion scoped to `rp_id` and
+    /// made at `origin`.
+    fn signs_in_from(
+        v: &tenzro_vm::WebAuthnValidator,
+        pk: &TestPasskey,
+        origin: &str,
+        rp_id: &str,
+    ) -> bool {
+        let challenge = [9u8; 32];
+        let parts = pk.assert_from(origin, rp_id, &challenge, 0x05);
+        let cred = URL_SAFE_NO_PAD.encode(&pk.credential_id);
+        let acct = hex::encode(&pk.account);
+        verify_passkey_login(
+            v,
+            &challenge,
+            &pk.login(&parts, &cred, &acct),
+            |_| true,
+            |_| None,
+            |_| pk.pq_key(),
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn passkey_login_accepts_a_listed_android_app_and_no_other_listed_origin() {
+        let app = app_origin(0x11);
+        let v = validator_listing(&[app.as_str(), "https://app.sibling.example"]);
+        let pk = TestPasskey::enroll(&v, 4);
+        assert!(signs_in_from(&v, &pk, "https://tenzro.com", "tenzro.com"));
+        assert!(signs_in_from(&v, &pk, &app, "tenzro.com"));
+        // A listed web origin, an app nobody listed, and the listed app's
+        // origin with one more character.
+        assert!(!signs_in_from(
+            &v,
+            &pk,
+            "https://app.sibling.example",
+            "tenzro.com"
+        ));
+        assert!(!signs_in_from(&v, &pk, &app_origin(0x22), "tenzro.com"));
+        assert!(!signs_in_from(&v, &pk, &format!("{app}A"), "tenzro.com"));
+    }
+
+    #[test]
+    fn passkey_login_from_an_android_app_needs_the_node_to_list_it() {
+        let v = validator_listing(&[]);
+        let pk = TestPasskey::enroll(&v, 5);
+        assert!(signs_in_from(&v, &pk, "https://tenzro.com", "tenzro.com"));
+        assert!(!signs_in_from(&v, &pk, &app_origin(0x11), "tenzro.com"));
+    }
+
+    #[test]
+    fn a_listed_android_app_signs_in_only_a_passkey_of_the_nodes_relying_party() {
+        // The keystore links this passkey under another relying party. Its
+        // own site still signs it in; the node's list is for the node's.
+        let app = app_origin(0x11);
+        let v = validator_listing(&[app.as_str()]);
+        let pk = TestPasskey::enroll_under(&v, 6, "example.org");
+        assert!(signs_in_from(&v, &pk, "https://example.org", "example.org"));
+        assert!(!signs_in_from(&v, &pk, &app, "example.org"));
+        assert!(!signs_in_from(&v, &pk, &app, "tenzro.com"));
     }
 
     #[test]
@@ -1709,6 +2028,96 @@ mod tests {
                 |_| pk.pq_key(),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_login_naming_no_account_finds_it_only_for_a_registered_passkey() {
+        let v = validator();
+        let pk = TestPasskey::enroll(&v, 12);
+        let challenge = [13u8; 32];
+        let rp = relying_party_id(v.relying_party());
+        let cred = URL_SAFE_NO_PAD.encode(&pk.credential_id);
+        let acct = hex::encode(&pk.account);
+        let parts = pk.assert(v.relying_party(), &challenge, 0x05);
+        let by_credential = |challenge: &[u8; 32], rp: &str, login: &PasskeyLogin<'_>| {
+            verify_passkey_login_by_credential(&v, challenge, rp, login, |_| true, |_| None)
+        };
+
+        let mut login = pk.login(&parts, &cred, "");
+        login.ml_dsa_signature_hex = None;
+        let (did, post_quantum) = by_credential(&challenge, &rp, &login).expect("found");
+        assert!(!post_quantum);
+        let mut named = pk.login(&parts, &cred, &acct);
+        named.ml_dsa_signature_hex = None;
+        let (named_did, _) =
+            verify_passkey_login_for_pairing(&v, &challenge, &named, |_| true, |_| None, |_| None)
+                .expect("named account");
+        assert_eq!(did, named_did);
+
+        // A credential nobody linked, the right one over another challenge
+        // and the right one under another relying party read the same.
+        let unknown = URL_SAFE_NO_PAD.encode([0xee, 0xee, 0xee]);
+        let mut stranger = pk.login(&parts, &unknown, "");
+        stranger.ml_dsa_signature_hex = None;
+        let refused = by_credential(&challenge, &rp, &stranger).unwrap_err();
+        assert_eq!(refused, "that passkey signs in no identity on this node");
+        assert_eq!(
+            by_credential(&[14u8; 32], &rp, &login).unwrap_err(),
+            refused
+        );
+        assert_eq!(
+            by_credential(&challenge, "other.example", &login).unwrap_err(),
+            refused
+        );
+    }
+
+    #[test]
+    fn a_pairing_sign_in_checks_the_ml_dsa_leg_only_when_it_comes() {
+        let v = validator();
+        let pk = TestPasskey::enroll(&v, 8);
+        let other = TestPasskey::enroll(&v, 9);
+        let challenge = [10u8; 32];
+        let cred = URL_SAFE_NO_PAD.encode(&pk.credential_id);
+        let acct = hex::encode(&pk.account);
+        let parts = pk.assert(v.relying_party(), &challenge, 0x05);
+        let sign_in = |login: &PasskeyLogin<'_>, pq_key: Option<Vec<u8>>| {
+            verify_passkey_login_for_pairing(
+                &v,
+                &challenge,
+                login,
+                |_| true,
+                |_| None,
+                |_| pq_key.clone(),
+            )
+        };
+
+        // Without the leg, and with no ML-DSA-65 key enrolled at all.
+        let mut login = pk.login(&parts, &cred, &acct);
+        login.ml_dsa_signature_hex = None;
+        let (did, post_quantum) = sign_in(&login, None).expect("passkey alone");
+        assert!(!post_quantum);
+        // With it.
+        let (with_leg, post_quantum) =
+            sign_in(&pk.login(&parts, &cred, &acct), pk.pq_key()).expect("both legs");
+        assert!(post_quantum);
+        assert_eq!(did, with_leg);
+        // A leg that comes must verify.
+        let foreign = other.pq_leg(&challenge);
+        let mut login = pk.login(&parts, &cred, &acct);
+        login.ml_dsa_signature_hex = Some(&foreign);
+        assert!(sign_in(&login, pk.pq_key()).is_err());
+        // The passkey itself is checked as for every sign-in.
+        let mut login = pk.login(&parts, &cred, &acct);
+        login.ml_dsa_signature_hex = None;
+        let wrong = [11u8; 32];
+        assert!(
+            verify_passkey_login_for_pairing(&v, &wrong, &login, |_| true, |_| None, |_| None)
+                .is_err()
+        );
+        assert!(
+            verify_passkey_login_for_pairing(&v, &challenge, &login, |_| false, |_| None, |_| None)
+                .is_err()
         );
     }
 

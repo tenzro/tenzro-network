@@ -1,7 +1,7 @@
 //! Disk and resource protection shared by the node, `tenzro-node doctor`,
 //! `tenzro status`, the setup preflight and the assistant.
 //!
-//! Everything here reacts to what is measured, never to elapsed time:
+//! Everything here reacts to what is measured, never to a timer:
 //!
 //! - [`DataClass`] says how critical each kind of stored data is, and the
 //!   tables [`DATA_LAYOUT`] and [`COLUMN_FAMILY_CLASSES`] list every path and
@@ -10,10 +10,13 @@
 //!   classifies as [`DataClass::Critical`].
 //! - [`Reading`] is one measurement of the volume (free bytes, free percent,
 //!   inodes, read-only flag), of the host (swap, memory, I/O pressure) and of
-//!   how fast the data grows ([`GrowthTracker`], bytes per block).
+//!   how fast the data grows ([`GrowthTracker`], bytes per block and per
+//!   hour).
 //! - [`Ladder`] turns readings into a [`Level`], entering and leaving levels
-//!   with hysteresis, and reports the runway: blocks left at the measured
-//!   growth.
+//!   with hysteresis, and reports the runway: the hours the free bytes last
+//!   at the growth measured over wall-clock time, and the blocks they last
+//!   at the growth measured per block. Levels follow the hours: a chain that
+//!   makes few blocks fills a disk slowly however large each block is.
 //! - [`Headroom`] answers whether a step that writes a lot may start.
 //! - [`role_estimate`] and [`preflight`] size a data directory for a role.
 
@@ -28,8 +31,11 @@ pub const GIB: u64 = 1 << 30;
 pub const MIB: u64 = 1 << 20;
 
 /// Blocks in one epoch at the public network's parameters (7,200
-/// checkpoints at one a second). Runway budgets are stated in multiples of it.
+/// checkpoints at one a second). Growth budgets are stated in multiples of it.
 pub const EPOCH_BLOCKS: u64 = 7_200;
+
+/// Milliseconds in an hour.
+const HOUR_MS: f64 = 3_600_000.0;
 
 /// How critical stored data is. The pruner touches
 /// [`Expendable`](DataClass::Expendable) first, then
@@ -521,28 +527,42 @@ impl VolumeStats {
 pub fn volume_stats(path: &Path) -> std::io::Result<VolumeStats> {
     let st = fs4::statvfs(path)?;
     let used = st.total_space().saturating_sub(st.free_space());
-    let mut out = VolumeStats {
+    let (inodes_total, inodes_free, read_only) = inode_stats(path)?;
+    Ok(VolumeStats {
         total_bytes: used + st.available_space(),
         free_bytes: st.available_space(),
-        inodes_total: 0,
-        inodes_free: 0,
-        read_only: false,
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-        // SAFETY: `c` is a valid NUL-terminated path and `s` a valid out
-        // pointer for the duration of the call.
-        if unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0 {
-            out.inodes_total = s.f_files as u64;
-            out.inodes_free = s.f_favail as u64;
-            out.read_only = (s.f_flag & libc::ST_RDONLY) != 0;
-        }
+        inodes_total,
+        inodes_free,
+        read_only,
+    })
+}
+
+/// Total and free inodes of the volume holding `path` and whether it is
+/// mounted read-only; zeros and writable when the call fails.
+#[cfg(unix)]
+fn inode_stats(path: &Path) -> std::io::Result<(u64, u64, bool)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid NUL-terminated path and `s` a valid out
+    // pointer for the duration of the call.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0 {
+        Ok((
+            s.f_files as u64,
+            s.f_favail as u64,
+            (s.f_flag & libc::ST_RDONLY) != 0,
+        ))
+    } else {
+        Ok((0, 0, false))
     }
-    Ok(out)
+}
+
+/// Without `statvfs` (Windows) no inodes are reported and the volume counts
+/// as writable.
+#[cfg(not(unix))]
+fn inode_stats(_path: &Path) -> std::io::Result<(u64, u64, bool)> {
+    Ok((0, 0, false))
 }
 
 /// Host pressure that threatens the data besides the volume itself.
@@ -605,58 +625,72 @@ pub fn host_pressure() -> HostPressure {
     out
 }
 
-/// Bytes added per block over the last blocks, from samples of the node's
-/// own data size.
+/// Bytes added per block and per hour over the last hours, from samples of
+/// the node's own data size.
 #[derive(Debug, Clone)]
 pub struct GrowthTracker {
-    samples: VecDeque<(u64, u64)>,
-    window_blocks: u64,
+    /// (height, data bytes, wall-clock milliseconds) per sample.
+    samples: VecDeque<(u64, u64, u64)>,
+    window_ms: u64,
 }
 
 /// Fewest blocks a growth figure needs to span before it is trusted.
 pub const MIN_GROWTH_SPAN_BLOCKS: u64 = 50;
 
 impl GrowthTracker {
-    /// A tracker over the last `window_blocks` blocks.
-    pub fn new(window_blocks: u64) -> Self {
+    /// A tracker over the last `window_hours` hours of samples.
+    pub fn new(window_hours: u64) -> Self {
         Self {
             samples: VecDeque::new(),
-            window_blocks: window_blocks.max(MIN_GROWTH_SPAN_BLOCKS * 2),
+            window_ms: window_hours.max(1) * HOUR_MS as u64,
         }
     }
 
-    /// Records the data size at a height. A height that does not advance
-    /// replaces the last sample.
-    pub fn record(&mut self, height: u64, data_bytes: u64) {
+    /// Records the data size at a height, measured at `at_ms` (wall clock,
+    /// milliseconds). A height that does not advance updates the last
+    /// sample; a height or a clock that goes back starts over.
+    pub fn record(&mut self, height: u64, data_bytes: u64, at_ms: u64) {
         if let Some(last) = self.samples.back_mut() {
-            if height < last.0 {
+            if height < last.0 || at_ms < last.2 {
                 self.samples.clear();
             } else if height == last.0 {
                 last.1 = data_bytes;
+                last.2 = at_ms;
                 return;
             }
         }
-        self.samples.push_back((height, data_bytes));
+        self.samples.push_back((height, data_bytes, at_ms));
         while self
             .samples
             .front()
-            .is_some_and(|f| height.saturating_sub(f.0) > self.window_blocks)
+            .is_some_and(|f| at_ms.saturating_sub(f.2) > self.window_ms)
             && self.samples.len() > 2
         {
             self.samples.pop_front();
         }
     }
 
+    /// The first and last sample, once they span [`MIN_GROWTH_SPAN_BLOCKS`].
+    fn span(&self) -> Option<((u64, u64, u64), (u64, u64, u64))> {
+        let first = *self.samples.front()?;
+        let last = *self.samples.back()?;
+        (last.0.checked_sub(first.0)? >= MIN_GROWTH_SPAN_BLOCKS).then_some((first, last))
+    }
+
     /// Bytes added per block over the window, or `None` until the samples
     /// span [`MIN_GROWTH_SPAN_BLOCKS`]. Shrinkage (pruning) counts as zero.
     pub fn bytes_per_block(&self) -> Option<f64> {
-        let (h0, b0) = *self.samples.front()?;
-        let (h1, b1) = *self.samples.back()?;
-        let span = h1.checked_sub(h0)?;
-        if span < MIN_GROWTH_SPAN_BLOCKS {
-            return None;
-        }
-        Some(b1.saturating_sub(b0) as f64 / span as f64)
+        let ((h0, b0, _), (h1, b1, _)) = self.span()?;
+        Some(b1.saturating_sub(b0) as f64 / (h1 - h0) as f64)
+    }
+
+    /// Bytes added per hour of wall-clock time over the window, or `None`
+    /// until the samples span [`MIN_GROWTH_SPAN_BLOCKS`] and some time.
+    /// Shrinkage (pruning) counts as zero.
+    pub fn bytes_per_hour(&self) -> Option<f64> {
+        let ((_, b0, t0), (_, b1, t1)) = self.span()?;
+        let elapsed = t1.checked_sub(t0).filter(|&e| e > 0)?;
+        Some(b1.saturating_sub(b0) as f64 * HOUR_MS / elapsed as f64)
     }
 }
 
@@ -664,6 +698,16 @@ impl GrowthTracker {
 /// not growing (or growth is unknown).
 pub fn runway_blocks(free_bytes: u64, bytes_per_block: Option<f64>) -> Option<u64> {
     let g = bytes_per_block?;
+    if g < 1.0 {
+        return None;
+    }
+    Some((free_bytes as f64 / g) as u64)
+}
+
+/// Hours the free bytes last at `bytes_per_hour`; `None` when the data is
+/// not growing (or growth is unknown).
+pub fn runway_hours(free_bytes: u64, bytes_per_hour: Option<f64>) -> Option<u64> {
+    let g = bytes_per_hour?;
     if g < 1.0 {
         return None;
     }
@@ -752,7 +796,7 @@ impl Level {
 
 /// Thresholds of the ladder. A level trips when free bytes AND free percent
 /// are both under its pair (so a 100 GB disk and a 4 TB disk behave
-/// differently), or when the runway under it is shorter than its blocks,
+/// differently), or when the runway under it is shorter than its hours,
 /// or when the inode, read-only or memory checks say so.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -773,21 +817,21 @@ pub struct LadderConfig {
     pub reserve_free_gib: u64,
     /// Last level percent.
     pub reserve_free_pct: f64,
-    /// Runway, in blocks, under which the first level trips.
-    pub warn_runway_blocks: u64,
-    /// Runway under which the second level trips.
-    pub prune_runway_blocks: u64,
-    /// Runway under which the third level trips.
-    pub refuse_runway_blocks: u64,
-    /// Runway under which the last level trips.
-    pub reserve_runway_blocks: u64,
+    /// Runway, in hours, under which the first level trips.
+    pub warn_runway_hours: u64,
+    /// Runway, in hours, under which the second level trips.
+    pub prune_runway_hours: u64,
+    /// Runway, in hours, under which the third level trips.
+    pub refuse_runway_hours: u64,
+    /// Runway, in hours, under which the last level trips.
+    pub reserve_runway_hours: u64,
     /// A level is left only once the measurement clears its threshold by
     /// this factor (bytes and runway) and by this many points (percent).
     pub hysteresis_factor: f64,
     /// Hysteresis in percentage points.
     pub hysteresis_points: f64,
-    /// Blocks the growth figure averages over.
-    pub growth_window_blocks: u64,
+    /// Hours the growth figures average over.
+    pub growth_window_hours: u64,
     /// Size of the ballast file, MiB; 0 turns it off.
     pub ballast_mb: u64,
     /// Margin, MiB, kept free beyond what a large write needs.
@@ -805,13 +849,13 @@ impl Default for LadderConfig {
             refuse_free_pct: 6.0,
             reserve_free_gib: 3,
             reserve_free_pct: 3.0,
-            warn_runway_blocks: 20 * EPOCH_BLOCKS * 24,
-            prune_runway_blocks: 20 * EPOCH_BLOCKS * 8,
-            refuse_runway_blocks: 20 * EPOCH_BLOCKS,
-            reserve_runway_blocks: 2 * EPOCH_BLOCKS,
+            warn_runway_hours: 20 * 24,
+            prune_runway_hours: 20 * 8,
+            refuse_runway_hours: 20,
+            reserve_runway_hours: 2,
             hysteresis_factor: 1.25,
             hysteresis_points: 1.0,
-            growth_window_blocks: 4 * EPOCH_BLOCKS,
+            growth_window_hours: 4,
             ballast_mb: 2048,
             step_margin_mb: 1024,
         }
@@ -827,6 +871,8 @@ pub struct Reading {
     pub host: HostPressure,
     /// Bytes added per block lately, if known.
     pub bytes_per_block: Option<f64>,
+    /// Bytes added per hour lately, if known.
+    pub bytes_per_hour: Option<f64>,
 }
 
 impl Reading {
@@ -836,6 +882,7 @@ impl Reading {
             volume,
             host: HostPressure::default(),
             bytes_per_block: None,
+            bytes_per_hour: None,
         }
     }
 }
@@ -863,6 +910,11 @@ pub struct Assessment {
     /// Blocks until the volume is full at that growth; `None` when the data
     /// is not growing.
     pub runway_blocks: Option<u64>,
+    /// Bytes added per hour lately, if known.
+    pub bytes_per_hour: Option<f64>,
+    /// Hours until the volume is full at that growth; `None` when the data
+    /// is not growing. The levels follow this runway.
+    pub runway_hours: Option<u64>,
     /// The class the pruner gives up next at this level.
     pub next_sacrificed: Option<DataClass>,
     /// What put the node at this level.
@@ -880,9 +932,12 @@ pub struct Assessment {
 impl Assessment {
     /// One line for doctor and status.
     pub fn summary(&self) -> String {
-        let runway = self
-            .runway_blocks
-            .map_or("not growing".to_string(), |b| format!("{b} blocks"));
+        let runway = match (self.runway_hours, self.runway_blocks) {
+            (Some(h), Some(b)) => format!("{} ({b} blocks)", hours_text(h)),
+            (Some(h), None) => hours_text(h),
+            (None, Some(b)) => format!("{b} blocks"),
+            (None, None) => "not growing".to_string(),
+        };
         let next = self
             .next_sacrificed
             .map_or("none".to_string(), |c| c.name().to_string());
@@ -894,6 +949,15 @@ impl Assessment {
             self.bytes_per_block
                 .map_or("unknown".into(), |g| format!("{g:.0}")),
         )
+    }
+}
+
+/// Hours as the summary prints them: hours under two days, days above.
+fn hours_text(h: u64) -> String {
+    if h < 48 {
+        format!("{h} h")
+    } else {
+        format!("{} days", h / 24)
     }
 }
 
@@ -927,21 +991,21 @@ impl Ladder {
     fn bytes_of(&self, i: u8) -> (u64, f64, u64) {
         let c = &self.cfg;
         match i {
-            1 => (c.warn_free_gib * GIB, c.warn_free_pct, c.warn_runway_blocks),
+            1 => (c.warn_free_gib * GIB, c.warn_free_pct, c.warn_runway_hours),
             2 => (
                 c.prune_free_gib * GIB,
                 c.prune_free_pct,
-                c.prune_runway_blocks,
+                c.prune_runway_hours,
             ),
             3 => (
                 c.refuse_free_gib * GIB,
                 c.refuse_free_pct,
-                c.refuse_runway_blocks,
+                c.refuse_runway_hours,
             ),
             _ => (
                 c.reserve_free_gib * GIB,
                 c.reserve_free_pct,
-                c.reserve_runway_blocks,
+                c.reserve_runway_hours,
             ),
         }
     }
@@ -961,7 +1025,7 @@ impl Ladder {
         };
         let free = r.volume.free_bytes;
         let pct = r.volume.free_pct();
-        let runway = runway_blocks(free, r.bytes_per_block);
+        let runway = runway_hours(free, r.bytes_per_hour);
         for i in 1..=4u8 {
             let (bytes, p, rw) = self.bytes_of(i);
             let level = Level::from_index(i);
@@ -976,12 +1040,12 @@ impl Ladder {
                     &mut top,
                 );
             }
-            if let Some(blocks) = runway
-                && (blocks as f64) < rw as f64 * scale
+            if let Some(hours) = runway
+                && (hours as f64) < rw as f64 * scale
             {
                 note(
                     level,
-                    format!("runway of {blocks} blocks is under {rw}"),
+                    format!("runway of {hours} hours is under {rw}"),
                     &mut top,
                 );
             }
@@ -1062,6 +1126,8 @@ impl Ladder {
             free_pct: r.volume.free_pct(),
             bytes_per_block: r.bytes_per_block,
             runway_blocks: runway_blocks(r.volume.free_bytes, r.bytes_per_block),
+            bytes_per_hour: r.bytes_per_hour,
+            runway_hours: runway_hours(r.volume.free_bytes, r.bytes_per_hour),
             next_sacrificed: new.sacrifice_class(),
             causes,
             memory_exhausted: r.host.memory_exhausted(),
@@ -1309,10 +1375,10 @@ pub fn snapshot_need_bytes(db_dir: &Path, snapshot_root: &Path) -> u64 {
     #[cfg(windows)]
     {
         let volume = |p: &Path| windows_files::volume(&existing_ancestor(p));
-        if let (Some((a, true)), Some((b, _))) = (volume(db_dir), volume(snapshot_root)) {
-            if a == b {
-                return LINKED_BYTES;
-            }
+        if let (Some((a, true)), Some((b, _))) = (volume(db_dir), volume(snapshot_root))
+            && a == b
+        {
+            return LINKED_BYTES;
         }
         tree_bytes(db_dir).max(LINKED_BYTES)
     }
@@ -1338,6 +1404,11 @@ pub struct StatusReport {
     pub runway_blocks: Option<u64>,
     /// Bytes added per block lately; absent until measured.
     pub bytes_per_block: Option<f64>,
+    /// Hours of runway at the measured growth; absent when not growing.
+    /// The level follows this runway.
+    pub runway_hours: Option<u64>,
+    /// Bytes added per hour lately; absent until measured.
+    pub bytes_per_hour: Option<f64>,
     /// The class the pruner gives up next.
     pub next_sacrificed: Option<DataClass>,
     /// What put the node at this level.
@@ -1354,6 +1425,8 @@ impl Assessment {
             free_pct: self.free_pct,
             runway_blocks: self.runway_blocks,
             bytes_per_block: self.bytes_per_block,
+            runway_hours: self.runway_hours,
+            bytes_per_hour: self.bytes_per_hour,
             next_sacrificed: self.next_sacrificed,
             reasons: self.causes.iter().map(|c| c.what.clone()).collect(),
         }
@@ -1368,6 +1441,7 @@ pub fn assess_now(dir: &Path, cfg: &LadderConfig) -> std::io::Result<Assessment>
         volume,
         host: host_pressure(),
         bytes_per_block: None,
+        bytes_per_hour: None,
     };
     Ok(Ladder::new(cfg.clone()).assess(&reading))
 }
@@ -1380,11 +1454,13 @@ mod tests {
         n * GIB
     }
 
-    fn reading(total: u64, free: u64, g: Option<f64>) -> Reading {
+    /// A reading with `per_hour` bytes of growth an hour.
+    fn reading(total: u64, free: u64, per_hour: Option<f64>) -> Reading {
         Reading {
             volume: VolumeStats::of(total, free),
             host: HostPressure::default(),
-            bytes_per_block: g,
+            bytes_per_block: None,
+            bytes_per_hour: per_hour,
         }
     }
 
@@ -1422,21 +1498,20 @@ mod tests {
         let free = gib(500);
         let mut slow = Ladder::new(LadderConfig::default());
         let mut fast = Ladder::new(LadderConfig::default());
-        // 1 KB a block: 500 GiB lasts half a billion blocks.
+        // 1 MB an hour: 500 GiB lasts over half a million hours.
         assert_eq!(
-            slow.assess(&reading(total, free, Some(1_000.0))).level,
+            slow.assess(&reading(total, free, Some(1_000_000.0))).level,
             Level::Ok
         );
-        // 230 KB a block (the checkpoint-record loop): about 2.3 million
-        // blocks, which is under the first level's runway of 3.4 million.
-        let a = fast.assess(&reading(total, free, Some(230_000.0)));
+        // 2 GB an hour: about 268 hours, under the first level's 480.
+        let a = fast.assess(&reading(total, free, Some(2_000_000_000.0)));
         assert_eq!(a.level, Level::Warn);
-        assert!(a.runway_blocks.unwrap() < 3_456_000);
-        // 4 MB a block leaves 130,000 blocks: the third level.
+        assert!(a.runway_hours.unwrap() < 480);
+        // 40 GB an hour leaves 13 hours: the third level.
         let mut faster = Ladder::new(LadderConfig::default());
         assert_eq!(
             faster
-                .assess(&reading(total, free, Some(4_000_000.0)))
+                .assess(&reading(total, free, Some(40_000_000_000.0)))
                 .level,
             Level::Refuse
         );
@@ -1501,17 +1576,58 @@ mod tests {
 
     #[test]
     fn growth_is_bytes_per_block_over_the_window_and_pruning_counts_as_zero() {
-        let mut g = GrowthTracker::new(1000);
+        let hour = HOUR_MS as u64;
+        let mut g = GrowthTracker::new(4);
         assert_eq!(g.bytes_per_block(), None);
-        g.record(100, 1_000_000);
-        g.record(110, 1_100_000);
+        g.record(100, 1_000_000, 0);
+        g.record(110, 1_100_000, hour / 10);
         assert_eq!(g.bytes_per_block(), None, "too short a span");
-        g.record(300, 1_000_000 + 200 * 500);
+        assert_eq!(g.bytes_per_hour(), None, "too short a span");
+        g.record(300, 1_000_000 + 200 * 500, hour / 2);
         assert_eq!(g.bytes_per_block(), Some(500.0));
-        g.record(400, 1_000);
+        assert_eq!(g.bytes_per_hour(), Some(200_000.0));
+        g.record(400, 1_000, hour);
         assert_eq!(g.bytes_per_block(), Some(0.0));
+        assert_eq!(g.bytes_per_hour(), Some(0.0));
         assert_eq!(runway_blocks(1_000_000, Some(0.0)), None);
         assert_eq!(runway_blocks(1_000_000, Some(500.0)), Some(2000));
+        assert_eq!(runway_hours(1_000_000, Some(0.0)), None);
+        assert_eq!(runway_hours(1_000_000, Some(500.0)), Some(2000));
+        // Samples older than the window drop out; a clock that goes back
+        // starts over.
+        g.record(500, 2_000, 6 * hour);
+        g.record(600, 3_000, 7 * hour);
+        assert_eq!(g.samples.len(), 2);
+        g.record(700, 4_000, hour);
+        assert_eq!(g.samples.len(), 1);
+    }
+
+    #[test]
+    fn a_chain_that_makes_few_blocks_is_not_short_of_disk_for_their_size() {
+        // 184 GiB free of 216 GiB, 61 KB a block. At one block a minute the
+        // data grows 3.7 MB an hour and the disk lasts for years: no level.
+        let hour = HOUR_MS as u64;
+        let mut slow = GrowthTracker::new(4);
+        for i in 0..=120u64 {
+            slow.record(1_000 + i, 50_000_000 + i * 61_000, i * hour / 60);
+        }
+        let mut r = reading(gib(216), gib(184), slow.bytes_per_hour());
+        r.bytes_per_block = slow.bytes_per_block();
+        let a = Ladder::new(LadderConfig::default()).assess(&r);
+        assert_eq!(a.level, Level::Ok, "{}", a.summary());
+        assert_eq!(a.runway_blocks, Some(gib(184) / 61_000));
+        assert!(a.runway_hours.unwrap() > 24 * 365, "{}", a.summary());
+        assert!(a.summary().contains("days"), "{}", a.summary());
+        // The same blocks at two a second: 440 MB an hour, under 20 days.
+        let mut fast = GrowthTracker::new(4);
+        for i in 0..=7_200u64 {
+            fast.record(1_000 + i, 50_000_000 + i * 61_000, i * 500);
+        }
+        let mut r = reading(gib(216), gib(184), fast.bytes_per_hour());
+        r.bytes_per_block = fast.bytes_per_block();
+        let a = Ladder::new(LadderConfig::default()).assess(&r);
+        assert_eq!(a.level, Level::Warn, "{}", a.summary());
+        assert_eq!(a.runway_blocks, Some(gib(184) / 61_000));
     }
 
     #[test]

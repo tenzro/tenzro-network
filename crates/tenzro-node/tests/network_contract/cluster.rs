@@ -40,7 +40,7 @@ use tenzro_iroh::discovery::{ALPN_DISCOVERY, DiscoveryProtocol, DiscoveryRequest
 use tenzro_iroh::gossip::{ALPN_GOSSIP, GossipGate, GossipTransport};
 use tenzro_iroh::identity_record::BootIdentity;
 use tenzro_iroh::identity_transport::{
-    IdentityTransport, RelayRoleConfig, base_builder, endpoint_addr, with_relays,
+    IdentityTransport, RelayRoleConfig, base_builder, endpoint_addr, on_loopback, with_relays,
 };
 use tenzro_iroh::{Connectivity, EndpointRecord};
 use tenzro_network::{
@@ -223,14 +223,6 @@ fn machine_signers(count: usize) -> Vec<&'static dyn HardwareSigner> {
         .collect()
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("a free port")
-        .local_addr()
-        .expect("local address")
-        .port()
-}
-
 impl Cluster {
     /// Endpoints only; nothing is served.
     pub async fn endpoints() -> Self {
@@ -250,7 +242,7 @@ impl Cluster {
         let mut nodes = Vec::with_capacity(TOPOLOGY.len());
         for (index, reach) in TOPOLOGY.into_iter().enumerate() {
             let gate = GossipGate::default();
-            let mut builder = Endpoint::builder(presets::Minimal)
+            let mut builder = on_loopback(Endpoint::builder(presets::Minimal))
                 .relay_mode(RelayMode::Custom(relay_map.clone()))
                 .ca_tls_config(CaTlsConfig::insecure_skip_verify())
                 .hooks(gate.clone());
@@ -313,7 +305,7 @@ impl Cluster {
                 )
             })
             .collect();
-        let port = free_port();
+        let port = tenzro_iroh::test_ports::tcp();
         let url = url::Url::parse(&format!("http://127.0.0.1:{port}/")).expect("relay url");
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().expect("bind address"),
@@ -336,12 +328,18 @@ impl Cluster {
                 reach.label()
             );
             let gate = GossipGate::default();
-            let mut builder: Builder = with_relays(
-                base_builder().portmapper_config(iroh::endpoint::PortmapperConfig::Disabled),
-                transport.relays(),
-                Some(transport.store().clone()),
-            )
-            .hooks(gate.clone());
+            // The nodes that accept connections listen on their interfaces:
+            // a peer reports the address it sees a node at, and
+            // `Observations::record` drops a loopback report by design, so
+            // the direct tier cannot be judged between loopback-only nodes.
+            let base = if reach.listens() {
+                base_builder().portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            } else {
+                on_loopback(base_builder())
+            };
+            let mut builder: Builder =
+                with_relays(base, transport.relays(), Some(transport.store().clone()))
+                    .hooks(gate.clone());
             if reach == Reach::RelayOnly {
                 builder = builder.clear_ip_transports();
             }

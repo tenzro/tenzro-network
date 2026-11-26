@@ -135,7 +135,10 @@ form does not occur in receipts.
   and `field(sha256)` as the catalog lists them; lowercase hex.
 - `input_commitment`: SHA-256 over the ASCII tag `tenzro/inference-input`,
   then the JSON encoding of the messages the engine was given with a u64 LE
-  length, then each media item with a u64 LE length. A raw completion uses
+  length, then the JSON encoding of the render settings
+  `{tools, enable_thinking, reasoning_effort}` (the tools the turn offered
+  and the thinking switch and effort the caller set, `null` when unset) with
+  a u64 LE length, then each media item with a u64 LE length. A raw completion uses
   the tag `tenzro/inference-input/prompt` and the prompt bytes with a u64 LE
   length.
 - `output_hash`: SHA-256 over the visible text, the reasoning and the tool

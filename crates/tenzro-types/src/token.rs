@@ -330,6 +330,20 @@ impl std::str::FromStr for AcceleratorClass {
     }
 }
 
+/// Most platforms one protocol upgrade names a binary for.
+pub const MAX_UPGRADE_PLATFORMS: usize = 16;
+
+/// The binary a protocol upgrade names for one platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformDigest {
+    /// The platform the binary is built for, as a target triple
+    /// (`x86_64-unknown-linux-gnu`). A label for whoever fetches the binary:
+    /// the chain compares hashes, never platform names.
+    pub platform: String,
+    /// SHA-256 of the binary.
+    pub code_hash: Vec<u8>,
+}
+
 /// A change to network policy decided by on-chain governance
 /// (`ProposalAction::PolicyUpdate` in tenzro-vm). Consensus records the
 /// decision; every node applies it to the subsystem it names.
@@ -427,6 +441,34 @@ pub enum PolicyUpdate {
         #[serde(with = "crate::agent_audit::hex32")]
         image_id: [u8; 32],
     },
+    /// Protocol upgrade of a release built for several platforms: the
+    /// release version and the binary it names for each. A node keeps
+    /// running through the activation when its own binary is one of them.
+    /// Refused until `feature.upgrade_platforms.activation_epoch` is in
+    /// force.
+    ProtocolUpgradePlatforms {
+        version: String,
+        digests: Vec<PlatformDigest>,
+    },
+    /// Replace the roots (PEM) a human root's passkey attestation must chain
+    /// to for its registration to count as hardware-held, once
+    /// `feature.registration_attestation.activation_epoch` is in force.
+    /// Empty recognises none.
+    WebauthnRootsSet { roots_pem: Vec<String> },
+    /// Replace the JSON Web Key Set (JWKS) the NVIDIA attestation service's
+    /// tokens are verified against, once
+    /// `feature.nras_jwks.activation_epoch` is in force. Empty recognises
+    /// none.
+    NrasJwksSet { jwks_json: String },
+    /// Replace the machine identities (`did:tenzro:machine:<id>[@relay url]`)
+    /// a node dials to find the network, once
+    /// `feature.boot_nodes.activation_epoch` is in force. A node with no
+    /// chain state yet dials the list its genesis file names.
+    BootNodesSet { identities: Vec<String> },
+    /// Replace the release signing keys (hex SEC1 P-256) a signed update notice
+    /// must verify under, once `feature.update_notice_keys.activation_epoch`
+    /// is in force.
+    UpdateNoticeKeysSet { keys_hex: Vec<String> },
 }
 
 #[cfg(test)]

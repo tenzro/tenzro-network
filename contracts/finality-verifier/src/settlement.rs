@@ -39,7 +39,13 @@ pub const RECON_REFUNDED: u8 = 3;
 /// Fold one lock entry into a running reconciliation hash:
 /// `sha256(RECON_DOMAIN || acc || plan_id || leg_id || kind || amount)`,
 /// the amount as a 32-byte big-endian word, from zero in recording order.
-pub fn recon_step(acc: &[u8; 32], plan_id: &[u8; 32], leg_id: &[u8; 32], kind: u8, amount: u128) -> [u8; 32] {
+pub fn recon_step(
+    acc: &[u8; 32],
+    plan_id: &[u8; 32],
+    leg_id: &[u8; 32],
+    kind: u8,
+    amount: u128,
+) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(RECON_DOMAIN);
     h.update(acc);
@@ -80,9 +86,15 @@ pub fn decode_decision(plan_id: &[u8; 32], decision: &[u8]) -> Option<Outcome> {
 
 /// The outcome of plan `plan_id`, if `decision` is its commitment and
 /// `proof` proves it under `root`.
-pub fn proven_outcome(root: &[u8; 32], plan_id: &[u8; 32], decision: &[u8], proof: &[u8]) -> Option<Outcome> {
+pub fn proven_outcome(
+    root: &[u8; 32],
+    plan_id: &[u8; 32],
+    decision: &[u8],
+    proof: &[u8],
+) -> Option<Outcome> {
     let outcome = decode_decision(plan_id, decision)?;
-    crate::state_proof::verify_at(root, &decision_tree_key(plan_id), Some(decision), proof).then_some(outcome)
+    crate::state_proof::verify_at(root, &decision_tree_key(plan_id), Some(decision), proof)
+        .then_some(outcome)
 }
 
 /// Length of a leg receipt at `plr:<leg_id>`.
@@ -158,9 +170,15 @@ pub fn decode_leg_receipt(leg_id: &[u8; 32], bytes: &[u8]) -> Option<LegReceipt>
 }
 
 /// Leg `leg_id`'s receipt, if `bytes` is it and `proof` proves it under `root`.
-pub fn proven_leg_receipt(root: &[u8; 32], leg_id: &[u8; 32], bytes: &[u8], proof: &[u8]) -> Option<LegReceipt> {
+pub fn proven_leg_receipt(
+    root: &[u8; 32],
+    leg_id: &[u8; 32],
+    bytes: &[u8],
+    proof: &[u8],
+) -> Option<LegReceipt> {
     let receipt = decode_leg_receipt(leg_id, bytes)?;
-    crate::state_proof::verify_at(root, &leg_receipt_tree_key(leg_id), Some(bytes), proof).then_some(receipt)
+    crate::state_proof::verify_at(root, &leg_receipt_tree_key(leg_id), Some(bytes), proof)
+        .then_some(receipt)
 }
 
 /// Where a locked leg stands.
@@ -190,7 +208,13 @@ pub enum LegError {
 /// state when `decision` is the plan's commitment proven by `proof` under
 /// `root`. Every lock settles through this, so a leg moves once and only on
 /// a proven outcome.
-pub fn settle_leg(state: LegState, root: &[u8; 32], plan_id: &[u8; 32], decision: &[u8], proof: &[u8]) -> Result<LegState, LegError> {
+pub fn settle_leg(
+    state: LegState,
+    root: &[u8; 32],
+    plan_id: &[u8; 32],
+    decision: &[u8],
+    proof: &[u8],
+) -> Result<LegState, LegError> {
     if state != LegState::Locked {
         return Err(LegError::NotLocked);
     }
@@ -218,7 +242,10 @@ mod tests {
     use std::vec::Vec;
 
     fn hex32(v: &serde_json::Value) -> [u8; 32] {
-        hex::decode(v.as_str().unwrap().trim_start_matches("0x")).unwrap().try_into().unwrap()
+        hex::decode(v.as_str().unwrap().trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap()
     }
 
     fn bytes(v: &serde_json::Value) -> Vec<u8> {
@@ -227,18 +254,35 @@ mod tests {
 
     #[test]
     fn the_shared_vectors_prove_each_outcome_and_nothing_else() {
-        let v: serde_json::Value =
-            serde_json::from_str(include_str!("../../../sdk/fixtures/settlement_lock/vectors.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../sdk/fixtures/settlement_lock/vectors.json"
+        ))
+        .unwrap();
         let root = hex32(&v["root"]);
         let committed = hex32(&v["committed"]["plan_id"]);
         let aborted = hex32(&v["aborted"]["plan_id"]);
         let undecided = hex32(&v["undecided"]["plan_id"]);
-        assert_eq!(decision_tree_key(&committed), hex32(&v["committed"]["tree_key"]));
+        assert_eq!(
+            decision_tree_key(&committed),
+            hex32(&v["committed"]["tree_key"])
+        );
         assert_eq!(leg_id(&committed, 2), hex32(&v["committed"]["leg_ids"][2]));
-        let (cd, cp) = (bytes(&v["committed"]["decision"]), bytes(&v["committed"]["proof"]));
-        let (ad, ap) = (bytes(&v["aborted"]["decision"]), bytes(&v["aborted"]["proof"]));
-        assert_eq!(proven_outcome(&root, &committed, &cd, &cp), Some(Outcome::Commit));
-        assert_eq!(proven_outcome(&root, &aborted, &ad, &ap), Some(Outcome::Abort));
+        let (cd, cp) = (
+            bytes(&v["committed"]["decision"]),
+            bytes(&v["committed"]["proof"]),
+        );
+        let (ad, ap) = (
+            bytes(&v["aborted"]["decision"]),
+            bytes(&v["aborted"]["proof"]),
+        );
+        assert_eq!(
+            proven_outcome(&root, &committed, &cd, &cp),
+            Some(Outcome::Commit)
+        );
+        assert_eq!(
+            proven_outcome(&root, &aborted, &ad, &ap),
+            Some(Outcome::Abort)
+        );
         // Another plan's decision, or a forged one, proves nothing.
         assert_eq!(proven_outcome(&root, &undecided, &cd, &cp), None);
         let mut forged = cd.clone();
@@ -250,8 +294,10 @@ mod tests {
 
     #[test]
     fn a_leg_receipt_proves_its_outcome_and_repaid_network_fee() {
-        let v: serde_json::Value =
-            serde_json::from_str(include_str!("../../../sdk/fixtures/settlement_lock/leg_receipts.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../sdk/fixtures/settlement_lock/leg_receipts.json"
+        ))
+        .unwrap();
         let root = hex32(&v["root"]);
         let plan = hex32(&v["plan_id"]);
         let c = &v["committed"];
@@ -259,14 +305,32 @@ mod tests {
         assert_eq!(leg_receipt_tree_key(&leg), hex32(&c["tree_key"]));
         let (r, p) = (bytes(&c["receipt"]), bytes(&c["proof"]));
         let got = proven_leg_receipt(&root, &leg, &r, &p).unwrap();
-        assert_eq!((got.plan_id, got.index, got.committed, got.class), (plan, 1, true, 2));
-        assert_eq!(got.network_fee, c["network_fee"].as_str().unwrap().parse::<u128>().unwrap());
+        assert_eq!(
+            (got.plan_id, got.index, got.committed, got.class),
+            (plan, 1, true, 2)
+        );
+        assert_eq!(
+            got.network_fee,
+            c["network_fee"].as_str().unwrap().parse::<u128>().unwrap()
+        );
         assert_eq!(got.relayer, Some(hex32(&c["relayer"])));
         let a = &v["aborted"];
-        let aborted = proven_leg_receipt(&root, &hex32(&a["leg_id"]), &bytes(&a["receipt"]), &bytes(&a["proof"])).unwrap();
-        assert_eq!((aborted.committed, aborted.compensation, aborted.relayer), (false, Some(3), None));
+        let aborted = proven_leg_receipt(
+            &root,
+            &hex32(&a["leg_id"]),
+            &bytes(&a["receipt"]),
+            &bytes(&a["proof"]),
+        )
+        .unwrap();
+        assert_eq!(
+            (aborted.committed, aborted.compensation, aborted.relayer),
+            (false, Some(3), None)
+        );
         // Another leg's receipt, an altered one, or one under another root proves nothing.
-        assert_eq!(proven_leg_receipt(&root, &hex32(&v["absent"]["leg_id"]), &r, &p), None);
+        assert_eq!(
+            proven_leg_receipt(&root, &hex32(&v["absent"]["leg_id"]), &r, &p),
+            None
+        );
         let mut forged = r.clone();
         forged[93 + 15] ^= 1;
         assert_eq!(proven_leg_receipt(&root, &leg, &forged, &p), None);
@@ -275,21 +339,56 @@ mod tests {
 
     #[test]
     fn a_leg_moves_once_and_only_on_a_proven_outcome() {
-        let v: serde_json::Value =
-            serde_json::from_str(include_str!("../../../sdk/fixtures/settlement_lock/vectors.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../sdk/fixtures/settlement_lock/vectors.json"
+        ))
+        .unwrap();
         let root = hex32(&v["root"]);
         let committed = hex32(&v["committed"]["plan_id"]);
         let aborted = hex32(&v["aborted"]["plan_id"]);
-        let (cd, cp) = (bytes(&v["committed"]["decision"]), bytes(&v["committed"]["proof"]));
-        let (ad, ap) = (bytes(&v["aborted"]["decision"]), bytes(&v["aborted"]["proof"]));
-        assert_eq!(settle_leg(LegState::Locked, &root, &committed, &cd, &cp), Ok(LegState::Released));
-        assert_eq!(settle_leg(LegState::Locked, &root, &aborted, &ad, &ap), Ok(LegState::Refunded));
-        assert_eq!(settle_leg(LegState::Released, &root, &committed, &cd, &cp), Err(LegError::NotLocked));
-        assert_eq!(settle_leg(LegState::Refunded, &root, &aborted, &ad, &ap), Err(LegError::NotLocked));
-        assert_eq!(settle_leg(LegState::Locked, &root, &aborted, &cd, &cp), Err(LegError::Unproven));
-        assert_eq!(settle_leg(LegState::Locked, &[0u8; 32], &committed, &cd, &cp), Err(LegError::Unproven));
-        assert_eq!(escape_leg(LegState::Locked, 99, 100), Err(LegError::TooEarly));
-        assert_eq!(escape_leg(LegState::Locked, 100, 100), Ok(LegState::Refunded));
-        assert_eq!(escape_leg(LegState::Released, 200, 100), Err(LegError::NotLocked));
+        let (cd, cp) = (
+            bytes(&v["committed"]["decision"]),
+            bytes(&v["committed"]["proof"]),
+        );
+        let (ad, ap) = (
+            bytes(&v["aborted"]["decision"]),
+            bytes(&v["aborted"]["proof"]),
+        );
+        assert_eq!(
+            settle_leg(LegState::Locked, &root, &committed, &cd, &cp),
+            Ok(LegState::Released)
+        );
+        assert_eq!(
+            settle_leg(LegState::Locked, &root, &aborted, &ad, &ap),
+            Ok(LegState::Refunded)
+        );
+        assert_eq!(
+            settle_leg(LegState::Released, &root, &committed, &cd, &cp),
+            Err(LegError::NotLocked)
+        );
+        assert_eq!(
+            settle_leg(LegState::Refunded, &root, &aborted, &ad, &ap),
+            Err(LegError::NotLocked)
+        );
+        assert_eq!(
+            settle_leg(LegState::Locked, &root, &aborted, &cd, &cp),
+            Err(LegError::Unproven)
+        );
+        assert_eq!(
+            settle_leg(LegState::Locked, &[0u8; 32], &committed, &cd, &cp),
+            Err(LegError::Unproven)
+        );
+        assert_eq!(
+            escape_leg(LegState::Locked, 99, 100),
+            Err(LegError::TooEarly)
+        );
+        assert_eq!(
+            escape_leg(LegState::Locked, 100, 100),
+            Ok(LegState::Refunded)
+        );
+        assert_eq!(
+            escape_leg(LegState::Released, 200, 100),
+            Err(LegError::NotLocked)
+        );
     }
 }

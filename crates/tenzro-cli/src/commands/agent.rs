@@ -24,8 +24,11 @@ pub enum AgentCommand {
     /// registered with
     LiftQuarantine(AgentLiftQuarantineCmd),
     /// Terminate an agent via kill-switch (irreversible). Slashes stake by
-    /// `slash_bps`, optionally cascades to descendants.
+    /// `slash_bps`.
     Terminate(AgentTerminateCmd),
+    /// Move TNZO out of an agent's wallet to the wallet of its controller, or
+    /// of the successor its revoked root named
+    Reclaim(AgentReclaimCmd),
     /// The audit trail a node keeps of an agent's actions: fetch an entry
     /// and check it against the root committed on chain
     #[command(subcommand)]
@@ -62,6 +65,7 @@ impl AgentCommand {
             Self::Pause(cmd) => cmd.execute().await,
             Self::Quarantine(cmd) => cmd.execute().await,
             Self::LiftQuarantine(cmd) => cmd.execute().await,
+            Self::Reclaim(cmd) => cmd.execute().await,
             Self::Terminate(cmd) => cmd.execute().await,
             Self::Audit(cmd) => cmd.execute().await,
             Self::Delegation(cmd) => cmd.execute().await,
@@ -314,7 +318,7 @@ pub struct AgentTerminateCmd {
     /// Basis points of stake to slash (0..=10000)
     #[arg(long, default_value_t = 0u16)]
     slash_bps: u16,
-    /// Recursively terminate descendants under children:<parent_id>
+    /// Recorded in the kill-switch receipt. An agent has no descendants, so nothing further is terminated
     #[arg(long)]
     cascade: bool,
     /// Optional human reason text
@@ -524,6 +528,60 @@ impl AgentAuditAttestationCmd {
     }
 }
 
+/// `tenzro agent reclaim`: a `ReclaimAgentFunds` transaction, signed by the
+/// wallet that receives the funds.
+#[derive(Debug, Parser)]
+pub struct AgentReclaimCmd {
+    /// Hardware key namespace of the signing account: the wallet the
+    /// controller's (or successor's) identity is registered with, which
+    /// receives the funds
+    #[arg(long, default_value = "client")]
+    key_namespace: String,
+
+    /// The agent's controller, or the successor its revoked root named
+    #[arg(long)]
+    controller_did: String,
+    /// Agent DID whose wallet is drawn from
+    #[arg(long)]
+    agent_did: String,
+    /// Wei to move; the whole balance when absent
+    #[arg(long)]
+    amount: Option<u128>,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl AgentReclaimCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Reclaim Agent Funds");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = crate::keystore::send_as_client(
+            &rpc,
+            &self.key_namespace,
+            [0u8; 32],
+            serde_json::to_value(
+                tenzro_types::transaction::TransactionType::ReclaimAgentFunds {
+                    agent_did: self.agent_did.clone(),
+                    controller_did: self.controller_did.clone(),
+                    amount: self.amount,
+                },
+            )?,
+            DEFAULT_KILLSWITCH_QUARANTINE_GAS,
+        )
+        .await?;
+        let tx_hash = result
+            .get("tx_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>");
+        output::print_success("ReclaimAgentFunds transaction submitted");
+        output::print_field("Agent DID", &self.agent_did);
+        output::print_field("Transaction Hash", tx_hash);
+        Ok(())
+    }
+}
+
 /// Lift an agent's quarantine.
 #[derive(Debug, Parser)]
 pub struct AgentLiftQuarantineCmd {
@@ -603,6 +661,8 @@ impl AgentAuditQuarantineCmd {
 pub enum AgentRpcCommand {
     /// Call tenzro_getAgentTerms: the agent's full consensus Terms, root kind, status and spend so far
     Terms(AgentTermsRpcCmd),
+    /// Call tenzro_getAgentTermsCredential: the agent's Terms as an unsigned VC 2.0 credential its controller signs, with the on-behalf-of claims and registration data a payment network asks for
+    TermsCredential(AgentTermsCredentialRpcCmd),
     /// Call tenzro_flagAgentAudit (flag agent audit) and print the node's answer
     FlagAudit(AgentFlagAuditRpcCmd),
     /// Call tenzro_recordAgentAuditSession: report an audit session's latest line for this node to commit
@@ -627,6 +687,7 @@ impl AgentRpcCommand {
     pub async fn execute(&self) -> anyhow::Result<()> {
         match self {
             Self::Terms(cmd) => cmd.execute().await,
+            Self::TermsCredential(cmd) => cmd.execute().await,
             Self::FlagAudit(cmd) => cmd.execute().await,
             Self::RecordAuditSession(cmd) => cmd.execute().await,
             Self::BridgeCircuit(cmd) => cmd.execute().await,
@@ -660,6 +721,34 @@ impl AgentTermsRpcCmd {
                 serde_json::json!({ "agent_did": self.agent_did }),
             )
             .await?;
+        crate::output::print_json(&result)
+    }
+}
+
+/// Call tenzro_getAgentTermsCredential (the agent's Terms as a credential its controller signs)
+#[derive(Debug, clap::Parser)]
+pub struct AgentTermsCredentialRpcCmd {
+    /// agent did
+    #[arg(long)]
+    agent_did: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl AgentTermsCredentialRpcCmd {
+    pub async fn execute(&self) -> anyhow::Result<()> {
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getAgentTermsCredential",
+                serde_json::json!({ "agent_did": self.agent_did }),
+            )
+            .await?;
+        if result.is_null() {
+            crate::output::print_error("The agent has no Terms on chain.");
+            return Ok(());
+        }
         crate::output::print_json(&result)
     }
 }

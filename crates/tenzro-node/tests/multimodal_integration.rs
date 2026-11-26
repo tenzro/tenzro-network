@@ -20,10 +20,7 @@
 
 use std::sync::Arc;
 
-use tenzro_model::{
-    ModelRegistry, get_audio_catalog, get_detection_catalog, get_forecast_catalog,
-    get_segmentation_catalog, get_text_embedding_catalog, get_video_catalog, get_vision_catalog,
-};
+use tenzro_model::{Catalog, CatalogCell, ModelRegistry};
 use tenzro_storage::{KvStore, MemoryStore};
 use tenzro_types::model::{
     AudioParameters, ModelInfo, ModelModality, TimeseriesParameters, VideoParameters,
@@ -99,8 +96,7 @@ fn make_model(model_id: &str, modality: ModelModality, seed: u8) -> ModelInfo {
 
 #[test]
 fn forecast_catalog_is_non_empty_and_well_formed() {
-    tenzro_catalog::install_test_seed();
-    let catalog = get_forecast_catalog();
+    let catalog = Catalog::test_seed().get_forecast_catalog();
     assert!(
         !catalog.is_empty(),
         "forecast catalog must include TimesFM 2.5"
@@ -114,8 +110,7 @@ fn forecast_catalog_is_non_empty_and_well_formed() {
 
 #[test]
 fn vision_catalog_is_non_empty_and_well_formed() {
-    tenzro_catalog::install_test_seed();
-    let catalog = get_vision_catalog();
+    let catalog = Catalog::test_seed().get_vision_catalog();
     assert!(
         !catalog.is_empty(),
         "vision catalog must include CLIP/SigLIP2/DINOv3 entries"
@@ -131,8 +126,7 @@ fn vision_catalog_is_non_empty_and_well_formed() {
 
 #[test]
 fn text_embedding_catalog_is_non_empty_and_well_formed() {
-    tenzro_catalog::install_test_seed();
-    let catalog = get_text_embedding_catalog();
+    let catalog = Catalog::test_seed().get_text_embedding_catalog();
     assert!(
         !catalog.is_empty(),
         "text embedding catalog must include Qwen3-Embedding / EmbeddingGemma / BGE-M3"
@@ -148,8 +142,7 @@ fn text_embedding_catalog_is_non_empty_and_well_formed() {
 
 #[test]
 fn segmentation_catalog_is_non_empty_and_well_formed() {
-    tenzro_catalog::install_test_seed();
-    let catalog = get_segmentation_catalog();
+    let catalog = Catalog::test_seed().get_segmentation_catalog();
     assert!(
         !catalog.is_empty(),
         "segmentation catalog must include SAM 2 / EdgeSAM / MobileSAM"
@@ -161,8 +154,7 @@ fn segmentation_catalog_is_non_empty_and_well_formed() {
 
 #[test]
 fn detection_catalog_is_non_empty_and_well_formed() {
-    tenzro_catalog::install_test_seed();
-    let catalog = get_detection_catalog();
+    let catalog = Catalog::test_seed().get_detection_catalog();
     assert!(
         !catalog.is_empty(),
         "detection catalog must include RF-DETR / D-FINE entries"
@@ -174,8 +166,7 @@ fn detection_catalog_is_non_empty_and_well_formed() {
 
 #[test]
 fn audio_catalog_is_non_empty_and_well_formed() {
-    tenzro_catalog::install_test_seed();
-    let catalog = get_audio_catalog();
+    let catalog = Catalog::test_seed().get_audio_catalog();
     assert!(
         !catalog.is_empty(),
         "audio catalog must include Moonshine / Distil-Whisper / Whisper-v3-turbo / Parakeet / Canary"
@@ -188,7 +179,6 @@ fn audio_catalog_is_non_empty_and_well_formed() {
 
 #[test]
 fn video_catalog_lists_nothing_the_node_cannot_load() {
-    tenzro_catalog::install_test_seed();
     // The catalog previously advertised the V-JEPA 2 family. It was removed:
     // `facebook/vjepa2-*` ships safetensors only (verified against the HF API
     // — no `.onnx` sibling on any size), and the community exports are not
@@ -201,7 +191,7 @@ fn video_catalog_lists_nothing_the_node_cannot_load() {
     // and discovery that ends in "you cannot actually load this" is worse for
     // a caller than discovery that returns nothing.
     assert!(
-        get_video_catalog().is_empty(),
+        Catalog::test_seed().get_video_catalog().is_empty(),
         "a video entry needs a loader path before it is advertised"
     );
 }
@@ -212,7 +202,7 @@ fn video_catalog_lists_nothing_the_node_cannot_load() {
 
 #[test]
 fn register_and_lookup_per_modality() {
-    let registry = ModelRegistry::new();
+    let registry = ModelRegistry::new(CatalogCell::default());
 
     let modalities = [
         ("ts-1", ModelModality::Timeseries),
@@ -261,7 +251,7 @@ fn restart_rehydrates_every_modality_with_sidecars() {
 
     // First "node lifetime" — register one model per modality.
     {
-        let registry = ModelRegistry::with_storage(storage.clone());
+        let registry = ModelRegistry::with_storage(storage.clone(), CatalogCell::default());
         let entries = [
             ("ts-1", ModelModality::Timeseries),
             ("vis-1", ModelModality::Image),
@@ -280,7 +270,7 @@ fn restart_rehydrates_every_modality_with_sidecars() {
 
     // Second "node lifetime" — rehydrate, every model must reappear with
     // its modality-specific sidecar intact.
-    let registry = ModelRegistry::with_storage(storage);
+    let registry = ModelRegistry::with_storage(storage, CatalogCell::default());
 
     let ts = registry.get_model("ts-1").expect("ts-1 rehydrated");
     assert_eq!(ts.modality, ModelModality::Timeseries);
@@ -315,7 +305,7 @@ fn restart_rehydrates_every_modality_with_sidecars() {
 
 #[test]
 fn get_models_by_modality_returns_only_requested() {
-    let registry = ModelRegistry::new();
+    let registry = ModelRegistry::new(CatalogCell::default());
 
     let entries = [
         ("ts-a", ModelModality::Timeseries),
@@ -381,7 +371,7 @@ fn modality_supports_compound_semantics() {
 
 #[test]
 fn duplicate_register_is_rejected() {
-    let registry = ModelRegistry::new();
+    let registry = ModelRegistry::new(CatalogCell::default());
     let m = make_model("dup-1", ModelModality::Image, 1);
     registry.register_model(m.clone()).expect("first register");
     let err = registry
@@ -400,7 +390,7 @@ fn duplicate_register_is_rejected() {
 
 #[test]
 fn zero_hash_register_is_rejected() {
-    let registry = ModelRegistry::new();
+    let registry = ModelRegistry::new(CatalogCell::default());
     // Build by hand without `with_hash` so model_hash stays at Hash::zero().
     let m = ModelInfo::new(
         "zero-hash-1".to_string(),

@@ -1,7 +1,5 @@
-use std::{
-    collections::{BinaryHeap, hash_map},
-    io,
-};
+use alloc::collections::BinaryHeap;
+use std::io;
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -11,7 +9,7 @@ use super::spaces::Retransmits;
 use crate::{
     Dir, StreamId, VarInt,
     connection::streams::state::{StreamRecv, get_or_insert_recv, get_or_insert_send},
-    frame,
+    frame, hash_map,
 };
 
 mod recv;
@@ -266,7 +264,7 @@ impl<'a> SendStream<'a> {
     /// the chunk will be advanced and contain only non-written data after the call.
     pub fn write_chunks(&mut self, data: &mut &mut [Bytes]) -> Result<usize, WriteError> {
         let written = self.write_source(&mut BytesArray::from_chunks(data))?;
-        *data = &mut std::mem::take(data)[written.chunks..];
+        *data = &mut core::mem::take(data)[written.chunks..];
         Ok(written.bytes)
     }
 

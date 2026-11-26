@@ -363,8 +363,8 @@ impl Paths {
         let addr =
             EndpointAddr::new(peer).with_addrs([iroh::TransportAddr::Custom(punched_addr(peer))]);
         let named =
-            tokio::time::timeout(Duration::from_secs(10), endpoint.connect(addr, ALPN_PUNCH)).await;
-        if let Ok(Ok(conn)) = named {
+            crate::bounded::connect(&endpoint, addr, ALPN_PUNCH, Duration::from_secs(10)).await;
+        if let Ok(conn) = named {
             conn.close(0u32.into(), b"named");
         }
     }
@@ -411,8 +411,8 @@ impl Paths {
             return false;
         };
         let nonce: [u8; 16] = rand::random();
-        let Ok(Ok(conn)) =
-            tokio::time::timeout(Duration::from_secs(10), endpoint.connect(peer, ALPN_PUNCH)).await
+        let Ok(conn) =
+            crate::bounded::connect(&endpoint, peer, ALPN_PUNCH, Duration::from_secs(10)).await
         else {
             self.inner
                 .punch
@@ -520,7 +520,9 @@ impl Paths {
 }
 
 async fn ask(conn: &Connection, message: &Message) -> Option<Message> {
-    let (mut send, mut recv) = conn.open_bi().await.ok()?;
+    let (mut send, mut recv) = crate::bounded::open_bi(conn, crate::bounded::BACKSTOP)
+        .await
+        .ok()?;
     send.write_all(&serde_json::to_vec(message).ok()?)
         .await
         .ok()?;
@@ -606,7 +608,9 @@ impl Observer {
 
 /// The observe port a forwarder announces on a stream of the connection.
 async fn observe_port(conn: &Connection) -> Option<u16> {
-    let (mut send, mut recv) = conn.open_bi().await.ok()?;
+    let (mut send, mut recv) = crate::bounded::open_bi(conn, crate::bounded::BACKSTOP)
+        .await
+        .ok()?;
     send.write_all(b"observe").await.ok()?;
     send.finish().ok()?;
     let answer = tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(16))

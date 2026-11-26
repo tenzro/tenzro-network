@@ -72,4 +72,11 @@ mod tests {
         drop(big);
         let _ = trim_now();
     }
+
+    #[test]
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    fn a_target_without_glibc_sets_and_trims_nothing() {
+        assert!(!limit_arenas(MAX_ARENAS));
+        assert!(!trim_now());
+    }
 }

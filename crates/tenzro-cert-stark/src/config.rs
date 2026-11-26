@@ -174,7 +174,7 @@ mod tests {
     /// behind revealing `c~` and `w1` instead. Prints one `COST {json}` line.
     /// Run with `TENZRO_CERT_PERMS=<n>` and `--ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn cost_of_keccak_permutations() {
         let perms: usize = std::env::var("TENZRO_CERT_PERMS")
             .ok()

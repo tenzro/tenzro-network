@@ -35,8 +35,10 @@ The MCP server (`/mcp`) runs in one of two auth modes, selected by the `TENZRO_M
 
 | Mode | Behavior |
 |------|----------|
-| `tiered` | The default when unset. Public-read tools are open; every other call requires a bearer JWT issued for the `/mcp` resource. |
-| `full` | All calls require a bearer JWT. |
+| `tiered` | The default when unset. Public-read tools are open; every other call requires either the DPoP-bound access token from onboarding or sign-in (`Authorization: DPoP …` with its `DPoP` proof), or a bearer JWT from the server's `/authorize` flow. |
+| `full` | All calls require one of the two. |
+
+Operator-class tools answer to the node's access policy, which names a caller only from a DPoP-bound token, so they need the DPoP form; a bearer JWT reaches them as an anonymous caller. `/mcp/compact` takes the same credentials.
 
 `tenzro_chat` is a write method (it consumes tokens and bills the caller). Under `tiered` and `full`, it requires an authenticated request.
 
@@ -90,7 +92,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
     "top_p": 0.9,
     "repeat_penalty": 1.1,
     "verification": "receipt",
-    "caller_address": "0x..."
+    "payment": { "payer": "0x...", "payment_id": "0x...", "authorization": "0x..." }
   },
   "id": 1
 }
@@ -116,10 +118,10 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `verifiable` | bool | no | false | Request a TOPLOC top-k logit commitment with the response. See [Verifiable inference](#verifiable-inference-toploc-commitments-and-challenges). A request served without a commitment fails with `-32025`. |
 | `jurisdiction` | string | no | — | Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. `"DE,EU"`), case-insensitive. The serving node must declare a matching locality claim or the request fails with `-32024`. See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts). |
 | `jurisdiction_receipt` | string | no | — | Set to `"required"` to fail the request unless the response carries a verifiable signed `tenzro_jurisdiction` receipt. Off by default — pinned routing works without receipt strictness. |
-| `caller_address` | string | no | — | TNZO address billed for the inference. If absent, no on-chain billing. |
+| `payment` | object | no | — | A `PayerSettle` the payer signed for this call: `{payer, payment_id, authorization}`, the signature covering the payment, its payee and a ceiling. The node settles the metered cost, plus any fee leg it declares, up to that ceiling; each `payment_id` settles once. Without `payment` or `channel_voucher` the call is not billed. |
+| `caller_address` | string | no | — | Account refunded when an `optimistic` answer is found faulty on re-execution. It does not bill. |
 | `channel_voucher` | object | no | — | Pay through a payment channel instead of a direct transfer. A channel is an escrow the payer funded on the ledger naming this node's payee; the voucher is the payer's next cumulative voucher on it: `{escrow_id, cumulative_amount, public_key, signature}` (hex fields; `signature` is Ed25519 over the escrow-voucher preimage of chain id, escrow id and cumulative amount). The voucher must advance the channel by at least the call's cost. |
-| `provider` | string | no | — | Pins the call to one provider's wallet address. Set by intent routing, which scored a specific announcement at its advertised price. A pin naming another operator outranks any locally-resolved service. If the pinned offer is no longer announced the call fails with `-32004` rather than serving a different provider at a price the consumer never priced against. |
-| `app_id` | string | no | — | Registered app whose developer margin is added on top of the network cost and routed to that app's wallet. An unknown or deactivated `app_id` fails with `-32602` instead of silently dropping the margin. |
+| `provider` | string | no | — | Pins the call to one provider's wallet address. A pin naming another operator outranks any locally-resolved service. If the pinned offer is no longer announced the call fails with `-32004` rather than serving a different provider at a price the consumer never priced against. |
 
 ### Response
 
@@ -136,13 +138,15 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
     "tokens_per_second": 49.3,
     "cost_wei": "210000000000000",
     "settlement": {
+      "tx_hash": "0x...",
       "status": "settled",
-      "via": "transfer",
-      "commission_wei": "10500000000000",
-      "provider_wei": "199500000000000",
-      "margin_wei": "0",
-      "provider": "0x...",
-      "app_id": null
+      "amount": "210000000000000",
+      "declared_leg": "0",
+      "network_fee": "210000000000",
+      "payee_credit": "209790000000000",
+      "pay_ref": "...",
+      "via": "ledger",
+      "provider": "0x..."
     },
     "location": "local",
     "load": {
@@ -174,7 +178,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `generation_time_ms` | uint | Wall-clock generation duration. Local path only. |
 | `tokens_per_second` | float | Throughput. Local path only. |
 | `cost_wei` | string | Total cost in wei (10^-18 TNZO). Local path only. |
-| `settlement` | object | `{"status": "settled", "via": "channel"\|"transfer", "commission_wei", "provider_wei", "margin_wei", "provider", "app_id"}` when payment cleared, `{"status": "not_applicable"}` when no billing applied (zero cost, no `caller_address`, or no billing wallet on the settling node). `commission_wei` and `provider_wei` sum to the network cost — commission is carved out of the quoted price, not added to it, so the consumer pays exactly the advertised offer. `margin_wei` is the developer margin added on top of the network cost and routed to `app_id`'s wallet; both are `0`/`null` without an `app_id`. `provider` is the wallet actually paid. The `channel` path reports `commission_wei: 0` and `margin_wei: 0`: the `ClaimEscrow` that redeems the channel pays the escrow's payee what the calls cost (never more than the signed voucher) with no treasury leg or margin. Present on both paths: when this node forwards to a peer it settles that peer's leg itself. |
+| `settlement` | object | On the ledger path (`payment`): `{"tx_hash", "status": "settled"\|"pending", "amount", "declared_leg", "network_fee", "payee_credit", "pay_ref", "via": "ledger", "provider"}`. `amount` is what the payer was debited; `declared_leg` is the fee leg this node declares, paid to its own wallet; `network_fee` is the governed settlement fee on the rest; `payee_credit` is what `provider`, the wallet actually paid, is credited. `pending` means the `PayerSettle` had not executed when the wait ended and is still pending under `tx_hash`. On the channel path (`channel_voucher`): `{"status": "settled", "via": "channel", "reference", "amount_wei", "provider"}`; the `ClaimEscrow` that redeems the channel pays the escrow's payee what the calls cost, never more than the signed voucher. `{"status": "not_applicable"}` when no billing applied (zero cost, no `payment` or `channel_voucher`, or no billing wallet on the settling node). Present on both paths: when this node forwards to a peer it settles that peer's leg itself. |
 | `location` | string | `"local"` if served by this node, `"network"` if forwarded to a peer. |
 | `provider` | string | Serving provider identifier. Network path only. |
 | `load` | object | Provider load snapshot. Useful for client-side routing decisions. Local path only. |
@@ -191,9 +195,10 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | -32000 | Model not serving / runtime error. `data.load` carries load snapshot if at capacity. |
 | -32004 | The pinned `provider` no longer announces the requested model. The call fails rather than silently serving a different provider at a price the consumer never priced against — route again to pick a live offer. |
 | -32021 | The requested `verification` cannot be provided: the serving node cannot meet it, or the answer arrived without the evidence it requires. Never served at a lower level. (Routing that finds no provider able to meet the level fails as any unroutable request does.) |
-| -32023 | Settlement failed — channel voucher or token transfer rejected. `data` carries `cost_wei` and `unpaid_key` (a persisted unpaid-settlement marker for retry). Never a silent free inference. |
-| -32024 | Jurisdiction pin not satisfied — no serving node with a matching locality claim (routing found none, or the local node's claim does not match), or `jurisdiction_receipt: "required"` was set and no verifiable signed receipt is available. |
+| -32023 | Settlement failed — channel voucher or `PayerSettle` rejected. `data` carries `cost_wei` and `model_id`. Never a silent free inference. |
+| -32024 | Jurisdiction pin not satisfied — no serving node with a matching locality claim (routing found none, or the local node's claim does not match), or `jurisdiction_receipt: "required"` was set and no verifiable signed receipt is available. Also returned, with `data.remedy` `open_channel`, when the call's cost is below the micro-settlement floor and no `channel_voucher` was given. |
 | -32025 | `verifiable: true` was set and the engine that served the request produced no commitment, or this node cannot store one. |
+| -32026 | Below the micro-settlement floor — the call metered less than the network's governance-set floor, so it cannot settle as its own transaction. `data` carries `cost_wei`, `micro_settlement_floor` and `remedy: "open_channel"`: fund an escrow, open a channel on it and pass a signed `channel_voucher`. |
 
 ### Provenance lookup
 
@@ -214,15 +219,20 @@ Provenance signing proves *who* served a response; a TOPLOC commitment proves *w
 | Method | Params | Notes |
 |--------|--------|-------|
 | `tenzro_getInferenceCommitment` | `{commitment_hash}` | Full stored envelope `{commitment_hash, model_id, provider, created_at, commitment}`, or `null`. |
-| `tenzro_verifyInferenceCommitment` | `{commitment_hash, prompt}` | Re-executes locally; requires the model loaded in serial mode. Returns `{pass, steps_total, steps_passed, failing_steps}` plus serving context. |
-| `tenzro_fileInferenceChallenge` | `{commitment_hash, challenger, reason?}` | Open to any caller. Model and provider are read from the stored envelope, so filings cannot misattribute. Draws the committee (below). A commitment can be challenged once. |
+| `tenzro_verifyInferenceCommitment` | `{commitment_hash, prompt` or `request, commitment?, receipt?, receipt_nonce?}` | Re-executes locally, on the serial or the batch engine; `request` is a `tenzro_chat` frame this node renders as its chat path does, and a node that did not serve the answer takes the `commitment` with the provider's signed `receipt`. With `receipt_nonce` the verdict comes back under this node's signed task receipt: how a witness answers a validator. Returns `{pass, steps_total, steps_passed, failing_steps}` plus serving context. A step passes when the emitted token is in the re-executed top-k, at least three quarters of the committed ids reappear and the mean logit difference is within `inference.verification.commitment_logit_delta_milli` (0.60 at genesis, above the 0.505 decode-versus-prefill difference measured on CPU); the commitment passes when its passing steps, plus up to `inference.verification.commitment_tolerated_misses` (2) of its failing ones, make at least `inference.verification.commitment_passing_bps` (90%) of its steps and more steps pass than fail, so a short honest answer survives a rounding miss. |
+| `tenzro_fileInferenceChallenge` | `{commitment_hash, challenger, reason?, receipt, inputs, commitment?}` | Open to any caller, on a validator or model-provider node that publishes a public https RPC URL. `receipt` is the provider's signed receipt; `inputs` is what the engine was given (`{kind: "prompt", prompt}` or `{kind: "chat", messages, media}`) and must be what the receipt's `input_commitment` commits to, at most 8 MiB; `commitment` is needed when this node did not serve the response. Model and provider are read from the receipt, so filings cannot misattribute. Draws the committee (below) and publishes the challenge to every validator. A commitment can be challenged once. |
 | `tenzro_getInferenceChallenge` | `{challenge_id}` | Full challenge record (committee, votes, tally) or `null`. |
 | `tenzro_listInferenceChallenges` | `{status?, provider?}` | `{count, challenges}` sorted newest first. Status ∈ `voting_commit`, `voting_reveal`, `upheld`, `dismissed`. |
-| `tenzro_signChallengeVote` | `{challenge_id, commit_hash}` or `{challenge_id, verdict, salt}` | Admin, on the **voter's own node**: signs a commit or a reveal with that node's validator consensus key and returns `{voter, public_key, signature}`. The key never leaves the node. |
+| `tenzro_signChallengeVote` | `{phase, challenge_id, verdict, salt}` | Admin, on the **voter's own node**: signs a commit (`phase: "commit"`, returns `{voter, public_key, commit_hash, signature}`) or a reveal (`phase: "reveal"`, returns `{voter, public_key, signature}`) with that node's validator key. It signs only the verdict this node's own `tenzro_reexecuteChallenge` recorded, so a seat cannot vote on a response it has not re-executed. |
+| `tenzro_reexecuteChallenge` | `{challenge_id, inputs?}` | Admin, on a **seat's own node**: fetches the inputs from the node holding the challenge (`tenzro_getChallengeInputs`, signed by this node's validator key) or takes `inputs`, checks them against the receipt, re-executes them (the model loaded in serial mode; a chat turn is rendered through the model's own template with no tools; a turn with media is refused) and records `{verdict, scored: {steps_total, steps_passed, failing_steps}}`. `verdict` is `true` when the commitment did not verify. |
+| `tenzro_listSeatDuties` | — | Admin: the open challenges this node holds a seat on, each with `challenge_id, voter, model_id, status, commit_deadline, reveal_deadline, reexecuted, verdict, scored, committed, revealed`. |
+| `tenzro_getChallengeInputs` | `{challenge_id, voter, requested_at, signature}` | Open, on the node holding the challenge: the inputs, for a drawn seat whose validator key signed `tenzro/inference-challenge/inputs-request ‖ challenge_id ‖ voter ‖ requested_at` within five minutes of this node's clock. Deleted when the challenge is finalized or its reveal window passes. |
 | `tenzro_commitChallengeVote` | `{challenge_id, voter, commit_hash, signature}` | Committee seat only, within the commit window (1 h). `commit_hash` = `H(verdict ‖ salt ‖ challenge_id ‖ voter)`; the verdict stays hidden. `signature` must verify against the seat's registered consensus key. When committed stake passes the quorum the challenge advances to the reveal phase. |
 | `tenzro_revealChallengeVote` | `{challenge_id, voter, verdict, salt, signature}` | Accepted once commits close (quorum or window) and until the reveal window (1 h more) ends; refused while commits are open. `(verdict, salt)` must reproduce the commit and `signature` must verify. `verdict = true` upholds. `salt` is hex. |
 | `tenzro_finalizeChallenge` | `{challenge_id}` | Tallies revealed votes by committee stake weight. More than two thirds of committee stake upholds or dismisses; with no quorum the challenge closes as dismissed only once the reveal window has passed. Idempotent. |
 | `tenzro_auditInferenceChallenge` | `{challenge_id}` or `{challenge}` | Re-checks a challenge record — this node's, or one fetched from any node — from its contents: every commit and reveal signature against its seat's key, every reveal against its commit, the recorded verdict against the signed stake, and each seat's key against this node's validator registry. |
+
+**How seats hear of a challenge.** The node a challenge is filed on publishes it, with the commitment its receipt binds, on the gossip topic `tenzro/inference-challenges`, which validators and model providers join. A receiving node takes it in only when the provider's receipt verifies, the block at `entropy_height` in its own chain has the hash `chain_entropy`, the entropy draws exactly the named committee from its own validator set, and the windows are the governed ones; of two filings of one commitment every node keeps the one with the lower entropy height. Accepted commits and reveals travel on the same topic, signed by their seats, so every node holding the challenge applies the same votes and finalizes the same record, and a seat submits its vote to its own node. A message for a challenge or vote a node already holds is dropped before any signature is checked, and each neighbour may deliver at most 120 messages a minute on the topic. The inputs never travel on the topic.
 
 **Committee & quorum.** No administrator decides the verdict, and no one but a seat can cast a seat's vote: votes are signed by the seat's validator consensus key, so the node holding the dispute, and its operator, cannot vote on the committee's behalf. The committee (a third of the active validators, between three and seven) is sampled without replacement with probability proportional to stake, from keys derived from the commitment hash and the finalized block hash at filing. The provider fixed the commitment hash before any dispute and a commitment can be challenged only once, so neither side can re-draw the committee. A validator whose consensus key is the provider's own key is never seated. The quorum threshold is `floor(2 × total / 3) + 1` of committee stake. Challenge state is held by the node that stores the commitment; the signed record lets any node audit it, and it is not replicated through consensus.
 
@@ -265,7 +275,7 @@ Data-residency rules (GDPR transfers, sectoral regulation, sovereign-deployment 
 
 **Streaming.** SSE streams carry no `tenzro_jurisdiction` receipt, in the final chunk or anywhere else — the general `tenzro_receipt` inference receipt, when the serving node can sign one, rides the final chunk of a stream (and no chunk before it) just as it rides the body of a non-streamed completion; it binds the request and the served output, not a locality claim. A forwarding gateway passes the provider's receipt through unchanged. For pinned streaming requests the fail-closed claim check runs before generation starts — refusal arrives as HTTP 412 (`jurisdiction_not_satisfied`) before the first token. That pre-stream check is the whole streaming locality contract; callers needing a jurisdiction receipt use the non-streaming path.
 
-**Surfaces.** Simple + rich `tenzro_chat` and `tenzro_chatByIntent` (`jurisdiction` / `jurisdiction_receipt` params); OpenAI-compatible HTTP (same field names in the request body, refusals as HTTP 412 with error codes `jurisdiction_not_satisfied` / `jurisdiction_receipt_unavailable`); MCP `chat` (same params); A2A inference skill (`jurisdiction` / `jurisdiction_receipt` message metadata); CLI `tenzro chat --jurisdiction "DE,EU" [--require-jurisdiction-receipt]`, `tenzro inference route --message ... --jurisdiction ...`.
+**Surfaces.** Simple + rich `tenzro_chat` (`jurisdiction` / `jurisdiction_receipt` params); OpenAI-compatible HTTP (same field names in the request body, refusals as HTTP 412 with error codes `jurisdiction_not_satisfied` / `jurisdiction_receipt_unavailable`); MCP `chat` (same params); A2A inference skill (`jurisdiction` / `jurisdiction_receipt` message metadata); CLI `tenzro chat --jurisdiction "DE,EU" [--require-jurisdiction-receipt]`, `tenzro inference route --message ... --jurisdiction ...`.
 
 ---
 
@@ -310,7 +320,7 @@ For multi-turn conversations, system prompts, tool calls, vision input, and stru
     "top_p": 0.9,
     "stop_sequences": ["</answer>"],
     "reasoning_effort": "medium",
-    "caller_address": "0x..."
+    "payment": { "payer": "0x...", "payment_id": "0x...", "authorization": "0x..." }
   },
   "id": 1
 }
@@ -331,9 +341,8 @@ For multi-turn conversations, system prompts, tool calls, vision input, and stru
 | `presence_penalty` | float | no | 0.0 | Flat logit penalty for any token already present. |
 | `stop_sequences` | string \| string[] | no | [] | Stop sequences. The matched suffix is trimmed from the returned text. |
 | `reasoning_effort` | string | no | `"medium"` | `"low"` \| `"medium"` \| `"high"`. Bounds the `thinking` block budget on models that support extended thinking. Ignored otherwise. |
-| `caller_address` | string | no | — | Billing address. |
+| `payment` | object | no | — | The payer's signed `PayerSettle`, same contract as the simple shape. |
 | `provider` | string | no | — | Pins the call to one provider's wallet address, same contract as the simple shape. |
-| `app_id` | string | no | — | Registered app whose developer margin is added on top of the network cost, same contract as the simple shape. |
 
 ### Messages
 
@@ -548,9 +557,9 @@ A receipt verifies on its own: `tenzro_verifyInferenceReceipt {receipt}` checks 
 
 **Verification levels.** A request may name the verification it needs with `verification` (on `/v1/chat/completions` and `tenzro_chat`): `none` (the default), `receipt`, `optimistic` or `tee`. A serving node that cannot meet the level refuses the request before doing any work (`-32021`, or `400 verification_unavailable`); it never answers at a lower level. At `tee` the node must have detected confidential compute at startup, and the receipt carries the hardware attestation report (`tee.report`) whose report data is a SHA-256 over the model, the model hash and engine, the machine, the nonce, the input and output commitments and the signing key. `tenzro_verifyInferenceReceipt {receipt, level: "tee"}` checks the chain: the report against the vendor's roots as of when the receipt was signed, its report data against the receipt, its launch measurement against the attestation transparency log, and the receipt signature, which covers the report. When a streamed answer's receipt cannot be produced, the final chunk carries `tenzro_receipt_error`.
 
-**Choosing and pricing a level.** `tenzro_routeIntent` and `tenzro_chatByIntent` take the same `verification` field. Each provider announces the levels it serves at, and the routing node keeps only those it can check itself: `receipt`; `tee` when the provider's announcement names confidential-compute hardware; `optimistic` when the routing node's view of chain state holds an active compute bond registering the provider's receipt key and another provider serves the same model to re-execute on. A candidate that cannot meet the level is dropped, and an intent no candidate meets is refused rather than relaxed. The estimate and the settled cost carry the level's governed surcharge (`inference.verification.receipt_bps`, `inference.verification.optimistic_bps`, `inference.verification.tee_bps`). A forwarded answer whose receipt does not check out at its level is withheld from the caller.
+**Choosing and pricing a level.** A request names its level in the `verification` field. Each provider announces the levels it serves at, and the routing node keeps only those it can check itself: `receipt`; `tee` when the provider's announcement names confidential-compute hardware; `optimistic` when the routing node's view of chain state holds an active compute bond registering the provider's receipt key and another provider serves the same model to re-execute on. A candidate that cannot meet the level is dropped, and a request no candidate meets is refused rather than relaxed. The estimate and the settled cost carry the level's governed surcharge (`inference.verification.receipt_bps`, `inference.verification.optimistic_bps`, `inference.verification.tee_bps`). A forwarded answer whose receipt does not check out at its level is withheld from the caller.
 
-**Optimistic verification.** At `optimistic` the serving node must hold an active compute bond for its machine DID, whose registered hardware identity key signs its receipts. The forwarding node sends the request with `temperature: 0`, so the answer is a greedy decode any provider serving the same weights reproduces. A streamed answer is reassembled as it passes through the forwarding node and checked once complete, exactly as a whole one; a stream that failed over to a second provider spans two answers and is not drawn. After the answer arrives the forwarding node draws, at the governed rate `inference.optimistic.sample_bps`, whether to re-execute it on another provider announcing the same model. The second provider's receipt must name the same model hash, engine, input commitment and sampling; the outputs must match exactly, or for `gguf` match in their tool calls and their first 32 words. On a mismatch the forwarding node files an `InferenceFault` transaction within the challenge window (`inference.optimistic.window_ms` after the receipt was signed) carrying the receipt, the request and the output. Any part of the request or the output larger than 4 KiB of canonical JSON (an image, a mask, a long conversation) travels as `{ "blake3": <hex>, "bytes": <length> }`, the BLAKE3 hash of that part's canonical JSON: a modality receipt commits to its output in that form, the filing node holds the parts in its content store, and a validator fetches them and checks them against their hashes before judging, so a dispute fits a fault whatever the size of the answer. Every bonded validator re-executes it on a provider other than the accused and attests a verdict; once attesters hold two thirds of bonded stake the verdict freezes. A media render (`tenzro_mediaGen_render`, and every whole job on the media market, whose worker signs a receipt for the task `media`) commits to its output's SHA-256 and a perceptual fingerprint: the mean luma of a 16 x 16 grid per picture or for up to 8 frames of a clip, the RMS level of every 100 ms of sound, and for a 3D asset (GLB) the share of its surface area in each cell of an 8 x 8 x 8 grid over its bounding cube. Two renders of the same seed and parameters agree when every part of their fingerprints lies within a relative L2 distance of the other no larger than the tolerance both receipts commit to (5% for pictures and video, 10% for sound and 3D assets, at most 10%). The node a market job was posted through draws completed jobs at the same rate and re-executes them through `tenzro_mediaGen_render` on another provider. Upheld, the provider's bond refunds whoever paid for the answer (capped by `inference.optimistic.max_refund_gwei`) and pays the insurance pool `inference.optimistic.penalty_payment_bps` of the payment (default 20x), at least `inference.optimistic.penalty_floor_micro_usd` in TNZO at the rate in force, recorded on chain; a fault undecided within the window expires and slashes nothing.
+**Optimistic verification.** At `optimistic` the serving node must hold an active compute bond for its machine DID, whose registered hardware identity key signs its receipts. The forwarding node sends the request with `temperature: 0`, so the answer is a greedy decode. A completion at this level carries its decode commitment: the serving node records the top-k logits of every token it emits and returns the whole commitment with the answer, and the forwarding node keeps it when it hashes to the commitment the receipt signs. After the answer arrives the forwarding node draws, at the governed rate `inference.optimistic.sample_bps`, whether to check it on another provider announcing the same model. A completion is checked by its commitment, never by regenerating it: two greedy decodes that meet a near tie break it differently on different hardware, so their words may part where neither is wrong. The other provider (`tenzro_verifyInferenceCommitment` with the `tenzro_chat` request, the commitment and a receipt nonce) renders the request as its chat path does, scores the committed tokens in one prefill, compares its logits with the committed ones within the verification tolerance, and checks that every emitted token is the one greedy decoding picks from the committed logits; it signs that verdict under a receipt for the task `verify_commitment` with the same model hash and engine. A completion that came without a commitment, a streamed answer among them, is not checked. A modality call is re-executed instead: the second provider's receipt must name the same model hash, engine, input commitment and sampling, and the outputs must agree (exactly, or within the tolerances below). On a failed check the forwarding node files an `InferenceFault` transaction within the challenge window (`inference.optimistic.window_ms` after the receipt was signed) carrying the receipt, the request and the output. Any part of the request or the output larger than 4 KiB of canonical JSON (an image, a mask, a long conversation) travels as `{ "blake3": <hex>, "bytes": <length> }`, the BLAKE3 hash of that part's canonical JSON: a modality receipt commits to its output in that form, the filing node holds the parts in its content store, and a validator fetches them and checks them against their hashes before judging, so a dispute fits a fault whatever the size of the answer. Every bonded validator checks it on providers other than the accused and attests a verdict: a completion is upheld when two of them find its commitment fails, and dismissed when one passes it; a completion filed without a commitment is dismissed. Once attesters hold two thirds of bonded stake the verdict freezes. Validators running a release from before the commitment check judge completions by regenerating them, so while the committee upgrades an operator bonds no compute before most bonded stake runs a release with the check, or the network first votes `inference.optimistic.sample_bps` to 0. A media render (`tenzro_mediaGen_render`, and every whole job on the media market, whose worker signs a receipt for the task `media`) commits to its output's SHA-256 and a perceptual fingerprint: the mean luma of a 16 x 16 grid per picture or for up to 8 frames of a clip, the RMS level of every 100 ms of sound, and for a 3D asset (GLB) the share of its surface area in each cell of an 8 x 8 x 8 grid over its bounding cube. Two renders of the same seed and parameters agree when every part of their fingerprints lies within a relative L2 distance of the other no larger than the tolerance both receipts commit to (5% for pictures and video, 10% for sound and 3D assets, at most 10%). The node a market job was posted through draws completed jobs at the same rate and re-executes them through `tenzro_mediaGen_render` on another provider. Upheld, the provider's bond refunds whoever paid for the answer (capped by `inference.optimistic.max_refund_gwei`) and pays the insurance pool `inference.optimistic.penalty_payment_bps` of the payment (default 20x), at least `inference.optimistic.penalty_floor_micro_usd` in TNZO at the rate in force, recorded on chain; a fault undecided within the window expires and slashes nothing.
 
 When this node forwards a request to another provider it pays that provider out of the operator's payee, so it bills the leg only from a receipt it can check: signed by the key the provider announced, naming the model hash and engine this node's own catalog states for the routed model, naming this request's nonce, hashing the output actually received, and carrying the same units as the usage block. Whatever is billed is then capped against the request itself — output tokens by `max_tokens` and by the bytes received, prompt-side counts by the bytes sent, media dimensions by what the request could have carried. A provider learned from gossip that returns no acceptable receipt is paid the offer's per-request floor. A per-compute-time offer is billed by the latency this node measured, not by a duration the provider reports.
 
@@ -562,7 +571,7 @@ When this node forwards a request to another provider it pays that provider out 
 
 A provider that served a prompt holds its prefix warm, and routing the next request of the same conversation to it saves a prefill. Which prefixes are warm is never published. A serving node records each served prompt as 512-byte runs, each digested as `SHA-256(tag ‖ salt ‖ previous digest ‖ run)` under the caller's cache salt: a per-process secret mixed with the authenticated principal (the signed-in DID), or the `cache_salt` a forwarding node attached. An anonymous caller has no salt and nothing it sends is recorded. The provider announcement carries only a count of warm runs.
 
-A router that wants affinity for a caller sends the digests of the caller's conversation to the providers reporting warm runs (`tenzro_prefixProbe {digests: [hex; ≤256]}` → `{matches: {model_id: runs}}`). Only a party holding both the salt and the prompt can produce those digests, and a provider only matches them against prefixes served under the same salt, so no one can test a guess about another caller's prompt, and one caller's warm prefix never answers another caller's probe. The probe results weight provider choice on `/v1/chat/completions` (among announcements of the same model), `tenzro_chatByIntent` and `tenzro_routeIntent`; they break ties and never override price.
+A router that wants affinity for a caller sends the digests of the caller's conversation to the providers reporting warm runs (`tenzro_prefixProbe {digests: [hex; ≤256]}` → `{matches: {model_id: runs}}`). Only a party holding both the salt and the prompt can produce those digests, and a provider only matches them against prefixes served under the same salt, so no one can test a guess about another caller's prompt, and one caller's warm prefix never answers another caller's probe. The probe results weight provider choice on `/v1/chat/completions` among announcements of the same model; they break ties and never override price.
 
 ### Message content parts
 
@@ -1140,251 +1149,6 @@ matched markers are stripped from the returned text and re-emitted as
 
 ---
 
-## Intent routing
-
-`tenzro_chat` requires the caller to name a `model`. Intent routing removes that requirement: the caller states an intent — a use-case, a budget, a quality floor, and where to sit on the cost↔quality axis — and the network discovers, selects, and (optionally) dispatches to a model without the caller naming one.
-
-This is a three-tier design layered on top of the existing routing:
-
-| Tier | Input | Output | Method |
-|------|-------|--------|--------|
-| **model selection** | intent (use-case + budget + quality floor + optimize knob) | `model_id` | `tenzro_routeIntent` |
-| **provider selection** | `model_id` | operator `Address` serving that model | existing `tenzro_chat` dispatch |
-
-Model selection picks the model; the existing dispatch path then selects the provider serving it. Capability composition sits one layer above — it plans and runs a set of capabilities (which may include several model calls) to satisfy a goal. Naming a model directly (`tenzro_chat`) skips both higher tiers — nothing about the existing contract changes.
-
-### `tenzro_routeIntent` — discovery only
-
-Resolves an intent to a `model_id` and a fallback chain. Does **not** run inference — a read-tier method, useful for previewing the selection, caching a decision, or driving a client-side dispatch.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tenzro_routeIntent",
-  "params": {
-    "use_case": "code",
-    "budget": "500000000000000",
-    "optimize": 0.3,
-    "quality_floor": "cheap",
-    "est_input_tokens": 400,
-    "est_output_tokens": 256,
-    "prompt": "Write a Rust function that reverses a linked list.",
-    "payer_did": "did:tenzro:machine:0x...",
-    "payer_address": "0x..."
-  },
-  "id": 1
-}
-```
-
-| Field | Type | Required | Default | Notes |
-|-------|------|----------|---------|-------|
-| `use_case` | string | yes | — | One of `chat`, `code`, `reasoning`, `research`, `summarize`, `extract`, `embed`. Case-insensitive. `research` biases toward the strong tier for open-ended synthesis. |
-| `budget` | string (u128) | no | none | Per-request cost cap in wei (10^-18 TNZO). Candidate models whose estimated cost exceeds this are pre-filtered out at discovery time. Sent as a string because a u128 exceeds the JSON safe-integer range. |
-| `optimize` | float | no | 0.5 | Continuous cost↔quality knob in `[0.0, 1.0]`. `0.0` = cheapest acceptable model, `1.0` = strongest acceptable model. |
-| `quality_floor` | string | no | `cheap` | Minimum tier the selection may return: `cheap` or `strong`. A floor of `strong` refuses to route to a cheap-tier model even when the budget would allow it. |
-| `jurisdiction` | string | no | none | Where the request may be served: ISO 3166-1 alpha-2 codes and bloc tokens, comma-separated. A candidate whose provider declares no satisfying jurisdiction is dropped; an intent no candidate satisfies is refused, never relaxed. `budget` is the price ceiling. |
-| `max_p95_ms` | integer | no | none | p95 latency target in ms. A provider observed slower at p95 is dropped; one not yet observed stays eligible. |
-| `continuity` | string | no | `none` | `none`, `standby` or `hot_successor` (`tenzro_chatByIntent` only). Above `none` the session gets a successor in the same jurisdiction that holds its KV cache and takes over if the provider fails (see AI.md, session continuity). Needs `jurisdiction` and `session_id`. |
-| `session_id` | string | no | none | The session the turns belong to, when `continuity` is above `none`. |
-| `est_input_tokens` | uint | no | 0 | Estimated prompt tokens, used to compute the per-request cost estimate against `budget`. |
-| `est_output_tokens` | uint | no | 0 | Estimated completion tokens, used the same way. |
-| `prompt` | string | no | — | The text the model will answer. Used only to place the request in a difficulty cluster (see below); it is not sent to any provider by this method. On `tenzro_chatByIntent` it is derived from `message`, or from the last user turn of `messages`, so it never has to be repeated. |
-| `payer_did` | string | no | — | DID whose rolling-window spend cap is checked at admission. Independent of the per-request `budget`: `budget` bounds this single call, `payer_did` bounds the DID's aggregate spend over its policy window. |
-| `payer_address` | string | no | — | Payer wallet address (hex). Enables the wallet-balance hard ceiling: the estimated cost of the selected model is checked against the payer's on-chain balance, and an unaffordable request is rejected at discovery time — before any provider is dialed or any spend recorded. |
-
-Response:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "model_id": "qwen3.8-27b",
-    "tier": "cheap",
-    "estimated_cost": "336000000000000",
-    "alternates": ["qwen3-14b", "deepseek-v3"],
-    "cluster": 7,
-    "expected_error": 0.083,
-    "reason": "use_case=code optimize=0.30 within budget; cheap tier meets quality_floor; scoring=measured cluster=7 expected_error=0.083"
-  }
-}
-```
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `model_id` | string | The selected model. |
-| `tier` | string | `cheap` or `strong` — the quality tier of the selected model. |
-| `estimated_cost` | string (u128) | Estimated cost of the call in wei, given `est_input_tokens`/`est_output_tokens` at the selected model's price. String for the same range reason as `budget`. |
-| `alternates` | array of string | Ordered alternate `model_id`s to try if the primary is unavailable at dispatch, best-first. |
-| `cluster` | uint or null | The difficulty cluster the prompt was placed in. `null` when no `prompt` was supplied or the node has no embedding model loaded. Echo it back to `tenzro_recordRouteOutcome` so the outcome is attributed to the right cluster. |
-| `expected_error` | float or null | The selected model's observed adverse-outcome rate in that cluster, in `[0.0, 1.0]`. `null` means the cluster has no observations yet and the decision was made on declared model metadata alone. |
-| `reason` | string | Human-readable explanation of the selection. Its `scoring=` clause states which path was taken: `measured` (cluster has observations) or `declared`. |
-
-Errors:
-
-| Code | Meaning |
-|------|---------|
-| -32602 | Unknown `use_case`, malformed `budget`, or `optimize` outside `[0.0, 1.0]`. |
-| -32000 | No catalog model satisfies the intent (budget too low, `quality_floor` unmet, over the `payer_did` window cap, over the `payer_address` wallet balance, or empty catalog). |
-
-#### How difficulty affects the selection
-
-Two prompts with the same `use_case` are not equally hard, so routing on the declared use case alone over-serves easy prompts and under-serves hard ones.
-
-When the intent carries a `prompt` and the node has a text-embedding model loaded, the prompt is embedded and placed in a difficulty cluster — an online clustering of the prompts this node has routed. Selection then scores each candidate on a blend of its normalized cost and its observed error rate *in that cluster*, weighted by `optimize`. A cheap model that keeps getting escalated on prompts like this one loses to a stronger model even though it is cheaper.
-
-Clusters start empty. Until a cluster has observations, selection falls back to declared model metadata (parameter count, context window, capability tags) — the same behavior as before, and the same behavior on nodes with no embedding model loaded. Unmeasured model/cluster pairs carry a bounded exploration allowance so a model is not written off before it has been tried.
-
-The loop closes through `tenzro_recordRouteOutcome`: report `resolved`, `escalated`, or `failed` against the `model_id` and `cluster` from the routing decision, and subsequent selections in that cluster account for it. Reporting is optional — routing works without it, it just stays on declared metadata.
-
-### `tenzro_chatByIntent` — discover and dispatch
-
-Resolves the intent exactly as `tenzro_routeIntent` does, then dispatches the prompt to the selected model through the standard chat path in one call. A write-tier method — it consumes tokens and bills the caller, subject to the same auth, settlement, and `-32023` rules as `tenzro_chat`.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tenzro_chatByIntent",
-  "params": {
-    "use_case": "code",
-    "budget": "500000000000000",
-    "optimize": 0.3,
-    "message": "Write a Rust function that reverses a linked list.",
-    "max_tokens": 512,
-    "caller_address": "0x..."
-  },
-  "id": 1
-}
-```
-
-It accepts every `tenzro_routeIntent` field plus the `tenzro_chat` simple-shape dispatch fields (`message`, `max_tokens`, `temperature`, `top_p`, `repeat_penalty`, `verification`, `caller_address`, `channel_voucher`). The response is the `tenzro_chat` response object with the resolved `model_id`, augmented with the full routing decision under `route` so the caller can see what the network picked. The prompt used for difficulty clustering is taken from `message` (or the last user turn of `messages`), so no extra field is needed.
-
-Routing selects a model *and* a provider, and both are injected before dispatch: a caller-supplied `model` is dropped so intent routing stays authoritative, and the winning provider's address is set as the `provider` pin so the call settles against the offer that was actually scored. That is what makes the `settlement` object's `provider` and `provider_wei` refer to the same offer the `route` decision priced.
-
-`tenzro_chatByIntent` records the outcome it can observe itself: a completed dispatch is recorded as `resolved`, a failed one as `failed`, against the cluster in the routing decision. Callers do not report those.
-
-### `tenzro_recordRouteOutcome` — report an escalation
-
-Reports how a routed call turned out, so per-cluster error rates reflect what happened rather than only what the catalog declares.
-
-In practice this method carries `escalated` — the outcome only the caller knows, because it means the caller took the answer to a stronger model. `resolved` and `failed` are already recorded by `tenzro_chatByIntent` from the dispatch itself.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tenzro_recordRouteOutcome",
-  "params": {
-    "model_id": "qwen3.8-27b",
-    "cluster": 7,
-    "outcome": "escalated"
-  },
-  "id": 1
-}
-```
-
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `model_id` | string | yes | The model that served the call — the `model_id` from the routing decision. |
-| `cluster` | uint | yes | The `cluster` from the routing decision. A decision with `cluster: null` has nothing to report against. |
-| `outcome` | string | yes | One of `resolved`, `escalated`, `failed`. |
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "retained": true,
-    "model_id": "qwen3.8-27b",
-    "cluster": 7,
-    "outcome": "escalated"
-  }
-}
-```
-
-`retained: false` means the node has no difficulty index — it routes on declared metadata, so the report was accepted and discarded. That is not an error; reporting is advisory.
-
-Errors:
-
-| Code | Meaning |
-|------|---------|
-| -32602 | Missing `model_id`, missing or out-of-range `cluster`, or an `outcome` outside the three accepted values. |
-| -32603 | This node has no model router configured. |
-| -32000 | The difficulty index rejected the observation. |
-
-### `tenzro_routeDifficultyStats` — inspect the difficulty index
-
-Read-only view of the node's difficulty index: how many clusters it has discovered, how many prompts fell into each, and the per-cluster outcome counters for one model when `model_id` is supplied.
-
-Centroids are not returned — they are high-dimensional vectors of no use to a caller and would dominate the response.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tenzro_routeDifficultyStats",
-  "params": { "model_id": "qwen3.8-27b" },
-  "id": 1
-}
-```
-
-`model_id` is optional. Without it the response carries only the cluster shape.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "enabled": true,
-    "cluster_count": 9,
-    "capacity": 64,
-    "embedding_dim": 768,
-    "split_threshold": 0.72,
-    "clusters": [
-      { "cluster": 0, "prompts": 412 },
-      { "cluster": 7, "prompts": 96 }
-    ],
-    "model_id": "qwen3.8-27b",
-    "model_clusters": [
-      {
-        "cluster": 7,
-        "resolved": 88,
-        "escalated": 6,
-        "failed": 2,
-        "error_rate": 0.083
-      }
-    ]
-  }
-}
-```
-
-`enabled: false` (with `cluster_count: 0` and an empty `clusters`) means the node has no embedding model loaded, so every routing decision on it takes the declared-metadata path.
-
-Errors:
-
-| Code | Meaning |
-|------|---------|
-| -32603 | This node has no model router configured. |
-
-### Cross-surface wrappers
-
-All four operations are exposed on JSON-RPC, both MCP servers, A2A, the CLI, both SDKs, and the OpenClaw skill:
-
-| Surface | Discovery | Discover + dispatch | Feedback | Index inspection |
-|---------|-----------|---------------------|----------|------------------|
-| JSON-RPC | `tenzro_routeIntent` | `tenzro_chatByIntent` | `tenzro_recordRouteOutcome` | `tenzro_routeDifficultyStats` |
-| MCP (node) | `route_by_intent` tool | `chat_by_intent` tool | `record_route_outcome` tool | `route_difficulty_stats` tool |
-| MCP (Python package) | `route_by_intent` tool | `chat_by_intent` tool | `record_route_outcome` tool | `route_difficulty_stats` tool |
-| A2A | `inference` skill, intent-routing prompt | `inference` skill, intent chat prompt | `inference` skill, outcome prompt | `inference` skill, difficulty prompt |
-| CLI | `tenzro inference route --use-case ...` | `tenzro inference route --use-case ... --message ...`, or `tenzro chat --use-case ...` | `tenzro inference record-outcome` | `tenzro inference difficulty-stats` |
-| Rust SDK | `inference().route_intent(&params)` | `inference().chat_by_intent(&params, messages)` | `inference().record_route_outcome(...)` | `inference().route_difficulty_stats(...)` |
-| TS SDK | `inference.routeIntent(params)` | `inference.chatByIntent(params)` | `inference.recordRouteOutcome(...)` | `inference.routeDifficultyStats(...)` |
-| OpenClaw skill | `route_intent(...)` | `chat_by_intent(...)` | `record_route_outcome(...)` | `route_difficulty_stats(...)` |
-
-The MCP `chat` tool and the CLI `tenzro chat` command also make `model` optional: when `model` is omitted and a `use_case` is supplied, they resolve the model via the router before dispatching. That path resolves the offer at dispatch rather than pinning it to the scored price, so `chat_by_intent` is the one that guarantees the quoted price is the settled price. Supplying `model` explicitly skips routing.
-
-Neither feedback nor index inspection is needed for routing to work. Outcomes the node can observe are recorded by `tenzro_chatByIntent` itself, whichever wrapper called it, so the feedback call carries `escalated` in practice. The stats call is an operator diagnostic.
-
----
-
 ## Implementation notes
 
 These are notes for the implementer; not part of the public contract.
@@ -1422,11 +1186,11 @@ The forward travels over the `tenzro/infer` ALPN on the node's iroh endpoint. Th
 
 Cost calculation is identical for both shapes: `input_tokens × input_price + output_tokens × output_price`. Tool-use response tokens (the `tool_use` blocks themselves) count as output tokens.
 
-Settlement runs on the node the request arrived at, before the response is returned. With a `caller_address` and non-zero cost, that node either accepts a channel voucher (when `channel_voucher` is supplied) or executes a direct on-chain transfer. A rejected debit or transfer fails the request with `-32023` and persists an unpaid-settlement marker keyed in `data.unpaid_key` — settlement failure is never a silent free inference. The outcome is reported in the response `settlement` field.
+Settlement runs on the node the request arrived at, before the response is returned. With a non-zero cost, that node either accepts a channel voucher (when `channel_voucher` is supplied) or submits the payer's signed `PayerSettle` (when `payment` is supplied). A charge below the governed micro-settlement floor must use a channel and fails with `-32024` (`data.remedy`: `open_channel`). A rejected voucher or settlement fails the request with `-32023` — settlement failure is never a silent free inference. The outcome is reported in the response `settlement` field.
 
 When the request is forwarded to a peer, the **gateway** settles the peer's leg rather than the serving provider doing it: the forwarded request carries no payer, and every node shares one ledger, so the node holding the payer relationship is the one that can move funds. Pricing for that leg comes from the announcement the routing decision scored, not from anything in the provider's response — a provider cannot re-price after serving. The provider's wallet is the `provider_address` on that announcement.
 
-The split is a carve-out, not a surcharge. The quoted cost is divided by the serving node's economic mode — a private node keeps it all, a public validating node pays the treasury leg, a public delegated node also pays the RPC provider — so `network_wei + provider_wei` equals the price the consumer was quoted. A developer margin (`app_id`) is the opposite direction: it is added on top of the network cost and routed to the app's wallet as `margin_wei`. The channel path reports `network_wei: 0` and `margin_wei: 0`: the payer's voucher caps the cumulative amount, and the on-chain `ClaimEscrow` that redeems it pays the escrow's payee what the calls cost with no treasury leg or margin. See [ECONOMICS.md](ECONOMICS.md).
+The network's share is a carve-out, not a surcharge. The ledger divides the quoted cost once, when the `PayerSettle` executes: the governed settlement fee (`network_fee`) to the network and the rest (`payee_credit`) to the provider, so the payer pays the price it was quoted. A fee leg the settling node declares (`declared_leg`) is the opposite direction: it is added on top and paid to that node's own wallet. The channel path pays the escrow's payee what the calls cost, with no fee leg. See [ECONOMICS.md](ECONOMICS.md).
 
 Every completed generation is also recorded with the node's usage tracker under the completion id, which is what [`GET /tenzro/generation`](#generation-stats-lookup) reads back. A routed generation is recorded by the router as the response passes back through the gateway; one served from this node's own weights is recorded on the local path. A node with no payee address configured records nothing, because per-provider totals feed reward metering at epoch close and an unattributed record would distort it.
 

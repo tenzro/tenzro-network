@@ -18,8 +18,9 @@
 //!   month's realised fee revenue plus `treasury.reserve_drawdown_bps` of the
 //!   reserve balance, less what the month already paid); the epoch's sale cap
 //!   (`treasury.sale_volume_share_bps` of the TNZO the market traded in an
-//!   epoch, from the validators' sealed volume reports, zero without a recent
-//!   one); and the reserve balance.
+//!   epoch, from the validators' sealed volume reports; without a recent one,
+//!   `feature.reserve_no_volume_sale.max_tnzo_epoch` whole TNZO, zero at
+//!   genesis); and the reserve balance.
 //!
 //! An empty reserve, an empty treasury, a month without revenue or a market
 //! without volume pays nothing and waits: nothing is refused, nothing goes
@@ -54,6 +55,10 @@ pub const SALE_VOLUME_SHARE_PARAM: &str = "treasury.sale_volume_share_bps";
 /// Governed key: most the running-cost reserve pays out in one epoch, whole
 /// TNZO, whatever the volume reports say.
 pub const MAX_SALE_PARAM: &str = "treasury.max_sale_tnzo_epoch";
+/// Governed key: the sale cap, whole TNZO an epoch, while no volume report is
+/// recent enough to size it; at most [`MAX_SALE_PARAM`]. Zero, its genesis
+/// value, pays nothing until a market reports volume.
+pub const NO_VOLUME_SALE_PARAM: &str = "feature.reserve_no_volume_sale.max_tnzo_epoch";
 /// Governed: market epochs a volume report stays usable; an older one counts
 /// as no volume.
 pub const VOLUME_MAX_AGE_PARAM: &str = "treasury.volume_max_age_epochs";
@@ -222,6 +227,8 @@ pub struct ReserveRules {
     pub sale_volume_share_bps: u64,
     /// Whole TNZO.
     pub max_sale_tnzo_epoch: u64,
+    /// The sale cap without a recent volume report, whole TNZO.
+    pub no_volume_sale_tnzo_epoch: u64,
 }
 
 impl ReserveRules {
@@ -235,6 +242,7 @@ impl ReserveRules {
             month_epochs: network_param(state, MONTH_EPOCHS_PARAM).max(1),
             sale_volume_share_bps: network_param(state, SALE_VOLUME_SHARE_PARAM).min(10_000),
             max_sale_tnzo_epoch: network_param(state, MAX_SALE_PARAM),
+            no_volume_sale_tnzo_epoch: network_param(state, NO_VOLUME_SALE_PARAM),
         }
     }
 }
@@ -293,8 +301,15 @@ pub fn plan_boundary(rules: &ReserveRules, i: &BoundaryInputs) -> BoundaryPlan {
     let reserve = i.reserve.saturating_add(fill);
     let allowance = revenue_allowance.saturating_add(bps(reserve, rules.drawdown_bps));
     let allowance_left = allowance.saturating_sub(i.month_paid);
-    // Volume reports can be washed; the absolute ceiling cannot.
-    let sale_cap = bps(i.epoch_volume, rules.sale_volume_share_bps).min(
+    // Volume reports can be washed; the absolute ceiling cannot. With no
+    // recent report the governed no-volume cap stands in for the volume share.
+    let by_volume = if i.epoch_volume == 0 {
+        u128::from(rules.no_volume_sale_tnzo_epoch)
+            .saturating_mul(tenzro_types::constants::ONE_TNZO)
+    } else {
+        bps(i.epoch_volume, rules.sale_volume_share_bps)
+    };
+    let sale_cap = by_volume.min(
         u128::from(rules.max_sale_tnzo_epoch).saturating_mul(tenzro_types::constants::ONE_TNZO),
     );
     let payout = i.owed.min(allowance_left).min(sale_cap).min(reserve);
@@ -552,7 +567,49 @@ mod tests {
             month_epochs: DEFAULT_MONTH_EPOCHS,
             sale_volume_share_bps: DEFAULT_SALE_VOLUME_SHARE_BPS,
             max_sale_tnzo_epoch: DEFAULT_MAX_SALE_TNZO_EPOCH,
+            no_volume_sale_tnzo_epoch: 0,
         }
+    }
+
+    /// With no recent volume report the reserve pays nothing at genesis, and
+    /// up to the governed no-volume cap (never above the absolute ceiling)
+    /// once governance sets one; a recent report sizes the cap as before.
+    #[test]
+    fn without_volume_the_governed_no_volume_cap_bounds_the_payout() {
+        let base = BoundaryInputs {
+            month_revenue: 100_000_000 * T,
+            treasury: 1_000_000_000 * T,
+            reserve: 100_000_000 * T,
+            epoch_volume: 0,
+            owed: 100_000_000 * T,
+            ..BoundaryInputs::default()
+        };
+        let genesis = plan_boundary(&rules(), &base);
+        assert_eq!((genesis.sale_cap, genesis.payout), (0, 0));
+        let set = ReserveRules {
+            no_volume_sale_tnzo_epoch: 300,
+            ..rules()
+        };
+        let paid = plan_boundary(&set, &base);
+        assert_eq!((paid.sale_cap, paid.payout), (300 * T, 300 * T));
+        let over = ReserveRules {
+            no_volume_sale_tnzo_epoch: DEFAULT_MAX_SALE_TNZO_EPOCH + 1,
+            ..rules()
+        };
+        let ceiling = u128::from(DEFAULT_MAX_SALE_TNZO_EPOCH) * T;
+        assert_eq!(plan_boundary(&over, &base).sale_cap, ceiling);
+        let reported = BoundaryInputs {
+            epoch_volume: 100_000 * T,
+            ..base
+        };
+        assert_eq!(
+            plan_boundary(&set, &reported).sale_cap,
+            plan_boundary(&rules(), &reported).sale_cap
+        );
+        let mut state = StateAdapter::new();
+        assert_eq!(ReserveRules::read(&state).no_volume_sale_tnzo_epoch, 0);
+        set_param(&mut state, NO_VOLUME_SALE_PARAM, 300);
+        assert_eq!(ReserveRules::read(&state).no_volume_sale_tnzo_epoch, 300);
     }
 
     #[test]

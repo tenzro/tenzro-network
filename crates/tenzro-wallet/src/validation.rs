@@ -28,6 +28,10 @@ const MAX_GAS_PRICE: u64 = 1_000_000_000_000;
 /// priced in USD at the rate in force.
 const MIN_GAS_PRICE: u64 = 1;
 
+/// Longest memo that is a fee payer's consent: its account, key and both
+/// signature legs in hex (the ML-DSA-65 signature alone is 3.3 KB).
+pub const MAX_FEE_PAYER_CONSENT_LENGTH: usize = 8_000;
+
 /// Maximum memo length (1 KB)
 const MAX_MEMO_LENGTH: usize = 1024;
 
@@ -271,6 +275,7 @@ impl TransactionValidator {
                 | TransactionType::AttachMachineAttestation { .. }
                 | TransactionType::SponsoredBond { .. }
                 | TransactionType::AccountOutflow { .. }
+                | TransactionType::NativeCall { .. }
                 | TransactionType::ComputeClaim { .. } => {
                     // `to` is structurally ignored by the VM for these variants.
                 }
@@ -368,9 +373,16 @@ impl TransactionValidator {
         }
     }
 
+    /// An ordinary memo is held to the configured length. A memo that is a
+    /// well-formed fee payer consent (`tenzro_crypto::fee_payer`) carries
+    /// two signatures and is held to [`MAX_FEE_PAYER_CONSENT_LENGTH`]
+    /// instead; one that only starts with the consent prefix is an ordinary
+    /// memo here.
     fn validate_memo(&self, tx: &Transaction, errors: &mut Vec<ValidationError>) {
         if let Some(ref memo) = tx.memo
             && memo.len() > self.config.max_memo_length
+            && !(memo.len() <= MAX_FEE_PAYER_CONSENT_LENGTH
+                && matches!(tenzro_crypto::fee_payer::named_in(tx), Some(Ok(_))))
         {
             errors.push(ValidationError {
                 field: "memo".to_string(),
@@ -629,6 +641,36 @@ mod tests {
         );
         let err = validator.validate(&tx).unwrap_err();
         assert!(err.to_string().contains("contract code size"));
+    }
+
+    /// A fee payer's consent is longer than an ordinary memo may be and is
+    /// accepted as a memo; a long memo that only starts with the consent
+    /// prefix is still too long.
+    #[test]
+    fn a_fee_payer_consent_may_exceed_the_memo_length() {
+        use tenzro_crypto::composite::HybridSigner;
+        use tenzro_crypto::fee_payer::{FeePayerConsent, MEMO_PREFIX, consent_digest};
+        let validator = TransactionValidator::new();
+        let payer = tenzro_crypto::composite::testing::TestHybridSigner::hybrid(7);
+        let mut tx = create_valid_transfer();
+        let consent = FeePayerConsent {
+            fee_payer: payer.address(),
+            public_key: payer.public_key().p256.clone(),
+            signature: payer
+                .sign(
+                    tenzro_crypto::SignatureContext::FeePayer,
+                    &consent_digest(&tx, &payer.address()),
+                )
+                .unwrap(),
+        };
+        let memo = consent.to_memo().unwrap();
+        assert!(memo.len() > MAX_MEMO_LENGTH && memo.len() <= MAX_FEE_PAYER_CONSENT_LENGTH);
+        tx.memo = Some(memo);
+        validator.validate(&tx).unwrap();
+
+        tx.memo = Some(format!("{MEMO_PREFIX}{}", "x".repeat(2000)));
+        let err = validator.validate(&tx).unwrap_err();
+        assert!(err.to_string().contains("memo"));
     }
 
     #[test]

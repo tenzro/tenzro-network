@@ -29,7 +29,7 @@ use solana_program::account_info::AccountInfo;
 use solana_program::entrypoint::ProgramResult;
 use solana_program::program_error::ProgramError;
 use solana_program::pubkey::Pubkey;
-use tenzro_finality_verifier::{Bn254, Error, JOURNAL_LEN, Journal, Params, Store};
+use tenzro_finality_verifier::{Bn254, Error, Journal, Params, Store, JOURNAL_LEN};
 
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process_instruction);
@@ -50,14 +50,20 @@ impl Bn254 for Syscalls {
         let mut input = [0u8; 128];
         input[..64].copy_from_slice(a);
         input[64..].copy_from_slice(b);
-        solana_bn254::prelude::alt_bn128_addition(&input).ok()?.try_into().ok()
+        solana_bn254::prelude::alt_bn128_addition(&input)
+            .ok()?
+            .try_into()
+            .ok()
     }
 
     fn g1_mul(&self, p: &[u8; 64], s: &[u8; 32]) -> Option<[u8; 64]> {
         let mut input = [0u8; 96];
         input[..64].copy_from_slice(p);
         input[64..].copy_from_slice(s);
-        solana_bn254::prelude::alt_bn128_multiplication(&input).ok()?.try_into().ok()
+        solana_bn254::prelude::alt_bn128_multiplication(&input)
+            .ok()?
+            .try_into()
+            .ok()
     }
 
     fn pairing4(&self, pairs: &[([u8; 64], [u8; 128]); 4]) -> Option<bool> {
@@ -100,13 +106,22 @@ impl State<'_> {
     }
 
     pub fn params(&self) -> Params {
-        Params { image_id: self.b32_at(O_IMAGE), chain_id: self.u64_at(O_CHAIN), genesis_hash: self.b32_at(O_GENESIS) }
+        Params {
+            image_id: self.b32_at(O_IMAGE),
+            chain_id: self.u64_at(O_CHAIN),
+            genesis_hash: self.b32_at(O_GENESIS),
+        }
     }
 
     /// The latest final checkpoint: index, digest, state root, state height.
     pub fn latest(&self) -> Option<(u64, [u8; 32], [u8; 32], u64)> {
         (self.0[O_HAS_FINAL] == 1).then(|| {
-            (self.u64_at(O_INDEX), self.b32_at(O_DIGEST), self.b32_at(O_STATE_ROOT), self.u64_at(O_STATE_HEIGHT))
+            (
+                self.u64_at(O_INDEX),
+                self.b32_at(O_DIGEST),
+                self.b32_at(O_STATE_ROOT),
+                self.u64_at(O_STATE_HEIGHT),
+            )
         })
     }
 
@@ -132,7 +147,8 @@ impl Store for State<'_> {
         let n = self.0[O_ROOTS_LEN] as usize;
         if n == EPOCHS {
             // Drop the oldest epoch.
-            self.0.copy_within(O_ROOTS + 40..O_ROOTS + 40 * EPOCHS, O_ROOTS);
+            self.0
+                .copy_within(O_ROOTS + 40..O_ROOTS + 40 * EPOCHS, O_ROOTS);
         } else {
             self.0[O_ROOTS_LEN] = (n + 1) as u8;
         }
@@ -184,18 +200,30 @@ pub fn verify_decision(state: &State, data: &[u8]) -> ProgramResult {
     if data.len() < 72 {
         return Err(ProgramError::InvalidInstructionData);
     }
-    let (_, _, root, _) = state.latest().ok_or(ProgramError::Custom(E_NO_CHECKPOINT))?;
+    let (_, _, root, _) = state
+        .latest()
+        .ok_or(ProgramError::Custom(E_NO_CHECKPOINT))?;
     let proposal_id: [u8; 32] = data[..32].try_into().expect("32 bytes");
     let record_hash: [u8; 32] = data[32..64].try_into().expect("32 bytes");
     let height = u64::from_le_bytes(data[64..72].try_into().expect("8 bytes"));
-    if tenzro_finality_verifier::governance::proven_decision(&root, &proposal_id, &record_hash, height, &data[72..]) {
+    if tenzro_finality_verifier::governance::proven_decision(
+        &root,
+        &proposal_id,
+        &record_hash,
+        height,
+        &data[72..],
+    ) {
         Ok(())
     } else {
         Err(ProgramError::Custom(E_NOT_DECIDED))
     }
 }
 
-pub fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+pub fn process_instruction(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
     let state_account = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
     if state_account.owner != program_id || !state_account.is_writable {
         return Err(ProgramError::IllegalOwner);
@@ -226,9 +254,15 @@ pub fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], data: 
                 return Err(ProgramError::Custom(E_UNINITIALIZED));
             }
             let params = state.params();
-            tenzro_finality_verifier::submit(&Syscalls, &params, &mut state, &rest[..JOURNAL_LEN], &rest[JOURNAL_LEN..])
-                .map(|_| ())
-                .map_err(code)
+            tenzro_finality_verifier::submit(
+                &Syscalls,
+                &params,
+                &mut state,
+                &rest[..JOURNAL_LEN],
+                &rest[JOURNAL_LEN..],
+            )
+            .map(|_| ())
+            .map_err(code)
         }
         Some((2, rest)) => {
             if !state.initialized() {

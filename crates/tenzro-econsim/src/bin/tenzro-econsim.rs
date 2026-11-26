@@ -15,6 +15,7 @@
 //! tenzro-econsim settlement [--threads N]
 //! tenzro-econsim hwlevels [--seed S] [--epochs E] [--mix L0,L1,L2,L3] [--cap BPS] [--arrivals N] [--every K]
 //! tenzro-econsim treasury --days D [--seed S] [--threads N] [--out DIR] [--case NAME] [--ask USD_MONTH]
+//! tenzro-econsim supply --days D [--seed S] [--threads N] [--out DIR]
 //! tenzro-econsim admission [--seconds S] [--defaults 1 --blocks B --price USD]
 //! tenzro-econsim population --seed S --actors N --hours H --scenario NAME --out FILE
 //! tenzro-econsim agents --mode record|replay|live-probe --cache FILE --out DIR
@@ -53,6 +54,8 @@ fn get<T: std::str::FromStr>(m: &HashMap<String, String>, k: &str, d: T) -> T {
 }
 
 const USAGE: &str = "\
+tenzro-econsim recycle --lw DIR[,DIR...] [--group A|B|BOOT|C] [--threads N] [--out DIR]
+tenzro-econsim runway --lw DIR[,DIR...] [--threads N] [--out DIR]
 tenzro-econsim usage [--lw DIR | --manifest F --trace F] [--days D] [--threads N] [--out DIR] [--write-sample DIR]
 tenzro-econsim all --out DIR [--commit SHA] [--budget-s S] [--threads N] [--scenario-threads N]
                    [--years Y] [--seeds S] [--ablation-days D] [--ablation-seeds S]
@@ -67,7 +70,10 @@ tenzro-econsim attack --family F --days D [--restarts N] [--generations G] [--pe
 tenzro-econsim probes [--days D] [--seed S] [--threads N]
 tenzro-econsim settlement [--threads N]
 tenzro-econsim treasury --days D [--seed S] [--threads N] [--out DIR] [--case NAME] [--ask USD_MONTH]
+tenzro-econsim supply --days D [--seed S] [--threads N] [--out DIR]
 tenzro-econsim earnings [--days D] [--seed S] [--out DIR]   (spot/standby/readiness-reward sweep)
+tenzro-econsim backtest [--trace CSV] [--out DIR]   (base-fee rule on real block usage)
+tenzro-econsim ruin [--months M] [--paths N] [--seed S] [--out DIR]   (cover-reserve ruin, minimal loading)
 tenzro-econsim admission [--seconds S] [--defaults 1 --blocks B --price USD]
 tenzro-econsim population --seed S --actors N --hours H --scenario calm|outage|defect|surge|reprice|stress|adversarial --out FILE
                       (writes a market trace: POPULATION_TRACE_CMD for scripts/testnet/stages.sh's stage_population)
@@ -889,6 +895,12 @@ fn is_help_request(cmd: &str) -> bool {
 }
 
 fn main() {
+    // Every TLS connection in this process uses aws-lc-rs, the provider with
+    // the X25519MLKEM768 hybrid key exchange, never one another dependency
+    // compiled in.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("no TLS provider is installed before main");
     let (cmd, m) = args();
     if is_help_request(&cmd) {
         println!("{}", USAGE.trim_start());
@@ -977,6 +989,26 @@ fn main() {
                 .expect("json")
             );
         }
+        "supply" => {
+            let r = tenzro_econsim::supply::study(
+                &tenzro_econsim::supply::LEVELS_USD_PER_DAY,
+                get(&m, "days", 1_826u32),
+                get(&m, "seed", 1),
+                threads,
+            );
+            let table = tenzro_econsim::supply::table(&r);
+            println!("{table}");
+            if let Some(dir) = m.get("out") {
+                let dir = PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).expect("out dir");
+                std::fs::write(dir.join("supply.md"), &table).expect("write table");
+                std::fs::write(
+                    dir.join("supply.json"),
+                    serde_json::to_string_pretty(&r).expect("json"),
+                )
+                .expect("write results");
+            }
+        }
         "treasury" => {
             let days = get(&m, "days", 365u32);
             let r = tenzro_econsim::treasury::study(
@@ -1052,10 +1084,54 @@ fn main() {
                 .expect("write results");
             }
         }
+        "ruin" => {
+            let rows = tenzro_econsim::ruin::sweep(
+                get(&m, "months", 360u32),
+                get(&m, "paths", 10_000u32),
+                get(&m, "seed", 1u64),
+            );
+            let table = tenzro_econsim::ruin::table(&rows);
+            println!("{table}");
+            if let Some(dir) = m.get("out") {
+                let dir = PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).expect("out dir");
+                std::fs::write(dir.join("ruin.md"), &table).expect("write table");
+                std::fs::write(
+                    dir.join("ruin.json"),
+                    serde_json::to_string_pretty(&rows).expect("json"),
+                )
+                .expect("write results");
+            }
+        }
+        "backtest" => {
+            use tenzro_econsim::fee_backtest as fb;
+            let text = match m.get("trace") {
+                Some(f) => std::fs::read_to_string(f).unwrap_or_else(|e| die(format!("{f}: {e}"))),
+                None => fb::ETH_FEE_HISTORY.to_string(),
+            };
+            let blocks = fb::parse(&text).unwrap_or_else(|e| die(e));
+            let report = fb::backtest(&fb::genesis_config(), &blocks);
+            let table = fb::table(&report);
+            println!("{table}");
+            if let Some(dir) = m.get("out") {
+                let dir = PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).expect("out dir");
+                std::fs::write(dir.join("backtest.md"), &table).expect("write table");
+                std::fs::write(
+                    dir.join("backtest.json"),
+                    serde_json::to_string_pretty(&report).expect("json"),
+                )
+                .expect("write results");
+            }
+        }
         "crash" => {
             let rows = tenzro_econsim::crash::measured();
             let tests = tenzro_econsim::crash::scenarios(&rows);
             let mut md = tenzro_econsim::crash::table(&rows);
+            if m.contains_key("ablate") {
+                md.push('\n');
+                md.push_str(&tenzro_econsim::crash::ablation());
+            }
             md.push_str("\n| test | what | pass | measured |\n|---|---|---|---|\n");
             for t in &tests {
                 md.push_str(&format!(
@@ -1079,6 +1155,8 @@ fn main() {
         "chaos" if m.contains_key("help") => println!("{CHAOS_HELP}"),
         "chaos" => chaos(&m, threads),
         "usage" => usage_cmd(&m, threads),
+        "recycle" => recycle_cmd(&m, threads),
+        "runway" => runway_cmd(&m, threads),
         "devices" => devices_cmd(&m, threads),
         "eval" => eval(threads),
         "probes" => {
@@ -1695,6 +1773,123 @@ fn devices_cmd(m: &HashMap<String, String>, threads: usize) {
         bad.len()
     );
     std::process::exit(if viol == 0 && !recs.is_empty() { 0 } else { 1 });
+}
+
+/// `runway`: the sponsorship and grants runway over market-stress traces; one JSON record per
+/// study, and the deterministic tables beside them.
+fn runway_cmd(m: &HashMap<String, String>, threads: usize) {
+    use std::io::Write as _;
+    let out = PathBuf::from(m.get("out").cloned().unwrap_or_else(|| "runway-out".into()));
+    std::fs::create_dir_all(&out).expect("create --out");
+    let mut dirs = Vec::new();
+    for root in m.get("lw").cloned().unwrap_or_default().split(',') {
+        if !root.is_empty() {
+            dirs.extend(tenzro_econsim::usage_lw::seed_dirs(std::path::Path::new(
+                root,
+            )));
+        }
+    }
+    let mut w = std::io::BufWriter::new(
+        std::fs::File::create(out.join("runway-records.jsonl")).expect("records"),
+    );
+    let mut bad = Vec::new();
+    let mut n = 0u64;
+    tenzro_econsim::runway::sweep(
+        &dirs,
+        threads,
+        |r| {
+            writeln!(w, "{r}").expect("write");
+            n += 1;
+        },
+        |e| bad.push(e),
+    );
+    w.flush().expect("flush");
+    std::fs::write(
+        out.join("runway-side.json"),
+        serde_json::to_string_pretty(&tenzro_econsim::runway::side()).expect("json"),
+    )
+    .expect("side");
+    println!("{n} records, {} traces refused", bad.len());
+    for b in &bad {
+        eprintln!("{b}");
+    }
+    std::process::exit(if bad.is_empty() { 0 } else { 1 });
+}
+
+/// `recycle`: the recycling-pool and tier settings over market-stress traces; one JSON record per
+/// replay, and the governed values and the wash-attack table beside them.
+fn recycle_cmd(m: &HashMap<String, String>, threads: usize) {
+    use std::io::Write as _;
+    let out = PathBuf::from(
+        m.get("out")
+            .cloned()
+            .unwrap_or_else(|| "recycle-out".into()),
+    );
+    std::fs::create_dir_all(&out).expect("create --out");
+    let mut dirs = Vec::new();
+    for root in m.get("lw").cloned().unwrap_or_default().split(',') {
+        if !root.is_empty() {
+            dirs.extend(tenzro_econsim::usage_lw::seed_dirs(std::path::Path::new(
+                root,
+            )));
+        }
+    }
+    let only = m.get("group").map(String::as_str);
+    let mut w = std::io::BufWriter::new(
+        std::fs::File::create(out.join("recycle-records.jsonl")).expect("records"),
+    );
+    let mut bad = Vec::new();
+    let mut n = 0u64;
+    tenzro_econsim::recycle::sweep(
+        &dirs,
+        threads,
+        only,
+        |r| {
+            writeln!(w, "{r}").expect("write");
+            n += 1;
+        },
+        |e| bad.push(e),
+    );
+    w.flush().expect("flush");
+    let mut wash = Vec::new();
+    for ratio in [
+        None,
+        Some(0.25),
+        Some(0.5),
+        Some(0.75),
+        Some(0.9),
+        Some(1.0),
+        Some(1.5),
+        Some(2.0),
+        Some(3.0),
+    ] {
+        for s in [0.0, 1.0 / 7.0, 1.0 / 3.0, 1.0] {
+            use tenzro_econsim::recycle::{WashPayer, wash as wash_row};
+            let open = WashPayer::Hidden {
+                volume_share: 1.0,
+                share_cap: None,
+            };
+            wash.push(wash_row(ratio, s, 0.0, open));
+            wash.push(wash_row(ratio, s, 0.0, WashPayer::Own));
+            for cap in [0.05, 0.10, 0.20] {
+                for volume_share in [0.10, 0.50] {
+                    let capped = WashPayer::Hidden {
+                        volume_share,
+                        share_cap: Some(cap),
+                    };
+                    wash.push(wash_row(ratio, s, 0.0, capped));
+                }
+            }
+        }
+    }
+    let side = serde_json::json!({"governed": tenzro_econsim::recycle::governed(), "wash": wash, "replays": n, "bad": bad});
+    std::fs::write(
+        out.join("recycle-side.json"),
+        serde_json::to_string_pretty(&side).expect("json"),
+    )
+    .expect("side");
+    println!("{n} replays, {} traces refused", bad.len());
+    std::process::exit(if bad.is_empty() { 0 } else { 1 });
 }
 
 /// `usage`: replays usage traces through the chain's accounting. With

@@ -35,6 +35,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tenzro_device_key::signer::{PasskeyAuthorization, PasskeyController, verify_authorization};
 use tenzro_storage::{CF_IDENTITIES, KvStore};
 use tenzro_types::device_binding::{
     BindingPolicy, BoundDevice, DeviceSession, WalletReadiness, custody_counts,
@@ -78,6 +79,13 @@ fn b64(field: &str, value: &str) -> Result<Vec<u8>, JsonRpcError> {
     base64::engine::general_purpose::STANDARD
         .decode(value.trim())
         .map_err(|e| invalid(format!("{field} is not valid base64: {e}")))
+}
+
+fn b64url(field: &str, value: &str) -> Result<Vec<u8>, JsonRpcError> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.trim().trim_end_matches('='))
+        .map_err(|e| invalid(format!("{field} is not valid base64url: {e}")))
 }
 
 /// Spend the custody challenge for exactly this change, returning the digest
@@ -150,32 +158,114 @@ fn require_bound_device_assertion(
     challenge: &[u8; 32],
     assertion: &DeviceAssertion,
 ) -> Result<BoundDevice, JsonRpcError> {
-    use tenzro_device_key::signer::{
-        PasskeyAuthorization, PasskeyController, verify_authorization,
-    };
-    let store = storage(node)?;
-    let key = device_key(identity_did, &assertion.credential_id);
-    let raw = store
-        .get(CF_IDENTITIES, &key)
-        .map_err(|e| internal("read device", e))?
-        .ok_or_else(|| {
-            refused(format!(
-                "credential {} is not a device bound to {identity_did}",
-                assertion.credential_id
-            ))
-        })?;
-    let mut device: BoundDevice =
-        serde_json::from_slice(&raw).map_err(|e| internal("decode device", e))?;
     let authz = PasskeyAuthorization {
         authenticator_data: b64("authenticator_data_b64", &assertion.authenticator_data_b64)?,
         client_data_json: b64("client_data_json_b64", &assertion.client_data_json_b64)?,
         signature: b64("signature_b64", &assertion.signature_b64)?,
     };
+    let store = storage(node)?;
+    require_bound_device(
+        &*store,
+        node.http_surface().webauthn_rp_id(),
+        &[],
+        identity_did,
+        challenge,
+        &assertion.credential_id,
+        &authz,
+    )
+}
+
+/// The same check for the assertion an approval carries, whose fields are
+/// base64url, against a device bound to the node's operator. The approval may
+/// come from an Android app the node lists ([`listed_app_origins`]), as the
+/// operator's phone app makes it, or from the relying party's own page. The
+/// device must still be hardware-bound when it approves.
+pub(crate) fn require_operator_assertion(
+    node: &Arc<TenzroNode>,
+    operator_did: &str,
+    challenge: &[u8; 32],
+    assertion: &crate::conditions::Assertion,
+) -> Result<BoundDevice, JsonRpcError> {
+    let (credential_id, authz) = presented(assertion)?;
+    let store = storage(node)?;
+    let device = require_bound_device(
+        &*store,
+        node.http_surface().webauthn_rp_id(),
+        &listed_app_origins(node),
+        operator_did,
+        challenge,
+        &credential_id,
+        &authz,
+    )?;
+    if !device.is_hardware_bound() {
+        return Err(refused(format!(
+            "credential {credential_id} is not hardware-bound, so it cannot approve"
+        )));
+    }
+    Ok(device)
+}
+
+/// The Android app origins the node's operator lists in
+/// `TENZRO_WEBAUTHN_RELATED_ORIGINS` (`android:apk-key-hash:<hash>`), the
+/// same entries passkey sign-in accepts; any other entry is left out.
+fn listed_app_origins(node: &TenzroNode) -> Vec<String> {
+    match node.webauthn_validator().map(|v| v.relying_party()) {
+        Some(tenzro_crypto::webauthn::WebAuthnRelyingParty::RegistrableDomain {
+            related_origins,
+            ..
+        }) => related_origins
+            .iter()
+            .filter(|origin| tenzro_crypto::webauthn::is_android_app_origin(origin))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The hex credential id and the signed parts of the assertion an approval
+/// carries.
+fn presented(
+    assertion: &crate::conditions::Assertion,
+) -> Result<(String, PasskeyAuthorization), JsonRpcError> {
+    let authz = PasskeyAuthorization {
+        authenticator_data: b64url("authenticator_data", &assertion.authenticator_data)?,
+        client_data_json: b64url("client_data_json", &assertion.client_data_json)?,
+        signature: b64url("signature", &assertion.signature)?,
+    };
+    let credential_id = hex::encode(b64url("credential_id", &assertion.credential_id)?);
+    Ok((credential_id, authz))
+}
+
+/// Whether `authz` is the device in `store` with the hex `credential_id`,
+/// bound to `identity_did`, approving exactly `challenge` on the relying party
+/// `rp_id`, from its page or one of `app_origins`. A device that passes has
+/// its signature counter advanced.
+fn require_bound_device(
+    store: &dyn KvStore,
+    rp_id: &str,
+    app_origins: &[String],
+    identity_did: &str,
+    challenge: &[u8; 32],
+    credential_id: &str,
+    authz: &PasskeyAuthorization,
+) -> Result<BoundDevice, JsonRpcError> {
+    let key = device_key(identity_did, credential_id);
+    let raw = store
+        .get(CF_IDENTITIES, &key)
+        .map_err(|e| internal("read device", e))?
+        .ok_or_else(|| {
+            refused(format!(
+                "credential {credential_id} is not a device bound to {identity_did}"
+            ))
+        })?;
+    let mut device: BoundDevice =
+        serde_json::from_slice(&raw).map_err(|e| internal("decode device", e))?;
     let controller = PasskeyController {
         public_key_sec1: device.public_key_sec1.clone(),
-        rp_id: node.http_surface().webauthn_rp_id().to_string(),
+        rp_id: rp_id.to_string(),
+        app_origins: app_origins.to_vec(),
     };
-    verify_authorization(&controller, challenge, &authz)
+    verify_authorization(&controller, challenge, authz)
         .map_err(|e| refused(format!("device assertion refused: {e}")))?;
     let counter: [u8; 4] = authz.authenticator_data[33..37]
         .try_into()
@@ -279,19 +369,50 @@ pub(crate) fn list_devices(
 }
 
 /// Every session recorded for `identity_did`, live or not.
-fn list_sessions(
-    node: &Arc<TenzroNode>,
-    identity_did: &str,
-) -> Result<Vec<DeviceSession>, JsonRpcError> {
-    let store = storage(node)?;
+fn sessions_in(store: &dyn KvStore, identity_did: &str) -> Result<Vec<DeviceSession>, String> {
     let prefix = format!("{SESSION_PREFIX}{identity_did}:");
     let rows = store
         .scan_prefix(CF_IDENTITIES, prefix.as_bytes())
-        .map_err(|e| internal("read sessions", e))?;
+        .map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
         .filter_map(|(_, v)| serde_json::from_slice::<DeviceSession>(&v).ok())
         .collect())
+}
+
+/// Unbind the device `credential_id` from `identity_did` and end the sessions
+/// it granted. Returns whether a binding existed and how many sessions ended.
+///
+/// The two happen together: removing the device without ending its sessions
+/// would leave a lost phone's access live.
+pub(crate) fn unbind_device(
+    store: &dyn KvStore,
+    identity_did: &str,
+    credential_id: &str,
+) -> Result<(bool, usize), String> {
+    let key = device_key(identity_did, credential_id);
+    let existed = store
+        .get(CF_IDENTITIES, &key)
+        .map_err(|e| format!("read device: {e}"))?
+        .is_some();
+    if existed {
+        store
+            .delete(CF_IDENTITIES, &key)
+            .map_err(|e| format!("delete device: {e}"))?;
+    }
+    let mut sessions =
+        sessions_in(store, identity_did).map_err(|e| format!("read sessions: {e}"))?;
+    let ended = revoke_sessions_for_device(&mut sessions, credential_id);
+    for s in sessions.iter().filter(|s| s.revoked) {
+        store
+            .put(
+                CF_IDENTITIES,
+                &session_key(identity_did, &s.session_id),
+                &serde_json::to_vec(s).map_err(|e| format!("encode session: {e}"))?,
+            )
+            .map_err(|e| format!("persist session: {e}"))?;
+    }
+    Ok((existed, ended))
 }
 
 fn now_ms() -> u64 {
@@ -562,10 +683,6 @@ pub struct RevokeBoundDeviceRequest {
 }
 
 /// `tenzro_revokeBoundDevice` — unbind a device and end the sessions it granted.
-///
-/// The two happen together, and that is the point: removing the device without
-/// ending its sessions would leave a lost phone's access live, which is the
-/// exact situation the user is trying to fix.
 pub(crate) async fn handle_revoke_bound_device(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -579,30 +696,12 @@ pub(crate) async fn handle_revoke_bound_device(
         &req.credential_id,
     )?;
     require_bound_device_assertion(node, &req.identity_did, &challenge, &req.authorization)?;
-    let store = storage(node)?;
-
-    let key = device_key(&req.identity_did, &req.credential_id);
-    let existed = store
-        .get(CF_IDENTITIES, &key)
-        .map_err(|e| internal("read device", e))?
-        .is_some();
-    if existed {
-        store
-            .delete(CF_IDENTITIES, &key)
-            .map_err(|e| internal("delete device", e))?;
-    }
-
-    let mut sessions = list_sessions(node, &req.identity_did)?;
-    let ended = revoke_sessions_for_device(&mut sessions, &req.credential_id);
-    for s in sessions.iter().filter(|s| s.revoked) {
-        store
-            .put(
-                CF_IDENTITIES,
-                &session_key(&req.identity_did, &s.session_id),
-                &serde_json::to_vec(s).map_err(|e| internal("encode session", e))?,
-            )
-            .map_err(|e| internal("persist session", e))?;
-    }
+    let (existed, ended) = unbind_device(
+        storage(node)?.as_ref(),
+        &req.identity_did,
+        &req.credential_id,
+    )
+    .map_err(|e| internal("unbind device", e))?;
 
     let remaining = list_devices(node, &req.identity_did)?;
     Ok(serde_json::json!({
@@ -834,6 +933,11 @@ pub(crate) async fn handle_transfer_machine_ownership(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::ecdsa::SigningKey;
+    use tenzro_device_key::signer::{FLAG_UP, FLAG_UV};
+    use tenzro_types::device_binding::{
+        Aaguid, AttestationEvidence, AttestationFormat, KeyProtection,
+    };
 
     /// The wire shape every surface sends. `parse_params` deserializes the
     /// params value directly, so a one-element array — the other convention in
@@ -896,6 +1000,76 @@ mod tests {
         assert_eq!(r.ttl_ms, default_ttl_ms());
         assert!(r.ttl_ms > 0);
         assert!(r.machine_signature_hex.is_none());
+    }
+
+    /// A keystore change that retires a passkey unbinds the device bound
+    /// under it and ends the sessions that device granted. A device and a
+    /// session of a passkey the change kept are untouched.
+    #[test]
+    fn a_retired_passkeys_device_is_unbound_and_its_sessions_end() {
+        let store = tenzro_storage::MemoryStore::new();
+        let did = "did:tenzro:human:alice";
+        for credential in ["aa", "bb"] {
+            store
+                .put(CF_IDENTITIES, &device_key(did, credential), b"{}")
+                .unwrap();
+            let session = DeviceSession {
+                session_id: format!("session-{credential}"),
+                identity_did: did.to_string(),
+                credential_id: credential.to_string(),
+                issued_at_ms: 1,
+                expires_at_ms: u64::MAX,
+                revoked: false,
+            };
+            store
+                .put(
+                    CF_IDENTITIES,
+                    &session_key(did, &session.session_id),
+                    &serde_json::to_vec(&session).unwrap(),
+                )
+                .unwrap();
+        }
+        let log = tenzro_vm::Log::new(
+            tenzro_vm::native::SYSTEM_ADDRESS.to_vec(),
+            vec![tenzro_vm::keystore::KEYSTORE_UPDATED_TOPIC.to_vec()],
+            serde_json::to_vec(&serde_json::json!({
+                "account": "00",
+                "version": 2,
+                "commitment": "00",
+                "owner_did": did,
+                "added": ["cc"],
+                "retired": ["aa"],
+                "recovered": true,
+            }))
+            .unwrap(),
+        );
+        let outcome = crate::identity_mirror::mirror_identity_logs(
+            &tenzro_identity::IdentityRegistry::new(),
+            None,
+            Some(&store),
+            &[log],
+        );
+        assert_eq!(outcome.devices_unbound, 1);
+        assert_eq!(outcome.sessions_ended, 1);
+        assert!(
+            store
+                .get(CF_IDENTITIES, &device_key(did, "aa"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get(CF_IDENTITIES, &device_key(did, "bb"))
+                .unwrap()
+                .is_some()
+        );
+        let revoked: Vec<(String, bool)> = sessions_in(&store, did)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.credential_id, s.revoked))
+            .collect();
+        assert!(revoked.contains(&("aa".to_string(), true)));
+        assert!(revoked.contains(&("bb".to_string(), false)));
     }
 
     fn assertion_json() -> Value {
@@ -1044,5 +1218,231 @@ mod tests {
     fn a_missing_params_value_is_an_invalid_params_error_not_a_panic() {
         let e = crate::passkey_rpc::parse_params::<ListBoundDevicesRequest>(None).unwrap_err();
         assert_eq!(e.code, -32602);
+    }
+
+    const OPERATOR: &str = "did:tenzro:human:operator";
+    const RP_ID: &str = "node.example";
+    const CHALLENGE: [u8; 32] = [9u8; 32];
+
+    /// A store holding one hardware-bound device of the operator's, the
+    /// passkey inside that device and its credential id.
+    fn bound() -> (tenzro_storage::MemoryStore, SigningKey, Vec<u8>) {
+        let passkey = SigningKey::from_slice(&[21u8; 32]).unwrap();
+        let credential = vec![7u8; 16];
+        let device = BoundDevice {
+            credential_id: hex::encode(&credential),
+            identity_did: OPERATOR.into(),
+            label: "phone".into(),
+            public_key_sec1: passkey
+                .verifying_key()
+                .to_sec1_point(false)
+                .as_bytes()
+                .to_vec(),
+            aaguid: Aaguid([1u8; 16]),
+            backup_eligible: false,
+            backed_up: false,
+            attestation: AttestationEvidence {
+                format: AttestationFormat::Apple,
+                protection: KeyProtection::SecureElement,
+                chain_verified: true,
+                verified_boot: None,
+            },
+            sign_count: 0,
+            bound_at_ms: 1_700_000_000_000,
+        };
+        let store = tenzro_storage::MemoryStore::new();
+        store
+            .put(
+                CF_IDENTITIES,
+                &device_key(OPERATOR, &device.credential_id),
+                &serde_json::to_vec(&device).unwrap(),
+            )
+            .unwrap();
+        (store, passkey, credential)
+    }
+
+    /// What the passkey returns for `challenge`, in the encoding an approval
+    /// carries.
+    fn approval(
+        passkey: &SigningKey,
+        credential: &[u8],
+        challenge: &[u8; 32],
+        counter: u32,
+    ) -> crate::conditions::Assertion {
+        approval_at(
+            passkey,
+            credential,
+            challenge,
+            counter,
+            &format!("https://{RP_ID}"),
+        )
+    }
+
+    /// [`approval`] made at `origin`.
+    fn approval_at(
+        passkey: &SigningKey,
+        credential: &[u8],
+        challenge: &[u8; 32],
+        counter: u32,
+        origin: &str,
+    ) -> crate::conditions::Assertion {
+        use base64::Engine;
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use sha2::{Digest, Sha256};
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let mut authenticator_data = Sha256::digest(RP_ID.as_bytes()).to_vec();
+        authenticator_data.push(FLAG_UP | FLAG_UV);
+        authenticator_data.extend_from_slice(&counter.to_be_bytes());
+        let client_data_json = serde_json::json!({
+            "type": "webauthn.get",
+            "challenge": b64(challenge),
+            "origin": origin,
+            "crossOrigin": false,
+        })
+        .to_string()
+        .into_bytes();
+        let mut signed = authenticator_data.clone();
+        signed.extend_from_slice(&Sha256::digest(&client_data_json));
+        let digest: [u8; 32] = Sha256::digest(&signed).into();
+        let signature: p256::ecdsa::Signature = passkey.sign_prehash(&digest).unwrap();
+        crate::conditions::Assertion {
+            credential_id: b64(credential),
+            authenticator_data: b64(&authenticator_data),
+            client_data_json: b64(&client_data_json),
+            signature: b64(signature.to_der().as_bytes()),
+        }
+    }
+
+    fn checked(
+        store: &dyn KvStore,
+        challenge: &[u8; 32],
+        assertion: &crate::conditions::Assertion,
+    ) -> Result<BoundDevice, JsonRpcError> {
+        checked_listing(store, &[], challenge, assertion)
+    }
+
+    /// [`checked`] on a node listing the Android app origins `apps`.
+    fn checked_listing(
+        store: &dyn KvStore,
+        apps: &[String],
+        challenge: &[u8; 32],
+        assertion: &crate::conditions::Assertion,
+    ) -> Result<BoundDevice, JsonRpcError> {
+        let (credential_id, authz) = presented(assertion)?;
+        require_bound_device(
+            store,
+            RP_ID,
+            apps,
+            OPERATOR,
+            challenge,
+            &credential_id,
+            &authz,
+        )
+    }
+
+    /// The operator's phone app makes its approvals at its Android app origin:
+    /// an app the node lists counts, one it does not list is refused, and the
+    /// relying party's own page counts whatever the list.
+    #[test]
+    fn an_approval_from_an_android_app_counts_only_when_the_node_lists_the_app() {
+        let (store, passkey, credential) = bound();
+        let app = format!("android:apk-key-hash:{}", "A".repeat(43));
+        let other = format!("android:apk-key-hash:{}", "B".repeat(43));
+        let from_app = approval_at(&passkey, &credential, &CHALLENGE, 1, &app);
+        for listed in [
+            Vec::new(),
+            vec![other],
+            vec!["https://evil.example".to_string()],
+        ] {
+            let refused = checked_listing(&store, &listed, &CHALLENGE, &from_app).unwrap_err();
+            assert!(
+                refused.message.contains("another origin"),
+                "{}",
+                refused.message
+            );
+        }
+        let listed = vec![app.clone()];
+        checked_listing(&store, &listed, &CHALLENGE, &from_app).expect("a listed app");
+        let from_page = approval_at(
+            &passkey,
+            &credential,
+            &CHALLENGE,
+            2,
+            &format!("https://{RP_ID}"),
+        );
+        checked_listing(&store, &listed, &CHALLENGE, &from_page).expect("the page");
+    }
+
+    #[test]
+    fn an_operator_device_approves_the_challenge_it_signed() {
+        let (store, passkey, credential) = bound();
+        let assertion = approval(&passkey, &credential, &CHALLENGE, 1);
+        let device = checked(&store, &CHALLENGE, &assertion).expect("approved");
+        assert_eq!(device.label, "phone");
+        assert_eq!(device.sign_count, 1);
+    }
+
+    /// The counter the first use advanced is stored, so the same assertion
+    /// presented again is a counter that did not move.
+    #[test]
+    fn an_assertion_presented_twice_is_refused_the_second_time() {
+        let (store, passkey, credential) = bound();
+        let assertion = approval(&passkey, &credential, &CHALLENGE, 1);
+        checked(&store, &CHALLENGE, &assertion).expect("approved");
+        let again = checked(&store, &CHALLENGE, &assertion).unwrap_err();
+        assert_eq!(again.code, -32003);
+        assert!(
+            again.message.contains("did not advance"),
+            "{}",
+            again.message
+        );
+    }
+
+    #[test]
+    fn an_assertion_over_another_challenge_is_refused() {
+        let (store, passkey, credential) = bound();
+        let assertion = approval(&passkey, &credential, &[8u8; 32], 1);
+        let refused = checked(&store, &CHALLENGE, &assertion).unwrap_err();
+        assert_eq!(refused.code, -32003);
+        assert!(
+            refused.message.starts_with("device assertion refused"),
+            "{}",
+            refused.message
+        );
+    }
+
+    #[test]
+    fn a_passkey_that_is_not_the_bound_one_is_refused() {
+        let (store, _passkey, credential) = bound();
+        let other = SigningKey::from_slice(&[22u8; 32]).unwrap();
+        let assertion = approval(&other, &credential, &CHALLENGE, 1);
+        let refused = checked(&store, &CHALLENGE, &assertion).unwrap_err();
+        assert_eq!(refused.code, -32003);
+    }
+
+    #[test]
+    fn a_credential_the_operator_never_bound_is_refused_by_name() {
+        let (store, passkey, _credential) = bound();
+        let assertion = approval(&passkey, &[3u8; 16], &CHALLENGE, 1);
+        let refused = checked(&store, &CHALLENGE, &assertion).unwrap_err();
+        let unbound = hex::encode([3u8; 16]);
+        assert_eq!(
+            refused.message,
+            format!("credential {unbound} is not a device bound to {OPERATOR}")
+        );
+    }
+
+    #[test]
+    fn a_field_that_is_not_base64url_is_an_invalid_params_error() {
+        let (_store, passkey, credential) = bound();
+        let mut assertion = approval(&passkey, &credential, &CHALLENGE, 1);
+        assertion.signature = "not base64url!".into();
+        let e = presented(&assertion).unwrap_err();
+        assert_eq!(e.code, -32602);
+        assert!(
+            e.message.starts_with("signature is not valid base64url"),
+            "{}",
+            e.message
+        );
     }
 }

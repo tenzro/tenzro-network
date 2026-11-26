@@ -47,7 +47,7 @@ fn sign(k: &SigningKey, chain_id: U256, delegate: [u8; 20], nonce: u64) -> Eip77
         nonce,
         signature: vec![],
     };
-    let (sig, rid) = k.sign_prehash_recoverable(&auth.signing_hash()).unwrap();
+    let (sig, rid) = k.sign_prehash_recoverable(&auth.signing_hash());
     auth.signature = sig.to_bytes().to_vec();
     auth.signature.push(rid.to_byte());
     auth
@@ -109,6 +109,7 @@ impl World {
             VmType::Evm,
             CHAIN,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
         .with_authorization_list(auths)
     }
 

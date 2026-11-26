@@ -1,0 +1,51 @@
+[package]
+name = "tenzro-mailbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Store-and-forward mailbox for Tenzro Network: sealed messages held for an offline recipient, paid with escrow vouchers, run beside a node"
+
+[features]
+# Group sessions (preview): MLS groups whose commits, welcomes and messages
+# travel through mailboxes.
+mls = ["dep:openmls", "dep:openmls_rust_crypto", "dep:openmls_basic_credential"]
+# Encrypted file sharing (preview): age files whose file key is sealed to each
+# recipient with the hybrid X25519 + ML-KEM-768 seal.
+files = ["dep:age", "dep:age-core", "dep:zeroize"]
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-crypto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+bs58 = { workspace = true }
+axum = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service", "server"] }
+tower-http = { workspace = true, features = ["timeout"] }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+sha2 = { workspace = true }
+openmls = { workspace = true, optional = true }
+openmls_rust_crypto = { workspace = true, optional = true }
+openmls_basic_credential = { workspace = true, optional = true }
+age = { workspace = true, optional = true }
+age-core = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+
+[dev-dependencies]
+tenzro-crypto = { workspace = true, features = ["test-keys"] }
+# The ledger's own charge for a claim, which the claim gas must cover.
+tenzro-vm = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

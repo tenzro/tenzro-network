@@ -17,9 +17,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tenzro_consensus::compact::CompactCertificate;
-use tenzro_consensus::light_client::{ChainSegment, GenesisAnchor, LightClient};
 use tenzro_consensus::{Certificate, Member, SessionCertificate};
+use tenzro_light::TrustAnchor;
+use tenzro_light::compact::CompactCertificate;
+use tenzro_light::light_client::ChainSegment;
+use tenzro_light::{Clock, LightClient};
 
 use crate::output;
 use crate::rpc::RpcClient;
@@ -74,7 +76,7 @@ impl FinalityHandoverCmd {
         let sessions: Vec<SessionCertificate> = decode(&h, "sessions")?;
         let next_members: Vec<Member> = decode(&h, "next_members")?;
         let index = certificate.checkpoint.index;
-        let handover = tenzro_consensus::light_client::EpochHandover {
+        let handover = tenzro_light::light_client::EpochHandover {
             certificate,
             sessions,
             next_members,
@@ -174,13 +176,17 @@ pub struct GenesisArgs {
     /// Genesis block hash (0x-prefixed hex)
     #[arg(long)]
     genesis_hash: String,
-    /// Root of the genesis committee (0x-prefixed hex), from the genesis file
+    /// Genesis file: the first committee is read from its validators
     #[arg(long)]
-    genesis_committee_root: String,
+    genesis: std::path::PathBuf,
     /// Image id of the handover program (0x-prefixed hex), from the chain's
     /// governance: needed once the node serves a handover chain proof
     #[arg(long)]
     handover_program: Option<String>,
+    /// Oldest the node's latest compact certificate may be, in seconds,
+    /// against this machine's clock: an older one is refused as stale
+    #[arg(long, default_value_t = 3600)]
+    max_age_secs: u64,
 }
 
 fn hex32(s: &str, what: &str) -> Result<[u8; 32]> {
@@ -204,10 +210,11 @@ pub(crate) async fn follow(
     rpc: &RpcClient,
     genesis: &GenesisArgs,
 ) -> Result<(LightClient, CompactCertificate)> {
-    let anchor = GenesisAnchor {
+    let anchor = TrustAnchor {
+        epoch: 0,
         chain_id: genesis.chain_id,
         genesis_hash: hex32(&genesis.genesis_hash, "genesis hash")?,
-        committee_root: hex32(&genesis.genesis_committee_root, "genesis committee root")?,
+        committee_root: super::genesis_file::committee_root(&genesis.genesis)?,
     };
     let program = genesis
         .handover_program
@@ -242,9 +249,19 @@ pub(crate) async fn follow(
         );
     }
     let sessions: Vec<SessionCertificate> = decode(&latest, "sessions")?;
-    client.add_sessions(sessions);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("this machine's clock is before 1970")?
+        .as_millis();
+    let clock = Clock {
+        now_ms: u64::try_from(now_ms).context("this machine's clock is out of range")?,
+        max_age_ms: genesis.max_age_secs.saturating_mul(1_000),
+        // The clock difference tolerated between this machine and the
+        // validators.
+        max_ahead_ms: 30_000,
+    };
     client
-        .accept_compact(&compact)
+        .advance_compact(&compact, sessions, &clock)
         .context("compact certificate")?;
     Ok((client, compact))
 }

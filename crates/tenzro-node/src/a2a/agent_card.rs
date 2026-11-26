@@ -4,11 +4,15 @@
 //! payload is the RFC 8785 canonical form of the card with `signatures`
 //! removed, so a reverse proxy or cache that rewrites the interface URL, the
 //! skills or the extensions invalidates the signature. The key that signs is
-//! the node operator's wallet key, reached through the wallet service's
-//! bound signer: the wallet service holds no private key of its own, so the
-//! signature is produced by the hardware custody that wallet is bound to.
-//! A node with no operator identity or no bound signer serves the card
-//! without `signatures` rather than with a placeholder.
+//! the machine's identity key in its TPM or Secure Enclave, the key its
+//! machine DID derives from, so the card needs no wallet or operator account
+//! on the node. A node whose key cannot sign answers 503 rather than serving
+//! an unsigned card.
+//!
+//! The signature says who published the card. What the card may claim is
+//! decided here: a skill that needs something of the node (a role it serves,
+//! which it holds the bond for; a build that can run models; a bound iroh
+//! endpoint) is listed only while the node has it ([`Served`]).
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -24,8 +28,8 @@ pub const A2A_PROTOCOL_VERSION: &str = "1.0";
 /// Well-known path the agent card is served at.
 pub const WELL_KNOWN_AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
 
-/// Extension URI for the Tenzro DID envelope that every mutating request
-/// must carry. Declared `required` in the card so a client that does not
+/// Extension URI for the Tenzro DID envelope that every task request must
+/// carry. Declared `required` in the card so a client that does not
 /// implement it learns so before its first request is refused.
 pub const DID_ENVELOPE_EXTENSION_URI: &str = "https://tenzro.com/a2a/extensions/did-envelope";
 
@@ -135,13 +139,71 @@ pub fn card_url(config: &crate::config::NodeConfig) -> Option<String> {
 
 /// Build an Agent Card advertising `url` as its one interface; with no URL
 /// the card lists no interface.
-pub fn build_agent_card(url: Option<String>, node_role: &str) -> AgentCard {
+/// What a node serves at the moment its card is built. A skill is listed
+/// only when what it needs is here, so a node that follows the chain and
+/// nothing else does not advertise inference, storage or compute.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Served {
+    /// The node serves models: it holds the role (and so its bond) and this
+    /// build can run them.
+    pub models: bool,
+    /// The node serves storage.
+    pub storage: bool,
+    /// The node rents compute.
+    pub compute: bool,
+    /// The node's iroh endpoint is bound, so `tenzro/a2a` is reachable.
+    pub iroh: bool,
+}
+
+impl Served {
+    /// Everything: the card of a node that serves every role.
+    pub const ALL: Self = Self {
+        models: true,
+        storage: true,
+        compute: true,
+        iroh: true,
+    };
+
+    /// What `node` serves now. The roles are the ones it runs with, which a
+    /// node holds only while it holds their bonds.
+    pub fn of(node: &crate::node::TenzroNode) -> Self {
+        let roles = node.runtime_roles.read().clone();
+        Self {
+            models: cfg!(feature = "inference") && roles.serves_ai(),
+            storage: roles.serves_storage(),
+            compute: roles.serves_compute(),
+            iroh: node.iroh_resolver().is_some(),
+        }
+    }
+
+    /// Whether the skill with `id` may be listed. A skill that reads the
+    /// chain or submits what its caller signed needs nothing of the node.
+    fn lists(&self, id: &str) -> bool {
+        match id {
+            "inference" | "moe" | "media-gen" => self.models,
+            "storage" => self.storage,
+            "compute" => self.compute,
+            "iroh-transport" => self.iroh,
+            _ => true,
+        }
+    }
+}
+
+/// The card of a node with `node_role` that serves `served`.
+pub fn build_agent_card(url: Option<String>, node_role: &str, served: Served) -> AgentCard {
+    let mut card = full_agent_card(url, node_role);
+    card.skills.retain(|skill| served.lists(&skill.id));
+    card
+}
+
+/// The card with every skill a node can have.
+fn full_agent_card(url: Option<String>, node_role: &str) -> AgentCard {
     AgentCard {
         name: "Tenzro Network Agent".to_string(),
         description: format!(
-            "Tenzro Network node ({}) — AI-native agentic tokenized settlement layer. \
+            "Tenzro Network node ({}) — compute of every kind for the machine economy. \
              Provides wallet operations, identity management, inference routing, \
-             settlement, and blockchain interaction.",
+             storage and compute rental, settlement, and ledger interaction.",
             node_role
         ),
         supported_interfaces: url
@@ -158,11 +220,12 @@ pub fn build_agent_card(url: Option<String>, node_role: &str) -> AgentCard {
             push_notifications: false,
             extensions: vec![AgentExtension {
                 uri: DID_ENVELOPE_EXTENSION_URI.to_string(),
-                description: "SendMessage, SendStreamingMessage and CancelTask carry a \
-                              signature by the sender DID's wallet key over the method, \
-                              task id, nonce, timestamp and the SHA-256 of the RFC 8785 \
-                              canonical request params, in the tenzro.a2a.envelope.* \
-                              metadata keys."
+                description: "SendMessage, SendStreamingMessage, CancelTask, GetTask and \
+                              ListTasks carry a signature by the sender DID's wallet key \
+                              over the method, task id, nonce, timestamp and the SHA-256 \
+                              of the RFC 8785 canonical request params, in the \
+                              tenzro.a2a.envelope.* metadata keys. A task is shown only \
+                              to the DID that opened it."
                     .to_string(),
                 required: true,
             }],
@@ -334,11 +397,9 @@ pub fn build_agent_card(url: Option<String>, node_role: &str) -> AgentCard {
             AgentSkill {
                 id: "join".to_string(),
                 name: "Join as MicroNode".to_string(),
-                description: "Join the Tenzro Network as a full MicroNode participant — \
-                              zero-install. Auto-provisions a TDIP DID, permissionless wallet, and \
-                              10 network capabilities (inference, payments, agent collaboration, \
-                              MCP tools, task execution, chain queries, smart contracts, \
-                              TEE compute, cross-chain bridge, governance)."
+                description: "Provision a TDIP DID and a wallet bound to a key the caller \
+                              holds, so the identity can pay for and call the network's \
+                              services. It runs no node and takes no part in consensus."
                     .to_string(),
                 tags: vec![
                     "join".to_string(),
@@ -432,11 +493,8 @@ pub fn build_agent_card(url: Option<String>, node_role: &str) -> AgentCard {
                      current BurnRateConfig (base / local burn bps with treasury \
                      complements), the latest \
                      SupplyMetricsSnapshot (rolling-window epoch delta, burn breakdown, \
-                     supply added: always 0, TNZO supply is fixed at genesis), and the \
-                     pure-function BurnRateRecommendation (NoChange / \
-                     IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation (a fault) / \
-                     AlarmHighDeflation with magnitude bps capped at the normal / alarm \
-                     ceiling). The dial moves only via on-chain governance votes: every \
+                     supply added: always 0, TNZO supply is fixed at genesis). The dial \
+                     moves only via on-chain governance votes: every \
                      validator's auto-proposal generator drafts an AdaptiveBurnConfigUpdate \
                      proposal from the supply metrics (expedited on an alarm), and once \
                      enacted, block fee settlement burns that share of the base fee and \
@@ -533,7 +591,7 @@ pub fn build_agent_card(url: Option<String>, node_role: &str) -> AgentCard {
             },
             AgentSkill {
                 id: "storage".to_string(),
-                name: "Decentralized Storage".to_string(),
+                name: "Storage".to_string(),
                 description: "Content-addressed storage on the iroh data plane, billed per \
                               byte-epoch and held to a proof of retrievability. Store an object \
                               with an erasure-coded redundancy scheme, open a streaming deal, run \
@@ -583,7 +641,7 @@ pub fn build_agent_card(url: Option<String>, node_role: &str) -> AgentCard {
             AgentSkill {
                 id: "moe".to_string(),
                 name: "Distributed MoE Serving".to_string(),
-                description: "Decentralized mixture-of-experts expert-shard serving. Read the \
+                description: "Mixture-of-experts expert-shard serving across holders. Read the \
                               shard map for a model, build a dispatch plan from per-token top-k \
                               routing decisions, read the governance-tuned replication policy, \
                               read the catalog-side MoE topology, load per-expert and gating \
@@ -679,6 +737,10 @@ pub enum CardSignatureError {
     /// A signature entry is well formed but does not verify.
     #[error("signature {index} does not verify over the canonical card")]
     Invalid { index: usize },
+    /// A signature verifies, but under a key that is not the hardware key of
+    /// the machine its `kid` names.
+    #[error("signature {index}: its key is not the hardware key of {kid}")]
+    NotTheKidsKey { index: usize, kid: String },
     /// The node cannot produce a signature.
     #[error("card cannot be signed: {0}")]
     Signing(String),
@@ -726,7 +788,7 @@ fn signing_input(protected_b64: &str, card: &Value) -> Result<String, CardSignat
 /// (`x || y`) rides in `jwk` so a relying party can check the signature
 /// without a key lookup and then check separately that `kid` resolves to
 /// that key.
-fn es256_protected_header(kid: &str, public_key: &[u8]) -> String {
+pub(crate) fn es256_protected_header(kid: &str, public_key: &[u8]) -> String {
     let (x, y) = public_key.split_at(32);
     let header = serde_json::json!({
         "alg": "ES256",
@@ -741,6 +803,67 @@ fn es256_protected_header(kid: &str, public_key: &[u8]) -> String {
     });
     let canonical = jcs::canonicalize(&header).expect("header holds only strings");
     URL_SAFE_NO_PAD.encode(canonical.as_bytes())
+}
+
+/// Verify one ES256 JWS: `protected` (base64url header carrying `kid` and a
+/// P-256 `jwk`), `signature` (base64url `r || s`) over `input`, the JWS
+/// signing input. Returns the algorithm, the `kid` and the key (`x || y`).
+/// `Err(Some(reason))` for a malformed JWS, `Err(None)` for a well-formed
+/// signature that does not verify.
+pub(crate) fn verify_es256_jws(
+    protected: &str,
+    signature: &str,
+    input: &str,
+) -> Result<(String, String, Vec<u8>), Option<String>> {
+    let malformed = |reason: String| Some(reason);
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(protected)
+        .map_err(|e| malformed(format!("protected header base64url: {e}")))?;
+    let header: Value = serde_json::from_slice(&header_bytes)
+        .map_err(|e| malformed(format!("protected header JSON: {e}")))?;
+    let alg = header.get("alg").and_then(Value::as_str).unwrap_or("");
+    if alg != "ES256" {
+        return Err(malformed(format!("unsupported alg '{alg}'")));
+    }
+    let kid = header
+        .get("kid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| malformed("protected header has no kid".to_string()))?;
+    let jwk = header
+        .get("jwk")
+        .ok_or_else(|| malformed("protected header has no jwk".to_string()))?;
+    if jwk.get("kty").and_then(Value::as_str) != Some("EC")
+        || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
+    {
+        return Err(malformed("jwk is not a P-256 EC key".to_string()));
+    }
+    let coord = |name: &str| -> Result<Vec<u8>, Option<String>> {
+        let c = URL_SAFE_NO_PAD
+            .decode(
+                jwk.get(name)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| malformed(format!("jwk has no {name}")))?,
+            )
+            .map_err(|e| malformed(format!("jwk {name} base64url: {e}")))?;
+        if c.len() != 32 {
+            return Err(malformed(format!("jwk {name} is not 32 bytes")));
+        }
+        Ok(c)
+    };
+    let pk_bytes = [coord("x")?, coord("y")?].concat();
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|e| malformed(format!("signature base64url: {e}")))?;
+    if sig_bytes.len() != 64 {
+        return Err(malformed("signature is not 64 bytes".to_string()));
+    }
+    let key = tenzro_crypto::p256::P256Verifier::from_public_key_bytes(&pk_bytes)
+        .map_err(|e| malformed(format!("jwk is not a P-256 point: {e}")))?;
+    let sig = tenzro_crypto::p256::P256Signature::from_slice(&sig_bytes)
+        .map_err(|e| malformed(format!("signature: {e}")))?;
+    let digest: [u8; 32] = Sha256::digest(input.as_bytes()).into();
+    key.verify_prehash(&digest, &sig).map_err(|_| None)?;
+    Ok((alg.to_string(), kid.to_string(), pk_bytes))
 }
 
 /// Verify every signature on `card`. Succeeds only when the card carries at
@@ -765,56 +888,23 @@ pub fn verify_agent_card(card: &Value) -> Result<Vec<VerifiedCardSignature>, Car
 
     let mut verified = Vec::with_capacity(signatures.len());
     for (index, sig) in signatures.iter().enumerate() {
-        let malformed = |reason: String| CardSignatureError::Malformed { index, reason };
-        let header_bytes = URL_SAFE_NO_PAD
-            .decode(&sig.protected)
-            .map_err(|e| malformed(format!("protected header base64url: {e}")))?;
-        let header: Value = serde_json::from_slice(&header_bytes)
-            .map_err(|e| malformed(format!("protected header JSON: {e}")))?;
-        let alg = header.get("alg").and_then(Value::as_str).unwrap_or("");
-        if alg != "ES256" {
-            return Err(malformed(format!("unsupported alg '{alg}'")));
-        }
-        let kid = header
-            .get("kid")
-            .and_then(Value::as_str)
-            .ok_or_else(|| malformed("protected header has no kid".to_string()))?;
-        let jwk = header
-            .get("jwk")
-            .ok_or_else(|| malformed("protected header has no jwk".to_string()))?;
-        if jwk.get("kty").and_then(Value::as_str) != Some("EC")
-            || jwk.get("crv").and_then(Value::as_str) != Some("P-256")
-        {
-            return Err(malformed("jwk is not a P-256 EC key".to_string()));
-        }
-        let coord = |name: &str| -> Result<Vec<u8>, CardSignatureError> {
-            let c = URL_SAFE_NO_PAD
-                .decode(
-                    jwk.get(name)
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| malformed(format!("jwk has no {name}")))?,
-                )
-                .map_err(|e| malformed(format!("jwk {name} base64url: {e}")))?;
-            if c.len() != 32 {
-                return Err(malformed(format!("jwk {name} is not 32 bytes")));
-            }
-            Ok(c)
-        };
-        let pk_bytes = [coord("x")?, coord("y")?].concat();
-        let sig_bytes = URL_SAFE_NO_PAD
-            .decode(&sig.signature)
-            .map_err(|e| malformed(format!("signature base64url: {e}")))?;
-        if sig_bytes.len() != 64 {
-            return Err(malformed("signature is not 64 bytes".to_string()));
-        }
-        let key = tenzro_crypto::p256::P256Verifier::from_public_key_bytes(&pk_bytes)
-            .map_err(|e| malformed(format!("jwk is not a P-256 point: {e}")))?;
-        let signature = tenzro_crypto::p256::P256Signature::from_slice(&sig_bytes)
-            .map_err(|e| malformed(format!("signature: {e}")))?;
         let input = signing_input(&sig.protected, card)?;
-        let digest: [u8; 32] = Sha256::digest(input.as_bytes()).into();
-        key.verify_prehash(&digest, &signature)
-            .map_err(|_| CardSignatureError::Invalid { index })?;
+        let (alg, kid, pk_bytes) = verify_es256_jws(&sig.protected, &sig.signature, &input)
+            .map_err(|e| match e {
+                Some(reason) => CardSignatureError::Malformed { index, reason },
+                None => CardSignatureError::Invalid { index },
+            })?;
+        // A machine DID derives from its hardware key, the key its DID
+        // Document lists under `#hardware-key`: the key must be the one the
+        // `kid` names, not merely the one the header carries.
+        let sec1 = [&[0x04][..], &pk_bytes].concat();
+        let did = tenzro_types::did_derivation::machine_did(&sec1);
+        if kid != format!("{did}{}", crate::node_did_document::HARDWARE_KEY_FRAGMENT) {
+            return Err(CardSignatureError::NotTheKidsKey {
+                index,
+                kid: kid.to_string(),
+            });
+        }
 
         verified.push(VerifiedCardSignature {
             alg: alg.to_string(),
@@ -825,55 +915,40 @@ pub fn verify_agent_card(card: &Value) -> Result<Vec<VerifiedCardSignature>, Car
     Ok(verified)
 }
 
-/// Sign `card` with the node operator's wallet key.
+/// Sign `card` with this machine's identity key, the P-256 key in its TPM or
+/// Secure Enclave that its machine DID derives from.
 ///
-/// The wallet service signs only through the signer bound to the wallet, so
-/// the private key stays in whatever hardware custody backs the operator's
-/// wallet. The signed card is verified before it is returned, so a signer
-/// that does not produce a plain ES256 signature over the input yields an error
-/// here rather than a card relying parties reject.
-pub(crate) async fn sign_with_operator_wallet(
-    node: &crate::node::TenzroNode,
+/// The `kid` is `<machine DID>#hardware-key`, the method the node's DID
+/// Document lists for that key, and the protected header carries the key as
+/// a `jwk`; since the DID derives from the key, a relying party checks the
+/// binding without trusting this node. The signed card is verified before it
+/// is returned, so a signer that does not produce a plain ES256 signature over
+/// the input yields an error here rather than a card relying parties reject.
+pub(crate) fn sign_with_machine_key(
+    signer: &dyn tenzro_device_key::signer::HardwareSigner,
     card: &AgentCard,
 ) -> Result<AgentCard, CardSignatureError> {
-    use tenzro_wallet::{WalletId, WalletService};
-
     let signing = |m: &str| CardSignatureError::Signing(m.to_string());
-    let did = node
-        .operator_did()
-        .ok_or_else(|| signing("this node has no provisioned operator identity"))?;
-    let registry = node
-        .identity_registry()
-        .ok_or_else(|| signing("identity registry not initialized"))?;
-    let wallet_id = registry
-        .find_wallet_id_for_did(&did)
-        .map_err(|e| signing(&format!("no wallet for operator DID {did}: {e}")))?;
-    let wallets = node
-        .wallet_service()
-        .ok_or_else(|| signing("wallet service not initialized"))?;
-    let wid = WalletId::from_string(wallet_id);
-    let wallet = wallets
-        .get_wallet(&wid)
-        .await
-        .map_err(|e| signing(&format!("wallet lookup: {e}")))?
-        .ok_or_else(|| signing("operator wallet not found"))?;
-    let public_key = wallet.public_key.p256.clone();
+    let sec1 = signer
+        .public_key_sec1()
+        .map_err(|e| signing(&format!("machine key: {e}")))?;
+    let did = tenzro_types::did_derivation::machine_did(&sec1);
+    let kid = format!("{did}{}", crate::node_did_document::HARDWARE_KEY_FRAGMENT);
 
     let mut unsigned = card.clone();
     unsigned.signatures.clear();
     let card_value =
         serde_json::to_value(&unsigned).map_err(|e| signing(&format!("card encode: {e}")))?;
-    let protected = es256_protected_header(&did, &public_key);
+    let protected = es256_protected_header(&kid, &sec1[1..]);
     let input = signing_input(&protected, &card_value)?;
-    // A JWS verifier checks a plain ES256 signature over the signing input.
-    let classical = wallets
-        .sign_external(&wid, input.as_bytes())
-        .await
-        .map_err(|e| signing(&format!("operator wallet signer: {e}")))?;
+    let digest: [u8; 32] = Sha256::digest(input.as_bytes()).into();
+    let signature = signer
+        .sign_prehash(&digest)
+        .map_err(|e| signing(&format!("machine key signer: {e}")))?;
 
     unsigned.signatures.push(AgentCardSignature {
         protected,
-        signature: URL_SAFE_NO_PAD.encode(&classical),
+        signature: URL_SAFE_NO_PAD.encode(signature),
     });
     let signed_value =
         serde_json::to_value(&unsigned).map_err(|e| signing(&format!("card encode: {e}")))?;
@@ -895,7 +970,7 @@ mod tests {
 
     #[test]
     fn test_agent_card_serialization() {
-        let card = build_agent_card(published(), "Validator");
+        let card = build_agent_card(published(), "Validator", Served::ALL);
         let json = serde_json::to_string_pretty(&card).unwrap();
 
         // Verify key fields are present
@@ -940,7 +1015,7 @@ mod tests {
             None => assert!(crate::identity_bootstrap::machine_did().is_none()),
         }
 
-        let card = build_agent_card(None, "Validator");
+        let card = build_agent_card(None, "Validator", Served::ALL);
         assert!(card.supported_interfaces.is_empty(), "no URL, no interface");
         let json = serde_json::to_string(&card).unwrap();
         assert!(
@@ -951,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_agent_card_has_all_skills() {
-        let card = build_agent_card(published(), "LightClient");
+        let card = build_agent_card(published(), "LightClient", Served::ALL);
 
         let skill_ids: Vec<&str> = card.skills.iter().map(|s| s.id.as_str()).collect();
         // Skill IDs must be unique — a duplicate id would shadow a skill in the
@@ -980,9 +1055,77 @@ mod tests {
         assert!(skill_ids.contains(&"media-gen"));
     }
 
+    /// A skill that needs a role, a model-running build or the iroh
+    /// endpoint is listed only on a node that has it; the rest always are.
+    #[test]
+    fn a_skill_is_listed_only_when_the_node_serves_what_it_needs() {
+        let ids = |served: Served| -> Vec<String> {
+            build_agent_card(published(), "Validator", served)
+                .skills
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        };
+        let all = ids(Served::ALL);
+        let none = ids(Served::default());
+        let gated = [
+            "inference",
+            "moe",
+            "media-gen",
+            "storage",
+            "compute",
+            "iroh-transport",
+        ];
+        for id in gated {
+            assert!(all.iter().any(|s| s == id), "{id} on a node that serves it");
+            assert!(
+                !none.iter().any(|s| s == id),
+                "{id} on a node that does not"
+            );
+        }
+        assert_eq!(none.len() + gated.len(), all.len());
+        for id in ["wallet", "identity", "verification", "events", "join"] {
+            assert!(
+                none.iter().any(|s| s == id),
+                "{id} needs nothing of the node"
+            );
+        }
+
+        let models_only = ids(Served {
+            models: true,
+            ..Served::default()
+        });
+        for id in ["inference", "moe", "media-gen"] {
+            assert!(models_only.iter().any(|s| s == id), "{id}");
+        }
+        for id in ["storage", "compute", "iroh-transport"] {
+            assert!(!models_only.iter().any(|s| s == id), "{id}");
+        }
+        let storage_only = ids(Served {
+            storage: true,
+            ..Served::default()
+        });
+        assert!(storage_only.iter().any(|s| s == "storage"));
+        assert!(!storage_only.iter().any(|s| s == "inference"));
+        assert!(!storage_only.iter().any(|s| s == "compute"));
+    }
+
+    /// Dropping a skill changes what is signed: a card that claims more than
+    /// the node signed for does not verify.
+    #[test]
+    fn a_skill_added_to_a_signed_card_breaks_the_signature() {
+        let narrow = build_agent_card(published(), "Validator", Served::default());
+        let mut signed = sign_card(&narrow, &key(3));
+        assert!(verify_agent_card(&signed).is_ok());
+        let full =
+            serde_json::to_value(build_agent_card(published(), "Validator", Served::ALL)).unwrap();
+        signed["skills"] = full["skills"].clone();
+        assert!(verify_agent_card(&signed).is_err());
+    }
+
     #[test]
     fn test_agent_card_roundtrip() {
-        let card = build_agent_card(published(), "Validator");
+        let card = build_agent_card(published(), "Validator", Served::ALL);
         let json = serde_json::to_string(&card).unwrap();
         let parsed: AgentCard = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, card.name);
@@ -996,16 +1139,29 @@ mod tests {
     const KID: &str = "did:tenzro:machine:card-test";
 
     fn fixed_card() -> AgentCard {
-        build_agent_card(published(), "Validator")
+        build_agent_card(published(), "Validator", Served::ALL)
     }
 
-    /// Sign the way `sign_with_operator_wallet` does, with a software key
-    /// standing in for the wallet's bound signer.
+    /// The `kid` of `key`'s machine: its DID's hardware key.
+    fn kid_of(key: &TestHybridSigner) -> String {
+        let sec1 = [&[0x04][..], &key.public_key().p256].concat();
+        format!(
+            "{}#hardware-key",
+            tenzro_types::did_derivation::machine_did(&sec1)
+        )
+    }
+
+    /// Sign an ES256 card with a software key under its own machine's `kid`.
     fn sign_card(card: &AgentCard, key: &TestHybridSigner) -> Value {
+        sign_card_as(card, key, &kid_of(key))
+    }
+
+    /// Sign an ES256 card with a software key, naming `kid` as the signer.
+    fn sign_card_as(card: &AgentCard, key: &TestHybridSigner, kid: &str) -> Value {
         let mut unsigned = card.clone();
         unsigned.signatures.clear();
         let value = serde_json::to_value(&unsigned).unwrap();
-        let protected = es256_protected_header(KID, &key.public_key().p256);
+        let protected = es256_protected_header(kid, &key.public_key().p256);
         let input = signing_input(&protected, &value).unwrap();
         let sig = key.sign_external(input.as_bytes()).unwrap();
         unsigned.signatures.push(AgentCardSignature {
@@ -1020,13 +1176,53 @@ mod tests {
     }
 
     #[test]
+    fn the_machine_key_signs_under_the_did_it_derives() {
+        use tenzro_device_key::signer::HardwareSigner as _;
+        let signer = crate::data_integrity::tests::test_signer(9);
+        let sec1 = signer.public_key_sec1().unwrap();
+        let card = sign_with_machine_key(&signer, &fixed_card()).unwrap();
+        let verified = verify_agent_card(&serde_json::to_value(&card).unwrap()).unwrap();
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].alg, "ES256");
+        let did = verified[0].kid.strip_suffix("#hardware-key").unwrap();
+        assert!(tenzro_types::did_derivation::did_derives_from_key(
+            did, &sec1
+        ));
+        assert_eq!(verified[0].public_key_hex, hex::encode(&sec1[1..]));
+        // Signing again replaces the signature instead of adding one.
+        let again = sign_with_machine_key(&signer, &card).unwrap();
+        assert_eq!(again.signatures.len(), 1);
+    }
+
+    /// A card signed by one machine's key under another machine's `kid` is
+    /// refused: the header's key is not the key the named DID derives from.
+    #[test]
+    fn a_card_signed_by_another_key_than_its_kid_names_is_refused() {
+        let ours = key(7);
+        let theirs = key(8);
+        let forged = sign_card_as(&fixed_card(), &theirs, &kid_of(&ours));
+        assert_eq!(
+            verify_agent_card(&forged).unwrap_err(),
+            CardSignatureError::NotTheKidsKey {
+                index: 0,
+                kid: kid_of(&ours),
+            }
+        );
+        let unbound = sign_card_as(&fixed_card(), &ours, KID);
+        assert!(matches!(
+            verify_agent_card(&unbound),
+            Err(CardSignatureError::NotTheKidsKey { .. })
+        ));
+    }
+
+    #[test]
     fn signed_card_verifies_and_reports_the_signing_key() {
         let k = key(7);
         let signed = sign_card(&fixed_card(), &k);
         let verified = verify_agent_card(&signed).unwrap();
         assert_eq!(verified.len(), 1);
         assert_eq!(verified[0].alg, "ES256");
-        assert_eq!(verified[0].kid, KID);
+        assert_eq!(verified[0].kid, kid_of(&k));
         assert_eq!(
             verified[0].public_key_hex,
             hex::encode(&k.public_key().p256)

@@ -775,7 +775,19 @@ async fn complete(
     } else {
         checkout_mandate.to_string()
     };
-    let approved = match crate::ap2::verify_sd_jwt(&checkout_mandate) {
+    // A key-binding JWT on a mandate must be made to this business's payee
+    // for this checkout session.
+    let pay_to = current["ucp"]["payment_handlers"][TENZRO_HANDLER_NAME][0]["config"]
+        ["requirement"]["payTo"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let expect = crate::ap2::KeyBindingExpectation {
+        audience: &pay_to,
+        nonce: &id,
+        now: chrono::Utc::now().timestamp(),
+    };
+    let approved = match crate::ap2::verify_sd_jwt(&checkout_mandate, &expect) {
         Ok(v) => v,
         Err(e) => {
             return refused(
@@ -844,7 +856,7 @@ async fn complete(
     }
     // The key that approved the checkout authorized the payment: it signed
     // the payment mandate, or is the agent key the open mandate binds.
-    let payment_signer = match crate::ap2::verify_sd_jwt(payment_mandate) {
+    let payment_signer = match crate::ap2::verify_sd_jwt(payment_mandate, &expect) {
         Ok(v) => v.issuer_key,
         Err(e) => {
             return refused(
@@ -858,7 +870,7 @@ async fn complete(
         }
     };
     let agent_key = open_mandate
-        .and_then(|m| crate::ap2::verify_sd_jwt(m).ok())
+        .and_then(|m| crate::ap2::verify_sd_jwt(m, &expect).ok())
         .filter(|o| o.claims["vct"] == VCT_PAYMENT_OPEN)
         .and_then(|o| {
             o.claims

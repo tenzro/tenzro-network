@@ -96,7 +96,11 @@ impl StacksShowCmd {
             .unwrap_or_default();
         println!();
         if configured.is_empty() {
-            output::print_field("Configured", "no stacks — every model stays as-is");
+            output::print_field(
+                "Configured",
+                "no stacks — every model stays as-is (stacks are the windows of the \
+                 [provider_schedule] table in the node's configuration)",
+            );
         } else {
             for w in &configured {
                 let name = w.get("stack").and_then(|s| s.as_str()).unwrap_or("?");

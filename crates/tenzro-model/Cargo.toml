@@ -209,6 +209,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
 tenzro-catalog = { workspace = true, features = ["test-seed"] }
 tempfile = "3"
 tenzro-crypto = { workspace = true, features = ["test-keys"] }

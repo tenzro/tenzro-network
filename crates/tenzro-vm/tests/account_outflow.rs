@@ -155,7 +155,7 @@ async fn a_policy_account_takes_no_delegation_so_no_sweeper_runs_as_it() {
         nonce: 0,
         signature: vec![],
     };
-    let (sig, rid) = key.sign_prehash_recoverable(&a.signing_hash()).unwrap();
+    let (sig, rid) = key.sign_prehash_recoverable(&a.signing_hash());
     a.signature = sig.to_bytes().to_vec();
     a.signature.push(rid.to_byte());
     let mut policy = set(E18, HOUR as u64, None);

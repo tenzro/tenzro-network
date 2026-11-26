@@ -17,16 +17,17 @@
 //! action. The sender of an action is refunded up to the grant's cap.
 
 use cosmwasm_std::{
-    Addr, BankMsg, Binary, CanonicalAddr, Coin, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult,
-    Storage, WasmMsg, entry_point, from_json, instantiate2_address, to_json_binary,
+    entry_point, from_json, instantiate2_address, to_json_binary, Addr, BankMsg, Binary,
+    CanonicalAddr, Coin, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Storage,
+    WasmMsg,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tenzro_finality_verifier::{Journal, Params, Store, agent, state_proof};
+use tenzro_finality_verifier::{agent, state_proof, Journal, Params, Store};
 
 const P256_HALF_N: [u8; 32] = [
-    0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xde, 0x73, 0x7d, 0x56,
-    0xd3, 0x8b, 0xcf, 0x42, 0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8,
+    0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xde, 0x73, 0x7d, 0x56, 0xd3, 0x8b, 0xcf, 0x42, 0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8,
 ];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -34,7 +35,13 @@ const P256_HALF_N: [u8; 32] = [
 pub enum InstantiateMsg {
     /// A registry following the Tenzro chain `chain_id` with genesis
     /// `genesis_hash`, from its epoch-0 committee, for the chain `caip2`.
-    Registry { image_id: Binary, chain_id: u64, genesis_hash: Binary, genesis_committee_root: Binary, caip2: String },
+    Registry {
+        image_id: Binary,
+        chain_id: u64,
+        genesis_hash: Binary,
+        genesis_committee_root: Binary,
+        caip2: String,
+    },
     /// The account of `did`; only a registry instantiates one.
     Account { did: String, caip2: String },
 }
@@ -47,9 +54,19 @@ pub enum ExecuteMsg {
     /// Registry: instantiate the account of `did`. Anyone may.
     CreateAccount { did: String },
     /// Account: install a grant proven under final checkpoint `index`.
-    Sync { index: u64, grant: Binary, proof: Binary, caip19: String, payee: Binary },
+    Sync {
+        index: u64,
+        grant: Binary,
+        proof: Binary,
+        caip19: String,
+        payee: Binary,
+    },
     /// Account: run an action signed by serving nodes.
-    Act { action: Binary, signers: Vec<ActSigner>, target_proof: Vec<Binary> },
+    Act {
+        action: Binary,
+        signers: Vec<ActSigner>,
+        target_proof: Vec<Binary>,
+    },
     /// Account: run the one action of an exact grant.
     ActExact { action: Binary },
 }
@@ -131,7 +148,9 @@ struct Ledger<'a>(&'a mut dyn Storage);
 
 impl Store for Ledger<'_> {
     fn committee_root(&self, epoch: u64) -> Option<[u8; 32]> {
-        self.0.get(&committee_key(epoch)).and_then(|v| v.try_into().ok())
+        self.0
+            .get(&committee_key(epoch))
+            .and_then(|v| v.try_into().ok())
     }
     fn set_committee_root(&mut self, epoch: u64, root: [u8; 32]) {
         self.0.set(&committee_key(epoch), &root);
@@ -145,17 +164,32 @@ impl Store for Ledger<'_> {
 }
 
 #[entry_point]
-pub fn instantiate(deps: DepsMut, env: Env, info: MessageInfo, msg: InstantiateMsg) -> StdResult<Response> {
+pub fn instantiate(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: InstantiateMsg,
+) -> StdResult<Response> {
     match msg {
-        InstantiateMsg::Registry { image_id, chain_id, genesis_hash, genesis_committee_root, caip2 } => {
+        InstantiateMsg::Registry {
+            image_id,
+            chain_id,
+            genesis_hash,
+            genesis_committee_root,
+            caip2,
+        } => {
             let data = RegistryData {
                 image_id: b32(&image_id, "image_id")?,
                 chain_id,
                 genesis_hash: b32(&genesis_hash, "genesis_hash")?,
                 caip2,
             };
-            deps.storage.set(REGISTRY, &cosmwasm_std::to_json_vec(&data)?);
-            deps.storage.set(&committee_key(0), &b32(&genesis_committee_root, "genesis_committee_root")?);
+            deps.storage
+                .set(REGISTRY, &cosmwasm_std::to_json_vec(&data)?);
+            deps.storage.set(
+                &committee_key(0),
+                &b32(&genesis_committee_root, "genesis_committee_root")?,
+            );
             Ok(Response::new())
         }
         InstantiateMsg::Account { did, caip2 } => {
@@ -177,7 +211,8 @@ pub fn instantiate(deps: DepsMut, env: Env, info: MessageInfo, msg: InstantiateM
                 nonce: 0,
                 exact_used: false,
             };
-            deps.storage.set(ACCOUNT, &cosmwasm_std::to_json_vec(&data)?);
+            deps.storage
+                .set(ACCOUNT, &cosmwasm_std::to_json_vec(&data)?);
             Ok(Response::new())
         }
     }
@@ -206,7 +241,11 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
     match msg {
         ExecuteMsg::SubmitCheckpoint { journal, seal } => {
             let r = load_registry(deps.storage)?;
-            let params = Params { image_id: r.image_id, chain_id: r.chain_id, genesis_hash: r.genesis_hash };
+            let params = Params {
+                image_id: r.image_id,
+                chain_id: r.chain_id,
+                genesis_hash: r.genesis_hash,
+            };
             let j = tenzro_finality_verifier::submit(
                 &tenzro_finality_verifier::arkworks::Arkworks,
                 &params,
@@ -219,19 +258,37 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
         }
         ExecuteMsg::CreateAccount { did } => {
             let r = load_registry(deps.storage)?;
-            let me = deps.querier.query_wasm_contract_info(&env.contract.address)?;
+            let me = deps
+                .querier
+                .query_wasm_contract_info(&env.contract.address)?;
             let msg = WasmMsg::Instantiate2 {
                 admin: None,
                 code_id: me.code_id,
-                label: format!("tenzro agent account {}", hex(&Sha256::digest(did.as_bytes()))),
-                msg: to_json_binary(&InstantiateMsg::Account { did: did.clone(), caip2: r.caip2 })?,
+                label: format!(
+                    "tenzro agent account {}",
+                    hex(&Sha256::digest(did.as_bytes()))
+                ),
+                msg: to_json_binary(&InstantiateMsg::Account {
+                    did: did.clone(),
+                    caip2: r.caip2,
+                })?,
                 funds: vec![],
                 salt: Binary::from(salt(&did).to_vec()),
             };
             Ok(Response::new().add_message(msg))
         }
-        ExecuteMsg::Sync { index, grant, proof, caip19, payee } => sync(deps, env, index, &grant, &proof, &caip19, &payee),
-        ExecuteMsg::Act { action, signers, target_proof } => act(deps, env, info, &action, Some((&signers, &target_proof))),
+        ExecuteMsg::Sync {
+            index,
+            grant,
+            proof,
+            caip19,
+            payee,
+        } => sync(deps, env, index, &grant, &proof, &caip19, &payee),
+        ExecuteMsg::Act {
+            action,
+            signers,
+            target_proof,
+        } => act(deps, env, info, &action, Some((&signers, &target_proof))),
         ExecuteMsg::ActExact { action } => act(deps, env, info, &action, None),
     }
 }
@@ -240,11 +297,23 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn sync(deps: DepsMut, env: Env, index: u64, grant: &[u8], proof: &[u8], caip19: &str, payee: &[u8]) -> StdResult<Response> {
+fn sync(
+    deps: DepsMut,
+    env: Env,
+    index: u64,
+    grant: &[u8],
+    proof: &[u8],
+    caip19: &str,
+    payee: &[u8],
+) -> StdResult<Response> {
     let mut a = load_account(deps.storage)?;
-    let root: Binary = deps.querier.query_wasm_smart(&a.registry, &QueryMsg::StateRoot { index })?;
+    let root: Binary = deps
+        .querier
+        .query_wasm_smart(&a.registry, &QueryMsg::StateRoot { index })?;
     if !state_proof::verify_at(&b32(&root, "state root")?, &a.tree_key, Some(grant), proof) {
-        return Err(err("the grant does not prove under the checkpoint's state root"));
+        return Err(err(
+            "the grant does not prove under the checkpoint's state root",
+        ));
     }
     let g = agent::Grant::decode(grant).ok_or_else(|| err("malformed grant"))?;
     let here = deps.api.addr_canonicalize(env.contract.address.as_str())?;
@@ -274,7 +343,10 @@ fn sync(deps: DepsMut, env: Env, index: u64, grant: &[u8], proof: &[u8], caip19:
     if <[u8; 32]>::from(Sha256::digest(caip19.as_bytes())) != g.asset {
         return Err(err("the asset is not the grant's"));
     }
-    let denom = caip19.split_once("/bank:").map(|(_, d)| d.to_string()).ok_or_else(|| err("a CosmWasm grant names a bank denomination"))?;
+    let denom = caip19
+        .split_once("/bank:")
+        .map(|(_, d)| d.to_string())
+        .ok_or_else(|| err("a CosmWasm grant names a bank denomination"))?;
     if new_seq {
         a.spent = 0;
         a.exact_used = false;
@@ -322,7 +394,11 @@ fn act(
     signed: Option<(&Vec<ActSigner>, &Vec<Binary>)>,
 ) -> StdResult<Response> {
     let mut a = load_account(deps.storage)?;
-    let g = a.grant.as_deref().and_then(agent::Grant::decode).ok_or_else(|| err("no live grant"))?;
+    let g = a
+        .grant
+        .as_deref()
+        .and_then(agent::Grant::decode)
+        .ok_or_else(|| err("no live grant"))?;
     if g.void {
         return Err(err("the grant is void"));
     }
@@ -330,7 +406,8 @@ fn act(
     if now < g.not_before_ms || now > g.not_after_ms {
         return Err(err("outside the grant's time window"));
     }
-    let (target, selector, amount, refund, data) = decode_action(action).ok_or_else(|| err("malformed action"))?;
+    let (target, selector, amount, refund, data) =
+        decode_action(action).ok_or_else(|| err("malformed action"))?;
     if refund > g.relay_fee_max {
         return Err(err("the relayer refund is above the grant's cap"));
     }
@@ -360,8 +437,15 @@ fn act(
                 return Err(err("over the grant's budget"));
             }
             if g.targets_root != [0u8; 32] {
-                let proof: Vec<[u8; 32]> = target_proof.iter().map(|p| b32(p, "proof")).collect::<StdResult<_>>()?;
-                if !agent::merkle_verify(&g.targets_root, &agent::target_leaf(target, selector), &proof) {
+                let proof: Vec<[u8; 32]> = target_proof
+                    .iter()
+                    .map(|p| b32(p, "proof"))
+                    .collect::<StdResult<_>>()?;
+                if !agent::merkle_verify(
+                    &g.targets_root,
+                    &agent::target_leaf(target, selector),
+                    &proof,
+                ) {
                     return Err(err("target not allowed"));
                 }
             }
@@ -381,9 +465,21 @@ fn act(
                 if !ok {
                     return Err(err("a signature does not verify"));
                 }
-                let key: [u8; 65] = s.key.as_slice().try_into().map_err(|_| err("a key is 65 bytes"))?;
-                let proof: Vec<[u8; 32]> = s.proof.iter().map(|p| b32(p, "proof")).collect::<StdResult<_>>()?;
-                if !agent::merkle_verify(&g.keys_root, &agent::key_leaf(&key, s.operator.as_bytes()), &proof) {
+                let key: [u8; 65] = s
+                    .key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| err("a key is 65 bytes"))?;
+                let proof: Vec<[u8; 32]> = s
+                    .proof
+                    .iter()
+                    .map(|p| b32(p, "proof"))
+                    .collect::<StdResult<_>>()?;
+                if !agent::merkle_verify(
+                    &g.keys_root,
+                    &agent::key_leaf(&key, s.operator.as_bytes()),
+                    &proof,
+                ) {
                     return Err(err("key not in root"));
                 }
                 if i == 1 && signers[0].operator == s.operator {
@@ -396,27 +492,47 @@ fn act(
     // A paying action reports the payment, bound to what it bought, for
     // Tenzro to record as this agent's.
     let report = if selector == agent::PAY_SELECTOR {
-        Some(agent::paid_report(&g, n, data, amount).ok_or_else(|| err("a payment carries payee, request, quote and price"))?)
+        Some(
+            agent::paid_report(&g, n, data, amount)
+                .ok_or_else(|| err("a payment carries payee, request, quote and price"))?,
+        )
     } else {
         None
     };
     a.nonce += 1;
     a.spent += amount;
     deps.storage.set(ACCOUNT, &cosmwasm_std::to_json_vec(&a)?);
-    let to = deps.api.addr_humanize(&CanonicalAddr::from(target.to_vec()))?;
+    let to = deps
+        .api
+        .addr_humanize(&CanonicalAddr::from(target.to_vec()))?;
     // An `execute` action calls the target contract with the signed message
     // and exactly the action's amount attached; any other action sends it.
     let mut resp = if selector == EXECUTE_SELECTOR {
-        let funds = if amount > 0 { vec![Coin::new(amount, a.denom.clone())] } else { vec![] };
-        Response::new().add_message(WasmMsg::Execute { contract_addr: to.into_string(), msg: Binary::from(data.to_vec()), funds })
+        let funds = if amount > 0 {
+            vec![Coin::new(amount, a.denom.clone())]
+        } else {
+            vec![]
+        };
+        Response::new().add_message(WasmMsg::Execute {
+            contract_addr: to.into_string(),
+            msg: Binary::from(data.to_vec()),
+            funds,
+        })
     } else {
-        Response::new().add_message(BankMsg::Send { to_address: to.into_string(), amount: vec![Coin::new(amount, a.denom.clone())] })
+        Response::new().add_message(BankMsg::Send {
+            to_address: to.into_string(),
+            amount: vec![Coin::new(amount, a.denom.clone())],
+        })
     };
     if refund > 0 {
-        resp = resp.add_message(BankMsg::Send { to_address: info.sender.into_string(), amount: vec![Coin::new(refund, a.denom)] });
+        resp = resp.add_message(BankMsg::Send {
+            to_address: info.sender.into_string(),
+            amount: vec![Coin::new(refund, a.denom)],
+        });
     }
     if let Some(report) = report {
-        resp = resp.add_event(cosmwasm_std::Event::new("reported").add_attribute("report", hex(&report)));
+        resp = resp
+            .add_event(cosmwasm_std::Event::new("reported").add_attribute("report", hex(&report)));
     }
     Ok(resp.add_event(
         cosmwasm_std::Event::new("acted")
@@ -431,10 +547,15 @@ fn act(
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::StateRoot { index } => {
-            let root = deps.storage.get(&checkpoint_key(index)).ok_or_else(|| err(format!("no final checkpoint {index}")))?;
+            let root = deps
+                .storage
+                .get(&checkpoint_key(index))
+                .ok_or_else(|| err(format!("no final checkpoint {index}")))?;
             to_json_binary(&Binary::from(root))
         }
-        QueryMsg::AccountOf { did } => to_json_binary(&account_of(deps, &env.contract.address, &did)?),
+        QueryMsg::AccountOf { did } => {
+            to_json_binary(&account_of(deps, &env.contract.address, &did)?)
+        }
         QueryMsg::Status {} => {
             let a = load_account(deps.storage)?;
             let g = a.grant.as_deref().and_then(agent::Grant::decode);

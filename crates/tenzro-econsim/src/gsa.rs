@@ -284,6 +284,63 @@ pub struct SobolIndex {
     pub first: f64,
     /// Total-order index.
     pub total: f64,
+    /// 95% bootstrap interval of the first-order index (2.5th and 97.5th
+    /// percentiles over [`SOBOL_BOOTSTRAP`] resamples of the base samples).
+    pub first_ci: (f64, f64),
+    /// 95% bootstrap interval of the total-order index.
+    pub total_ci: (f64, f64),
+}
+
+/// Bootstrap resamples behind each Sobol interval.
+pub const SOBOL_BOOTSTRAP: usize = 200;
+
+/// Saltelli first-order and Jansen total-order estimates over the base
+/// samples `idx` (indices into `fa`, `fb`, `fab`, repeats allowed): the
+/// variance is taken over the same samples, so a resample is a whole
+/// re-estimate. Zero for both when that variance is zero.
+fn sobol_estimate(fa: &[f64], fb: &[f64], fab: &[f64], idx: &[usize]) -> (f64, f64) {
+    let n = idx.len() as f64;
+    let all = idx.iter().flat_map(|&s| [fa[s], fb[s]]);
+    let mean = all.clone().sum::<f64>() / (2.0 * n);
+    let var = all.map(|v| (v - mean).powi(2)).sum::<f64>() / (2.0 * n);
+    if var <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let s1 = idx.iter().map(|&s| fb[s] * (fab[s] - fa[s])).sum::<f64>() / n / var;
+    let st = idx.iter().map(|&s| (fa[s] - fab[s]).powi(2)).sum::<f64>() / (2.0 * n) / var;
+    (s1, st)
+}
+
+/// The 2.5th and 97.5th percentiles of `v`, sorted in place.
+fn interval_95(v: &mut [f64]) -> (f64, f64) {
+    if v.is_empty() {
+        return (0.0, 0.0);
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let at = |q: f64| v[((q * (v.len() - 1) as f64).round() as usize).min(v.len() - 1)];
+    (at(0.025), at(0.975))
+}
+
+/// The point estimates over every base sample, and their 95% intervals over
+/// [`SOBOL_BOOTSTRAP`] resamples drawn from `rng`.
+fn sobol_with_intervals(
+    fa: &[f64],
+    fb: &[f64],
+    fab: &[f64],
+    rng: &mut StdRng,
+) -> ((f64, f64), (f64, f64), (f64, f64)) {
+    let n = fa.len();
+    let every: Vec<usize> = (0..n).collect();
+    let point = sobol_estimate(fa, fb, fab, &every);
+    let mut firsts = Vec::with_capacity(SOBOL_BOOTSTRAP);
+    let mut totals = Vec::with_capacity(SOBOL_BOOTSTRAP);
+    for _ in 0..SOBOL_BOOTSTRAP {
+        let idx: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
+        let (f, t) = sobol_estimate(fa, fb, fab, &idx);
+        firsts.push(f);
+        totals.push(t);
+    }
+    (point, interval_95(&mut firsts), interval_95(&mut totals))
 }
 
 /// One evaluated point: unit coordinates, factor values and its metrics.
@@ -485,25 +542,17 @@ pub fn analyse(
             let y = |i: usize| ms[i].named()[o].1;
             let fa: Vec<f64> = (0..n).map(y).collect();
             let fb: Vec<f64> = (0..n).map(|s| y(n + s)).collect();
-            let all: Vec<f64> = fa.iter().chain(&fb).copied().collect();
-            let mean = all.iter().sum::<f64>() / all.len() as f64;
-            let var = all.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / all.len() as f64;
             for j in 0..kk {
                 let fab: Vec<f64> = (0..n).map(|s| y(2 * n + j * n + s)).collect();
-                let (first, total) = if var > 0.0 {
-                    let s1 = (0..n).map(|s| fb[s] * (fab[s] - fa[s])).sum::<f64>() / n as f64 / var;
-                    let st = (0..n).map(|s| (fa[s] - fab[s]).powi(2)).sum::<f64>()
-                        / (2.0 * n as f64)
-                        / var;
-                    (s1, st)
-                } else {
-                    (0.0, 0.0)
-                };
+                let ((first, total), first_ci, total_ci) =
+                    sobol_with_intervals(&fa, &fb, &fab, &mut rng);
                 sobol.push(SobolIndex {
                     factor: fs[top[j]].name.clone(),
                     output: names[o].into(),
                     first,
                     total,
+                    first_ci,
+                    total_ci,
                 });
             }
         }
@@ -588,4 +637,60 @@ pub fn safe_ranges(fs: &[Factor], points: &[Point]) -> Vec<SafeRange> {
 /// others.
 pub fn base(days: u32, seed: u64) -> RunConfig {
     RunConfig::scenario(Market::Downturn, seed, days)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// y = 4 x0 + x1 over independent uniforms has first-order indices
+    /// 16/17 for x0 and 1/17 for x1, equal to their totals. The estimates
+    /// land near them, each interval holds its estimate, and the intervals
+    /// separate the two factors.
+    #[test]
+    fn bootstrap_intervals_bracket_a_known_model() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let n = 2_000;
+        let a: Vec<[f64; 2]> = (0..n)
+            .map(|_| [rng.gen_range(0.0..1.0), rng.gen_range(0.0..1.0)])
+            .collect();
+        let b: Vec<[f64; 2]> = (0..n)
+            .map(|_| [rng.gen_range(0.0..1.0), rng.gen_range(0.0..1.0)])
+            .collect();
+        let y = |x: [f64; 2]| 4.0 * x[0] + x[1];
+        let fa: Vec<f64> = a.iter().map(|x| y(*x)).collect();
+        let fb: Vec<f64> = b.iter().map(|x| y(*x)).collect();
+        let mut results = Vec::new();
+        for j in 0..2 {
+            let fab: Vec<f64> = (0..n)
+                .map(|s| {
+                    let mut x = a[s];
+                    x[j] = b[s][j];
+                    y(x)
+                })
+                .collect();
+            results.push(sobol_with_intervals(&fa, &fb, &fab, &mut rng));
+        }
+        for (((first, total), first_ci, total_ci), exact) in
+            results.iter().zip([16.0 / 17.0, 1.0 / 17.0])
+        {
+            assert!((first - exact).abs() < 0.08, "first {first} vs {exact}");
+            assert!((total - exact).abs() < 0.08, "total {total} vs {exact}");
+            assert!(first_ci.0 <= *first && *first <= first_ci.1);
+            assert!(total_ci.0 <= *total && *total <= total_ci.1);
+        }
+        assert!(
+            results[1].2.1 < results[0].2.0,
+            "the x1 total interval sits below x0's"
+        );
+    }
+
+    /// A constant output has no variance to divide: every estimate is zero.
+    #[test]
+    fn a_constant_output_has_zero_indices() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let flat = vec![3.0; 50];
+        let ((f, t), fci, tci) = sobol_with_intervals(&flat, &flat, &flat, &mut rng);
+        assert_eq!((f, t, fci, tci), (0.0, 0.0, (0.0, 0.0), (0.0, 0.0)));
+    }
 }

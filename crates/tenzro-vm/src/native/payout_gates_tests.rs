@@ -2026,3 +2026,214 @@ async fn a_treasury_remote_action_that_moves_value_names_an_approved_operator() 
     };
     super::stable_payout::check_remote(&state, &idle, None).unwrap();
 }
+
+/// One-day reward epochs closed through `last`, the last with seven
+/// validators in its cover, each carrying `organic_wei` of paid usage.
+fn paid_usage(state: &mut StateAdapter, last: u64, organic_wei: u128) {
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        crate::native::rewards::REWARD_SCHEDULE_KEY.as_bytes(),
+        crate::native::rewards::genesis_reward_schedule(86_400_000).unwrap(),
+    );
+    let rs = tenzro_token::rewards::RewardEngineState {
+        last_closed_epoch: Some(last),
+        ..Default::default()
+    };
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        crate::native::rewards::REWARD_STATE_KEY.as_bytes(),
+        serde_json::to_vec(&rs).unwrap(),
+    );
+    let cover = crate::native::validator_cover::EpochCover {
+        validators: 7,
+        ..Default::default()
+    };
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        format!("validator_cover_epoch:{last:016x}").as_bytes(),
+        serde_json::to_vec(&cover).unwrap(),
+    );
+    for e in 0..=last {
+        let activity = crate::native::economy::EpochActivity {
+            organic_value: organic_wei,
+            ..Default::default()
+        };
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            crate::native::economy::activity_key(e).as_bytes(),
+            serde_json::to_vec(&activity).unwrap(),
+        );
+    }
+}
+
+/// Until its gate is set the usage trigger reads nothing and sponsorship
+/// pays whatever the usage; once live, sponsorship is refused while paid
+/// usage carries the seven validators and pays again when it falls back.
+#[tokio::test]
+async fn running_cost_sponsorship_ends_while_paid_usage_carries_the_set() {
+    let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+    let mut state = chain();
+    open_caps(&mut state);
+    let (account, did) = endorsed_validator(&mut state, OP_A, 50_000 * TNZO);
+    verified(&mut state, &did, 1..=9, true);
+    enact_ok(
+        &executor,
+        &mut state,
+        &approve_operator(account, &did, 1, 9),
+        STEP_MS,
+    )
+    .await;
+    let heavy = 1_000_000_000 * TNZO;
+    paid_usage(&mut state, 5, heavy);
+    assert!(crate::native::sponsorship_end::usage_trigger(&state).is_none());
+    enact_ok(
+        &executor,
+        &mut state,
+        &running_cost(account, 1, 3, TNZO),
+        2 * STEP_MS,
+    )
+    .await;
+
+    set_param(&mut state, crate::native::sponsorship_end::GATE, 0);
+    let t = crate::native::sponsorship_end::usage_trigger(&state).unwrap();
+    assert!(t.ended, "{t:?}");
+    assert_eq!(t.window, 6);
+    refused(
+        &executor,
+        &mut state,
+        &running_cost(account, 4, 6, TNZO),
+        3 * STEP_MS,
+        "paid usage carries the validator set",
+    )
+    .await;
+
+    paid_usage(&mut state, 5, 0);
+    assert!(
+        !crate::native::sponsorship_end::usage_trigger(&state)
+            .unwrap()
+            .ended
+    );
+    enact_ok(
+        &executor,
+        &mut state,
+        &running_cost(account, 4, 6, TNZO),
+        4 * STEP_MS,
+    )
+    .await;
+}
+
+fn affiliation(who: [u8; 32], affiliated: bool) -> ProposalAction {
+    ProposalAction::SetAffiliation {
+        account: Address::new(who),
+        affiliated,
+        memo: "a founder's company".into(),
+    }
+}
+
+/// Until its gate is set, an account cannot be marked as affiliated, a
+/// grant pays as it always did, and the report carries no affiliated share.
+#[tokio::test]
+async fn a_dormant_affiliated_share_marks_no_one_and_pays_as_before() {
+    let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+    let mut state = chain();
+    open_caps(&mut state);
+    refused(
+        &executor,
+        &mut state,
+        &affiliation(GRANTEE_A, true),
+        STEP_MS,
+        "waits for feature.affiliated_share",
+    )
+    .await;
+    assert!(!super::affiliated_share::is_affiliated(&state, &GRANTEE_A));
+    enact_ok(
+        &executor,
+        &mut state,
+        &approve_grantee(GRANTEE_A, GranteeClass::Developer),
+        2 * STEP_MS,
+    )
+    .await;
+    enact_ok(
+        &executor,
+        &mut state,
+        &grant(GRANTEE_A, 1_000 * TNZO, Vec::new()),
+        3 * STEP_MS,
+    )
+    .await;
+    assert_eq!(state.get_balance(&GRANTEE_A), 1_000 * TNZO);
+    assert!(payout_gates::affiliated_report(&state, BASE_MS + 3 * STEP_MS).is_none());
+}
+
+/// Live, a grant to a marked account that would lift the year's affiliated
+/// share above the cap fails and pays nothing, with no payout recorded; once
+/// grants to others widen the year's total, the same grant pays, and the
+/// report publishes the share.
+#[tokio::test]
+async fn the_affiliated_cap_holds_a_marked_grant_until_others_widen_the_year() {
+    let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+    let mut state = chain();
+    open_caps(&mut state);
+    set_param(&mut state, super::affiliated_share::GATE, 0);
+    for (i, who) in [GRANTEE_A, GRANTEE_B].into_iter().enumerate() {
+        enact_ok(
+            &executor,
+            &mut state,
+            &approve_grantee(who, GranteeClass::Developer),
+            (1 + i as i64) * STEP_MS,
+        )
+        .await;
+    }
+    enact_ok(
+        &executor,
+        &mut state,
+        &affiliation(GRANTEE_A, true),
+        3 * STEP_MS,
+    )
+    .await;
+    assert!(super::affiliated_share::is_affiliated(&state, &GRANTEE_A));
+
+    let to_a = grant(GRANTEE_A, 1_000 * TNZO, Vec::new());
+    refused(
+        &executor,
+        &mut state,
+        &to_a,
+        4 * STEP_MS,
+        "affiliated with the founders",
+    )
+    .await;
+    assert_eq!(state.get_balance(&GRANTEE_A), 0);
+    assert_eq!(payout_gates::payout_count(&state), 0);
+
+    enact_ok(
+        &executor,
+        &mut state,
+        &grant(GRANTEE_B, 3_000 * TNZO, Vec::new()),
+        5 * STEP_MS,
+    )
+    .await;
+    let result = enact_ok(&executor, &mut state, &to_a, 6 * STEP_MS).await;
+    assert_eq!(state.get_balance(&GRANTEE_A), 1_000 * TNZO);
+    assert_eq!(payouts(&result).len(), 1);
+
+    let report = payout_gates::affiliated_report(&state, BASE_MS + 6 * STEP_MS).unwrap();
+    assert_eq!(report.tnzo.paid, 1_000 * TNZO);
+    assert_eq!(report.tnzo.total, 4_000 * TNZO);
+    assert_eq!(report.tnzo.share_bps, 2_500);
+    assert_eq!(report.cap_bps, 2_500);
+    assert_eq!(report.accounts, vec![hex::encode(GRANTEE_A)]);
+
+    // Clearing the mark lets the account be paid like anyone else.
+    enact_ok(
+        &executor,
+        &mut state,
+        &affiliation(GRANTEE_A, false),
+        7 * STEP_MS,
+    )
+    .await;
+    assert!(
+        payout_gates::affiliated_report(&state, BASE_MS + 7 * STEP_MS)
+            .unwrap()
+            .accounts
+            .is_empty()
+    );
+}

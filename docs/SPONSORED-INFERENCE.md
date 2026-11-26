@@ -72,9 +72,13 @@ Its terms are the grant: the only calls it pays for.
        { "machine_did": "did:tenzro:machine:...", "operator_did": "did:tenzro:human:..." }
      ],
      "min_distinct_operators": 1,
-     "expires_at_ms": null
+     "expires_at_ms": 1798000000000
    }
    ```
+
+   Terms state a daily ceiling (`max_daily_spend`) and an end time
+   (`expires_at_ms`, unix ms): the node prepares no approval for terms that
+   leave either out, and the CLI says which one is missing.
 
 3. **Bond and create the agent.** An agent's terms need a bond sized by their
    spend ceiling; `tenzro bond get` shows an existing one.

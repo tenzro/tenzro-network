@@ -1,6 +1,6 @@
 {
   "name": "@tenzro/device-key",
-  "version": "0.1.1",
+  "version": "0.2.2",
   "description": "Hardware device keys for Node.js: read the public key and sign a digest with a key held in the TPM 2.0 (Linux, Windows) or the Apple Secure Enclave. No key export, no software fallback.",
   "keywords": [
     "tenzro",
@@ -55,11 +55,11 @@
     "stage": "node scripts/stage.js"
   },
   "optionalDependencies": {
-    "@tenzro/device-key-linux-x64-gnu": "0.1.1",
-    "@tenzro/device-key-linux-arm64-gnu": "0.1.1",
-    "@tenzro/device-key-darwin-arm64": "0.1.1",
-    "@tenzro/device-key-darwin-x64": "0.1.1",
-    "@tenzro/device-key-win32-x64-msvc": "0.1.1"
+    "@tenzro/device-key-linux-x64-gnu": "0.2.2",
+    "@tenzro/device-key-linux-arm64-gnu": "0.2.2",
+    "@tenzro/device-key-darwin-arm64": "0.2.2",
+    "@tenzro/device-key-darwin-x64": "0.2.2",
+    "@tenzro/device-key-win32-x64-msvc": "0.2.2"
   },
   "publishConfig": {
     "access": "public"

@@ -106,6 +106,7 @@ impl Network {
                     tenzro_node::identity_mirror::mirror_identity_logs(
                         &node.registry,
                         None,
+                        None,
                         &r.logs,
                     );
                     true

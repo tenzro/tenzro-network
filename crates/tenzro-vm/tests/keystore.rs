@@ -324,6 +324,15 @@ impl Net {
             Err("execution failed".to_string())
         }
     }
+    /// Puts the rule gated by `key` in force from the first epoch, as an
+    /// enacted vote would.
+    fn enact(&mut self, key: &str) {
+        self.state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            tenzro_vm::native::governed_param_key(key).as_bytes(),
+            0u64.to_le_bytes().to_vec(),
+        );
+    }
     /// The next nonce of the passkey account `account`: a refused
     /// transaction may already have consumed one.
     fn nonce(&self, account: &[u8]) -> u64 {
@@ -667,6 +676,473 @@ async fn recovery_waits_and_any_passkey_can_cancel_it() {
     .unwrap();
     let record = read_record(&net.state, &account).unwrap();
     assert!(record.credential_by_key(&newphone.key()).is_some());
+}
+
+/// An account under the two-passkey policy loses a passkey to a thief. The
+/// recovery its signer approves leaves the account with the new passkey
+/// alone: the stolen passkey and the one beside it spend nothing and approve
+/// nothing afterwards, and the change's log names what it linked and retired.
+#[tokio::test]
+async fn a_completed_recovery_retires_every_passkey_the_account_held() {
+    let mut net = Net::new().await;
+    net.enact(tenzro_vm::keystore::RECOVERY_ROTATION_GATE);
+    net.enact(tenzro_vm::native::identity_keys::GATE);
+    let stolen = Device::synced(44, 0xaa);
+    let key = Device::bound(45);
+    let backup = TestHybridSigner::hybrid(46);
+    let account = stolen.account();
+    net.state.set_balance(&slot(&account), 10 * ONE_TNZO);
+    net.send(
+        &add(&net.state, &account, Some(stolen.anchor()), &stolen, &key),
+        T0,
+    )
+    .await
+    .unwrap();
+    let counted = T0 + ADD_DEVICE_WAIT_MS as i64;
+    let mut u = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::SetRecovery {
+            signers: vec![RecoverySigner {
+                rp_id: String::new(),
+                public_key: backup.public_key().p256.clone(),
+                aaguid: vec![0; 16],
+                backup_eligible: false,
+                backup_state: false,
+                role: RecoveryRole::RecoveryKey,
+                label: "Backup key".to_string(),
+            }],
+            threshold: 1,
+        },
+    );
+    u.approvals = vec![stolen.approve(&u)];
+    net.send(&u, counted).await.unwrap();
+    let mut u = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::SetPolicy {
+            policy: SecondFactorPolicy::TwoCredentials,
+        },
+    );
+    u.approvals = vec![stolen.approve(&u), key.approve(&u)];
+    net.send(&u, counted).await.unwrap();
+
+    let newphone = Device::synced(47, 0xbb);
+    let mut start = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::StartRecovery {
+            credential: newphone.credential(),
+        },
+    );
+    start.possession = Some(newphone.assert(SignatureContext::AccountOwner, &start.digest()));
+    start.approvals = vec![KeystoreApproval {
+        public_key: backup.public_key().p256.clone(),
+        signature: backup
+            .sign(SignatureContext::RecoveryApproval, &start.digest())
+            .unwrap(),
+    }];
+    net.send(&start, counted).await.unwrap();
+    let ready = read_record(&net.state, &account)
+        .unwrap()
+        .pending_recovery
+        .unwrap()
+        .ready_at_ms as i64;
+
+    // A second recovery, even one the recovery signer approved, does not
+    // start beside the first. Signed before the first completes, it does not
+    // apply after it either: the keystore it names is gone.
+    let thief = Device::synced(48, 0xcc);
+    let mut second_recovery = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::StartRecovery {
+            credential: thief.credential(),
+        },
+    );
+    second_recovery.possession =
+        Some(thief.assert(SignatureContext::AccountOwner, &second_recovery.digest()));
+    second_recovery.approvals = vec![KeystoreApproval {
+        public_key: backup.public_key().p256.clone(),
+        signature: backup
+            .sign(
+                SignatureContext::RecoveryApproval,
+                &second_recovery.digest(),
+            )
+            .unwrap(),
+    }];
+    assert!(net.send(&second_recovery, counted + 1).await.is_err());
+
+    let finish = update(&account, &net.state, None, KeystoreOp::FinishRecovery);
+    let mut tx = relayed(&net.payer, &finish, 0, ready);
+    tx.chain_id = net.chain_id;
+    let did = tenzro_types::keystore::human_did(&stolen.key());
+    let head = tenzro_vm::native::read_identity_head(&net.state, &did);
+    let (_, logs) = tenzro_vm::keystore::apply(&mut net.state, &tx, &finish, ready as u64).unwrap();
+    // The recovery is one more link in the identity's chain of logs.
+    assert_eq!(
+        tenzro_vm::native::read_identity_head(&net.state, &did),
+        head.advanced(&did, &logs[0].topics[0], &logs[0].data)
+    );
+    assert!(head.sequence > 0);
+    let event: serde_json::Value = serde_json::from_slice(&logs[0].data).unwrap();
+    assert_eq!(
+        event["added"],
+        serde_json::json!([hex::encode(&newphone.credential_id)])
+    );
+    assert_eq!(
+        event["retired"],
+        serde_json::json!([
+            hex::encode(&stolen.credential_id),
+            hex::encode(&key.credential_id)
+        ])
+    );
+    assert_eq!(event["recovered"], true);
+    assert_eq!(event["owner_did"], did);
+
+    let record = read_record(&net.state, &account).unwrap();
+    assert_eq!(record.credentials.len(), 1);
+    assert!(record.credential_by_key(&newphone.key()).is_some());
+    assert_eq!(record.policy, SecondFactorPolicy::SingleCredential);
+    assert!(record.pending_recovery.is_none());
+    for old in [&stolen, &key] {
+        assert!(resolve_credential(&net.state, old.rp_id, &old.credential_id).is_empty());
+        assert!(
+            net.run(transfer(
+                old,
+                &account,
+                &[9; 20],
+                net.nonce(&account),
+                ready + 1
+            ))
+            .await
+            .is_err(),
+            "a retired passkey does not spend"
+        );
+    }
+    // The retired passkeys together link nothing, and neither the recovery
+    // they tried before nor a new one starts on their approval.
+    let mut link = add(&net.state, &account, None, &stolen, &thief);
+    link.approvals.push(key.approve(&link));
+    assert!(net.send(&link, ready + 1).await.is_err());
+    assert!(net.send(&second_recovery, ready + 1).await.is_err());
+    let mut again = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::StartRecovery {
+            credential: thief.credential(),
+        },
+    );
+    again.possession = Some(thief.assert(SignatureContext::AccountOwner, &again.digest()));
+    again.approvals = vec![stolen.approve(&again), key.approve(&again)];
+    assert!(net.send(&again, ready + 1).await.is_err());
+    assert_eq!(read_record(&net.state, &account).unwrap(), record);
+
+    // The recovered passkey links a second device, and the two spend.
+    let second = Device::bound(49);
+    net.send(
+        &add(&net.state, &account, None, &newphone, &second),
+        ready + 1,
+    )
+    .await
+    .unwrap();
+    net.run(transfer(
+        &newphone,
+        &account,
+        &[9; 20],
+        net.nonce(&account),
+        ready + 1 + ADD_DEVICE_WAIT_MS as i64,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(net.state.get_balance(&[9; 20]), ONE_TNZO);
+}
+
+/// Before recovery rotation is voted in, a completed recovery adds its
+/// passkey beside the ones the account held and the keystore log keeps the
+/// shape it had.
+#[tokio::test]
+async fn until_rotation_is_voted_in_a_recovery_adds_its_passkey_beside_the_others() {
+    let mut net = Net::new().await;
+    let phone = Device::synced(54, 0xaa);
+    let backup = TestHybridSigner::hybrid(55);
+    let account = phone.account();
+    let mut u = update(
+        &account,
+        &net.state,
+        Some(phone.anchor()),
+        KeystoreOp::SetRecovery {
+            signers: vec![RecoverySigner {
+                rp_id: String::new(),
+                public_key: backup.public_key().p256.clone(),
+                aaguid: vec![0; 16],
+                backup_eligible: false,
+                backup_state: false,
+                role: RecoveryRole::RecoveryKey,
+                label: "Backup key".to_string(),
+            }],
+            threshold: 1,
+        },
+    );
+    u.approvals = vec![phone.approve(&u)];
+    net.send(&u, T0).await.unwrap();
+    let newphone = Device::synced(56, 0xbb);
+    let mut start = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::StartRecovery {
+            credential: newphone.credential(),
+        },
+    );
+    start.possession = Some(newphone.assert(SignatureContext::AccountOwner, &start.digest()));
+    start.approvals = vec![KeystoreApproval {
+        public_key: backup.public_key().p256.clone(),
+        signature: backup
+            .sign(SignatureContext::RecoveryApproval, &start.digest())
+            .unwrap(),
+    }];
+    net.send(&start, T0).await.unwrap();
+    let ready = read_record(&net.state, &account)
+        .unwrap()
+        .pending_recovery
+        .unwrap()
+        .ready_at_ms as i64;
+    let finish = update(&account, &net.state, None, KeystoreOp::FinishRecovery);
+    let mut tx = relayed(&net.payer, &finish, 0, ready);
+    tx.chain_id = net.chain_id;
+    let (_, logs) = tenzro_vm::keystore::apply(&mut net.state, &tx, &finish, ready as u64).unwrap();
+    let record = read_record(&net.state, &account).unwrap();
+    assert!(record.credential_by_key(&phone.key()).is_some());
+    assert!(record.credential_by_key(&newphone.key()).is_some());
+    let event: serde_json::Value = serde_json::from_slice(&logs[0].data).unwrap();
+    let mut fields: Vec<&str> = event
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(fields, ["account", "commitment", "version"]);
+}
+
+#[tokio::test]
+async fn one_passkey_alone_does_not_cancel_a_recovery_the_signers_started() {
+    let mut net = Net::new().await;
+    net.enact(tenzro_vm::keystore::RECOVERY_CANCEL_GATE);
+    let phone = Device::synced(40, 0xaa);
+    let backup = TestHybridSigner::hybrid(41);
+    let account = phone.account();
+    let signer = RecoverySigner {
+        rp_id: String::new(),
+        public_key: backup.public_key().p256.clone(),
+        aaguid: vec![0; 16],
+        backup_eligible: false,
+        backup_state: false,
+        role: RecoveryRole::RecoveryKey,
+        label: "Backup key".to_string(),
+    };
+    let mut u = update(
+        &account,
+        &net.state,
+        Some(phone.anchor()),
+        KeystoreOp::SetRecovery {
+            signers: vec![signer],
+            threshold: 1,
+        },
+    );
+    u.approvals = vec![phone.approve(&u)];
+    net.send(&u, T0).await.unwrap();
+
+    let newphone = Device::synced(42, 0xbb);
+    let start = |state: &StateAdapter| {
+        let mut u = update(
+            &account,
+            state,
+            None,
+            KeystoreOp::StartRecovery {
+                credential: newphone.credential(),
+            },
+        );
+        u.possession = Some(newphone.assert(SignatureContext::AccountOwner, &u.digest()));
+        u.approvals = vec![KeystoreApproval {
+            public_key: backup.public_key().p256.clone(),
+            signature: backup
+                .sign(SignatureContext::RecoveryApproval, &u.digest())
+                .unwrap(),
+        }];
+        u
+    };
+
+    // Started. The one passkey of the account, which may be the stolen one
+    // the recovery answers, neither cancels it nor replaces the signers who
+    // can; the signer who approved it cancels it.
+    net.send(&start(&net.state), T0).await.unwrap();
+    let mut cancel = update(&account, &net.state, None, KeystoreOp::CancelRecovery);
+    cancel.approvals = vec![phone.approve(&cancel)];
+    assert!(net.send(&cancel, T0 + 1).await.is_err());
+    let mut swap = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::SetRecovery {
+            signers: Vec::new(),
+            threshold: 0,
+        },
+    );
+    swap.approvals = vec![phone.approve(&swap)];
+    assert!(net.send(&swap, T0 + 1).await.is_err());
+    assert!(
+        read_record(&net.state, &account)
+            .unwrap()
+            .pending_recovery
+            .is_some()
+    );
+    cancel.approvals = vec![KeystoreApproval {
+        public_key: backup.public_key().p256.clone(),
+        signature: backup
+            .sign(SignatureContext::RecoveryApproval, &cancel.digest())
+            .unwrap(),
+    }];
+    net.send(&cancel, T0 + 1).await.unwrap();
+    assert!(
+        read_record(&net.state, &account)
+            .unwrap()
+            .pending_recovery
+            .is_none()
+    );
+
+    // Started again, this time by the account itself, paid from its own
+    // balance and signed by the joining passkey; it completes only after its
+    // wait, sent the same way.
+    net.state.set_balance(&slot(&account), ONE_TNZO);
+    let stranger = Device::synced(43, 0xcc);
+    assert!(
+        net.run(sent_by_account(
+            &stranger,
+            &account,
+            &start(&net.state),
+            net.nonce(&account),
+            T0 + 2
+        ))
+        .await
+        .is_err()
+    );
+    net.run(sent_by_account(
+        &newphone,
+        &account,
+        &start(&net.state),
+        net.nonce(&account),
+        T0 + 2,
+    ))
+    .await
+    .unwrap();
+    // A recovery key alone serves the governed key wait, 48 h at genesis.
+    assert_eq!(
+        read_record(&net.state, &account)
+            .unwrap()
+            .pending_recovery
+            .as_ref()
+            .unwrap()
+            .ready_at_ms,
+        (T0 + 2) as u64 + tenzro_types::keystore::RECOVERY_WAIT_KEY_MS
+    );
+    let finish = update(&account, &net.state, None, KeystoreOp::FinishRecovery);
+    assert!(net.send(&finish, T0 + 3).await.is_err());
+    let ready = read_record(&net.state, &account)
+        .unwrap()
+        .pending_recovery
+        .unwrap()
+        .ready_at_ms as i64;
+    net.run(sent_by_account(
+        &newphone,
+        &account,
+        &finish,
+        net.nonce(&account),
+        ready,
+    ))
+    .await
+    .unwrap();
+    let record = read_record(&net.state, &account).unwrap();
+    assert!(record.credential_by_key(&newphone.key()).is_some());
+}
+
+/// An owner who still holds two independent devices stops a recovery the
+/// recovery signers started without them; either device alone does not.
+#[tokio::test]
+async fn two_independent_passkeys_cancel_a_recovery_the_signers_started() {
+    let mut net = Net::new().await;
+    net.enact(tenzro_vm::keystore::RECOVERY_CANCEL_GATE);
+    let phone = Device::synced(60, 0xaa);
+    let key = Device::bound(61);
+    let backup = TestHybridSigner::hybrid(62);
+    let account = phone.account();
+    net.send(
+        &add(&net.state, &account, Some(phone.anchor()), &phone, &key),
+        T0,
+    )
+    .await
+    .unwrap();
+    let counted = T0 + ADD_DEVICE_WAIT_MS as i64;
+    let mut u = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::SetRecovery {
+            signers: vec![RecoverySigner {
+                rp_id: String::new(),
+                public_key: backup.public_key().p256.clone(),
+                aaguid: vec![0; 16],
+                backup_eligible: false,
+                backup_state: false,
+                role: RecoveryRole::RecoveryKey,
+                label: "Backup key".to_string(),
+            }],
+            threshold: 1,
+        },
+    );
+    u.approvals = vec![phone.approve(&u)];
+    net.send(&u, counted).await.unwrap();
+
+    let intruder = Device::synced(63, 0xbb);
+    let mut start = update(
+        &account,
+        &net.state,
+        None,
+        KeystoreOp::StartRecovery {
+            credential: intruder.credential(),
+        },
+    );
+    start.possession = Some(intruder.assert(SignatureContext::AccountOwner, &start.digest()));
+    start.approvals = vec![KeystoreApproval {
+        public_key: backup.public_key().p256.clone(),
+        signature: backup
+            .sign(SignatureContext::RecoveryApproval, &start.digest())
+            .unwrap(),
+    }];
+    net.send(&start, counted).await.unwrap();
+
+    let mut cancel = update(&account, &net.state, None, KeystoreOp::CancelRecovery);
+    for one in [&phone, &key] {
+        cancel.approvals = vec![one.approve(&cancel)];
+        assert!(net.send(&cancel, counted + 1).await.is_err());
+    }
+    // The same passkey twice is one root.
+    cancel.approvals = vec![phone.approve(&cancel), phone.approve(&cancel)];
+    assert!(net.send(&cancel, counted + 1).await.is_err());
+    cancel.approvals = vec![phone.approve(&cancel), key.approve(&cancel)];
+    net.send(&cancel, counted + 1).await.unwrap();
+    assert!(
+        read_record(&net.state, &account)
+            .unwrap()
+            .pending_recovery
+            .is_none()
+    );
 }
 
 #[test]
@@ -1138,6 +1614,45 @@ async fn a_sponsor_pays_for_an_unfunded_account_and_cannot_change_it_alone() {
     assert!(
         net.state.get_balance(&sponsor) < before,
         "the sponsor paid the fee"
+    );
+}
+
+/// Only the commitment to a recovery code is recorded: the state an account
+/// writes when it sets a code holds the commitment and never the code.
+#[tokio::test]
+async fn a_recovery_code_is_never_written_to_state_only_its_commitment() {
+    let mut net = Net::new().await;
+    let phone = Device::synced(50, 0xaa);
+    let account = phone.account();
+    let code: [u8; 32] = std::array::from_fn(|i| 0xc3u8.wrapping_add((i as u8).wrapping_mul(7)));
+    let commitment = recovery_code_commitment(CHAIN, &account, &code);
+    let mut set = update(
+        &account,
+        &net.state,
+        Some(phone.anchor()),
+        KeystoreOp::SetRecoveryCode {
+            commitment: Some(RecoveryCodeCommitment(commitment.to_vec())),
+        },
+    );
+    set.approvals = vec![phone.approve(&set)];
+    net.send(&set, T0).await.unwrap();
+
+    let record = read_record(&net.state, &account).unwrap();
+    assert_eq!(
+        record
+            .recovery_code
+            .as_ref()
+            .map(|held| held.commitment.clone()),
+        Some(commitment.to_vec()),
+        "the record holds the commitment"
+    );
+    let written = net.state.flush_to_storage().unwrap();
+    let holds = |needle: &[u8]| written.windows(needle.len()).any(|w| w == needle);
+    let hex_code = hex::encode(code);
+    assert!(!holds(&code), "the code is never written");
+    assert!(
+        !holds(hex_code.as_bytes()),
+        "the code is never written in hex"
     );
 }
 

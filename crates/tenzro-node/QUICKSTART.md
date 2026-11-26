@@ -108,6 +108,7 @@ rpc_addr = "127.0.0.1:8545"
 web_addr = "127.0.0.1:8080"
 mcp_addr = "127.0.0.1:3001"
 a2a_addr = "127.0.0.1:3002"
+paired_device_addr = "0.0.0.0:8543"
 tee_enabled = false
 metrics_enabled = true
 health_enabled = true

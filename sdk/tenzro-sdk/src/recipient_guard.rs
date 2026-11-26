@@ -161,7 +161,12 @@ mod tests {
     #[test]
     fn trusted_recipient_has_no_friction() {
         let t = addr("010203", "09", "070809");
-        let a = assess_recipient(&t, &[t.clone()], &[], &LookalikeParams::default());
+        let a = assess_recipient(
+            &t,
+            std::slice::from_ref(&t),
+            &[],
+            &LookalikeParams::default(),
+        );
         assert!(!a.requires_full_address_confirmation());
     }
 
@@ -180,7 +185,12 @@ mod tests {
     fn poisoned_lookalike_is_flagged() {
         let real = addr("010203", "09", "070809");
         let fake = addr("010203", "05", "070809");
-        let a = assess_recipient(&fake, &[real.clone()], &[fake.clone()], &Default::default());
+        let a = assess_recipient(
+            &fake,
+            std::slice::from_ref(&real),
+            std::slice::from_ref(&fake),
+            &Default::default(),
+        );
         assert!(a.is_lookalike());
         assert!(a.flags.contains(&RecipientFlag::SeenOnlyAsInboundSender));
         assert_eq!(a.full_address.len(), 64);
@@ -192,7 +202,13 @@ mod tests {
         let real = addr("010203", "09", "070809");
         let other = addr("040203", "05", "070809");
         assert!(
-            !assess_recipient(&other, &[real.clone()], &[], &Default::default()).is_lookalike()
+            !assess_recipient(
+                &other,
+                std::slice::from_ref(&real),
+                &[],
+                &Default::default()
+            )
+            .is_lookalike()
         );
         let fake = addr("010203", "05", "070809");
         let zero = LookalikeParams {

@@ -13,9 +13,10 @@
 //! signature. There is no constructor that takes key bytes.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::error::{BridgeError, Result};
+use crate::relayer_nonce::NonceLane;
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use reqwest::Client;
 use serde_json::json;
@@ -42,11 +43,15 @@ pub struct EvmTransactionSigner {
     rpc_url: String,
     /// HTTP client for JSON-RPC calls
     http_client: Client,
-    /// Next nonce to use, once synced from chain
-    nonce: AtomicU64,
-    /// Whether `nonce` has been synced from chain
-    nonce_synced: AtomicBool,
+    /// The relayer's nonces: the count, its gaps and those the node may hold.
+    nonces: NonceLane,
 }
+
+/// How long one JSON-RPC request may take.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Gas of a plain value transfer, used by a filler transaction.
+const TRANSFER_GAS: u64 = 21_000;
 
 impl EvmTransactionSigner {
     /// A signer backed by `device`, a hardware secp256k1 signer.
@@ -77,7 +82,7 @@ impl EvmTransactionSigner {
         sender_address.copy_from_slice(&address_hash[12..]);
 
         let http_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| Client::new());
         Ok(Self {
@@ -87,8 +92,7 @@ impl EvmTransactionSigner {
             chain_id,
             rpc_url,
             http_client,
-            nonce: AtomicU64::new(0),
-            nonce_synced: AtomicBool::new(false),
+            nonces: NonceLane::default(),
         })
     }
 
@@ -185,22 +189,21 @@ impl EvmTransactionSigner {
             .map_err(|e| BridgeError::NetworkError(format!("unparseable nonce {nonce_hex}: {e}")))
     }
 
-    /// Reserves the next nonce, syncing from chain the first time.
+    /// Reserves the next nonce, reading it from the chain while the count
+    /// is unknown.
     async fn next_nonce(&self) -> Result<u64> {
-        if !self.nonce_synced.load(Ordering::SeqCst) {
-            let chain_nonce = self.chain_nonce().await?;
-            // Only the first task to finish syncing installs the chain value;
-            // a concurrent one reserves after it.
-            if self
-                .nonce_synced
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                self.nonce.store(chain_nonce, Ordering::SeqCst);
-                debug!("Synced nonce from chain: {}", chain_nonce);
+        loop {
+            let chain = if self.nonces.unsynced() {
+                let chain_nonce = self.chain_nonce().await?;
+                debug!("Read nonce from chain: {}", chain_nonce);
+                Some(chain_nonce)
+            } else {
+                None
+            };
+            if let Some(nonce) = self.nonces.reserve(chain) {
+                return Ok(nonce);
             }
         }
-        Ok(self.nonce.fetch_add(1, Ordering::SeqCst))
     }
 
     /// Estimates gas for a transaction via eth_estimateGas
@@ -286,8 +289,7 @@ impl EvmTransactionSigner {
     /// # Returns
     /// The transaction hash as a hex string
     pub async fn send_transaction(&self, to: &str, calldata: &[u8]) -> Result<String> {
-        // Gas and fee first: a nonce is reserved only for a transaction that
-        // is about to be signed, so a failed estimate leaves no gap.
+        // Gas and fee first, so a failed estimate holds no nonce.
         let gas_limit = self.estimate_gas(to, calldata).await?;
         let base_fee = self.get_base_fee().await?;
 
@@ -295,13 +297,13 @@ impl EvmTransactionSigner {
         let max_priority_fee: u128 = 2_000_000_000; // 2 gwei
         let max_fee_per_gas = base_fee.saturating_mul(2).saturating_add(max_priority_fee);
 
+        self.settle_unknown().await?;
         let nonce = self.next_nonce().await?;
         info!(
             "Signing EIP-1559 tx: to={}, nonce={}, gas_limit={}, max_fee={}",
             to, nonce, gas_limit, max_fee_per_gas
         );
-
-        let raw_tx = match self
+        let encoded = self
             .encode_eip1559_transaction(
                 nonce,
                 max_priority_fee,
@@ -310,12 +312,60 @@ impl EvmTransactionSigner {
                 to,
                 calldata,
             )
-            .await
-        {
+            .await;
+        let sent = self.submit_encoded(nonce, encoded).await;
+        if sent.is_err() {
+            self.fill_gaps(max_priority_fee, max_fee_per_gas).await;
+        }
+        sent
+    }
+
+    /// Settles the nonces the node may hold against the chain's pending nonce.
+    async fn settle_unknown(&self) -> Result<()> {
+        if self.nonces.has_unknown() {
+            let chain = self.chain_nonce().await?;
+            self.nonces
+                .resync(chain, Instant::now(), REQUEST_TIMEOUT * 2);
+        }
+        Ok(())
+    }
+
+    /// Fills each gap a failed send left below a nonce still out with a
+    /// zero-value transfer to this signer's own address, so the transactions
+    /// above it do not wait on a nonce no sender comes for. A filler that
+    /// fails leaves its gap to the next send, which takes gaps first and
+    /// fills again if it fails too.
+    async fn fill_gaps(&self, max_priority_fee: u128, max_fee_per_gas: u128) {
+        if let Err(e) = self.settle_unknown().await {
+            debug!("nonce gaps not settled: {e}");
+        }
+        let own = self.sender_address();
+        while let Some(nonce) = self.nonces.take_gap() {
+            info!("Filling nonce gap {nonce}");
+            let encoded = self
+                .encode_eip1559_transaction(
+                    nonce,
+                    max_priority_fee,
+                    max_fee_per_gas,
+                    TRANSFER_GAS,
+                    &own,
+                    &[],
+                )
+                .await;
+            if let Err(e) = self.submit_encoded(nonce, encoded).await {
+                debug!("filler for nonce {nonce} failed: {e}");
+                break;
+            }
+        }
+    }
+
+    /// Submits a transaction signed under the reserved `nonce`, or releases
+    /// the nonce when signing failed, and records what became of it.
+    async fn submit_encoded(&self, nonce: u64, encoded: Result<Vec<u8>>) -> Result<String> {
+        let raw_tx = match encoded {
             Ok(tx) => tx,
             Err(e) => {
-                // The reserved nonce was not used; resync before the next send.
-                self.nonce_synced.store(false, Ordering::SeqCst);
+                self.nonces.release(nonce);
                 return Err(e);
             }
         };
@@ -327,44 +377,60 @@ impl EvmTransactionSigner {
             "id": 1
         });
 
-        let sent: Result<serde_json::Value> = async {
-            self.http_client
-                .post(&self.rpc_url)
-                .json(&request)
-                .send()
-                .await
-                .map_err(|e| BridgeError::NetworkError(format!("Failed to send tx: {}", e)))?
-                .json()
-                .await
-                .map_err(|e| BridgeError::NetworkError(format!("Invalid tx response: {}", e)))
-        }
-        .await;
-        let json = match sent {
+        let response = match self
+            .http_client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                if e.is_connect() {
+                    // No connection, so the body never left.
+                    self.nonces.release(nonce);
+                } else {
+                    // The body may have reached the node: a different
+                    // transaction under this nonce could replace it.
+                    self.nonces.unknown(nonce, Instant::now());
+                }
+                return Err(BridgeError::NetworkError(format!("Failed to send tx: {e}")));
+            }
+        };
+        let json: serde_json::Value = match response.json().await {
             Ok(json) => json,
             Err(e) => {
-                self.nonce_synced.store(false, Ordering::SeqCst);
-                return Err(e);
+                self.nonces.unknown(nonce, Instant::now());
+                return Err(BridgeError::NetworkError(format!(
+                    "Invalid tx response: {e}"
+                )));
             }
         };
 
         if let Some(error) = json.get("error") {
-            self.nonce_synced.store(false, Ordering::SeqCst);
+            // A refusal can still name a transaction the pool holds under this
+            // nonce, so the chain's pending nonce decides: below it the nonce
+            // is used, at it the pool has nothing under it and it is free
+            // (no request carrying it is on its way: the node answered).
+            self.nonces.unknown(nonce, Instant::now());
+            match self.chain_nonce().await {
+                Ok(chain) => self.nonces.resync(chain, Instant::now(), Duration::ZERO),
+                Err(e) => debug!("nonce {nonce} left to settle: {e}"),
+            }
             return Err(BridgeError::TransferFailed(format!(
                 "Transaction rejected: {}",
                 error
             )));
         }
 
-        let tx_hash = json
-            .get("result")
-            .and_then(|r| r.as_str())
-            .ok_or_else(|| {
-                BridgeError::NetworkError("eth_sendRawTransaction returned no hash".into())
-            })?
-            .to_string();
-
+        let Some(tx_hash) = json.get("result").and_then(|r| r.as_str()) else {
+            self.nonces.unknown(nonce, Instant::now());
+            return Err(BridgeError::NetworkError(
+                "eth_sendRawTransaction returned no hash".into(),
+            ));
+        };
         info!("Transaction submitted: {}", tx_hash);
-        Ok(tx_hash)
+        Ok(tx_hash.to_string())
     }
 
     /// Encodes an EIP-1559 (type 2) transaction and signs it
@@ -746,5 +812,207 @@ mod tests {
         let (sig, rec) = signer.sign_prehash(&digest).await.unwrap();
         let vk = VerifyingKey::recover_from_prehash(&digest, &sig, rec).unwrap();
         assert_eq!(vk, signer.verifying_key);
+    }
+
+    /// A JSON-RPC node on loopback. `answer(method, nth)` gives the result of
+    /// the `nth` call (from 0) of `method`: `Ok(result)`, `Err(error)`, or
+    /// `None` for a reply that is not JSON. Records every raw transaction.
+    struct FakeNode {
+        url: String,
+        sent: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl FakeNode {
+        /// The nonce and recipient of every raw transaction sent.
+        fn sent(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|tx| (rlp_list_item(&tx[1..], 1), rlp_list_item(&tx[1..], 5)))
+                .collect()
+        }
+    }
+
+    type Answer = Option<std::result::Result<serde_json::Value, serde_json::Value>>;
+
+    async fn fake_node(answer: impl Fn(&str, usize) -> Answer + Send + Sync + 'static) -> FakeNode {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_request(
+            sock: &mut tokio::net::TcpStream,
+            buf: &mut Vec<u8>,
+        ) -> Option<Vec<u8>> {
+            loop {
+                if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                    let len = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                    if buf.len() >= end + 4 + len {
+                        let body = buf[end + 4..end + 4 + len].to_vec();
+                        *buf = buf.split_off(end + 4 + len);
+                        return Some(body);
+                    }
+                }
+                let mut chunk = [0u8; 4096];
+                let n = sock.read(&mut chunk).await.ok()?;
+                if n == 0 {
+                    return None;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let answer = Arc::new(answer);
+        let log = sent.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let (log, calls, answer) = (log.clone(), calls.clone(), answer.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    while let Some(body) = read_request(&mut sock, &mut buf).await {
+                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let method = request["method"].as_str().unwrap().to_string();
+                        if method == "eth_sendRawTransaction" {
+                            let raw = request["params"][0].as_str().unwrap();
+                            log.lock().unwrap().push(hex::decode(&raw[2..]).unwrap());
+                        }
+                        let nth = {
+                            let mut calls = calls.lock().unwrap();
+                            let n = calls.entry(method.clone()).or_insert(0usize);
+                            *n += 1;
+                            *n - 1
+                        };
+                        let reply = match answer(&method, nth) {
+                            Some(Ok(result)) => {
+                                json!({"jsonrpc": "2.0", "id": 1, "result": result}).to_string()
+                            }
+                            Some(Err(error)) => {
+                                json!({"jsonrpc": "2.0", "id": 1, "error": error}).to_string()
+                            }
+                            None => "not json".to_string(),
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
+                            reply.len()
+                        );
+                        if sock.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        FakeNode { url, sent }
+    }
+
+    /// The answers of a node that has everything but the transaction itself.
+    fn chain(method: &str, nth: usize, pending: impl Fn(usize) -> u64) -> Answer {
+        match method {
+            "eth_estimateGas" => Some(Ok(json!("0x5208"))),
+            "eth_getBlockByNumber" => Some(Ok(json!({"baseFeePerGas": "0x1"}))),
+            "eth_getTransactionCount" => Some(Ok(json!(format!("{:#x}", pending(nth))))),
+            _ => unreachable!("{method}"),
+        }
+    }
+
+    async fn signer_on(node: &FakeNode) -> EvmTransactionSigner {
+        EvmTransactionSigner::from_hardware(test_device(1), 1, node.url.clone())
+            .await
+            .expect("test device")
+    }
+
+    const TO: &str = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0";
+
+    /// The node may hold a transaction whose reply never came: its nonce is
+    /// not given to the next transaction, which could replace it in the pool.
+    #[tokio::test]
+    async fn a_send_whose_reply_is_lost_holds_its_nonce() {
+        let node = fake_node(|method, nth| match method {
+            "eth_sendRawTransaction" if nth == 0 => None,
+            "eth_sendRawTransaction" => Some(Ok(json!("0xab"))),
+            _ => chain(method, nth, |_| 7),
+        })
+        .await;
+        let signer = signer_on(&node).await;
+        assert!(signer.send_transaction(TO, &[1]).await.is_err());
+        signer.send_transaction(TO, &[1]).await.unwrap();
+        let nonces: Vec<_> = node.sent().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(nonces, vec![vec![7], vec![8]]);
+    }
+
+    /// Whether a refused nonce was used is the chain's to say, whatever the
+    /// refusal's wording: here another holder of the key used 7 and 8.
+    #[tokio::test]
+    async fn a_refusal_is_judged_by_the_chain_nonce_not_its_wording() {
+        let node = fake_node(|method, nth| match method {
+            "eth_sendRawTransaction" if nth == 0 => {
+                Some(Err(json!({"code": -32000, "message": "rejected"})))
+            }
+            "eth_sendRawTransaction" => Some(Ok(json!("0xab"))),
+            _ => chain(method, nth, |n| if n == 0 { 7 } else { 9 }),
+        })
+        .await;
+        let signer = signer_on(&node).await;
+        assert!(signer.send_transaction(TO, &[1]).await.is_err());
+        signer.send_transaction(TO, &[1]).await.unwrap();
+        let nonces: Vec<_> = node.sent().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(nonces, vec![vec![7], vec![9]]);
+    }
+
+    /// A refusal while the chain still waits on the nonce frees it at once.
+    #[tokio::test]
+    async fn a_refused_nonce_the_chain_still_waits_on_is_used_by_the_next_send() {
+        let node = fake_node(|method, nth| match method {
+            "eth_sendRawTransaction" if nth == 0 => {
+                Some(Err(json!({"code": -32000, "message": "rejected"})))
+            }
+            "eth_sendRawTransaction" => Some(Ok(json!("0xab"))),
+            _ => chain(method, nth, |_| 7),
+        })
+        .await;
+        let signer = signer_on(&node).await;
+        assert!(signer.send_transaction(TO, &[1]).await.is_err());
+        signer.send_transaction(TO, &[1]).await.unwrap();
+        let nonces: Vec<_> = node.sent().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(nonces, vec![vec![7], vec![7]]);
+    }
+
+    /// A send that fails below one already in the pool leaves a gap the pool
+    /// would wait on for good: it is filled with a transfer to the signer.
+    #[tokio::test]
+    async fn a_gap_below_a_sent_transaction_is_filled() {
+        let node = fake_node(|method, nth| match method {
+            "eth_sendRawTransaction" => Some(Ok(json!("0xab"))),
+            _ => chain(method, nth, |_| 7),
+        })
+        .await;
+        let signer = signer_on(&node).await;
+        // Another send holds 7 while this one goes out under 8; then 7 fails.
+        assert_eq!(signer.nonces.reserve(Some(7)), Some(7));
+        signer.send_transaction(TO, &[1]).await.unwrap();
+        signer.nonces.release(7);
+        signer.fill_gaps(1, 3).await;
+        let own = hex::decode(signer.sender_address().trim_start_matches("0x")).unwrap();
+        let mut filler = vec![0x94];
+        filler.extend(own);
+        assert_eq!(
+            node.sent(),
+            vec![
+                (vec![8], {
+                    let mut to = vec![0x94];
+                    to.extend(hex::decode(&TO[2..]).unwrap());
+                    to
+                }),
+                (vec![7], filler),
+            ]
+        );
     }
 }

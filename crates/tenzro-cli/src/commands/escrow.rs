@@ -91,7 +91,6 @@ fn release_conditions(
         "provider" => serde_json::json!("ProviderSignature"),
         "consumer" => serde_json::json!("ConsumerSignature"),
         "both" => serde_json::json!("BothSignatures"),
-        "custom" => serde_json::json!({ "Custom": { "condition": "" } }),
         // Released by the named executor, or by the payer when none is named,
         // before expiry; refundable to the payer after it.
         "executor" => serde_json::json!({ "Executor": { "executor": executor.unwrap_or(payer) } }),
@@ -102,7 +101,7 @@ fn release_conditions(
             }
         }),
         other => anyhow::bail!(
-            "unsupported release condition kind '{}': use timeout|provider|consumer|both|custom|stream|executor",
+            "unsupported release condition kind '{}': use timeout|provider|consumer|both|stream|executor",
             other
         ),
     })
@@ -154,7 +153,7 @@ pub struct EscrowCreateCmd {
     #[arg(long)]
     expires_at: u64,
 
-    /// Release condition kind: timeout | provider | consumer | both | custom
+    /// Release condition kind: timeout | provider | consumer | both
     /// | stream (pays the payee per elapsed epoch: a compute rental or a standby)
     /// | executor (released by `--executor`, or by the payer, before expiry)
     #[arg(long, default_value = "timeout")]
@@ -290,7 +289,7 @@ pub struct EscrowReleaseCmd {
 
     /// Optional proof data (hex). If omitted, an empty proof is used: the
     /// release transaction signed from your own account is your authorisation,
-    /// all that any kind but a custom or quorum escrow asks.
+    /// all that any kind but a quorum escrow asks.
     #[arg(long)]
     proof: Option<String>,
 

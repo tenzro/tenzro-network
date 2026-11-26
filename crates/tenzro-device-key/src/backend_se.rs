@@ -157,15 +157,18 @@ fn err(code: i32, op: &str) -> DeviceKeyError {
 ///
 /// The label is hashed rather than used as a path component: labels come from
 /// callers, and a label of `../../x` must not be able to steer writes. Override
-/// with `TENZRO_DEVICE_KEY_DIR` — a daemon with no home directory needs that.
+/// with `TENZRO_DEVICE_KEY_DIR` — a daemon with no home directory needs that. `TENZRO_APP_ID` (the embedding app's bundle id) puts the keys in a directory of its own.
 fn dir_for(label: &str) -> PathBuf {
     key_root().join(hex::encode(super::credential_id_for_label(label)))
 }
 
-fn key_root() -> PathBuf {
-    std::env::var_os("TENZRO_DEVICE_KEY_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_root)
+pub(crate) fn key_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os("TENZRO_DEVICE_KEY_DIR") {
+        return PathBuf::from(dir);
+    }
+    // An app that carries the node names itself with its bundle id: its keys sit apart from every other app's.
+    let app = std::env::var("TENZRO_APP_ID").ok();
+    super::app_key_dir(&default_root(), app.as_deref())
 }
 
 fn default_root() -> PathBuf {

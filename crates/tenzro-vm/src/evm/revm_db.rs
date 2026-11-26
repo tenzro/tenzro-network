@@ -19,12 +19,16 @@ use crate::traits::VmState;
 /// representation (Vec<u8>, u128, etc.).
 pub struct RevmStateAdapter<'a> {
     state: &'a mut StateAdapter,
+    /// Whether the EVM runs under Prague alone ([`super::PRAGUE_ONLY_KEY`]):
+    /// stored code that opens with the EOF magic is then legacy code.
+    prague_only: bool,
 }
 
 impl<'a> RevmStateAdapter<'a> {
     /// Create a new revm database adapter wrapping the given state
     pub fn new(state: &'a mut StateAdapter) -> Self {
-        Self { state }
+        let prague_only = super::rule_set(state) == revm::primitives::SpecId::PRAGUE;
+        Self { state, prague_only }
     }
 }
 
@@ -56,8 +60,17 @@ impl<'a> Database for RevmStateAdapter<'a> {
         };
 
         // Convert code to Bytecode if present
+        // Under Prague alone an EOF container deployed earlier is not a
+        // container: its bytes are legacy code, read whole by the code
+        // opcodes and halting on their first byte when called.
         let bytecode = code
-            .map(|c| Bytecode::new_raw(c.into()))
+            .map(|c| {
+                if self.prague_only && c.starts_with(&[0xEF, 0x00]) {
+                    Bytecode::new_legacy(c.into())
+                } else {
+                    Bytecode::new_raw(c.into())
+                }
+            })
             .unwrap_or_default();
 
         Ok(Some(AccountInfo {
@@ -87,34 +100,38 @@ impl<'a> Database for RevmStateAdapter<'a> {
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-        // Query the block hash from persistent storage if available.
-        // The block store indexes hashes by height under the key
-        // "height_hash:{height_be_bytes}" in the CF_BLOCKS column family.
-        if let Some(store) = self.state.kv_store() {
-            let height = BlockHeight::new(number);
-            let mut key = b"height_hash:".to_vec();
-            key.extend_from_slice(&height.0.to_be_bytes());
+        Ok(B256::from(stored_block_hash(self.state, number)))
+    }
+}
 
-            match store.get(CF_BLOCKS, &key) {
-                Ok(Some(hash_bytes)) => {
-                    if let Some(hash) = Hash::from_bytes(&hash_bytes) {
-                        return Ok(B256::from_slice(hash.as_bytes()));
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        block_number = number,
-                        error = %e,
-                        "Failed to query block hash from storage, returning zero"
-                    );
+/// The hash of the block at height `number` as the block store holds it
+/// (`height_hash:{height_be_bytes}` in `CF_BLOCKS`), or zero when there is
+/// no store or no such block.
+pub(super) fn stored_block_hash(state: &StateAdapter, number: u64) -> [u8; 32] {
+    if let Some(store) = state.kv_store() {
+        let height = BlockHeight::new(number);
+        let mut key = b"height_hash:".to_vec();
+        key.extend_from_slice(&height.0.to_be_bytes());
+
+        match store.get(CF_BLOCKS, &key) {
+            Ok(Some(hash_bytes)) => {
+                if let Some(hash) = Hash::from_bytes(&hash_bytes)
+                    && let Ok(hash) = <[u8; 32]>::try_from(hash.as_bytes())
+                {
+                    return hash;
                 }
             }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    block_number = number,
+                    error = %e,
+                    "Failed to query block hash from storage, returning zero"
+                );
+            }
         }
-
-        // Fallback: no storage configured or block not found
-        Ok(B256::ZERO)
     }
+    [0u8; 32]
 }
 
 #[cfg(test)]

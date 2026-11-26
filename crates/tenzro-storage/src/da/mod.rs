@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tenzro_types::primitives::{Hash, Timestamp};
-use tenzro_types::principal_chain::PrincipalChainSummary;
 
 use crate::error::{Result, StorageError};
 
@@ -165,10 +164,6 @@ pub struct ReceiptSummary {
     #[serde(default)]
     pub amount_wei: Option<u128>,
     pub timestamp: Timestamp,
-    /// Compact view of the principal chain when applicable. Full
-    /// chain (delegation_scope_ids etc.) lives in the offloaded payload.
-    #[serde(default)]
-    pub principal_chain_summary: Option<PrincipalChainSummary>,
 }
 
 /// Reference to a signed off-chain mandate that authorized the receipt.
@@ -602,7 +597,39 @@ mod tests {
             payee: Some("did:tenzro:machine:bob".into()),
             amount_wei: Some(123_456_789),
             timestamp: Timestamp::new(1_700_000_000_000),
-            principal_chain_summary: None,
+        }
+    }
+
+    /// A receipt envelope written before the summary lost its last field has one extra byte
+    /// (the absent field's tag) at the end of the summary, in the middle of the envelope.
+    fn envelope_bytes_in_the_earlier_layout(payload: Option<Vec<u8>>) -> Vec<u8> {
+        let envelope = ReceiptEnvelope {
+            kind: ReceiptKind::SettlementEscrow,
+            storage_mode: ReceiptStorageMode::Inline,
+            inline_summary: sample_summary(),
+            inline_payload: payload,
+            da_pointer: None,
+            commitment: Hash::new([9u8; 32]),
+            mandate_ref: None,
+        };
+        let mut bytes = bincode::serialize(&envelope).unwrap();
+        let kind_and_mode = bincode::serialize(&envelope.kind).unwrap().len()
+            + bincode::serialize(&envelope.storage_mode).unwrap().len();
+        let summary = bincode::serialize(&envelope.inline_summary).unwrap().len();
+        bytes.insert(kind_and_mode + summary, 0);
+        bytes
+    }
+
+    #[test]
+    fn an_envelope_in_the_earlier_layout_is_refused_not_misread() {
+        for payload in [None, Some(vec![1u8, 2, 3])] {
+            let old = envelope_bytes_in_the_earlier_layout(payload.clone());
+            match bincode::deserialize::<ReceiptEnvelope>(&old) {
+                Err(_) => {}
+                Ok(read) => {
+                    panic!("an earlier-layout envelope decoded as {read:?} (payload {payload:?})")
+                }
+            }
         }
     }
 

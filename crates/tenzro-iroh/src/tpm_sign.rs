@@ -111,12 +111,10 @@ pub async fn tpm_sign_request(
 ) -> IrohResult<Vec<u8>> {
     let peer: EndpointAddr = peer.into();
     let id = peer.id;
-    let conn = endpoint
-        .connect(peer, ALPN_TPM_SIGN)
+    let conn = crate::bounded::connect(endpoint, peer, ALPN_TPM_SIGN, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("tpm-sign connect to {id}: {e}")))?;
-    let (mut send, mut recv) = conn
-        .open_bi()
+    let (mut send, mut recv) = crate::bounded::open_bi(&conn, crate::bounded::BACKSTOP)
         .await
         .map_err(|e| IrohError::Backend(format!("tpm-sign open stream: {e}")))?;
     write_frame(&mut send, request).await?;
@@ -219,20 +217,24 @@ mod tests {
 
     #[tokio::test]
     async fn the_server_is_told_who_the_connection_authenticated() {
-        let server = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let server = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let _router = iroh::protocol::Router::builder(server.clone())
             .accept(
                 ALPN_TPM_SIGN,
                 TpmSignProtocol::new(Arc::new(Echo), AdmissionLimits::default()),
             )
             .spawn();
-        let client = Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .unwrap();
+        let client = crate::identity_transport::on_loopback(Endpoint::builder(
+            iroh::endpoint::presets::Minimal,
+        ))
+        .bind()
+        .await
+        .unwrap();
         let response = tpm_sign_request(&client, server.addr(), b"abc")
             .await
             .unwrap();
@@ -271,11 +273,7 @@ mod tests {
     /// An address the operator names is the only one the provider binds.
     #[tokio::test]
     async fn the_provider_listens_only_where_the_operator_says() {
-        let port = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = crate::test_ports::udp();
         let listen: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -284,10 +282,11 @@ mod tests {
         let addr = ready_rx.await.unwrap();
         let ips: Vec<_> = addr.ip_addrs().copied().collect();
         assert_eq!(ips, vec![listen]);
-        let client = crate::identity_transport::base_builder()
-            .bind()
-            .await
-            .unwrap();
+        let client =
+            crate::identity_transport::on_loopback(crate::identity_transport::base_builder())
+                .bind()
+                .await
+                .unwrap();
         let response = tpm_sign_request(&client, addr, b"abc").await.unwrap();
         assert_eq!(&response[32..], b"abc");
         task.abort();

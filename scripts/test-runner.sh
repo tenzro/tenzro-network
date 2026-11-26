@@ -12,4 +12,9 @@ else
     target=$hard
 fi
 ulimit -n "$target" || { echo "test-runner: cannot raise the open-file limit to $target" >&2; exit 1; }
+# A test binary (target/<profile>/deps/<name>-<hash>) does not run on a machine
+# that runs a node as a service and whose operator forbids builds there.
+case "$1" in
+    */deps/*) "$(dirname "$0")/supply-chain/check-build-host.sh" --quiet || exit 1 ;;
+esac
 exec "$@"

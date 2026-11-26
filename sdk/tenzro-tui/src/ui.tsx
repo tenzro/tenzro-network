@@ -8,6 +8,9 @@ import { ageText } from "./format.js";
 export const ThemeContext = React.createContext<Theme>({ color: false, accent: undefined, ok: undefined, warn: undefined, bad: undefined, muted: undefined });
 export const useTheme = () => React.useContext(ThemeContext);
 
+/** How old an answer may be before it is shown as stale, ms: three refresh periods. */
+export const StaleAfterContext = React.createContext<number>(15000);
+
 export function Muted({ children }: { children: React.ReactNode }) {
   const t = useTheme();
   return <Text color={t.muted}>{children}</Text>;
@@ -48,18 +51,38 @@ export function Field({ label, children, width = 14 }: { label: string; children
   );
 }
 
-/** Shows the value when the reading is fine, the reason when it is not, and says so when it is old. */
+/**
+ * Shows the value when the reading is fine, the reason when it is not, and says so when it is old:
+ * the last answer before a failure, or an answer nothing has replaced for three refresh periods.
+ */
 export function Show<T>({ r, children, now }: { r: Reading<T>; children: (v: T) => React.ReactNode; now: number }) {
+  const staleAfter = React.useContext(StaleAfterContext);
   if (r.state === "pending") return <Muted>loading...</Muted>;
-  if (r.state === "ok") return <>{children(r.value)}</>;
-  if (r.last) {
-    return (
+  const seen = r.state === "ok" ? { value: r.value, at: r.at } : r.last;
+  if (!seen) return <Word tone="bad">no data</Word>;
+  if (r.state === "ok" && now - seen.at <= staleAfter) return <>{children(seen.value)}</>;
+  return (
+    <Text>
+      {children(seen.value)} <Word tone="warn">STALE</Word> <Muted>{ageText(now - seen.at)}</Muted>
+    </Text>
+  );
+}
+
+/**
+ * The one way the console asks before it acts: the person types `word` in
+ * full. A single key can be pressed by accident; a typed word cannot.
+ */
+export function TypedConfirm({ word, typed, error }: { word: string; typed: string; error: string | null }) {
+  return (
+    <Box flexDirection="column">
       <Text>
-        {children(r.last.value)} <Word tone="warn">STALE</Word> <Muted>{ageText(now - r.last.at)}</Muted>
+        {`Type ${word} and press Enter to go on, or Esc to leave: `}
+        {typed}
+        <Text inverse> </Text>
       </Text>
-    );
-  }
-  return <Word tone="bad">no data</Word>;
+      {error ? <Word tone="bad">{error}</Word> : null}
+    </Box>
+  );
 }
 
 export interface Column<R> {

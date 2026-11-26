@@ -95,3 +95,36 @@ pub(crate) mod testing {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// Each part is length-prefixed and the domain is bound, so no two
+    /// different inputs share a digest by moving bytes between parts or
+    /// between the domain and the parts.
+    #[test]
+    fn a_digest_binds_its_domain_and_where_each_part_ends() {
+        let d = digest(b"tenzro/test", &[b"ab", b"c"]);
+        assert_eq!(d, digest(b"tenzro/test", &[b"ab", b"c"]));
+        assert_ne!(d, digest(b"tenzro/test", &[b"a", b"bc"]));
+        assert_ne!(d, digest(b"tenzro/test", &[b"abc"]));
+        assert_ne!(d, digest(b"tenzro/test", &[b"ab", b"c", b""]));
+        assert_ne!(d, digest(b"tenzro/tes", &[b"tab", b"c"]));
+        assert_ne!(d, digest(b"tenzro/other", &[b"ab", b"c"]));
+    }
+
+    /// The layout is SHA-256 over little-endian u64 lengths before the
+    /// domain and each part: signatures over it outlive any one build.
+    #[test]
+    fn a_digest_is_sha256_over_length_prefixed_domain_and_parts() {
+        let mut h = Sha256::new();
+        for p in [&b"d"[..], b"xy", b""] {
+            h.update((p.len() as u64).to_le_bytes());
+            h.update(p);
+        }
+        let want: [u8; 32] = h.finalize().into();
+        assert_eq!(digest(b"d", &[b"xy", b""]), want);
+    }
+}

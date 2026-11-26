@@ -192,6 +192,7 @@ impl MoveTransfer {
             token_pool: self.token,
             token: self.endpoint,
             amount: self.amount,
+            finality: super::finality::WAIT_FOR_FINALITY,
         }
     }
 
@@ -228,6 +229,7 @@ impl MoveTransfer {
             token_pool: route.local_endpoint,
             token: self.token,
             amount: self.amount,
+            finality: super::finality::WAIT_FOR_FINALITY,
         })
     }
 }

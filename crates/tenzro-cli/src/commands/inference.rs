@@ -17,6 +17,9 @@ pub enum InferenceCommand {
     /// Read the inference router's live metrics (requests routed, hedges
     /// dispatched, hedges won, deadline-exceeded requests).
     RouterMetrics(RouterMetricsCmd),
+    /// Check a jurisdiction receipt's signature and the key that made it
+    #[command(name = "verify-jurisdiction-receipt")]
+    VerifyJurisdictionReceipt(VerifyJurisdictionReceiptCmd),
     /// Fetch a stored TOPLOC inference commitment by hash.
     GetCommitment(GetCommitmentCmd),
     /// Re-execute a prompt against a stored commitment and report the
@@ -28,25 +31,23 @@ pub enum InferenceCommand {
     GetChallenge(GetChallengeCmd),
     /// List inference challenges, optionally filtered by status or provider.
     ListChallenges(ListChallengesCmd),
-    /// Commit a committee vote (hidden) on an inference challenge.
+    /// The challenges this node holds a committee seat on.
+    SeatDuties(SeatDutiesCmd),
+    /// Re-execute a challenged reply as a committee seat and record the
+    /// verdict.
+    Reexecute(ReexecuteCmd),
+    /// Commit this node's seat to its recorded verdict (hidden); the verdict
+    /// and salt stay on this machine until the reveal.
     CommitVote(CommitVoteCmd),
-    /// Reveal a previously committed committee vote.
+    /// Reveal the vote committed from this machine.
     RevealVote(RevealVoteCmd),
     /// Finalize an inference challenge by tallying revealed committee
     /// votes. Upheld verdicts decrement the provider's reputation and
     /// record a compute-bond failure.
     FinalizeChallenge(FinalizeChallengeCmd),
-    /// Select a model for an intent (use case + budget + quality floor +
-    /// cost-quality knob) without naming one. Discovery only — dispatches
-    /// nothing. With `--message`, discovers and runs in one call.
-    Route(RouteCmd),
-    /// Report how a routed call turned out, so the router's per-cluster
-    /// error rates reflect what happened rather than only what the catalog
-    /// declares.
-    RecordOutcome(RecordOutcomeCmd),
-    /// Read the node's difficulty index: cluster sizes, and per-cluster
-    /// outcome counters for a model when one is named.
-    DifficultyStats(DifficultyStatsCmd),
+    /// Take a challenge its committee upheld to the chain as an inference
+    /// fault against the provider's bond (operator only).
+    FileChallengeFault(FileChallengeFaultCmd),
 }
 
 /// Run a short inference a sponsoring agent pays for
@@ -91,425 +92,19 @@ impl InferenceCommand {
             Self::Request(cmd) => cmd.execute().await,
             Self::Sponsored(cmd) => cmd.execute().await,
             Self::RouterMetrics(cmd) => cmd.execute().await,
+            Self::VerifyJurisdictionReceipt(cmd) => cmd.execute().await,
             Self::GetCommitment(cmd) => cmd.execute().await,
             Self::VerifyCommitment(cmd) => cmd.execute().await,
             Self::FileChallenge(cmd) => cmd.execute().await,
             Self::GetChallenge(cmd) => cmd.execute().await,
             Self::ListChallenges(cmd) => cmd.execute().await,
+            Self::SeatDuties(cmd) => cmd.execute().await,
+            Self::Reexecute(cmd) => cmd.execute().await,
             Self::CommitVote(cmd) => cmd.execute().await,
             Self::RevealVote(cmd) => cmd.execute().await,
             Self::FinalizeChallenge(cmd) => cmd.execute().await,
-            Self::Route(cmd) => cmd.execute().await,
-            Self::RecordOutcome(cmd) => cmd.execute().await,
-            Self::DifficultyStats(cmd) => cmd.execute().await,
+            Self::FileChallengeFault(cmd) => cmd.execute().await,
         }
-    }
-}
-
-/// `tenzro inference route --use-case <u> [--budget <b>] [--optimize <f>]
-///   [--quality-floor cheap|strong] [--message <m>]`
-///
-/// Runs the model-selection pipeline. Without `--message`, calls
-/// `tenzro_routeIntent` and prints the chosen model, tier, estimated cost,
-/// and fallback chain (discovery only). With `--message`, calls
-/// `tenzro_chatByIntent`, which discovers a model then dispatches it.
-#[derive(Debug, Parser)]
-pub struct RouteCmd {
-    /// Use case: chat, code, reasoning, summarize, extract, or embed.
-    #[arg(long)]
-    use_case: String,
-
-    /// Per-request cost cap in smallest TNZO unit (decimal string).
-    #[arg(long)]
-    budget: Option<String>,
-
-    /// Cost-quality knob in [0.0, 1.0]: 0.0 cheapest acceptable, 1.0 strongest.
-    #[arg(long)]
-    optimize: Option<f32>,
-
-    /// Reject any model below this tier: cheap or strong.
-    #[arg(long)]
-    quality_floor: Option<String>,
-
-    /// Estimated input tokens for cost estimation.
-    #[arg(long)]
-    est_input_tokens: Option<u64>,
-
-    /// Estimated output tokens for cost estimation.
-    #[arg(long)]
-    est_output_tokens: Option<u64>,
-
-    /// Payer DID — enables the per-DID rolling-window budget gate.
-    #[arg(long)]
-    payer_did: Option<String>,
-
-    /// Payer wallet address (hex) — the payer's on-chain TNZO balance
-    /// becomes a hard ceiling, so unaffordable models are dropped.
-    #[arg(long)]
-    payer_address: Option<String>,
-
-    /// Text the model would answer. Used only to place the request in a
-    /// difficulty cluster, so selection accounts for how hard the prompt is;
-    /// it is not sent to any provider. Redundant with --message, which the
-    /// node reads for the same purpose.
-    #[arg(long)]
-    prompt: Option<String>,
-
-    /// When set, discover a model and run this prompt in one call.
-    #[arg(long)]
-    message: Option<String>,
-
-    /// Maximum output tokens (only used with --message).
-    #[arg(long, default_value_t = 256)]
-    max_tokens: u64,
-
-    /// Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes
-    /// and/or bloc tokens (e.g. "DE,EU"), case-insensitive. The serving
-    /// node must declare a matching attestation-bound locality claim or
-    /// the request is refused. Only used with --message.
-    #[arg(long)]
-    jurisdiction: Option<String>,
-
-    /// Fail the request unless the response carries a verifiable signed
-    /// jurisdiction receipt. Only used with --message.
-    #[arg(long)]
-    require_jurisdiction_receipt: bool,
-
-    /// Output format (text, json)
-    #[arg(long, default_value = "text")]
-    format: String,
-
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-}
-
-impl RouteCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "use_case".to_string(),
-            serde_json::Value::String(self.use_case.clone()),
-        );
-        if let Some(b) = &self.budget {
-            params.insert("budget".to_string(), serde_json::Value::String(b.clone()));
-        }
-        if let Some(o) = self.optimize {
-            params.insert("optimize".to_string(), serde_json::json!(o));
-        }
-        if let Some(q) = &self.quality_floor {
-            params.insert(
-                "quality_floor".to_string(),
-                serde_json::Value::String(q.clone()),
-            );
-        }
-        if let Some(n) = self.est_input_tokens {
-            params.insert("est_input_tokens".to_string(), serde_json::json!(n));
-        }
-        if let Some(n) = self.est_output_tokens {
-            params.insert("est_output_tokens".to_string(), serde_json::json!(n));
-        }
-        if let Some(did) = &self.payer_did {
-            params.insert(
-                "payer_did".to_string(),
-                serde_json::Value::String(did.clone()),
-            );
-        }
-        if let Some(addr) = &self.payer_address {
-            params.insert(
-                "payer_address".to_string(),
-                serde_json::Value::String(addr.clone()),
-            );
-        }
-        if let Some(p) = &self.prompt {
-            params.insert("prompt".to_string(), serde_json::Value::String(p.clone()));
-        }
-
-        let rpc = RpcClient::new(&self.rpc);
-
-        // With a message, discover + dispatch; otherwise discovery only.
-        if let Some(message) = &self.message {
-            params.insert(
-                "message".to_string(),
-                serde_json::Value::String(message.clone()),
-            );
-            params.insert("max_tokens".to_string(), serde_json::json!(self.max_tokens));
-            if let Some(pin) = &self.jurisdiction {
-                params.insert(
-                    "jurisdiction".to_string(),
-                    serde_json::Value::String(pin.clone()),
-                );
-            }
-            if self.require_jurisdiction_receipt {
-                params.insert(
-                    "jurisdiction_receipt".to_string(),
-                    serde_json::Value::String("required".to_string()),
-                );
-            }
-
-            let spinner = output::create_spinner("Routing intent and dispatching...");
-            let result: serde_json::Value = rpc
-                .call("tenzro_chatByIntent", serde_json::Value::Object(params))
-                .await
-                .context("calling tenzro_chatByIntent")?;
-            spinner.finish_and_clear();
-
-            if self.format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
-            }
-
-            if let Some(route) = result.get("route") {
-                output::print_header("Selected Model");
-                print_route(route);
-                println!();
-            }
-            let response_text = result
-                .get("response")
-                .or_else(|| result.get("result").and_then(|r| r.get("response")))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !response_text.is_empty() {
-                output::print_header("Response");
-                println!(
-                    "{}",
-                    tenzro_types::eu_ai_disclosure::render_cli_chat_chunk(response_text)
-                );
-            }
-            return Ok(());
-        }
-
-        let spinner = output::create_spinner("Selecting a model for the intent...");
-        let result: serde_json::Value = rpc
-            .call("tenzro_routeIntent", serde_json::Value::Object(params))
-            .await
-            .context("calling tenzro_routeIntent")?;
-        spinner.finish_and_clear();
-
-        if self.format == "json" {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            return Ok(());
-        }
-        output::print_header("Selected Model");
-        print_route(&result);
-        Ok(())
-    }
-}
-
-fn print_route(route: &serde_json::Value) {
-    for key in [
-        "model_id",
-        "tier",
-        "estimated_cost",
-        "cluster",
-        "expected_error",
-        "provider",
-        "endpoint",
-        "reason",
-    ] {
-        if let Some(v) = route.get(key)
-            && !v.is_null()
-        {
-            let rendered = match v.as_str() {
-                Some(s) => s.to_string(),
-                None => v.to_string(),
-            };
-            output::print_field(key, &rendered);
-        }
-    }
-    if let Some(chain) = route.get("alternates").and_then(|v| v.as_array())
-        && !chain.is_empty()
-    {
-        let joined: Vec<String> = chain
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        output::print_field("alternates", &joined.join(" → "));
-    }
-}
-
-/// `tenzro inference record-outcome --model-id <m> --cluster <c> --outcome <o>`
-///
-/// Reports how a routed call turned out. In practice this carries
-/// `escalated` — the outcome only the caller knows, because it means the
-/// caller took the answer to a stronger model. `resolved` and `failed` are
-/// already recorded by `tenzro_chatByIntent` from the dispatch itself.
-///
-/// `retained: false` means the node has no difficulty index wired, so the
-/// feedback was accepted and discarded. Reporting is advisory.
-#[derive(Debug, Parser)]
-pub struct RecordOutcomeCmd {
-    /// The model that served the call — the routing decision's model_id.
-    #[arg(long)]
-    model_id: String,
-
-    /// The difficulty cluster the request landed in — the routing decision's
-    /// `cluster`.
-    #[arg(long)]
-    cluster: u32,
-
-    /// How the call turned out: resolved, escalated, or failed.
-    #[arg(long)]
-    outcome: String,
-
-    /// Output format (text, json)
-    #[arg(long, default_value = "text")]
-    format: String,
-
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-}
-
-impl RecordOutcomeCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-
-        let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
-            .call(
-                "tenzro_recordRouteOutcome",
-                serde_json::json!({
-                    "model_id": self.model_id,
-                    "cluster": self.cluster,
-                    "outcome": self.outcome,
-                }),
-            )
-            .await
-            .context("calling tenzro_recordRouteOutcome")?;
-
-        if self.format == "json" {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            return Ok(());
-        }
-
-        output::print_header("Route Outcome Recorded");
-        for key in ["model_id", "cluster", "outcome", "retained"] {
-            if let Some(v) = result.get(key)
-                && !v.is_null()
-            {
-                let rendered = match v.as_str() {
-                    Some(s) => s.to_string(),
-                    None => v.to_string(),
-                };
-                output::print_field(key, &rendered);
-            }
-        }
-        if result.get("retained").and_then(|v| v.as_bool()) == Some(false) {
-            println!();
-            println!("This node has no difficulty index, so the report was discarded.");
-        }
-        Ok(())
-    }
-}
-
-/// `tenzro inference difficulty-stats [--model-id <m>]`
-///
-/// Reads the node's difficulty index: how many prompt clusters it has
-/// discovered and how many prompts landed in each. With `--model-id`, also
-/// prints that model's per-cluster outcome counters and error rate.
-#[derive(Debug, Parser)]
-pub struct DifficultyStatsCmd {
-    /// Report per-cluster outcome counters and error rate for this model.
-    #[arg(long)]
-    model_id: Option<String>,
-
-    /// Output format (text, json)
-    #[arg(long, default_value = "text")]
-    format: String,
-
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-}
-
-impl DifficultyStatsCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-
-        let mut params = serde_json::Map::new();
-        if let Some(id) = &self.model_id {
-            params.insert(
-                "model_id".to_string(),
-                serde_json::Value::String(id.clone()),
-            );
-        }
-
-        let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
-            .call(
-                "tenzro_routeDifficultyStats",
-                serde_json::Value::Object(params),
-            )
-            .await
-            .context("calling tenzro_routeDifficultyStats")?;
-
-        if self.format == "json" {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            return Ok(());
-        }
-
-        output::print_header("Difficulty Index");
-        if result.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
-            println!("No embedding model is loaded — this node routes on declared metadata alone.");
-            return Ok(());
-        }
-        for key in [
-            "cluster_count",
-            "capacity",
-            "embedding_dim",
-            "split_threshold",
-        ] {
-            if let Some(v) = result.get(key)
-                && !v.is_null()
-            {
-                output::print_field(key, &v.to_string());
-            }
-        }
-        if let Some(clusters) = result.get("clusters").and_then(|v| v.as_array())
-            && !clusters.is_empty()
-        {
-            println!();
-            output::print_header("Prompts per Cluster");
-            for c in clusters {
-                let id = c.get("cluster").map(|v| v.to_string()).unwrap_or_default();
-                let n = c.get("prompts").map(|v| v.to_string()).unwrap_or_default();
-                output::print_field(&format!("cluster {id}"), &n);
-            }
-        }
-        if let Some(per_model) = result.get("model_clusters").and_then(|v| v.as_array()) {
-            println!();
-            let model = result
-                .get("model_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("model");
-            output::print_header(&format!("Outcomes for {model}"));
-            if per_model.is_empty() {
-                println!("No observations yet — selection rests on declared metadata.");
-            }
-            for c in per_model {
-                let id = c.get("cluster").map(|v| v.to_string()).unwrap_or_default();
-                let resolved = c.get("resolved").map(|v| v.to_string()).unwrap_or_default();
-                let escalated = c
-                    .get("escalated")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
-                let failed = c.get("failed").map(|v| v.to_string()).unwrap_or_default();
-                let rate = c
-                    .get("error_rate")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
-                output::print_field(
-                    &format!("cluster {id}"),
-                    &format!(
-                        "resolved {resolved}, escalated {escalated}, failed {failed}, error rate {rate}"
-                    ),
-                );
-            }
-        }
-        Ok(())
     }
 }
 
@@ -573,6 +168,7 @@ impl GetCommitmentCmd {
 /// The prompt is never stored with the commitment — the verifier must
 /// supply the exact prompt that produced the output. Verification
 /// requires the node to have the model loaded in serial (llama.cpp) mode.
+/// A node that did not serve the response needs `--envelope` and `--receipt`.
 #[derive(Debug, Parser)]
 pub struct VerifyCommitmentCmd {
     /// Commitment hash (hex, with or without 0x prefix).
@@ -580,6 +176,17 @@ pub struct VerifyCommitmentCmd {
 
     /// The exact prompt the committed response was generated from.
     prompt: String,
+
+    /// File holding the output of `get-commitment` run against the node that
+    /// served the response, for checking on a node that holds no copy.
+    /// Needs `--receipt`.
+    #[arg(long, requires = "receipt")]
+    envelope: Option<std::path::PathBuf>,
+
+    /// File holding the receipt the provider signed for the response. It
+    /// checks the decode, and names the model and provider of an envelope.
+    #[arg(long)]
+    receipt: Option<std::path::PathBuf>,
 
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
@@ -593,7 +200,17 @@ pub struct VerifyCommitmentCmd {
 impl VerifyCommitmentCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        let spinner = output::create_spinner("Re-executing prompt against stored commitment...");
+        let read = |path: &Option<std::path::PathBuf>| -> Result<Option<serde_json::Value>> {
+            match path {
+                Some(path) => Ok(Some(serde_json::from_slice(&std::fs::read(path)?)?)),
+                None => Ok(None),
+            }
+        };
+        // Only the commitment itself is sent: model and provider are taken
+        // from the receipt it is checked with.
+        let commitment = read(&self.envelope)?.and_then(|e| e.get("commitment").cloned());
+        let receipt = read(&self.receipt)?;
+        let spinner = output::create_spinner("Re-executing prompt against the commitment...");
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
             .call(
@@ -601,6 +218,8 @@ impl VerifyCommitmentCmd {
                 serde_json::json!({
                     "commitment_hash": self.commitment_hash,
                     "prompt": self.prompt,
+                    "commitment": commitment,
+                    "receipt": receipt,
                 }),
             )
             .await?;
@@ -644,7 +263,11 @@ impl VerifyCommitmentCmd {
     }
 }
 
-/// `tenzro inference file-challenge <hash> <challenger> [--reason ...]`
+/// `tenzro inference file-challenge <hash> <challenger> --receipt <file>
+/// --inputs <file> [--envelope <file>] [--reason ...]`
+///
+/// The challenge goes to every validator; the inputs are served only to the
+/// drawn seats, which re-execute them before voting.
 #[derive(Debug, Parser)]
 pub struct FileChallengeCmd {
     /// Commitment hash being disputed (hex, with or without 0x prefix).
@@ -657,6 +280,23 @@ pub struct FileChallengeCmd {
     #[arg(long)]
     reason: Option<String>,
 
+    /// File holding the receipt the provider signed for the response.
+    #[arg(long)]
+    receipt: std::path::PathBuf,
+
+    /// File holding what the engine was given, as JSON: `{"kind": "prompt",
+    /// "prompt": ...}` for a raw completion or `{"kind": "chat", "messages":
+    /// [...], "render": {"tools": [...], "enable_thinking": ..,
+    /// "reasoning_effort": ..}, "media": [...]}` for a chat turn. It must be
+    /// what the receipt commits to.
+    #[arg(long)]
+    inputs: std::path::PathBuf,
+
+    /// File holding the commitment envelope, when the node filed on did not
+    /// serve the response.
+    #[arg(long)]
+    envelope: Option<std::path::PathBuf>,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -665,6 +305,13 @@ pub struct FileChallengeCmd {
 impl FileChallengeCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
+        let read = |path: &std::path::Path| -> Result<serde_json::Value> {
+            Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+        };
+        let commitment = match &self.envelope {
+            Some(path) => read(path)?.get("commitment").cloned(),
+            None => None,
+        };
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
             .call(
@@ -673,6 +320,9 @@ impl FileChallengeCmd {
                     "commitment_hash": self.commitment_hash,
                     "challenger": self.challenger,
                     "reason": self.reason,
+                    "receipt": read(&self.receipt)?,
+                    "inputs": read(&self.inputs)?,
+                    "commitment": commitment,
                 }),
             )
             .await?;
@@ -783,31 +433,204 @@ impl ListChallengesCmd {
     }
 }
 
-/// `tenzro inference commit-vote <challenge_id> --commit-hash <hex> [--voter-rpc URL] [--rpc URL]`
+/// A committed vote kept until its reveal: the verdict and salt stay on this
+/// machine, with the reveal signature made at commit time.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SealedVote {
+    challenge_id: String,
+    voter: String,
+    verdict: bool,
+    salt: String,
+    reveal_signature: String,
+}
+
+/// Where the sealed vote for a challenge is kept. The id must be a UUID, so
+/// it can never name a path outside the folder.
+fn sealed_vote_path(data_dir: &std::path::Path, challenge_id: &str) -> Result<std::path::PathBuf> {
+    let id = uuid::Uuid::parse_str(challenge_id)
+        .with_context(|| format!("{challenge_id} is not a challenge id"))?;
+    Ok(data_dir
+        .join("challenge-votes")
+        .join(format!("{}.json", id.hyphenated())))
+}
+
+fn keep_sealed_vote(data_dir: &std::path::Path, vote: &SealedVote) -> Result<()> {
+    let path = sealed_vote_path(data_dir, &vote.challenge_id)?;
+    let dir = path.parent().expect("the path has a folder");
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // A fresh file, so the mode below always applies.
+    let partial = path.with_extension("partial");
+    let _ = std::fs::remove_file(&partial);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(&partial)
+        .with_context(|| format!("writing {}", partial.display()))?;
+    std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(vote)?)?;
+    file.sync_all()?;
+    std::fs::rename(&partial, &path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+fn sealed_vote(data_dir: &std::path::Path, challenge_id: &str) -> Result<SealedVote> {
+    let path = sealed_vote_path(data_dir, challenge_id)?;
+    let bytes = std::fs::read(&path).with_context(|| {
+        format!(
+            "no vote committed from this machine for {challenge_id} ({})",
+            path.display()
+        )
+    })?;
+    serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))
+}
+
+/// The verdict this node's re-execution recorded for a challenge it holds a
+/// seat on, read from the `tenzro_listSeatDuties` reply. `true` upholds.
+fn recorded_verdict(seats: &serde_json::Value, challenge_id: &str) -> Result<bool> {
+    let duty = seats["duties"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|d| d["challenge_id"].as_str() == Some(challenge_id))
+        .with_context(|| format!("this node holds no seat on challenge {challenge_id}"))?;
+    if duty["committed"].as_bool() == Some(true) {
+        anyhow::bail!("this node's seat on {challenge_id} has already committed");
+    }
+    duty["verdict"].as_bool().with_context(|| {
+        format!(
+            "challenge {challenge_id} is not re-executed yet: run `tenzro inference reexecute {challenge_id}` first"
+        )
+    })
+}
+
+fn verdict_word(upholds: bool) -> &'static str {
+    if upholds { "upheld" } else { "dismissed" }
+}
+
+/// `tenzro inference seat-duties [--rpc URL]`
 ///
-/// A drawn committee member records the hidden commit
-/// `H(verdict||salt||challenge_id||voter)`. The verdict stays sealed until
-/// `reveal-vote`. The commit is signed by the validator key of the node at
-/// `--voter-rpc` (as an administrator of that node), then submitted to the node
-/// holding the dispute at `--rpc`.
+/// The challenges this node's key holds a committee seat on, with their
+/// deadlines and how far the seat has got: re-executed, committed, revealed.
 #[derive(Debug, Parser)]
-pub struct CommitVoteCmd {
+pub struct SeatDutiesCmd {
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// This node's RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl SeatDutiesCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let reply: serde_json::Value = RpcClient::new(&self.rpc)
+            .call("tenzro_listSeatDuties", serde_json::json!({}))
+            .await?;
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+            return Ok(());
+        }
+        let seats = reply["duties"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if seats.is_empty() {
+            output::print_success("This node holds no committee seat");
+            return Ok(());
+        }
+        for d in seats {
+            let step = match (
+                d["revealed"].as_bool(),
+                d["committed"].as_bool(),
+                d["verdict"].as_bool(),
+            ) {
+                (Some(true), _, _) => "revealed".to_string(),
+                (_, Some(true), _) => "committed, reveal next".to_string(),
+                (_, _, Some(v)) => format!("re-executed ({}), commit next", verdict_word(v)),
+                _ => "re-execute next".to_string(),
+            };
+            println!(
+                "{}  {}  {}  commit by {}  reveal by {}  {}",
+                d["challenge_id"].as_str().unwrap_or("?"),
+                d["model_id"].as_str().unwrap_or("?"),
+                d["status"].as_str().unwrap_or("?"),
+                d["commit_deadline"],
+                d["reveal_deadline"],
+                step
+            );
+        }
+        Ok(())
+    }
+}
+
+/// `tenzro inference reexecute <challenge_id> [--rpc URL]`
+///
+/// This node, as a committee seat, fetches the challenged reply's inputs from
+/// the node holding the challenge, re-executes them and records its verdict.
+/// The verdict a seat may commit is the one recorded here.
+#[derive(Debug, Parser)]
+pub struct ReexecuteCmd {
     /// Challenge id (UUID).
     challenge_id: String,
-
-    /// Vote commitment hash (hex).
-    #[arg(long)]
-    commit_hash: String,
-
-    /// The voting validator's own node, which signs the commit.
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    voter_rpc: String,
 
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
     format: String,
 
-    /// RPC endpoint
+    /// This node's RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ReexecuteCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let spinner = output::create_spinner("Re-executing the challenged reply...");
+        let result: serde_json::Value = RpcClient::new(&self.rpc)
+            .call(
+                "tenzro_reexecuteChallenge",
+                serde_json::json!({ "challenge_id": self.challenge_id }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        let upholds = result["verdict"]
+            .as_bool()
+            .context("the node recorded no verdict")?;
+        let scored = &result["scored"];
+        output::print_success(&format!(
+            "Recorded verdict: {} ({} of {} steps matched)",
+            verdict_word(upholds),
+            scored["steps_passed"],
+            scored["steps_total"]
+        ));
+        Ok(())
+    }
+}
+
+/// `tenzro inference commit-vote <challenge_id> [--rpc URL]`
+///
+/// Commits this node's seat to the verdict its re-execution recorded. The
+/// salt is drawn here; the node signs the reveal and the commit with its
+/// validator key, and the verdict, salt and reveal signature are kept in this
+/// machine's data directory until `reveal-vote`. Submitted to this node,
+/// which passes the commit on to every node holding the challenge.
+#[derive(Debug, Parser)]
+pub struct CommitVoteCmd {
+    /// Challenge id (UUID).
+    challenge_id: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// This node's RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -815,24 +638,52 @@ pub struct CommitVoteCmd {
 impl CommitVoteCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        let signed: serde_json::Value = RpcClient::new(&self.voter_rpc)
-            .call(
+        let data_dir = crate::commands::update::notice::data_dir();
+        // Checked before anything is signed or kept.
+        sealed_vote_path(&data_dir, &self.challenge_id)?;
+        let node = RpcClient::new(&self.rpc);
+        let seats: serde_json::Value = node
+            .call("tenzro_listSeatDuties", serde_json::json!({}))
+            .await?;
+        let verdict = recorded_verdict(&seats, &self.challenge_id)?;
+        let salt = hex::encode(rand::random::<[u8; 32]>());
+        let sign = |phase: &str| {
+            node.call::<serde_json::Value>(
                 "tenzro_signChallengeVote",
                 serde_json::json!({
+                    "phase": phase,
                     "challenge_id": self.challenge_id,
-                    "commit_hash": self.commit_hash,
+                    "verdict": verdict,
+                    "salt": salt,
                 }),
             )
-            .await?;
-        let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
+        };
+        let reveal = sign("reveal").await?;
+        let sealed = SealedVote {
+            challenge_id: self.challenge_id.clone(),
+            voter: reveal["voter"]
+                .as_str()
+                .context("the node named no voter")?
+                .to_string(),
+            verdict,
+            salt: salt.clone(),
+            reveal_signature: reveal["signature"]
+                .as_str()
+                .context("the node returned no reveal signature")?
+                .to_string(),
+        };
+        // Kept before the commit is sent, so a commit that lands can always
+        // be revealed.
+        keep_sealed_vote(&data_dir, &sealed)?;
+        let commit = sign("commit").await?;
+        let result: serde_json::Value = node
             .call(
                 "tenzro_commitChallengeVote",
                 serde_json::json!({
                     "challenge_id": self.challenge_id,
-                    "voter": signed["voter"],
-                    "commit_hash": self.commit_hash,
-                    "signature": signed["signature"],
+                    "voter": commit["voter"],
+                    "commit_hash": commit["commit_hash"],
+                    "signature": commit["signature"],
                 }),
             )
             .await?;
@@ -846,27 +697,15 @@ impl CommitVoteCmd {
     }
 }
 
-/// `tenzro inference reveal-vote <challenge_id> --verdict <bool> --salt <hex> [--voter-rpc URL] [--rpc URL]`
+/// `tenzro inference reveal-vote <challenge_id> [--rpc URL]`
 ///
-/// Reveals a committed vote. `(verdict, salt)` must reproduce the commit
-/// hash. `--verdict true` means the commitment did not verify (upholds).
-/// Signed by the validator key of the node at `--voter-rpc`.
+/// Reveals the vote `commit-vote` committed from this machine: the verdict,
+/// salt and reveal signature kept then are submitted to the node holding the
+/// dispute, and the kept copy is removed once the reveal is accepted.
 #[derive(Debug, Parser)]
 pub struct RevealVoteCmd {
     /// Challenge id (UUID).
     challenge_id: String,
-
-    /// The voting validator's own node, which signs the reveal.
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    voter_rpc: String,
-
-    /// Revealed verdict (true = did-not-verify / upholds).
-    #[arg(long)]
-    verdict: bool,
-
-    /// Reveal salt (hex) — must reproduce the earlier commit hash.
-    #[arg(long)]
-    salt: String,
 
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
@@ -880,29 +719,22 @@ pub struct RevealVoteCmd {
 impl RevealVoteCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        let signed: serde_json::Value = RpcClient::new(&self.voter_rpc)
-            .call(
-                "tenzro_signChallengeVote",
-                serde_json::json!({
-                    "challenge_id": self.challenge_id,
-                    "verdict": self.verdict,
-                    "salt": self.salt,
-                }),
-            )
-            .await?;
+        let data_dir = crate::commands::update::notice::data_dir();
+        let sealed = sealed_vote(&data_dir, &self.challenge_id)?;
         let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
             .call(
                 "tenzro_revealChallengeVote",
                 serde_json::json!({
-                    "challenge_id": self.challenge_id,
-                    "voter": signed["voter"],
-                    "verdict": self.verdict,
-                    "salt": self.salt,
-                    "signature": signed["signature"],
+                    "challenge_id": sealed.challenge_id,
+                    "voter": sealed.voter,
+                    "verdict": sealed.verdict,
+                    "salt": sealed.salt,
+                    "signature": sealed.reveal_signature,
                 }),
             )
             .await?;
+        std::fs::remove_file(sealed_vote_path(&data_dir, &self.challenge_id)?)?;
         if self.format == "json" {
             println!("{}", serde_json::to_string_pretty(&result)?);
             return Ok(());
@@ -970,6 +802,47 @@ impl FinalizeChallengeCmd {
             println!();
             output::print_header("Tally");
             output::print_json(verification)?;
+        }
+        Ok(())
+    }
+}
+
+/// `tenzro inference file-challenge-fault <challenge_id> <dispute file>`
+///
+/// Takes a challenge its committee upheld to the chain: the node files the
+/// inference fault for the answer the challenged commitment was signed into,
+/// from its own validator account, once. Operator only.
+#[derive(Debug, Parser)]
+pub struct FileChallengeFaultCmd {
+    /// Challenge id (UUID).
+    challenge_id: String,
+
+    /// File holding the answer the challenged commitment was signed into, as
+    /// JSON {receipt, request, output}.
+    dispute: std::path::PathBuf,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl FileChallengeFaultCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let dispute: serde_json::Value = serde_json::from_slice(&std::fs::read(&self.dispute)?)?;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_fileChallengeFault",
+                serde_json::json!({
+                    "challenge_id": self.challenge_id,
+                    "dispute": dispute,
+                }),
+            )
+            .await?;
+        if let Some(fault) = result.get("fault_id").and_then(|v| v.as_str()) {
+            output::print_success("Inference fault filed");
+            output::print_field("fault_id", fault);
         }
         Ok(())
     }
@@ -1460,5 +1333,100 @@ impl InferenceMoeDisputeReceiptRpcCmd {
             )
             .await?;
         crate::output::print_json(&result)
+    }
+}
+
+/// Check a jurisdiction receipt against this node's chain state.
+#[derive(Debug, Parser)]
+pub struct VerifyJurisdictionReceiptCmd {
+    /// File holding the receipt as JSON
+    #[arg(long)]
+    file: std::path::PathBuf,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl VerifyJurisdictionReceiptCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let text = std::fs::read_to_string(&self.file)
+            .with_context(|| format!("reading {}", self.file.display()))?;
+        let receipt: serde_json::Value = serde_json::from_str(&text)?;
+        let verdict: serde_json::Value = RpcClient::new(&self.rpc)
+            .call(
+                "tenzro_verifyJurisdictionReceipt",
+                serde_json::json!({ "receipt": receipt }),
+            )
+            .await?;
+        output::print_header("Jurisdiction Receipt");
+        output::print_json(&verdict)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHALLENGE: &str = "6f1c2a8e-3b4d-4e5f-9a0b-1c2d3e4f5a6b";
+
+    #[test]
+    fn a_committed_vote_is_kept_until_its_reveal_and_only_under_a_challenge_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let vote = SealedVote {
+            challenge_id: CHALLENGE.to_string(),
+            voter: "0xabcd".to_string(),
+            verdict: true,
+            salt: hex::encode([7u8; 32]),
+            reveal_signature: "aa".to_string(),
+        };
+        assert!(sealed_vote(dir.path(), CHALLENGE).is_err());
+        keep_sealed_vote(dir.path(), &vote).unwrap();
+        assert_eq!(sealed_vote(dir.path(), CHALLENGE).unwrap(), vote);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = sealed_vote_path(dir.path(), CHALLENGE).unwrap();
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        for id in ["../escape", "a/b", ""] {
+            assert!(sealed_vote_path(dir.path(), id).is_err());
+        }
+    }
+
+    #[test]
+    fn a_seat_commits_only_the_verdict_its_re_execution_recorded() {
+        let duties = serde_json::json!({ "voter": "0xabcd", "duties": [
+            { "challenge_id": "a", "verdict": true, "committed": false },
+            { "challenge_id": "b", "verdict": null, "committed": false },
+            { "challenge_id": "c", "verdict": false, "committed": true },
+            { "challenge_id": CHALLENGE, "verdict": false, "committed": false },
+        ]});
+        assert!(recorded_verdict(&duties, "a").unwrap());
+        assert!(!recorded_verdict(&duties, CHALLENGE).unwrap());
+        let not_run = recorded_verdict(&duties, "b").unwrap_err().to_string();
+        assert!(
+            not_run.contains("tenzro inference reexecute b"),
+            "{not_run}"
+        );
+        assert!(recorded_verdict(&duties, "c").is_err());
+        assert!(recorded_verdict(&duties, "d").is_err());
+        assert!(recorded_verdict(&serde_json::Value::Null, "a").is_err());
+    }
+
+    #[test]
+    fn a_seat_names_no_verdict_salt_or_hash() {
+        assert!(CommitVoteCmd::try_parse_from(["commit-vote", CHALLENGE]).is_ok());
+        for flag in ["--verdict", "--commit-hash", "--voter-rpc"] {
+            assert!(
+                CommitVoteCmd::try_parse_from(["commit-vote", CHALLENGE, flag, "x"]).is_err(),
+                "{flag}"
+            );
+        }
+        assert!(RevealVoteCmd::try_parse_from(["reveal-vote", CHALLENGE]).is_ok());
+        assert!(RevealVoteCmd::try_parse_from(["reveal-vote", CHALLENGE, "--salt", "00"]).is_err());
+        assert!(ReexecuteCmd::try_parse_from(["reexecute", CHALLENGE]).is_ok());
+        assert!(SeatDutiesCmd::try_parse_from(["seat-duties"]).is_ok());
     }
 }

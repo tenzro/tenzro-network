@@ -655,6 +655,10 @@ fn every_transaction_variant_at_defaults() -> Vec<tenzro_types::transaction::Tra
             },
         },
         T::AccountOutflow { op: vec![1, 2, 3] },
+        T::NativeCall {
+            selector: [0x01, 0x00, 0x00, 0xDE],
+            data: br#"{"did":"did:tenzro:human:00"}"#.to_vec(),
+        },
     ]
 }
 
@@ -746,11 +750,12 @@ fn variant_index(t: &tenzro_types::transaction::TransactionType) -> usize {
         T::AttachMachineAttestation { .. } => 81,
         T::SponsoredBond { .. } => 82,
         T::AccountOutflow { .. } => 83,
+        T::NativeCall { .. } => 84,
     }
 }
 
 /// Number of `TransactionType` variants. Bump together with `variant_index`.
-const TRANSACTION_VARIANT_COUNT: usize = 84;
+const TRANSACTION_VARIANT_COUNT: usize = 85;
 
 fn signed_default_transaction(
     tx_type: tenzro_types::transaction::TransactionType,
@@ -812,6 +817,66 @@ fn every_transaction_variant_at_defaults_survives_the_wire() {
             ),
             _ => panic!("{what}: decoded to a different payload kind"),
         }
+    }
+}
+
+/// Two validators publishing one block send the same bytes, which every
+/// receiver accepts; a block whose own time a receiver would refuse as a
+/// message time goes out under a time and id of its own instead, and is
+/// accepted too.
+#[test]
+fn a_blocks_message_is_the_same_on_every_publisher_unless_its_time_would_be_refused() {
+    use tenzro_network::message::{MAX_MESSAGE_AGE_MS, MAX_MESSAGE_AHEAD_MS, validate_message};
+    use tenzro_types::block::{Block, BlockHeader};
+    use tenzro_types::primitives::{Address, BlockHeight, Hash, Timestamp};
+    let now = chrono::Utc::now().timestamp_millis();
+    let block_at = |time: i64| {
+        let mut header = BlockHeader::new(
+            BlockHeight::from(7u64),
+            Hash::default(),
+            Block::compute_tx_root(&[]),
+            Hash::default(),
+            Address::new([0u8; 32]),
+        );
+        header.timestamp = Timestamp::new(time);
+        Block::new(header, Vec::new())
+    };
+
+    let block = block_at(now - 500);
+    let (one, other) = (
+        NetworkMessage::block_at(block.clone(), now),
+        NetworkMessage::block_at(block.clone(), now + 150),
+    );
+    assert_eq!(one.to_bytes().unwrap(), other.to_bytes().unwrap());
+    assert_eq!(one.message_id, hex::encode(block.hash().as_bytes()));
+    assert_eq!(one.timestamp, now - 500);
+    validate_message(&one).expect("receivers accept it");
+
+    // A block dated outside what receivers accept as a message time, either
+    // way, and one just inside the bound, where a receiver's clock may
+    // differ: none takes the block's time.
+    for time in [
+        now - MAX_MESSAGE_AGE_MS - 1,
+        now - MAX_MESSAGE_AGE_MS + 1_000,
+        now + MAX_MESSAGE_AHEAD_MS + 1,
+        now + MAX_MESSAGE_AHEAD_MS - 1_000,
+        0,
+        i64::MAX,
+    ] {
+        let block = block_at(time);
+        let message = NetworkMessage::block_at(block.clone(), now);
+        assert_ne!(message.message_id, hex::encode(block.hash().as_bytes()));
+        assert!(
+            (message.timestamp - now).abs() < 60_000,
+            "dated {}",
+            message.timestamp
+        );
+        validate_message(&message).expect("receivers accept the fallback");
+        assert_ne!(
+            message.to_bytes().unwrap(),
+            NetworkMessage::block_at(block, now).to_bytes().unwrap(),
+            "a fallback message is this publication's own"
+        );
     }
 }
 

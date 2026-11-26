@@ -1,137 +1,17 @@
-//! Provable data possession: succinct challenges that a provider still holds
-//! the shards it is paid to store.
-//!
-//! Each shard is cut into [`CHUNK_SIZE`]-byte chunks and committed as a
-//! Merkle root when the object is stored ([`chunk_commitment`], recorded on
-//! the object's [`ShardRef`]). A challenge is a fresh random nonce; the nonce
-//! alone determines which `(shard, chunk)` positions must be proven
-//! ([`sample_positions`]), so neither side chooses them and the provider
-//! cannot know them in advance. The answer is, per position, the chunk bytes
-//! and their Merkle path — a few kilobytes whatever the object size. The
-//! verifier checks each path against the committed root and never downloads a
-//! shard.
-//!
-//! A provider that has kept only a fraction `f` of a shard's chunks survives
-//! `s` samples on that shard with probability about `f^s`, so a handful of
-//! samples per epoch makes discarding data a losing bet.
+//! Provable data possession, the provider's part: drawing a challenge and
+//! answering one from the shards it holds. What a challenge, a proof and a
+//! shard commitment are, and how a proof is checked, live in
+//! [`tenzro_storage::pdp`], so consensus code verifies a proof without this
+//! crate.
 
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use tenzro_storage::pdp::ChunkTree;
+pub use tenzro_storage::pdp::{
+    CHUNK_SIZE, DescriptorShards, PdpChallenge, PdpError, PdpItem, PdpProof, ShardRef,
+    chunk_commitment, sample_positions, verify,
+};
 
-use crate::error::{Result, StorageProviderError};
-use crate::provider::{ObjectDescriptor, ShardRef};
-
-/// Chunk size the per-shard Merkle tree is built over.
-pub const CHUNK_SIZE: usize = 1024;
-
-type Hash = [u8; 32];
-
-fn leaf(index: u64, chunk: &[u8]) -> Hash {
-    let mut h = Sha256::new();
-    h.update([0x00]);
-    h.update(index.to_be_bytes());
-    h.update(chunk);
-    h.finalize().into()
-}
-
-fn node(l: &Hash, r: &Hash) -> Hash {
-    let mut h = Sha256::new();
-    h.update([0x01]);
-    h.update(l);
-    h.update(r);
-    h.finalize().into()
-}
-
-fn chunk_leaves(shard: &[u8]) -> Vec<Hash> {
-    if shard.is_empty() {
-        return vec![leaf(0, &[])];
-    }
-    shard
-        .chunks(CHUNK_SIZE)
-        .enumerate()
-        .map(|(i, c)| leaf(i as u64, c))
-        .collect()
-}
-
-/// Levels of the tree bottom-up; an odd node is paired with itself.
-fn levels(leaves: Vec<Hash>) -> Vec<Vec<Hash>> {
-    let mut out = vec![leaves];
-    while out.last().map(|l| l.len()).unwrap_or(0) > 1 {
-        let prev = out.last().expect("non-empty");
-        let next = prev
-            .chunks(2)
-            .map(|p| node(&p[0], p.get(1).unwrap_or(&p[0])))
-            .collect();
-        out.push(next);
-    }
-    out
-}
-
-/// The Merkle root over a shard's chunks and the chunk count, as recorded on
-/// its [`ShardRef`].
-pub fn chunk_commitment(shard: &[u8]) -> (String, u64) {
-    let leaves = chunk_leaves(shard);
-    let count = leaves.len() as u64;
-    let tree = levels(leaves);
-    let root = tree.last().expect("root")[0];
-    (hex::encode(root), count)
-}
-
-fn path(tree: &[Vec<Hash>], mut index: usize) -> Vec<Hash> {
-    let mut out = Vec::new();
-    for level in &tree[..tree.len() - 1] {
-        let sibling = index ^ 1;
-        out.push(*level.get(sibling).unwrap_or(&level[index]));
-        index >>= 1;
-    }
-    out
-}
-
-fn root_from(mut h: Hash, mut index: u64, path: &[Hash]) -> Hash {
-    for s in path {
-        h = if index & 1 == 0 {
-            node(&h, s)
-        } else {
-            node(s, &h)
-        };
-        index >>= 1;
-    }
-    h
-}
-
-/// A possession challenge for one object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PdpChallenge {
-    /// Object challenged.
-    pub object_id: String,
-    /// Fresh random nonce; selects the positions to prove.
-    pub nonce: [u8; 32],
-    /// How many positions to prove.
-    pub samples: usize,
-}
-
-/// One proven chunk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PdpItem {
-    /// Shard index.
-    pub shard: usize,
-    /// Chunk index within the shard.
-    pub chunk: u64,
-    /// The chunk bytes.
-    pub bytes: Vec<u8>,
-    /// Merkle path from the chunk to the shard's committed root.
-    pub path: Vec<[u8; 32]>,
-}
-
-/// The provider's answer to a [`PdpChallenge`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PdpProof {
-    /// Object the proof is for.
-    pub object_id: String,
-    /// One item per sampled position, in sample order.
-    pub items: Vec<PdpItem>,
-}
+use crate::error::Result;
 
 /// Draw a fresh challenge with `samples` positions.
 pub fn new_pdp_challenge(object_id: &str, samples: usize) -> PdpChallenge {
@@ -142,28 +22,6 @@ pub fn new_pdp_challenge(object_id: &str, samples: usize) -> PdpChallenge {
         nonce,
         samples: samples.max(1),
     }
-}
-
-/// The `(shard, chunk)` positions a challenge requires, derived from its nonce
-/// and the object's committed shard layout. Deterministic, so prover and
-/// verifier agree without exchanging the list.
-pub fn sample_positions(challenge: &PdpChallenge, shards: &[ShardRef]) -> Vec<(usize, u64)> {
-    if shards.is_empty() {
-        return Vec::new();
-    }
-    (0..challenge.samples as u64)
-        .map(|i| {
-            let mut h = Sha256::new();
-            h.update(b"tenzro/pdp-sample");
-            h.update(challenge.nonce);
-            h.update(i.to_be_bytes());
-            let d: Hash = h.finalize().into();
-            let a = u64::from_be_bytes(d[..8].try_into().expect("8 bytes"));
-            let b = u64::from_be_bytes(d[8..16].try_into().expect("8 bytes"));
-            let shard = &shards[(a % shards.len() as u64) as usize];
-            (shard.index, b % shard.chunk_count.max(1))
-        })
-        .collect()
 }
 
 /// Answer a challenge from the shards the provider holds. `fetch_shard`
@@ -178,12 +36,12 @@ where
     F: FnMut(usize) -> Result<Vec<u8>>,
 {
     let mut items = Vec::new();
-    let mut trees: std::collections::HashMap<usize, (Vec<u8>, Vec<Vec<Hash>>)> =
+    let mut trees: std::collections::HashMap<usize, (Vec<u8>, ChunkTree)> =
         std::collections::HashMap::new();
     for (shard, chunk) in sample_positions(challenge, shards) {
         if let std::collections::hash_map::Entry::Vacant(e) = trees.entry(shard) {
             let bytes = fetch_shard(shard)?;
-            let tree = levels(chunk_leaves(&bytes));
+            let tree = ChunkTree::of(&bytes);
             e.insert((bytes, tree));
         }
         let (bytes, tree) = &trees[&shard];
@@ -193,7 +51,7 @@ where
             shard,
             chunk,
             bytes: bytes.get(start..end).unwrap_or(&[]).to_vec(),
-            path: path(tree, chunk as usize),
+            path: tree.path(chunk as usize),
         });
     }
     Ok(PdpProof {
@@ -202,64 +60,10 @@ where
     })
 }
 
-fn fail(object_id: &str, reason: String) -> StorageProviderError {
-    StorageProviderError::ChallengeFailed {
-        object_id: object_id.to_string(),
-        reason,
-    }
-}
-
-/// Check a proof against the object's committed chunk roots. Needs only the
-/// descriptor and the proof.
-pub fn verify(
-    descriptor: &ObjectDescriptor,
-    challenge: &PdpChallenge,
-    proof: &PdpProof,
-) -> Result<()> {
-    let id = &challenge.object_id;
-    if proof.object_id != *id || descriptor.object_id != *id {
-        return Err(fail(id, "proof is for another object".into()));
-    }
-    let positions = sample_positions(challenge, &descriptor.shards);
-    if proof.items.len() != positions.len() {
-        return Err(fail(
-            id,
-            format!(
-                "expected {} items, got {}",
-                positions.len(),
-                proof.items.len()
-            ),
-        ));
-    }
-    for (item, (shard, chunk)) in proof.items.iter().zip(positions) {
-        if item.shard != shard || item.chunk != chunk {
-            return Err(fail(
-                id,
-                "proof answers positions that were not asked".into(),
-            ));
-        }
-        if item.bytes.len() > CHUNK_SIZE {
-            return Err(fail(id, "chunk longer than the chunk size".into()));
-        }
-        let sref = descriptor
-            .shards
-            .iter()
-            .find(|s| s.index == shard)
-            .ok_or_else(|| fail(id, format!("no shard {shard}")))?;
-        let root = root_from(leaf(chunk, &item.bytes), chunk, &item.path);
-        if hex::encode(root) != sref.chunk_root {
-            return Err(fail(
-                id,
-                format!("shard {shard} chunk {chunk} does not match its commitment"),
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ObjectDescriptor;
     use crate::redundancy::RedundancyScheme;
     use tenzro_types::access_policy::AccessPolicy;
 
@@ -307,7 +111,7 @@ mod tests {
         for _ in 0..20 {
             let c = new_pdp_challenge("obj", 8);
             let p = prove(&c, &d.shards, |i| Ok(data[i].clone())).unwrap();
-            verify(&d, &c, &p).unwrap();
+            verify(&d.object_id, &d.shards, &c, &p).unwrap();
             let size: usize = p
                 .items
                 .iter()
@@ -333,7 +137,7 @@ mod tests {
         for _ in 0..40 {
             let c = new_pdp_challenge("obj", 8);
             let p = prove(&c, &d.shards, |i| Ok(damaged[i].clone())).unwrap();
-            if verify(&d, &c, &p).is_err() {
+            if verify(&d.object_id, &d.shards, &c, &p).is_err() {
                 failures += 1;
             }
         }
@@ -350,7 +154,7 @@ mod tests {
         let old = new_pdp_challenge("obj", 8);
         let replay = prove(&old, &d.shards, |i| Ok(data[i].clone())).unwrap();
         let fresh = new_pdp_challenge("obj", 8);
-        assert!(verify(&d, &fresh, &replay).is_err());
+        assert!(verify(&d.object_id, &d.shards, &fresh, &replay).is_err());
     }
 
     #[test]
@@ -360,6 +164,6 @@ mod tests {
         let c = new_pdp_challenge("obj", 4);
         let mut p = prove(&c, &d.shards, |i| Ok(data[i].clone())).unwrap();
         p.items[0].bytes[0] ^= 0xff;
-        assert!(verify(&d, &c, &p).is_err());
+        assert!(verify(&d.object_id, &d.shards, &c, &p).is_err());
     }
 }

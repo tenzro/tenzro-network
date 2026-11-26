@@ -9,7 +9,7 @@
 #           (AMD and Intel GPUs through /dev/dri; NVIDIA through the NVIDIA
 #           container toolkit, which mounts the driver's own Vulkan support)
 #   cuda    NVIDIA CUDA runtime with cuDNN (Ubuntu 24.04), and the ONNX Runtime
-#           libraries from the archive's lib/
+#           providers from the archive, beside the binary
 ARG BASE
 FROM ${BASE}
 
@@ -29,9 +29,9 @@ RUN groupadd --system --gid 10001 tenzro \
 
 COPY archive/bin/tenzro-node /usr/local/bin/tenzro-node
 COPY archive/bin/tenzro /usr/local/bin/tenzro
-# The CUDA build resolves ONNX Runtime through its $ORIGIN/../lib run path;
-# other builds have no lib/ and this copies nothing.
-COPY archive/lib/ /usr/local/lib/
+# The CUDA build's ONNX Runtime providers, beside the binary where its
+# statically linked runtime loads them; other builds carry none.
+COPY archive/providers/ /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/tenzro-entrypoint
 
 # Everything the node keeps lives on one volume: chain state, models, and the

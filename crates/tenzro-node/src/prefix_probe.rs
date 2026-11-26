@@ -44,27 +44,6 @@ pub fn request_salt(explicit: Option<&str>, principal: Option<&str>) -> Option<S
     principal.filter(|p| *p != "anonymous").map(principal_salt)
 }
 
-/// Fill `intent`'s probe results for a caller with a salt. A caller without
-/// one routes with no affinity at all.
-pub async fn probe_for_intent(
-    node: &Arc<TenzroNode>,
-    intent: tenzro_model::routing::intent::RouteIntent,
-    salt: Option<Salt>,
-) -> tenzro_model::routing::intent::RouteIntent {
-    let Some(salt) = salt else {
-        return intent;
-    };
-    let Some(conversation) = intent
-        .affinity_prefix
-        .clone()
-        .or_else(|| intent.prompt.clone())
-    else {
-        return intent;
-    };
-    let matches = probe_providers(node, conversation.as_bytes(), &salt).await;
-    intent.with_prefix_matches(matches)
-}
-
 /// `tenzro_prefixProbe`: `{digests: [hex; <=256]}` to
 /// `{matches: {model_id: runs}}`.
 pub(crate) async fn handle_prefix_probe(

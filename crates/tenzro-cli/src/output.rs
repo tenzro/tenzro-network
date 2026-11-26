@@ -137,7 +137,7 @@ pub fn print_banner() {
         " ".repeat(right)
     );
     println!("║{}║", " ".repeat(width));
-    println!("║      AI-Native, Agentic, Tokenized Settlement Layer      ║");
+    println!("║          Compute of every kind, settled in TNZO          ║");
     println!("║{}║", " ".repeat(width));
     println!("╚{}╝", "═".repeat(width));
     println!("{}", colors::reset());

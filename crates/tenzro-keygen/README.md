@@ -18,7 +18,7 @@ The same machine always derives the same keys, so the public halves
   implements `tenzro_crypto::hybrid_seal::HybridRecipient`); the private halves
   are derived on demand from hardware and never held.
 
-A machine without a TPM or Secure Enclave has no keys and `open` refuses.
+A machine without a TPM or Secure Enclave has no local keys and `open` refuses. Such a machine can keep its node keys in another machine's TPM through the node's key holder (`tenzro-node tpm key-holder`, see `docs/NODE.md`), which this crate does not reach.
 
 It is its own crate so the CLI can reach the keys without depending on
 `tenzro-node`.

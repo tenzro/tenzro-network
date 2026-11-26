@@ -1,8 +1,13 @@
 # Install Tenzro and run it for the first time
 
 Install it, run `tenzro`, and follow the screens. The first run checks your machine, asks whether you want to
-use the network, provide compute, run a validator or try a local chain, sets up your keys, starts the node and
+provide compute, run a validator or try a local chain, sets up your keys, starts the node and
 shows the console. You do not need to be an expert.
+
+What a machine needs: a node keeps its keys only in the machine's own hardware key store, a TPM 2.0 (Linux or
+Windows) or a Secure Enclave (a Mac with Apple silicon or a T2 chip). The first screen checks for one and says
+what to turn on if it is missing. A machine without one can still take part through a passkey for a person, or
+keep its identity key in another machine's TPM ([NODE.md](NODE.md), "Raspberry Pi and other edge devices").
 
 ## Easy path
 
@@ -40,7 +45,7 @@ The `.deb` and `.rpm` packages are described in [INSTALL.md](INSTALL.md).
 ### What `tenzro` does the first time
 
 On a machine with no Tenzro settings, `tenzro` opens a full-screen first run: a welcome, a check of this machine, and
-one question (use the network, provide compute, run a validator, or try a local chain). After setup, `tenzro` opens the
+one question (provide compute, run a validator, or try a local chain). After setup, `tenzro` opens the
 console (Overview, Wallet, Models, Validators, Governance, Health); press `q` to leave it. Outside a terminal (a script
 or a pipe) `tenzro` prints the command list instead.
 
@@ -69,9 +74,10 @@ The Linux script needs no `sudo`; the download is 95 MB for the Linux x86_64 bui
 
 ### What the installer does
 
-1. Detects the system (Linux or macOS; x86_64 or arm64), the glibc version and whether an NVIDIA GPU is present, and
-   picks the archive from the release's `SHA256SUMS`: CUDA build with an NVIDIA GPU, CPU build without, Metal build on
-   Apple silicon.
+1. Detects the system (Linux or macOS; x86_64 or arm64), the glibc version and the GPU, and picks the archive from the
+   release's `SHA256SUMS`: CUDA build with an NVIDIA GPU, Vulkan build with an AMD or Intel GPU, CPU build without
+   one, Metal build on Apple silicon. On Linux, when the GPU build it chose refuses to start on the machine (step 4's
+   check), it says so and takes the CPU build instead; a build named with `--target` is never replaced.
 2. Downloads `SHA256SUMS` and `SHA256SUMS.sig` and verifies the signature with `openssl` against the release public
    key embedded in the script. It first checks that the embedded key has the published fingerprint
    (`c88aaee70b3c0bf17a994bad44963a6a72359b2e1497df9a15a40ed099aeb72d`). A bad signature stops the install.
@@ -79,8 +85,11 @@ The Linux script needs no `sudo`; the download is 95 MB for the Linux x86_64 bui
    deletes the file and stops the install.
 4. Unpacks to `~/.tenzro/install/versions/<archive>-<hash>/`, refusing paths that would escape that folder and files that
    are not executables for this system, then runs the binary's own hardware check (`tenzro-node hardware`) and, on
-   Linux when `bash`, `file` and `readelf` are present, the archive's install gate in dry-run.
-5. Links `tenzro` and `tenzro-node` into `~/.local/bin`. If that folder is not on your `PATH` it adds it to your
+   Linux when `bash`, `file` and `readelf` are present, the archive's install gate in dry-run. It records the
+   release's version in that folder's `RELEASE` file.
+5. Points `~/.tenzro/install/current` at it, the way `tenzro update` does (a new link renamed over the old one, so
+   `current` always names a release), makes the release it replaces `~/.tenzro/install/previous`, and removes every
+   other release folder. Links `tenzro` and `tenzro-node` into `~/.local/bin`. If that folder is not on your `PATH` it adds it to your
    shell profile (a marked block; so a new terminal finds `tenzro`; no question is asked, `--no-modify-path` opts out, `--uninstall` removes it), and it never overwrites a
    `tenzro` it did not create.
 
@@ -211,9 +220,8 @@ Node Status:
 
 | You want to | Run | Needs |
 |---|---|---|
-| Use the network (wallet, models, payments) | `tenzro setup --path network` | the public network; a browser for the passkey |
 | Provide compute (models, storage) | `tenzro setup --mode provide`, then `tenzro join --provider` | a node on this machine, TNZO for the bond (`tenzro sponsor check`) |
-| Validate | `tenzro setup --mode validate`, then `tenzro setup --apply` | a TPM 2.0 or Secure Enclave, 10,000 TNZO of stake (or a sponsorship) |
+| Validate | `tenzro setup --mode validate`, then `tenzro setup --apply` | a TPM 2.0 or Secure Enclave, or the keys in another machine's TPM through a key holder ([NODE.md](NODE.md#raspberry-pi-and-other-edge-devices)); 10,000 TNZO of stake (or a sponsorship) |
 | Try it on this machine, no network | `tenzro dev` | a TPM 2.0 or a Mac |
 | Build a private network | `tenzro setup --path local --network-name lab` | a TPM 2.0 or a Mac |
 
@@ -224,15 +232,16 @@ To point the CLI at a particular node, most commands take `--rpc <url>` (`join`,
 
 | Situation | What you see | What to do |
 |---|---|---|
-| No TPM (VM, container, many laptops) | installer: "This machine has no TPM 2.0..."; `tenzro-node`/`tenzro dev`/`setup --path local`: "this machine has no TPM 2.0 ... or Secure Enclave" | Use the CLI and join with a passkey (`tenzro setup --path network`); to run a node use a machine with a TPM 2.0, enable fTPM/PTT in firmware, or on a Raspberry Pi hold the key in another machine's TPM (docs/NODE.md) |
+| No TPM (VM, container, many laptops) | installer: "This machine has no TPM 2.0..."; `tenzro-node`/`tenzro dev`/`setup --path local`: "this machine has no TPM 2.0 ... or Secure Enclave" | Use the CLI and join with a passkey (`tenzro setup --path network`); to run a node, validators included, enable fTPM/PTT in firmware, use a machine with a TPM 2.0, or keep this machine's keys in another machine's TPM through the key holder (`tenzro-node tpm key-holder`, `--tpm-key-holder`; limits in docs/NODE.md) |
 | TPM present but not provisioned | `tenzro-node`: "run `tenzro-node tpm provision` as the node user" | `tenzro setup` offers to run it; or run it once yourself |
 | No GPU | installer picks the CPU build; self-check "0 GPU(s)" | nothing; GPU roles need a GPU |
-| NVIDIA GPU, CPU build | installer note: "an NVIDIA GPU is present, but this release's x86_64 Linux build is CPU-only; the GPU is not used" | none today: the published Linux x86_64 build is CPU-only |
+| NVIDIA GPU | installer picks the CUDA build; when the node's own check refuses it (no usable driver), it says so and takes the CPU build | install the NVIDIA driver and install again for the GPU; `--target` names a build and is never replaced |
+| AMD or Intel GPU (Linux) | installer picks the Vulkan build; on a refusal (no Vulkan driver), the CPU build, with a note | install the GPU's Vulkan driver and install again for the GPU |
 | glibc older than 2.39 (Debian 12, Ubuntu 22.04) | "this system's glibc is too old ... needs glibc 2.39 or newer and this machine has 2.36" | Ubuntu 24.04, Debian 13, Fedora 40 or newer, or a container based on one |
 | Alpine (musl) | "this Linux uses musl libc" | use a glibc image |
 | Linux arm64 without an NVIDIA GPU (Raspberry Pi) | installer picks `tenzro-node-linux-aarch64-cpu.tar.gz` on Trixie-class glibc, `tenzro-node-linux-aarch64-cpu-bookworm.tar.gz` on Bookworm-class glibc | both archives install-gate pass; the Bookworm archive also starts correctly under qemu-user emulation of a Cortex-A72 and a Cortex-A76 — see [docs/LINUX-AARCH64-SUPPORT.md](LINUX-AARCH64-SUPPORT.md) |
 | Jetson (NVIDIA GPU, arm64) | installer picks `tenzro-node-linux-aarch64-cuda-orin.tar.gz` on a Jetson Orin device tree, `tenzro-node-linux-aarch64-cuda.tar.gz` on Jetson Thor | both archives install-gate pass on JetPack 7.x; Jetson Orin on JetPack 6.x (Ubuntu 22.04, glibc 2.35, CUDA 12.6) has no archive in 0.2.1 — see [docs/LINUX-AARCH64-SUPPORT.md](LINUX-AARCH64-SUPPORT.md) |
-| Windows without an NVIDIA GPU | installer note that the Windows build is the CUDA build | the CLI is installed; GPU features will not work |
+| Windows | `install.ps1` picks the CUDA build for an NVIDIA GPU, the Vulkan build for an AMD or Intel GPU, the CPU build otherwise; a GPU build the node refuses gives way to the CPU build | to keep a refused GPU build, name it with `-Target`; the CLI works either way |
 
 ### When the public network is unreachable
 
@@ -248,8 +257,9 @@ nothing is listening on `127.0.0.1:8545`. What still works without any network:
 
 - `tenzro version`, `--help`, every command's `--help`; `tenzro-node hardware`; `tenzro crypto verify`.
 - On a machine with a TPM 2.0 or a Secure Enclave: `tenzro dev` (a local chain), `tenzro setup --path local`.
+- On a machine without one: a node whose keys live in another machine's TPM through the key holder (docs/NODE.md); `tenzro dev` itself needs a local TPM or Secure Enclave.
 
-On a machine with neither a TPM nor a network, there is nothing to run yet besides reading the help; that is a limit of the
+On a machine with neither a TPM (its own or another machine's through the key holder) nor a network, there is nothing to run yet besides reading the help; that is a limit of the
 0.2.0 binaries, not of the install.
 
 ### The doctor checklist
@@ -260,7 +270,7 @@ to do next if anything blocks Tenzro. For a manual walk-through, run these in or
 first that fails; each line says what to do.
 
 ```bash
-tenzro version && tenzro-node --version          # tenzro 0.2.1, tenzro-node 0.2.1; if "command not found": export PATH="$HOME/.local/bin:$PATH"
+tenzro version && tenzro-node --version          # tenzro 0.2.2, tenzro-node 0.2.2; if "command not found": export PATH="$HOME/.local/bin:$PATH"
 command -v tenzro                                # should be ~/.local/bin/tenzro (another path = an older copy shadows it)
 tenzro-node hardware                             # build: CPU|CUDA, gpus, startup: ok
 getconf GNU_LIBC_VERSION                         # Linux: 2.39 or newer
@@ -286,11 +296,24 @@ steps that remain. `--no-restart` does the same on any machine.
 
 The same update one step at a time: `tenzro update check`, then `tenzro update apply` (installs, restarts nothing),
 then restart the node, then `tenzro update verify`. `tenzro update rollback` puts the previous release back.
-On Windows `tenzro update` does not replace the running program: it says so and stops. Install a new release with its MSI.
+An update that was interrupted (a dropped connection, a closed terminal, a power cut) is finished by running it again:
+the download continues from the bytes already received, and an install that stopped half-way is completed with the
+same verified files. One update runs at a time on a machine; a second one is refused until the first ends.
+
+On Windows, an install made with `install.ps1` is updated and rolled back the same way: the new release goes beside the
+old one and the `current` junction is switched to it in one step. `install.ps1` switches the junction the same way
+(its target is rewritten in place, never removed and made again) and keeps `current` and `previous` only. `tenzro update` restarts nothing there, because
+`tenzro setup` installs no service on Windows; restart the node task, then run `tenzro update verify`. The supervised
+task in `scripts/launch/units` counts each start against the update, so a release that keeps failing to start is
+rolled back before the next start. An MSI install is not changed by `tenzro update`: install a new release with its MSI.
 
 Running the installer again also updates. It fetches the signed list, and if the archive it lists is already installed
-it downloads nothing; otherwise it installs the new version beside the old one, switches the `current` link and keeps
-the previous version.
+it downloads nothing; otherwise it installs the new version beside the old one, switches `current` and makes the
+release it replaced `previous`, as `tenzro update` does. Exactly those two releases are kept, chosen by the two
+pointers and never by folder dates, so `tenzro update rollback` always finds the previous release.
+
+`tenzro update` refuses a release older than the one installed: it compares with the release `current` names (its
+`RELEASE` file), not with the version of the `tenzro` it runs as.
 
 Remove: `curl -fsSL https://downloads.tenzro.com/install.sh | sh -s -- --uninstall` removes the links, `~/.tenzro/install`
 and the profile block if it added one. It leaves `~/.tenzro` itself (settings, node data) alone.

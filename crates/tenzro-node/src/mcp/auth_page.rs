@@ -1,6 +1,6 @@
 //! HTML template for the OAuth authorization page.
 //! Matches the Tenzro website design language: olive monochromatic OKLCH palette,
-//! Inter font, sharp borders (no radius), minimal and geometric.
+//! System font, sharp borders (no radius), minimal and geometric.
 
 /// What the consent page shows and the passkey ceremony it runs.
 pub struct ConsentPage<'a> {
@@ -35,13 +35,10 @@ pub fn render_authorize_page(page: &ConsentPage<'_>) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Authorize — Tenzro Network</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
-            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+            font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
             background: oklch(0.988 0.001 106.5);
             color: oklch(0.200 0.020 106.5);
             min-height: 100vh;

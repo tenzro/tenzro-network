@@ -28,7 +28,7 @@ use tenzro_types::agent_audit::{ActionKind, ActionOutcome, AuditEntry, SignedAud
 use tenzro_types::evidence_pack::{EvidencePack, ProvenRecord};
 
 use crate::evidence_pack::{VerifyReport, check_record, verify_pack_with, verify_under_root};
-use crate::light_client::GenesisAnchor;
+use tenzro_light::TrustAnchor;
 
 /// Name of the profile this module builds.
 pub const EU_AI_ACT_PROFILE: &str = "eu-ai-act/2024-1689/v1";
@@ -395,7 +395,7 @@ pub fn verify_profile_under_root(
 pub fn verify_profile<F>(
     pack: &EvidencePack,
     profile: &Profile,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     handover_program: Option<[u8; 32]>,
     verify_receipt: F,
 ) -> Result<ProfileReport, String>
@@ -626,6 +626,7 @@ pub(crate) mod fixture {
             commerce: vec![],
             governance: vec![],
             token_actions: vec![],
+            service: vec![],
             receipts: vec![],
             models: vec![],
             jurisdiction: Jurisdiction {

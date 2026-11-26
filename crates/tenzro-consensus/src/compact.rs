@@ -29,9 +29,7 @@ use crate::committee::ValidatorIndex;
 use crate::error::{ConsensusError, Result};
 use crate::vertex::Digest;
 
-pub use crate::compact_certificate::{
-    CompactCertificate, ProofSetups, message_prime, proof_scheme, slot_keys,
-};
+use tenzro_light::compact::{CompactCertificate, ProofSetups, message_prime, slot_keys};
 
 /// Whether the certificate of checkpoint `index` gets a compact form under
 /// `time`: one every [`crate::TimeRules::compact_interval_ms`] of checkpoint
@@ -136,9 +134,29 @@ mod tests {
     use crate::checkpoint::{VoteCollector, VoteOutcome};
     use crate::committee::Committee;
     use crate::committee::test_support::committee;
-    use crate::light_client::LightClient;
     use crate::session::SessionBook;
     use crate::validator_key::test_signer::SoftwareTestSigner;
+    use tenzro_light::{LightClient, TrustAnchor};
+
+    /// A clock under which every test checkpoint is current: these tests are
+    /// about certificates, not freshness.
+    fn any_time() -> tenzro_light::Clock {
+        tenzro_light::Clock {
+            now_ms: 0,
+            max_age_ms: u64::MAX,
+            max_ahead_ms: u64::MAX,
+        }
+    }
+
+    /// The anchor of a light client that trusts `c`, on the test chain.
+    fn anchor(c: &Committee) -> TrustAnchor {
+        TrustAnchor {
+            chain_id: 7,
+            genesis_hash: [1; 32],
+            epoch: c.epoch,
+            committee_root: c.root(),
+        }
+    }
 
     fn certify(
         c: &Committee,
@@ -382,7 +400,7 @@ mod tests {
     fn a_light_client_follows_certificates_across_a_handover() {
         let (c0, s) = committee(4);
         let c1 = Committee::from_members(1, c0.members().to_vec()).unwrap();
-        let mut lc = LightClient::new(7, [1; 32], c0.clone());
+        let mut lc = LightClient::new(&anchor(&c0), c0.members().to_vec()).unwrap();
 
         let mut book0 = SessionBook::new(7, [1; 32], 0);
         let end = crate::checkpoint::Checkpoint {
@@ -390,23 +408,30 @@ mod tests {
             ..checkpoint(5, 1)
         };
         let handover = certify(&c0, &s, &[0, 1, 2], &end, &mut book0);
-        assert!(lc.accept_certificate(&handover).is_err(), "no bundle yet");
         assert!(
-            lc.hand_over(c1.members().to_vec()).is_err(),
-            "no accepted checkpoint ends the epoch"
+            lc.advance(&handover, Vec::new(), &any_time()).is_err(),
+            "no bundle yet"
         );
-        assert_eq!(lc.add_sessions(book0.bundle(&handover.sessions)), 3);
+        assert!(
+            lc.hand_over(&handover, Vec::new(), c1.members().to_vec())
+                .is_err(),
+            "no checkpoint that ends the epoch verifies without its bundle"
+        );
+        let bundle0 = book0.bundle(&handover.sessions);
+        assert_eq!(bundle0.len(), 3);
         let setups = ProofSetups::new();
         let compact = crate::compact::prove(&handover, &ctx(&c0, &book0), &setups).unwrap();
-        lc.accept_compact(&compact).unwrap();
+        lc.advance_compact(&compact, bundle0.clone(), &any_time())
+            .unwrap();
         assert_eq!(lc.latest().map(|c| c.index), Some(5));
 
         // A committee other than the one committed is refused.
         let mut wrong = c1.members().to_vec();
         wrong[0].stake += 1;
-        assert!(lc.hand_over(wrong).is_err());
-        lc.hand_over(c1.members().to_vec()).unwrap();
-        assert_eq!(lc.committee().epoch, 1);
+        assert!(lc.hand_over(&handover, bundle0.clone(), wrong).is_err());
+        lc.hand_over(&handover, bundle0.clone(), c1.members().to_vec())
+            .unwrap();
+        assert_eq!(lc.epoch(), 1);
 
         let mut book1 = SessionBook::new(7, [1; 32], 1);
         let cp1 = crate::checkpoint::Checkpoint {
@@ -415,10 +440,10 @@ mod tests {
         };
         let cert1 = certify(&c1, &s, &[1, 2, 3], &cp1, &mut book1);
         // Epoch 0's certificate no longer counts, and epoch 1's needs its own bundle.
-        assert!(lc.accept_certificate(&handover).is_err());
-        assert!(lc.accept_certificate(&cert1).is_err());
-        lc.add_sessions(book1.bundle(&cert1.sessions));
-        lc.accept_certificate(&cert1).unwrap();
+        assert!(lc.advance(&handover, bundle0, &any_time()).is_err());
+        assert!(lc.advance(&cert1, Vec::new(), &any_time()).is_err());
+        lc.advance(&cert1, book1.bundle(&cert1.sessions), &any_time())
+            .unwrap();
         assert_eq!(lc.latest().map(|c| c.index), Some(9));
     }
 
@@ -459,12 +484,20 @@ mod tests {
             "the proof names its scheme"
         );
 
-        let mut lc = LightClient::new(7, [1; 32], c.clone());
-        assert_eq!(lc.add_sessions(book.bundle(&cert.sessions)), 3);
+        let mut lc = LightClient::new(&anchor(&c), c.members().to_vec()).unwrap();
+        let bundle = book.bundle(&cert.sessions);
+        assert_eq!(bundle.len(), 3);
         let start = std::time::Instant::now();
-        lc.accept_compact(&cc).unwrap();
+        lc.advance_compact(&cc, bundle.clone(), &any_time())
+            .unwrap();
         let verify_ms = start.elapsed().as_millis();
         assert_eq!(lc.latest().map(|c| c.index), Some(3));
+        // A compact certificate moves no committee, and this checkpoint does
+        // not end its epoch: handing over on its quorum certificate fails.
+        assert!(matches!(
+            lc.hand_over(&cert, bundle.clone(), c.members().to_vec()),
+            Err(tenzro_light::LightError::NotEpochEnd)
+        ));
         let raw: usize = cert
             .signatures
             .iter()
@@ -476,24 +509,62 @@ mod tests {
              compact {compact} B, prove {prove_ms} ms, light client verify {verify_ms} ms"
         );
 
-        let fresh = || LightClient::new(7, [1; 32], c.clone());
+        let fresh = || LightClient::new(&anchor(&c), c.members().to_vec()).unwrap();
         let mut renamed = cc.clone();
         renamed.proof[0] = tenzro_cert_stark::Scheme::MlDsa65.id();
         let mut lc2 = fresh();
-        lc2.add_sessions(book.bundle(&cert.sessions));
         assert!(
-            lc2.accept_compact(&renamed).is_err(),
+            lc2.advance_compact(&renamed, bundle.clone(), &any_time())
+                .is_err(),
             "a proof naming the other scheme"
         );
         let mut swapped = cc.clone();
         swapped.p256.swap(0, 2);
         assert!(
-            lc2.accept_compact(&swapped).is_err(),
+            lc2.advance_compact(&swapped, bundle.clone(), &any_time())
+                .is_err(),
             "another signer's ECDSA half"
         );
         let mut changed = cc.clone();
         changed.checkpoint.state_root[0] ^= 1;
-        assert!(lc2.accept_compact(&changed).is_err(), "another checkpoint");
+        assert!(
+            lc2.advance_compact(&changed, bundle, &any_time()).is_err(),
+            "another checkpoint"
+        );
+    }
+
+    /// Two compact certificates, each signed by a quorum, of one checkpoint
+    /// index with different states: the light client keeps both and stops.
+    #[test]
+    fn two_compact_certificates_of_one_index_with_different_states_stop_the_light_client() {
+        let (c, s) = committee(4);
+        let mut book = SessionBook::new(7, [1; 32], 0);
+        let cp = checkpoint(3, 4);
+        let other_cp = Checkpoint {
+            state_root: [0xEE; 32],
+            ..cp.clone()
+        };
+        let cert = certify(&c, &s, &[0, 1, 2], &cp, &mut book);
+        let other = certify(&c, &s, &[1, 2, 3], &other_cp, &mut book);
+        let setups = ProofSetups::new();
+        let a = crate::compact::prove(&cert, &ctx(&c, &book), &setups).unwrap();
+        let b = crate::compact::prove(&other, &ctx(&c, &book), &setups).unwrap();
+        // The session certificates a compact certificate's slots name, as a
+        // node serves them with it.
+        let slots = |cc: &CompactCertificate| {
+            book.bundle(&cc.slots.iter().flatten().copied().collect::<Vec<_>>())
+        };
+        let mut lc = LightClient::new(&anchor(&c), c.members().to_vec()).unwrap();
+        lc.advance_compact(&a, slots(&a), &any_time()).unwrap();
+        assert!(matches!(
+            lc.advance_compact(&b, slots(&b), &any_time()),
+            Err(tenzro_light::LightError::Conflict(_))
+        ));
+        assert!(lc.conflict().is_some());
+        assert!(matches!(
+            lc.advance_compact(&a, slots(&a), &any_time()),
+            Err(tenzro_light::LightError::Stopped)
+        ));
     }
 
     /// A memory line of this process's status (`VmHWM`, `VmRSS`), in MB.
@@ -522,7 +593,7 @@ mod tests {
     /// first half's plus 64 MB, and the peak stays under 2 GB. Prints one
     /// `GATE {json}` line. Run in release with `--ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn soak_compact_certificates_keep_memory_flat() {
         use crate::compact_work::CompactWork;
         use crate::session::{SessionCertificate, SessionKey};
@@ -613,7 +684,7 @@ mod tests {
     /// `TDC_COMPACT_MEMBERS` (default 7). Prints one `GATE {json}` line.
     /// Run in release with `--ignored --nocapture --test-threads 1`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn gate_compact_certificate_cost() {
         let n: usize = std::env::var("TDC_COMPACT_MEMBERS")
             .ok()

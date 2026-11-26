@@ -60,6 +60,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
+use crate::error::VmError;
 use crate::ledger::{
     BlockFees, FEE_POOL_ADDRESS, TxOutcome, execute_checked_in_block, execute_in_block,
 };
@@ -126,6 +127,13 @@ pub(crate) struct WriteSet {
 /// The result is identical to running [`execute_in_block`] over the
 /// transactions one after another: same state, same supply change, same fee
 /// pool, same outcome for every transaction.
+///
+/// Once the block gas limit is in force ([`crate::evm::block_gas_limit`]),
+/// EVM and SVM transactions run in order while the gas such transactions
+/// have used in this block is below it. The one that crosses it completes;
+/// each later one is not run and is reported as
+/// [`VmError::BlockGasLimit`], to run in a later block. The work of a block
+/// is then at most the limit plus one transaction.
 pub async fn execute_block(
     runtime: &MultiVmRuntime,
     state: &mut StateAdapter,
@@ -135,6 +143,8 @@ pub async fn execute_block(
     config: &BlockStmConfig,
 ) -> Vec<BlockTx> {
     let mut out = Vec::with_capacity(txs.len());
+    let gas_limit = crate::evm::block_gas_limit(state);
+    let mut vm_gas_used = 0u64;
     let mut i = 0;
     while i < txs.len() {
         let end = txs[i..]
@@ -162,7 +172,24 @@ pub async fn execute_block(
         // must run alone: in order, on the node adapter.
         let stop = if end > i { end } else { i + 1 };
         for tx in &txs[i..stop] {
+            let alone = !parallel_eligible(tx);
+            if alone
+                && let Some(limit) = gas_limit
+                && vm_gas_used >= limit
+            {
+                out.push(BlockTx {
+                    outcome: TxOutcome::Rejected(VmError::BlockGasLimit { limit }),
+                    reexecutions: 0,
+                });
+                continue;
+            }
             let outcome = execute_in_block(runtime, state, tx, base_fee, fees).await;
+            if alone
+                && let TxOutcome::Applied { result, .. } | TxOutcome::Reverted { result, .. } =
+                    &outcome
+            {
+                vm_gas_used = vm_gas_used.saturating_add(result.gas_used);
+            }
             out.push(BlockTx {
                 outcome,
                 reexecutions: 0,
@@ -840,6 +867,7 @@ mod tests {
             VmType::Tenzro,
             VmConfig::default().chain_id,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 
     fn funded(accounts: u8) -> StateAdapter {
@@ -998,6 +1026,100 @@ mod tests {
 
     /// The same equivalence on a runtime with a single thread, where the
     /// workers cannot hand the calling thread back.
+    /// EVM transfers of 21,000 gas each, from three senders.
+    fn evm_transfers() -> Vec<VmTransaction> {
+        (0..3u8)
+            .map(|i| {
+                let mut tx = transfer(i, 3, 1, 0, BASE_FEE);
+                tx.vm_type = VmType::Evm;
+                tx
+            })
+            .collect()
+    }
+
+    fn applied(out: &[BlockTx]) -> Vec<bool> {
+        out.iter()
+            .map(|t| matches!(t.outcome, TxOutcome::Applied { .. }))
+            .collect()
+    }
+
+    /// While the conformance rules are dormant a block's gas is not limited.
+    #[tokio::test]
+    async fn a_block_runs_every_evm_transaction_while_the_gas_limit_is_dormant() {
+        let runtime = MultiVmRuntime::new(VmConfig::default()).await.unwrap();
+        let mut state = funded(4);
+        // A stored limit alone does nothing: the gate is what turns it on.
+        crate::native::set_governed_param_for_test(
+            &mut state,
+            crate::evm::BLOCK_GAS_LIMIT_PARAM,
+            30_000,
+        );
+        let out = execute_block(
+            &runtime,
+            &mut state,
+            &evm_transfers(),
+            BASE_FEE,
+            &mut BlockFees::default(),
+            &BlockStmConfig::default(),
+        )
+        .await;
+        assert_eq!(applied(&out), [true, true, true]);
+    }
+
+    /// Once live, EVM transactions run while the block has used less than
+    /// the limit: the one that crosses it completes, the next is left
+    /// unrun with its nonce unspent, and it runs in the next block.
+    #[tokio::test]
+    async fn evm_transactions_past_the_block_gas_limit_run_in_the_next_block() {
+        let runtime = MultiVmRuntime::new(VmConfig::default()).await.unwrap();
+        let mut state = funded(4);
+        crate::native::set_governed_param_for_test(&mut state, crate::evm::CONFORMANCE_KEY, 0);
+        crate::native::set_governed_param_for_test(
+            &mut state,
+            crate::evm::BLOCK_GAS_LIMIT_PARAM,
+            30_000,
+        );
+        let txs = evm_transfers();
+        let config = BlockStmConfig::default();
+        let out = execute_block(
+            &runtime,
+            &mut state,
+            &txs,
+            BASE_FEE,
+            &mut BlockFees::default(),
+            &config,
+        )
+        .await;
+        // 21,000 used is below 30,000, so the second runs and crosses it.
+        assert_eq!(applied(&out), [true, true, false]);
+        assert!(matches!(
+            out[2].outcome,
+            TxOutcome::Rejected(VmError::BlockGasLimit { limit: 30_000 })
+        ));
+        assert_eq!(state.get_nonce(&account(2)), 0, "it did not run");
+        assert_eq!(
+            state.get_balance(&account(2)),
+            100 * ONE,
+            "and paid nothing"
+        );
+
+        // A native transaction is not held back by the limit.
+        let native = [transfer(1, 3, 1, 1, BASE_FEE)];
+        let mut block = txs[2..].to_vec();
+        block.extend_from_slice(&native);
+        let next = execute_block(
+            &runtime,
+            &mut state,
+            &block,
+            BASE_FEE,
+            &mut BlockFees::default(),
+            &config,
+        )
+        .await;
+        assert_eq!(applied(&next), [true, true]);
+        assert_eq!(state.get_nonce(&account(2)), 1);
+    }
+
     #[tokio::test]
     async fn parallel_equals_sequential_on_a_current_thread_runtime() {
         let runtime = MultiVmRuntime::new(VmConfig::default()).await.unwrap();

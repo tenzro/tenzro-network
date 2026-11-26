@@ -231,12 +231,92 @@ fn prove_token_actions(
     Ok(out)
 }
 
+/// The service track record the export asks for: each named machine's SLA
+/// verdict for every hour of `epochs`, and each named claim, every one
+/// proven. A machine or claim the pack does not cover is refused.
+fn prove_service(
+    trie: &StateTrie,
+    height: u64,
+    chain: &dyn tenzro_vm::traits::VmState,
+    params: &Value,
+    covers: &(dyn Fn(&str) -> bool + Send),
+) -> Result<Vec<ProvenRecord>, JsonRpcError> {
+    let strings = |key: &str| -> Result<Vec<String>, JsonRpcError> {
+        params
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or(Some(Vec::new()))
+            .ok_or_else(|| err(-32602, format!("{key} is a list of strings")))
+    };
+    let providers = strings("providers")?;
+    let claims = strings("claims")?;
+    let mut out = Vec::new();
+    if !providers.is_empty() {
+        let [first, last] = params
+            .get("epochs")
+            .and_then(|v| serde_json::from_value::<[u64; 2]>(v.clone()).ok())
+            .filter(|[a, b]| a <= b)
+            .ok_or_else(|| err(-32602, "epochs is [first, last] with first <= last"))?;
+        let hours = (last - first).saturating_add(1);
+        if hours.saturating_mul(providers.len() as u64) > MAX_SECTION_ITEMS as u64 {
+            return Err(err(
+                -32602,
+                format!("a pack carries at most {MAX_SECTION_ITEMS} verdicts"),
+            ));
+        }
+        for p in &providers {
+            if !covers(p) {
+                return Err(err(-32602, format!("{p} is not covered by this pack")));
+            }
+            for epoch in first..=last {
+                out.push(prove(
+                    trie,
+                    height,
+                    "sla_verdict",
+                    &format!("{epoch}:{p}"),
+                    tenzro_vm::native::sla_verdict_key(p, epoch),
+                )?);
+            }
+        }
+    }
+    if claims.len() > MAX_SECTION_ITEMS {
+        return Err(err(
+            -32602,
+            format!("a pack carries at most {MAX_SECTION_ITEMS} claims"),
+        ));
+    }
+    for id in &claims {
+        let claim = tenzro_vm::native::compute_claim::read_claim(chain, id)
+            .ok_or_else(|| err(-32004, format!("no claim {id} at height {height}")))?;
+        if !covers(&claim.provider_did) {
+            return Err(err(
+                -32602,
+                format!(
+                    "claim {id} is delivered by {}, which this pack does not cover",
+                    claim.provider_did
+                ),
+            ));
+        }
+        out.push(prove(
+            trie,
+            height,
+            "claim",
+            id,
+            tenzro_vm::native::compute_claim::claim_key(id),
+        )?);
+    }
+    Ok(out)
+}
+
 /// `tenzro_exportEvidencePack { agent_did } | { root_did }`, optionally
 /// `audit` (entry proofs from the agents' recorder), `receipts` (their
 /// signed session receipts), `agents` (the root's agents to cover) and
 /// `payments` (pay_refs of the covered agents' payments), `proposals`
 /// (governance decisions touching the subject), `tokens` (tokens whose
-/// issuer actions to prove).
+/// issuer actions to prove), `providers` with `epochs` `[first, last]` (the
+/// covered bonded machines whose hourly SLA verdicts to prove) and `claims`
+/// (ids of compute or storage claims a covered machine delivers).
 pub(crate) async fn handle_export(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -255,11 +335,11 @@ pub(crate) async fn handle_export(
         (Some(a), None) => (a.clone(), Box::new(move |d: &str| d == a)),
         (None, Some(r)) => (
             r.clone(),
-            Box::new(move |d: &str| tenzro_vm::funding::root_did(d) == r),
+            Box::new(move |d: &str| d == r || tenzro_types::identity::is_delegated_under(d, &r)),
         ),
         _ => return Err(err(-32602, "give exactly one of 'agent_did' or 'root_did'")),
     };
-    let controller = tenzro_vm::funding::root_did(&subject);
+    let controller = crate::agent_audit::controller_of(node, &subject);
     crate::agent_audit::may_read(node, auth_ctx, Some(&controller)).await?;
     let mut audit: Vec<AuditProof> = match params.get("audit") {
         Some(v) => {
@@ -458,6 +538,7 @@ pub(crate) async fn handle_export(
     }
     let governance = prove_governance(&trie, height, &chain, &params)?;
     let token_actions = prove_token_actions(&trie, height, &params)?;
+    let service = prove_service(&trie, height, &chain, &params, &*covers)?;
     let mut actions = Vec::new();
     let mut models = BTreeSet::new();
     for p in &audit {
@@ -475,7 +556,9 @@ pub(crate) async fn handle_export(
     let models = models
         .into_iter()
         .map(|model| ModelProvenance {
-            files: tenzro_model::catalog::entry(&model)
+            files: node
+                .catalog()
+                .entry(&model)
                 .map(|e| {
                     e.components
                         .iter()
@@ -502,6 +585,7 @@ pub(crate) async fn handle_export(
         commerce,
         governance,
         token_actions,
+        service,
         receipts,
         models,
         jurisdiction: Jurisdiction {
@@ -512,4 +596,23 @@ pub(crate) async fn handle_export(
     };
     pack.manifest = pack.build_manifest();
     serde_json::to_value(pack).map_err(|e| err(-32603, e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The slots the export proves are the ones the offline verifier
+    /// reconstructs from a record's subject.
+    #[test]
+    fn service_slots_are_the_chains_own_keys() {
+        use tenzro_types::evidence_pack::{claim_slot, sla_verdict_slot};
+        let machine = "did:tenzro:machine:aa:m1";
+        assert_eq!(
+            tenzro_vm::native::sla_verdict_key(machine, 7),
+            sla_verdict_slot(machine, 7)
+        );
+        assert_eq!(
+            tenzro_vm::native::compute_claim::claim_key("c1"),
+            claim_slot("c1")
+        );
+    }
 }

@@ -32,8 +32,7 @@
 //! `eip155:8453/erc20:0x833589f...` is unambiguous, and it is what the payee's
 //! preference is keyed on.
 //!
-//! This module decides *what asset settles*. Who receives it is
-//! [`crate::revenue_split`].
+//! This module decides *what asset settles*; the payee receives it.
 
 use std::collections::HashMap;
 

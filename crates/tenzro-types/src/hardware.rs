@@ -1,7 +1,7 @@
 //! Hardware capability descriptors used across the Tenzro stack.
 //!
 //! Both `tenzro-network` (for `ProviderAnnouncementMessage`) and `tenzro-model`
-//! (for `ModelProvisioner`) need to describe the hardware envelope of a node.
+//! need to describe the hardware envelope of a node.
 //! Lifting the type into `tenzro-types` keeps the dependency graph acyclic
 //! (`tenzro-network -> tenzro-types`, `tenzro-model -> tenzro-network -> tenzro-types`).
 //!
@@ -190,8 +190,7 @@ pub enum Interconnect {
 
 /// Hardware capabilities advertised by a provider node.
 ///
-/// Used both as a local provisioning input (in `tenzro-model::ModelProvisioner`)
-/// and as part of the gossiped `ProviderAnnouncementMessage` payload so that
+/// Carried in the gossiped `ProviderAnnouncementMessage` payload so that
 /// consumers can route inference / TEE work by available memory, GPU presence,
 /// and CPU shape without an extra round-trip RPC.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

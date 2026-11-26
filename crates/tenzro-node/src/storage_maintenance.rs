@@ -37,9 +37,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tenzro_consensus::Checkpoint;
 use tenzro_consensus::committee::Committee;
-use tenzro_consensus::light_client::{
-    Certification, CheckpointProof, EpochHandover, GenesisAnchor, HandoverChainJournal,
-    HandoverChainProof,
+use tenzro_light::TrustAnchor;
+use tenzro_light::light_client::{
+    Certification, CheckpointProof, EpochHandover, HandoverChainJournal, HandoverChainProof,
 };
 use tenzro_model::memory_budget::{MemoryBudget, Tier};
 use tenzro_storage::backup::{self, BackupReport, SnapshotDir};
@@ -66,8 +66,22 @@ pub const DISK_SUBSYSTEM: &str = "disk";
 /// How often the maintenance pass runs.
 const TICK: Duration = Duration::from_secs(60);
 /// Checkpoints whose compact and stride certificates a node keeps however
-/// slowly its history ages: a week at the public network's 500 ms spacing.
-pub const CERTIFICATE_WINDOW_CHECKPOINTS: u64 = 1_209_600;
+/// slowly its history ages, unless its `[storage]` section says otherwise: a
+/// week at the public network's 500 ms spacing.
+pub const DEFAULT_CERTIFICATE_WINDOW_CHECKPOINTS: u64 = 1_209_600;
+
+/// The shortest certificate window a node may set: a day at the public
+/// network's 500 ms spacing, so a joiner or light client catching up from
+/// this node within a day finds every certificate it needs. A shorter one,
+/// zero above all, would drop certificates peers still ask for.
+pub const MIN_CERTIFICATE_WINDOW_CHECKPOINTS: u64 = 172_800;
+
+/// The checkpoint index below which certificates are dropped: those of
+/// checkpoints whose blocks have left (`history_floor`), and those more than
+/// `window` checkpoints behind `latest`, whichever is higher.
+pub fn certificate_floor(history_floor: u64, latest: u64, window: u64) -> u64 {
+    history_floor.max(latest.saturating_sub(window))
+}
 /// Shortest spacing between full compactions under disk pressure.
 /// Where a prover drops its newest proof of the handover chain (a
 /// [`HandoverChainProof`], bincode) under the proof log's directory, for the
@@ -78,6 +92,17 @@ pub const INCOMING_CHAIN_PROOF: &str = "incoming-chain.bin";
 /// proof covers: the epoch manager reads the newest epochs at start, and a
 /// peer catching up is served recent handovers.
 pub const EPOCH_RECORDS_KEPT: u64 = 12;
+
+/// The epoch below which epoch records may go: the lowest of the epoch the
+/// chain proof reaches, the epochs in the proof log, the first epoch with an
+/// unarchived checkpoint, and [`EPOCH_RECORDS_KEPT`] behind `current`. A
+/// record the chain proof does not cover is never below it.
+fn records_floor(chain: u64, logged: u64, archived: u64, current: u64) -> u64 {
+    chain
+        .min(logged)
+        .min(archived)
+        .min(current.saturating_sub(EPOCH_RECORDS_KEPT))
+}
 
 /// Segments (of up to 4,096 blocks each) one pass hands over while the
 /// volume has room.
@@ -195,6 +220,11 @@ pub struct StoragePolicy {
     /// `history_budget_bytes` is unset, percent; 0 turns the byte budget
     /// off.
     pub history_budget_pct: u8,
+    /// Checkpoints behind the latest whose compact and stride certificates
+    /// the node keeps even when its history reaches back further. A node on
+    /// a small disk lowers it; certificates of checkpoints whose blocks have
+    /// left are dropped whatever it says.
+    pub certificate_window_checkpoints: u64,
 }
 
 impl Default for StoragePolicy {
@@ -210,11 +240,24 @@ impl Default for StoragePolicy {
             archival: false,
             history_budget_bytes: None,
             history_budget_pct: DEFAULT_HISTORY_BUDGET_PCT,
+            certificate_window_checkpoints: DEFAULT_CERTIFICATE_WINDOW_CHECKPOINTS,
         }
     }
 }
 
 impl StoragePolicy {
+    /// Refuses settings the node cannot run with.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.certificate_window_checkpoints < MIN_CERTIFICATE_WINDOW_CHECKPOINTS {
+            return Err(format!(
+                "certificate_window_checkpoints is {}; it is at least {MIN_CERTIFICATE_WINDOW_CHECKPOINTS} \
+                 (a day of checkpoints), or peers catching up from this node miss certificates",
+                self.certificate_window_checkpoints
+            ));
+        }
+        Ok(())
+    }
+
     /// The history budget on a volume of `volume_bytes`; `None` when off.
     pub fn history_budget(&self, volume_bytes: u64) -> Option<u64> {
         match (self.history_budget_bytes, self.history_budget_pct) {
@@ -471,7 +514,7 @@ impl StorageMaintenance {
             last_compaction: None,
             data_dir: data_dir.to_path_buf(),
             ladder: Ladder::new(policy.ladder.clone()),
-            growth: GrowthTracker::new(policy.ladder.growth_window_blocks),
+            growth: GrowthTracker::new(policy.ladder.growth_window_hours),
             level: Level::Ok,
             ballast_released: false,
             history_dirty: false,
@@ -555,11 +598,15 @@ impl StorageMaintenance {
     /// Reads the data volume, the host and the growth at `height`.
     pub fn measure(&mut self, height: u64) -> std::io::Result<Reading> {
         let volume = resources::volume_stats(&self.data_dir)?;
-        self.growth.record(height, self.data_bytes());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        self.growth.record(height, self.data_bytes(), now_ms);
         Ok(Reading {
             volume,
             host: resources::host_pressure(),
             bytes_per_block: self.growth.bytes_per_block(),
+            bytes_per_hour: self.growth.bytes_per_hour(),
         })
     }
 
@@ -719,10 +766,11 @@ impl StorageMaintenance {
                 let latest = consensus
                     .latest_certificate()
                     .map_or(0, |c| c.checkpoint.index);
-                let below = archive
-                    .next_checkpoint()
-                    .unwrap_or(0)
-                    .max(latest.saturating_sub(CERTIFICATE_WINDOW_CHECKPOINTS));
+                let below = certificate_floor(
+                    archive.next_checkpoint().unwrap_or(0),
+                    latest,
+                    self.policy.certificate_window_checkpoints,
+                );
                 let dropped = consensus.prune_certificates_below(below);
                 if dropped > 0 {
                     info!(
@@ -906,8 +954,8 @@ impl StorageMaintenance {
         let state = tenzro_vm::StateAdapter::with_storage(self.storage.clone() as Arc<dyn KvStore>);
         let program = tenzro_vm::native::read_handover_program(&state)
             .ok_or_else(|| refuse("the chain names no handover program".into()))?;
-        let proof: HandoverChainProof =
-            bincode::deserialize(bytes).map_err(|e| refuse(format!("it does not decode: {e}")))?;
+        let proof: HandoverChainProof = tenzro_network::wire::decode_bounded(bytes, bytes.len())
+            .map_err(|e| refuse(format!("it does not decode: {e}")))?;
         let journal = tenzro_zk::handover_chain::verify_receipt(&program, &proof.receipt)
             .map_err(|e| refuse(format!("its receipt does not verify: {e}")))?;
         let journal = HandoverChainJournal::decode(&journal)
@@ -975,10 +1023,7 @@ impl StorageMaintenance {
         } else {
             consensus.checkpoint(next).map_or(0, |cp| cp.epoch)
         };
-        chain
-            .min(logged)
-            .min(archived)
-            .min(latest.epoch.saturating_sub(EPOCH_RECORDS_KEPT))
+        records_floor(chain, logged, archived, latest.epoch)
     }
 
     fn retention_blocks(&self) -> u64 {
@@ -1003,13 +1048,20 @@ impl StorageMaintenance {
         resources::headroom(&volume, need, &self.policy.ladder)
             .map_err(|short| NodeError::Other(format!("epoch snapshot not started: {short}")))?;
         if let (Some(consensus), Some(log)) = (self.consensus.as_ref(), self.proof_log.as_ref()) {
-            let missing = || {
-                NodeError::Other(format!(
-                    "no proof from genesis is kept for checkpoint {}",
-                    cp.index
-                ))
+            // What this node does not hold, named: a node that joined after
+            // genesis holds neither the genesis committee nor the early
+            // handovers its proof from genesis is made of.
+            let missing = |what: String| {
+                move || {
+                    NodeError::Other(format!(
+                        "no proof from genesis is kept for checkpoint {}: {what}",
+                        cp.index
+                    ))
+                }
             };
-            let certificate = consensus.certificate(cp.index).ok_or_else(missing)?;
+            let certificate = consensus
+                .certificate(cp.index)
+                .ok_or_else(missing("no certificate for it".to_string()))?;
             let sessions = consensus.session_bundle(&certificate);
             let mut log = log.lock();
             // Past a chain proof the genesis committee is not part of the
@@ -1018,14 +1070,16 @@ impl StorageMaintenance {
                 Some(_) => Vec::new(),
                 None => consensus
                     .committee_of(0)
-                    .ok_or_else(missing)?
+                    .ok_or_else(missing("the genesis committee is not held".into()))?
                     .members()
                     .to_vec(),
             };
             while log.count() < cp.epoch {
-                let (certificate, sessions, next) =
-                    consensus.handover(log.count()).ok_or_else(missing)?;
-                log.append(&tenzro_consensus::light_client::EpochHandover {
+                let epoch = log.count();
+                let (certificate, sessions, next) = consensus.handover(epoch).ok_or_else(
+                    missing(format!("the handover of epoch {epoch} is not held")),
+                )?;
+                log.append(&tenzro_light::light_client::EpochHandover {
                     certificate,
                     sessions,
                     next_members: next.members().to_vec(),
@@ -1154,11 +1208,11 @@ pub fn backup_latest(data_dir: &Path, dest: &Path, bytes_per_sec: u64) -> Result
 pub fn decode_proof(bytes: &[u8]) -> Result<Certification> {
     let tag = crate::proof_log::CHAINED_PROOF_TAG;
     if let Some(rest) = bytes.strip_prefix(tag.as_slice()) {
-        bincode::deserialize(rest)
+        tenzro_network::wire::decode_bounded(rest, rest.len())
             .map(Certification::Chained)
             .map_err(|e| NodeError::Other(format!("chained checkpoint proof: {e}")))
     } else {
-        bincode::deserialize(bytes)
+        tenzro_network::wire::decode_bounded(bytes, bytes.len())
             .map(Certification::FromGenesis)
             .map_err(|e| NodeError::Other(format!("checkpoint proof: {e}")))
     }
@@ -1179,7 +1233,7 @@ pub fn snapshot_proof(snapshot: &Path) -> Result<Certification> {
 pub fn restore(
     snapshot: &Path,
     data_dir: &Path,
-    anchor: &GenesisAnchor,
+    anchor: &TrustAnchor,
     proof: Option<Certification>,
     handover_program: Option<[u8; 32]>,
 ) -> Result<Checkpoint> {
@@ -1250,7 +1304,7 @@ pub async fn fetch_certification(peer: &str, epoch: u64, index: u64) -> Result<C
             .ok_or_else(|| NodeError::Other(format!("peer reply has no {name}")))?;
         let bytes = hex::decode(hex_str.trim_start_matches("0x"))
             .map_err(|e| NodeError::Other(format!("peer {name} is not hex: {e}")))?;
-        bincode::deserialize(&bytes)
+        tenzro_network::wire::decode_bounded(&bytes, bytes.len())
             .map_err(|e| NodeError::Other(format!("peer {name} does not decode: {e}")))
     }
     let segment = fetch_segment(peer, Some(epoch)).await?;
@@ -1372,7 +1426,8 @@ mod tests {
     fn restore_refuses_an_uncertified_snapshot() {
         let tmp = tempfile::tempdir().unwrap();
         let (snap, cp) = snapshotted(tmp.path());
-        let anchor = GenesisAnchor {
+        let anchor = TrustAnchor {
+            epoch: 0,
             chain_id: cp.chain_id,
             genesis_hash: cp.genesis_hash,
             committee_root: [4; 32],
@@ -1619,11 +1674,12 @@ mod tests {
         (m, guard)
     }
 
-    fn volume_reading(total_gib: u64, free_gib: u64, per_block: Option<f64>) -> Reading {
+    fn volume_reading(total_gib: u64, free_gib: u64, per_hour: Option<f64>) -> Reading {
         Reading {
             volume: VolumeStats::of(total_gib * resources::GIB, free_gib * resources::GIB),
             host: Default::default(),
-            bytes_per_block: per_block,
+            bytes_per_block: None,
+            bytes_per_hour: per_hour,
         }
     }
 
@@ -1632,20 +1688,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (mut m, guard) = maintenance(tmp.path(), 0);
         // 500 of 1000 GiB free: 50 percent, no level near by size.
-        m.pass_with(volume_reading(1000, 500, Some(1_000.0)), 50)
+        m.pass_with(volume_reading(1000, 500, Some(1_000_000.0)), 50)
             .await;
         assert_eq!(guard.level(), Level::Ok);
-        // 230 KB a block leaves about 2.3 million blocks: the first level.
-        m.pass_with(volume_reading(1000, 500, Some(230_000.0)), 50)
+        // 2 GB an hour leaves about 268 hours: the first level.
+        m.pass_with(volume_reading(1000, 500, Some(2_000_000_000.0)), 50)
             .await;
         assert_eq!(guard.level(), Level::Warn);
         let status = guard.status();
         assert_eq!(status.pressure, DiskPressure::Normal);
         let a = status.assessment.expect("an assessment is reported");
-        assert!(a.runway_blocks.unwrap() < 3_000_000);
+        assert!(a.runway_hours.unwrap() < 480);
         assert!(a.summary.contains("runway"));
-        // 4 MB a block leaves 130,000 blocks: refusing, at 50 percent used.
-        m.pass_with(volume_reading(1000, 500, Some(4_000_000.0)), 50)
+        // 40 GB an hour leaves 13 hours: refusing, at 50 percent used.
+        m.pass_with(volume_reading(1000, 500, Some(40_000_000_000.0)), 50)
             .await;
         assert_eq!(guard.level(), Level::Refuse);
         assert!(guard.refuse(Action::Snapshot, "epoch snapshot").is_some());
@@ -1763,6 +1819,40 @@ mod tests {
         assert_eq!(budget_floor(5, 1, 500, 100, 10), None, "nothing held");
     }
 
+    /// Certificates go below the history floor, and below the window behind
+    /// the latest checkpoint; a node that sets a shorter window keeps fewer.
+    #[test]
+    fn certificates_are_kept_for_the_configured_window() {
+        let window = StoragePolicy::default().certificate_window_checkpoints;
+        assert_eq!(window, DEFAULT_CERTIFICATE_WINDOW_CHECKPOINTS);
+        // History reaches back further than the window: the window decides.
+        assert_eq!(certificate_floor(10, window + 500, window), 500);
+        // The blocks left first: the history floor decides.
+        assert_eq!(certificate_floor(900, window + 500, window), 900);
+        // Fewer checkpoints than the window: nothing beyond the floor goes.
+        assert_eq!(certificate_floor(0, 100, window), 0);
+
+        let small: StoragePolicy =
+            toml::from_str("certificate_window_checkpoints = 200000").unwrap();
+        small.validate().unwrap();
+        assert_eq!(small.certificate_window_checkpoints, 200_000);
+        assert_eq!(certificate_floor(10, 300_000, 200_000), 100_000);
+        assert_eq!(
+            small.history_budget_pct,
+            StoragePolicy::default().history_budget_pct
+        );
+        StoragePolicy::default().validate().unwrap();
+
+        // A window under a day of checkpoints, zero above all, is refused.
+        for too_short in [0, 1_000, MIN_CERTIFICATE_WINDOW_CHECKPOINTS - 1] {
+            let policy = StoragePolicy {
+                certificate_window_checkpoints: too_short,
+                ..StoragePolicy::default()
+            };
+            assert!(policy.validate().is_err(), "{too_short}");
+        }
+    }
+
     #[test]
     fn the_history_budget_is_a_share_of_the_volume_unless_set() {
         let p = StoragePolicy::default();
@@ -1810,5 +1900,19 @@ mod tests {
             .map(|c| c.sst_files)
             .sum();
         assert!(held > state_only);
+    }
+
+    #[test]
+    fn records_the_chain_proof_does_not_cover_are_kept_whatever_else_allows() {
+        // Archived far ahead and the log far ahead: the proof decides.
+        assert_eq!(records_floor(5, 100, 100, 100), 5);
+        // No chain proof installed: nothing goes.
+        assert_eq!(records_floor(0, 100, 100, 100), 0);
+        // Covered by the proof but not yet archived or logged: kept too.
+        assert_eq!(records_floor(50, 30, 100, 100), 30);
+        assert_eq!(records_floor(50, 100, 20, 100), 20);
+        // The newest epochs stay whatever covers them.
+        assert_eq!(records_floor(100, 100, 100, 100), 100 - EPOCH_RECORDS_KEPT);
+        assert_eq!(records_floor(100, 100, 100, 5), 0);
     }
 }

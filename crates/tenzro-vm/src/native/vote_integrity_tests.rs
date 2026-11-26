@@ -565,3 +565,62 @@ async fn two_thirds_of_stake_cannot_loosen_a_safety_bound_but_can_tighten_it() {
         }
     }
 }
+
+/// Once the root cap is live, the ballots of one root's validators count
+/// together at most the governed share of the eligible stake; before it each
+/// counts its whole bond.
+#[tokio::test]
+async fn one_roots_validators_count_together_at_most_the_root_cap_once_live() {
+    for live in [false, true] {
+        let executor = NativeExecutor::new(VmConfig::default()).unwrap();
+        let mut state = StateAdapter::new();
+        let (first, operator) = operated_validator(&mut state, 0x10);
+        let second = vec![0x55u8; 32];
+        staking::add_bond(
+            &mut state,
+            &second,
+            STAKE,
+            -crate::governance::MIN_BOND_AGE_MS,
+        )
+        .unwrap();
+        let vault = state.get_balance(&STAKING_VAULT_ADDRESS);
+        state.set_balance(&STAKING_VAULT_ADDRESS, vault + STAKE);
+        bind(&mut state, &second, "did:tenzro:machine:op16:second");
+        let third = vec![0x56u8; 32];
+        staking::add_bond(
+            &mut state,
+            &third,
+            STAKE,
+            -crate::governance::MIN_BOND_AGE_MS,
+        )
+        .unwrap();
+        let vault = state.get_balance(&STAKING_VAULT_ADDRESS);
+        state.set_balance(&STAKING_VAULT_ADDRESS, vault + STAKE);
+        bind(&mut state, &third, "did:tenzro:machine:op16:third");
+        operated_validator(&mut state, 0x20);
+        set_genesis_param(&mut state, ROOT_VOTE_CAP_PARAM, 4_000);
+        if live {
+            set_genesis_param(&mut state, ROOT_VOTE_CAP_GATE, 0);
+        }
+        let id = open(&executor, &mut state, &first, 0).await;
+
+        ballot(&executor, &mut state, &operator, &id, &first, 10)
+            .await
+            .expect("first ballot");
+        ballot(&executor, &mut state, &operator, &id, &second, 10)
+            .await
+            .expect("second ballot");
+        let yes = load_tally(&state, &hex::encode(&id)).yes;
+        if live {
+            // 40% of four bonds: the first counts whole, the second the rest.
+            assert_eq!(yes, 4 * STAKE * 4 / 10);
+            // A third ballot from the root counts nothing and is refused.
+            let err = ballot(&executor, &mut state, &operator, &id, &third, 20)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("the most one root may"), "{err}");
+        } else {
+            assert_eq!(yes, 2 * STAKE);
+        }
+    }
+}

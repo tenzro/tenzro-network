@@ -859,6 +859,15 @@ pub enum RailKind {
     Iso20022,
     /// A card capture through a payment processor.
     Card,
+    /// A mobile money transfer through the operator's API (an M-Pesa Daraja
+    /// payment, for example), confirmed by the payee or by the bonded
+    /// attestor that connected it.
+    MobileMoney,
+    /// An account-to-account payment a payment initiation service started
+    /// from the payer's bank account (a PISP under open banking, a Pix
+    /// initiator), confirmed by the payee or by the bonded attestor that
+    /// connected it.
+    PaymentInitiation,
 }
 
 /// Witness script of a [`LegKind::HashLocked`] leg, paid to as P2WSH:

@@ -72,6 +72,52 @@ fn the_defaults_keep_every_invariant() {
 }
 
 #[test]
+fn a_governed_proposal_raises_the_treasury_legs_mid_run_and_the_floor_still_holds() {
+    // Governance can raise the treasury legs after launch, not only set
+    // them as genesis parameters: Assumptions::leg_proposal_bps files the
+    // same ParameterChange Settings::new bakes in at genesis, through the
+    // normal propose, vote, timelock, enact path, once per leg.
+    fn bare_at_zero() -> Settings {
+        let mut s = Settings::new(YEARS);
+        for key in [
+            "fees.treasury_leg_inference_bps",
+            "fees.treasury_leg_compute_bps",
+        ] {
+            s.base.network_params.insert(key.into(), 0);
+        }
+        s
+    }
+    let without_proposal = chaos::run_seed(1, &bare_at_zero());
+    let mut governed = bare_at_zero();
+    governed.base.assumptions.leg_proposal_bps = chaos::TREASURY_LEG_BPS as f64;
+    governed.base.assumptions.leg_proposal_day = 1.0;
+    // Raising a leg is a tightening change, so it is held for
+    // governance.tightening_grace_epochs (genesis 168, i.e. 168 days, one
+    // epoch per day) before it actually takes effect -- real, intentional
+    // advance notice, not a defect. A 90-day run cannot observe it land at
+    // the real default, so this test fast-forwards the notice period to
+    // exercise the propose -> schedule -> activate -> floor-holds path
+    // deterministically; it does not change the real governed default.
+    governed
+        .base
+        .network_params
+        .insert("governance.tightening_grace_epochs".into(), 1);
+    let with_proposal = chaos::run_seed(1, &governed);
+
+    assert!(
+        without_proposal
+            .broken
+            .contains(&"validator_floor".to_string()),
+        "{without_proposal:?}"
+    );
+    assert!(with_proposal.pass, "{with_proposal:?}");
+    assert_eq!(
+        with_proposal.floor_first_miss_day, None,
+        "{with_proposal:?}"
+    );
+}
+
+#[test]
 fn a_sweep_cell_runs_the_same_on_any_thread_count() {
     let base = Settings::new(0.1);
     let picks = [chaos::sweep_cells()[0].clone(), chaos::Cell::central()];
@@ -145,4 +191,39 @@ fn sponsorship_comes_from_the_treasury_within_the_usd_caps_and_mints_nothing() {
     assert_eq!(r.burned_fell_days, 0, "{r:?}");
     let off = chaos::run_seed(1, &s.without_sponsorship());
     assert!(r.supply_max_tnzo <= off.supply_max_tnzo, "{r:?} {off:?}");
+}
+
+/// With the treasury leg taken in the stable asset, a higher leg keeps the
+/// validator floor at least as long as a lower one on the same seed: a leg
+/// that funds the floor cannot lose it sooner by being larger. Taken in
+/// TNZO instead, the leg is bought from the outside float, and that run is
+/// reported beside it so the two can be compared.
+#[test]
+fn a_higher_stable_leg_never_loses_the_floor_sooner() {
+    let run = |leg: u64, stable: bool| {
+        let mut s = Settings::new(YEARS);
+        for key in [
+            "fees.treasury_leg_inference_bps",
+            "fees.treasury_leg_compute_bps",
+        ] {
+            s.base.network_params.insert(key.into(), leg);
+        }
+        s.base.assumptions.stable_leg = stable;
+        chaos::run_seed(1, &s)
+    };
+    let held = |r: &chaos::SeedResult| r.floor_first_miss_day.unwrap_or(u32::MAX);
+    let mut last = 0;
+    for leg in [1_000, 2_500, 5_000] {
+        let stable = run(leg, true);
+        let tnzo = run(leg, false);
+        println!(
+            "leg {leg}: stable floor {:?} validators_min {}; tnzo floor {:?} validators_min {}",
+            stable.floor_first_miss_day,
+            stable.validators_min,
+            tnzo.floor_first_miss_day,
+            tnzo.validators_min
+        );
+        assert!(held(&stable) >= last, "leg {leg}: {stable:?}");
+        last = held(&stable);
+    }
 }

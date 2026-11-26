@@ -27,6 +27,36 @@ fn kinds(r: &Report) -> Vec<&'static str> {
     r.violations.iter().map(|v| v.kind).collect()
 }
 
+/// The commit path counted in message delays: with one-way latency fixed
+/// at 100 ms a healthy committee orders within a few delays, a member that
+/// sends nothing or sits behind slow links breaks no invariant, and the
+/// slow links are what the profile says they are.
+#[test]
+fn the_delay_profiles_run_clean_and_order_within_a_few_delays() {
+    let slow = SimConfig::profile("delays-slow-link", 3).expect("profile");
+    assert_eq!(slow.faults.slow_links, vec![(6, 5)]);
+    for profile in ["delays", "delays-slow-link", "delays-mute"] {
+        let mut c = SimConfig::profile(profile, 3).expect("profile");
+        c.max_sim_ms = 40_000;
+        let r = run(c);
+        assert!(kinds(&r).is_empty(), "{profile}: {:?}", kinds(&r));
+        let mut ordered = r.ordered_ms.clone();
+        ordered.sort_by(f64::total_cmp);
+        let samples = ordered.len();
+        assert!(samples > 0, "{profile}: nothing ordered after warm-up");
+        let (p50, p99) = (ordered[samples / 2], ordered[samples * 99 / 100]);
+        println!(
+            "{profile}: ordered p50 {:.1} delays, p99 {:.1} delays ({samples} samples)",
+            p50 / 100.0,
+            p99 / 100.0
+        );
+        assert!(
+            p50 >= 200.0,
+            "{profile}: ordered in under two delays ({p50} ms)"
+        );
+    }
+}
+
 #[test]
 fn a_run_replays_exactly_from_its_seed() {
     let a = run(short("ci", 11, 2.0));
@@ -49,6 +79,9 @@ fn a_run_replays_exactly_from_its_seed() {
     );
     assert_eq!(kinds(&a), kinds(&b));
     assert!(a.height > 0, "the chain grew");
+    assert_eq!(a.state_root.len(), 64);
+    assert_eq!(a.state_root, b.state_root);
+    assert_ne!(a.state_root, run(short("ci", 12, 2.0)).state_root);
 }
 
 #[test]
@@ -63,6 +96,28 @@ fn a_healthy_network_holds_every_invariant_across_epochs() {
     );
     assert!(r.ledger.fees_collected > 0, "fees flowed");
     assert!(r.max_commit_gap_ms < 30_000);
+}
+
+/// Connections between healthy validators close many times an hour and are
+/// dialled again, with frames lost and reordered meanwhile: the network
+/// keeps every invariant, and the same seed replays the same closures.
+#[test]
+fn closed_connections_lost_and_reordered_frames_keep_every_invariant() {
+    let lossy = |seed| {
+        let mut c = quiet(seed, 3.0);
+        c.faults.link_drops_per_hour = 7_200.0;
+        c.faults.frame_loss = 0.01;
+        c
+    };
+    let r = run(lossy(17));
+    assert!(r.passed, "violations: {:#?}", r.violations);
+    assert!(
+        r.faults.link_drops > 10,
+        "link drops {}",
+        r.faults.link_drops
+    );
+    assert!(r.epochs >= 2, "epochs {}", r.epochs);
+    assert_eq!(run(lossy(17)).faults.link_drops, r.faults.link_drops);
 }
 
 /// TNZO supply is fixed at genesis. Across fees and their burn, epoch
@@ -299,4 +354,107 @@ fn a_validator_completes_an_epoch_whose_closing_checkpoint_never_certified() {
         let r = run(SimConfig::profile("swarm", seed).expect("profile"));
         assert!(r.passed, "seed {seed}: {:?}", r.failure_lines());
     }
+}
+
+/// Validators stopped together until the rest are no quorum, and every
+/// validator stopped at once, halt the chain. It resumes when they return:
+/// on exactly a quorum while the stops the committee tolerated last, and
+/// from every validator's journal after a cold start.
+#[test]
+fn a_chain_halted_below_its_quorum_resumes_when_its_validators_return() {
+    let r = run(short("threshold-halt", 1, 60.0));
+    assert!(r.passed, "violations: {:#?}", r.violations);
+    assert!(
+        r.faults.threshold_halts >= 3,
+        "halts {}",
+        r.faults.threshold_halts
+    );
+    assert!(r.faults.cold_starts >= 1, "no cold start in this seed");
+    // Seven validators tolerate two stops: a halt stops at least three.
+    assert!(r.faults.crashes >= 3 * r.faults.threshold_halts);
+    assert!(r.epochs >= 10, "epochs {}", r.epochs);
+}
+
+/// A seed-drawn run with halts replays exactly from its seed.
+#[test]
+fn a_swarm_run_with_halts_replays_exactly_from_its_seed() {
+    let a = run(short("swarm-halt", 29, 20.0));
+    let b = run(short("swarm-halt", 29, 20.0));
+    assert_eq!(
+        (
+            a.epochs,
+            a.height,
+            a.txs_submitted,
+            a.checkpoints_certified,
+            a.faults.crashes,
+            a.faults.threshold_halts,
+            a.faults.cold_starts
+        ),
+        (
+            b.epochs,
+            b.height,
+            b.txs_submitted,
+            b.checkpoints_certified,
+            b.faults.crashes,
+            b.faults.threshold_halts,
+            b.faults.cold_starts
+        )
+    );
+    assert_eq!(kinds(&a), kinds(&b));
+}
+
+/// A validator whose second signature implementation disagrees with the
+/// first refuses a quarter of the valid votes and certificates it receives;
+/// the others keep certifying and no invariant fails.
+#[test]
+fn a_validator_whose_second_verifier_disagrees_breaks_no_invariant() {
+    let r = run(short("nversion", 3, 30.0));
+    assert!(r.passed, "violations: {:#?}", r.violations);
+    assert!(
+        r.faults.refused_signed_messages > 100,
+        "refused {}",
+        r.faults.refused_signed_messages
+    );
+    assert!(r.checkpoints_certified > 0);
+}
+
+/// A validator that sends its own messages with a field changed, and
+/// earlier messages again, breaks nothing for the others: no invariant
+/// fails and the chain keeps its pace.
+#[test]
+fn a_validator_altering_and_replaying_its_own_messages_breaks_no_invariant() {
+    let r = run(short("mutate", 3, 30.0));
+    assert!(r.passed, "violations: {:#?}", r.violations);
+    assert!(
+        r.faults.mutated_messages > 100,
+        "mutated {}",
+        r.faults.mutated_messages
+    );
+    assert!(
+        r.faults.replayed_messages > 20,
+        "replayed {}",
+        r.faults.replayed_messages
+    );
+    assert!(r.epochs >= 20, "epochs {}", r.epochs);
+}
+
+/// Governed parameters change through real proposals while a second ledger,
+/// built from the same genesis, executes every block as it is ordered. A
+/// node replaying the chain from its first block reaches the network's root
+/// at every height, across each change.
+#[test]
+fn a_ledger_replaying_from_genesis_follows_the_network_across_parameter_changes() {
+    let mut c = short("years-upgrades", 4, 46.0);
+    c.workload.param_schedule.truncate(2);
+    c.workload.param_schedule[0].day = 9.0;
+    c.workload.param_schedule[1].day = 22.0;
+    let r = run(c);
+    assert!(r.passed, "violations: {:#?}", r.violations);
+    assert!(
+        r.ledger.params_applied >= 2,
+        "parameter changes applied: {}",
+        r.ledger.params_applied
+    );
+    assert!(r.epochs >= 30, "epochs {}", r.epochs);
+    assert_eq!(r.state_root.len(), 64);
 }

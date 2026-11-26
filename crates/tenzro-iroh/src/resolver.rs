@@ -3,7 +3,7 @@
 //! concrete iroh-blobs-backed implementation added here
 //! alongside the `DaBackend` impl in `tenzro-storage::da`.
 
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
@@ -29,10 +29,12 @@ use iroh_blobs::{
 use tokio::sync::Mutex;
 
 use crate::config::TenzroIrohConfig;
-use crate::connection_limits::{ConnectionGate, GatedRouter};
+use crate::connection_limits::{ConnectionGate, ConnectionLimits, GatedRouter};
 use crate::discovery::{ALPN_DISCOVERY, DiscoveryProtocol, DiscoveryStore};
 use crate::error::{IrohError, IrohResult};
-use crate::identity_transport::{IdentityTransport, base_builder, base_builder_with, with_relays};
+use crate::identity_transport::{
+    IdentityTransport, base_builder, base_builder_with, on_loopback, with_relays,
+};
 use crate::jsonrpc::{
     ALPN_A2A_PQ, ALPN_MCP_PQ, ALPN_MOE_PQ, JsonRpcDispatcher, JsonRpcProtocol, McpProtocol,
     McpStreamHandler,
@@ -195,6 +197,9 @@ impl Deref for ResolverStore {
 ///   surface.
 pub struct IrohBackedResolver {
     endpoint: Endpoint,
+    /// The RPC ALPNs the router serves, exactly as registered: what the
+    /// node advertises, so it never names one a caller would be refused on.
+    rpc_alpns: Vec<&'static [u8]>,
     store: ResolverStore,
     /// Router is kept alive (not used directly after spawn) so the
     /// iroh-blobs ALPN handler stays registered until shutdown.
@@ -222,6 +227,13 @@ pub struct IrohBackedResolver {
     /// Snapshot manifests this node serves over [`crate::state_sync::ALPN_STATE_SYNC`].
     /// Empty until the node installs its snapshot store.
     snapshot_directory: crate::state_sync::DeferredSnapshotDirectory,
+    /// The certified anchor of the newest snapshot this node serves, over
+    /// [`crate::state_sync::ALPN_STATE_SYNC_ANCHOR`]. Empty until the node
+    /// installs its source.
+    anchor_source: crate::state_sync::DeferredAnchorSource,
+    /// Where proofs sent over [`crate::zk_proof::ALPN_ZK_PROOF`] go. Refuses
+    /// every proof until the node installs its verifier.
+    zk_proof_sink: Arc<crate::zk_proof::DeferredProofSink>,
     /// Consensus streams peers open over [`crate::consensus::ALPN_CONSENSUS`].
     consensus_handler: crate::consensus::DeferredConsensusHandler,
     /// Block-sync requests peers send over [`crate::block_sync::ALPN_BLOCK_SYNC`].
@@ -237,9 +249,17 @@ pub struct IrohBackedResolver {
     /// Session successor assignments and sealed KV-cache deltas peers send
     /// over [`crate::request::ALPN_KV_CHECKPOINT`].
     kv_checkpoint_handler: DeferredRequestHandler,
+    /// SLA probes validators send straight to this node over
+    /// [`crate::request::ALPN_SLA`].
+    sla_handler: DeferredRequestHandler,
     /// Admits peers to each protocol by registered identity. Inert until the
     /// node installs the identity registry it reads.
     identity_gate: crate::identity_gate::IdentityGate,
+    /// How long accepted connections took to reach a direct path.
+    path_timings: Arc<crate::path_metrics::PathTimings>,
+    /// The snapshot files the blob provider serves to a peer with no
+    /// registered identity.
+    snapshot_blobs: crate::licence_gate::SnapshotBlobs,
     /// Registration requests peers send over
     /// [`crate::identity_gate::ALPN_ONBOARD`].
     onboard_handler: DeferredRequestHandler,
@@ -253,8 +273,8 @@ pub struct IrohBackedResolver {
 const MAX_PROVIDERS_PER_BLOB: usize = 8;
 
 impl IrohBackedResolver {
-    /// Bind a new endpoint on a random port, with no relay and no address
-    /// lookup, and stand up an in-memory blob store with the iroh-blobs
+    /// Bind a new endpoint on a random loopback port, with no relay, no
+    /// address lookup and no port mapping, and stand up an in-memory blob store with the iroh-blobs
     /// protocol handler registered. For tests and local tools; nodes use
     /// [`Self::bind_with_jsonrpc`].
     ///
@@ -262,7 +282,7 @@ impl IrohBackedResolver {
     /// config-driven binds use the persistent filesystem store instead.
     pub async fn bind_in_memory() -> IrohResult<Arc<Self>> {
         let gate = crate::gossip::GossipGate::default();
-        let endpoint = base_builder()
+        let endpoint = on_loopback(base_builder())
             .hooks(gate.clone())
             .bind()
             .await
@@ -280,7 +300,8 @@ impl IrohBackedResolver {
             None,
             None,
             crate::limits::AdmissionLimits::default(),
-            crate::connection_limits::ConnectionLimits::default(),
+            ConnectionLimits::default(),
+            None,
         )
     }
 
@@ -291,8 +312,19 @@ impl IrohBackedResolver {
         lookup: &iroh::address_lookup::memory::MemoryLookup,
         discovery: Arc<DiscoveryStore>,
     ) -> IrohResult<Arc<Self>> {
+        Self::bind_for_test_with_paths(lookup, discovery, None).await
+    }
+
+    /// [`Self::bind_for_test`] with `paths` as the endpoint's paths
+    /// transport state (not installed on the endpoint).
+    #[cfg(test)]
+    pub(crate) async fn bind_for_test_with_paths(
+        lookup: &iroh::address_lookup::memory::MemoryLookup,
+        discovery: Arc<DiscoveryStore>,
+        paths: Option<crate::paths::Paths>,
+    ) -> IrohResult<Arc<Self>> {
         let gate = crate::gossip::GossipGate::default();
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint = on_loopback(Endpoint::builder(iroh::endpoint::presets::Minimal))
             .hooks(gate.clone())
             .bind()
             .await
@@ -313,9 +345,10 @@ impl IrohBackedResolver {
             None,
             None,
             None,
-            None,
+            paths,
             crate::limits::AdmissionLimits::default(),
-            crate::connection_limits::ConnectionLimits::default(),
+            ConnectionLimits::default(),
+            None,
         )
     }
 
@@ -376,6 +409,7 @@ impl IrohBackedResolver {
             punch,
             cfg.admission,
             cfg.connection,
+            None,
         )
     }
 
@@ -392,16 +426,23 @@ impl IrohBackedResolver {
             Some(t) => (t.relays(), Some(t.store().clone())),
             None => (&[][..], None),
         };
-        let mut builder = with_relays(base_builder_with(&cfg.connection), relays, discovery)
-            .hooks(gate.clone())
-            .clear_ip_transports();
+        let serves_peer_relay = identity.is_some_and(IdentityTransport::serves_peer_relay);
+        let mut builder = with_relays(
+            base_builder_with(&cfg.connection, serves_peer_relay),
+            relays,
+            discovery,
+        )
+        .hooks(gate.clone())
+        .clear_ip_transports();
         if let Some(secret) = &cfg.endpoint_secret.0 {
             builder = builder.secret_key(iroh::SecretKey::from_bytes(secret));
         }
         if let Some(t) = identity {
             builder = t.paths().install(builder);
         }
-        if !cfg.port_mapping {
+        // A port bound on loopback cannot be reached through the router, so
+        // it is never mapped there.
+        if !cfg.port_mapping || cfg.bind_addr.ip().is_loopback() {
             builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
         }
         // Relays are reached over HTTPS, through the operator's proxy when
@@ -417,7 +458,7 @@ impl IrohBackedResolver {
                 .await
                 .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?;
             if let Some(t) = identity {
-                t.paths().attach(&endpoint);
+                t.paths().attach(&endpoint, &cfg.connection);
             }
             return Ok(endpoint);
         }
@@ -426,37 +467,38 @@ impl IrohBackedResolver {
         // doesn't bind a random ephemeral UDP port (which cannot be opened
         // in firewalls ahead of time). `clear_ip_transports` strips the
         // builder's default `0.0.0.0:0` + `[::]:0` pre-binds before we
-        // install our pinned IPv4 + IPv6 addresses.
+        // install our pinned address.
         // A node serving the relay role is a peer relay too: it binds its
         // relay UDP port (443 by default, the port networks that pass only
         // web traffic leave open).
         let mut bind = cfg.bind_addr;
-        if identity.is_some_and(|t| t.peer_relay_service().is_some()) {
+        if serves_peer_relay {
             bind.set_port(cfg.relay_udp_port);
         }
         builder = builder
             .bind_addr(bind)
             .map_err(|e| IrohError::Backend(format!("bind_addr {bind} invalid: {e}")))?;
-        // IPv6 wildcard at the same port — `bind_addr_with_opts` would allow
-        // tuning the prefix length, but the default (`/0`) matches the
-        // builder's pre-configured `[::]:0` semantics. Failure to bind the
-        // v6 socket is allowed by iroh (matches the default-builder
-        // contract for the unspecified `[::]` address).
-        builder = builder
-            .bind_addr(SocketAddr::new(
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                bind.port(),
-            ))
-            .map_err(|e| {
-                IrohError::Backend(format!("bind_addr [::]:{} invalid: {e}", bind.port()))
-            })?;
+        // The IPv4 wildcard means every interface, so the IPv6 wildcard is
+        // bound at the same port; iroh allows that socket to fail on a host
+        // without IPv6. Any other address is the only one the endpoint
+        // listens on.
+        if bind.ip() == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+            builder = builder
+                .bind_addr(SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    bind.port(),
+                ))
+                .map_err(|e| {
+                    IrohError::Backend(format!("bind_addr [::]:{} invalid: {e}", bind.port()))
+                })?;
+        }
 
         let endpoint = builder
             .bind()
             .await
             .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?;
         if let Some(t) = identity {
-            t.paths().attach(&endpoint);
+            t.paths().attach(&endpoint, &cfg.connection);
         }
         Ok(endpoint)
     }
@@ -473,7 +515,8 @@ impl IrohBackedResolver {
     ///
     /// `None` for any dispatcher skips that ALPN registration. Nodes
     /// that do not run an A2A or MCP server — or do not host MoE
-    /// experts — pass `None` for the corresponding slot.
+    /// experts, or carry no app streams between nodes — pass `None` for the
+    /// corresponding slot.
     pub async fn bind_with_jsonrpc(
         cfg: &TenzroIrohConfig,
         identity: Option<&IdentityTransport>,
@@ -481,6 +524,7 @@ impl IrohBackedResolver {
         mcp: Option<Arc<dyn McpStreamHandler>>,
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
         infer: Option<Arc<dyn RequestHandler>>,
+        app_stream: Option<Arc<dyn crate::app_stream::PeerStreams>>,
     ) -> IrohResult<Arc<Self>> {
         let gate = crate::gossip::GossipGate::default();
         let endpoint = Self::build_endpoint(cfg, identity, &gate).await?;
@@ -503,6 +547,7 @@ impl IrohBackedResolver {
             punch,
             cfg.admission,
             cfg.connection,
+            app_stream,
         )
     }
 
@@ -523,16 +568,29 @@ impl IrohBackedResolver {
         peer_relay: Option<crate::paths::PeerRelayService>,
         punch: Option<crate::paths::Paths>,
         limits: crate::limits::AdmissionLimits,
-        connection: crate::connection_limits::ConnectionLimits,
+        connection: ConnectionLimits,
+        app_stream: Option<Arc<dyn crate::app_stream::PeerStreams>>,
     ) -> IrohResult<Arc<Self>> {
+        let identity_gate = crate::identity_gate::IdentityGate::new(
+            tenzro_onboarding_types::onboarding::OnboardingPolicy::default(),
+            discovery.clone(),
+        );
+        let snapshot_blobs = crate::licence_gate::SnapshotBlobs::default();
         let blobs = BlobsProtocol::new(
             &store,
             Some(crate::licence_gate::events(
                 BlobStore::clone(&store),
                 discovery.clone(),
+                identity_gate.clone(),
+                snapshot_blobs.clone(),
+                punch.as_ref().map(|paths| {
+                    Arc::new(crate::bulk_pacer::BulkPacer::new(paths.latency_source()))
+                }),
             )),
         );
         let snapshot_directory = crate::state_sync::DeferredSnapshotDirectory::new();
+        let anchor_source = crate::state_sync::DeferredAnchorSource::new();
+        let zk_proof_sink = Arc::new(crate::zk_proof::DeferredProofSink::default());
         let consensus_handler = crate::consensus::DeferredConsensusHandler::new();
         let block_sync_server = crate::block_sync::DeferredBlockSyncServer::new();
         let gossip = crate::gossip::GossipTransport::spawn(&endpoint, gate);
@@ -540,75 +598,90 @@ impl IrohBackedResolver {
         let agent_key_handler = DeferredRequestHandler::new("agent serving");
         let agent_token_handler = DeferredRequestHandler::new("agent serving");
         let kv_checkpoint_handler = DeferredRequestHandler::new("session continuity");
-        let identity_gate = crate::identity_gate::IdentityGate::new(
-            tenzro_onboarding_types::onboarding::OnboardingPolicy::default(),
-            discovery.clone(),
-        );
+        let sla_handler = DeferredRequestHandler::new("SLA probes");
         let onboard_handler = DeferredRequestHandler::new("onboarding");
-        let mut builder = GatedRouter::new(
-            Router::builder(endpoint.clone()),
-            ConnectionGate::new(connection),
-        )
-        .with_identity_gate(identity_gate.clone())
-        .accept(ALPN, blobs)
-        .accept(
-            crate::identity_gate::ALPN_ONBOARD,
-            RequestProtocol::new(
-                "onboard",
-                Arc::new(onboard_handler.clone()),
-                crate::request::MAX_ONBOARD_REQUEST,
-                limits,
-            ),
-        )
-        .accept(
-            ALPN_DA_COMMITTEE,
-            RequestProtocol::new(
-                "da-committee",
-                Arc::new(da_committee_handler.clone()),
-                MAX_STORE_REQUEST,
-                limits,
-            ),
-        )
-        .accept(
-            crate::request::ALPN_AGENT_KEY,
-            RequestProtocol::new(
-                "agent-key",
-                Arc::new(agent_key_handler.clone()),
-                crate::request::MAX_AGENT_KEY_REQUEST,
-                limits,
-            ),
-        )
-        .accept(
-            crate::request::ALPN_AGENT_TOKEN,
-            RequestProtocol::new(
-                "agent-token",
-                Arc::new(agent_token_handler.clone()),
-                crate::request::MAX_AGENT_KEY_REQUEST * 4,
-                limits,
-            ),
-        )
-        .accept(
-            crate::request::ALPN_KV_CHECKPOINT,
-            RequestProtocol::new(
-                "kv-checkpoint",
-                Arc::new(kv_checkpoint_handler.clone()),
-                crate::request::MAX_KV_CHECKPOINT_REQUEST,
-                limits,
-            ),
-        )
-        .accept(
-            crate::state_sync::ALPN_STATE_SYNC,
-            crate::state_sync::StateSyncProtocol::new(Arc::new(snapshot_directory.clone())),
-        )
-        .accept(
-            crate::consensus::ALPN_CONSENSUS,
-            crate::consensus::ConsensusProtocol::new(Arc::new(consensus_handler.clone())),
-        )
-        .accept(
-            crate::block_sync::ALPN_BLOCK_SYNC,
-            crate::block_sync::BlockSyncProtocol::new(block_sync_server.clone(), limits),
-        )
-        .accept(crate::gossip::ALPN_GOSSIP, gossip.protocol());
+        let connection_gate = ConnectionGate::new(connection);
+        let path_timings = connection_gate.path_timings();
+        let mut builder = GatedRouter::new(Router::builder(endpoint.clone()), connection_gate)
+            .with_identity_gate(identity_gate.clone())
+            .accept(ALPN, blobs)
+            .accept(
+                crate::identity_gate::ALPN_ONBOARD,
+                RequestProtocol::new(
+                    "onboard",
+                    Arc::new(onboard_handler.clone()),
+                    crate::request::MAX_ONBOARD_REQUEST,
+                    limits,
+                ),
+            )
+            .accept(
+                ALPN_DA_COMMITTEE,
+                RequestProtocol::new(
+                    "da-committee",
+                    Arc::new(da_committee_handler.clone()),
+                    MAX_STORE_REQUEST,
+                    limits,
+                ),
+            )
+            .accept(
+                crate::request::ALPN_AGENT_KEY,
+                RequestProtocol::new(
+                    "agent-key",
+                    Arc::new(agent_key_handler.clone()),
+                    crate::request::MAX_AGENT_KEY_REQUEST,
+                    limits,
+                ),
+            )
+            .accept(
+                crate::request::ALPN_AGENT_TOKEN,
+                RequestProtocol::new(
+                    "agent-token",
+                    Arc::new(agent_token_handler.clone()),
+                    crate::request::MAX_AGENT_KEY_REQUEST * 4,
+                    limits,
+                ),
+            )
+            .accept(
+                crate::request::ALPN_KV_CHECKPOINT,
+                RequestProtocol::new(
+                    "kv-checkpoint",
+                    Arc::new(kv_checkpoint_handler.clone()),
+                    crate::request::MAX_KV_CHECKPOINT_REQUEST,
+                    limits,
+                ),
+            )
+            .accept(
+                crate::request::ALPN_SLA,
+                RequestProtocol::new(
+                    "sla",
+                    Arc::new(sla_handler.clone()),
+                    crate::request::MAX_SLA_REQUEST,
+                    limits,
+                ),
+            )
+            .accept(
+                crate::state_sync::ALPN_STATE_SYNC,
+                crate::state_sync::StateSyncProtocol::new(Arc::new(snapshot_directory.clone())),
+            )
+            .accept(
+                crate::state_sync::ALPN_STATE_SYNC_ANCHOR,
+                crate::state_sync::AnchorProtocol::new(Arc::new(anchor_source.clone())),
+            )
+            .accept(
+                crate::zk_proof::ALPN_ZK_PROOF,
+                crate::zk_proof::ZkProofProtocol::new(
+                    zk_proof_sink.clone() as Arc<dyn crate::zk_proof::ProofSink>
+                ),
+            )
+            .accept(
+                crate::consensus::ALPN_CONSENSUS,
+                crate::consensus::ConsensusProtocol::new(Arc::new(consensus_handler.clone())),
+            )
+            .accept(
+                crate::block_sync::ALPN_BLOCK_SYNC,
+                crate::block_sync::BlockSyncProtocol::new(block_sync_server.clone(), limits),
+            )
+            .accept(crate::gossip::ALPN_GOSSIP, gossip.protocol());
         if let Some(discovery) = discovery.clone() {
             builder = builder.accept(ALPN_DISCOVERY, DiscoveryProtocol::new(discovery));
         }
@@ -626,34 +699,50 @@ impl IrohBackedResolver {
         // carries the ML-DSA leg of endpoint authentication: with no identity
         // transport there is no way to authenticate a peer, and none is
         // served on the first ALPN.
+        let mut rpc_alpns = Vec::new();
         if let Some(dispatcher) = a2a
             && let Some(pq) = pq.clone()
         {
             let proto = JsonRpcProtocol::a2a(dispatcher, limits);
             builder = builder.accept(ALPN_A2A_PQ, proto.with_pq_channel(pq));
+            rpc_alpns.push(ALPN_A2A_PQ);
         }
         if let Some(handler) = mcp
             && let Some(pq) = pq.clone()
         {
             let proto = McpProtocol::new(handler, limits);
             builder = builder.accept(ALPN_MCP_PQ, proto.with_pq_channel(pq));
+            rpc_alpns.push(ALPN_MCP_PQ);
         }
         if let Some(dispatcher) = moe
             && let Some(pq) = pq.clone()
         {
             let proto = JsonRpcProtocol::moe(dispatcher, limits);
             builder = builder.accept(ALPN_MOE_PQ, proto.with_pq_channel(pq));
+            rpc_alpns.push(ALPN_MOE_PQ);
         }
         if let Some(handler) = infer {
             builder = builder.accept(
                 ALPN_INFER,
                 RequestProtocol::new("infer", handler, MAX_INFER_BYTES, limits),
             );
+            rpc_alpns.push(ALPN_INFER);
+        }
+        // Registered only for a node that carries streams between nodes,
+        // and only when peers can be named by their records.
+        if let Some(streams) = app_stream
+            && let Some(discovery) = discovery.clone()
+        {
+            builder = builder.accept(
+                crate::app_stream::ALPN_APP_STREAM,
+                crate::app_stream::AppStreamProtocol::new(streams, discovery),
+            );
         }
         let router = builder.spawn();
         let downloader = Downloader::new(&store, &endpoint);
         Ok(Arc::new(Self {
             endpoint,
+            rpc_alpns,
             store,
             router: Mutex::new(Some(router)),
             downloader,
@@ -661,6 +750,8 @@ impl IrohBackedResolver {
             pq,
             hint_cache: DashMap::new(),
             snapshot_directory,
+            anchor_source,
+            zk_proof_sink,
             consensus_handler,
             block_sync_server,
             gossip,
@@ -668,10 +759,20 @@ impl IrohBackedResolver {
             agent_key_handler,
             agent_token_handler,
             kv_checkpoint_handler,
+            sla_handler,
             identity_gate,
+            path_timings,
+            snapshot_blobs,
             onboard_handler,
             paths: paths_handle,
         }))
+    }
+
+    /// The RPC ALPNs this endpoint serves. A2A, MCP and MoE appear only on
+    /// their versioned ALPNs, and only when a peer's ML-DSA endpoint key can
+    /// be checked; their first ALPNs are never served.
+    pub fn rpc_alpns(&self) -> &[&'static [u8]] {
+        &self.rpc_alpns
     }
 
     /// The gossip protocol on this endpoint. The node attaches its topic
@@ -698,6 +799,18 @@ impl IrohBackedResolver {
         &self.identity_gate
     }
 
+    /// What the endpoint has counted about its paths: hole punches, direct
+    /// connections, relay traffic and the time to a direct path.
+    pub fn path_report(&self) -> crate::path_metrics::PathReport {
+        crate::path_metrics::path_report(&self.endpoint, &self.path_timings)
+    }
+
+    /// The snapshot files served to a peer with no registered identity; the
+    /// node sets them from the snapshots it retains.
+    pub fn snapshot_blobs(&self) -> &crate::licence_gate::SnapshotBlobs {
+        &self.snapshot_blobs
+    }
+
     /// The handler of registration requests peers send over
     /// [`crate::identity_gate::ALPN_ONBOARD`]. A node that onboards peers
     /// installs it here.
@@ -715,6 +828,12 @@ impl IrohBackedResolver {
     /// deltas peers send over [`crate::request::ALPN_KV_CHECKPOINT`].
     pub fn kv_checkpoint_handler(&self) -> &DeferredRequestHandler {
         &self.kv_checkpoint_handler
+    }
+
+    /// The handler of SLA probes validators send over
+    /// [`crate::request::ALPN_SLA`].
+    pub fn sla_handler(&self) -> &DeferredRequestHandler {
+        &self.sla_handler
     }
 
     /// The server of block-sync requests peers send over
@@ -767,6 +886,18 @@ impl IrohBackedResolver {
     /// installs its snapshot store here once it exists.
     pub fn snapshot_directory(&self) -> &crate::state_sync::DeferredSnapshotDirectory {
         &self.snapshot_directory
+    }
+
+    /// The certified snapshot anchor served over the anchor ALPN. The node
+    /// installs its source here once its consensus and snapshots exist.
+    pub fn anchor_source(&self) -> &crate::state_sync::DeferredAnchorSource {
+        &self.anchor_source
+    }
+
+    /// Where proofs sent over the zk-proof ALPN go. The node installs its
+    /// verifier here.
+    pub fn zk_proof_sink(&self) -> &crate::zk_proof::DeferredProofSink {
+        &self.zk_proof_sink
     }
 
     /// The handler of consensus streams peers open over
@@ -1099,21 +1230,115 @@ impl IrohResolver for IrohBackedResolver {
 mod tests {
     use super::*;
 
-    fn free_udp_port() -> u16 {
-        std::net::UdpSocket::bind("127.0.0.1:0")
-            .expect("probe port")
-            .local_addr()
-            .expect("probe addr")
-            .port()
+    #[derive(Debug)]
+    struct Answers;
+
+    #[async_trait]
+    impl JsonRpcDispatcher for Answers {
+        async fn dispatch(&self, _request: Bytes) -> IrohResult<Bytes> {
+            Ok(Bytes::from_static(
+                b"{\"jsonrpc\":\"2.0\",\"result\":null,\"id\":1}",
+            ))
+        }
+    }
+
+    async fn resolver_serving_a2a(
+        pq: Option<crate::pq_endpoint::PqChannel>,
+    ) -> Arc<IrohBackedResolver> {
+        let gate = crate::gossip::GossipGate::default();
+        let endpoint = on_loopback(Endpoint::builder(iroh::endpoint::presets::Minimal))
+            .hooks(gate.clone())
+            .bind()
+            .await
+            .unwrap();
+        IrohBackedResolver::with_endpoint(
+            endpoint,
+            gate,
+            ResolverStore::Mem(MemStore::new()),
+            None,
+            pq,
+            Some(Arc::new(Answers)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            crate::limits::AdmissionLimits::default(),
+            crate::connection_limits::ConnectionLimits::default(),
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A peer whose record binds an ML-DSA key, and which the node holds,
+    /// is never served on the first A2A ALPN: the node serves A2A only on
+    /// the versioned one, which runs the ML-DSA leg, and says so.
+    #[tokio::test]
+    async fn a_pinned_peer_is_not_served_on_the_first_alpn() {
+        use crate::identity_record::tests::TestMachineKey;
+        use crate::identity_record::{EndpointRecord, RecordScope};
+        use crate::identity_transport::iroh_endpoint_key;
+        use crate::pq_endpoint::tests::TestMachinePq;
+        use crate::pq_endpoint::{ChannelKeys, PqChannel};
+
+        let client = on_loopback(Endpoint::builder(iroh::endpoint::presets::Minimal))
+            .bind()
+            .await
+            .unwrap();
+        let client_pq = TestMachinePq::generate();
+        let mut client_record = EndpointRecord::sign(
+            &TestMachineKey::from_seed(71),
+            iroh_endpoint_key(client.id()),
+            Vec::new(),
+            Vec::new(),
+            None,
+            RecordScope::Network,
+            Vec::new(),
+            1,
+            crate::relay::now_ms(),
+        )
+        .unwrap();
+        client_record.bind_pq(&client_pq).unwrap();
+        let store = Arc::new(DiscoveryStore::new());
+        store.offer(client_record).unwrap();
+        let channel = PqChannel::new(store);
+        channel.set_own_key(ChannelKeys {
+            p256: Arc::new(TestMachineKey::from_seed(70)),
+            ml_dsa: Arc::new(TestMachinePq::generate()),
+        });
+        assert!(
+            channel.bound_record(client.id()).is_some(),
+            "the pin is held"
+        );
+
+        let server = resolver_serving_a2a(Some(channel)).await;
+        assert_eq!(server.rpc_alpns(), [ALPN_A2A_PQ]);
+        assert!(
+            crate::jsonrpc::call(
+                &client,
+                server.endpoint().addr(),
+                crate::jsonrpc::ALPN_A2A,
+                Bytes::from_static(b"null"),
+            )
+            .await
+            .is_err(),
+            "the first ALPN served a pinned peer"
+        );
+
+        let unauthenticated = resolver_serving_a2a(None).await;
+        assert!(
+            unauthenticated.rpc_alpns().is_empty(),
+            "with no way to check a peer's ML-DSA key no RPC ALPN is served"
+        );
     }
 
     /// State sync binds a dial-only endpoint before the node's own; it must
     /// not take the configured port, which the node's endpoint binds next.
     #[tokio::test]
     async fn a_dial_only_endpoint_leaves_the_configured_port_free() {
-        let dir = std::env::temp_dir().join(format!("tz-rebind-{}", free_udp_port()));
+        let dir = std::env::temp_dir().join(format!("tz-rebind-{}", crate::test_ports::udp()));
         let mut cfg = TenzroIrohConfig::with_data_dir(dir.clone());
-        let port = free_udp_port();
+        let port = crate::test_ports::udp();
         cfg.bind_addr = SocketAddr::from(([127, 0, 0, 1], port));
         cfg.port_mapping = false;
         let sync = IrohBackedResolver::bind_with_config(&cfg.dial_only(), None)
@@ -1135,26 +1360,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Two nodes on one host each bind the port their configuration names:
+    /// the second's port differs from the first's, so both start.
+    #[tokio::test]
+    async fn two_endpoints_on_different_ports_coexist() {
+        let dir = std::env::temp_dir().join(format!("tz-two-ports-{}", crate::test_ports::udp()));
+        let mut ports = Vec::new();
+        let mut nodes = Vec::new();
+        for i in 0..2 {
+            let mut cfg = TenzroIrohConfig::with_data_dir(dir.join(i.to_string()));
+            let port = crate::test_ports::udp();
+            cfg.bind_addr = SocketAddr::from(([127, 0, 0, 1], port));
+            cfg.port_mapping = false;
+            let node = IrohBackedResolver::bind_with_config(&cfg, None)
+                .await
+                .expect("bind on its own port");
+            assert!(
+                node.endpoint()
+                    .bound_sockets()
+                    .iter()
+                    .any(|a| a.port() == port),
+                "node {i} bound {:?}, not {port}",
+                node.endpoint().bound_sockets()
+            );
+            ports.push(port);
+            nodes.push(node);
+        }
+        assert_ne!(ports[0], ports[1]);
+        for node in nodes {
+            let _ = node.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An endpoint configured on a loopback address opens no socket on any
+    /// other address.
+    #[tokio::test]
+    async fn a_loopback_endpoint_binds_only_loopback() {
+        let dir = std::env::temp_dir().join(format!("tz-loopback-{}", crate::test_ports::udp()));
+        let mut cfg = TenzroIrohConfig::with_data_dir(dir.clone());
+        cfg.bind_addr = SocketAddr::from(([127, 0, 0, 1], crate::test_ports::udp()));
+        cfg.port_mapping = false;
+        let node = IrohBackedResolver::bind_with_config(&cfg, None)
+            .await
+            .expect("bind");
+        let bound = node.endpoint().bound_sockets();
+        assert!(bound.contains(&cfg.bind_addr), "bound {bound:?}");
+        assert!(
+            bound.iter().all(|a| a.ip().is_loopback()),
+            "bound {bound:?}"
+        );
+        let _ = node.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The path transport is shared and outlives the endpoint; once detached
     /// it no longer pins the closed endpoint's sockets.
     #[tokio::test]
     async fn a_detached_path_transport_releases_the_endpoint_sockets() {
-        let addr = SocketAddr::from(([127, 0, 0, 1], free_udp_port()));
+        let addr = SocketAddr::from(([127, 0, 0, 1], crate::test_ports::udp()));
         let paths = crate::paths::Paths::new();
         let bind = |paths: &crate::paths::Paths| {
             let builder = paths
                 .install(crate::identity_transport::base_builder().clear_ip_transports())
                 .bind_addr(addr)
-                .expect("bind_addr");
+                .expect("bind_addr")
+                .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
             async move { builder.bind().await }
         };
         let first = bind(&paths).await.expect("first bind");
-        paths.attach(&first);
+        paths.attach(&first, &ConnectionLimits::default());
         first.close().await;
         paths.detach();
         drop(first);
-        let second = bind(&paths).await;
-        assert!(second.is_ok(), "second bind: {:?}", second.err());
+        // The endpoint's socket tasks end a moment after close returns; the
+        // second bind has to succeed once they have, which a loaded host can
+        // delay by some seconds, and never if the path transport kept them.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        let second = loop {
+            match bind(&paths).await {
+                Ok(second) => break second,
+                Err(e) if tokio::time::Instant::now() >= deadline => {
+                    panic!("second bind: {e:?}")
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
+        };
+        drop(second);
     }
 
     /// Tag the cargo runner with the `iroh-net` cfg so the iroh n0 preset

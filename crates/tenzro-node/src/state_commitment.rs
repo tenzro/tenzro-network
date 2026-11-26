@@ -182,20 +182,8 @@ pub fn epoch_open_writes(
         );
     }
     if let Some(registry) = registry {
-        let mut entries = registry.list();
-        entries.sort_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()));
-        let index: Vec<Address> = entries.iter().map(|e| e.address).collect();
-        for entry in &entries {
-            if let Ok(bytes) = bincode::serialize(&registry_projection(entry)) {
-                out.insert(
-                    (
-                        NS_VALIDATOR_REGISTRY.to_string(),
-                        entry.address.as_bytes().to_vec(),
-                    ),
-                    Some(bytes),
-                );
-            }
-        }
+        let (index, rows) = registry_rows(registry);
+        out.extend(rows);
         for gone in previous_index
             .unwrap_or_default()
             .into_iter()
@@ -206,21 +194,10 @@ pub fn epoch_open_writes(
                 None,
             );
         }
-        if let Ok(bytes) = bincode::serialize(&index) {
-            out.insert(
-                (
-                    NS_VALIDATOR_REGISTRY.to_string(),
-                    REGISTRY_INDEX_KEY.to_vec(),
-                ),
-                Some(bytes),
-            );
-        }
-    }
-    let side = EpochSide {
+    } else if let Ok(bytes) = bincode::serialize(&EpochSide {
         version: EPOCH_SIDE_VERSION,
-        registry: registry.map(|r| r.side_state()),
-    };
-    if let Ok(bytes) = bincode::serialize(&side) {
+        registry: None,
+    }) {
         out.insert(
             (
                 NS_VALIDATOR_REGISTRY.to_string(),
@@ -230,6 +207,216 @@ pub fn epoch_open_writes(
         );
     }
     out
+}
+
+/// The rows that commit `registry` as it stands: every entry's projection,
+/// the index of their addresses (returned as well) and the side state.
+fn registry_rows(registry: &ValidatorRegistry) -> (Vec<Address>, Writes) {
+    let mut out = Writes::new();
+    let mut entries = registry.list();
+    entries.sort_by(|a, b| a.address.as_bytes().cmp(b.address.as_bytes()));
+    let index: Vec<Address> = entries.iter().map(|e| e.address).collect();
+    for entry in &entries {
+        if let Ok(bytes) = bincode::serialize(&registry_projection(entry)) {
+            out.insert(
+                (
+                    NS_VALIDATOR_REGISTRY.to_string(),
+                    entry.address.as_bytes().to_vec(),
+                ),
+                Some(bytes),
+            );
+        }
+    }
+    if let Ok(bytes) = bincode::serialize(&index) {
+        out.insert(
+            (
+                NS_VALIDATOR_REGISTRY.to_string(),
+                REGISTRY_INDEX_KEY.to_vec(),
+            ),
+            Some(bytes),
+        );
+    }
+    if let Ok(bytes) = bincode::serialize(&EpochSide {
+        version: EPOCH_SIDE_VERSION,
+        registry: Some(registry.side_state()),
+    }) {
+        out.insert(
+            (
+                NS_VALIDATOR_REGISTRY.to_string(),
+                REGISTRY_SIDE_KEY.to_vec(),
+            ),
+            Some(bytes),
+        );
+    }
+    (index, out)
+}
+
+/// The writes that put committed registry rows back into a registry's own
+/// store: each entry's projection (`entries`, bincode), the side state and
+/// the index, in the layout [`ValidatorRegistry::with_storage`] reads.
+pub(crate) fn registry_store_writes(
+    entries: Vec<Vec<u8>>,
+    side: Option<tenzro_token::validator_registry::RegistrySide>,
+    index: Option<Vec<Address>>,
+) -> std::result::Result<Vec<tenzro_storage::WriteOp>, String> {
+    use tenzro_storage::WriteOp;
+    use tenzro_token::validator_registry::{VALIDATOR_INDEX_KEY, VALIDATOR_PREFIX};
+    let cf = tenzro_storage::CF_TOKENS;
+    let mut ops = Vec::new();
+    for value in entries {
+        let entry: ValidatorRegistryEntry =
+            bincode::deserialize(&value).map_err(|e| format!("decode registry entry: {e}"))?;
+        ops.push(WriteOp::Put {
+            cf: cf.to_string(),
+            key: format!(
+                "{VALIDATOR_PREFIX}{}",
+                hex::encode(entry.address.as_bytes())
+            )
+            .into_bytes(),
+            value,
+        });
+    }
+    for (key, value) in side.map(|s| s.storage_rows()).unwrap_or_default() {
+        ops.push(WriteOp::Put {
+            cf: cf.to_string(),
+            key,
+            value,
+        });
+    }
+    if let Some(index) = index {
+        let hexes: Vec<String> = index.iter().map(|a| hex::encode(a.as_bytes())).collect();
+        ops.push(WriteOp::Put {
+            cf: cf.to_string(),
+            key: VALIDATOR_INDEX_KEY.as_bytes().to_vec(),
+            value: bincode::serialize(&hexes).map_err(|e| e.to_string())?,
+        });
+    }
+    Ok(ops)
+}
+
+/// The registry rows the chain implies at a tip inside an epoch: the rows
+/// committed at the epoch's first block (`committed_at_open`), with the
+/// validator logs of every later block of the epoch applied in order
+/// (`blocks`, each block's logs as (topics, data) pairs). The epoch's
+/// boundary changes are already in the committed rows, and the next
+/// boundary's are not applied before its first block, so these are the rows a
+/// node that executed the same blocks holds.
+pub fn replayed_registry_rows(
+    committed_at_open: &dyn Fn(&[u8]) -> std::result::Result<Option<Vec<u8>>, String>,
+    epoch: u64,
+    blocks: impl IntoIterator<Item = Vec<(Vec<Vec<u8>>, Vec<u8>)>>,
+) -> std::result::Result<Writes, String> {
+    use tenzro_storage::KvStore as _;
+    fn decode<T: serde::de::DeserializeOwned>(
+        what: &str,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<T, String> {
+        bincode::deserialize(&bytes).map_err(|e| format!("decode committed registry {what}: {e}"))
+    }
+    let index: Vec<Address> = match committed_at_open(REGISTRY_INDEX_KEY)? {
+        Some(bytes) => decode("index", bytes)?,
+        None => Vec::new(),
+    };
+    let side: Option<EpochSide> = committed_at_open(REGISTRY_SIDE_KEY)?
+        .map(|bytes| decode("side state", bytes))
+        .transpose()?;
+    let mut entries = Vec::with_capacity(index.len());
+    for address in &index {
+        entries.push(committed_at_open(address.as_bytes())?.ok_or_else(|| {
+            format!(
+                "the committed registry lists 0x{} with no entry",
+                hex::encode(address.as_bytes())
+            )
+        })?);
+    }
+    let store = std::sync::Arc::new(tenzro_storage::MemoryStore::new());
+    store
+        .write_batch(registry_store_writes(
+            entries,
+            side.and_then(|s| s.registry),
+            Some(index),
+        )?)
+        .map_err(|e| e.to_string())?;
+    let registry = ValidatorRegistry::with_storage(store);
+    for logs in blocks {
+        crate::event_loop::apply_validator_logs(
+            &registry,
+            logs.iter().map(|(t, d)| (t.as_slice(), d.as_slice())),
+            epoch,
+            |validator, _, _, deferred| {
+                let _ = match deferred {
+                    Some(policy) => registry.jail_deferred(validator, epoch, policy).map(|_| ()),
+                    None => registry.jail(validator, epoch),
+                };
+            },
+        );
+    }
+    Ok(registry_rows(&registry).1)
+}
+
+/// What an operator does about a registry the node refuses to start on.
+const REGISTRY_REPAIR: &str = "restore the node from a snapshot (`tenzro-node restore`) or start it \
+     on an empty data directory with `--state-sync-from`";
+
+/// Whether a node may start on `registry`, checked before anything runs.
+///
+/// `committed` reads the rows the chain holds at the tip: the rows the tip
+/// committed when it is an epoch's first block, and otherwise the rows the
+/// epoch's first block committed with the validator logs since replayed
+/// ([`replayed_registry_rows`]). A registry marked unverified must equal
+/// them; one found equal is no longer unverified. An unmarked registry that
+/// differs is logged and the node starts. Where neither can be read (the
+/// event log does not reach back to the epoch's first block), a registry
+/// marked unverified (undo records of a change that never committed were
+/// discarded) is refused. A node running on
+/// a registry the chain does not hold would stop following, or sign for
+/// another committee than the quorum, at the next epoch boundary.
+pub fn registry_start_check(
+    registry: &ValidatorRegistry,
+    committed: Option<&dyn Fn(&[u8]) -> std::result::Result<Option<Vec<u8>>, String>>,
+) -> std::result::Result<(), String> {
+    let marked = registry.is_unverified()?;
+    let Some(committed) = committed else {
+        return if marked {
+            Err(format!(
+                "undo records of a validator registry change that never committed were discarded, so \
+                 the registry may hold that change, and it cannot be compared with the chain here: the \
+                 tip is inside an epoch and the event log does not reach back to the epoch's first \
+                 block: {REGISTRY_REPAIR}"
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let (_, rows) = registry_rows(registry);
+    for ((_, key), value) in rows {
+        if committed(&key)? != value {
+            let what = if key == REGISTRY_INDEX_KEY {
+                "its set of validators".to_string()
+            } else if key == REGISTRY_SIDE_KEY {
+                "its configuration or pending key changes".to_string()
+            } else {
+                format!("the entry of 0x{}", hex::encode(&key))
+            };
+            // Unmarked, the difference is one the registry's mirror of the
+            // chain's logs already tolerates (a change it refused is logged
+            // and skipped), and the node runs on as it always has. Marked, it
+            // may be the change of a block that never committed.
+            if !marked {
+                tracing::warn!(
+                    difference = %what,
+                    "the validator registry differs from the one the chain holds at the tip"
+                );
+                return Ok(());
+            }
+            return Err(format!(
+                "undo records of a change that never committed were discarded, and the validator \
+                 registry differs from the one the chain holds at the tip ({what}): \
+                 {REGISTRY_REPAIR}"
+            ));
+        }
+    }
+    registry.clear_unverified()
 }
 
 /// The record and writes of block `height` in one step; see
@@ -266,6 +453,250 @@ mod tests {
             bincode::serialize(&registry_projection(&entry)).unwrap(),
             bincode::serialize(&registry_projection(&later)).unwrap(),
         );
+    }
+
+    /// A registry over its own store holding one candidate, and with
+    /// `own` a second one: the node's own entry when it runs a validator.
+    fn stored_registry(dir: &std::path::Path, own: Option<Address>) -> ValidatorRegistry {
+        let store: Arc<dyn tenzro_storage::KvStore> =
+            Arc::new(tenzro_storage::RocksDbStore::open_default(dir).unwrap());
+        let reg = ValidatorRegistry::with_storage(store);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        for a in [Some(Address::new([7u8; 32])), own].into_iter().flatten() {
+            let mut ml_dsa = vec![0u8; 1952];
+            ml_dsa[..32].copy_from_slice(a.as_bytes());
+            let mut key = p256.clone();
+            key[1..33].copy_from_slice(a.as_bytes());
+            reg.register_candidate(a, ml_dsa, key, [0u8; 32], a, 0, 0, String::new())
+                .unwrap();
+        }
+        reg
+    }
+
+    /// The rows the chain committed for `registry`, as the start check reads
+    /// them.
+    fn committed_rows(
+        registry: &ValidatorRegistry,
+    ) -> impl Fn(&[u8]) -> std::result::Result<Option<Vec<u8>>, String> {
+        let (_, rows) = registry_rows(registry);
+        move |key: &[u8]| {
+            Ok(rows
+                .get(&(NS_VALIDATOR_REGISTRY.to_string(), key.to_vec()))
+                .cloned()
+                .flatten())
+        }
+    }
+
+    /// A slash under the deferred-removal rule replays to the rows the live
+    /// node wrote: the seat-held log that comes before the equivocation in
+    /// the block decides on both, so the replayed validator is held, as the
+    /// live one is, and without that log both jail it.
+    #[test]
+    fn a_slash_whose_seat_is_held_replays_to_the_rows_the_live_node_wrote() {
+        let members: Vec<Address> = (1..=4u8).map(|i| Address::new([i; 32])).collect();
+        let keys = |a: &Address| {
+            let mut ml_dsa = vec![0u8; 1952];
+            ml_dsa[..32].copy_from_slice(a.as_bytes());
+            let mut p256 = vec![0u8; 65];
+            p256[0] = 0x04;
+            p256[1..33].copy_from_slice(a.as_bytes());
+            (ml_dsa, p256)
+        };
+        let equivocation = |a: &Address| {
+            let (ml_dsa, p256) = keys(a);
+            let mut data = 3u64.to_be_bytes().to_vec();
+            data.extend_from_slice(&17u64.to_be_bytes());
+            data.extend_from_slice(&p256);
+            data.extend_from_slice(&ml_dsa);
+            (vec![b"CheckpointEquivocation".to_vec()], data)
+        };
+        let held = tenzro_vm::native::SeatHeld {
+            cap_epochs: 5,
+            absent: Vec::new(),
+        };
+        let seat = (
+            vec![tenzro_vm::native::SLASH_SEAT_HELD_TOPIC.to_vec()],
+            held.encode(),
+        );
+        for (logs, expected) in [
+            (
+                vec![seat, equivocation(&members[0])],
+                tenzro_token::ValidatorRegistryStatus::JailedPending,
+            ),
+            (
+                vec![equivocation(&members[0])],
+                tenzro_token::ValidatorRegistryStatus::Jailed,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn tenzro_storage::KvStore> =
+                Arc::new(tenzro_storage::RocksDbStore::open_default(dir.path()).unwrap());
+            let live = ValidatorRegistry::with_storage(store);
+            for a in &members {
+                let (ml_dsa, p256) = keys(a);
+                live.register_candidate(
+                    *a,
+                    ml_dsa,
+                    p256,
+                    [0u8; 32],
+                    *a,
+                    tenzro_token::DEFAULT_MIN_VALIDATOR_SELF_STAKE,
+                    0,
+                    String::new(),
+                )
+                .unwrap();
+            }
+            for e in 1..=6 {
+                live.compute_epoch_transition(e);
+            }
+            let at_open = committed_rows(&live);
+            crate::event_loop::apply_validator_logs(
+                &live,
+                logs.iter().map(|(t, d)| (t.as_slice(), d.as_slice())),
+                7,
+                |validator, _, _, deferred| {
+                    let _ = match deferred {
+                        Some(policy) => live.jail_deferred(validator, 7, policy).map(|_| ()),
+                        None => live.jail(validator, 7),
+                    };
+                },
+            );
+            assert_eq!(live.get(&members[0]).unwrap().status, expected);
+            let rows = replayed_registry_rows(&at_open, 7, [logs]).unwrap();
+            assert_eq!(rows, registry_rows(&live).1, "{expected:?}");
+        }
+    }
+
+    /// The start check on a follower (the registry holds other nodes only)
+    /// and on a validator (it holds the node's own entry too): a marked
+    /// registry is refused where it cannot be compared, a registry equal to
+    /// the committed one starts and loses its mark, and one that differs is
+    /// refused with the repair named.
+    #[test]
+    fn a_node_starts_only_on_a_registry_the_chain_holds() {
+        for own in [None, Some(Address::new([9u8; 32]))] {
+            let dir = tempfile::tempdir().unwrap();
+            let reg = stored_registry(dir.path(), own);
+            let chain = committed_rows(&reg);
+
+            // Nothing discarded, tip inside an epoch: nothing to refuse.
+            registry_start_check(&reg, None).unwrap();
+
+            // Undo records of an uncommitted change were discarded.
+            reg.mark_unverified().unwrap();
+            let refused = registry_start_check(&reg, None).unwrap_err();
+            assert!(refused.contains("tenzro-node restore"), "{refused}");
+            assert!(reg.is_unverified().unwrap());
+
+            // The tip is an epoch's first block and the registry equals the
+            // committed one: the node starts and the mark goes.
+            registry_start_check(&reg, Some(&chain)).unwrap();
+            assert!(!reg.is_unverified().unwrap());
+            registry_start_check(&reg, None).unwrap();
+
+            // The registry kept a change the chain never committed.
+            let stray = Address::new([3u8; 32]);
+            let mut p256 = vec![0u8; 65];
+            p256[0] = 0x04;
+            p256[1] = 3;
+            reg.register_candidate(
+                stray,
+                vec![3u8; 1952],
+                p256,
+                [0u8; 32],
+                stray,
+                0,
+                0,
+                String::new(),
+            )
+            .unwrap();
+            reg.mark_unverified().unwrap();
+            let refused = registry_start_check(&reg, Some(&chain)).unwrap_err();
+            assert!(
+                refused.contains("differs from the one the chain holds"),
+                "{refused}"
+            );
+            assert!(refused.contains("tenzro-node restore"), "{refused}");
+            assert!(reg.is_unverified().unwrap());
+        }
+    }
+
+    /// Inside an epoch the registry is compared with the rows the epoch's
+    /// first block committed and the validator logs since: a marked registry
+    /// that took the same logs starts and loses its mark; one holding a change
+    /// no log carries is refused while marked and only logged otherwise.
+    #[test]
+    fn inside_an_epoch_the_registry_is_checked_against_the_replayed_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = stored_registry(dir.path(), None);
+        let at_open = committed_rows(&live);
+        let validator = Address::new([7u8; 32]);
+        let mut data = validator.as_bytes().to_vec();
+        data.extend_from_slice(&5u128.to_le_bytes());
+        data.extend_from_slice(&5u128.to_le_bytes());
+        let block = vec![(vec![b"ValidatorStakeIncreased".to_vec()], data)];
+        crate::event_loop::apply_validator_logs(
+            &live,
+            block.iter().map(|(t, d)| (t.as_slice(), d.as_slice())),
+            0,
+            |_, _, _, _| {},
+        );
+        live.mark_unverified().unwrap();
+        // The block changed the registry after its epoch's rows were committed.
+        assert!(registry_start_check(&live, Some(&at_open)).is_err());
+
+        let rows = replayed_registry_rows(&at_open, 0, [block]).unwrap();
+        let replayed = |key: &[u8]| {
+            Ok(rows
+                .get(&(NS_VALIDATOR_REGISTRY.to_string(), key.to_vec()))
+                .cloned()
+                .flatten())
+        };
+        registry_start_check(&live, Some(&replayed)).unwrap();
+        assert!(!live.is_unverified().unwrap());
+
+        let stray = Address::new([3u8; 32]);
+        let mut p256 = vec![0u8; 65];
+        p256[0] = 0x04;
+        p256[1] = 3;
+        live.register_candidate(
+            stray,
+            vec![3u8; 1952],
+            p256,
+            [0u8; 32],
+            stray,
+            0,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        registry_start_check(&live, Some(&replayed)).unwrap();
+        live.mark_unverified().unwrap();
+        let refused = registry_start_check(&live, Some(&replayed)).unwrap_err();
+        assert!(refused.contains("tenzro-node restore"), "{refused}");
+    }
+
+    /// Without a discard behind it, a registry that differs at an epoch's
+    /// first block is logged and the node starts: the mirror of the chain's
+    /// logs tolerates a change it refused. With one, the start is refused.
+    #[test]
+    fn a_registry_that_differs_at_an_epoch_start_is_refused_only_when_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = stored_registry(dir.path(), None);
+        let other = tempfile::tempdir().unwrap();
+        let on_chain = stored_registry(other.path(), Some(Address::new([9u8; 32])));
+        let chain = committed_rows(&on_chain);
+        assert!(!reg.is_unverified().unwrap());
+        registry_start_check(&reg, Some(&chain)).unwrap();
+
+        reg.mark_unverified().unwrap();
+        let refused = registry_start_check(&reg, Some(&chain)).unwrap_err();
+        assert!(
+            refused.contains("its set of validators") || refused.contains("the entry of"),
+            "{refused}"
+        );
+        assert!(reg.is_unverified().unwrap());
     }
 
     /// Two nodes that register the same candidate at different wall-clock
@@ -366,6 +797,7 @@ mod tests {
             1337,
         );
         tx.public_key = Some(key);
+        tx.block_timestamp_ms = Some(chrono::Utc::now().timestamp_millis());
         let root = execute_and_commit(&store, &tx, 1).await;
         let trie = StateTrie::new(store.clone());
         assert_eq!(trie.root_at(1).unwrap(), Some(root));

@@ -8,10 +8,11 @@
 #
 # A GPU role (the default on a machine with a GPU) takes a CUDA build or a
 # Vulkan build. A CUDA build is proven three ways, all of which must agree:
-#   1. the node binary carries the CUDA backend (ggml_cuda_init) and links
-#      ONNX Runtime dynamically, resolved through $ORIGIN/../lib;
-#   2. the archive's lib/ holds ONNX Runtime with its CUDA provider
-#      (libonnxruntime_providers_cuda.so and libonnxruntime_providers_shared.so);
+#   1. the node binary carries the CUDA backend (ggml_cuda_init) and ONNX
+#      Runtime linked statically (it needs no libonnxruntime.so);
+#   2. the archive's bin/ holds the ONNX Runtime providers beside the binary,
+#      where the static runtime loads them (libonnxruntime_providers_cuda.so,
+#      linking the CUDA runtime, and libonnxruntime_providers_shared.so);
 #   3. the binary's own check (`tenzro-node hardware`), run from the unpacked
 #      archive on this machine, reports a CUDA build, at least one GPU, the
 #      CUDA execution provider for ONNX Runtime, and `startup: ok`.
@@ -26,8 +27,7 @@
 # no GPU offered a light build takes it for the edge role.
 #
 # Installs bin/tenzro-node and bin/tenzro into PREFIX/bin (default
-# /usr/local) and, for a CUDA build, the ONNX Runtime libraries into
-# PREFIX/lib, where the binary's $ORIGIN/../lib run path finds them. The
+# /usr/local) and, for a CUDA build, the ONNX Runtime providers beside them. The
 # previous node binary is kept beside it. --dry-run runs every check and
 # installs nothing.
 #
@@ -56,6 +56,23 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+# on_path <bin dir> <link dir>: every shell finds the programs, a remote one included (ssh runs a command with the
+# system's default PATH, which holds /usr/local/bin on Debian, Raspberry Pi OS, Ubuntu and Fedora, but never a
+# custom prefix). A prefix elsewhere gets a link per program in <link dir>; an existing file there that is not
+# such a link is left alone and named.
+on_path() {
+    local bin=$1 dir=$2 b
+    [ "$(readlink -f "$bin")" = "$(readlink -f "$dir")" ] && return 0
+    sudo install -d "$dir"
+    for b in tenzro tenzro-node; do
+        if [ -e "$dir/$b" ] && [ ! -L "$dir/$b" ]; then
+            echo "WARNING: $dir/$b exists and is not a link: $b is not on the default PATH" >&2
+        else
+            sudo ln -sfn "$bin/$b" "$dir/$b" && echo "linked $dir/$b -> $bin/$b"
+        fi
+    done
+}
+
 [ -n "$SRC" ] && [ -e "$SRC" ] || { echo "usage: tenzro-node-install [--dry-run] [--role gpu|cpu|edge] [--prefix DIR] [--sums FILE [--sig FILE --key FILE]] <archive.tar.gz | dir>" >&2; exit 64; }
 
 # The download is verified before anything is unpacked.
@@ -134,23 +151,15 @@ if [ "$ROLE" = gpu ] && [ $vulkan_backend = 1 ]; then
         || refuse "the Vulkan loader (libvulkan.so.1) is not installed on this machine"
 elif [ "$ROLE" = gpu ]; then
     [ $cuda_backend = 1 ] || refuse "no GPU backend in bin/tenzro-node: this is a CPU build; a GPU role needs the CUDA or the Vulkan build"
-    echo "$needed" | grep -qx 'libonnxruntime\.so\.1' \
-        || refuse "bin/tenzro-node does not link ONNX Runtime dynamically, so it cannot load the CUDA provider"
-    case ":$runpath:" in *':$ORIGIN/../lib:'*) ;; *) refuse "bin/tenzro-node has no \$ORIGIN/../lib run path" ;; esac
+    ! echo "$needed" | grep -q 'libonnxruntime\.so' \
+        || refuse "bin/tenzro-node links a shared ONNX Runtime, not the pinned static one this release builds"
 
-    # 2. The archive: ONNX Runtime and its CUDA provider beside the binary.
-    for lib in libonnxruntime.so.1 libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
-        if [ -e "$root/lib/$lib" ]; then echo "  lib/$lib: present"; else refuse "lib/$lib is missing from the archive"; fi
+    # 2. The archive: the ONNX Runtime providers beside the binary, where the static runtime loads them.
+    for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+        if [ -e "$root/bin/$lib" ]; then echo "  bin/$lib: present"; else refuse "bin/$lib is missing from the archive"; fi
     done
-    if [ -e "$root/lib/libonnxruntime_providers_cuda.so" ]; then
-        readelf -d "$root/lib/libonnxruntime_providers_cuda.so" | grep -q 'NEEDED.*libcudart\|NEEDED.*libcublas' \
-            || refuse "lib/libonnxruntime_providers_cuda.so does not link the CUDA runtime"
-    fi
-    # The ONNX Runtime the binary loads must be the one shipped beside it.
-    resolved=$(ldd "$node" 2>/dev/null | awk '/libonnxruntime\.so/ {print $3}')
-    echo "  ONNX Runtime resolves to: ${resolved:-not found}"
-    [ "$(readlink -f "${resolved:-/nonexistent}")" = "$(readlink -f "$root/lib/libonnxruntime.so.1")" ] \
-        || refuse "bin/tenzro-node loads ONNX Runtime from ${resolved:-nowhere}, not from the archive's lib/"
+    readelf -d "$root/bin/libonnxruntime_providers_cuda.so" | grep -q 'NEEDED.*libcudart\|NEEDED.*libcublas' \
+        || refuse "bin/libonnxruntime_providers_cuda.so does not link the CUDA runtime"
 elif [ "$ROLE" = edge ]; then
     [ $engines = 0 ] || refuse "bin/tenzro-node carries the model engines; the edge role takes the light build"
     [ $cuda_backend = 0 ] || refuse "this is a CUDA build; the edge role takes the light build"
@@ -201,8 +210,8 @@ if [ -e "$PREFIX/bin/tenzro-node" ]; then
     echo "previous node kept at $bak"
 fi
 if [ "$ROLE" = gpu ] && [ $cuda_backend = 1 ]; then
-    sudo install -d "$PREFIX/lib"
-    for f in "$root"/lib/libonnxruntime*; do sudo cp -a "$f" "$PREFIX/lib/"; done
+    # The ONNX Runtime providers beside the binary, where its static runtime loads them.
+    for f in "$root"/bin/libonnxruntime_providers_*.so; do sudo install -m644 "$f" "$PREFIX/bin/"; done
 fi
 # The network profile the node joins through when started without --boot-nodes:
 # found at <dir of the binary>/../share/network/<chain_id>.toml.
@@ -212,11 +221,14 @@ if ls "$root"/share/network/*.toml >/dev/null 2>&1; then
 else
     echo "WARNING: this archive ships no network profile; the node will not find the relay by itself" >&2
 fi
+# The web console `tenzro control --web` serves, found at <dir of the binary>/../share/console;
+# replaced whole, so no file of an earlier console is left in it.
+if [ -f "$root/share/console/index.html" ]; then
+    sudo rm -rf "${PREFIX:?}/share/console"
+    sudo install -d "$PREFIX/share"
+    sudo cp -R "$root/share/console" "$PREFIX/share/console"
+fi
 sudo install -m755 "$cli" "$PREFIX/bin/tenzro"
 sudo install -m755 "$node" "$PREFIX/bin/tenzro-node"
-if [ "$ROLE" = gpu ] && [ $cuda_backend = 1 ]; then
-    got=$(ldd "$PREFIX/bin/tenzro-node" | awk '/libonnxruntime\.so/ {print $3}')
-    [ "$(readlink -f "$got")" = "$(readlink -f "$PREFIX/lib/libonnxruntime.so.1")" ] \
-        || echo "WARNING: the installed node loads ONNX Runtime from $got, not $PREFIX/lib" >&2
-fi
+on_path "$PREFIX/bin" /usr/local/bin
 echo "installed into $PREFIX. Restart the node service to run it."

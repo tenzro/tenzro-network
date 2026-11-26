@@ -249,6 +249,7 @@ pub fn send_packet(
         token_pool: route.local_endpoint,
         token: route.remote_token,
         amount: transfer.amount,
+        finality: super::finality::WAIT_FOR_FINALITY,
     };
     let packet = outbound_packet(route, &message, timeout)?;
     message.message_id = packet.commitment();

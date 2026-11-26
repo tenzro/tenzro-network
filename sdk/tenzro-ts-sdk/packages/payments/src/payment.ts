@@ -104,6 +104,23 @@ export class PaymentClient {
       signature: compositeSignatureJson(p256, pq),
     });
   }
+
+  /**
+   * `tenzro_resolvePaymentIntent`: the settlement plan leg that carries a
+   * payment stated without a rail: the payee's first accepted rail the payer
+   * can fund and the caller priced. Stateless.
+   */
+  async resolvePaymentIntent<T = unknown>(params: {
+    usd_e6: number | string;
+    payee: string;
+    accepts: unknown[];
+    means: unknown[];
+    amounts: unknown[];
+    instruction_digest?: string;
+    reserve?: unknown;
+  }): Promise<T> {
+    return this.rpc.call<T>("tenzro_resolvePaymentIntent", params);
+  }
 }
 
 /** A settlement on Tenzro, as `tenzro_settle` reports it. */

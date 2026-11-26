@@ -116,6 +116,7 @@
 
 mod aap;
 mod claims;
+pub mod client;
 mod dpop;
 mod engine;
 mod error;

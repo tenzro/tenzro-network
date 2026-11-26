@@ -312,16 +312,23 @@ pub(crate) fn supply_after_mint(total: u128, max: Option<u128>, amount: u128) ->
         .filter(|s| max.is_none_or(|m| *s <= m))
 }
 
-/// The frozen amount once the holder keeps only `left`: a freeze never
-/// exceeds the balance.
-pub(crate) fn frozen_after(frozen: u128, left: u128) -> u128 {
-    frozen.min(left)
-}
+/// The gate of the final ERC-7943 rules: a frozen amount may exceed the
+/// balance, and the EVM interface is the standard's final one.
+pub const ERC7943_FINAL_KEY: &str = "feature.erc7943_final.activation_epoch";
 
-/// The amount a freeze of `amount` sets against a balance of `held`, or
-/// `None` when it exceeds the balance.
+/// The amount a freeze of `amount` sets against a balance of `held` while
+/// the final ERC-7943 rules are dormant, or `None` when it exceeds the
+/// balance.
 pub(crate) fn freeze_within(amount: u128, held: u128) -> Option<u128> {
     (amount <= held).then_some(amount)
+}
+
+/// The frozen amount after a forced transfer took a balance of `held` down
+/// to `left`: the freeze drops by the part of the move that reached past the
+/// spendable balance, and is untouched when the move stayed within it.
+pub(crate) fn frozen_after(frozen: u128, held: u128, left: u128) -> u128 {
+    let moved = held.saturating_sub(left);
+    frozen - moved.saturating_sub(spendable(held, frozen))
 }
 
 /// The part of `held` its holder may move past a freeze of `frozen`.
@@ -339,7 +346,9 @@ pub fn halted(state: &dyn VmState, id: &[u8; 32]) -> bool {
     word(state, &halted_slot(id)) != 0
 }
 
-/// Freeze `amount` of `owner`'s balance of `id` (zero unfreezes it). A
+/// Set the frozen amount of `owner` for `id` (zero unfreezes it). Once the
+/// final ERC-7943 rules are live the amount is absolute and may exceed the
+/// balance, which withholds what the account receives later; until then a
 /// freeze larger than the balance is refused.
 pub(crate) fn set_frozen(
     state: &mut dyn VmState,
@@ -348,9 +357,11 @@ pub(crate) fn set_frozen(
     amount: u128,
     changes: &mut Vec<StateChange>,
 ) -> Result<()> {
-    let held = balance(state, id, owner);
-    let amount = freeze_within(amount, held)
-        .ok_or_else(|| refuse(format!("the holder has {held}, the freeze is {amount}")))?;
+    if !crate::feature_gate::is_live_now(state, ERC7943_FINAL_KEY) {
+        let held = balance(state, id, owner);
+        freeze_within(amount, held)
+            .ok_or_else(|| refuse(format!("the holder has {held}, the freeze is {amount}")))?;
+    }
     write_word(state, frozen_slot(id, owner), amount, changes);
     Ok(())
 }
@@ -367,8 +378,8 @@ pub(crate) fn set_halted(
 
 /// Move `amount` of token `id` from `from` to `to` by the force authority:
 /// neither a halt, a lockup nor a frozen amount stops it, but the recipient
-/// must still be eligible, and the frozen amount is lowered to what `from`
-/// still holds.
+/// must still be eligible, and the frozen amount drops by the part of the
+/// move that reached into it.
 pub(crate) fn forced_transfer(
     state: &mut dyn VmState,
     id: &[u8; 32],
@@ -382,13 +393,15 @@ pub(crate) fn forced_transfer(
     if let Err(r) = can_receive(&mut StateView(state), id, &record, to, amount, now_ms)? {
         return Err(refuse(r.to_string()));
     }
+    let held = balance(state, id, from);
     let moved = move_balance(state, id, from, to, amount)?
         .ok_or_else(|| refuse("the holder has less than the forced transfer"))?;
     changes.extend(moved);
     let left = balance(state, id, from);
     let frozen = frozen(state, id, from);
-    if frozen_after(frozen, left) != frozen {
-        write_word(state, frozen_slot(id, from), left, changes);
+    let after = frozen_after(frozen, held, left);
+    if after != frozen {
+        write_word(state, frozen_slot(id, from), after, changes);
     }
     Ok(())
 }
@@ -519,14 +532,41 @@ pub fn can_transfer(
     if held >= amount && spendable(held, frozen) < amount {
         return Ok(Err(Refusal::Frozen));
     }
-    for rule in &record.policy.eligibility {
-        if let Rule::Lockup { until_ms } = rule
-            && now_ms < *until_ms
-        {
-            return Ok(Err(Refusal::Lockup(*until_ms)));
-        }
+    if let Some(until_ms) = lockup(&record, now_ms) {
+        return Ok(Err(Refusal::Lockup(until_ms)));
     }
     can_receive(r, token, &record, to, amount, now_ms)
+}
+
+/// The end of a lockup of `record` still running at `now_ms`.
+fn lockup(record: &TokenRecord, now_ms: i64) -> Option<i64> {
+    record
+        .policy
+        .eligibility
+        .iter()
+        .find_map(|rule| match rule {
+            Rule::Lockup { until_ms } if now_ms < *until_ms => Some(*until_ms),
+            _ => None,
+        })
+}
+
+/// Whether a holder of `token` may send at block time `now_ms`, whatever the
+/// amount and the recipient: not while the issuer has halted transfers, and
+/// not before a lockup ends. No rule of the ledger singles out a sender, so
+/// the answer is the same for every account.
+pub fn can_send(
+    r: &mut impl LedgerRead,
+    token: &[u8; 32],
+    record: &TokenRecord,
+    now_ms: i64,
+) -> Result<std::result::Result<(), Refusal>> {
+    if read_u128(r, &halted_slot(token))? != 0 {
+        return Ok(Err(Refusal::Halted));
+    }
+    if let Some(until_ms) = lockup(record, now_ms) {
+        return Ok(Err(Refusal::Lockup(until_ms)));
+    }
+    Ok(Ok(()))
 }
 
 /// Whether `to` may receive `amount` of `token` under its eligibility rules
@@ -557,29 +597,9 @@ pub fn can_receive(
                     ));
                 }
             }
-            Rule::DenyJurisdiction { blocs } => {
-                for issuer in named_issuers(record) {
-                    if let Some(code) = live_claim(r, token, to, "jurisdiction", &issuer, now_ms)?
-                        && blocs.iter().any(|b| b.eq_ignore_ascii_case(&code))
-                    {
-                        return ineligible(format!("jurisdiction {code} is refused"));
-                    }
-                }
-            }
-            Rule::AllowJurisdiction { blocs } => {
-                let mut served = false;
-                for issuer in named_issuers(record) {
-                    if let Some(code) = live_claim(r, token, to, "jurisdiction", &issuer, now_ms)?
-                        && blocs.iter().any(|b| b.eq_ignore_ascii_case(&code))
-                    {
-                        served = true;
-                        break;
-                    }
-                }
-                if !served {
-                    return ineligible(
-                        "no live jurisdiction claim in a jurisdiction the token serves".to_string(),
-                    );
+            Rule::DenyJurisdiction { .. } | Rule::AllowJurisdiction { .. } => {
+                if let Err(refusal) = jurisdiction_rule(r, token, record, rule, to, now_ms)? {
+                    return Ok(Err(refusal));
                 }
             }
             Rule::HolderKind { kind } => {
@@ -632,6 +652,66 @@ pub fn can_receive(
                     return ineligible(format!("the recipient's KYC tier {have} is below {tier}"));
                 }
             }
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// Whether `who`'s live jurisdiction claims pass `rule` of `token` when it is
+/// a jurisdiction rule; any other rule passes.
+fn jurisdiction_rule(
+    r: &mut impl LedgerRead,
+    token: &[u8; 32],
+    record: &TokenRecord,
+    rule: &Rule,
+    who: &[u8],
+    now_ms: i64,
+) -> Result<std::result::Result<(), Refusal>> {
+    let ineligible = |why: String| Ok(Err(Refusal::Ineligible(why)));
+    match rule {
+        Rule::DenyJurisdiction { blocs } => {
+            for issuer in named_issuers(record) {
+                if let Some(code) = live_claim(r, token, who, "jurisdiction", &issuer, now_ms)?
+                    && blocs.iter().any(|b| b.eq_ignore_ascii_case(&code))
+                {
+                    return ineligible(format!("jurisdiction {code} is refused"));
+                }
+            }
+            Ok(Ok(()))
+        }
+        Rule::AllowJurisdiction { blocs } => {
+            for issuer in named_issuers(record) {
+                if let Some(code) = live_claim(r, token, who, "jurisdiction", &issuer, now_ms)?
+                    && blocs.iter().any(|b| b.eq_ignore_ascii_case(&code))
+                {
+                    return Ok(Ok(()));
+                }
+            }
+            ineligible("no live jurisdiction claim in a jurisdiction the token serves".to_string())
+        }
+        _ => Ok(Ok(())),
+    }
+}
+
+/// Whether `who`'s live jurisdiction claims pass every jurisdiction rule of
+/// `token`, and nothing else. A payment gateway asks it of the payer of each
+/// request: a buyer's jurisdiction is what its claims say now, not what they
+/// said when it received the token.
+pub fn jurisdiction_admits(
+    r: &mut impl LedgerRead,
+    token: &[u8; 32],
+    who: &[u8],
+    now_ms: i64,
+) -> Result<std::result::Result<(), Refusal>> {
+    if *token == tnzo_id() {
+        return Ok(Ok(()));
+    }
+    let Some(record) = read_record(r, token)? else {
+        return Ok(Err(Refusal::UnknownToken));
+    };
+    for rule in &record.policy.eligibility {
+        if let Err(refusal) = jurisdiction_rule(r, token, &record, rule, who, now_ms)? {
+            return Ok(Err(refusal));
         }
     }
     Ok(Ok(()))
@@ -1156,12 +1236,107 @@ mod tests {
         assert!(orphan.validate().is_err());
     }
 
+    /// A payer is admitted only while its live jurisdiction claim is one the
+    /// token serves, whatever its other eligibility; TNZO has no such rule.
+    #[test]
+    fn a_payer_is_admitted_only_in_a_jurisdiction_the_token_serves() {
+        let mut state = StateAdapter::new();
+        let issuer = "did:tenzro:human:residency-attestor";
+        let token = test_token(
+            &mut state,
+            vec![
+                Rule::RequireClaim {
+                    kind: "jurisdiction".into(),
+                    issuers: vec![issuer.into()],
+                },
+                Rule::AllowJurisdiction {
+                    blocs: vec!["EU".into()],
+                },
+            ],
+        );
+        let claim = |state: &mut StateAdapter, who: &[u8], value: &str, expires_ms: i64| {
+            let bytes = serde_json::to_vec(&Claim {
+                value: value.into(),
+                expires_ms,
+            })
+            .unwrap();
+            crate::evm::precompile_host::state_write_blob(
+                state,
+                &crate::precompiles::PRECOMPILE_TOKEN_FACTORY,
+                crate::evm::token_factory::claim_slot(&token, who, "jurisdiction", issuer),
+                &bytes,
+            );
+        };
+        let (eu, us, lapsed, none) = ([0x61u8; 32], [0x62u8; 32], [0x63u8; 32], [0x64u8; 32]);
+        claim(&mut state, &eu, "EU", 10_000);
+        claim(&mut state, &us, "US", 10_000);
+        claim(&mut state, &lapsed, "EU", 5);
+        let admits =
+            |who: &[u8; 32]| jurisdiction_admits(&mut StateView(&state), &token, who, 100).unwrap();
+        assert!(admits(&eu).is_ok());
+        for refused in [&us, &lapsed, &none] {
+            assert!(matches!(admits(refused), Err(Refusal::Ineligible(_))));
+        }
+        assert!(
+            jurisdiction_admits(&mut StateView(&state), &tnzo_id(), &none, 100)
+                .unwrap()
+                .is_ok()
+        );
+    }
+
     #[test]
     fn tnzo_is_the_native_balance() {
         let mut state = StateAdapter::new();
         let a = [1u8; 32];
         state.set_balance(&a, 5);
         assert_eq!(balance(&state, &tnzo_id(), &a), 5);
+    }
+
+    #[test]
+    fn a_freeze_may_exceed_the_balance_and_a_forced_transfer_takes_from_it() {
+        let mut state = StateAdapter::new();
+        let token = test_token(&mut state, Vec::new());
+        let (holder, other) = ([0x11u8; 32], [0x12u8; 32]);
+        let mut changes = Vec::new();
+        assert!(
+            set_frozen(&mut state, &token, &holder, 1_500, &mut changes).is_err(),
+            "refused while the final rules are dormant"
+        );
+        crate::native::set_governed_param_for_test(&mut state, ERC7943_FINAL_KEY, 0);
+        set_frozen(&mut state, &token, &holder, 1_500, &mut changes).unwrap();
+        assert_eq!(frozen(&state, &token, &holder), 1_500);
+        assert!(
+            transfer(&mut state, &token, &holder, &other, 1, 0).is_err(),
+            "nothing is spendable under a freeze above the balance"
+        );
+        forced_transfer(&mut state, &token, &holder, &other, 300, 0, &mut changes).unwrap();
+        assert_eq!(balance(&state, &token, &holder), 700);
+        assert_eq!(
+            frozen(&state, &token, &holder),
+            1_200,
+            "the whole move came out of the frozen part"
+        );
+
+        set_frozen(&mut state, &token, &holder, 500, &mut changes).unwrap();
+        forced_transfer(&mut state, &token, &holder, &other, 150, 0, &mut changes).unwrap();
+        assert_eq!(
+            frozen(&state, &token, &holder),
+            500,
+            "a move within the spendable 200 leaves the freeze"
+        );
+        forced_transfer(&mut state, &token, &holder, &other, 150, 0, &mut changes).unwrap();
+        assert_eq!(balance(&state, &token, &holder), 400);
+        assert_eq!(
+            frozen(&state, &token, &holder),
+            400,
+            "50 was spendable, 100 came out of the freeze"
+        );
+        forced_transfer(&mut state, &token, &holder, &holder, 400, 0, &mut changes).unwrap();
+        assert_eq!(
+            frozen(&state, &token, &holder),
+            400,
+            "a forced transfer to the holder itself keeps its freeze"
+        );
     }
 
     #[test]

@@ -53,6 +53,9 @@ pub struct ValidatorRegistryEntry {
     /// Base58-encoded 32-byte address.
     #[serde(default)]
     pub address: String,
+    /// Root id of the operator behind the account as the chain derives it;
+    /// `None` when the account has no identity on chain.
+    pub operator: Option<String>,
     /// Hardware validator key, ML-DSA-65 leg (1952 bytes), hex-encoded.
     #[serde(default)]
     pub ml_dsa_pubkey: String,
@@ -77,6 +80,10 @@ pub struct ValidatorRegistryEntry {
     pub exited_at_epoch: Option<u64>,
     #[serde(default)]
     pub jailed_until_epoch: Option<u64>,
+    /// For a jailed validator: when the jail ends, the command that proposes
+    /// an earlier return, and where to write.
+    #[serde(default)]
+    pub jailed_remedy: Option<String>,
     #[serde(default)]
     pub tee_attestation_hash: Option<String>,
     #[serde(default)]
@@ -86,11 +93,27 @@ pub struct ValidatorRegistryEntry {
     pub updated_at: u64,
 }
 
+/// The machines of a whole listing and the operators behind them: one
+/// operator per root identity, so machines a person or another machine
+/// delegated count once, and a machine nobody delegated counts as its own
+/// operator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorCounts {
+    /// Entries in the whole listing.
+    pub machines: usize,
+    /// Distinct root identities behind the entries that have one.
+    pub distinct_operators: usize,
+    /// Entries whose account has no identity on chain.
+    pub without_identity: usize,
+}
+
 /// Result of `tenzro_listValidators` / `tenzro_listActiveValidators`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListValidatorsResult {
     #[serde(default)]
     pub count: usize,
+    /// The operators behind the validators listed.
+    pub operators: OperatorCounts,
     #[serde(default)]
     pub validators: Vec<ValidatorRegistryEntry>,
 }

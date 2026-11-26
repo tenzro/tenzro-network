@@ -192,6 +192,37 @@ impl InstanceLock {
     }
 }
 
+/// Create `data_dir` and any missing parent, readable by the owner only: it
+/// holds the node's keystore, its database and its access policy. A
+/// directory that already exists keeps its mode.
+pub fn create_data_dir(data_dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(data_dir)
+}
+
+/// The permission bits of `dir` when its group or other users may read,
+/// write or enter it; `None` when only its owner may, or on a platform
+/// without such bits.
+pub fn open_to_others(dir: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir).ok()?.permissions().mode() & 0o777;
+        (mode & 0o077 != 0).then_some(mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
 /// Take the single-instance lock for `data_dir`, creating the directory if it
 /// does not exist.
 ///
@@ -203,10 +234,19 @@ impl InstanceLock {
 /// degrades to running anyway, because the failure mode being prevented is
 /// silent data corruption.
 pub fn acquire(data_dir: &Path) -> Result<InstanceLock, InstanceError> {
-    std::fs::create_dir_all(data_dir).map_err(|source| InstanceError::Unusable {
+    create_data_dir(data_dir).map_err(|source| InstanceError::Unusable {
         path: data_dir.to_path_buf(),
         source,
     })?;
+    if let Some(mode) = open_to_others(data_dir) {
+        tracing::warn!(
+            data_dir = %data_dir.display(),
+            mode = format!("{mode:o}"),
+            "the data directory holds the keystore, the database and the access policy and is \
+             readable by other users of this machine; `chmod 700 {}` makes it the owner's alone",
+            data_dir.display()
+        );
+    }
 
     // Canonicalise *after* creating, so the resolved path exists. Aliases —
     // `~`, a relative path, a symlink — collapse here, which is what stops two
@@ -349,6 +389,32 @@ fn process_command(_pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A data directory the node creates, and each parent it creates for
+    /// it, is the owner's alone; one that exists keeps the mode it has.
+    #[cfg(unix)]
+    #[test]
+    fn a_created_data_directory_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let data_dir = root.path().join("instances").join("node-a");
+        acquire(&data_dir).expect("acquire");
+        for dir in [root.path().join("instances"), data_dir] {
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} is {mode:o}", dir.display());
+        }
+
+        let existing = root.path().join("shared");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o750)).unwrap();
+        create_data_dir(&existing).unwrap();
+        let mode = std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750);
+
+        // What the start warns about: an existing directory others can reach.
+        assert_eq!(open_to_others(&existing), Some(0o750));
+        assert_eq!(open_to_others(&root.path().join("instances")), None);
+    }
 
     #[test]
     fn a_lock_is_granted_on_a_fresh_directory_and_records_our_pid() {

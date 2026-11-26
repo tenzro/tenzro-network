@@ -23,6 +23,7 @@ tenzro-crypto = { workspace = true }
 tenzro-storage = { workspace = true }
 tenzro-cert-stark = { workspace = true, features = ["parallel"] }
 tenzro-finality = { workspace = true }
+tenzro-light = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

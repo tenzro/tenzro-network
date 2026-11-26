@@ -14,10 +14,7 @@ use crate::{
     precompiles::PrecompileRegistry,
     state_adapter::StateAdapter,
     traits::{VmExecutor, VmState, VmType},
-    types::{
-        CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log,
-        StateChange, VmTransaction,
-    },
+    types::{CallResult, ContractCall, ExecutionResult, Log, StateChange, VmTransaction},
 };
 
 use revm::{
@@ -27,8 +24,6 @@ use revm::{
         U256,
     },
 };
-
-use sha3::{Digest as Sha3Digest, Keccak256};
 
 use super::precompile_host::{HostContext, register_tenzro_precompiles};
 use super::revm_db::RevmStateAdapter;
@@ -48,7 +43,7 @@ use super::revm_db::RevmStateAdapter;
 ///   rather than silently truncated to an aliased address.
 ///
 /// Everything else is a `VmError::InvalidTransaction`.
-fn evm_address(bytes: &[u8]) -> Result<RevmAddress> {
+pub(super) fn evm_address(bytes: &[u8]) -> Result<RevmAddress> {
     match bytes.len() {
         20 => Ok(RevmAddress::from_slice(bytes)),
         32 => {
@@ -65,6 +60,46 @@ fn evm_address(bytes: &[u8]) -> Result<RevmAddress> {
             "EVM address must be 20 bytes or a canonical 32-byte slot, got {} bytes",
             n
         ))),
+    }
+}
+
+/// How the failure of a transaction reads when the engine itself returned
+/// an error.
+const ENGINE_ERROR: &str = "revm execution failed: ";
+
+/// Whether `reason`, the whole failure a transaction's result reports, is an
+/// error the transaction made the EVM engine return after it had run: a
+/// precompile or engine fault. A transaction the engine refused before
+/// running it is not one, and neither is a fault of this node's own storage.
+pub fn is_engine_fault(reason: &str) -> bool {
+    let outer = VmError::ExecutionFailed(String::new()).to_string();
+    reason
+        .strip_prefix(outer.as_str())
+        .and_then(|rest| rest.strip_prefix(ENGINE_ERROR))
+        .is_some_and(|error| {
+            ["Precompile(", "Custom("]
+                .iter()
+                .any(|kind| error.starts_with(kind))
+        })
+}
+
+/// What an error of the engine itself comes to. A transaction the engine
+/// refuses before running it (an invalid transaction or header) is refused
+/// here too. Any other error ends a transaction that has already run: once
+/// the conformance rules are live it is a failed transaction that spent its
+/// whole gas limit, as an exceptional halt does; until then it is refused
+/// like the first kind, which charges it as a transaction that never ran.
+fn engine_error(
+    tx: &VmTransaction,
+    error: revm::primitives::EVMError<String>,
+    conformance: bool,
+) -> Result<ExecutionResult> {
+    use revm::primitives::EVMError;
+    let refused = VmError::ExecutionFailed(format!("{ENGINE_ERROR}{error:?}"));
+    match error {
+        EVMError::Transaction(_) | EVMError::Header(_) => Err(refused),
+        _ if conformance => Ok(ExecutionResult::failed(tx.gas_limit, refused.to_string())),
+        _ => Err(refused),
     }
 }
 
@@ -114,21 +149,6 @@ impl EvmExecutor {
         self.execute_with_revm(tx, state)
     }
 
-    /// Compute Ethereum CREATE address: keccak256(rlp([sender, nonce]))[12..]
-    fn compute_create_address(deployer: &[u8], nonce: u64) -> Vec<u8> {
-        use rlp::RlpStream;
-
-        let mut stream = RlpStream::new_list(2);
-        stream.append(&deployer);
-        stream.append(&nonce);
-        let rlp_encoded = stream.out();
-
-        let hash = Keccak256::digest(&rlp_encoded);
-
-        // Take last 20 bytes for EVM address
-        hash[12..].to_vec()
-    }
-
     /// Execute transaction using revm
     ///
     /// Primary execution path for all EVM transactions. Sets up the revm environment,
@@ -147,6 +167,28 @@ impl EvmExecutor {
         tx: &VmTransaction,
         state: &mut StateAdapter,
     ) -> Result<ExecutionResult> {
+        self.transact(tx, state, false)
+    }
+
+    /// The call the ERC-7786 gateway makes to hand a received message to its
+    /// recipient. `call` comes from the gateway's address at gas price zero:
+    /// the transaction that delivers the message has paid for its gas. The
+    /// block's base fee stays visible to the contract, and the gateway
+    /// refuses to send while the call runs.
+    pub(crate) fn deliver(
+        &self,
+        call: &VmTransaction,
+        state: &mut StateAdapter,
+    ) -> Result<ExecutionResult> {
+        self.transact(call, state, true)
+    }
+
+    fn transact(
+        &self,
+        tx: &VmTransaction,
+        state: &mut StateAdapter,
+        delivering: bool,
+    ) -> Result<ExecutionResult> {
         tracing::debug!("Executing transaction with revm");
 
         // Validate nonce before execution (replay attack protection)
@@ -156,6 +198,10 @@ impl EvmExecutor {
                 expected: expected_nonce,
                 got: tx.nonce,
             });
+        }
+
+        if super::osaka_live(state) {
+            return super::osaka::execute(&self.config, &self.precompiles, tx, state, delivering);
         }
 
         // Get nonce before borrowing state mutably
@@ -206,10 +252,13 @@ impl EvmExecutor {
 
         // Execute transaction in a scope to release state borrow
         let (result_state, success, gas_used, gas_refund, output, contract_address, logs) = {
+            let rule_set = super::rule_set(state);
+            let conformance = super::conformance_live(state);
             let mut db = RevmStateAdapter::new(state);
 
             let mut evm = Evm::builder()
                 .with_db(&mut db)
+                .with_spec_id(rule_set)
                 .modify_tx_env(|tx_env| {
                     tx_env.caller = caller;
                     tx_env.gas_limit = tx.gas_limit;
@@ -224,6 +273,7 @@ impl EvmExecutor {
                 })
                 .modify_cfg_env(|cfg_env| {
                     cfg_env.chain_id = tx.chain_id;
+                    cfg_env.disable_base_fee = delivering;
                 })
                 .modify_block_env(|block_env| {
                     block_env.number = U256::from(block_number);
@@ -235,14 +285,19 @@ impl EvmExecutor {
                     register_tenzro_precompiles(
                         handler,
                         registry.clone(),
-                        HostContext { read_only: false },
+                        HostContext {
+                            read_only: false,
+                            conformance,
+                            delivering,
+                        },
                     )
                 }))
                 .build();
 
-            let result = evm
-                .transact()
-                .map_err(|e| VmError::ExecutionFailed(format!("revm execution failed: {:?}", e)))?;
+            let result = match evm.transact() {
+                Ok(result) => result,
+                Err(e) => return engine_error(tx, e, conformance),
+            };
 
             // Extract execution result, logs, and state
             let (success, gas_used, gas_refund, output, contract_address, logs) =
@@ -333,9 +388,24 @@ impl EvmExecutor {
         // Apply state changes from revm result
         let mut state_changes = Vec::new();
         let mut delegations = Vec::new();
+        let conformance = super::conformance_live(state);
 
+        // The engine's state is a hash map whose order differs per process:
+        // build the changes and delegations in address and key order.
+        let mut result_state: Vec<_> = result_state.into_iter().collect();
+        result_state.sort_by_key(|entry| entry.0);
         for (address, account) in result_state {
             let addr_bytes = address.as_slice().to_vec();
+
+            // An account destroyed in the transaction that created it leaves
+            // nothing behind: its balance has already moved to the
+            // beneficiary, and its nonce, code and storage are not written.
+            if conformance && account.is_selfdestructed() {
+                if state.get_balance(&addr_bytes) != 0 {
+                    state.set_balance(&addr_bytes, 0);
+                }
+                continue;
+            }
 
             // Update balance if touched
             if account.is_touched() {
@@ -374,7 +444,9 @@ impl EvmExecutor {
             }
 
             // Update storage
-            for (key, value) in account.storage {
+            let mut slots: Vec<_> = account.storage.into_iter().collect();
+            slots.sort_by_key(|entry| entry.0);
+            for (key, value) in slots {
                 let key_bytes = key.to_be_bytes::<32>().to_vec();
                 let value_bytes = value.present_value.to_be_bytes::<32>().to_vec();
                 let old_value = state.get_storage(&addr_bytes, &key_bytes);
@@ -418,6 +490,9 @@ impl EvmExecutor {
         call: &ContractCall,
         state: &mut StateAdapter,
     ) -> Result<CallResult> {
+        if super::osaka_live(state) {
+            return super::osaka::call(&self.config, &self.precompiles, call, state);
+        }
         let from: Vec<u8> = if call.caller.is_empty() {
             vec![0u8; 20]
         } else {
@@ -442,10 +517,13 @@ impl EvmExecutor {
         let registry = self.precompiles.clone();
 
         let (success, gas_used, output, revert_reason) = {
+            let rule_set = super::rule_set(state);
+            let conformance = super::conformance_live(state);
             let mut db = RevmStateAdapter::new(state);
 
             let mut evm = Evm::builder()
                 .with_db(&mut db)
+                .with_spec_id(rule_set)
                 .modify_tx_env(|tx_env| {
                     tx_env.caller = caller;
                     tx_env.gas_limit = gas_limit;
@@ -469,7 +547,11 @@ impl EvmExecutor {
                     register_tenzro_precompiles(
                         handler,
                         registry.clone(),
-                        HostContext { read_only: true },
+                        HostContext {
+                            read_only: true,
+                            conformance,
+                            delivering: false,
+                        },
                     )
                 }))
                 .build();
@@ -489,10 +571,12 @@ impl EvmExecutor {
                     };
                     (true, gas_used, output_data, None)
                 }
+                // The revert data is the caller's to decode: a reason string,
+                // a custom error, or nothing.
                 RevmExecutionResult::Revert { gas_used, output } => {
                     let reason = String::from_utf8(output.to_vec())
                         .unwrap_or_else(|_| "Execution reverted".to_string());
-                    (false, gas_used, Vec::new(), Some(reason))
+                    (false, gas_used, output.to_vec(), Some(reason))
                 }
                 RevmExecutionResult::Halt { reason, gas_used } => (
                     false,
@@ -566,51 +650,6 @@ impl VmExecutor for EvmExecutor {
         self.execute_call_revm(call, &mut fork)
     }
 
-    async fn deploy_contract(
-        &self,
-        deployment: &ContractDeployment,
-        state: &mut dyn VmState,
-    ) -> Result<DeployResult> {
-        tracing::info!(
-            "EVM: Deploying contract from {}",
-            hex::encode(&deployment.deployer)
-        );
-
-        // Validate contract size
-        self.config.validate_contract_size(deployment.code.len())?;
-
-        // Build a VmTransaction for deployment
-        let nonce = state.get_nonce(&deployment.deployer);
-        let tx = VmTransaction::new(
-            deployment.deployer.clone(),
-            None,
-            deployment.value,
-            deployment.code.clone(),
-            deployment.gas_limit,
-            deployment.gas_price,
-            nonce,
-            VmType::Evm,
-            self.config.chain_id,
-        );
-
-        // Route through execute_transaction for consistent revm execution
-        let result = self.execute_transaction(&tx, state).await?;
-
-        if result.success {
-            let address = result
-                .contract_address
-                .unwrap_or_else(|| Self::compute_create_address(&deployment.deployer, nonce));
-            Ok(DeployResult::success(address, result.gas_used))
-        } else {
-            Ok(DeployResult::failed(
-                result.gas_used,
-                result
-                    .revert_reason
-                    .unwrap_or_else(|| "Deployment failed".to_string()),
-            ))
-        }
-    }
-
     async fn estimate_gas(&self, tx: &VmTransaction, state: &dyn VmState) -> Result<u64> {
         if tx.to.is_none() {
             Ok(GasEstimator::estimate_deployment(tx.data.len()))
@@ -630,6 +669,22 @@ impl VmExecutor for EvmExecutor {
 mod tests {
     use super::*;
     use crate::state_adapter::StateAdapter;
+
+    /// The Ethereum CREATE address: keccak256(rlp([sender, nonce]))[12..]
+    fn compute_create_address(deployer: &[u8], nonce: u64) -> Vec<u8> {
+        use rlp::RlpStream;
+        use sha3::{Digest, Keccak256};
+
+        let mut stream = RlpStream::new_list(2);
+        stream.append(&deployer);
+        stream.append(&nonce);
+        let rlp_encoded = stream.out();
+
+        let hash = Keccak256::digest(&rlp_encoded);
+
+        // Take last 20 bytes for EVM address
+        hash[12..].to_vec()
+    }
 
     fn create_executor() -> EvmExecutor {
         let config = VmConfig::default();
@@ -680,11 +735,11 @@ mod tests {
         let deployer = vec![1u8; 20];
         let nonce = 0;
 
-        let address = EvmExecutor::compute_create_address(&deployer, nonce);
+        let address = compute_create_address(&deployer, nonce);
         assert_eq!(address.len(), 20);
 
         // Different nonce should produce different address
-        let address2 = EvmExecutor::compute_create_address(&deployer, 1);
+        let address2 = compute_create_address(&deployer, 1);
         assert_ne!(address, address2);
     }
 
@@ -694,12 +749,12 @@ mod tests {
         // Deployer 0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0, nonce 0
         // Expected: keccak256(rlp([0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0, 0]))[12..]
         let deployer = hex::decode("6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0").unwrap();
-        let address = EvmExecutor::compute_create_address(&deployer, 0);
+        let address = compute_create_address(&deployer, 0);
 
         // Verify it's 20 bytes and deterministic
         assert_eq!(address.len(), 20);
 
-        let address2 = EvmExecutor::compute_create_address(&deployer, 0);
+        let address2 = compute_create_address(&deployer, 0);
         assert_eq!(address, address2);
     }
 
@@ -769,6 +824,323 @@ mod tests {
             - 1_000_000_000_000_000
             - (result.gas_used as u128 * 1_000_000_000);
         assert_eq!(state.get_balance(&from), expected_from_balance);
+    }
+
+    /// A call to the KZG point evaluation address is an engine error, and
+    /// its failure is recognised as one; a refused transaction is not.
+    #[test]
+    fn an_engine_error_is_told_from_a_refused_transaction() {
+        let mut state = StateAdapter::new();
+        let sender = vec![1u8; 20];
+        state.set_balance(&sender, 10_000_000_000_000_000_000u128);
+        let mut kzg = vec![0u8; 20];
+        kzg[19] = 0x0a;
+        let tx = VmTransaction::new(
+            sender,
+            Some(kzg),
+            0,
+            vec![0u8; 192],
+            1_000_000,
+            1_000_000_000,
+            0,
+            VmType::Evm,
+            1337,
+        );
+        let error = create_executor()
+            .execute_with_revm(&tx, &mut state)
+            .expect_err("the engine fails");
+        assert!(is_engine_fault(&error.to_string()), "{error}");
+
+        assert!(!is_engine_fault(
+            "Execution failed: revm execution failed: Transaction(NonceTooLow { tx: 0, state: 1 })"
+        ));
+        assert!(!is_engine_fault("Execution reverted"));
+        // This node's own storage failing is not the sender's doing, and the
+        // marker counts only at the start of the failure.
+        assert!(!is_engine_fault(
+            "Execution failed: revm execution failed: Database(\"io\")"
+        ));
+        assert!(!is_engine_fault(
+            "reverted: Execution failed: revm execution failed: Precompile(\"x\")"
+        ));
+    }
+
+    /// A well-formed EOF v1 init container: its code section returns the
+    /// embedded container (PUSH0 PUSH0 RETURNCONTRACT 0), whose own code
+    /// section is a single STOP.
+    fn eof_init_code() -> Vec<u8> {
+        hex::decode(concat!(
+            "ef0001",
+            "010004",
+            "0200010004",
+            "0300010014",
+            "040000",
+            "00",
+            "00800002",
+            "5f5fee00",
+            "ef0001",
+            "010004",
+            "0200010001",
+            "040000",
+            "00",
+            "00800000",
+            "00",
+        ))
+        .unwrap()
+    }
+
+    async fn create_from_eof_init_code(state: &mut StateAdapter) -> ExecutionResult {
+        let deployer = vec![1u8; 20];
+        state.set_balance(&deployer, 10_000_000_000_000_000_000u128);
+        let tx = VmTransaction::new(
+            deployer,
+            None,
+            0,
+            eof_init_code(),
+            500_000,
+            1_000_000_000,
+            0,
+            VmType::Evm,
+            1337,
+        );
+        create_executor()
+            .execute_with_state_adapter(&tx, state)
+            .await
+            .unwrap()
+    }
+
+    /// While the Prague-only rule is dormant the engine runs under its own
+    /// default, which deploys an EOF container.
+    #[tokio::test]
+    async fn eof_init_code_deploys_while_the_prague_only_rule_is_dormant() {
+        let mut state = StateAdapter::new();
+        let result = create_from_eof_init_code(&mut state).await;
+        assert!(result.success, "{:?}", result.revert_reason);
+        let created = result.contract_address.expect("a created address");
+        assert!(
+            state
+                .get_code(&created)
+                .is_some_and(|c| c.starts_with(&[0xef, 0x00])),
+            "an EOF container is deployed"
+        );
+    }
+
+    /// Once the rule is live, init code that opens with the EOF magic is
+    /// ordinary legacy code: its first byte is an undefined opcode, so the
+    /// creation halts and nothing is deployed.
+    #[tokio::test]
+    async fn eof_init_code_halts_once_the_prague_only_rule_is_live() {
+        let mut state = StateAdapter::new();
+        crate::native::set_governed_param_for_test(&mut state, crate::evm::PRAGUE_ONLY_KEY, 0);
+        let result = create_from_eof_init_code(&mut state).await;
+        assert!(!result.success, "EOF init code must not deploy");
+        let reason = result.revert_reason.unwrap_or_default();
+        assert!(
+            reason.contains("OpcodeNotFound"),
+            "expected the legacy undefined-opcode halt, got: {reason}"
+        );
+        let created = compute_create_address(&[1u8; 20], 0);
+        assert!(state.get_code(&created).is_none_or(|c| c.is_empty()));
+    }
+
+    /// An EOF container deployed while the rule was dormant is legacy code
+    /// once it is live: a transaction that calls it halts on its first byte,
+    /// the read-only call path answers the same, and the code opcodes read
+    /// its bytes whole.
+    #[tokio::test]
+    async fn a_deployed_eof_container_is_legacy_code_once_the_rule_is_live() {
+        let mut state = StateAdapter::new();
+        let deployed = create_from_eof_init_code(&mut state).await;
+        let container = deployed.contract_address.expect("a created address");
+        let stored = state.get_code(&container).expect("the container");
+        let caller = vec![1u8; 20];
+        let call = |nonce: u64| {
+            VmTransaction::new(
+                caller.clone(),
+                Some(container.clone()),
+                0,
+                Vec::new(),
+                200_000,
+                1_000_000_000,
+                nonce,
+                VmType::Evm,
+                1337,
+            )
+        };
+        let read_only = ContractCall::new(
+            caller.clone(),
+            container.clone(),
+            Vec::new(),
+            0,
+            200_000,
+            VmType::Evm,
+        );
+        let executor = create_executor();
+
+        // Dormant: the container runs (a single STOP).
+        let ran = executor
+            .execute_with_state_adapter(&call(1), &mut state)
+            .await
+            .unwrap();
+        assert!(ran.success, "{:?}", ran.revert_reason);
+        assert!(
+            executor
+                .execute_call_revm(&read_only, &mut state)
+                .unwrap()
+                .success
+        );
+
+        crate::native::set_governed_param_for_test(&mut state, crate::evm::PRAGUE_ONLY_KEY, 0);
+        let halted = executor
+            .execute_with_state_adapter(&call(2), &mut state)
+            .await
+            .unwrap();
+        assert!(!halted.success);
+        let reason = halted.revert_reason.unwrap_or_default();
+        assert!(reason.contains("OpcodeNotFound"), "{reason}");
+        let answered = executor.execute_call_revm(&read_only, &mut state).unwrap();
+        assert!(!answered.success);
+        assert!(
+            answered
+                .revert_reason
+                .is_some_and(|r| r.contains("OpcodeNotFound"))
+        );
+
+        // EXTCODESIZE of the container, returned as a word: the whole
+        // stored length, where the dormant engine answers 2 for a container.
+        let mut probe = vec![0x73];
+        probe.extend_from_slice(&container);
+        probe.extend_from_slice(&[0x3b, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3]);
+        let reader = vec![0x7eu8; 20];
+        state.set_code(&reader, probe);
+        let size = ContractCall::new(caller, reader, Vec::new(), 0, 200_000, VmType::Evm);
+        let out = executor.execute_call_revm(&size, &mut state).unwrap();
+        assert!(out.success, "{:?}", out.revert_reason);
+        assert_eq!(out.output[31] as usize, stored.len());
+    }
+
+    /// An engine error after the transaction ran spends the whole gas limit
+    /// once the conformance rules are live; a transaction the engine never
+    /// ran is refused on both sides.
+    #[test]
+    fn an_engine_error_spends_the_whole_gas_limit_once_conformance_is_live() {
+        use revm::primitives::{EVMError, InvalidTransaction};
+        let tx = VmTransaction::new(
+            vec![1u8; 20],
+            Some(vec![2u8; 20]),
+            0,
+            Vec::new(),
+            700_000,
+            1_000_000_000,
+            0,
+            VmType::Evm,
+            1337,
+        );
+        let fault = || EVMError::<String>::Precompile("fault".into());
+        assert!(engine_error(&tx, fault(), false).is_err());
+        let failed = engine_error(&tx, fault(), true).unwrap();
+        assert!(!failed.success);
+        assert_eq!(failed.gas_used, 700_000);
+        for conformance in [false, true] {
+            let never_ran = EVMError::<String>::Transaction(InvalidTransaction::NonceTooLow {
+                tx: 0,
+                state: 1,
+            });
+            assert!(engine_error(&tx, never_ran, conformance).is_err());
+        }
+    }
+
+    /// A read-only call to a standard precompile at `address`.
+    fn precompile_call(state: &mut StateAdapter, address: u8, data: Vec<u8>) -> Result<CallResult> {
+        let mut to = vec![0u8; 20];
+        to[19] = address;
+        let call = ContractCall::new(vec![1u8; 20], to, data, 0, 1_000_000, VmType::Evm);
+        create_executor().execute_call_revm(&call, state)
+    }
+
+    fn conformance_live() -> StateAdapter {
+        let mut state = StateAdapter::new();
+        crate::native::set_governed_param_for_test(&mut state, crate::evm::CONFORMANCE_KEY, 0);
+        state
+    }
+
+    /// BLS12-381 G1 addition of the point at infinity to itself: served once
+    /// the conformance rules are live, an account with no code before.
+    #[test]
+    fn the_bls12_381_precompiles_are_served_once_conformance_is_live() {
+        let dormant = precompile_call(&mut StateAdapter::new(), 0x0b, vec![0u8; 256]).unwrap();
+        assert!(dormant.success);
+        assert!(
+            dormant.output.is_empty(),
+            "no precompile answers while dormant"
+        );
+
+        let live = precompile_call(&mut conformance_live(), 0x0b, vec![0u8; 256]).unwrap();
+        assert!(live.success, "{:?}", live.revert_reason);
+        assert_eq!(live.output, vec![0u8; 128], "infinity plus infinity");
+    }
+
+    /// KZG point evaluation at `0x0a`: while dormant any call to it fails
+    /// the whole transaction; once live a malformed input fails that call
+    /// alone, as a precompile does.
+    #[test]
+    fn kzg_point_evaluation_is_a_precompile_once_conformance_is_live() {
+        let dormant = precompile_call(&mut StateAdapter::new(), 0x0a, vec![0u8; 192]);
+        assert!(
+            dormant
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("c-kzg feature is not enabled")),
+            "{dormant:?}"
+        );
+
+        let live = precompile_call(&mut conformance_live(), 0x0a, vec![0u8; 192]).unwrap();
+        assert!(
+            !live.success,
+            "a malformed input is refused by the precompile"
+        );
+    }
+
+    /// A transaction priced below the block's base fee is refused by the
+    /// EVM itself: only the gateway's delivery call runs without that check.
+    #[tokio::test]
+    async fn a_transaction_below_the_base_fee_is_refused() {
+        let executor = create_executor();
+        let mut state = StateAdapter::new();
+        let from = vec![1u8; 20];
+        state.set_balance(&from, 10_000_000_000_000_000_000u128);
+        let priced = |gas_price: u128| {
+            VmTransaction::new(
+                from.clone(),
+                Some(vec![2u8; 20]),
+                0,
+                Vec::new(),
+                21_000,
+                gas_price,
+                0,
+                VmType::Evm,
+                1337,
+            )
+            .with_block_base_fee(10_000_000_000)
+        };
+
+        let refused = executor
+            .execute_with_revm(&priced(1_000_000_000), &mut state)
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("GasPriceLessThanBasefee"),
+            "{refused}"
+        );
+        let free = executor
+            .execute_with_revm(&priced(0), &mut state)
+            .unwrap_err();
+        assert!(
+            free.to_string().contains("GasPriceLessThanBasefee"),
+            "{free}"
+        );
+
+        let delivered = executor.deliver(&priced(0), &mut state).unwrap();
+        assert!(delivered.success);
+        assert_eq!(state.get_balance(&from), 10_000_000_000_000_000_000u128);
     }
 
     #[tokio::test]
@@ -889,6 +1261,61 @@ mod tests {
         );
     }
 
+    /// A read-only call that reverts returns the revert data, which is what
+    /// `eth_call` hands a wallet. A transaction that reverts the same way is
+    /// unchanged by it: no output, the same reason, no state change beyond
+    /// what the block applies, and the call itself leaves state untouched.
+    #[tokio::test]
+    async fn a_reverted_call_returns_its_data_and_a_reverted_transaction_is_unchanged() {
+        let executor = create_executor();
+        let mut state = StateAdapter::new();
+        let caller = vec![3u8; 20];
+        state.set_balance(&caller, 10_000_000_000_000_000_000u128);
+        // PUSH4 0xdeadbeef PUSH1 0 MSTORE PUSH1 4 PUSH1 28 REVERT
+        let reverts = vec![
+            0x63, 0xde, 0xad, 0xbe, 0xef, 0x60, 0x00, 0x52, 0x60, 0x04, 0x60, 0x1c, 0xfd,
+        ];
+        let contract = vec![6u8; 20];
+        state.set_code(&contract, reverts);
+
+        let call = ContractCall::new(
+            caller.clone(),
+            contract.clone(),
+            Vec::new(),
+            0,
+            100_000,
+            VmType::Evm,
+        );
+        let balance = state.get_balance(&caller);
+        let nonce = state.get_nonce(&caller);
+        let called = executor.call(&call, &state).await.unwrap();
+        assert!(!called.success);
+        assert_eq!(called.output, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(state.get_balance(&caller), balance);
+        assert_eq!(state.get_nonce(&caller), nonce);
+
+        let tx = VmTransaction::new(
+            caller.clone(),
+            Some(contract),
+            0,
+            Vec::new(),
+            100_000,
+            1_000_000_000,
+            0,
+            VmType::Evm,
+            1337,
+        );
+        let sent = executor
+            .execute_with_state_adapter(&tx, &mut state)
+            .await
+            .unwrap();
+        assert!(!sent.success);
+        assert!(sent.output.is_empty());
+        assert!(sent.logs.is_empty());
+        assert!(sent.state_changes.is_empty());
+        assert_eq!(sent.revert_reason.as_deref(), Some("Execution failed"));
+    }
+
     #[tokio::test]
     async fn test_revm_revert_state_unchanged() {
         let executor = create_executor();
@@ -932,7 +1359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_contract_deployment_via_trait() {
+    async fn a_creation_transaction_deploys_a_contract() {
         let executor = create_executor();
         let mut state = StateAdapter::new();
 
@@ -941,23 +1368,21 @@ mod tests {
 
         state.set_balance(&deployer, 10_000_000_000_000_000_000u128);
 
-        let deployment = ContractDeployment::new(
+        let tx = VmTransaction::new(
             deployer.clone(),
-            code.clone(),
-            Vec::new(),
+            None,
             0,
+            code,
             500_000,
             1_000_000_000,
             0,
             VmType::Evm,
+            1337,
         );
 
-        let result = executor
-            .deploy_contract(&deployment, &mut state)
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert_eq!(result.address.len(), 20);
+        let result = executor.execute_transaction(&tx, &mut state).await.unwrap();
+        assert!(result.success, "{:?}", result.revert_reason);
+        assert_eq!(result.contract_address.map(|a| a.len()), Some(20));
     }
 
     #[tokio::test]

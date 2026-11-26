@@ -11,9 +11,19 @@ use iroh_base::{EndpointId, TransportAddr};
 pub struct RemoteInfo {
     pub(super) endpoint_id: EndpointId,
     pub(super) addrs: Vec<TransportAddrInfo>,
+    /// Whether a hole punch to the remote is recorded or scheduled.
+    #[cfg(test)]
+    pub(super) holepunch_held: bool,
 }
 
 impl RemoteInfo {
+    /// Whether a hole punch to the remote is recorded or scheduled, so that the
+    /// next one waits for the interval between two punches.
+    #[cfg(test)]
+    pub(crate) fn holds_holepunch(&self) -> bool {
+        self.holepunch_held
+    }
+
     /// Returns the remote's endpoint id.
     pub fn id(&self) -> EndpointId {
         self.endpoint_id

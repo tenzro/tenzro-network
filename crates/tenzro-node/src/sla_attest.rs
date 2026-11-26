@@ -24,6 +24,10 @@
 //! operator's endpoint must forward a peer relay datagram. The same verdict
 //! and unavailable penalty apply, out of the edge bond.
 //!
+//! Once `feature.paid_readiness` is live, a compute provider that served a
+//! request paid by another root in the hour counts as answered for that
+//! round without a probe, unless it owes a storage possession proof.
+//!
 //! Scoring a single probe and slashing on repeated failure stays in
 //! [`tenzro_model::SlaManager`]; this module only schedules probes and turns
 //! their results into a consensus record.
@@ -49,6 +53,11 @@ fn probe_interval_ms(chain: Option<&tenzro_vm::StateAdapter>) -> i64 {
 /// `sla.probe_window_ms`, never longer than the probe interval.
 fn probe_window_ms(chain: Option<&tenzro_vm::StateAdapter>) -> i64 {
     sla_param(chain, tenzro_vm::native::SLA_PROBE_WINDOW_PARAM).min(probe_interval_ms(chain))
+}
+
+/// More than half of the probes answered: the SLA without chain state.
+pub(crate) fn majority(_did: &str, answered: u32, failed: u32) -> bool {
+    answered > failed
 }
 
 fn sla_param(chain: Option<&tenzro_vm::StateAdapter>, key: &str) -> i64 {
@@ -103,7 +112,8 @@ impl SlaTally {
     }
 
     /// Remove and return `epoch`'s outcomes, sorted by DID. A provider is
-    /// available when it answered more than half of this validator's probes.
+    /// available when `meets` holds for what it answered and failed of this
+    /// validator's probes: its readiness tier's SLA, or more than half.
     /// Its capacity is its consensus participation when `participation_of`
     /// gives one, and otherwise the median of the capacities verified probes showed. Tallies older
     /// than `epoch` are dropped: their window has passed.
@@ -111,6 +121,7 @@ impl SlaTally {
         &self,
         epoch: u64,
         participation_of: &dyn Fn(&str) -> Option<u64>,
+        meets: &dyn Fn(&str, u32, u32) -> bool,
     ) -> Vec<SlaOutcome> {
         let mut out: Vec<SlaOutcome> = self
             .counts
@@ -126,9 +137,10 @@ impl SlaTally {
                         v.get(v.len() / 2).copied()
                     }),
                 };
+                let (answered, failed) = *kv.value();
                 SlaOutcome {
+                    available: meets(&did, answered, failed),
                     provider_did: did,
-                    available: kv.value().0 > kv.value().1,
                     capacity,
                 }
             })
@@ -145,6 +157,107 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Whether probes are drawn under the beacon on this chain yet.
+pub(crate) fn probe_beacon_live(state: &dyn tenzro_vm::traits::VmState) -> bool {
+    tenzro_vm::feature_gate::is_live_now(state, tenzro_vm::native::beacon::PROBE_BEACON_GATE)
+}
+
+/// The randomness beacon value a probe issued now is drawn under: the one
+/// `state` holds, once beacon-drawn probes are live; `None` before.
+pub(crate) fn probe_beacon(
+    state: &dyn tenzro_vm::traits::VmState,
+) -> Option<tenzro_model::ProbeBeacon> {
+    use tenzro_vm::native::beacon;
+    probe_beacon_live(state).then(|| {
+        let round = beacon::read_head(state).round;
+        tenzro_model::ProbeBeacon {
+            round,
+            mix: beacon::mix_at(state, round).unwrap_or_else(beacon::genesis_mix),
+        }
+    })
+}
+
+/// Where the beacon value a probe names stands against this node's chain. A
+/// probe is answered only under a current value, so it cannot be drawn under
+/// one its issuer knew long ahead or picked among old ones.
+pub(crate) fn probe_beacon_standing(
+    state: &dyn tenzro_vm::traits::VmState,
+    named: &tenzro_model::ProbeBeacon,
+) -> BeaconStanding {
+    tenzro_vm::native::beacon::standing_of(state, named.round, &named.mix)
+}
+
+pub(crate) use tenzro_vm::native::beacon::Standing as BeaconStanding;
+
+/// Most probes [`TakenProbes`] remembers and most probes waiting on the
+/// chain at once; the oldest remembered probe gives way to a new one.
+pub(crate) const PROBE_MEMORY: usize = 4_096;
+
+/// The probes this node has taken, so each (issuer, subject, epoch, round)
+/// is answered once under one beacon value. While the beacon stands still an
+/// issuer would otherwise draw again for the same round with other work or
+/// another deadline until the draw suited it.
+#[derive(Default)]
+pub(crate) struct TakenProbes {
+    order: std::collections::VecDeque<TakenKey>,
+    taken: std::collections::HashSet<TakenKey>,
+}
+
+type TakenKey = (Vec<u8>, String, u64, u64, Option<tenzro_model::ProbeBeacon>);
+
+impl TakenProbes {
+    /// Records `probe` as taken. `false` when one for the same issuer,
+    /// subject, epoch and round under the same beacon value already was.
+    pub(crate) fn take(&mut self, probe: &tenzro_model::SlaProbe) -> bool {
+        let key = (
+            probe.issuer.to_bytes().to_vec(),
+            probe.provider_did.clone(),
+            probe.epoch,
+            probe.round,
+            probe.beacon,
+        );
+        if !self.taken.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key);
+        if self.order.len() > PROBE_MEMORY
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.taken.remove(&oldest);
+        }
+        true
+    }
+}
+
+/// Waits until this node's chain reaches the beacon round `probe` names, at
+/// most the shortest response window, and hands the probe back on `again`.
+/// A probe whose round the chain does not reach in that time, or whose
+/// deadline passes first, is dropped: the issuer counts a miss in its own
+/// tally, and a verdict takes two thirds of the bonded attesters.
+pub(crate) async fn park_probe(
+    store: Arc<dyn tenzro_storage::KvStore>,
+    probe: tenzro_model::SlaProbe,
+    again: tokio::sync::mpsc::Sender<tenzro_model::SlaProbe>,
+) {
+    let give_up = now_ms().saturating_add(tenzro_model::MIN_SLA_RESPONSE_WINDOW_MS);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let waiting = {
+            let state = tenzro_vm::StateAdapter::reader(store.clone());
+            probe.beacon.as_ref().is_some_and(|named| {
+                probe_beacon_standing(&state, named) == BeaconStanding::NotYetSeen
+            })
+        };
+        if !waiting {
+            let _ = again.send(probe).await;
+            return;
+        }
+        if now_ms() >= give_up.min(probe.deadline_ms) {
+            return;
+        }
+    }
+}
+
 /// Issue one VRF-stamped probe to `provider_did` carrying `work`, register
 /// it as outstanding and broadcast it on `tenzro/sla`. Registration happens
 /// before the broadcast so a fast answer cannot race it.
@@ -159,8 +272,11 @@ async fn issue_probe_with_work(
     let manager = node
         .sla_manager()
         .ok_or_else(|| "SlaManager not initialized (validator-only)".to_string())?;
+    let beacon = crate::rpc::chain_state_of(node)
+        .ok_or_else(|| "no chain state to draw the probe's beacon value from".to_string())
+        .map(|chain| probe_beacon(&chain))?;
     let probe = manager
-        .issue_probe(provider_did, epoch, round, deadline_ms, work)
+        .issue_probe(beacon, provider_did, epoch, round, deadline_ms, work)
         .map_err(|e| format!("issue_probe failed: {}", e))?;
     if probe.work.is_some() {
         node.sla_tally()
@@ -169,17 +285,86 @@ async fn issue_probe_with_work(
     node.sla_outstanding_probes()
         .insert(hex::encode(probe.challenge_nonce), probe.clone());
     if let Some(network) = node.network() {
-        let payload = bincode::serialize(&tenzro_model::SlaEnvelope::Probe(probe.clone()))
-            .map_err(|e| format!("bincode serialize SlaProbe: {}", e))?;
+        // A probe drawn under the beacon goes on its own topic, which only
+        // nodes that read it subscribe to.
+        let (topic, payload) = tenzro_model::probe_wire(&probe).map_err(|e| e.to_string())?;
         let msg = tenzro_network::NetworkMessage::new(tenzro_network::MessagePayload::Custom {
-            topic: "tenzro/sla".to_string(),
-            data: payload,
+            topic: topic.to_string(),
+            data: payload.clone(),
         });
-        if let Err(e) = network.broadcast("tenzro/sla", msg).await {
-            warn!(error = %e, "Failed to broadcast SLA probe on tenzro/sla");
+        if let Err(e) = network.broadcast(topic, msg).await {
+            warn!(error = %e, topic, "Failed to broadcast SLA probe");
+        }
+        if matches!(
+            probe.work,
+            Some(tenzro_model::CapacityWork::Possession { .. })
+        ) {
+            probe_directly(node, &probe, payload);
         }
     }
     Ok(probe)
+}
+
+/// Largest answer a provider gives over the direct ALPN.
+const MAX_DIRECT_ANSWER: usize = 4 * 1024 * 1024;
+
+/// Sends a possession probe straight to its subject over the
+/// `tenzro/sla-probe` ALPN as well, so its answer is timed without the gossip
+/// delay, and hands the answer to the loop that scores the gossip ones: the
+/// same signature check and scoring apply. A provider with no endpoint record
+/// here, that does not speak the ALPN (an older release) or answers nothing
+/// leaves the gossip copy to be scored, so the direct path never costs a
+/// provider anything and logs only at debug level.
+fn probe_directly(node: &TenzroNode, probe: &tenzro_model::SlaProbe, envelope: Vec<u8>) {
+    let (Some(tx), Some(transport), Some(resolver)) = (
+        node.sla_direct_tx().cloned(),
+        node.identity_transport.clone(),
+        node.iroh_resolver().cloned(),
+    ) else {
+        return;
+    };
+    let provider = probe.provider_did.clone();
+    let deadline_ms = probe.deadline_ms;
+    tokio::spawn(async move {
+        let Some(addr) = transport
+            .store()
+            .lookup(&provider)
+            .and_then(|record| tenzro_iroh::identity_transport::endpoint_addr(&record).ok())
+        else {
+            debug!(provider = %provider, "No endpoint record for a direct SLA probe; gossip stands");
+            return;
+        };
+        let wait = std::time::Duration::from_millis((deadline_ms - now_ms()).max(0) as u64);
+        let call = async {
+            let response =
+                tenzro_iroh::request(resolver.endpoint(), addr, tenzro_iroh::ALPN_SLA, &envelope)
+                    .await?;
+            let ok = response.is_success();
+            let bytes = response.bytes(MAX_DIRECT_ANSWER).await?;
+            Ok::<_, tenzro_iroh::IrohError>((ok, bytes))
+        };
+        match direct_answer(tokio::time::timeout(wait, call).await) {
+            Some(answer) => {
+                let _ = tx.send(answer).await;
+            }
+            None => debug!(provider = %provider, "Direct SLA probe unanswered; gossip stands"),
+        }
+    });
+}
+
+/// The answer a direct probe hands on to be scored: only a successful reply.
+/// A refused ALPN, a failed dial, an error status or the deadline passing
+/// hand on nothing, which leaves the gossip copy to be scored.
+fn direct_answer(
+    outcome: Result<
+        Result<(bool, bytes::Bytes), tenzro_iroh::IrohError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> Option<Vec<u8>> {
+    match outcome {
+        Ok(Ok((true, bytes))) => Some(bytes.to_vec()),
+        _ => None,
+    }
 }
 
 /// Issue one VRF-stamped probe to `provider_did`, register it as outstanding
@@ -197,13 +382,15 @@ pub(crate) async fn issue_probe(
     issue_probe_with_work(node, provider_did, epoch, round, deadline_ms, work).await
 }
 
-/// How often a validator runs a burst challenge against each operator
-/// claiming more than one compute unit — about the governed probe interval
-/// times this many rounds. Sparse enough that the matrix work stays a small
-/// share of challenge energy; frequent enough that a run of it lands inside
-/// any reasonably long-lived network, not just a token "per week" that a
-/// short-lived deployment would never see fire.
-const BURST_ROUNDS_BETWEEN: u64 = 36;
+/// Rounds between burst challenges of `subject`: the governed warm cadence
+/// `every` ([`tenzro_vm::native::SLA_BURST_ROUNDS_PARAM`]) times its declared
+/// readiness tier's multiple
+/// ([`tenzro_vm::native::sla_energy_budget::burst_rounds_between`]).
+fn burst_rounds_between(chain: &dyn tenzro_vm::VmState, subject: &str, every: u64) -> u64 {
+    use tenzro_vm::native::sla_energy_budget::{WARM_BURST_ROUNDS_BETWEEN, burst_rounds_between};
+    let tier = tenzro_vm::native::availability_reward::declared_readiness_tier(chain, subject);
+    every.saturating_mul(burst_rounds_between(tier) / WARM_BURST_ROUNDS_BETWEEN)
+}
 
 /// Groups `subjects`, each given with its owning account, by owner,
 /// dropping any owner with only one: the key a burst challenge issues
@@ -234,10 +421,10 @@ pub(crate) fn operators_with_units(
     }))
 }
 
-/// On a validator, run a burst challenge every [`BURST_ROUNDS_BETWEEN`]
-/// probe rounds against every operator claiming more than one compute
-/// unit: every one of its units gets [`crate::capacity_probe::burst_work`]
-/// in the same round, under the same deadline, in place of whatever its
+/// On a validator, run a burst challenge against every operator claiming
+/// more than one compute unit, each unit every `feature.sla_burst.rounds_between`
+/// probe rounds times the multiple its declared readiness tier sets (one
+/// warm, four cool, twenty-eight cold): every unit due gets [`crate::capacity_probe::burst_work`]/// in the same round, under the same deadline, in place of whatever its
 /// ordinary probe would have asked for. One real accelerator backing more
 /// claimed units than it owns cannot produce a genuine matrix proof for
 /// every one of them inside that single window; scoring is the same
@@ -259,14 +446,18 @@ pub fn spawn_burst_challenge_scheduler(node: Arc<TenzroNode>) {
             let now = now_ms();
             let interval = probe_interval_ms(Some(&chain)).max(1);
             let round = (now / interval) as u64;
-            if !round.is_multiple_of(BURST_ROUNDS_BETWEEN) {
+            let every = sla_param(Some(&chain), tenzro_vm::native::SLA_BURST_ROUNDS_PARAM).max(1);
+            if !round.is_multiple_of(every as u64) {
                 continue;
             }
+            let due = |subject: &String| {
+                round.is_multiple_of(burst_rounds_between(&chain, subject, every as u64))
+            };
             let epoch = (now / tenzro_vm::native::MARKET_EPOCH_MS) as u64;
             let window = probe_window_ms(Some(&chain));
             let deadline = now + window;
             for (_owner, subjects) in operators_with_units(&chain) {
-                for subject in subjects {
+                for subject in subjects.into_iter().filter(due) {
                     let node = node.clone();
                     tokio::spawn(async move {
                         if let Err(e) = issue_probe_with_work(
@@ -339,6 +530,17 @@ pub fn spawn_probe_scheduler(node: Arc<TenzroNode>) {
                         node.sla_tally().record(&subject, epoch, serves);
                     });
                 }
+                // A provider that served a request paid by another root this
+                // hour has shown it is ready through the request path; while
+                // it owes no storage proof, it is not probed again.
+                if crate::capacity_probe::probe_work(&chain, &subject).is_none()
+                    && tenzro_vm::native::paid_readiness::served_paid_in_hour(
+                        &chain, &subject, epoch,
+                    )
+                {
+                    node.sla_tally().record(&subject, epoch, true);
+                    continue;
+                }
                 if let Err(e) = issue_probe(&node, &subject, epoch, round, now + window).await {
                     warn!(provider = %subject, error = %e, "scheduled SLA probe failed");
                 }
@@ -357,7 +559,8 @@ pub(crate) fn chain_sla_subject(
     tenzro_vm::native::sla_subject(&chain, subject)
 }
 
-/// Every subject a validator probes this round: eligible compute bonds and
+/// Every subject a validator probes this round: eligible compute bonds that
+/// have not said they are offline, and
 /// every bonded role stake that owes an SLA, each only once the hardware
 /// identity that answers for it is registered on chain.
 pub(crate) fn probe_subjects(chain: &dyn tenzro_vm::VmState) -> Vec<String> {
@@ -371,10 +574,17 @@ pub(crate) fn probe_subjects(chain: &dyn tenzro_vm::VmState) -> Vec<String> {
                 .filter_map(|account| hex::decode(account).ok())
                 .map(move |account| tenzro_vm::native::role_stake_subject(&account, role))
         });
+    let hour = (now_ms().max(0) / tenzro_vm::native::MARKET_EPOCH_MS) as u64;
     tenzro_vm::native::compute_bonds(chain)
         .into_iter()
         .filter(|bond| bond.is_eligible())
         .map(|bond| bond.provider_did)
+        // A compute provider that has said it is offline this hour, and owes
+        // the hour to no held claim, is not probed: its outcome would be left out.
+        .filter(|did| {
+            !tenzro_vm::native::sla_subject(chain, did)
+                .is_some_and(|s| tenzro_vm::native::presence::excused(chain, &s.owner, did, hour))
+        })
         .chain(role_stakes)
         .filter(|subject| {
             // A wallet provider is checked at its domain and an edge operator
@@ -614,9 +824,17 @@ pub fn spawn_attestation_submitter(node: Arc<TenzroNode>) {
             tokio::time::sleep(std::time::Duration::from_millis((next - now).max(0) as u64)).await;
 
             let closed = (now_ms() / epoch_ms - 1).max(0) as u64;
-            let _chain = crate::rpc::chain_state_of(&node);
+            let chain = crate::rpc::chain_state_of(&node);
             let participation_of = |_did: &str| None;
-            let outcomes = node.sla_tally().take_epoch(closed, &participation_of);
+            let meets = |did: &str, answered: u32, failed: u32| match &chain {
+                Some(c) => {
+                    tenzro_vm::native::availability_reward::meets_sla(c, did, answered, failed)
+                }
+                None => majority(did, answered, failed),
+            };
+            let outcomes = node
+                .sla_tally()
+                .take_epoch(closed, &participation_of, &meets);
             if outcomes.is_empty() {
                 debug!(epoch = closed, "no SLA outcomes to attest");
                 continue;
@@ -645,6 +863,116 @@ pub fn spawn_attestation_submitter(node: Arc<TenzroNode>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Probes are drawn under the beacon only once the gate is live. Then a
+    /// probe is taken once per issuer, subject, epoch and round under one
+    /// beacon value, whatever work or deadline a second one carries; another
+    /// round, another subject or the next beacon value is a new probe.
+    #[test]
+    fn a_round_is_answered_once_under_one_beacon_value() {
+        use tenzro_crypto::vrf::VrfSecretKey;
+        let mgr = tenzro_model::SlaManager::new(
+            tenzro_crypto::keys::Address::new([1u8; 20]),
+            VrfSecretKey([9u8; 32]),
+        );
+        let mut state = tenzro_vm::StateAdapter::new();
+        assert!(!probe_beacon_live(&state));
+        assert_eq!(probe_beacon(&state), None);
+        tenzro_vm::native::set_genesis_param(
+            &mut state,
+            tenzro_vm::native::beacon::PROBE_BEACON_GATE,
+            0,
+        );
+        assert!(probe_beacon_live(&state));
+        let beacon = probe_beacon(&state).expect("live: probes are drawn under the beacon");
+        assert_eq!(
+            probe_beacon_standing(&state, &beacon),
+            BeaconStanding::Current
+        );
+        let probe = |beacon, did: &str, round, deadline, work| {
+            mgr.issue_probe(Some(beacon), did, 3, round, deadline, work)
+                .unwrap()
+        };
+        let mut taken = TakenProbes::default();
+        let first = probe(beacon, "p1", 7, 10_000, None);
+        assert!(taken.take(&first));
+        assert!(!taken.take(&first));
+        // The same round drawn again with other work and another deadline.
+        let work = tenzro_model::CapacityWork::StateReads {
+            height: 1,
+            count: 2,
+        };
+        let again = probe(beacon, "p1", 7, 20_000, Some(work));
+        assert_ne!(again.challenge_nonce, first.challenge_nonce);
+        assert!(!taken.take(&again));
+        assert!(taken.take(&probe(beacon, "p1", 8, 10_000, None)));
+        assert!(taken.take(&probe(beacon, "p2", 7, 10_000, None)));
+        let moved = tenzro_model::ProbeBeacon {
+            round: beacon.round + 1,
+            mix: [4; 32],
+        };
+        assert!(taken.take(&probe(moved, "p1", 7, 10_000, None)));
+        // A probe naming a round the chain has not reached waits; one under
+        // a value the chain never took is refused.
+        assert_eq!(
+            probe_beacon_standing(&state, &moved),
+            BeaconStanding::NotYetSeen
+        );
+        let forged = tenzro_model::ProbeBeacon {
+            mix: [4; 32],
+            ..beacon
+        };
+        assert_eq!(
+            probe_beacon_standing(&state, &forged),
+            BeaconStanding::Refused
+        );
+    }
+
+    /// A declared cool unit is burst a quarter as often as a warm one and a cold
+    /// unit once a week; an undeclared unit counts as warm. Every colder
+    /// cadence is a multiple of the warmer ones, so a round that bursts a
+    /// cold unit bursts its operator's warmer units too.
+    #[test]
+    fn burst_cadence_follows_the_declared_readiness_tier() {
+        use tenzro_vm::traits::VmState;
+        let mut chain = tenzro_vm::StateAdapter::new();
+        for (did, tier) in [("did:cool", 1u8), ("did:cold", 0u8)] {
+            chain.set_storage(
+                &tenzro_vm::native::SYSTEM_ADDRESS,
+                format!("readiness_tier:{did}").as_bytes(),
+                vec![tier],
+            );
+        }
+        assert_eq!(burst_rounds_between(&chain, "did:warm", 36), 36);
+        assert_eq!(burst_rounds_between(&chain, "did:cool", 36), 144);
+        assert_eq!(burst_rounds_between(&chain, "did:cold", 36), 1_008);
+        // The governed warm cadence scales every tier.
+        assert_eq!(burst_rounds_between(&chain, "did:cool", 2), 8);
+        assert_eq!(burst_rounds_between(&chain, "did:cold", 2), 56);
+    }
+
+    /// An older provider that refuses the ALPN, a dial that fails, an error
+    /// status and a missed deadline all leave the gossip copy to be scored:
+    /// nothing is handed on, so nothing is scored against the provider.
+    #[tokio::test]
+    async fn only_a_successful_direct_answer_is_handed_on() {
+        let answer = bytes::Bytes::from_static(b"envelope");
+        assert_eq!(
+            direct_answer(Ok(Ok((true, answer.clone())))),
+            Some(b"envelope".to_vec())
+        );
+        assert_eq!(direct_answer(Ok(Ok((false, answer)))), None);
+        assert_eq!(
+            direct_answer(Ok(Err(tenzro_iroh::IrohError::Unauthorized(
+                "ALPN not offered".into()
+            )))),
+            None
+        );
+        let elapsed = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        assert_eq!(direct_answer(Err(elapsed)), None);
+    }
 
     #[test]
     fn group_by_owner_keeps_only_operators_with_more_than_one_unit() {
@@ -677,7 +1005,7 @@ mod tests {
         tally.record("did:a", 8, true);
         tally.record("did:a", 6, true);
 
-        let out = tally.take_epoch(7, &|_| None);
+        let out = tally.take_epoch(7, &|_| None, &majority);
         assert_eq!(
             out,
             vec![
@@ -694,9 +1022,9 @@ mod tests {
             ]
         );
         // Taken once; older epochs dropped, later ones kept.
-        assert!(tally.take_epoch(7, &|_| None).is_empty());
-        assert!(tally.take_epoch(6, &|_| None).is_empty());
-        assert_eq!(tally.take_epoch(8, &|_| None).len(), 1);
+        assert!(tally.take_epoch(7, &|_| None, &majority).is_empty());
+        assert!(tally.take_epoch(6, &|_| None, &majority).is_empty());
+        assert_eq!(tally.take_epoch(8, &|_| None, &majority).len(), 1);
     }
 
     #[test]
@@ -709,7 +1037,11 @@ mod tests {
             tally.record_capacity("did:ai", 3, c);
         }
         // The validator signed three quarters of its epoch's certified rounds.
-        let out = tally.take_epoch(3, &|did: &str| (did == "did:validator").then_some(7_500));
+        let out = tally.take_epoch(
+            3,
+            &|did: &str| (did == "did:validator").then_some(7_500),
+            &majority,
+        );
         let cap = |did: &str| out.iter().find(|o| o.provider_did == did).unwrap().capacity;
         assert_eq!(cap("did:validator"), Some(7_500));
         assert_eq!(cap("did:ai"), Some(20));

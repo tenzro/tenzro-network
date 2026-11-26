@@ -12,12 +12,16 @@
 //! A model on the batch engine serves sessions too. The engine holds a
 //! sequence's cache while its turn runs and afterwards keeps it as the slot's
 //! reusable prefix, which the session's next turn extends. A checkpoint there
-//! is the cache of the conversation up to the end of its last message, copied
-//! out between two decode steps once it is prefilled; it starts a chain of its
-//! own. A successor seeds the chain into a slot of its engine and the next turn
-//! prefills only what the conversation added after it. On a model with recurrent layers every
-//! checkpoint carries the whole recurrent state, so checkpoints are taken at
-//! turn boundaries, no more often than the configured interval.
+//! is the cache of a turn's own sequence, copied out between two decode steps
+//! while the turn runs: the conversation through that turn's prompt, and what
+//! of its reply was decoded by then. It starts a chain of its own, at most
+//! once per configured interval. A successor seeds the chain into a slot of
+//! its engine, and the next turn reuses the positions its prompt shares with
+//! it and prefills the rest, the last reply among it. A template may render
+//! the end of a prompt differently from the same turn in a later history; an
+//! attention cache is cut back to where they part, and a cache with recurrent
+//! state cannot be, so on a model with recurrent layers such a turn has no
+//! checkpoint and says so.
 //!
 //! Standby weights are staged in host memory, with no engine context and no
 //! device memory, so activating them on a failover or a surge costs graph and
@@ -34,6 +38,23 @@ const SEQ: i32 = 0;
 /// The sequence reserved for staging exports and imports; never decoded into.
 const SCRATCH: i32 = 1;
 
+/// Whether a successor could take the session over after a turn without
+/// reading the conversation again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnCheckpoint {
+    /// A checkpoint of this turn can be exported: the conversation through
+    /// this turn's prompt, of which the next turn reuses what its own prompt
+    /// shares with it.
+    Ready,
+    /// None was taken because the last one is newer than the checkpoint
+    /// interval; that one, which ends before this turn, is what a successor
+    /// gets.
+    NotDue,
+    /// Taking one failed, for the reason given. A successor replays the
+    /// conversation from its messages.
+    Unavailable(String),
+}
+
 /// What one session turn produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTurn {
@@ -43,6 +64,8 @@ pub struct SessionTurn {
     /// Of those, how many the session's cache already held (not prefilled).
     pub reused_tokens: u32,
     pub completion_tokens: u32,
+    /// Whether this turn left a checkpoint.
+    pub checkpoint: TurnCheckpoint,
 }
 
 /// One exported piece of a session's cache.
@@ -305,7 +328,7 @@ impl ModelRuntime {
 
     /// The tokenizer of batched `model_id`, loaded from its weights file
     /// without the weights.
-    fn session_vocab(&self, model_id: &str) -> Result<Arc<LlamaModel>> {
+    pub(super) fn session_vocab(&self, model_id: &str) -> Result<Arc<LlamaModel>> {
         if let Some(v) = self.sessions.vocabs.get(model_id) {
             return Ok(v.clone());
         }
@@ -355,8 +378,14 @@ impl ModelRuntime {
         }
         let vocab = self.session_vocab(model_id)?;
         let template = ChatTemplateSource::from_model(&vocab).ok();
-        let turn =
-            crate::tool_grammar::render_turn(template.as_ref(), model_id, messages, &[], config)?;
+        let turn = crate::tool_grammar::render_turn(
+            &self.catalog.current(),
+            template.as_ref(),
+            model_id,
+            messages,
+            &[],
+            config,
+        )?;
         let prompt = turn.prompt;
         let wanted = vocab
             .str_to_token(&prompt, AddBos::Always)
@@ -364,50 +393,91 @@ impl ModelRuntime {
         if wanted.is_empty() {
             return Err(session_err("the conversation rendered to no tokens"));
         }
-        let mut config = Self::batched_config(engine, &turn.config);
+        let mut config = self.batched_config(engine, &turn.config);
         // The session's slot prefix is reused by its own turns only.
         config.cache_salt = Some(format!("session/{session}"));
         // Every position this turn decodes that its prompt does not end up
         // reusing, whichever request of the turn decoded it.
         let mut prefilled = 0u32;
+        // A cache with recurrent state holds one position only.
+        let cuttable = !(vocab.is_recurrent() || vocab.is_hybrid());
         if let Some(chain) = s.imported.take() {
-            prefilled += seed_chain(engine, session, &chain, &wanted, &config)?;
+            prefilled += seed_chain(engine, session, &chain, &wanted, &config, cuttable)?;
         }
 
+        let interval =
+            Duration::from_millis(self.sessions.checkpoint_interval_ms.load(Ordering::Relaxed));
+        let due = s.taken_at.is_none_or(|t| t.elapsed() >= interval);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        engine.submit(BatchRequest {
+        let request = BatchRequest {
             prompt: BatchPrompt::Raw(prompt),
             config: config.clone(),
             token_tx: None,
             result_tx,
             media: Vec::new(),
-        })?;
+        };
+        // A due checkpoint is copied out of this turn's own sequence: the
+        // export travels with the request, so it holds the prompt however
+        // soon the reply ends.
+        let exporting = if due {
+            Some(engine.submit_exporting(request)?.1)
+        } else {
+            engine.submit(request)?;
+            None
+        };
         let result = result_rx
             .blocking_recv()
             .map_err(|_| ModelError::Other("batch engine dropped the request".into()))?
             .map_err(ModelError::from)?;
+        let copied = exporting.map(|exported| {
+            exported
+                .blocking_recv()
+                .map_err(|_| ModelError::Other("batch engine dropped the checkpoint".into()))?
+                .map_err(|e| session_err(format!("the turn's cache was not copied: {e}")))
+        });
         prefilled += result.input_tokens.saturating_sub(result.cached_tokens);
-        // The checkpoint carries the conversation through this turn's reply,
-        // rendered as the next turn's history renders it, so a successor
-        // that takes the session over prefills only the next message.
-        let interval =
-            Duration::from_millis(self.sessions.checkpoint_interval_ms.load(Ordering::Relaxed));
-        if s.taken_at.is_none_or(|t| t.elapsed() >= interval) {
-            let mut through_reply = messages.to_vec();
-            through_reply.push(ChatMessage {
-                role: "assistant".into(),
-                content: result.text.clone(),
-                ..Default::default()
+        let mut checkpoint = TurnCheckpoint::NotDue;
+        if let Some(copied) = copied {
+            // A checkpoint is kept only for what the next turn can take from
+            // it: its history is rendered here, through this turn's reply, and
+            // compared with the positions copied.
+            let kept = copied.and_then(|blob| {
+                let mut through_reply = messages.to_vec();
+                through_reply.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: result.text.clone(),
+                    ..Default::default()
+                });
+                let history = crate::tool_grammar::render_history(
+                    &self.catalog.current(),
+                    template.as_ref(),
+                    model_id,
+                    &through_reply,
+                    &config,
+                )?;
+                let next: Vec<i32> = vocab
+                    .str_to_token(&history, AddBos::Always)
+                    .map_err(|e| ModelError::Other(format!("Tokenization failed: {e}")))?
+                    .iter()
+                    .map(|t| t.0)
+                    .collect();
+                let copied = KvBlob::decode(&blob)
+                    .map_err(|e| session_err(e.to_string()))?
+                    .tokens;
+                checkpoint_reuse(&copied, &next, cuttable).map_err(session_err)?;
+                Ok(blob)
             });
-            match checkpoint_history(engine, &vocab, template.as_ref(), &through_reply, &config) {
+            match kept {
                 Ok(blob) => {
                     s.latest = Some(Arc::new(blob));
                     s.exported = false;
                     s.chain += 1;
                     s.taken_at = Some(std::time::Instant::now());
+                    checkpoint = TurnCheckpoint::Ready;
                 }
                 // The next turn is checkpointed instead.
                 Err(e) => {
+                    checkpoint = TurnCheckpoint::Unavailable(e.to_string());
                     if self
                         .sessions
                         .unchecked_reported
@@ -431,6 +501,7 @@ impl ModelRuntime {
             prompt_tokens: result.input_tokens,
             reused_tokens: result.input_tokens.saturating_sub(prefilled),
             completion_tokens: result.output_tokens,
+            checkpoint,
         })
     }
 
@@ -498,77 +569,66 @@ fn chain_err(e: praecise_runtime::Error) -> ModelError {
     }
 }
 
-/// A checkpoint of the conversation `messages`, which ends with the reply of
-/// its last turn: every position of the history as the next turn's prompt
-/// renders it, without a generation prompt.
-///
-/// The generation prompt is left out because a chat template renders it
-/// differently from the reply it becomes in the next turn's history, and a
-/// cache with recurrent state cannot be cut back to before it. The history is
-/// run on the engine as a request of its own, which reuses the session's slot
-/// prefix, and is copied out at the first step boundary after its prefill.
-fn checkpoint_history(
-    engine: &BatchEngine,
-    vocab: &LlamaModel,
-    template: Option<&ChatTemplateSource>,
-    messages: &[ChatMessage],
-    config: &GenerationConfig,
-) -> Result<Vec<u8>> {
-    let history =
-        crate::tool_grammar::render_history(template, engine.model_id(), messages, config)?;
-    let held = vocab
-        .str_to_token(&history, AddBos::Always)
-        .map_err(|e| ModelError::Other(format!("Tokenization failed: {e}")))?;
-    if held.is_empty() {
-        return Err(session_err("the conversation rendered to no tokens"));
+/// How many positions the next turn takes from a checkpoint holding the tokens
+/// `copied`, when its history renders as `next`: the positions the two share
+/// from the start. All of them when the history extends the checkpoint. Fewer
+/// when the template renders the end of the checkpointed prompt differently
+/// in the history; an attention cache (`cuttable`) is then cut back to where
+/// they part, and a cache with recurrent state, which holds its last position
+/// only, cannot be used at all. The error is the reason no checkpoint is kept.
+fn checkpoint_reuse(
+    copied: &[i32],
+    next: &[i32],
+    cuttable: bool,
+) -> std::result::Result<usize, String> {
+    let shared = copied.iter().zip(next).take_while(|(a, b)| a == b).count();
+    if shared == copied.len() && shared > 0 {
+        return Ok(shared);
     }
-    // Two tokens: the step that samples the first leaves the sequence
-    // running, and exportable, until the next step boundary.
-    let mut step = config.clone();
-    step.max_tokens = 2;
-    step.stop.clear();
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let ticket = engine.submit_tracked(BatchRequest {
-        prompt: BatchPrompt::Raw(history),
-        config: step,
-        token_tx: None,
-        result_tx,
-        media: Vec::new(),
-    })?;
-    let export = engine.export_sequence(ticket)?;
-    let blob = export
-        .blocking_recv()
-        .map_err(|_| ModelError::Other("batch engine dropped the checkpoint".into()));
-    let _ = result_rx.blocking_recv();
-    let blob = blob?.map_err(ModelError::from)?;
-    // Only the history itself extends every later turn of the conversation.
-    let tokens = KvBlob::decode(&blob)
-        .map_err(|e| session_err(e.to_string()))?
-        .tokens;
-    if tokens.len() != held.len() || tokens.iter().zip(&held).any(|(a, b)| *a != b.0) {
-        return Err(session_err(format!(
-            "the engine copied {} positions out, not the history's {}",
-            tokens.len(),
-            held.len()
-        )));
+    if shared == 0 {
+        return Err("the next turn's history shares no position with this turn's cache".into());
     }
-    Ok(blob)
+    if !cuttable {
+        return Err(format!(
+            "the next turn's history parts from this turn's cache at position {shared} of {}, \
+             and a cache with recurrent state cannot be cut back",
+            copied.len()
+        ));
+    }
+    Ok(shared)
+}
+
+/// The token to feed after seeding a chain holding the tokens `held` for a
+/// turn whose prompt is `wanted`, or `None` when the chain is of no use to
+/// it. A prompt that extends the chain continues it with its next token. A
+/// prompt that parts from the chain earlier still takes the positions they
+/// share when the cache can be cut back (`cuttable`): the token fed is then
+/// the prompt's first token after those, which lands after the chain and is
+/// cut away with everything past where they part.
+fn seed_token(held: &[i32], wanted: &[i32], cuttable: bool) -> Option<i32> {
+    let shared = held.iter().zip(wanted).take_while(|(a, b)| a == b).count();
+    if shared == 0 || shared >= wanted.len() {
+        return None;
+    }
+    (shared == held.len() || cuttable).then(|| wanted[shared])
 }
 
 /// Rebuild `chain` in a slot of `engine` and leave it there as that slot's
-/// cached prefix, for the turn about to run on `wanted`, which must extend it.
+/// cached prefix, for the turn about to run on `wanted`.
 ///
 /// The engine continues a rebuilt sequence from the token after the chain, so
-/// the conversation's next token is fed and the one sampled after it dropped.
-/// The turn then reuses the chain and that token and prefills the rest. A
-/// conversation that does not extend the chain is served by a full prefill.
-/// Returns the positions decoded here: the one token fed, or none.
+/// one token is fed ([`seed_token`]) and the one sampled after it dropped. The
+/// turn then reuses the positions its prompt shares with the slot's prefix and
+/// prefills the rest. A chain the prompt can take nothing from is not rebuilt,
+/// and the turn prefills in full. Returns the positions decoded here: the one
+/// token fed, or none.
 fn seed_chain(
     engine: &BatchEngine,
     session: &str,
     chain: &[Vec<u8>],
     wanted: &[LlamaToken],
     config: &GenerationConfig,
+    cuttable: bool,
 ) -> Result<u32> {
     let weights = engine.fingerprint().ok_or_else(|| {
         session_err(format!(
@@ -577,22 +637,22 @@ fn seed_chain(
         ))
     })?;
     let held = chain_tokens(weights, chain)?;
-    let n = held.len();
-    if n == 0 || n >= wanted.len() || held.iter().zip(wanted).any(|(a, b)| *a != b.0) {
+    let wanted: Vec<i32> = wanted.iter().map(|t| t.0).collect();
+    let Some(next_token) = seed_token(&held, &wanted, cuttable) else {
         warn!(
             session,
-            positions = n,
-            "the conversation does not extend the session's checkpoint; the turn prefills it in full"
+            positions = held.len(),
+            "the conversation can take nothing from the session's checkpoint; the turn prefills it in full"
         );
         return Ok(0);
-    }
+    };
     let mut step = config.clone();
     step.max_tokens = 1;
     step.stop.clear();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     engine.resume(SequenceResume {
         blobs: chain.to_vec(),
-        next_token: wanted[n].0,
+        next_token,
         generated: String::new(),
         config: step,
         token_tx: None,
@@ -703,8 +763,14 @@ impl SequenceEngine for ModelRuntime {
         // request on the single-context path.
         let loaded = owner.blocking_lock();
         let template = ChatTemplateSource::from_model(&loaded.model).ok();
-        let turn =
-            crate::tool_grammar::render_turn(template.as_ref(), model_id, messages, &[], config)?;
+        let turn = crate::tool_grammar::render_turn(
+            &self.catalog.current(),
+            template.as_ref(),
+            model_id,
+            messages,
+            &[],
+            config,
+        )?;
         let (prompt, config) = (turn.prompt, &turn.config);
         let wanted = loaded
             .model
@@ -785,6 +851,8 @@ impl SequenceEngine for ModelRuntime {
             prompt_tokens: wanted.len() as u32,
             reused_tokens: keep as u32,
             completion_tokens: completion,
+            // This session's own context is copied out whenever it is asked for.
+            checkpoint: TurnCheckpoint::Ready,
         })
     }
 
@@ -906,6 +974,52 @@ impl SequenceEngine for ModelRuntime {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_checkpoint_is_kept_for_what_the_next_history_shares_with_it() {
+        // The next history extends the turn's prompt: all of it is reused,
+        // with or without recurrent state.
+        let prompt = [1, 10, 11, 12, 20];
+        let extends = [1, 10, 11, 12, 20, 30, 31, 21];
+        assert_eq!(checkpoint_reuse(&prompt, &extends, true), Ok(5));
+        assert_eq!(checkpoint_reuse(&prompt, &extends, false), Ok(5));
+
+        // The template closes the prompt with tokens the history does not
+        // carry (20, 98, 99 against 20, 30): an attention cache is cut back to
+        // where they part, a recurrent one is no checkpoint.
+        let opened = [1, 10, 11, 12, 20, 98, 99];
+        assert_eq!(checkpoint_reuse(&opened, &extends, true), Ok(5));
+        let why = checkpoint_reuse(&opened, &extends, false).unwrap_err();
+        assert!(
+            why.contains("position 5 of 7") && why.contains("recurrent"),
+            "{why}"
+        );
+
+        // Nothing shared, or nothing copied, is no checkpoint for anyone.
+        assert!(checkpoint_reuse(&[7, 8], &extends, true).is_err());
+        assert!(checkpoint_reuse(&[], &extends, true).is_err());
+    }
+
+    #[test]
+    fn a_seeded_chain_is_continued_or_cut_back_and_never_misused() {
+        let held = [1, 10, 11, 12, 20, 98, 99];
+        // The prompt extends the chain: its next token continues it.
+        let extends = [1, 10, 11, 12, 20, 98, 99, 30, 31];
+        assert_eq!(seed_token(&held, &extends, false), Some(30));
+        assert_eq!(seed_token(&held, &extends, true), Some(30));
+        // The prompt parts from the chain at position 5: an attention cache
+        // is seeded and fed the prompt's token there, a recurrent one is not
+        // seeded.
+        let parts = [1, 10, 11, 12, 20, 30, 31, 21];
+        assert_eq!(seed_token(&held, &parts, true), Some(30));
+        assert_eq!(seed_token(&held, &parts, false), None);
+        // Nothing shared, an empty chain, or a prompt the chain already
+        // covers: nothing to seed.
+        assert_eq!(seed_token(&[7, 8], &parts, true), None);
+        assert_eq!(seed_token(&[], &parts, true), None);
+        assert_eq!(seed_token(&held, &held[..4], true), None);
+        assert_eq!(seed_token(&held, &held, true), None);
+    }
+
     /// A standby model is staged from its weights file in host memory with
     /// no engine context: it is listed as standby, not loaded, its
     /// fingerprint is that of the staged bytes, and a load of the same file
@@ -916,7 +1030,7 @@ mod tests {
         let path = dir.path().join("m.gguf");
         let weights = vec![7u8; 8192];
         std::fs::write(&path, &weights).expect("weights");
-        let rt = ModelRuntime::new().expect("runtime");
+        let rt = ModelRuntime::new(crate::catalog::CatalogCell::default()).expect("runtime");
 
         let staged = rt.stage_standby("m", &path).expect("staged");
         assert_eq!(staged.model_id, "m");

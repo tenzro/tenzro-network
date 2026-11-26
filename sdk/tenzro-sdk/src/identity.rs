@@ -442,6 +442,9 @@ mod tests {
         async fn sign_composite(&self, _m_prime: &[u8]) -> SdkResult<([u8; 64], Option<Vec<u8>>)> {
             Ok(([9; 64], None))
         }
+        async fn sign_ml_dsa_leg(&self, _m_prime: &[u8]) -> SdkResult<Vec<u8>> {
+            unreachable!("this signer holds no ML-DSA-65 key")
+        }
         async fn sign_p256(&self, _message: &[u8]) -> SdkResult<[u8; 64]> {
             unreachable!()
         }

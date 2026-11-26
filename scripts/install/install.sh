@@ -11,7 +11,9 @@
 #   3. verifies the archive's SHA-256 against that signed list
 #   4. unpacks to PREFIX/install/versions/, runs the binary's own hardware
 #      self-check and, on Linux, the archive's install gate in dry-run
-#   5. links tenzro and tenzro-node into BIN_DIR (default ~/.local/bin)
+#   5. points PREFIX/install/current at it (the release it replaces becomes
+#      PREFIX/install/previous; older releases are removed) and links tenzro and
+#      tenzro-node into BIN_DIR (default ~/.local/bin)
 # Nothing is installed unless 2 and 3 pass. No sudo. If BIN_DIR is not on PATH one marked
 # block is added to your shell profile so a new terminal finds tenzro (no question asked;
 # opt out with --no-modify-path; --uninstall removes the block).
@@ -57,7 +59,8 @@ fail() {
     printf '\n%serror:%s %s\n' "$e_acc" "$e_off" "$1" >&2
     [ -n "${2:-}" ] && printf '  why:  %s\n' "$2" >&2
     [ -n "${3:-}" ] && printf '  fix:  %s\n' "$3" >&2
-    printf '  Nothing was installed or changed on this machine.\n\n' >&2
+    if [ -n "${CHANGED:-}" ]; then printf '  %s\n\n' "$CHANGED" >&2
+    else printf '  Nothing was installed or changed on this machine.\n\n' >&2; fi
     exit 1
 }
 
@@ -136,18 +139,23 @@ sha256_of() {
 }
 
 # fetch NAME DEST [progress]: download from BASE, or copy from --from DIR.
+# transfer FILE DEST [progress]: download BASE/FILE; its status is the download tool's.
+transfer() {
+    if have curl; then
+        if [ "${3:-}" = progress ] && [ -t 2 ]; then curl -fL --retry 2 --connect-timeout 15 -# -o "$2" "$BASE/$1"
+        else curl -fsSL --retry 2 --connect-timeout 15 -o "$2" "$BASE/$1"; fi
+    else
+        wget -q -O "$2" "$BASE/$1"
+    fi
+}
+# fetch FILE DEST [progress]: a file the install cannot go on without, from --from or BASE; a failure ends the install.
 fetch() {
     if [ -n "$FROM" ]; then
         [ -f "$FROM/$1" ] || fail "$FROM/$1 is missing" "--from needs the archive, SHA256SUMS and SHA256SUMS.sig in one folder" "download them from $BASE and try again"
         cp "$FROM/$1" "$2"; return 0
     fi
     rc=0
-    if have curl; then
-        if [ "${3:-}" = progress ] && [ -t 2 ]; then curl -fL --retry 2 --connect-timeout 15 -# -o "$2" "$BASE/$1" || rc=$?
-        else curl -fsSL --retry 2 --connect-timeout 15 -o "$2" "$BASE/$1" || rc=$?; fi
-    else
-        wget -q -O "$2" "$BASE/$1" || rc=$?
-    fi
+    transfer "$@" || rc=$?
     [ "$rc" = 0 ] && return 0
     why="the request for $BASE/$1 failed (exit $rc)"
     case "$rc" in
@@ -166,6 +174,7 @@ fetch() {
 # On aarch64 Linux the Ubuntu 24.04 builds need glibc 2.39; an older glibc (Raspberry Pi OS or Debian 12 Bookworm,
 # 2.36) takes the Bookworm CPU build, which is the only one built against glibc 2.36. A Jetson Orin (ORIN=1)
 # takes the Orin CUDA build first, since the general CUDA build carries no sm_87 ONNX Runtime kernels.
+# A machine with an AMD or Intel GPU (GPU=other) takes the Vulkan build first.
 # pick_pref begin
 detect_orin() {
     for f in "$1/proc/device-tree/compatible" "$1/sys/firmware/devicetree/base/compatible"; do
@@ -173,13 +182,45 @@ detect_orin() {
     done
     return 1
 }
+# detect_display_gpu ROOT: whether a PCI display device (class 03) of AMD (1002) or Intel (8086) is present.
+# Only those two vendors count: a server's management controller (ASPEED 1a03, Matrox 102b) and virtual
+# display adapters (QEMU 1234, Red Hat 1b36, virtio 1af4, VMware 15ad, Hyper-V 1414) never select a GPU build.
+detect_display_gpu() {
+    for d in "$1"/sys/bus/pci/devices/*; do
+        [ -r "$d/class" ] && [ -r "$d/vendor" ] || continue
+        case "$(cat "$d/class" 2>/dev/null)" in 0x03*) ;; *) continue ;; esac
+        case "$(cat "$d/vendor" 2>/dev/null)" in 0x1002|0x8086) return 0 ;; esac
+    done
+    return 1
+}
 pick_pref() {
-    if [ "$1" = linux ] && [ "$3" = nvidia ]; then pp="cuda vulkan cpu"; else pp="cpu metal edge"; fi
+    if [ "$1" = linux ] && [ "$3" = nvidia ]; then pp="cuda vulkan cpu"
+    elif [ "$1" = linux ] && [ "$3" = other ]; then pp="vulkan cpu metal edge"
+    else pp="cpu metal edge"; fi
     if [ "$1" = linux ] && [ "$2" = aarch64 ]; then
         if [ "$3" = nvidia ] && [ "$5" = 1 ]; then pp="cuda-orin $pp"; fi
         if [ -n "$4" ] && [ "$(printf '%s\n%s\n' 2.39 "$4" | sort -V | head -1)" != 2.39 ]; then pp="cpu-bookworm"; fi
     fi
     echo "$pp"
+}
+# cpu_fallback NAME NAMES: the CPU archive to take when the GPU build NAME refuses to start on this machine and the
+# release (NAMES, one archive file per line) holds one; nothing for a build that is not a GPU build.
+cpu_fallback() {
+    case "$1" in
+        *-cuda-orin) fb=${1%-cuda-orin}-cpu ;;
+        *-cuda) fb=${1%-cuda}-cpu ;;
+        *-vulkan) fb=${1%-vulkan}-cpu ;;
+        *) return 0 ;;
+    esac
+    if echo "$2" | grep -qx "$fb.tar.gz"; then echo "$fb"; fi
+}
+# gate_role NAME: the role the archive's install gate checks it for.
+gate_role() {
+    case "$1" in
+        *-cuda|*-cuda-orin|*-vulkan) echo gpu ;;
+        *-edge) echo edge ;;
+        *) echo cpu ;;
+    esac
 }
 # pick_pref end
 
@@ -202,12 +243,13 @@ if [ "$OSN" = macos ] && [ "$ARCHN" = x86_64 ] && [ "$(sysctl -n hw.optional.arm
 GPU=none
 ORIN=0
 if [ "$OSN" = linux ]; then
-    if { have nvidia-smi && nvidia-smi -L 2>/dev/null | grep -q '^GPU '; } || [ -e /proc/driver/nvidia/version ]; then GPU=nvidia; fi
+    if { have nvidia-smi && nvidia-smi -L 2>/dev/null | grep -q '^GPU '; } || [ -e /proc/driver/nvidia/version ]; then GPU=nvidia
+    elif detect_display_gpu ""; then GPU=other; fi
     if have ldd && ldd --version 2>&1 | grep -qi musl; then
         fail "this Linux uses musl libc (Alpine, for example)" "the published Linux builds need glibc" "use a glibc distribution (Debian, Ubuntu, Fedora) or run Tenzro in a container based on one"
     fi
     LIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
-    ORIN=0; [ "$ARCHN" = aarch64 ] && detect_orin "${TENZRO_FS_ROOT:-}" && ORIN=1
+    ORIN=0; [ "$ARCHN" = aarch64 ] && detect_orin "" && ORIN=1
     # A Jetson reaches its GPU through the Tegra driver: no nvidia-smi, no /proc/driver/nvidia.
     [ "$ORIN" = 1 ] && GPU=nvidia
 elif [ "$ARCHN" = aarch64 ]; then GPU=metal
@@ -227,7 +269,7 @@ else mkdir -p "$INST" 2>/dev/null || fail "cannot create $INST" "no permission, 
 say ""
 say "${c_bld}Installing Tenzro${c_off}"
 say ""
-row machine "$OSN $ARCHN$( [ -n "${LIBC:-}" ] && echo ", glibc $LIBC" ), $( [ "$GPU" = nvidia ] && echo 'NVIDIA GPU' || { [ "$GPU" = metal ] && echo 'Apple silicon' || echo 'no GPU'; } )"
+row machine "$OSN $ARCHN$( [ -n "${LIBC:-}" ] && echo ", glibc $LIBC" ), $(case "$GPU" in nvidia) echo 'NVIDIA GPU' ;; other) echo 'AMD or Intel GPU' ;; metal) echo 'Apple silicon' ;; *) echo 'no GPU' ;; esac)"
 
 fetch SHA256SUMS "$WORK/SHA256SUMS"
 fetch SHA256SUMS.sig "$WORK/SHA256SUMS.sig"
@@ -241,7 +283,8 @@ fi
 row signature "verified, release key ${KEY_FPR%"${KEY_FPR#????????}"}"
 
 # pick the archive
-names=$(awk '{n=$2; sub(/^\*/,"",n); print n}' "$WORK/SHA256SUMS")
+# Debug archives (symbol files) are listed for crash reports, never installed.
+names=$(awk '{n=$2; sub(/^\*/,"",n); if (n !~ /-debug\.(tar\.gz|zip)$/) print n}' "$WORK/SHA256SUMS")
 if [ -n "$TARGET" ]; then
     NAME="${TARGET%.tar.gz}"
     echo "$names" | grep -qx "$NAME.tar.gz" || fail "$NAME is not in this release" "the signed list holds: $(echo "$names" | tr '\n' ' ')" "pick one of those with --target"
@@ -269,15 +312,24 @@ if [ "$OSN" = linux ] && [ "$GPU" = nvidia ] && [ "${NAME##*-}" = cpu ]; then
     note "note: an NVIDIA GPU is present, but this release's $ARCHN Linux build is CPU-only; it runs, the GPU is not used."
 fi
 
-# glibc floor, from matrix.json when it is reachable. Advisory: matrix.json is not signed.
-if [ "$OSN" = linux ] && [ -n "${LIBC:-}" ] && [ -z "$FROM" ]; then
-    if fetch matrix.json "$WORK/matrix.json" 2>/dev/null; then
-        floor=$(awk -v a="$NAME" '$0 ~ "\"artifact\": \""a"\""{f=1} f && /glibc_floor/{gsub(/[^0-9.]/,"",$0); print; exit}' "$WORK/matrix.json" 2>/dev/null || true)
-        if [ -n "$floor" ] && [ "$(printf '%s\n%s\n' "$floor" "$LIBC" | sort -V | head -1)" != "$floor" ]; then
-            fail "this system's glibc is too old" "$NAME needs glibc $floor or newer and this machine has $LIBC" "use Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer, or a container based on one"
+# glibc floor of NAME, from matrix.json when it is reachable. Advisory: matrix.json is not signed, and a release
+# site without one is installed from all the same.
+check_glibc_floor() {
+    if [ "$OSN" = linux ] && [ -n "${LIBC:-}" ] && [ -z "$FROM" ]; then
+        # A download that fails can leave part of a file: only a finished one is kept and read.
+        if [ ! -f "$WORK/matrix.json" ]; then
+            if transfer matrix.json "$WORK/matrix.part" 2>/dev/null; then mv "$WORK/matrix.part" "$WORK/matrix.json"
+            else rm -f "$WORK/matrix.part"; fi
+        fi
+        if [ -f "$WORK/matrix.json" ]; then
+            floor=$(awk -v a="$NAME" '$0 ~ "\"artifact\": \""a"\""{f=1} f && /glibc_floor/{gsub(/[^0-9.]/,"",$0); print; exit}' "$WORK/matrix.json" 2>/dev/null || true)
+            if [ -n "$floor" ] && [ "$(printf '%s\n%s\n' "$floor" "$LIBC" | sort -V | head -1)" != "$floor" ]; then
+                fail "this system's glibc is too old" "$NAME needs glibc $floor or newer and this machine has $LIBC" "use Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer, or a container based on one"
+            fi
         fi
     fi
-fi
+}
+check_glibc_floor
 
 if [ "$DRY" = 1 ]; then
     row install "would go to $INST/versions/$NAME-${WANT%"${WANT#????????????}"} and link into $BIN_DIR"
@@ -286,12 +338,10 @@ if [ "$DRY" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------- the archive
-VDIR="$INST/versions/$NAME-${WANT%"${WANT#????????????}"}"
-if [ -d "$VDIR/bin" ]; then
-    row archive "already installed, nothing to download"
-    CLIV=$("$VDIR/bin/tenzro" --version 2>/dev/null | awk '{print $NF}')
-    [ -n "$CLIV" ] || CLIV="(unknown version)"
-else
+# take_archive: download NAME, verify and unpack it, run its checks and move it to VDIR. It leaves FALLBACK set, and
+# nothing of NAME behind, when the node's own check refuses a GPU build the installer chose and the release holds a CPU
+# build to take instead. It is called bare, never as a condition, so a failing command in it stops the script.
+take_archive() {
     say "  ${c_dim}downloading $NAME.tar.gz${c_off}"
     fetch "$NAME.tar.gz" "$WORK/a.tar.gz" progress
     GOT=$(sha256_of "$WORK/a.tar.gz")
@@ -336,13 +386,21 @@ else
     if [ "$hrc" = 0 ] && [ "$hs" = ok ]; then
         row self-check "build $hb, $hg GPU(s), startup ok"
     elif [ "$OSN" = linux ]; then
+        # The node's verdict is `startup: refused (<reason>)`; anything else is a check that did not run.
+        case "$hs" in "refused ("*")") [ -n "$TARGET" ] || FALLBACK=$(cpu_fallback "$NAME" "$names") ;; esac
+        if [ -n "$FALLBACK" ]; then
+            reason=${hs#refused (}
+            note "note: the $NAME build does not start on this machine: ${reason%)}. Taking the CPU build instead."
+            rm -rf "$WORK/x"
+            return 0
+        fi
         fail "the node would not start on this machine" "its own hardware check said: $(echo "$hw" | tr '\n' ' ')" "run \`$X/bin/tenzro-node hardware\` for detail"
     else
         note "note: the hardware self-check did not finish ($(echo "$hw" | tr '\n' ' ')); the CLI is installed anyway."
     fi
     # The archive's own install gate (Linux), in dry-run, when its tools are present.
     if [ "$OSN" = linux ] && [ -f "$X/tenzro-node-install" ]; then
-        role=cpu; case "${NAME##*-}" in cuda|vulkan) role=gpu ;; edge) role=edge ;; esac
+        role=$(gate_role "$NAME")
         if have bash && have file && have readelf; then
             if g=$(bash "$X/tenzro-node-install" --dry-run --role "$role" "$X" 2>&1); then row gate "accepted for the $role role"
             else fail "the install gate refused this build" "$(echo "$g" | grep REFUSED | head -2 | tr '\n' ' ')" "choose another build with --target, or stop and ask"; fi
@@ -353,10 +411,63 @@ else
     mkdir -p "$INST/versions"
     mv "$X" "$VDIR"
     row install "$VDIR"
+}
+while :; do
+    VDIR="$INST/versions/$NAME-${WANT%"${WANT#????????????}"}"
+    if [ -d "$VDIR/bin" ]; then
+        row archive "already installed, nothing to download"
+        CLIV=$("$VDIR/bin/tenzro" --version 2>/dev/null | awk '{print $NF}')
+        [ -n "$CLIV" ] || CLIV="(unknown version)"
+        break
+    fi
+    FALLBACK=""
+    take_archive
+    [ -n "$FALLBACK" ] || break
+    NAME=$FALLBACK
+    WANT=$(awk -v f="$NAME.tar.gz" '{n=$2; sub(/^\*/,"",n); if (n==f) print $1}' "$WORK/SHA256SUMS")
+    row build "$NAME"
+    check_glibc_floor
+done
+
+# The release's version, so `tenzro update` knows what is installed without running it.
+if [ ! -f "$VDIR/RELEASE" ] && echo "$CLIV" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'; then
+    printf '%s\n' "$CLIV" > "$VDIR/RELEASE"
 fi
 
+# ---------------------------------------------------------------- current and previous
+# The layout and switch `tenzro update` uses: `current` and `previous` are symbolic
+# links to versions/<release>, each switched by renaming a new link over the old one,
+# so `current` names one release or the other at every moment, never none.
+repoint() { # repoint LINK TARGET
+    rm -f "$1.update-tmp"
+    ln -s "$2" "$1.update-tmp" || return 1
+    case "$(uname -s)" in
+        Darwin) mv -fh "$1.update-tmp" "$1" ;;
+        *) mv -fT "$1.update-tmp" "$1" ;;
+    esac
+}
+NEWREL=$(basename "$VDIR")
+OLDREL="" PREVREL=""
+[ -L "$INST/current" ] && OLDREL=$(basename "$(readlink "$INST/current")")
+[ -L "$INST/previous" ] && PREVREL=$(basename "$(readlink "$INST/previous")")
+CHANGED="The new release is unpacked at $VDIR; $INST/current still names the release that was current."
+if [ "$OLDREL" != "$NEWREL" ]; then
+    if [ -n "$OLDREL" ] && [ -d "$INST/versions/$OLDREL" ]; then
+        repoint "$INST/previous" "versions/$OLDREL" || fail "could not point $INST/previous at $OLDREL" "the folder is not writable, or $INST/previous is not a link" "check $INST and run this again"
+        PREVREL=$OLDREL
+    fi
+    repoint "$INST/current" "versions/$NEWREL" || fail "could not point $INST/current at $NEWREL" "the folder is not writable, or $INST/current is a real folder rather than a link" "check $INST and run this again"
+fi
+CHANGED=""
+sync 2>/dev/null || true
+# Keep the current and the previous release only, whatever their dates.
+for d in "$INST/versions"/*; do
+    [ -e "$d" ] || continue
+    n=$(basename "$d")
+    [ "$n" = "$NEWREL" ] || [ "$n" = "$PREVREL" ] || rm -rf "$d"
+done
+
 # ---------------------------------------------------------------- links
-ln -sfn "versions/$(basename "$VDIR")" "$INST/current"
 mkdir -p "$BIN_DIR" 2>/dev/null || fail "cannot create $BIN_DIR" "no permission" "pass --bin-dir with a folder you can write to"
 for t in tenzro tenzro-node; do
     l="$BIN_DIR/$t"
@@ -367,8 +478,7 @@ for t in tenzro tenzro-node; do
     ln -sfn "$INST/current/bin/$t" "$l"
 done
 row linked "$BIN_DIR/tenzro, $BIN_DIR/tenzro-node"
-# keep this and the previous version only
-( cd "$INST/versions" && ls -t | tail -n +3 | while read -r old; do [ "$old" != "$(basename "$VDIR")" ] && rm -rf "./$old"; done ) 2>/dev/null || true
+[ -n "$PREVREL" ] && row previous "$INST/versions/$PREVREL (tenzro update rollback restores it)"
 
 # ---------------------------------------------------------------- PATH
 NEED_SOURCE=0
@@ -410,6 +520,7 @@ case $NEED_SOURCE in
 esac
 say ""
 say "${c_dim}The first time, it takes you through setup; after that it opens the console. \`tenzro --help\` lists everything.${c_off}"
+say "${c_dim}In the console, a opens the Assistant. It answers from the guides built into tenzro; /assistant there downloads and serves a model sized for this machine, after you agree.${c_off}"
 case "$HAS_TPM" in
     no) say "${c_dim}This machine has no TPM 2.0: you can still use the CLI and join with a passkey. Running a node or \`tenzro dev\` needs a TPM 2.0, or a Mac with a Secure Enclave.${c_off}" ;;
 esac

@@ -570,7 +570,7 @@ mod tests {
     /// 5000). Prints one `GATE {json}` line. Run with `--release --ignored
     /// --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "measurement gate: run by the slow-tests job of ci.yml, which prints each as passed"]
     fn gate_leader_seed_grinding() {
         let env = |k: &str, d: u64| {
             std::env::var(k)

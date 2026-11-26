@@ -65,7 +65,7 @@ pub(crate) fn rpc_refusal(account: &[u8]) -> JsonRpcError {
             "reason": rule::REFUSAL_CODE,
             "mode": "closed",
             "contact": rule::CONTACT,
-            "alternatives": ["operator", "participant"],
+            "alternatives": ["operator"],
         })),
     }
 }

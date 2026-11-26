@@ -604,6 +604,21 @@ export class MultimodalClient {
     return this.rpc.call("tenzro_transcribe", [params]);
   }
 
+  /**
+   * Transcribe a whole recording through the streaming transcription, fed as a live stream would be, and answer
+   * every event in order: `partial` transcripts, `final` segments (billed and receipted as `transcribe` is), then
+   * `done`. `audio_base64` is a 16-bit PCM WAV; its first channel is transcribed.
+   */
+  async transcribeRecording(params: {
+    model_id: string;
+    audio_base64: string;
+    language?: string;
+    chunk_ms?: number;
+    verification?: TaskRouting["verification"];
+  }): Promise<{ events: { event: string; data: unknown }[] }> {
+    return this.rpc.call("tenzro_transcribeStream", params);
+  }
+
   // ── Video ──
 
   /** The V-JEPA 2 entries the node knows about. They describe the reference

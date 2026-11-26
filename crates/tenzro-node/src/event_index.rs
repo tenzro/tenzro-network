@@ -10,12 +10,22 @@
 //!   resumes with no gap and no repeat. Without `from_cursor` or
 //!   `from_height` it starts at the current tip.
 //! - `tenzro_queryEvents { filter?, from_cursor?, from_height?, to_cursor?,
-//!   limit?, anchor_index?, completeness? }`: a page of a historical range,
-//!   every event with its proof. With `completeness`, also the proof that
-//!   the page left out nothing the filter selects: for every block the page
+//!   limit?, anchor_index?, completeness? }`: a page of a historical range
+//!   read forward, every event with its proof (`from_height: 0` reads from
+//!   the oldest held height). With `completeness`, also the proof that the
+//!   page left out nothing the filter selects: for every block the page
 //!   covered, the block-index entries of the filter's keys, each under the
 //!   block's event root (see [`tenzro_types::chain_event::block_index`]).
 //!   `tenzro_subscribe` takes `completeness` too.
+//! - `tenzro_queryEvents { filter?, before_cursor?, limit?, anchor_index? }`,
+//!   with neither `from_cursor` nor `from_height`: the newest page, events
+//!   newest first, each with its proof, and the `before_cursor` that reads
+//!   the page older than it (`null` once the oldest locally held height was
+//!   read). The newest page (no `before_cursor`) for a caller that may read
+//!   this node's conditions (`tenzro_listConditions`) also carries
+//!   `node_events`: its conditions opening, clearing and being answered,
+//!   newest first, each with a `summary` and the time `at` which the node
+//!   saw it. They are this node's account of itself and have no proof.
 //! - `tenzro_getEventProof { cursor, anchor_index?, certified? }`: one
 //!   event's proof; with `certified`, also the proof from genesis that its
 //!   anchor checkpoint is certified.
@@ -38,12 +48,12 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use tenzro_consensus::Checkpoint;
-use tenzro_consensus::event_proof::{
-    BlockIndexProof, CertifiedEventProof, CompletenessProof, EventProof, IndexEntryProof,
-};
-use tenzro_consensus::light_client::GenesisAnchor;
 use tenzro_events::log::end_of_height;
 use tenzro_events::{EventFilter, EventLog, Page};
+use tenzro_light::TrustAnchor;
+use tenzro_light::event_proof::{
+    BlockIndexProof, CertifiedEventProof, CompletenessProof, EventProof, IndexEntryProof,
+};
 use tenzro_storage::BlockStoreImpl;
 use tenzro_storage::traits::BlockStore;
 use tenzro_types::block::BlockHeader;
@@ -638,10 +648,80 @@ pub(crate) async fn query(
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     let params = object(params);
+    let given = |key: &str| params.get(key).is_some_and(|v| !v.is_null());
+    if !given("from_cursor") && !given("from_height") {
+        return query_newest(node, &params).await;
+    }
+    if given("before_cursor") {
+        return Err(err(
+            -32602,
+            "'before_cursor' pages back from the newest events: give it without 'from_cursor' or 'from_height'",
+        ));
+    }
     let req = ReadRequest::parse(&params, None)?;
     let page = read(node, &req).await?;
     let (proofs, completeness) = page_proofs(node, &params, &req, &page, true).await?;
     Ok(page_json(&page, proofs, completeness, log(node)?.tip()))
+}
+
+/// `tenzro_queryEvents` with no start: the newest events, newest first, from
+/// the local log, and the cursor that reads the page older than them.
+async fn query_newest(node: &Arc<TenzroNode>, params: &Value) -> Result<Value, JsonRpcError> {
+    let given = |key: &str| params.get(key).is_some_and(|v| !v.is_null());
+    if given("to_cursor") || completeness_param(params) {
+        return Err(err(
+            -32602,
+            "'to_cursor' and 'completeness' cover a range read forward: give 'from_cursor' or 'from_height' (0 for the oldest)",
+        ));
+    }
+    let req = ReadRequest::parse(params, None)?;
+    let before = cursor_param(params, "before_cursor")?;
+    let log = log(node)?;
+    let floor = log.floor().map_err(storage_err)?;
+    if let Some(b) = before.filter(|b| b.height < floor) {
+        return Err(err(
+            -32004,
+            format!(
+                "{b} is below height {floor}, whose events are in the data availability layer: read them forward with 'from_height'"
+            ),
+        ));
+    }
+    let page = log
+        .read_before(before, req.limit, req.max_heights, &|e: &ChainEvent| {
+            req.filter.matches_chain(e)
+        })
+        .map_err(storage_err)?;
+    let proofs = prove(node, &page.events, anchor_param(params)?).await?;
+    let events: Vec<Value> = proofs
+        .into_iter()
+        .map(|p| json!({ "event": p.event, "proof": p }))
+        .collect();
+    let mut answer = json!({
+        "events": events,
+        "before_cursor": page.cursor.map(|c| c.to_string()),
+        "tip": log.tip(),
+    });
+    if before.is_none() && reads_conditions(node) {
+        crate::conditions::observe(node).await;
+        answer["node_events"] = json!(node.conditions.recent());
+    }
+    Ok(answer)
+}
+
+/// Whether this request's caller may read the node's conditions, and so
+/// its account of them.
+pub(crate) fn reads_conditions(node: &Arc<TenzroNode>) -> bool {
+    crate::access::admit(
+        node,
+        tenzro_types::node_access::Surface::Rpc,
+        "tenzro_listConditions",
+        None,
+        crate::access::Caller {
+            did: crate::rpc::current_caller_did(),
+            ip: None,
+        },
+    )
+    .is_ok()
 }
 
 /// `tenzro_getEventProof`.
@@ -678,7 +758,7 @@ pub(crate) async fn get_proof(
 }
 
 /// The genesis anchor this node follows, from its own consensus state.
-fn genesis_anchor(node: &TenzroNode) -> Result<GenesisAnchor, JsonRpcError> {
+fn genesis_anchor(node: &TenzroNode) -> Result<TrustAnchor, JsonRpcError> {
     let consensus = node
         .consensus()
         .ok_or_else(|| err(-32004, "this node follows no consensus"))?;
@@ -688,7 +768,8 @@ fn genesis_anchor(node: &TenzroNode) -> Result<GenesisAnchor, JsonRpcError> {
     let genesis = consensus
         .committee_of(0)
         .ok_or_else(|| err(-32004, "the genesis committee is not known here"))?;
-    Ok(GenesisAnchor {
+    Ok(TrustAnchor {
+        epoch: 0,
         chain_id: latest.checkpoint.chain_id,
         genesis_hash: latest.checkpoint.genesis_hash,
         committee_root: genesis.root(),

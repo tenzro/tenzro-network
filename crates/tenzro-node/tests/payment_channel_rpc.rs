@@ -19,6 +19,7 @@
 //! starts a node: the node's keys, and its payee, never change under it.
 
 mod dpop_bearer;
+mod hybrid_account;
 mod passkey_holder;
 
 // The media tests load models: the parser child is this binary started again.
@@ -40,6 +41,7 @@ use tenzro_types::transaction::{Transaction, TransactionType};
 
 /// The payer's fixed test key seed.
 const PAYER_SEED: u8 = 0x31;
+const PROVIDER_SEED: u8 = 0x41;
 /// Five TNZO (18 decimals).
 const AMOUNT: u128 = 5_000_000_000_000_000_000;
 /// One TNZO, for gas.
@@ -47,7 +49,7 @@ const ONE_TNZO: u128 = 1_000_000_000_000_000_000;
 const ESCROW_GAS_LIMIT: u64 = 2_000_000;
 
 fn payer_signer() -> TestHybridSigner {
-    TestHybridSigner::p256_only(PAYER_SEED)
+    TestHybridSigner::hybrid(PAYER_SEED)
 }
 
 /// The iroh endpoint of a test node: loopback, on a port the operating
@@ -71,7 +73,7 @@ fn account_of(signer: &dyn HybridSigner) -> Address {
 
 /// A key that is not the payer's.
 fn stranger() -> TestHybridSigner {
-    TestHybridSigner::random()
+    hybrid_account::fresh_signer()
 }
 
 struct Node {
@@ -230,6 +232,10 @@ impl Node {
                 async move { rpc.start_with_shutdown_and_addr(shutdown_rx, addr_tx).await },
             );
         let addr = addr_rx.await.expect("bound address");
+        // The ML-DSA-65 leg is required of every account: the two that
+        // transact are enrolled before their first transaction.
+        hybrid_account::enroll(&node, &payer_signer());
+        hybrid_account::enroll(&node, &TestHybridSigner::hybrid(PROVIDER_SEED));
         Self {
             url: format!("http://{addr}"),
             http: reqwest::Client::new(),
@@ -969,7 +975,7 @@ async fn an_agent_streams_four_model_types_and_settles_at_the_published_cards() 
     use tenzro_types::registry::owned_id;
     use tenzro_types::transaction::RegistryOp;
     let payer = payer_signer();
-    let provider = TestHybridSigner::p256_only(0x41);
+    let provider = TestHybridSigner::hybrid(PROVIDER_SEED);
     let provider_addr = account_of(&provider);
     let payer_addr = account_of(&payer);
     let n = Node::validator().await;
@@ -1270,7 +1276,7 @@ async fn a_voucher_after_the_agents_revocation_is_refused_over_rpc() {
 #[ignore = "needs this machine's hardware consensus key (TPM 2.0 or Secure Enclave)"]
 async fn an_exported_evidence_pack_verifies_from_the_genesis_anchor_alone() {
     use tenzro_consensus::evidence_pack::verify_pack;
-    use tenzro_consensus::light_client::GenesisAnchor;
+    use tenzro_light::TrustAnchor;
     use tenzro_storage::BlockStore;
     let _payer = payer_signer();
     let n = Node::follower().await;
@@ -1292,7 +1298,8 @@ async fn an_exported_evidence_pack_verifies_from_the_genesis_anchor_alone() {
     .await
     .expect("block read")
     .expect("the genesis block");
-    let anchor = GenesisAnchor {
+    let anchor = TrustAnchor {
+        epoch: 0,
         chain_id: n.chain_id().await,
         genesis_hash: genesis_block.hash().0,
         committee_root: n
@@ -1319,7 +1326,7 @@ async fn an_exported_evidence_pack_verifies_from_the_genesis_anchor_alone() {
         "a pack whose manifest does not match its sections"
     );
 
-    let other_chain = GenesisAnchor {
+    let other_chain = TrustAnchor {
         genesis_hash: [0x11; 32],
         ..anchor
     };
@@ -1507,8 +1514,10 @@ impl PaidMediaSession {
         let n = Node::validator_serving(models, licences, &publisher).await;
         // The registry entry as it ships, published by the node's catalog
         // publisher: the path every node learns a model by.
-        tenzro_catalog::install_test_seed();
-        let entry = tenzro_catalog::entry(model).expect("the registry lists it");
+        let entry = tenzro_catalog::Catalog::test_seed()
+            .entry(model)
+            .cloned()
+            .expect("the registry lists it");
         n.ok(
             "tenzro_submitTrustRecord",
             json!({ "record": publisher.publish(&entry) }),

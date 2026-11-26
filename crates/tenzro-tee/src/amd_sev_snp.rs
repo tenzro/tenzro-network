@@ -31,6 +31,7 @@ const SEV_IOCTL_MAGIC: u8 = b'S';
 #[cfg(target_os = "linux")]
 const SNP_GET_REPORT_NR: u8 = 0;
 
+#[cfg(any(target_os = "linux", test))]
 const SNP_REPORT_SIZE: usize = 1184;
 const OFF_REPORTED_TCB: usize = 0x180;
 const OFF_CHIP_ID: usize = 0x1A0;
@@ -128,6 +129,22 @@ impl AmdSevSnpProvider {
         }
     }
 
+    /// `[VCEK, ASK]` for this report: fetched from AMD KDS the first time a
+    /// chip reports a TCB, from memory after that (a VCEK is fixed by the
+    /// chip and the TCB it certifies).
+    async fn chain_for(report: &[u8]) -> Result<Vec<Vec<u8>>> {
+        static FETCHED: std::sync::LazyLock<
+            crate::collateral_cache::CollateralCache<Vec<u8>, Vec<Vec<u8>>>,
+        > = std::sync::LazyLock::new(crate::collateral_cache::CollateralCache::new);
+        let key = chain_key(report);
+        if let Some(chain) = FETCHED.get(&key, 0) {
+            return Ok(chain);
+        }
+        let chain = Self::fetch_chain(report).await?;
+        FETCHED.put(key, chain.clone(), None);
+        Ok(chain)
+    }
+
     /// Fetch `[VCEK, ASK]` for this report from AMD KDS.
     async fn fetch_chain(report: &[u8]) -> Result<Vec<Vec<u8>>> {
         let err = |m: String| TeeError::AttestationGenerationFailed(m);
@@ -177,6 +194,15 @@ impl AmdSevSnpProvider {
     }
 }
 
+/// What a VCEK is issued for: the report's chip id and reported TCB.
+fn chain_key(report: &[u8]) -> Vec<u8> {
+    [
+        &report[OFF_CHIP_ID..OFF_CHIP_ID + 64],
+        &report[OFF_REPORTED_TCB..OFF_REPORTED_TCB + 8],
+    ]
+    .concat()
+}
+
 impl Default for AmdSevSnpProvider {
     fn default() -> Self {
         Self::new()
@@ -205,7 +231,7 @@ impl TeeProvider for AmdSevSnpProvider {
         let (attestation_data, certificates) = match self.source {
             ReportSource::Hardware => {
                 let r = Self::get_report(&report_data)?;
-                let chain = Self::fetch_chain(&r).await?;
+                let chain = Self::chain_for(&r).await?;
                 (r, chain)
             }
             #[cfg(test)]
@@ -253,6 +279,24 @@ impl TeeProvider for AmdSevSnpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A VCEK certifies one chip at one TCB: a chain fetched for a report is
+    /// kept for reports of that chip at that TCB, whatever else they say,
+    /// and for no other chip or TCB.
+    #[test]
+    fn a_fetched_chain_is_kept_for_its_chip_and_tcb_only() {
+        let mut report = vec![0u8; SNP_REPORT_SIZE];
+        report[OFF_CHIP_ID] = 1;
+        let mut next = report.clone();
+        next[0x50] = 7;
+        assert_eq!(chain_key(&next), chain_key(&report));
+        let mut updated = report.clone();
+        updated[OFF_REPORTED_TCB + 7] = 3;
+        assert_ne!(chain_key(&updated), chain_key(&report));
+        let mut other = report.clone();
+        other[OFF_CHIP_ID + 63] = 9;
+        assert_ne!(chain_key(&other), chain_key(&report));
+    }
 
     #[tokio::test]
     async fn off_hardware_nothing_is_produced() {

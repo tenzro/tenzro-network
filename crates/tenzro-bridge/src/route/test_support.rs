@@ -27,6 +27,8 @@ pub struct MemState {
     /// Time since [`NOW_MS`], for tests that let a lane bucket refill.
     pub elapsed_ms: i64,
     pub kv: HashMap<String, Vec<u8>>,
+    /// Whether `feature.ccip_finality_policy` is live.
+    pub finality_policy_live: bool,
 }
 
 impl MemState {
@@ -89,6 +91,10 @@ impl RouteState for MemState {
     fn outflow_limits(&self) -> Option<NetworkOutflowLimits> {
         self.outflow.clone()
     }
+    fn finality_policy_live(&self) -> bool {
+        self.finality_policy_live
+    }
+
     fn get(&self, key: &str) -> Option<Vec<u8>> {
         self.kv.get(key).cloned()
     }

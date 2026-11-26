@@ -72,6 +72,7 @@ fn build_tx(
     VmTransaction::new(
         from, to, value, data, gas_limit, GAS_PRICE, nonce, vm_type, 1337,
     )
+    .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
 }
 
 /// Sum the balances of every address in `addrs`.

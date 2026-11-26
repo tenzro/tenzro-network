@@ -26,6 +26,17 @@ pub fn vm_storage_key(address: &[u8], key: &[u8]) -> Vec<u8> {
     format!("storage:{}:{}", hex::encode(address), hex::encode(key)).into_bytes()
 }
 
+/// System storage slot of the frozen SLA verdict for the bonded machine
+/// `provider` and hour `epoch`.
+pub fn sla_verdict_slot(provider: &str, epoch: u64) -> String {
+    format!("sla:{epoch}:{provider}")
+}
+
+/// System storage slot of the compute or storage claim `claim_id`.
+pub fn claim_slot(claim_id: &str) -> String {
+    format!("cclaim:{claim_id}")
+}
+
 /// One chain record with its proof under the pack's certified state root.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProvenRecord {
@@ -120,6 +131,18 @@ pub struct EvidencePack {
     /// Where the supervising node operates.
     pub jurisdiction: Jurisdiction,
     pub manifest: Vec<ManifestSection>,
+    /// The service track record of bonded machines the pack covers: the
+    /// SLA verdict of each hour asked for (`sla_verdict`, subject
+    /// `{epoch}:{provider}`; an absent value proves no verdict is kept),
+    /// and the compute or storage claims they deliver (`claim`, subject the
+    /// claim id), each proven under `state_root`. It checks with the genesis
+    /// anchor alone, so it outlives the chain it was made on. Appended last, and
+    /// left out of the manifest while empty, so a pack without one is the pack
+    /// of the release before it. A pack that carries service records has a
+    /// manifest of one more section, which only a verifier of this release
+    /// reads: make such packs once the network runs it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service: Vec<ProvenRecord>,
 }
 
 /// Oversight actions.
@@ -156,6 +179,7 @@ pub const SECTION_CONTROLS: &[(&str, &[&str])] = &[
         &["eu-ai-act:12(2)", "iso-42001:A.6.2.7", "iso-42001:A.10.3"],
     ),
     ("jurisdiction", &["iso-42001:A.9.4"]),
+    ("service", &[]),
 ];
 
 fn digest_of<T: Serialize>(v: &T) -> String {
@@ -167,6 +191,7 @@ impl EvidencePack {
     pub fn section_digests(&self) -> Vec<(&'static str, String)> {
         SECTION_CONTROLS
             .iter()
+            .filter(|(section, _)| *section != "service" || !self.service.is_empty())
             .map(|(section, _)| {
                 let d = match *section {
                     "audit" => digest_of(&self.audit),
@@ -176,6 +201,7 @@ impl EvidencePack {
                     "commerce" => digest_of(&self.commerce),
                     "governance" => digest_of(&self.governance),
                     "token_actions" => digest_of(&self.token_actions),
+                    "service" => digest_of(&self.service),
                     "receipts" => digest_of(&self.receipts),
                     "models" => digest_of(&self.models),
                     _ => digest_of(&self.jurisdiction),

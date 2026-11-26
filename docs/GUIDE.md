@@ -2,7 +2,7 @@
 
 Build and run a Tenzro node, the CLI, and the desktop app from source. Covers Linux, macOS, and Docker, plus a troubleshooting catalog for the most common build failures.
 
-Tenzro is an open network for the machine economy: machines from small edge devices to the largest GPU servers sell AI work, and agents and apps buy it, under one identity model and one payment rail. Which part you run depends on your machine:
+Tenzro is an open network for the machine economy: machines from small edge devices to the largest GPU servers sell compute of every kind (AI inference, rentable capacity and storage), and agents and apps buy it, under one identity model and one payment rail. Which part you run depends on your machine:
 
 | You have | Build | Start with |
 |---|---|---|
@@ -143,6 +143,15 @@ a larger model and names the GPU build. The CUDA build refuses to start on a
 machine with no usable NVIDIA GPU or driver and names the CPU build. Neither
 falls back silently to the other. Validators do not need a GPU.
 
+The CPU build also refuses to start on a machine that has an NVIDIA GPU,
+whatever roles it is asked to run: its ONNX Runtime has no CUDA provider, and
+it does not run ONNX models on the CPU beside a GPU it cannot use.
+`tenzro-node hardware` then prints `onnx: refused (...)` and
+`startup: refused (...)`. On such a machine take the CUDA build, or the light
+build, which carries no model engines and makes no accelerator check. The
+Windows and Linux install scripts pick the CUDA build on an NVIDIA machine
+for this reason.
+
 **Verifying a download.** Each release carries `SHA256SUMS` and its signature
 `SHA256SUMS.sig`. Check both before installing:
 
@@ -216,6 +225,21 @@ To install a release archive or package (no build):
 
 The glibc 2.39 floor is the highest `GLIBC_` symbol version in the released Linux binaries. Debian 12 and Ubuntu 22.04 are below it.
 
+### Install layout and updates
+
+`install.sh` and `install.ps1` install under `~/.tenzro/install` (`%USERPROFILE%\.tenzro\install`):
+`versions/<release>/` holds each release with its `RELEASE` file (the version), `current` names the
+release that runs and `previous` the one it replaced. The pointers are symbolic links on Linux and
+macOS and directory junctions on Windows. The installers and `tenzro update` share this layout and
+switch it the same way, in one file-system operation (a new link renamed over the old one; the
+junction's target rewritten in place), and both keep exactly the `current` and `previous` releases.
+
+`tenzro update` (see [GETTING-STARTED.md](GETTING-STARTED.md#update-uninstall) and
+[UPDATE-MANIFEST.md](UPDATE-MANIFEST.md)) installs a signed release beside the running one, and the
+node unit's start count rolls back a release that keeps failing to start. A release older than the
+installed one, the release `current` names, is refused. `tenzro update rollback` puts `previous`
+back with no network.
+
 To build from source:
 
 | Resource | Minimum | Recommended |
@@ -225,9 +249,9 @@ To build from source:
 | Disk | 20 GB for `target/` | 50 GB (multi-profile + models) |
 | OS (build toolchain) | Linux (glibc 2.31+), macOS 12+ | Ubuntu 22.04 / macOS 14+ |
 | Network | Open outbound 443 (crates.io, Hugging Face) | — |
-| Hardware key store | TPM 2.0 (Linux, Windows) or Secure Enclave (macOS), required to run a node | — |
+| Hardware key store | TPM 2.0 (Linux, Windows) or Secure Enclave (macOS), or another machine's TPM reached through a key holder; one of these is required to run a node | — |
 
-**A hardware key store is required.** `tenzro-node` refuses to start on a machine with no TPM 2.0 or Secure Enclave, or whose identity key does not open: it exits non-zero with a message naming what is missing. There is no keyless or software-key mode. A machine with no TPM of its own, such as a Raspberry Pi, keeps its identity key in another machine's TPM: that machine runs `tenzro-node tpm serve`, and the small one runs `tenzro-node tpm key-holder`, approved by the operator's passkey, and starts with `--tpm-key-holder` ([NODE.md](NODE.md#raspberry-pi-and-other-edge-devices)). Building needs no TPM; running does.
+**A hardware key store is required.** `tenzro-node` refuses to start on a machine with no TPM 2.0, no Secure Enclave and no key holder configured, or whose identity key does not open: it exits non-zero with a message naming what is missing. There is no keyless or software-key mode. A machine with no TPM of its own, such as a Raspberry Pi, a VM or a server without one, keeps its keys in another machine's TPM: that machine runs `tenzro-node tpm serve`, and the one without a TPM runs `tenzro-node tpm key-holder`, approved by the operator's passkey, and starts with `--tpm-key-holder` ([NODE.md](NODE.md#raspberry-pi-and-other-edge-devices)). This covers validators too: the default ML-DSA-65 + P-256 consensus key can live in the provider's TPM. The limits: every signature is a round trip to the provider, which must stay reachable; a grant lasts at most the provider's `max_grant_hours`, and after a reboot of the key holder or the end of the grant the node cannot sign until the operator installs a new one; the ML-DSA-87 / P-384 scheme needs a TPM in the validator's own machine; and a machine uses one provider, since a second provider's TPM holds a different key. A machine whose keys are in another machine's TPM cannot be a genesis validator: `tenzro-node validator-entry` reads only the machine's own TPM or Secure Enclave. Such a validator joins after genesis with `tenzro validator register --tpm-key-holder`. Building needs no TPM; running does.
 
 **GPU / accelerator (optional, for local inference):** enabled per cargo feature on `tenzro-node`, one backend per build — `cuda` (NVIDIA), `rocm` (AMD), `metal` (Apple), `vulkan` (any NVIDIA/AMD/Intel/ARM GPU), `sycl` (Intel GPU, needs oneAPI DPC++), `opencl`, `webgpu`, `musa` (Moore Threads), `cann` (Huawei Ascend NPU), `openvino` (Intel CPU/GPU/NPU), `zdnn` (IBM Z Telum), `blas` (accelerated CPU). A node with no backend feature runs CPU-only. See §3.2 and `docs/AI.md` §2.7 for the full matrix.
 
@@ -537,6 +561,22 @@ TPM-wrapped blobs (useless on any other chip) are kept in
 `~/.local/state/tenzro/device-keys` (or `TENZRO_DEVICE_KEY_DIR`). Machine
 attestation also needs the platform's endorsement key at `0x81010020`.
 
+Those blobs are the one part of a machine's keys that lives on its disk. If
+the directory is lost while the chip survives, the chip can no longer load
+them, and every key and grant made from them is gone with it; a machine that
+holds keys for other devices loses theirs too. Back the directory up after
+any key or grant is made:
+
+```
+tenzro-node tpm keys-backup  <file>     # writes the file, reads it back, compares
+tenzro-node tpm keys-verify  <file>     # lists what is missing, changed or new
+tenzro-node tpm keys-restore <file>     # puts back what is missing, replaces nothing
+```
+
+The file holds only TPM-wrapped blobs, so it can be kept anywhere; it opens
+only inside the chip that made it. It does not move a key to other hardware
+and does not help when the chip itself is lost.
+
 If the chip stops answering, the node says so once, refuses normal commands at once
 instead of queueing behind the stuck one, keeps votes and blocks waiting for the chip,
 probes it on a doubling pause, and says so once when it answers again, without a
@@ -574,9 +614,9 @@ that cannot be regenerated, so back the directory up before any risky operation.
 
 ### 4.7 Bootstrap a local or sovereign network
 
-`tenzro setup` walks through every participation path interactively — join the
-public network (consume / provide / validate), create your own network, or join
-an existing private one. Every prompt has a matching flag for non-interactive
+`tenzro setup` walks through each setup path interactively — join the public
+network as an operator or a validator (provide / validate), create your own
+network, or join an existing private one. Every prompt has a matching flag for non-interactive
 use.
 
 Create a self-contained network on your own hardware:
@@ -601,7 +641,7 @@ Join an existing private network instead:
 
 ```bash
 tenzro setup --path private --genesis ./genesis.toml \
-  --bootstrap /ip4/10.0.0.5/tcp/9000/p2p/12D3Koo...
+  --bootstrap did:tenzro:machine:<id>@<relay url>
 ```
 
 Choosing the validator role in the private path prints your `[[validators]]`
@@ -666,7 +706,11 @@ flow, and the behaviors that surprise first-time operators:
    validator self-stake plus gas from an account that holds TNZO, then
    self-register: `tenzro setup --mode validate` writes a unit that boots with
    `--validator-self-stake` (the node registers itself with its own keys once
-   the account is funded), or run `tenzro validator register --self-stake 10000`
+   the account is funded), or run `tenzro validator register --node-account
+   --self-stake 10000` with the keys and proofs `tenzro validator keys` prints
+   (they are signed over the node account, so the node account sends the
+   registration; the command waits for its receipt and fails with the reason
+   if the chain refuses it)
    (amounts on `tenzro stake` and `tenzro validator` are TNZO: `10000` or
    `10000 TNZO`; wei needs its suffix, `250000000000000000wei`). While
    admission approval is on, the account must first be named in an enacted
@@ -680,7 +724,7 @@ flow, and the behaviors that surprise first-time operators:
    restarts with no console once its TPM root credential is provisioned. Run under systemd with automatic restart so a
    crash, OOM, or reboot returns on the same identity. Never wipe the data
    directory to "reset" — that discards the only unregenerable material (the
-   list is in section 9.8, which also gives the supported recovery for a
+   list is in section 8.8, which also gives the supported recovery for a
    corrupt chain database).
 
 6. **Provider resources are gated; you choose how.** If you run provider roles
@@ -699,9 +743,14 @@ flow, and the behaviors that surprise first-time operators:
 Every service on the network is open to anyone who bonds for it. There is no
 list to be added to: an account bonds stake for a role with a signed `Stake`
 transaction (`tenzro stake bond`), the bond sits in the role-stake vault in
-consensus, and a node configured with a bonded role refuses to boot until its
-operator account holds that bond. The validator role bonds through
-`RegisterValidator` instead. Read any account's bonds with `tenzro stake info`
+consensus, and a node configured with a bonded role its operator account does
+not hold the bond for starts without that role and logs which bond is missing,
+then takes the role up by itself within a minute of the bond landing in a
+block: it announces the role, offers its payment schemes and serves it. A
+served role whose bond goes is put down the same way, and taken up again once
+it is bonded. The validator role bonds through
+`RegisterValidator` instead, and a node configured as a validator without that
+bond refuses to boot. Read any account's bonds with `tenzro stake info`
 (`tenzro_getRoleStakes`).
 
 | Role (`--role`) | What you run | Bond | Checked by | Slashed for |
@@ -809,8 +858,10 @@ and none can sign for your users. With the TypeScript SDK (`tenzro-sdk`):
    bound to the code with `recoveryCodeClaim` in `claim_recovery_code`, sent
    by an account other than the locked one, then revealed in
    `recover_with_code` once the claim has aged.
-5. Show every pending recovery and let any linked passkey cancel it
-   (`cancel_recovery`) during its wait.
+5. Show every pending recovery and let the holder cancel it
+   (`cancel_recovery`) during its wait. Any linked passkey cancels; once
+   `feature.recovery_cancel.activation_epoch` is in force, a recovery the
+   signers started takes two independent passkeys or the signers themselves.
 
 The Rust (`tenzro-sdk`) and Python (`tenzro`) SDKs offer the same encoding,
 digest and recovery code helpers, checked against one shared vector.
@@ -857,7 +908,7 @@ tenzro
 
 The CLI talks to `http://localhost:8545` by default. Point at the public network with `--rpc-url https://rpc.tenzro.com`.
 
-The commands that send a transaction sign as the CLI's own hardware account (namespace `client`). A network that requires a registered identity executes and reverts a transaction from an account that has none, so that account registers once, after it has been funded, with `tenzro identity register-account`. `tenzro wallet send` waits for the transfer to be executed and fails with the reason when it reverted; `--no-wait` returns as soon as the node has accepted it.
+The commands that send a transaction sign as the CLI's own hardware account (namespace `client`). A network that requires a registered identity executes and reverts a transaction from an account that has none, so that account registers once, after it has been funded, with `tenzro identity register-account`. `tenzro wallet send` waits for the transfer to be executed and fails with the reason when it reverted; `--no-wait` returns as soon as the node has accepted it. A recipient new to the account, or one that resembles an address it trusts, needs its full address repeated with `--confirm-address <address>`, and an amount at or above the governed `wallet.step_up_threshold_tnzo` needs it repeated with `--confirm-amount <amount>`; a terminal asks for both, a script must pass them.
 
 ---
 
@@ -872,10 +923,12 @@ log_level = "info"
 rpc_addr = "127.0.0.1:8545"
 mcp_addr = "127.0.0.1:3001"
 a2a_addr = "127.0.0.1:3002"
+paired_device_addr = "0.0.0.0:8543"
 
 [iroh]
-# Boot identities: omit to join through the genesis validators; set machine
-# identities here or via --boot-nodes for a private deployment.
+# Boot identities: a non-validator may omit them to join through the genesis
+# validators; a validator lists every other genesis validator here or via
+# --boot-nodes, and so does every node of a private deployment.
 # boot = ["did:tenzro:machine:<id>@https://relay.example.org"]
 ```
 
@@ -929,21 +982,9 @@ image from that archive.
 
 ---
 
-## 8. Control App (optional)
+## 8. Troubleshooting
 
-```bash
-cd apps/tenzro-control
-npm install
-npm run tauri dev
-```
-
-Requires Node.js 20+ and the Tauri CLI (`cargo install tauri-cli` or `npm i -g @tauri-apps/cli`).
-
----
-
-## 9. Troubleshooting
-
-### 9.1 `cc-rs: command did not execute successfully (status code exit status: 1)` while building `librocksdb-sys`
+### 8.1 `cc-rs: command did not execute successfully (status code exit status: 1)` while building `librocksdb-sys`
 
 **Most common cause: OOM killed during parallel C++ compile.** RocksDB, revm, and llama-cpp each allocate 500 MB–1 GB per translation unit. On machines with < 16 GB RAM, `cargo` default `-j$(nproc)` triggers the OOM killer.
 
@@ -976,13 +1017,13 @@ sudo mkswap /swapfile && sudo swapon /swapfile
 2. **Mixed toolchain** (e.g., `CC=gcc` but `CXX=clang++`). Unset both and re-export matching pair.
 3. **Missing `libclang-dev`** (Linux). Install via package manager.
 
-### 9.2 `llama-cpp-sys-2` build fails with cmake errors
+### 8.2 `llama-cpp-sys-2` build fails with cmake errors
 
 - **macOS Apple Silicon**: ensure `.cargo/config.toml` has `CMAKE_ARGS="-DGGML_NATIVE=OFF"` (it does by default). Do not set `target-cpu=native` globally.
 - **Linux with old cmake**: needs cmake ≥ 3.21. Install from Kitware APT repo or `pip install cmake`.
 - **GPU feature enabled without driver**: remove the `--features tenzro-model/cuda` (or rocm/vulkan) and retry CPU-only.
 
-### 9.3 `ld: library not found for -lssl` / `error: failed to run custom build command for openssl-sys`
+### 8.3 `ld: library not found for -lssl` / `error: failed to run custom build command for openssl-sys`
 
 **Linux:**
 ```bash
@@ -996,7 +1037,7 @@ export OPENSSL_DIR=$(brew --prefix openssl@3)
 export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig"
 ```
 
-### 9.4 `error: linker 'cc' not found`
+### 8.4 `error: linker 'cc' not found`
 
 Missing C toolchain.
 ```bash
@@ -1008,7 +1049,7 @@ sudo dnf groupinstall -y "Development Tools"
 xcode-select --install
 ```
 
-### 9.5 `SIGILL` / `Illegal instruction` at startup on older x86_64 CPUs
+### 8.5 `SIGILL` / `Illegal instruction` at startup on older x86_64 CPUs
 
 `.cargo/config.toml:22` sets `target-cpu=x86-64-v3` (AVX2 required). If your CPU is pre-Haswell (Intel) or pre-Zen (AMD):
 
@@ -1023,7 +1064,7 @@ If empty, remove the `rustflags` line for your target from `.cargo/config.toml` 
 RUSTFLAGS="-C target-cpu=x86-64" cargo build --release -p tenzro-node
 ```
 
-### 9.6 `error: failed to open: /tmp/.../CACHEDIR.TAG: Permission denied`
+### 8.6 `error: failed to open: /tmp/.../CACHEDIR.TAG: Permission denied`
 
 Running `cargo` as root after building as a user (or vice versa). Clean and rebuild as the correct user:
 
@@ -1031,7 +1072,7 @@ Running `cargo` as root after building as a user (or vice versa). Clean and rebu
 sudo chown -R "$USER:$USER" target/ ~/.cargo
 ```
 
-### 9.7 Port already in use
+### 8.7 Port already in use
 
 ```
 Error: Address already in use (os error 98) — 127.0.0.1:8545
@@ -1050,7 +1091,7 @@ lsof -i :8545
 
 Or override via flags: `--rpc-addr 127.0.0.1:8546 --mcp-addr 127.0.0.1:3011 --a2a-addr 127.0.0.1:3012`.
 
-### 9.8 RocksDB corruption after crash / kill -9
+### 8.8 RocksDB corruption after crash / kill -9
 
 The node repairs its write-ahead log on open. A store damaged beyond that (a
 bad disk, a partial overwrite) is detected and refused: the node does not start
@@ -1083,13 +1124,16 @@ peers: `db/`, `epoch-snapshots/` and `epoch-proof/`.
 3. Create a new data directory and put back from the backup only `consensus/`,
    `wallets/`, `contacts.json`, `credentials/` and `access.toml`; leave out
    `db/`, `epoch-snapshots/` and `epoch-proof/`.
-4. Start the node with `--state-sync-from ENDPOINT_ID` naming one or more
-   healthy peers (see [NODE.md](NODE.md)), and wait until it has synced and
-   reports the network's finalized height.
+4. Start the node without `--state-sync-from` and without the checkpoint
+   flags. On this release it rebuilds the chain by block replay from
+   genesis, fetching the blocks from its peers; wait until it reports the
+   network's finalized height. Restoring from a peer's snapshot
+   (`--state-sync-from` with a checkpoint that `tenzro node snapshots --rpc
+   <peer>` lists; see [NODE.md](NODE.md)) arrives in an update.
 
-Finalized blocks are fsync'd on the peers, so the sync restores the state.
+Finalized blocks are fsync'd on the peers, so the replay restores the state.
 
-### 9.9 `tenzro join` hangs
+### 8.9 `tenzro join` hangs
 
 Check the node is running and reachable:
 ```bash
@@ -1101,14 +1145,14 @@ Point the CLI at the public network if your local node is not ready:
 tenzro --rpc-url https://rpc.tenzro.com join --name "Alice"
 ```
 
-### 9.10 Peer discovery: "no peers connected" for > 60 s
+### 8.10 Peer discovery: "no peers connected" for > 60 s
 
 - Ensure outbound UDP for the iroh endpoint is not blocked by firewall.
 - Check `tenzro_iroh_getInfo`: `relays` lists the relays admitted by their operators' records and `boot_peers` the boot identities resolved. An empty `relays` means no boot entry named a relay whose record verified.
 - Pass boot identities via `--boot-nodes did:tenzro:machine:<id>@<relay url>` or `[iroh] boot`.
 - Check logs: `RUST_LOG=iroh=debug,tenzro_iroh=debug,tenzro_network=debug ./target/release/tenzro-node ...`
 
-### 9.11 macOS: "killed: 9" on first run of downloaded binary
+### 8.11 macOS: "killed: 9" on first run of downloaded binary
 
 Gatekeeper quarantine. Remove the attribute:
 
@@ -1117,7 +1161,7 @@ xattr -d com.apple.quarantine ./target/release/tenzro-node
 xattr -d com.apple.quarantine ./target/release/tenzro
 ```
 
-### 9.12 A gated model download is refused
+### 8.12 A gated model download is refused
 
 Model weights are content-addressed: each artifact is identified by its BLAKE3 hash and a `tenzro://blob/<hash>` URI. A download is peer-first: the node fetches from other nodes over the iroh blob transport when a peer holds the artifact, and from Hugging Face Hub otherwise. Weights their origin gates behind a licence need the operator to accept that licence first; the node then fetches them from other nodes, and those nodes serve them only to a node whose hardware-signed endpoint record lists the same licence. Accept it when starting the node:
 
@@ -1137,7 +1181,7 @@ A sealed token is used first. Operators without a TPM or Secure Enclave, or who 
 
 Every model a node downloads or serves is recorded in its trust ledger as a content-addressed manifest (per-file SHA-256 and BLAKE3, with a BLAKE3 Merkle root). A manifest is verified when independent origins agree on it: the model creator, the Hugging Face Hub commit, and the storage providers that hold it (`tenzro_getModelProvenance` shows which). Before weights load they are checked against the hashes in the model's catalog entry and the verified manifest; a mismatch fails the load, and a model no verified manifest lists loads with its provenance reported as `unverified`. See [TRUST.md](TRUST.md).
 
-### 9.13 Slow first build, no visible progress
+### 8.13 Slow first build, no visible progress
 
 `cargo` prints a line per crate but silences C++ compile progress. Watch RAM and CPU instead:
 
@@ -1147,7 +1191,7 @@ watch -n 1 'free -h && nproc && ps -eo pid,rss,comm --sort=-rss | head -20'
 
 A cold build compiles 32 workspace crates plus hundreds of dependencies and takes 20 minutes or more on a laptop.
 
-### 9.14 Clean rebuild when everything is wedged
+### 8.14 Clean rebuild when everything is wedged
 
 ```bash
 cargo clean
@@ -1158,7 +1202,7 @@ CARGO_BUILD_JOBS=2 cargo build --release -p tenzro-node -p tenzro-cli
 
 ---
 
-## 10. Running Tests
+## 9. Running Tests
 
 ```bash
 # Full workspace
@@ -1176,7 +1220,7 @@ RUST_LOG=debug cargo test -p tenzro-node -- --nocapture
 
 ---
 
-## 11. Development Loop
+## 10. Development Loop
 
 ```bash
 # Fast type-check (no codegen)
@@ -1195,7 +1239,7 @@ RUST_LOG=tenzro_node=debug,tenzro_consensus=info \
 
 ---
 
-## 12. Useful Environment Variables
+## 11. Useful Environment Variables
 
 | Variable | Effect |
 |----------|--------|
@@ -1210,9 +1254,9 @@ RUST_LOG=tenzro_node=debug,tenzro_consensus=info \
 
 ---
 
-## 13. Monitoring & Observability
+## 12. Monitoring & Observability
 
-### 13.1 Prometheus metrics
+### 12.1 Prometheus metrics
 
 The node exposes Prometheus-compatible metrics on the verification API port
 (8080), at the root path so a standard scraper finds them:
@@ -1230,14 +1274,14 @@ admitted, rejected), plus `tenzro_block_height`, `tenzro_peer_count`,
 
 Wire to Prometheus by scraping `http://<node>:8080/metrics`.
 
-### 13.2 Health checks
+### 12.2 Health checks
 
 ```bash
 curl http://localhost:8080/health     # liveness — always 200 if process is up
 curl http://localhost:8080/status     # readiness — block height, peer count, role
 ```
 
-### 13.3 Log filtering
+### 12.3 Log filtering
 
 The `tracing` crate is configured via `RUST_LOG`. Common filters:
 
@@ -1252,13 +1296,13 @@ Logs go to stderr in human-readable format. Pipe to `jq` for structured filterin
 
 ---
 
-## 14. Security Considerations
+## 13. Security Considerations
 
-### 14.1 Key material
+### 13.1 Key material
 
 - The wallet is permissionless and no custody is held: every private key lives in the holder's own hardware — a passkey (WebAuthn) for a human, a TPM 2.0 or Apple Secure Enclave for a node — and never leaves it, so neither the network nor any file holds the secret. No key is ever written to disk, placed in configuration or an environment variable, or sent in an RPC. The hardware root is the wallet; losing it is unrecoverable, so guard it accordingly.
 
-### 14.2 RPC exposure
+### 13.2 RPC exposure
 
 The JSON-RPC server binds `127.0.0.1:8545`, and the node refuses a non-loopback bind. Exposing it through your own reverse proxy puts every open and owner-proof method on the network; state changes without their own proof need a node administrator. The listener answers only to its own host names (`http_surface.allowed_hosts`) and gives no CORS grant unless `cors_allowed_origins` lists the origin. If you expose RPC:
 
@@ -1267,19 +1311,19 @@ The JSON-RPC server binds `127.0.0.1:8545`, and the node refuses a non-loopback 
 - Publish its URL with `--external-rpc-addr https://...`; the node refuses a loopback, private, CGNAT or link-local URL.
 - Enable MCP-tier authentication (`TENZRO_MCP_AUTH=full`) for MCP server access.
 
-### 14.3 Validator hygiene
+### 13.3 Validator hygiene
 
 - Run validators on dedicated hosts, not shared developer machines.
 - Use TEE-attested hardware where possible — TEE validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw and significantly stronger protection against key extraction.
 - Monitor `tenzro_consensus_equivocation_evidence{kind="vote"}` and `{kind="proposal"}` — any non-zero value indicates a misconfigured or compromised validator (10% slash penalty applies).
 
-### 14.4 Reporting vulnerabilities
+### 13.4 Reporting vulnerabilities
 
 Email security findings to `eng@tenzro.com` or use GitHub private vulnerability reporting on the affected repository. Do not file public issues for unpatched vulnerabilities. The policy is [SECURITY.md](../SECURITY.md).
 
 ---
 
-## 15. Getting Help
+## 14. Getting Help
 
 - **Docs**: https://tenzro.com/docs
 - **Issues**: https://github.com/tenzro/tenzro-network/issues

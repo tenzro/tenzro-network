@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { redact } from "../src/redact.js";
 import { fit, formatDuration, formatTnzo, isAddress, plainError, shortId } from "../src/format.js";
 import { shrinkColumns } from "../src/ui.js";
 import { colorEnabled } from "../src/theme.js";
@@ -32,8 +33,8 @@ test("isAddress accepts 20 and 32 byte accounts only", () => {
 
 test("plainError says what to do when the node is down", () => {
   const e = Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } });
-  assert.match(plainError(e, "http://x:1"), /Cannot reach a node at http:\/\/x:1/);
-  assert.match(plainError(new Error("timed out"), "u"), /did not answer/);
+  assert.match(plainError(e, redact("http://x:1")), /Cannot reach a node at http:\/\/x:1/);
+  assert.match(plainError(new Error("timed out"), redact("u")), /did not answer/);
 });
 
 test("NO_COLOR and TERM=dumb switch color off", () => {

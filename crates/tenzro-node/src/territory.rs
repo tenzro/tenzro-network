@@ -862,12 +862,11 @@ mod tests {
     ];
 
     fn h3_licence(id: &str) -> tenzro_model::catalog::Licence {
-        // The catalog is process-wide; these tests install the seed entries
-        // themselves rather than relying on another test having done so.
-        tenzro_catalog::install_test_seed();
-        tenzro_model::catalog::entry(id)
+        tenzro_model::Catalog::test_seed()
+            .entry(id)
             .unwrap_or_else(|| panic!("{id} catalogued"))
             .licence
+            .clone()
     }
 
     /// A node declaring a jurisdiction in an excluded territory loads none of

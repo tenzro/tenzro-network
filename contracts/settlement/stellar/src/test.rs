@@ -58,7 +58,13 @@ fn setup() -> T {
     let lock = SettlementLockClient::new(&env, &lock_id);
     let token = TokenClient::new(&env, &sac.address());
     let recipient = Address::generate(&env);
-    T { env, lock, token, payer, recipient }
+    T {
+        env,
+        lock,
+        token,
+        payer,
+        recipient,
+    }
 }
 
 impl T {
@@ -67,14 +73,30 @@ impl T {
     }
 
     fn lock_leg(&self, which: &str, index: u32, amount: i128) {
-        self.lock.lock(&self.payer, &self.plan(which), &index, &self.token.address, &amount, &self.recipient);
+        self.lock.lock(
+            &self.payer,
+            &self.plan(which),
+            &index,
+            &self.token.address,
+            &amount,
+            &self.recipient,
+        );
     }
 
-    fn settle(&self, which: &str, index: u32, proof_of: &str, checkpoint: u64) -> Result<(), Error> {
+    fn settle(
+        &self,
+        which: &str,
+        index: u32,
+        proof_of: &str,
+        checkpoint: u64,
+    ) -> Result<(), Error> {
         let vv = v();
         let decision = Bytes::from_slice(&self.env, &raw(&vv[proof_of]["decision"]));
         let proof = Bytes::from_slice(&self.env, &raw(&vv[proof_of]["proof"]));
-        match self.lock.try_settle(&self.plan(which), &index, &checkpoint, &decision, &proof) {
+        match self
+            .lock
+            .try_settle(&self.plan(which), &index, &checkpoint, &decision, &proof)
+        {
             Ok(Ok(())) => Ok(()),
             Err(Ok(e)) => Err(e),
             other => panic!("unexpected {other:?}"),
@@ -91,7 +113,10 @@ fn leg_ids_match_tenzro() {
             assert_eq!(t.lock.leg_id(&t.plan(which), &i).to_array(), want);
         }
     }
-    assert_eq!(t.lock.try_leg_id(&t.plan("committed"), &256), Err(Ok(Error::BadIndex)));
+    assert_eq!(
+        t.lock.try_leg_id(&t.plan("committed"), &256),
+        Err(Ok(Error::BadIndex))
+    );
 }
 
 #[test]
@@ -103,8 +128,14 @@ fn a_commit_pays_the_recipient_once() {
     assert_eq!(t.token.balance(&t.recipient), 400);
     assert_eq!(t.token.balance(&t.payer), 600);
     assert_eq!(t.lock.leg(&t.plan("committed"), &2).stage, Stage::Released);
-    assert_eq!(t.settle("committed", 2, "committed", CHECKPOINT), Err(Error::NotLocked));
-    assert_eq!(t.lock.try_escape(&t.plan("committed"), &2), Err(Ok(Error::NotLocked)));
+    assert_eq!(
+        t.settle("committed", 2, "committed", CHECKPOINT),
+        Err(Error::NotLocked)
+    );
+    assert_eq!(
+        t.lock.try_escape(&t.plan("committed"), &2),
+        Err(Ok(Error::NotLocked))
+    );
 }
 
 #[test]
@@ -123,17 +154,29 @@ fn a_foreign_forged_or_unanchored_decision_moves_nothing() {
     let t = setup();
     t.lock_leg("undecided", 1, 300);
     // Another plan's decision and proof.
-    assert_eq!(t.settle("undecided", 1, "committed", CHECKPOINT), Err(Error::Unproven));
+    assert_eq!(
+        t.settle("undecided", 1, "committed", CHECKPOINT),
+        Err(Error::Unproven)
+    );
     // The decision rewritten to this plan, under the real proof.
     let vv = v();
     let mut forged = raw(&vv["committed"]["decision"]);
     forged[10..].copy_from_slice(&raw(&vv["undecided"]["plan_id"]));
     let proof = Bytes::from_slice(&t.env, &raw(&vv["committed"]["proof"]));
-    let r = t.lock.try_settle(&t.plan("undecided"), &1, &CHECKPOINT, &Bytes::from_slice(&t.env, &forged), &proof);
+    let r = t.lock.try_settle(
+        &t.plan("undecided"),
+        &1,
+        &CHECKPOINT,
+        &Bytes::from_slice(&t.env, &forged),
+        &proof,
+    );
     assert_eq!(r, Err(Ok(Error::Unproven)));
     // A real decision under a root that does not hold it.
     t.lock_leg("committed", 0, 100);
-    assert_eq!(t.settle("committed", 0, "committed", ELSEWHERE), Err(Error::Unproven));
+    assert_eq!(
+        t.settle("committed", 0, "committed", ELSEWHERE),
+        Err(Error::Unproven)
+    );
     assert_eq!(t.token.balance(&t.lock.address), 400);
     assert_eq!(t.lock.leg(&t.plan("undecided"), &1).stage, Stage::Locked);
 }
@@ -144,21 +187,44 @@ fn an_undecided_leg_escapes_only_after_the_horizon() {
     t.lock_leg("undecided", 0, 500);
     let escape_at = t.lock.leg(&t.plan("undecided"), &0).escape_at;
     t.env.ledger().set_timestamp(escape_at - 1);
-    assert_eq!(t.lock.try_escape(&t.plan("undecided"), &0), Err(Ok(Error::TooEarly)));
+    assert_eq!(
+        t.lock.try_escape(&t.plan("undecided"), &0),
+        Err(Ok(Error::TooEarly))
+    );
     t.env.ledger().set_timestamp(escape_at);
     t.lock.escape(&t.plan("undecided"), &0);
     assert_eq!(t.token.balance(&t.payer), 1_000);
-    assert_eq!(t.lock.try_escape(&t.plan("undecided"), &0), Err(Ok(Error::NotLocked)));
+    assert_eq!(
+        t.lock.try_escape(&t.plan("undecided"), &0),
+        Err(Ok(Error::NotLocked))
+    );
 }
 
 #[test]
 fn a_leg_locks_once_with_a_positive_amount() {
     let t = setup();
     let p = t.plan("committed");
-    assert_eq!(t.lock.try_lock(&t.payer, &p, &1, &t.token.address, &0, &t.recipient), Err(Ok(Error::BadAmount)));
+    assert_eq!(
+        t.lock
+            .try_lock(&t.payer, &p, &1, &t.token.address, &0, &t.recipient),
+        Err(Ok(Error::BadAmount))
+    );
     t.lock_leg("committed", 1, 10);
-    assert_eq!(t.lock.try_lock(&t.payer, &p, &1, &t.token.address, &10, &t.recipient), Err(Ok(Error::AlreadyLocked)));
-    assert_eq!(t.lock.try_settle(&p, &0, &CHECKPOINT, &Bytes::new(&t.env), &Bytes::new(&t.env)), Err(Ok(Error::NotLocked)));
+    assert_eq!(
+        t.lock
+            .try_lock(&t.payer, &p, &1, &t.token.address, &10, &t.recipient),
+        Err(Ok(Error::AlreadyLocked))
+    );
+    assert_eq!(
+        t.lock.try_settle(
+            &p,
+            &0,
+            &CHECKPOINT,
+            &Bytes::new(&t.env),
+            &Bytes::new(&t.env)
+        ),
+        Err(Ok(Error::NotLocked))
+    );
 }
 
 /// The Locked event exactly as the ledger records it, which Tenzro's Stellar
@@ -172,7 +238,10 @@ fn the_locked_event_matches_the_shared_vector() {
     let events = t.env.events().all().filter_by_contract(&t.lock.address);
     let event = events.events().last().unwrap().clone();
     let got = hex::encode(event.to_xdr(Limits::none()).unwrap());
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sdk/fixtures/settlement_lock/stellar_locked_event.hex");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../sdk/fixtures/settlement_lock/stellar_locked_event.hex"
+    );
     if std::env::var("TENZRO_WRITE_FIXTURES").is_ok() {
         std::fs::write(path, std::format!("{got}\n")).unwrap();
     }
@@ -182,13 +251,18 @@ fn the_locked_event_matches_the_shared_vector() {
 #[test]
 fn the_reconciliation_hash_matches_the_shared_vector() {
     use soroban_sdk::testutils::Events as _;
-    let rv: serde_json::Value =
-        serde_json::from_str(include_str!("../../../../sdk/fixtures/settlement_lock/recon.json")).unwrap();
+    let rv: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../sdk/fixtures/settlement_lock/recon.json"
+    ))
+    .unwrap();
     let acc_at = |x: &serde_json::Value| -> [u8; 32] { raw(x).try_into().unwrap() };
     let t = setup();
     StellarAssetClient::new(&t.env, &t.token.address).mint(&t.payer, &2_000_000_000_000_000_000);
     t.lock_leg("committed", 0, 400);
-    assert_eq!(t.lock.reconciliation().1.to_array(), acc_at(&rv["entries"][0]["acc"]));
+    assert_eq!(
+        t.lock.reconciliation().1.to_array(),
+        acc_at(&rv["entries"][0]["acc"])
+    );
     t.lock_leg("aborted", 2, 1_000_000_000_000_000_000);
     assert_eq!(t.settle("committed", 0, "committed", CHECKPOINT), Ok(()));
     assert_eq!(t.settle("aborted", 2, "aborted", CHECKPOINT), Ok(()));
@@ -203,7 +277,10 @@ fn the_reconciliation_hash_matches_the_shared_vector() {
     let events = t.env.events().all().filter_by_contract(&t.lock.address);
     let event = events.events().last().unwrap().clone();
     let got = hex::encode(event.to_xdr(Limits::none()).unwrap());
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sdk/fixtures/settlement_lock/stellar_accumulator_event.hex");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../sdk/fixtures/settlement_lock/stellar_accumulator_event.hex"
+    );
     if std::env::var("TENZRO_WRITE_FIXTURES").is_ok() {
         std::fs::write(path, std::format!("{got}\n")).unwrap();
     }

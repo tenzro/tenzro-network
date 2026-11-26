@@ -50,27 +50,27 @@ Protected header (itself serialised in RFC 8785 form before base64url):
    the section 3.2.3 ordering example.
 3. JWS signing input is `BASE64URL(protected) || "." || BASE64URL(canonical card)`.
    The payload is detached: it is not repeated in the signature object.
-4. The signature is produced by `WalletService::sign_external` on the wallet of
-   the node's operator DID (`TenzroNode::operator_did`). The wallet service
-   holds no private key: it signs only through the hybrid signer bound to the
-   wallet (device custody: Secure Enclave, TPM), and refuses otherwise. The
-   operator's hardware P-256 key signs SHA-256 of the signing input, `r || s`
-   (JWS `alg` `ES256`).
+4. The signature is made by the machine's identity key, the P-256 key in its
+   TPM or Secure Enclave that its machine DID derives from. The protected
+   header carries `kid` = `<machine DID>#hardware-key` (the method the node's
+   DID Document lists for that key) and the key as a `jwk`. The key signs
+   SHA-256 of the signing input, `r || s` (JWS `alg` `ES256`). No wallet or
+   operator account on the node is involved.
 5. The node verifies its own signed card before serving it and caches it.
    Until signing succeeds, every card request retries.
 
-Code: `sign_with_operator_wallet` and `verify_agent_card` in
+Code: `sign_with_machine_key` and `verify_agent_card` in
 `crates/tenzro-node/src/a2a/agent_card.rs`.
 
 ## Verification
 
 `verify_agent_card(card_json)` succeeds only if the card carries at least
-one signature and every signature verifies: `alg` must be `EdDSA`, the
-protected header must carry `kid` and an Ed25519 `jwk`, and the Ed25519
-signature (strict verification) must cover the canonical card. It returns
-the `kid` and public key of each signature. A relying party must separately
-check that `kid` resolves to that key (for a Tenzro DID, via
-`tenzro_resolveDidDocument`).
+one signature and every signature verifies: `alg` must be `ES256`, the
+protected header must carry `kid` and a P-256 `jwk`, and the signature must
+cover the canonical card. It returns the `kid` and public key of each
+signature. A relying party then checks that the DID in `kid` derives from
+that key (`did:tenzro:machine:` is derived from the key itself), so the
+binding needs no trust in the serving node.
 
 Tests (`a2a::agent_card::tests`): a signed card verifies; pretty-printed
 re-serialisation still verifies; a rewritten interface URL, a stripped
@@ -79,10 +79,7 @@ rejected; an unsigned card and `alg: none` are rejected.
 
 ## Dependencies and limits
 
-- The signing key is whatever hardware custody backs the operator wallet.
-  A node with no operator identity, no bound signer, or a non-Ed25519
-  operator key serves no card (503). A dedicated hardware-signer
-  abstraction for node-level keys is owned by the identity stream; when it
-  lands, `sign_with_operator_wallet` is the one function to repoint.
-- `ES256` / `ES256K` card signatures are not verified; such a card is
-  reported as malformed rather than accepted.
+- A node whose machine key cannot sign serves no card (503); every card
+  request retries until signing succeeds.
+- Card signatures other than `ES256` are reported as malformed rather than
+  accepted.

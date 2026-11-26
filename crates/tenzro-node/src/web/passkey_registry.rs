@@ -5,7 +5,7 @@
 //! The share-escrow path used to obtain a credential's verifying key by
 //! *deriving* it:
 //!
-//! ```ignore
+//! ```text
 //! hasher.update(CREDENTIAL_KEY_DOMAIN_TAG);
 //! hasher.update(credential_id.as_bytes());   // a public identifier
 //! let signing_key = EdSigningKey::from_bytes(&seed);

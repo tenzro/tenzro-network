@@ -12,8 +12,6 @@
 //! - [`redundancy`] — systematic Reed-Solomon erasure coding (and its
 //!   `k = 1` replication degenerate case) so an object survives the loss of up
 //!   to `m` shards.
-//! - [`metering`] — per-byte pricing and per-epoch streaming payment,
-//!   gated on passing the retrievability challenge each epoch.
 //! - [`placement`] — rendezvous (HRW) hashing so shards self-select onto
 //!   multiple independent providers with no coordinator.
 //!
@@ -32,12 +30,17 @@ pub mod pdp;
 pub mod placement;
 pub mod provider;
 pub mod redundancy;
+#[cfg(test)]
+mod repair_cost;
+pub mod volume_probe;
 
 pub use error::{Result, StorageProviderError};
-pub use pdp::{PdpChallenge, PdpItem, PdpProof, new_pdp_challenge, prove, verify};
-pub use placement::{
-    MemberReachability, TieredCandidate, TieredHolders, hrw_score, select_holders,
-    select_tiered_holders, should_replicate, should_replicate_tiered,
+pub use pdp::{
+    DescriptorShards, PdpChallenge, PdpError, PdpItem, PdpProof, ShardRef, new_pdp_challenge,
+    prove, verify,
 };
-pub use provider::{ObjectDescriptor, ShardRef, StorageProvider};
+pub use placement::{
+    PlacementConstraint, RankedCandidate, hrw_score, select_ranked_holders, should_replicate_ranked,
+};
+pub use provider::{ObjectDescriptor, StorageProvider};
 pub use redundancy::{RedundancyScheme, Shard, encode, reconstruct};

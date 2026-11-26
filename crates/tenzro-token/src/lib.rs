@@ -75,10 +75,10 @@ pub use tnzo::{TnzoToken, TokenStats};
 pub use treasury::{FeeDistributionConfig, NetworkTreasury, TreasuryStats, TreasuryStorageBackend};
 pub use validator_registry::{
     ACTIVATION_EFFECTIVE_DELAY_BLOCKS, DEFAULT_ACTIVATION_CHURN_BPS, DEFAULT_EXIT_CHURN_BPS,
-    DEFAULT_MIN_VALIDATOR_SELF_STAKE, DEFAULT_REENTRY_COOLDOWN_EPOCHS, EpochTransitionPlan,
-    InactivityPolicy, MIN_CHURN_PER_EPOCH, RecoveryMember, VALIDATOR_CONFIG_KEY,
-    VALIDATOR_INDEX_KEY, VALIDATOR_PREFIX, ValidatorRegistry, ValidatorRegistryConfig,
-    ValidatorRegistryEntry, ValidatorRegistryStatus,
+    DEFAULT_MIN_VALIDATOR_SELF_STAKE, DEFAULT_REENTRY_COOLDOWN_EPOCHS, DeferredRemoval,
+    EpochTransitionPlan, InactivityPolicy, MIN_CHURN_PER_EPOCH, RecoveryMember,
+    VALIDATOR_CONFIG_KEY, VALIDATOR_INDEX_KEY, VALIDATOR_PREFIX, ValidatorRegistry,
+    ValidatorRegistryConfig, ValidatorRegistryEntry, ValidatorRegistryStatus,
 };
 pub use vesting::{
     CONTRIBUTOR_CLIFF_MS, CONTRIBUTOR_VESTING_MS, DAY_MILLIS, GRANT_VESTING_MS, REWARD_VESTING_MS,

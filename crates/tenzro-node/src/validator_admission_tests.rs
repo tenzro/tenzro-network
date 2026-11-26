@@ -73,7 +73,7 @@ fn boundary(
     state: &StateAdapter,
     height: u64,
 ) -> ValidatorSet {
-    EventLoop::stage_registry_epoch_plan(em, registry, &|_| true);
+    EventLoop::stage_registry_epoch_plan(em, registry, &|_| true, None, None);
     enforce_committee(em, state);
     em.transition_epoch(BlockHeight::from(height))
         .expect("transition")
@@ -198,9 +198,12 @@ fn validator_admission_rpc_refusal_and_status_read() {
         err.message
     );
     assert!(err.message.contains("operator"), "{}", err.message);
+    // Operators and validators only: there is no participant path to send a refused validator to.
+    assert!(!err.message.contains("participant"), "{}", err.message);
     let data = err.data.expect("data");
     assert_eq!(data["reason"], rule::REFUSAL_CODE);
     assert_eq!(data["contact"], "team@tenzro.com");
+    assert_eq!(data["alternatives"], serde_json::json!(["operator"]));
 
     let (a, _, _) = keys(0x41);
     let mut state = StateAdapter::new();

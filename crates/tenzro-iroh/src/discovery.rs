@@ -45,6 +45,10 @@ pub const MAX_SNAPSHOT_RECORDS: usize = 512;
 /// Largest request or response frame.
 const MAX_FRAME: usize = 1024 * 1024;
 
+/// How long each step of a request may take: the dial, opening the stream,
+/// and the answer.
+pub const ASK_STEP: Duration = Duration::from_secs(15);
+
 /// A discovery request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DiscoveryRequest {
@@ -117,6 +121,7 @@ async fn direct_remote_addr(conn: &Connection) -> Option<SocketAddr> {
 pub struct DiscoveryStore {
     book: RwLock<RecordBook>,
     epoch_set: RwLock<HashSet<String>>,
+    committee: RwLock<HashSet<String>>,
 }
 
 impl DiscoveryStore {
@@ -152,9 +157,27 @@ impl DiscoveryStore {
         *self.epoch_set.write() = set;
     }
 
-    /// Whether `did` is in the epoch set.
+    /// Sets the machine identities of the current validator committee, as
+    /// every node reads it from the chain. They count as members of the
+    /// epoch set: a node holding a committee member's epoch-set record
+    /// (its boot machine, say) answers it to the other members, so the
+    /// validators of a fresh network find each other through the machines
+    /// on their boot lists, and the record still reaches no one outside the
+    /// committee.
+    pub fn set_committee(&self, committee: HashSet<String>) {
+        *self.committee.write() = committee;
+    }
+
+    /// Whether `did` is in the epoch set or the committee.
     pub fn in_epoch_set(&self, did: &str) -> bool {
-        self.epoch_set.read().contains(did)
+        self.epoch_set.read().contains(did) || self.committee.read().contains(did)
+    }
+
+    /// The epoch set with the committee.
+    fn members(&self) -> HashSet<String> {
+        let mut set = self.epoch_set.read().clone();
+        set.extend(self.committee.read().iter().cloned());
+        set
     }
 
     /// The current record naming the peer that authenticated with
@@ -220,14 +243,14 @@ impl DiscoveryStore {
     }
 
     /// Whether `record` may be answered to the peer authenticated as
-    /// `asker`: anyone for a network-wide record, a certified member for an
-    /// epoch-set record, and only a certified counterparty the record lists
-    /// for a private node's record.
+    /// `asker`: anyone for a network-wide record, a certified member of the
+    /// epoch set or the committee for a member's epoch-set record, and only
+    /// a certified counterparty the record lists for a private node's record.
     fn may_share(&self, record: &EndpointRecord, asker: EndpointId) -> bool {
         match &record.scope {
             RecordScope::Network => true,
             RecordScope::EpochSet => {
-                let set = self.epoch_set.read();
+                let set = self.members();
                 set.contains(&record.machine_did()) && self.certified_in(asker, &set).is_some()
             }
             RecordScope::Counterparties(list) => {
@@ -328,20 +351,263 @@ pub async fn ask(
     request: &DiscoveryRequest,
 ) -> IrohResult<DiscoveryResponse> {
     let id = peer.id;
-    let conn = endpoint
-        .connect(peer, ALPN_DISCOVERY)
+    let conn = crate::bounded::connect(endpoint, peer, ALPN_DISCOVERY, ASK_STEP)
         .await
         .map_err(|e| IrohError::Backend(format!("discovery connect to {id}: {e}")))?;
-    let (mut send, mut recv) = conn
-        .open_bi()
+    let (mut send, mut recv) = crate::bounded::open_bi(&conn, ASK_STEP)
         .await
         .map_err(|e| IrohError::Backend(format!("discovery stream to {id}: {e}")))?;
     let body = serde_json::to_vec(request).map_err(|e| IrohError::Backend(e.to_string()))?;
-    write_frame(&mut send, &body).await?;
+    // A peer that stops reading stalls the write on flow control; `finish`
+    // only queues the end of the stream and does not wait.
+    crate::bounded::bounded(
+        ASK_STEP,
+        "the discovery request",
+        write_frame(&mut send, &body),
+    )
+    .await??;
     send.finish()
         .map_err(|e| IrohError::Backend(e.to_string()))?;
-    let frame = read_frame(&mut recv, MAX_FRAME).await?;
+    let frame = crate::bounded::bounded(
+        ASK_STEP,
+        "the discovery answer",
+        read_frame(&mut recv, MAX_FRAME),
+    )
+    .await??;
     conn.close(0u32.into(), b"done");
     serde_json::from_slice(&frame)
         .map_err(|e| IrohError::Backend(format!("discovery response from {id}: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity_record::RelayRef;
+    use crate::identity_record::tests::TestMachineKey;
+
+    fn id(seed: u8) -> EndpointId {
+        iroh::SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    fn did(seed: u8) -> String {
+        TestMachineKey::from_seed(seed).did()
+    }
+
+    /// The record of the machine with hardware key `seed`, whose transport
+    /// endpoint is `id(seed)`.
+    fn record(seed: u8, scope: RecordScope, sequence: u64) -> EndpointRecord {
+        EndpointRecord::sign(
+            &TestMachineKey::from_seed(seed),
+            iroh_endpoint_key(id(seed)),
+            vec![RelayRef {
+                did: did(200),
+                url: "https://relay.example.org".parse().unwrap(),
+            }],
+            Vec::new(),
+            None,
+            scope,
+            vec![],
+            sequence,
+            now_ms(),
+        )
+        .unwrap()
+    }
+
+    fn store_with(records: impl IntoIterator<Item = EndpointRecord>) -> DiscoveryStore {
+        let store = DiscoveryStore::new();
+        for r in records {
+            assert_eq!(store.offer(r), Ok(true));
+        }
+        store
+    }
+
+    fn looked_up(store: &DiscoveryStore, did: &str, asker: EndpointId) -> Option<EndpointRecord> {
+        match store.answer(DiscoveryRequest::Lookup(did.to_string()), asker) {
+            DiscoveryResponse::Record(r) => r,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// The identities a snapshot to `asker` carries, sorted.
+    fn snapshot(store: &DiscoveryStore, asker: EndpointId) -> Vec<String> {
+        match store.answer(DiscoveryRequest::Snapshot, asker) {
+            DiscoveryResponse::Records(records) => {
+                let mut dids: Vec<String> = records.iter().map(|r| r.machine_did()).collect();
+                dids.sort();
+                dids
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    fn sorted(mut dids: Vec<String>) -> Vec<String> {
+        dids.sort();
+        dids
+    }
+
+    #[test]
+    fn a_network_record_is_answered_to_anyone_by_lookup_and_in_a_snapshot() {
+        let store = store_with([record(1, RecordScope::Network, 1)]);
+        let stranger = id(9);
+        assert_eq!(
+            looked_up(&store, &did(1), stranger).map(|r| r.machine_did()),
+            Some(did(1))
+        );
+        assert_eq!(snapshot(&store, stranger), vec![did(1)]);
+        assert_eq!(looked_up(&store, &did(2), stranger), None);
+    }
+
+    #[test]
+    fn an_epoch_set_record_is_answered_only_to_a_certified_member_of_the_set() {
+        let store = store_with([
+            record(1, RecordScope::EpochSet, 1),
+            record(2, RecordScope::Network, 1),
+            record(3, RecordScope::Network, 1),
+            record(4, RecordScope::EpochSet, 1),
+        ]);
+        let (member, outsider, unknown) = (id(2), id(3), id(9));
+
+        // No set is known yet: an epoch-set record goes to no one.
+        assert_eq!(looked_up(&store, &did(1), member), None);
+        assert_eq!(snapshot(&store, member), sorted(vec![did(2), did(3)]));
+
+        for by_committee in [false, true] {
+            let set: HashSet<String> = [did(1), did(2)].into_iter().collect();
+            if by_committee {
+                store.set_epoch_set(HashSet::new());
+                store.set_committee(set);
+            } else {
+                store.set_epoch_set(set);
+            }
+            assert!(store.in_epoch_set(&did(1)) && store.in_epoch_set(&did(2)));
+            assert!(!store.in_epoch_set(&did(3)));
+
+            assert_eq!(
+                looked_up(&store, &did(1), member).map(|r| r.machine_did()),
+                Some(did(1))
+            );
+            assert_eq!(
+                snapshot(&store, member),
+                sorted(vec![did(1), did(2), did(3)])
+            );
+            // A peer with a record, outside the set, and a peer no record names.
+            for asker in [outsider, unknown] {
+                assert_eq!(looked_up(&store, &did(1), asker), None);
+                assert_eq!(snapshot(&store, asker), sorted(vec![did(2), did(3)]));
+            }
+            // An epoch-set record of a machine outside the set goes to no one.
+            assert_eq!(looked_up(&store, &did(4), member), None);
+        }
+    }
+
+    #[test]
+    fn a_private_record_is_answered_only_to_a_listed_counterparty_and_never_in_a_snapshot() {
+        let store = store_with([
+            record(1, RecordScope::Counterparties(vec![did(2)]), 1),
+            record(2, RecordScope::Network, 1),
+            record(3, RecordScope::Network, 1),
+        ]);
+        // Membership of the epoch set does not open a private record.
+        store.set_epoch_set([did(1), did(3)].into_iter().collect());
+        let (counterparty, other) = (id(2), id(3));
+        assert_eq!(
+            looked_up(&store, &did(1), counterparty).map(|r| r.machine_did()),
+            Some(did(1))
+        );
+        assert_eq!(looked_up(&store, &did(1), other), None);
+        assert_eq!(looked_up(&store, &did(1), id(9)), None);
+        for asker in [counterparty, other] {
+            assert_eq!(snapshot(&store, asker), sorted(vec![did(2), did(3)]));
+        }
+    }
+
+    #[test]
+    fn a_published_record_is_kept_when_newer_ignored_when_repeated_and_refused_when_stale_or_changed()
+     {
+        let store = DiscoveryStore::new();
+        let asker = id(9);
+        let publish = |r: EndpointRecord| match store.answer(DiscoveryRequest::Publish(r), asker) {
+            DiscoveryResponse::Published(kept) => kept,
+            other => panic!("unexpected {other:?}"),
+        };
+        let second = record(1, RecordScope::Network, 2);
+        assert_eq!(publish(second.clone()), Ok(true));
+        assert_eq!(publish(second.clone()), Ok(false));
+        assert!(publish(record(1, RecordScope::Network, 1)).is_err());
+        let mut changed = record(1, RecordScope::Network, 3);
+        changed.scope = RecordScope::EpochSet;
+        assert!(publish(changed).is_err());
+        assert_eq!(store.lookup(&did(1)), Some(second));
+
+        let third = record(1, RecordScope::Network, 3);
+        assert_eq!(publish(third.clone()), Ok(true));
+        assert_eq!(store.records(), vec![third]);
+    }
+
+    #[test]
+    fn the_store_names_and_certifies_a_peer_by_the_endpoint_it_authenticated_with() {
+        let store = store_with([
+            record(1, RecordScope::Network, 1),
+            record(2, RecordScope::Network, 1),
+        ]);
+        assert_eq!(store.naming(id(1)).map(|r| r.machine_did()), Some(did(1)));
+        assert_eq!(store.naming(id(9)), None);
+        let set: HashSet<String> = [did(1)].into_iter().collect();
+        assert_eq!(store.certified_in(id(1), &set), Some(did(1)));
+        assert_eq!(store.certified_in(id(2), &set), None);
+        assert_eq!(store.certified_in(id(9), &set), None);
+        assert!(!store.accepts_licence(id(1), "any"));
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_resolves_to_the_relays_its_record_names() {
+        let store = store_with([record(1, RecordScope::Network, 1)]);
+        let items: Vec<_> = store.resolve(id(1)).expect("a record").collect().await;
+        assert_eq!(items.len(), 1);
+        let item = items.into_iter().next().unwrap().expect("an address");
+        assert_eq!(item.endpoint_id(), id(1));
+        assert_eq!(item.provenance(), "tenzro-discovery");
+        assert!(
+            item.to_endpoint_addr()
+                .relay_urls()
+                .any(|u| u.as_str().starts_with("https://relay.example.org"))
+        );
+        assert!(store.resolve(id(9)).is_none());
+    }
+
+    #[test]
+    fn an_observe_request_is_left_to_the_connection_and_a_mapped_address_is_written_as_ipv4() {
+        let store = DiscoveryStore::new();
+        assert!(matches!(
+            store.answer(DiscoveryRequest::Observe, id(1)),
+            DiscoveryResponse::Observed(None)
+        ));
+        let v4: SocketAddr = "192.0.2.7:4433".parse().unwrap();
+        let mapped: SocketAddr = "[::ffff:192.0.2.7]:4433".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::7]:4433".parse().unwrap();
+        assert_eq!(canonical(mapped), v4);
+        assert_eq!(canonical(v4), v4);
+        assert_eq!(canonical(v6), v6);
+    }
+
+    #[test]
+    fn ml_dsa_pins_are_saved_when_they_changed_and_taken_back_by_a_new_store() {
+        let path = std::env::temp_dir().join(format!("discovery-pins-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = DiscoveryStore::new();
+        assert_eq!(store.save_pq_pins(&path, 0).unwrap(), 0);
+        assert!(!path.exists(), "nothing changed, nothing written");
+
+        store.pin_pq_key(&did(1), vec![7; 40]);
+        assert_eq!(store.pinned_pq_key(&did(1)), Some(vec![7; 40]));
+        let saved = store.save_pq_pins(&path, 0).unwrap();
+        assert!(saved > 0);
+        assert_eq!(store.save_pq_pins(&path, saved).unwrap(), saved);
+
+        let again = DiscoveryStore::new();
+        assert_eq!(again.restore_pq_pins(&path).unwrap(), 1);
+        assert_eq!(again.pinned_pq_key(&did(1)), Some(vec![7; 40]));
+        assert_eq!(again.pinned_pq_key(&did(2)), None);
+        std::fs::remove_file(&path).unwrap();
+    }
 }

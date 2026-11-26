@@ -25,8 +25,6 @@ pub enum AdaptiveBurnCommand {
     Config(AdaptiveBurnConfigCmd),
     /// Show the latest SupplyMetricsSnapshot (circulating supply, burns, supply added: always 0, TNZO supply is fixed)
     Metrics(AdaptiveBurnMetricsCmd),
-    /// Compute the recommended BurnRateRecommendation from current metrics
-    Recommendation(AdaptiveBurnRecommendationCmd),
     /// List burn-dial governance proposals, newest first
     Proposals(AdaptiveBurnProposalsCmd),
     /// Show the TNZO/USD rate fees are priced at, its mode, and the base fee
@@ -41,7 +39,6 @@ impl AdaptiveBurnCommand {
         match self {
             Self::Config(cmd) => cmd.execute().await,
             Self::Metrics(cmd) => cmd.execute().await,
-            Self::Recommendation(cmd) => cmd.execute().await,
             Self::Proposals(cmd) => cmd.execute().await,
             Self::FeeRate(cmd) => cmd.execute().await,
             Self::Economy(cmd) => cmd.execute().await,
@@ -83,26 +80,6 @@ impl AdaptiveBurnMetricsCmd {
         let rpc = RpcClient::new(&self.rpc);
         let v: serde_json::Value = rpc
             .call("tenzro_getSupplyMetrics", serde_json::json!({}))
-            .await?;
-        println!("{}", serde_json::to_string_pretty(&v)?);
-        Ok(())
-    }
-}
-
-#[derive(Debug, Parser)]
-pub struct AdaptiveBurnRecommendationCmd {
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-}
-
-impl AdaptiveBurnRecommendationCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-        output::print_header("Adaptive Burn — Recommendation");
-        let rpc = RpcClient::new(&self.rpc);
-        let v: serde_json::Value = rpc
-            .call("tenzro_getBurnRateRecommendation", serde_json::json!({}))
             .await?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())

@@ -1629,6 +1629,23 @@ pub fn endorsement_primary_qualified_name(name: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The response code of a framed response, `None` when it is too short.
+pub fn response_code(response: &[u8]) -> Option<u32> {
+    response
+        .get(6..10)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Whether a response code is the chip saying it did not run the command
+/// for now (another process's command was running, it yielded, or it is
+/// self-testing): the same command may be sent again unchanged.
+pub fn try_again(code: u32) -> bool {
+    const TPM_RC_YIELDED: u32 = 0x908;
+    const TPM_RC_TESTING: u32 = 0x90A;
+    const TPM_RC_RETRY: u32 = 0x922;
+    matches!(code, TPM_RC_YIELDED | TPM_RC_TESTING | TPM_RC_RETRY)
+}
+
 /// Whether a response code means a handle the command named no longer
 /// refers to a loaded object or session.
 pub fn handle_lost(code: u32) -> bool {

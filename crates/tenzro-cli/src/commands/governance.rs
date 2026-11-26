@@ -111,6 +111,10 @@ pub enum GovernanceCommand {
     /// Propose approving an operator (validator or provider) for sponsorship
     #[command(name = "propose-approve-operator")]
     ProposeApproveOperator(ProposeApproveOperatorCmd),
+    /// Propose admitting validators to register and take committee seats
+    /// (or, with --withdraw, taking them off), while admission is closed
+    #[command(name = "propose-approve-validators")]
+    ProposeApproveValidators(ProposeApproveValidatorsCmd),
     /// Propose returning a jailed validator to candidacy at the next epoch,
     /// ahead of the end of its jail term (slashing is not undone)
     #[command(name = "propose-reinstate-validator")]
@@ -163,6 +167,7 @@ impl GovernanceCommand {
             Self::ReleaseSponsoredBond(cmd) => cmd.execute().await,
             Self::Payouts(cmd) => cmd.execute().await,
             Self::ProposeApproveOperator(cmd) => cmd.execute().await,
+            Self::ProposeApproveValidators(cmd) => cmd.execute().await,
             Self::ProposeReinstateValidator(cmd) => {
                 cmd.execute("reinstate_validator", "validator").await
             }
@@ -175,19 +180,22 @@ impl GovernanceCommand {
     }
 }
 
-/// Sign `tx_type` with the client's hardware key and submit it.
+/// Sign `tx_type` as the signing account (a client account, or the node
+/// account through the TPM or the key holder) and submit it.
 async fn submit(
     rpc_url: &str,
-    key_namespace: &str,
+    signing: &crate::keystore::SigningAccount,
     tx_type: Value,
     gas: u64,
     what: &str,
 ) -> Result<()> {
     let rpc = RpcClient::new(rpc_url);
+    let (signer, from) = signing.open()?;
     let spinner = output::create_spinner(&format!("Submitting {what}..."));
     let result: Value =
-        crate::keystore::send_as_client(&rpc, key_namespace, [0u8; 32], tx_type, gas).await?;
+        crate::keystore::SigningAccount::send(&rpc, signer, [0u8; 32], tx_type, gas).await?;
     spinner.finish_and_clear();
+    output::print_field("From", &format!("0x{}", hex::encode(from)));
     let tx_hash = result
         .get("tx_hash")
         .and_then(|v| v.as_str())
@@ -216,8 +224,8 @@ fn proposal_id(raw: &str) -> Result<String> {
     Ok(id.to_string())
 }
 
-/// Show the live economic policy — the rates this node applies to every
-/// settlement, and how a payment divides under each of its capabilities.
+/// Show the live economic policy: the default settlement asset and the
+/// micro-settlement floor this node applies.
 #[derive(Debug, Parser)]
 pub struct EconomicPolicyCmd {
     /// Emit the raw JSON the node returned.
@@ -245,22 +253,6 @@ impl EconomicPolicyCmd {
         let policy = &result["policy"];
         println!();
         output::print_field(
-            "Validating split",
-            &format!(
-                "operator {} bps / treasury {} bps",
-                policy["validating"]["operator_bps"], policy["validating"]["treasury_bps"]
-            ),
-        );
-        output::print_field(
-            "Delegated split",
-            &format!(
-                "operator {} bps / rpc provider {} bps / treasury {} bps",
-                policy["delegated"]["operator_bps"],
-                policy["delegated"]["rpc_provider_bps"],
-                policy["delegated"]["treasury_bps"]
-            ),
-        );
-        output::print_field(
             "Marketplace commission",
             "none taken by the network; a reseller is paid its commission as a declared leg of each payment it sells",
         );
@@ -272,41 +264,10 @@ impl EconomicPolicyCmd {
             "Micro-settlement floor",
             &policy["micro_settlement_floor"].to_string(),
         );
-        output::print_field(
-            "Validating",
-            if result["validating"].as_bool().unwrap_or(false) {
-                "yes"
-            } else {
-                "no"
-            },
-        );
-        match result["rpc_provider_payee"].as_str() {
-            Some(addr) => output::print_field("RPC provider payee", addr),
-            None => output::print_field("RPC provider payee", "unset"),
-        }
-
-        output::print_field("Visibility", result["visibility"].as_str().unwrap_or("?"));
-        let shares: Vec<String> = result["shares"]
-            .as_array()
-            .map(|v| {
-                v.iter()
-                    .map(|s| format!("{} {}bps", s["role"].as_str().unwrap_or("?"), s["bps"]))
-                    .collect()
-            })
-            .unwrap_or_default();
-        output::print_field(
-            "Mode",
-            &format!(
-                "{} — {}",
-                result["mode"].as_str().unwrap_or("?"),
-                shares.join(", ")
-            ),
-        );
-
         println!();
         output::print_warning(
-            "A private node keeps the whole payment. Rates are governance-set: propose a \
-             change with `tenzro governance propose` and a policy_update action.",
+            "The policy is governance-set: propose a change with `tenzro governance propose` \
+             and a policy_update action.",
         );
         Ok(())
     }
@@ -406,15 +367,8 @@ impl GovernanceShowCmd {
 /// Open a governance proposal
 #[derive(Debug, Parser)]
 pub struct GovernanceProposeCmd {
-    /// Hardware key namespace of the signing account; with --node-account,
-    /// the node's `hardware_key_namespace` (omit for the machine's default
-    /// node)
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account, the validator account its
-    /// genesis entry or registration bonded, instead of a client account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     /// The proposal action as JSON, tagged by "action", e.g.
     /// '{"action":"parameter_change","key":"...","value":1,"memo":"..."}' or
     /// '{"action":"policy_update","update":{...},"memo":"...","track":{"kind":"standard"}}';
@@ -443,27 +397,7 @@ impl GovernanceProposeCmd {
         }
         let proposal = serde_json::to_vec(&action)?;
         let tx_type = json!({ "GovernancePropose": { "proposal": proposal } });
-        if !self.node_account {
-            let namespace = self.key_namespace.as_deref().unwrap_or("client");
-            return submit(&self.rpc, namespace, tx_type, PROPOSE_GAS, "proposal").await;
-        }
-        let rpc = RpcClient::new(&self.rpc);
-        let (result, from) = crate::keystore::send_as_node(
-            &rpc,
-            self.key_namespace.as_deref(),
-            [0u8; 32],
-            tx_type,
-            PROPOSE_GAS,
-        )
-        .await?;
-        output::print_success("proposal submitted");
-        output::print_field("Proposer", &from);
-        let tx_hash = result
-            .get("tx_hash")
-            .and_then(Value::as_str)
-            .or_else(|| result.as_str());
-        output::print_field("Transaction Hash", tx_hash.unwrap_or_default());
-        Ok(())
+        submit(&self.rpc, &self.signing, tx_type, PROPOSE_GAS, "proposal").await
     }
 }
 
@@ -638,12 +572,8 @@ pub struct ProposeParamCmd {
     /// Why, shown to voters
     #[arg(long)]
     memo: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -657,8 +587,7 @@ impl ProposeParamCmd {
             "memo": self.memo,
         });
         GovernanceProposeCmd {
-            key_namespace: self.key_namespace.clone(),
-            node_account: self.node_account,
+            signing: self.signing.clone(),
             action: Some(action.to_string()),
             file: None,
             rpc: self.rpc.clone(),
@@ -731,12 +660,8 @@ pub struct ProposeSponsoredBondCmd {
     /// Why, shown to voters
     #[arg(long)]
     memo: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -750,8 +675,7 @@ impl ProposeSponsoredBondCmd {
             "memo": self.memo,
         });
         GovernanceProposeCmd {
-            key_namespace: self.key_namespace.clone(),
-            node_account: self.node_account,
+            signing: self.signing.clone(),
             action: Some(action.to_string()),
             file: None,
             rpc: self.rpc.clone(),
@@ -767,9 +691,8 @@ impl ProposeSponsoredBondCmd {
 pub struct ReleaseSponsoredBondCmd {
     /// Validator address (64 hex)
     validator: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -783,7 +706,7 @@ impl ReleaseSponsoredBondCmd {
         });
         submit(
             &self.rpc,
-            &self.key_namespace,
+            &self.signing,
             tx_type,
             SPONSORED_BOND_GAS,
             "sponsored bond release",
@@ -897,13 +820,11 @@ impl PayoutsCmd {
 /// Propose a governance action with the shared signing options.
 async fn propose_action(
     action: Value,
-    key_namespace: &Option<String>,
-    node_account: bool,
+    signing: &crate::keystore::SigningAccount,
     rpc: &str,
 ) -> Result<()> {
     GovernanceProposeCmd {
-        key_namespace: key_namespace.clone(),
-        node_account,
+        signing: signing.clone(),
         action: Some(action.to_string()),
         file: None,
         rpc: rpc.to_string(),
@@ -944,12 +865,8 @@ pub struct ProposeApproveOperatorCmd {
     /// Why, shown to voters
     #[arg(long)]
     memo: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -970,7 +887,7 @@ impl ProposeApproveOperatorCmd {
             },
             "memo": self.memo,
         });
-        propose_action(action, &self.key_namespace, self.node_account, &self.rpc).await
+        propose_action(action, &self.signing, &self.rpc).await
     }
 }
 
@@ -992,12 +909,8 @@ pub struct ProposeApproveGranteeCmd {
     /// Why, shown to voters
     #[arg(long)]
     memo: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1011,7 +924,7 @@ impl ProposeApproveGranteeCmd {
             "criteria": { "summary": self.summary, "link": self.link },
             "memo": self.memo,
         });
-        propose_action(action, &self.key_namespace, self.node_account, &self.rpc).await
+        propose_action(action, &self.signing, &self.rpc).await
     }
 }
 
@@ -1025,12 +938,8 @@ pub struct ProposeRevokeCmd {
     /// Why, shown to voters
     #[arg(long)]
     memo: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1042,7 +951,45 @@ impl ProposeRevokeCmd {
             field: validator_bytes(&self.account)?,
             "memo": self.memo,
         });
-        propose_action(action, &self.key_namespace, self.node_account, &self.rpc).await
+        propose_action(action, &self.signing, &self.rpc).await
+    }
+}
+
+/// Propose approving the accounts validators register from. While admission
+/// is closed (`validator.admission_approval`), an approval admits a
+/// registration and a committee seat; with `--withdraw` a seated validator
+/// leaves the committee at the next epoch boundary.
+#[derive(Debug, Parser)]
+pub struct ProposeApproveValidatorsCmd {
+    /// An account (64 hex) the validator registers from; repeat for each
+    #[arg(long = "account", required = true)]
+    accounts: Vec<String>,
+    /// Withdraw the approval instead of granting it
+    #[arg(long)]
+    withdraw: bool,
+    /// Why, shown to voters and recorded on-chain
+    #[arg(long)]
+    memo: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ProposeApproveValidatorsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let accounts = self
+            .accounts
+            .iter()
+            .map(|a| validator_bytes(a))
+            .collect::<Result<Vec<_>>>()?;
+        let action = json!({
+            "action": "approve_validators",
+            "accounts": accounts,
+            "approve": !self.withdraw,
+            "memo": self.memo,
+        });
+        propose_action(action, &self.signing, &self.rpc).await
     }
 }
 
@@ -1066,12 +1013,8 @@ pub struct ProposeOperatorRunningCostCmd {
     /// Why, shown to voters
     #[arg(long)]
     memo: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1086,7 +1029,7 @@ impl ProposeOperatorRunningCostCmd {
             "amount": self.amount.to_string(),
             "memo": self.memo,
         });
-        propose_action(action, &self.key_namespace, self.node_account, &self.rpc).await
+        propose_action(action, &self.signing, &self.rpc).await
     }
 }
 
@@ -1117,12 +1060,8 @@ pub struct ProposeOperatorStableCmd {
     /// Why, shown to voters
     #[arg(long)]
     memo: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long)]
-    key_namespace: Option<String>,
-    /// Propose from this machine's node account
-    #[arg(long)]
-    node_account: bool,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1139,7 +1078,7 @@ impl ProposeOperatorStableCmd {
             "period_exception": self.period_exception,
             "memo": self.memo,
         });
-        propose_action(action, &self.key_namespace, self.node_account, &self.rpc).await
+        propose_action(action, &self.signing, &self.rpc).await
     }
 }
 
@@ -1148,11 +1087,8 @@ impl ProposeOperatorStableCmd {
 pub struct GovernanceVoteCmd {
     /// Proposal id (64 hex)
     proposal_id: String,
-    /// Hardware key namespace: the signing client account's (default
-    /// `client`), or with --machine-root the node's `hardware_key_namespace`
-    /// (default: the machine's default node)
-    #[arg(long)]
-    key_namespace: Option<String>,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     /// Validator account whose bond the ballot carries (64 hex). The ballot
     /// is cast by the validator's root: its operator's passkey identity
     /// signs it, or, with --machine-root, the autonomous machine that is the
@@ -1162,7 +1098,7 @@ pub struct GovernanceVoteCmd {
     /// Cast the ballot as the validator's machine root: this machine's
     /// identity key (the key its machine DID derives from) approves it and
     /// the node account submits it. For a validator whose identity is this
-    /// autonomous machine.
+    /// autonomous machine. Implies --node-account.
     #[arg(long)]
     machine_root: bool,
     /// Vote yes
@@ -1182,7 +1118,7 @@ impl GovernanceVoteCmd {
         if !self.machine_root {
             return submit(
                 &self.rpc,
-                self.key_namespace.as_deref().unwrap_or("client"),
+                &self.signing,
                 json!({ "GovernanceVote": { "proposal_id": id, "vote": self.yes, "validator": validator } }),
                 VOTE_GAS,
                 "vote",
@@ -1192,10 +1128,17 @@ impl GovernanceVoteCmd {
         let id_bytes: [u8; 32] = hex::decode(&id)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("proposal id is 32 bytes"))?;
+        // The machine root approves and the node account submits, both
+        // from this machine's keys: the key holder is installed first.
+        let signing = crate::keystore::SigningAccount {
+            node_account: true,
+            ..self.signing.clone()
+        };
+        let (signer, from) = signing.open()?;
         let rpc = RpcClient::new(&self.rpc);
         let chain_id = crate::rpc::fetch_chain_id(&rpc).await?;
         let approval = crate::keystore::machine_root_ballot(
-            self.key_namespace.as_deref(),
+            signing.key_namespace.as_deref(),
             chain_id,
             &id_bytes,
             self.yes,
@@ -1207,16 +1150,11 @@ impl GovernanceVoteCmd {
             "validator": validator,
             "root_approval": approval,
         } });
-        let (result, from) = crate::keystore::send_as_node(
-            &rpc,
-            self.key_namespace.as_deref(),
-            [0u8; 32],
-            tx_type,
-            VOTE_GAS,
-        )
-        .await?;
+        let result =
+            crate::keystore::SigningAccount::send(&rpc, signer, [0u8; 32], tx_type, VOTE_GAS)
+                .await?;
         output::print_success("vote submitted with the machine root's approval");
-        output::print_field("Submitted by", &from);
+        output::print_field("Submitted by", &format!("0x{}", hex::encode(from)));
         let tx_hash = result
             .get("tx_hash")
             .and_then(Value::as_str)
@@ -1231,9 +1169,8 @@ impl GovernanceVoteCmd {
 pub struct GovernanceIdCmd {
     /// Proposal id (64 hex)
     proposal_id: String,
-    /// Hardware key namespace of the signing account
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1250,14 +1187,7 @@ impl GovernanceIdCmd {
             tx.to_string(),
             json!({ "proposal_id": proposal_id(&self.proposal_id)? }),
         );
-        submit(
-            &self.rpc,
-            &self.key_namespace,
-            Value::Object(tx_type),
-            gas,
-            what,
-        )
-        .await
+        submit(&self.rpc, &self.signing, Value::Object(tx_type), gas, what).await
     }
 }
 
@@ -1273,7 +1203,7 @@ pub struct ReceiptCmd {
     #[arg(long)]
     out: Option<std::path::PathBuf>,
     /// Verify it offline against the genesis anchor
-    #[arg(long, requires_all = ["chain_id", "genesis_hash", "genesis_committee_root"])]
+    #[arg(long, requires_all = ["chain_id", "genesis_hash", "genesis"])]
     verify: bool,
     /// Chain id, from the genesis file
     #[arg(long)]
@@ -1281,9 +1211,9 @@ pub struct ReceiptCmd {
     /// Genesis block hash, hex
     #[arg(long)]
     genesis_hash: Option<String>,
-    /// Root of the genesis committee, hex
+    /// Genesis file: the first committee is read from its validators
     #[arg(long)]
-    genesis_committee_root: Option<String>,
+    genesis: Option<std::path::PathBuf>,
     /// Image id of the handover program, hex, from the chain's governance:
     /// needed when the receipt's checkpoint is certified from a handover
     /// chain proof
@@ -1321,15 +1251,15 @@ impl ReceiptCmd {
             output::print_field("Records", &receipt.records.len().to_string());
             return Ok(());
         }
-        let anchor = tenzro_consensus::light_client::GenesisAnchor {
+        let anchor = tenzro_light::TrustAnchor {
+            epoch: 0,
             chain_id: self.chain_id.unwrap_or_default(),
             genesis_hash: hex32(
                 self.genesis_hash.as_deref().unwrap_or_default(),
                 "--genesis-hash",
             )?,
-            committee_root: hex32(
-                self.genesis_committee_root.as_deref().unwrap_or_default(),
-                "--genesis-committee-root",
+            committee_root: super::genesis_file::committee_root(
+                self.genesis.as_deref().unwrap_or(std::path::Path::new("")),
             )?,
         };
         let program = self
@@ -1394,6 +1324,25 @@ impl ReadinessCmd {
         if let Some(a) = r.get("scheduled").filter(|a| !a.is_null()) {
             output::print_field("Scheduled version", a["version"].as_str().unwrap_or(""));
             output::print_field("Scheduled binary", a["code_hash"].as_str().unwrap_or(""));
+            // An upgrade built for several platforms lists a binary for each.
+            let platforms = r["scheduled_platforms"]
+                .as_object()
+                .filter(|p| p.get("proposal_id") == a.get("proposal_id"));
+            for d in platforms
+                .and_then(|p| p.get("digests"))
+                .and_then(|d| d.as_array())
+                .into_iter()
+                .flatten()
+            {
+                output::print_field(
+                    "Binary for platform",
+                    &format!(
+                        "{} {}",
+                        d["platform"].as_str().unwrap_or(""),
+                        d["code_hash"].as_str().unwrap_or("")
+                    ),
+                );
+            }
             output::print_field("Activation height", &a["activation_height"].to_string());
         }
         Ok(())
@@ -1433,9 +1382,8 @@ pub struct DiscloseCmd {
     /// File holding the disclosure; omit to claim the lapse
     #[arg(long)]
     file: Option<std::path::PathBuf>,
-    /// Hardware key namespace of the signing account
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1448,7 +1396,7 @@ impl DiscloseCmd {
         };
         submit(
             &self.rpc,
-            &self.key_namespace,
+            &self.signing,
             json!({ "GovernanceSecurityDisclosure": {
                 "proposal_id": proposal_id(&self.proposal_id)?,
                 "disclosure": disclosure,
@@ -1471,9 +1419,8 @@ pub struct VetoSignalCmd {
     proposal_id: String,
     /// TNZO to lock, in base units; it returns in full once the proposal is decided
     amount: u128,
-    /// Hardware key namespace of the signing account
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1482,7 +1429,7 @@ impl VetoSignalCmd {
     async fn execute(&self) -> Result<()> {
         submit(
             &self.rpc,
-            &self.key_namespace,
+            &self.signing,
             json!({ "GovernanceVetoSignal": {
                 "proposal_id": proposal_id(&self.proposal_id)?,
                 "amount": self.amount.to_string(),
@@ -1502,9 +1449,8 @@ pub struct VetoWithdrawCmd {
     /// The account that locked it (64 hex); defaults to the signing account
     #[arg(long)]
     holder: Option<String>,
-    /// Hardware key namespace of the signing account
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1513,14 +1459,11 @@ impl VetoWithdrawCmd {
     async fn execute(&self) -> Result<()> {
         let holder = match &self.holder {
             Some(h) => address_bytes(h)?,
-            None => crate::keystore::client_account(&self.key_namespace)?
-                .1
-                .account_slot()
-                .to_vec(),
+            None => self.signing.open()?.1.to_vec(),
         };
         submit(
             &self.rpc,
-            &self.key_namespace,
+            &self.signing,
             json!({ "GovernanceVetoWithdraw": {
                 "proposal_id": proposal_id(&self.proposal_id)?,
                 "holder": holder,
@@ -1538,9 +1481,8 @@ pub struct PauseCmd {
     /// Signal a resume instead of a pause
     #[arg(long)]
     resume: bool,
-    /// Hardware key namespace of the protocol guardian or Foundation steward account signing
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 }
@@ -1554,7 +1496,7 @@ impl PauseCmd {
         };
         submit(
             &self.rpc,
-            &self.key_namespace,
+            &self.signing,
             json!({ "GovernancePause": { "paused": !self.resume } }),
             EXECUTE_GAS,
             what,
@@ -1692,9 +1634,11 @@ impl VotingPowerCmd {
 /// Show an enacted policy
 #[derive(Debug, Parser)]
 pub struct PolicyCmd {
-    /// economic_policy | adaptive_burn_config | supply_targets | protocol_upgrade
+    /// economic_policy | adaptive_burn_config | supply_targets | protocol_upgrade |
+    /// protocol_upgrade_platforms
     #[arg(value_parser = [
         "economic_policy", "adaptive_burn_config", "supply_targets", "protocol_upgrade",
+        "protocol_upgrade_platforms",
     ])]
     kind: String,
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -1795,7 +1739,7 @@ mod tests {
             .expect("the policy serializes");
         let paths = printed_policy_paths();
         assert!(
-            paths.len() >= 5,
+            paths.len() >= 2,
             "the guard found the printed fields ({paths:?})"
         );
         let missing: Vec<String> = paths

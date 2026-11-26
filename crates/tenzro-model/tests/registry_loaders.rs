@@ -39,7 +39,9 @@ use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
 use praecise_runtime::{BatchEngine, BatchPrompt, BatchRequest, GenerationConfig};
 use tenzro_catalog::{CatalogEntry, Loader, ModelSpec, Source, read_entries};
-use tenzro_model::{DownloadProgress, DownloadState, HfDownloader, HfModelEntry, SourcePolicy};
+use tenzro_model::{
+    Catalog, CatalogCell, DownloadProgress, DownloadState, HfDownloader, HfModelEntry, SourcePolicy,
+};
 
 const HEADER_BYTES: u64 = 256 * 1024;
 
@@ -152,7 +154,8 @@ fn gguf_spec(e: &CatalogEntry) -> Option<&HfModelEntry> {
 }
 
 async fn fetch(dir: &Path, e: &HfModelEntry) -> Result<(PathBuf, Option<PathBuf>), String> {
-    let downloader = HfDownloader::new(dir.to_path_buf());
+    // The downloader fetches only files the seed catalog hashes.
+    let downloader = HfDownloader::new(dir.to_path_buf(), CatalogCell::new(Catalog::test_seed()));
     let (tx, _rx) = tokio::sync::watch::channel(DownloadProgress {
         model_id: e.id.clone(),
         status: DownloadState::Pending,
@@ -249,7 +252,7 @@ async fn run(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore]
+#[ignore = "loads every registry architecture; the testnet stage model-loaders runs it"]
 async fn every_registry_architecture_loads_and_decodes() {
     let arch_src =
         PathBuf::from(std::env::var("TENZRO_LOADER_ARCH_SRC").expect("TENZRO_LOADER_ARCH_SRC"));
@@ -277,8 +280,6 @@ async fn every_registry_architecture_loads_and_decodes() {
         writeln!(report, "{s}").unwrap();
     };
 
-    // The downloader fetches only files the installed catalog hashes.
-    tenzro_catalog::install_test_seed();
     let known = engine_architectures(&arch_src);
     assert!(
         known.len() > 50,

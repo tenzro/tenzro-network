@@ -11,10 +11,7 @@ use tenzro_types::primitives::BlockHeight;
 
 /// The JSON of the transaction with hex hash `hash`, or `None` when this
 /// node holds no such transaction (never finalized here, or pruned).
-pub(crate) fn stored_transaction_json<S: KvStore + ?Sized>(
-    store: &S,
-    hash: &str,
-) -> Option<Vec<u8>> {
+pub fn stored_transaction_json<S: KvStore + ?Sized>(store: &S, hash: &str) -> Option<Vec<u8>> {
     if let Ok(Some(own)) = store.get(CF_TRANSACTIONS, hash.as_bytes()) {
         return Some(own);
     }

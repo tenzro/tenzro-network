@@ -1,13 +1,12 @@
-# Public network genesis.
+# Public network genesis (chain 13380).
 #
-# The network starts from a fresh genesis whose validators hold their
-# consensus keys in hardware. Until their entries (printed on each machine by
-# `tenzro-node validator-entry --stake <whole TNZO>`) replace
-# `validators = []`, a node refuses to start on this genesis.
+# The genesis the public network started from: its founding validators, whose
+# consensus keys are held in hardware, its accounts, its bonds and its governed
+# parameters. A node started without `--genesis` runs on this file. A test
+# pins the hash of the genesis block it produces: no value here may change.
 version = 1
 chain_id = 13380
-timestamp = 0
-validators = []
+timestamp = 1794584700
 
 # Time rules every validator applies; the genesis state root commits to
 # them. A rehearsal network may compress them (shorter epochs, checkpoints and
@@ -23,18 +22,116 @@ leader_slots = 2
 calendar_scale = 1
 idle_round_interval_ms = 5000
 
-# Economy parameters (see genesis-prod.toml).
+# Ordering rules every validator applies alike: the DAG rounds kept below the
+# last committed leader and the seats a committee apportions by stake. They
+# decide the committee root and the ordering state, so they are fixed here and
+# a node's own [consensus] table cannot change them.
+[consensus]
+gc_depth = 50
+seat_budget = 1000
+
+# Validator registry rules that have no governed parameter and a release would
+# otherwise compile in. The registry configuration is committed chain state,
+# so they are fixed here. Its other rules (self-stake floor, the RPC provider
+# minimum stake.rpc_tnzo, exit churn, jail term) are governed parameters.
+[validator_registry]
+activation_churn_bps = 400
+reentry_cooldown_epochs = 4
+
 [network_params]
 # Starting values of governed network parameters. Each is changed only by an
 # enacted governance proposal and applies from the next epoch. A parameter
 # not listed starts at its registry value; see docs/GOVERNANCE_PARAMS.md.
+# The TNZO/USD rate fees are priced at. 0 (governance) uses fees.tnzo_usd_nano until
+# enough independent validators report; their sealed-then-opened reports run
+# alongside as a published shadow. 1 (validators) uses the stake-weighted median of
+# the opened reports, smoothed and bounded per hourly epoch.
 "fees.usd_rate_mode" = 0
+# 0.10 USD per TNZO, in nano-USD.
 "fees.tnzo_usd_nano" = 100000000
-"fees.usd_rate_max_change_bps" = 1000
+# Rises at most 1% per hour (1.27x a day) and falls at most 5% per hour, so a
+# crash is followed within days and a pump is not; only reporters holding two
+# thirds of stake can move the rate, and no faster than this.
+"fees.usd_rate_max_change_bps" = 100
+"fees.usd_rate_max_fall_bps" = 500
+# Safety checks (security ratio, stake-backed bridge caps, bond floors) value
+# TNZO at the lower of the rate in force and the lowest median of the last day.
+"fees.safety_rate_window_epochs" = 24
+# Two thirds of bonded stake must open its sealed rates for a median to count.
+# 6666, not 6667: with stake split in thirds, an honest two thirds suffices.
+"fees.usd_rate_quorum_bps" = 6666
+# The rate moves only into the band between the one-third and two-thirds
+# stake-weighted quantiles of the opened reports.
+"fees.usd_rate_quantile_low_bps" = 3334
+"fees.usd_rate_quantile_high_bps" = 6666
+"fees.usd_rate_frozen" = 0
+# Short of the quorum, a rate more than 3% from the median of the stake that
+# still reports (at least a majority) for six hourly epochs in a row moves
+# toward that median at the hourly bound: withholding reports freezes the
+# rate for six hours at most.
+"fees.usd_rate_stale_epochs" = 6
+"fees.usd_rate_stale_gap_bps" = 300
+"fees.usd_rate_stale_quorum_bps" = 5001
+# A validator rate no newer median has set for a day is reported held: fees
+# go on at it, and tenzro_getFeeRate answers held = true.
+"fees.usd_rate_max_age_epochs" = 24
+# Posted USD prices per use, paid in TNZO at the rate in force and burned in full.
+# One cent per identity: a Sybil cost far above the chain cost of the record.
+"fees.identity_register_micro_usd" = 10000
+# A tenth of a cent per proof attestation.
+"fees.verify_micro_usd" = 1000
+# A hundredth of a cent per inference settlement.
+"fees.inference_settle_micro_usd" = 100
+# A provider's bond covers 1.1x the TNZO it holds in open escrows.
+"compute_bond.var_ratio_bps" = 11000
+# Issuance in TNZO (never in fiat): 60M in year 0, 15% less each year, at least
+# 10M a year, times a controller multiplier between 0.5x and 1x that moves at
+# most 25% of 1x a year: up while slashable stake covers less than
+# security.min_ratio_bps of what one attack can take out over the bridges,
+# down once it covers more. Issuance never exceeds the base schedule.
+"mint.base_tnzo_per_year" = 60000000
+"mint.decay_bps_per_year" = 1500
+"mint.floor_tnzo_per_year" = 10000000
+"mint.adj_bps_per_year" = 2500
+"mint.min_mult_bps" = 5000
+"mint.max_mult_bps" = 10000
+# Validators 45%, providers 40%, apps 15%; providers are paid per settlement
+# at most 40% of the fee it paid outside the trade, apps at most 50% of it, so
+# a settlement never earns back what it cost.
+"mint.validator_share_bps" = 4500
+"mint.provider_share_bps" = 4000
+"mint.ecosystem_share_bps" = 1500
+"mint.revenue_peg_bps" = 10000
+"mint.provider_reward_cost_bps" = 4000
+# Validators' running cost: 1,500 USD a month each, paid first in stable assets from
+# the validator cover reserve (below); the base reward pays what that left, at the rate
+# in force, at most 20,000 TNZO a month, funded by up to a quarter of each epoch's burn.
+"fees.validator_burn_share_bps" = 2500
+"validator.base_cost_usd_month" = 1500
+# Validators' running cost is paid first in stable assets, from a reserve filled
+# only by the stable settlement fees the treasury keeps, up to 12 months of cost.
+"validator.stable_cover_fee_share_bps" = 10000
+"validator.stable_cover_target_months" = 12
+"validator.base_cap_tnzo_month" = 20000
+# A validator claims its running-cost base liquid, before the rest of the claim
+# is split into its liquid and vesting parts.
+"rewards.base_liquid_bps" = 10000
+# 0.1% of settled value = the low end of DEX pool fee tiers (0.05%-0.3%).
 "fees.settlement_fee_bps" = 10
+# 50% burned, 50% to the treasury = supply sink and funded treasury in equal weight.
 "fees.settlement_fee_burn_bps" = 5000
+# 50% of the fee paid = a settlement's reward never covers its fee, so wash trading loses.
 "fees.activity_reward_fee_bps" = 5000
+# 10% of the spend ceiling = lower bound of typical performance bonds.
 "agent_bond.spend_bps" = 1000
+# Foundation stewardship of the treasury. Steward seats can veto a queued
+# treasury or expedited proposal, or hold treasury and expedited enactment for
+# at most governance.max_pause_ms; they never spend, propose or set anything.
+# After the sunset no steward seat holds power. Governance may move the sunset
+# earlier or lower the seat cap; neither can move later or higher.
+# 2030-10-01T00:00:00Z. Three steward seats are filled at genesis.
+"governance.steward_sunset_ms" = 1917043200000
+"governance.steward_max_seats" = 5
 # Provider routing standing, out of 10000: a live serving bond holds
 # routing.standing_bonded; SLA verdicts over the last
 # routing.standing_window_hours closed hours add up to
@@ -44,12 +141,177 @@ idle_round_interval_ms = 5000
 "routing.standing_availability" = 7000
 "routing.standing_unjudged_bps" = 5000
 "routing.standing_window_hours" = 24
+# Base fee floor and ceiling, atto-USD per unit of gas: the floor is the
+# marginal cost of a transfer (about 0.0000021 USD for 21,000 gas); the
+# ceiling only stops runaway pricing.
+"fees.min_base_fee" = 100000000
+"fees.max_base_fee" = 1000000000000
+"fees.base_fee_change_denominator" = 8
+"fees.min_settlement_fee_micro_usd" = 1
+# 10% of the treasury's fee revenue goes to the insurance pool.
+"fees.insurance_pool_bps" = 1000
+# Admission lanes. Fee multiples are of the base fee the next block charges;
+# rates are transactions per second per sender (thousandths), bursts in
+# transactions. An open (unbonded) key pays 4x and is held to one transaction
+# every four seconds, bursts of 10: honest anonymous use is unaffected while
+# a funded flood of fresh keys pays four times as much and gets in at a
+# quarter of the rate. Above 4x the multiple buys little: the cheapest
+# full flood goes through bonded identities.
+"admission.open_fee_mult_bps" = 40000
+"admission.open_rate_milli" = 250
+"admission.open_burst" = 10
+"admission.delegated_fee_mult_bps" = 15000
+"admission.delegated_rate_milli" = 10000
+"admission.delegated_burst" = 100
+"admission.verified_fee_mult_bps" = 10000
+"admission.verified_rate_milli" = 50000
+"admission.verified_burst" = 500
+# Staking: 10,000 TNZO validator self-stake; seven days to unbond, longer
+# than a vote and its timelock (five days), so stake that votes stays bonded
+# until the outcome is enacted.
+"stake.validator_tnzo" = 10000
+# New validators register only from accounts an enacted ApproveValidators
+# proposal approved, until governance sets this to 0. Genesis validators and
+# ones already registered are not affected.
+"validator.admission_approval" = 1
+# A new bond keeps the USD value it has at 0.10 USD per TNZO: below that rate,
+# at the safety rate, every stake.* amount rises in proportion for entry.
+"stake.bond_floor_rate_nano_usd" = 100000000
+"stake.unbonding_ms" = 604800000
+"staking.validator_unbonding_ms" = 604800000
+# At most 4% of the active set's self-stake finishes exiting in one epoch
+# (at least one validator always does).
+"staking.exit_churn_bps" = 400
+# A validator that signs nothing certified for 5,000 epochs is moved to exit,
+# never below the four a launch accepts.
+"staking.inactivity_limit_epochs" = 5000
+"staking.active_set_floor" = 4
+"staking.inactivity_activation_epoch" = 0
+# Governance: three days to vote, a third of stake for quorum, two thirds to
+# pass, two days of timelock. Stake must be bonded seven days before a
+# proposal opens to count on it.
+"governance.voting_period_ms" = 86400000
+"governance.quorum_bps" = 3334
+"governance.threshold_bps" = 6667
+"governance.timelock_ms" = 14400000
+"governance.min_bond_age_ms" = 604800000
+# Any payment out of the treasury or its reserve needs yes votes of three
+# quarters of all eligible stake (not of the stake that voted); one of
+# 100,000 TNZO or more also waits fourteen days of timelock.
+"governance.large_spend_tnzo" = 100000
+"governance.large_spend_approval_bps" = 7500
+"governance.large_spend_timelock_ms" = 1209600000
+# One proposal may at most double a bridge cap, a capture guard or an exit
+# limit, or loosen one by as much; tightening is never limited.
+"governance.max_cap_raise_bps" = 20000
+# Treasury outflow: at most 2% of the balance per proposal and 3% in any
+# thirty days. These bound grants and recoveries from the
+# treasury; running costs are paid from the running-cost reserve under the
+# rules below (docs/ECONOMICS.md, "Treasury policy").
+"treasury.max_proposal_outflow_bps" = 200
+"treasury.max_period_outflow_bps" = 300
+"treasury.outflow_period_ms" = 2592000000
+# A change that loosens a capture guard (treasury outflow, the vote's quorum
+# and thresholds, issuance, validator pay, slashing, unbonding, the fee
+# rate's move cap and quorum) applies ninety days after it enacts.
+"governance.guard_loosening_grace_epochs" = 24
+# Running-cost reserve. No amount is fixed: the treasury and the reserve may
+# both start empty, and every flow follows from realised fee revenue and
+# observed traded volume. At each hourly epoch boundary half of the fee
+# revenue the treasury realised moves into the reserve while the reserve is
+# under twelve months of observed running cost. Running costs may use 30% of
+# the trailing month's (720 epochs') revenue plus 3% of the reserve a month,
+# and the reserve sells into the market at most 5% of the TNZO traded in an
+# epoch, taking the lowest of the last week of validators' volume reports,
+# the newest no older than six epochs. What an
+# enacted payment has not been paid within a month lapses.
+"treasury.reserve_fill_share_bps" = 5000
+"treasury.reserve_target_months" = 12
+"treasury.running_cost_revenue_share_bps" = 3000
+"treasury.reserve_drawdown_bps" = 300
+"treasury.month_epochs" = 720
+"treasury.sale_volume_share_bps" = 500
+# Whatever volume is reported, the reserve pays out at most 10,000 TNZO an
+# epoch.
+"treasury.max_sale_tnzo_epoch" = 10000
+"treasury.volume_max_age_epochs" = 6
+"treasury.volume_window_epochs" = 168
+"treasury.payment_ttl_epochs" = 720
+# A bridge exit above a quarter of its route's outflow bucket waits 24 hours,
+# in which a guardian, or anyone after a proven committee fault, may cancel it.
+"bridge.exit_delay_ms" = 86400000
+"bridge.exit_delay_threshold_bps" = 2500
+# Economic security: a third of bonded stake must cover 1.5 times what one
+# attack can take out over the bridges in a day. Raising any outflow cap, or
+# switching the fee rate to validator mode, is refused below that.
+"security.min_ratio_bps" = 15000
+"security.attack_stake_bps" = 3334
+"security.attack_window_epochs" = 24
+# Caps other than TNZO's shrink each epoch so one epoch lets out at most two
+# thirds of bonded stake over 1 + gamma (gamma = 1), at the safety rate. An
+# exit over the cap queues for up to a day's worth of the cap.
+"bridge.security_gamma_bps" = 10000
+"bridge.queue_max_epochs" = 24
+# Ready transactions wait at most 10 s on their assigned validator before the
+# next in turn may batch them.
+"consensus.sender_failover_ms" = 10000
+# Optimistic inference audits: at least 5% of answers re-executed elsewhere,
+# plus 10 points for each whole TNZO the answer's payment holds.
+"inference.optimistic.sample_bps" = 500
+"inference.optimistic.sample_escrow_step_gwei" = 1000000000
+"inference.optimistic.sample_step_bps" = 1000
+# An upheld fault pays 20x the answer's payment (the inverse of the 5% floor
+# share, so cheating never pays in expectation), at least 10 cents in TNZO.
+"inference.optimistic.penalty_payment_bps" = 200000
+"inference.optimistic.penalty_floor_micro_usd" = 100000
+
+# Post-quantum from block 0.
+# Stored records (receipts, billing, SLA answers, availability attestations)
+# carry hybrid Ed25519 / ML-DSA-65 session signatures from the first block.
+"session.hybrid_records_from_ms" = 0
+# Beacon contributions commit to a hardware-derived secret and reveal it; the
+# mix takes it beside the VRF output.
+"beacon.commit_reveal.status" = 0
+# Validators may register ML-DSA-87 / P-256 consensus keys beside ML-DSA-65 /
+# P-256, and name their machine identity on chain, so peers hold their
+# endpoint records to the machine's ML-DSA key from the first record.
+"staking.validator_signature_schemes" = 3
+"staking.validator_machine_identity.status" = 0
+# An account that enrolls an ML-DSA-65 key requires that leg of every key
+# acting for it from then on.
+"accounts.ml_dsa_leg_on_enrolment.status" = 0
+# Key exchange between endpoints is X25519MLKEM768 only in every build; no
+# parameter turns it off. The hardware root stays classical: TPM attestation
+# keys are ECDSA P-256, and no TPM in the field implements the ML-DSA objects
+# of TPM 2.0 library v1.85 yet.
+
+# Recent blocks every node keeps locally: 100,000 (about 46 days at idle). The
+# registry value, 1,209,600, does not apply on this network; a vote changes it
+# later with no new genesis (registry floor 10,000).
+"storage.history_retention_blocks" = 100000
+
+# The identity rule from block 0: a transaction from an account with no registered
+# identity is refused at execution (RegisterIdentity, key enrolment and protocol
+# records stay open; a bonded validator is exempt). The registry's own genesis value
+# stays dormant so a running chain is untouched; naming the key here seeds it into
+# this genesis, in the state root and in genesis_inputs_digest like any parameter.
+"feature.identity_required.activation_epoch" = 0
+# The rule's mode once live: 0 enforce. A vote moves it to 1 (audit: nothing is
+# refused, what enforce would refuse is logged; expedited track, applies at the next
+# epoch) or 2 (off), and back to 0, with no new genesis. Every node's peer, mempool
+# and edge admission follow the same value.
+"feature.identity_required.mode" = 0
 
 [economy]
+# TPM manufacturer EK roots (PEM) a machine's endorsement certificate must
+# chain to for machine admission. A governance parameter: governance replaces
+# the set with a policy update. Each certificate below is exactly as its
+# manufacturer publishes it at the URL named above it, converted from DER to PEM.
 tpm_endorsement_roots_pem = [
-  # Infineon: OPTIGA(TM) RSA Root CA, https://pki.infineon.com/OptigaRsaRootCA/OptigaRsaRootCA.crt
-  # sha256 899e35474c9807eb4c7f2f7a12da0028fb250cd02154d0009fca7d9c66574f3b
-  """
+  # Infineon OPTIGA(TM) RSA Root CA
+  # Source: https://pki.infineon.com/OptigaRsaRootCA/OptigaRsaRootCA.crt
+  # SHA-256 fingerprint: 89:9E:35:47:4C:98:07:EB:4C:7F:2F:7A:12:DA:00:28:FB:25:0C:D0:21:54:D0:00:9F:CA:7D:9C:66:57:4F:3B
+  '''
 -----BEGIN CERTIFICATE-----
 MIIFqzCCA5OgAwIBAgIBAzANBgkqhkiG9w0BAQsFADB3MQswCQYDVQQGEwJERTEh
 MB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJ
@@ -83,10 +345,11 @@ pubNq8Wuq7jQUs5U00ryrMCZog1cxLzyfZwwCYh6O2CmbvMoydHNy5CU3ygxaLWv
 JpgZVHN103npVMR3mLNa3QE+5MFlBlP3Mmystu8iVAKJas39VO5y5jad4dRLkwtM
 6sJa8iBpdRjZrBp5sJBI
 -----END CERTIFICATE-----
-""",
-  # Infineon: OPTIGA(TM) ECC Root CA, https://pki.infineon.com/OptigaEccRootCA/OptigaEccRootCA.crt
-  # sha256 cfeb02fecd55ad7a73c6e1d11985d4c47dee248ab63dcb66091a2489660443c3
-  """
+''',
+  # Infineon OPTIGA(TM) ECC Root CA
+  # Source: https://pki.infineon.com/OptigaEccRootCA/OptigaEccRootCA.crt
+  # SHA-256 fingerprint: CF:EB:02:FE:CD:55:AD:7A:73:C6:E1:D1:19:85:D4:C4:7D:EE:24:8A:B6:3D:CB:66:09:1A:24:89:66:04:43:C3
+  '''
 -----BEGIN CERTIFICATE-----
 MIICWzCCAeKgAwIBAgIBBDAKBggqhkjOPQQDAzB3MQswCQYDVQQGEwJERTEhMB8G
 A1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJR0Eo
@@ -102,10 +365,11 @@ AQH/BAUwAwEB/zAKBggqhkjOPQQDAwNnADBkAjA6QZcV8DjjbPuKjKDZQmTRywZk
 MAn8wE6kuW3EouVvBt+/2O+szxMe4vxj8R6TDCYCMG7c9ov86ll/jDlJb/q0L4G+
 +O3Bdel9P5+cOgzIGANkOPEzBQM3VfJegfnriT/kaA==
 -----END CERTIFICATE-----
-""",
-  # Infineon: OPTIGA(TM) RSA Root CA 2, https://pki.infineon.com/OptigaRsaRootCA2/OptigaRsaRootCA2.crt
-  # sha256 b413c71580af3ec5efe83fad31db2d4af4612355e3b01e50903b10763d738894
-  """
+''',
+  # Infineon OPTIGA(TM) RSA Root CA 2
+  # Source: https://pki.infineon.com/OptigaRsaRootCA2/OptigaRsaRootCA2.crt
+  # SHA-256 fingerprint: B4:13:C7:15:80:AF:3E:C5:EF:E8:3F:AD:31:DB:2D:4A:F4:61:23:55:E3:B0:1E:50:90:3B:10:76:3D:73:88:94
+  '''
 -----BEGIN CERTIFICATE-----
 MIIFsTCCA5mgAwIBAgIBWTANBgkqhkiG9w0BAQsFADB5MQswCQYDVQQGEwJERTEh
 MB8GA1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJ
@@ -139,10 +403,11 @@ nqu/imr4HSyvrsIGNak5RLEed8e02nbjTAehOLAZGdj+TMnvbQBS0AiZZO3qWx9T
 /ABQ8gFSGgorfvS5Lg7ANIiBSsCsVIa28I2eiYrJZatuFAo1Xg4z3n2kvL7S1wZy
 8MZsUVujMk+IInhi81MQZFUR2QbA
 -----END CERTIFICATE-----
-""",
-  # Infineon: OPTIGA(TM) ECC Root CA 2, https://pki.infineon.com/OptigaEccRootCA2/OptigaEccRootCA2.crt
-  # sha256 ee0c827555c4e9012037df4257bb8aaa26084a17b13ede41cd7895c8d6c11190
-  """
+''',
+  # Infineon OPTIGA(TM) ECC Root CA 2
+  # Source: https://pki.infineon.com/OptigaEccRootCA2/OptigaEccRootCA2.crt
+  # SHA-256 fingerprint: EE:0C:82:75:55:C4:E9:01:20:37:DF:42:57:BB:8A:AA:26:08:4A:17:B1:3E:DE:41:CD:78:95:C8:D6:C1:11:90
+  '''
 -----BEGIN CERTIFICATE-----
 MIICrTCCAg6gAwIBAgIBWjAKBggqhkjOPQQDBDB5MQswCQYDVQQGEwJERTEhMB8G
 A1UECgwYSW5maW5lb24gVGVjaG5vbG9naWVzIEFHMRswGQYDVQQLDBJPUFRJR0Eo
@@ -160,86 +425,67 @@ hs4DUiggpQhbgggV3Lf+T39l71KvCIPb8n5ZjSi5AKflmPGzumCjqDAPsgmsAkIA
 vpqNqptg4Sf3hrdAsLAqNPZGnx8gRBnsTvvQzNUOZETuBp+nbmSrKMWZpd5G7HkM
 9uXFb5ctX1cZQUbYFA2qG5g=
 -----END CERTIFICATE-----
-""",
-  # STMicroelectronics: GlobalSign Trusted Platform Module Root CA (issuer of STM TPM EK Root CA), http://secure.globalsign.com/cacert/gstpmroot.crt
-  # sha256 f27bf02c6e00c73d915eeb6a6a2f5fbf0c31ae0393149e6b5c31e41b113841c3
-  """
+''',
+  # STMicroelectronics STSAFE RSA Root CA 02
+  # Source: https://sw-center.st.com/STSAFE/STSAFERsaRootCA02.crt
+  # SHA-256 fingerprint: C8:F1:79:94:33:56:E1:3D:9D:84:B1:00:20:1C:EF:AB:BF:40:88:80:24:1E:53:29:E6:0D:95:0C:E1:DE:A6:23
+  '''
 -----BEGIN CERTIFICATE-----
-MIID1zCCAr+gAwIBAgILBAAAAAABIBkJGa4wDQYJKoZIhvcNAQELBQAwgYcxOzA5
-BgNVBAsTMkdsb2JhbFNpZ24gVHJ1c3RlZCBDb21wdXRpbmcgQ2VydGlmaWNhdGUg
-QXV0aG9yaXR5MRMwEQYDVQQKEwpHbG9iYWxTaWduMTMwMQYDVQQDEypHbG9iYWxT
-aWduIFRydXN0ZWQgUGxhdGZvcm0gTW9kdWxlIFJvb3QgQ0EwHhcNMDkwMzE4MTAw
-MDAwWhcNNDkwMzE4MTAwMDAwWjCBhzE7MDkGA1UECxMyR2xvYmFsU2lnbiBUcnVz
-dGVkIENvbXB1dGluZyBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkxEzARBgNVBAoTCkds
-b2JhbFNpZ24xMzAxBgNVBAMTKkdsb2JhbFNpZ24gVHJ1c3RlZCBQbGF0Zm9ybSBN
-b2R1bGUgUm9vdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPi3
-Gi0wHyTT7dq24caFAp31gXFDvALRGJrMiP+TunIYPacYD8eBVSNEiVoCUcVfYxzl
-/DPTxmRyGXgQM8CVh9THrxDTW7N2PSAoZ7fvlmjTiBL/IQ7m1F+9wGI/FuaMTphz
-w6lBda7HFlIYKTbM/vz24axCHLzJ8Xir2L889D9MMIerBRqouVsDGauH+TIOdw4o
-IGKhorqfsDro57JHwViMWlbB1Ogad7PBX5X/e9GDNdZTdo4c0bZnKO+dEtzEgKCh
-JmQ53Mxa9y4xPMGRRnjLsyxuM99vkkYXy7rnxctSo7GtGIJJVabNuXZ0peaY9ku0
-CUgKAsQndLkTHz8bIh0CAwEAAaNCMEAwDgYDVR0PAQH/BAQDAgEGMA8GA1UdEwEB
-/wQFMAMBAf8wHQYDVR0OBBYEFB4jY/CFtfYlTu0awFC+ZXzH1BV6MA0GCSqGSIb3
-DQEBCwUAA4IBAQCVb7lI4d49u7EtCX03/rUCCiaZ64NMxxqRmcSVdUx6yRrbl8NN
-FNr6ym2kTvwe1+JkTCiDxKzJsOR/jcPczAFiYpFbZQYLA6RK0bzbL9RGcaw5LLhY
-o/flqsu3N2/HNesWbekoxLosP6NLGEOnpj1B+R3y7HCQq/08U5l3Ete6TRKTAavc
-0mty+uCFtLXf+tirl7xSaIGD0LwcYNdzLEB9g4je6FQSWL0QOXb+zR755QYupZAw
-G1PnOgYWfqWowKcQQexFPrKGlzh0ncITV/nBEi++fnnZ7TFiwaKwe+WussrROV1S
-DDF29dmoMcbSFDL+DgSMabVT6Qr6Ze1rbmSh
+MIIFXjCCA0agAwIBAgIGVR0gAAACMA0GCSqGSIb3DQEBDAUAME0xCzAJBgNVBAYT
+AkNIMR4wHAYDVQQKExVTVE1pY3JvZWxlY3Ryb25pY3MgTlYxHjAcBgNVBAMTFVNU
+U0FGRSBSU0EgUm9vdCBDQSAwMjAgFw0yMjAxMjAwMDAwMDBaGA85OTk5MTIzMTAw
+MDAwMFowTTELMAkGA1UEBhMCQ0gxHjAcBgNVBAoTFVNUTWljcm9lbGVjdHJvbmlj
+cyBOVjEeMBwGA1UEAxMVU1RTQUZFIFJTQSBSb290IENBIDAyMIICIjANBgkqhkiG
+9w0BAQEFAAOCAg8AMIICCgKCAgEAyDtHbW51K/pnDbnPdLQTls2U/bu/aDATTi1W
+CZDAtFC9sWtCRK6jQ0SG9DCCys7ur170V3Q+HVov88FzH6bYg4TWY7+wEQKLR/4W
+IgdCjcW3uXMimsh9tOb+UlfRMW0yEozi7F+F/v07lULTJg+itCOMASi/caV1ySYI
+cX5z/5Woj3hDgJGa4scOoxdOfPg1GCkEjQPy7fG/IBt883palE/T4UNg1megfLcg
+hjOrbaPTFB3qXmm6E07QDYMkPiqryz3v9MCnOw62EXGcQLFIK4DwPxySU7NxO0ta
+DHXv+8B5ljv4Jtx5OLkDf9YAfjEg6ZOpsyIGKI+bgIoVYtGbXTDZAtoMKw3ystQX
+va9ceQ4cIQQUjpH6nFm8dbm/TOrkZd6m9pmLftR6kTuzRd8hhKCwpfcKbxQlMI2u
+TDVbw03IFUhk23uDSTOzsyOjB2f93SLEw1yTBuiYXhO2YHUHFJckbiuz7RdE4sjN
+1J0LwxKKbm9kleYEP+Kah6IJ0Zs7vbP3WNZUpmt6/XTmszb+paTSpanUYbBr2/IE
+aQCRiAlv0H26i5u4CjSHRjjRIqLAuGnpn0gZ2Zgs1espJwmey7MPKvTJtK1H+TQN
+0HZW8DYtcdzPkpxqKndWIUR7JTnozVPCVOcirSPGdkSvhbAGPyoyv7ju86RnTiT0
+NLz7SbECAwEAAaNCMEAwHQYDVR0OBBYEFHzCjb5uWdhKVANGmxMIANL48G0nMA4G
+A1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBDAUAA4IC
+AQCykiyYyHAXHzRBdqJ3QLr8qTDDNO3RdLToZmiFRdslaRr2RtlDDjcAEFKf1u/E
+1qprZe926Ob5KxWIQREvDAgqAbRS9fd3+w6hZ+ZrmHNh5aH2UEgsfAi9vZ3K8BH/
+rReqTm0oxCMz4socJ9tIpvGSZhJg6PDTidsIscr8iNcSsVYJO60wSMxn7tv+Buh+
+ZgJFddzEYZqTuezsdiXswkAkwqTJY9KM1w0bFLHrmifkc0y6I+jeBgjGxMknz8G5
+p7YX4GoeJp5LjM8z36qBFKcjkKpYEb2H+u6CxgXFsxu6nkB0pn3u2uNwmXTYIQKO
+trcshrmoKUv7mDvtaNIa0blMTRTEZzkwrR1BsHm/Gz7NLhgkDIv9p1u5oiCwlebh
+eJ1cDJ9I7puSBPiDDpkdvVPg0wNFPai/SAhjW0OaULcybVR7kXzST9/xerCoquYp
+I+qLjTs+RqahgL5a9ZRPVABX3DwvnDCarwVqMSfRjGP4e8b2BspDM+wPTvQH1K4O
+xk+qc9HT7YubzqhtJ/yfcYd/eKTsk60aNmknatNZDSFzq03lxN048n3D9mcjGDkR
+15Kv5NX8DhZuCNcBddkGC96uYpgSvl089RgnSL/qPlM+QlVjPbqDpISd/z3X4RNb
+vdT+agOdZZJRB1MROQXDnACVdQB1ba/DTO4UNEou27D03Q==
 -----END CERTIFICATE-----
-""",
-  # STMicroelectronics: STM TPM EK Root CA, http://secure.globalsign.com/cacert/stmtpmekroot.crt
-  # sha256 f8e37a86b689a20a6cc0c40cc3f81fb130fa9f44ce7ffa60d62590aaf87273a9
-  """
+''',
+  # STMicroelectronics STSAFE ECC Root CA 02
+  # Source: https://sw-center.st.com/STSAFE/STSAFEEccRootCA02.crt
+  # SHA-256 fingerprint: FD:1E:7B:68:AC:CD:82:56:36:B2:7B:31:77:C6:74:02:D4:63:A7:F0:4C:97:B6:C4:7A:B7:05:FC:DC:1A:04:F6
+  '''
 -----BEGIN CERTIFICATE-----
-MIIEDDCCAvSgAwIBAgILBAAAAAABIsFs834wDQYJKoZIhvcNAQELBQAwgYcxOzA5
-BgNVBAsTMkdsb2JhbFNpZ24gVHJ1c3RlZCBDb21wdXRpbmcgQ2VydGlmaWNhdGUg
-QXV0aG9yaXR5MRMwEQYDVQQKEwpHbG9iYWxTaWduMTMwMQYDVQQDEypHbG9iYWxT
-aWduIFRydXN0ZWQgUGxhdGZvcm0gTW9kdWxlIFJvb3QgQ0EwHhcNMDkwNzI4MTIw
-MDAwWhcNMzkxMjMxMjM1OTU5WjBKMQswCQYDVQQGEwJDSDEeMBwGA1UEChMVU1RN
-aWNyb2VsZWN0cm9uaWNzIE5WMRswGQYDVQQDExJTVE0gVFBNIEVLIFJvb3QgQ0Ew
-ggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDxBLG5wcB9J0MsiJMreoWQ
-l21bBN12SSGZPJ3HoPjzcrzAz6SPy+TrFmZ6eUVspsFL/23wdPprqTUtDHi+C2pw
-k/3dF3/Rb2t/yHgiPlbCshYpi5f/rJ7nzbQ1ca2LzX3saBe53VfNQQV0zd5uM0DT
-SrmAKU1RIAj2WlZFWXoN4NWTyRtqT5suPHa2y8FlCWMZKlS0FiY4pfM20b5YQ+EL
-4zqb9zN53u/TdYZegrfSlc30Nl9G13Mgi+8rtPFKwsxx05EBbhVroH7aKVI1djsf
-E1MVrUzw62PHik3xlzznXML8OjY//xKeiCWcsApuGCaIAf7TsTRi2l8DNB3rCr1X
-AgMBAAGjgbQwgbEwDgYDVR0PAQH/BAQDAgIEMBIGA1UdEwEB/wQIMAYBAf8CAQEw
-HQYDVR0OBBYEFG/mxWwHt2yLCoGSg1zLQR72jtEnMEsGA1UdIAREMEIwQAYJKwYB
-BAGgMgFaMDMwMQYIKwYBBQUHAgEWJWh0dHA6Ly93d3cuZ2xvYmFsc2lnbi5uZXQv
-cmVwb3NpdG9yeS8wHwYDVR0jBBgwFoAUHiNj8IW19iVO7RrAUL5lfMfUFXowDQYJ
-KoZIhvcNAQELBQADggEBAFrKpwFmRh7BGdpPZWc1Y6wIbdTAF6T+q1KwDJcyAjgJ
-qThFp3xTAt3tvyVrCRf7T/YARYE24DNa0iFaXsIXeQASDYHJjAZ6LQTslYBeRYLb
-C9v8ZE2ocKSCiC8ALYlJWk39Wob0H1Lk6l2zcUo3oKczGiAcRrlmwV496wvGyted
-2RBcLZro7yhOOGr9KMabV14fNl0lG+31J1nWI2hgTqh53GXg1QH2YpggD3b7UbVm
-c6GZaX37N3z15XfQafuAfHt10kYCNdePzC9tOwirHIsO8lrxoNlzOSxX8SqQGbBI
-+kWoe5+SY3gdOGGDQKIdw3W1poMN8bQ5x7XFcgVMwVU=
+MIICWjCCAbugAwIBAgIGVR0gAAECMAoGCCqGSM49BAMEME0xCzAJBgNVBAYTAkNI
+MR4wHAYDVQQKExVTVE1pY3JvZWxlY3Ryb25pY3MgTlYxHjAcBgNVBAMTFVNUU0FG
+RSBFQ0MgUm9vdCBDQSAwMjAgFw0yMjAxMjAwMDAwMDBaGA85OTk5MTIzMTAwMDAw
+MFowTTELMAkGA1UEBhMCQ0gxHjAcBgNVBAoTFVNUTWljcm9lbGVjdHJvbmljcyBO
+VjEeMBwGA1UEAxMVU1RTQUZFIEVDQyBSb290IENBIDAyMIGbMBAGByqGSM49AgEG
+BSuBBAAjA4GGAAQAJFgkbtp5mZpvISjL8zAUSSJXxXpPhxhSVGQfqU0GEjPBIMMD
+KNvc23xCcyIsiFTMD4MZQ1wov0SaBE3M31bWx78BrbiPCJ4lXUvJWiwm9+v3EL1z
+lznBtyJDYUkrUe2n7r8NH7kAQ1X/csItvyomECdRtm4wwD8VX1n+l3npVlMNOxWj
+QjBAMB0GA1UdDgQWBBT1XLcHvEsXQiYkgEBLu3yAulo8vjAOBgNVHQ8BAf8EBAMC
+AQYwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDBAOBjAAwgYgCQgC85uufYwd5
+yelX2EKkjx7s8LP6qgcXHxkO1zZYrTU7umomS5beVyPf2hA12yPVG9VnYUqs9+RA
+L0mbODJNfHR5yAJCAUf2a5qPe3a/BpZBoY7YI68nUt1UD8ScX+IbkLJQ6mPe8pNR
+xRJfSy8RvtTJcPEqH7kpj5sZjlRC5GUG/3Sco8uX
 -----END CERTIFICATE-----
-""",
-  # STMicroelectronics: STM TPM ECC Root CA 01, http://secure.globalsign.com/cacert/stmtpmeccroot01.crt
-  # sha256 c541d7e5b9e3f935621acbd403896225ec641036c9ae3b5f7ac793a606ff9b79
-  """
------BEGIN CERTIFICATE-----
-MIICyDCCAk+gAwIBAgIORyzLp/OdsAvb9r+66LowCgYIKoZIzj0EAwMwgYsxOzA5
-BgNVBAsTMkdsb2JhbFNpZ24gVHJ1c3RlZCBDb21wdXRpbmcgQ2VydGlmaWNhdGUg
-QXV0aG9yaXR5MRMwEQYDVQQKEwpHbG9iYWxTaWduMTcwNQYDVQQDEy5HbG9iYWxT
-aWduIFRydXN0ZWQgUGxhdGZvcm0gTW9kdWxlIEVDQyBSb290IENBMB4XDTE1MTAy
-ODAwMDAwMFoXDTM4MDExOTAzMTQwN1owTjELMAkGA1UEBhMCQ0gxHjAcBgNVBAoT
-FVNUTWljcm9lbGVjdHJvbmljcyBOVjEfMB0GA1UEAxMWU1RNIFRQTSBFQ0MgUm9v
-dCBDQSAwMTB2MBAGByqGSM49AgEGBSuBBAAiA2IABG7/OLXMiprQQHwNnkpT6aqG
-zOGLcbbAgUtyjlXOZtuv0GB0ttJ6fwMwgFtt8RKlko8Bwn89/BoZOUcI4ne8ddRS
-oqE6StnU3I13qqjalToq3Rnz61Omn6NErK1pxUe3j6OBtTCBsjAOBgNVHQ8BAf8E
-BAMCAgQwEgYDVR0TAQH/BAgwBgEB/wIBATAdBgNVHQ4EFgQUIJJWPAtDqAVyUwMp
-BxwH4OvsAwQwHwYDVR0jBBgwFoAUYT78EZkKf7CpW5CgJl4pYUe3MAMwTAYDVR0g
-BEUwQzBBBgkrBgEEAaAyAVowNDAyBggrBgEFBQcCARYmaHR0cHM6Ly93d3cuZ2xv
-YmFsc2lnbi5jb20vcmVwb3NpdG9yeS8wCgYIKoZIzj0EAwMDZwAwZAIwWnuUAzwy
-vHUhHehymKTZ2QcPUwHX0LdcVTac4ohyEL3zcuv/dM0BN62kFxHgBOhWAjAIxt9i
-50yAxy0Z/MeV2NTXqKpLwdhWNuzOSFZnzRKsh9MxY3zj8nebDNlHTDGSMR0=
------END CERTIFICATE-----
-""",
-  # Nuvoton: Nuvoton TPM Root CA 1110, https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%201110.cer
-  # sha256 2782e51a95e86d9557fe4204316cf805bd6f5898f81f9732e944d742bcdc5f54
-  """
+''',
+  # Nuvoton TPM Root CA 1110
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%201110.cer
+  # SHA-256 fingerprint: 27:82:E5:1A:95:E8:6D:95:57:FE:42:04:31:6C:F8:05:BD:6F:58:98:F8:1F:97:32:E9:44:D7:42:BC:DC:5F:54
+  '''
 -----BEGIN CERTIFICATE-----
 MIICBjCCAaygAwIBAgIIEDiqn2SaqGMwCgYIKoZIzj0EAwIwVTFTMB8GA1UEAxMY
 TnV2b3RvbiBUUE0gUm9vdCBDQSAxMTEwMCUGA1UEChMeTnV2b3RvbiBUZWNobm9s
@@ -253,10 +499,11 @@ kdS26vmNAQSGS2kDpI3QAmB30zAfBgNVHSMEGDAWgBQVkdS26vmNAQSGS2kDpI3Q
 AmB30zAKBggqhkjOPQQDAgNIADBFAiEAlfxysfHDcxYDed5dmRbvHPKHLEEq9Y9P
 wAxoKqH7Q5kCIGfsxiLr2j9nJ9jELwXz0/VWN9PhUNdM3qmsx2JEne6p
 -----END CERTIFICATE-----
-""",
-  # Nuvoton: Nuvoton TPM Root CA 1111, https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%201111.cer
-  # sha256 e38c280f7c0e0b49f31efc7531032bb6a86c3fba4eb89beb1d510eaa4510ae4a
-  """
+''',
+  # Nuvoton TPM Root CA 1111
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%201111.cer
+  # SHA-256 fingerprint: E3:8C:28:0F:7C:0E:0B:49:F3:1E:FC:75:31:03:2B:B6:A8:6C:3F:BA:4E:B8:9B:EB:1D:51:0E:AA:45:10:AE:4A
+  '''
 -----BEGIN CERTIFICATE-----
 MIICBzCCAa2gAwIBAgIJAN/u3L0l8osZMAoGCCqGSM49BAMCMFUxUzAfBgNVBAMT
 GE51dm90b24gVFBNIFJvb3QgQ0EgMTExMTAlBgNVBAoTHk51dm90b24gVGVjaG5v
@@ -270,10 +517,11 @@ iC8Ee4cSHPmIXzEWC8e7VYavRxswHwYDVR0jBBgwFoAUiC8Ee4cSHPmIXzEWC8e7
 VYavRxswCgYIKoZIzj0EAwIDSAAwRQIhANrKhBfLXyHCznBRtWRBmTbfYJR9mCl1
 2N/xZkcohRZIAiBDufnmhZWCbX4pibbzAOgcxjsc5+qmpAovxW9ipWJEsA==
 -----END CERTIFICATE-----
-""",
-  # Nuvoton: Nuvoton TPM Root CA 2110, https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%202110.cer
-  # sha256 4aebe77a51ed29959a7f9f5e07a24a558dee8167f3985d724995a541c258dfda
-  """
+''',
+  # Nuvoton TPM Root CA 2110
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%202110.cer
+  # SHA-256 fingerprint: 4A:EB:E7:7A:51:ED:29:95:9A:7F:9F:5E:07:A2:4A:55:8D:EE:81:67:F3:98:5D:72:49:95:A5:41:C2:58:DF:DA
+  '''
 -----BEGIN CERTIFICATE-----
 MIICBjCCAaygAwIBAgIIP5MvnZk8FrswCgYIKoZIzj0EAwIwVTFTMB8GA1UEAxMY
 TnV2b3RvbiBUUE0gUm9vdCBDQSAyMTEwMCUGA1UEChMeTnV2b3RvbiBUZWNobm9s
@@ -287,10 +535,11 @@ u3mqD1JieL7RUJKacXHpajW+9zAfBgNVHSMEGDAWgBSfu3mqD1JieL7RUJKacXHp
 ajW+9zAKBggqhkjOPQQDAgNIADBFAiEA/jiywhOKpiMOUnTfDmXsXfDFokhKVNTX
 B6Xtqm7J8L4CICjT3/Y+rrSnf8zrBXqWeHDh8Wi41+w2ppq6Ev9orZFI
 -----END CERTIFICATE-----
-""",
-  # Nuvoton: Nuvoton TPM Root CA 2111, https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%202111.cer
-  # sha256 cd8185ff8995ed09811970090a8c36fafab34ef87f47fa51fdb9ecf95c9c2e04
-  """
+''',
+  # Nuvoton TPM Root CA 2111
+  # Source: https://www.nuvoton.com/security/NTC-TPM-EK-Cert/Nuvoton%20TPM%20Root%20CA%202111.cer
+  # SHA-256 fingerprint: CD:81:85:FF:89:95:ED:09:81:19:70:09:0A:8C:36:FA:FA:B3:4E:F8:7F:47:FA:51:FD:B9:EC:F9:5C:9C:2E:04
+  '''
 -----BEGIN CERTIFICATE-----
 MIICBzCCAa2gAwIBAgIJAOCIUWvKMfuGMAoGCCqGSM49BAMCMFUxUzAfBgNVBAMT
 GE51dm90b24gVFBNIFJvb3QgQ0EgMjExMTAlBgNVBAoTHk51dm90b24gVGVjaG5v
@@ -304,58 +553,11 @@ I/TiKtO+N0pEl3KVSqKDrtdSVy4wHwYDVR0jBBgwFoAUI/TiKtO+N0pEl3KVSqKD
 rtdSVy4wCgYIKoZIzj0EAwIDSAAwRQIgXgXs2eVt2U4sCoRf1GLoUTf2ZzYTSsyg
 6I5w6hPTLigCIQDLLFlXK1xw1a1D1/idVhdd3a8gkE0FnTJO890WwiQbpg==
 -----END CERTIFICATE-----
-""",
-  # Nuvoton: NTC TPM EK Root CA 01, https://www.nuvoton.com/security/NTC-TPM-EK-Cert/NTC%20TPM%20EK%20Root%20CA%2001.cer
-  # sha256 56b67007f448bd5c5746299fcdea9323971bbdaaefd8e3b9b84773abc888c90e
-  """
------BEGIN CERTIFICATE-----
-MIIDSjCCAjKgAwIBAgIGAK3jXfbVMA0GCSqGSIb3DQEBBQUAMFIxUDAcBgNVBAMT
-FU5UQyBUUE0gRUsgUm9vdCBDQSAwMTAlBgNVBAoTHk51dm90b24gVGVjaG5vbG9n
-eSBDb3Jwb3JhdGlvbjAJBgNVBAYTAlRXMB4XDTEyMDcxMTE2MjkzMFoXDTMyMDcx
-MTE2MjkzMFowUjFQMBwGA1UEAxMVTlRDIFRQTSBFSyBSb290IENBIDAxMCUGA1UE
-ChMeTnV2b3RvbiBUZWNobm9sb2d5IENvcnBvcmF0aW9uMAkGA1UEBhMCVFcwggEi
-MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDoNqxhtD4yUtXhqKQGGZemoKJy
-uj1RnWvmNgzItLeejNU8B6fOnpMQyoS4K72tMhhFRK2jV9RYzyJMSjEwyX0ASTO1
-2yMti2UJQS60d36eGwk8WLgrFnnITlemshi01h9t1MOmay3TO1LLH/3/VDKJ+jbd
-cbfIO2bBquN8r3/ojYUaNSPj6pK1mmsMoJXF4dGRSEwb/4ozBIw5dugm1MEq4Zj3
-GZ0YPg5wyLRugQbt7DkUOX4FGuK5p/C0u5zX8u33EGTrDrRz3ye3zO+aAY1xXF/m
-qwEqgxX5M8f0/DXTTO/CfeIksuPeOzujFtXfi5Cy64eeIZ0nAUG3jbtnGjoFAgMB
-AAGjJjAkMA4GA1UdDwEB/wQEAwICBDASBgNVHRMBAf8ECDAGAQH/AgEAMA0GCSqG
-SIb3DQEBBQUAA4IBAQBBQznOPJAsD4Yvyt/hXtVJSgBX/+rRfoaqbdt3UMbUPJYi
-pUoTUgaTx02DVRwommO+hLx7CS++1F2zorWC8qQyvNbg7iffQbbjWitt8NPE6kCr
-q0Y5g7M/LkQDd5N3cFfC15uFJOtlj+A2DGzir8dlXU/0qNq9dBFbi+y+Y3rAT+wK
-fktmN82UT861wTUzDvnXO+v7H5DYXjUU8kejPW6q+GgsccIbVTOdHNNWbMrcD9yf
-oS91nMZ/+/n7IfFWXNN82qERsrvOFCDsbIzUOR30N0IP++oqGfwAbKFfCOCFUz6j
-jpXUdJlh22tp12UMsreibmi5bsWYBgybwSbRgvzE
------END CERTIFICATE-----
-""",
-  # Nuvoton: NTC TPM EK Root CA 02, https://www.nuvoton.com/security/NTC-TPM-EK-Cert/NTC%20TPM%20EK%20Root%20CA%2002.cer
-  # sha256 8fac94b462b37acb84431bdc71395585caf518c17f656051ff9c4347a4726ed9
-  """
------BEGIN CERTIFICATE-----
-MIIDSjCCAjKgAwIBAgIGAPadBmPZMA0GCSqGSIb3DQEBBQUAMFIxUDAcBgNVBAMT
-FU5UQyBUUE0gRUsgUm9vdCBDQSAwMjAlBgNVBAoTHk51dm90b24gVGVjaG5vbG9n
-eSBDb3Jwb3JhdGlvbjAJBgNVBAYTAlRXMB4XDTEyMDcxMTE2MzMyNFoXDTMyMDcx
-MTE2MzMyNFowUjFQMBwGA1UEAxMVTlRDIFRQTSBFSyBSb290IENBIDAyMCUGA1UE
-ChMeTnV2b3RvbiBUZWNobm9sb2d5IENvcnBvcmF0aW9uMAkGA1UEBhMCVFcwggEi
-MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDSagWxaANT1YA2YUSN7sq7yzOT
-1ymbIM+WijhE5AGcLwLFoJ9fmaQrYL6fAW2EW/Q3yu97Q9Ysr8yYZ2XCCfxfseEr
-Vs80an8Nk6LkTDz8+0Hm0Cct0klvNUAZEIvWpmgHZMvGijXyOcp4z494d8B28Ynb
-I7x0JMXZZQQKQi+WfuHtntF+2osYScweocipPrGeONLKU9sngWZ2vnnvw1SBneTa
-irxq0Q0SD6Bx9jtxvdf87euk8JzfPhX8jp8GEeAjmLwGR+tnOQrDmczGNmp7YYNN
-R+Q7NZVoYWHw5jaoZnNxbouWUXZZxFqDsB/ndCKWtsIzRYPuWcqrFcmUN4SVAgMB
-AAGjJjAkMA4GA1UdDwEB/wQEAwICBDASBgNVHRMBAf8ECDAGAQH/AgEAMA0GCSqG
-SIb3DQEBBQUAA4IBAQAIkdDSErzPLPYrVthw4lKjW4tRYelUicMPEHKjQeVUAAS5
-y9XTzB4DWISDAFsgtQjqHJj0xCG+vpY0Rmn2FCO/0YpP+YBQkdbJOsiyXCdFy9e4
-gGjQ24gw1B+rr84+pkI51y952NYBdoQDeb7diPe+24U94f//DYt/JQ8cJua4alr3
-2Pohhh5TxCXXfU2EHt67KyqBSxCSy9m4OkCOGLHL2X5nQIdXVj178mw6DSAwyhwR
-n3uJo5MvUEoQTFZJKGSXfab619mIgzEr+YHsIQToqf44VfDMDdM+MFiXQ3a5fLii
-hEKQ9DhBPtpHAbhFA4jhCiG9HA8FdEplJ+M4uxNz
------END CERTIFICATE-----
-""",
-  # Intel PTT: Intel TPM EK root cert signing, https://trustedservices.intel.com/content/CRL/ekcert/EKRootPublicKey.cer
-  # sha256 2e1b3ba79af56d758be51697621bc4b9e8cee0983db3e749c55eb9b37c6d2ae0
-  """
+''',
+  # Intel TPM EK root (PTT)
+  # Source: https://upgrades.intel.com/content/CRL/ekcert/EKRootPublicKey.cer
+  # SHA-256 fingerprint: 2E:1B:3B:A7:9A:F5:6D:75:8B:E5:16:97:62:1B:C4:B9:E8:CE:E0:98:3D:B3:E7:49:C5:5E:B9:B3:7C:6D:2A:E0
+  '''
 -----BEGIN CERTIFICATE-----
 MIICdzCCAh6gAwIBAgIUB+dPf7a3IyJGO923z34oQLRP7pwwCgYIKoZIzj0EAwIw
 gYcxCzAJBgNVBAYMAlVTMQswCQYDVQQIDAJDQTEUMBIGA1UEBwwLU2FudGEgQ2xh
@@ -372,10 +574,35 @@ AQH/AgEBMA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNHADBEAiAldFScWQ6L
 PQgW/YT+2GILcATEA2TgzASaCrG+AzL6FgIgLH8ABRzm028hRYR/JZVGkHiomzYX
 VILmTjHwSL7uZBU=
 -----END CERTIFICATE-----
-""",
-  # AMD fTPM: AMDTPM (RSA), https://ftpm.amd.com/pki/aia/264D39A23CEB5D5B49D610044EEBD121
-  # sha256 67bd2472a546751caca5f358a78f80727531671338960a9bcfdfbe6a34d0c6a1
-  """
+''',
+  # AMD fTPM root (AMDTPM, ECC)
+  # Source: https://ftpm.amd.com/pki/aia/23452201D41C5AB064032BD23F158FEF
+  # SHA-256 fingerprint: 14:AA:C9:FD:58:47:1A:61:2A:FD:75:D8:C0:95:5D:AF:99:F0:91:B1:86:37:02:F9:E0:D4:11:3F:AF:23:4F:9D
+  '''
+-----BEGIN CERTIFICATE-----
+MIIDBTCCAqygAwIBAgIQI0UiAdQcWrBkAyvSPxWP7zAKBggqhkjOPQQDAjB2MRQw
+EgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQBgNVBAcMCVN1bm55
+dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2VkIE1pY3JvIERldmlj
+ZXMxDzANBgNVBAMMBkFNRFRQTTAiGA8yMDE2MDEwMTA1MDAwMFoYDzIwNDEwMTAx
+MDUwMDAwWjB2MRQwEgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQ
+BgNVBAcMCVN1bm55dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2Vk
+IE1pY3JvIERldmljZXMxDzANBgNVBAMMBkFNRFRQTTBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABCizRsNBd7qu5HKGWs0gJuOjVMoiCQuQ4DQD6NQn6z7J91LUZ4tQ
+8QtcWrDLbyKN4wFR2ZVbJgE9YNK+V4jW+ZqjggEWMIIBEjAOBgNVHQ8BAf8EBAMC
+AQYwIwYJKwYBBAGCNxUrBBYEFPIa0Pjoowbpy804foZyYxfbwb65MB0GA1UdDgQW
+BBTyGtD46KMG6cvNOH6GcmMX28G+uTAPBgNVHRMBAf8EBTADAQH/MDgGCCsGAQUF
+BwEBBCwwKjAoBggrBgEFBQcwAYYcaHR0cDovL2Z0cG0uYW1kLmNvbS9wa2kvb2Nz
+cDAsBgNVHR8EJTAjMCGgH6AdhhtodHRwOi8vZnRwbS5hbWQuY29tL3BraS9jcmww
+QwYDVR0gBDwwOjA4BgorBgEEAZx4ZRUKMCowKAYIKwYBBQUHAgEWHGh0dHBzOi8v
+ZnRwbS5hbWQuY29tL3BraS9jcHMwCgYIKoZIzj0EAwIDRwAwRAIgdC//Fcx0tGsf
+HFjnzGiI77v83f5UkEFaTtHmodwAqkUCIHZ+ONVyeqVYIkRFWGl9GTnhSfvmghKj
+Ra64ryoheLlO
+-----END CERTIFICATE-----
+''',
+  # AMD fTPM root (AMDTPM, RSA)
+  # Source: https://ftpm.amd.com/pki/aia/264D39A23CEB5D5B49D610044EEBD121
+  # SHA-256 fingerprint: 67:BD:24:72:A5:46:75:1C:AC:A5:F3:58:A7:8F:80:72:75:31:67:13:38:96:0A:9B:CF:DF:BE:6A:34:D0:C6:A1
+  '''
 -----BEGIN CERTIFICATE-----
 MIIEjDCCA3SgAwIBAgIQJk05ojzrXVtJ1hAETuvRITANBgkqhkiG9w0BAQsFADB2
 MRQwEgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQBgNVBAcMCVN1
@@ -403,46 +630,462 @@ hz/uL0I64lUSLLoTZFdBIJ9r2RDiEqxsb7MbgtLOqeZFWfVITasTbcno8+rIOmn/
 860bTAfKuQWVIMKyHV/rElwa7A0d75Nl+p6BEMDxAs/bLq10PaGSxao8iGWiCihm
 tgzAbWXJ0VoaLTb3eZw+Rg==
 -----END CERTIFICATE-----
-""",
-  # AMD fTPM: AMDTPM (ECC), https://ftpm.amd.com/pki/aia/23452201D41C5AB064032BD23F158FEF
-  # sha256 14aac9fd58471a612afd75d8c0955daf99f091b1863702f9e0d4113faf234f9d
-  """
------BEGIN CERTIFICATE-----
-MIIDBTCCAqygAwIBAgIQI0UiAdQcWrBkAyvSPxWP7zAKBggqhkjOPQQDAjB2MRQw
-EgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQBgNVBAcMCVN1bm55
-dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2VkIE1pY3JvIERldmlj
-ZXMxDzANBgNVBAMMBkFNRFRQTTAiGA8yMDE2MDEwMTA1MDAwMFoYDzIwNDEwMTAx
-MDUwMDAwWjB2MRQwEgYDVQQLDAtFbmdpbmVlcmluZzELMAkGA1UEBhMCVVMxEjAQ
-BgNVBAcMCVN1bm55dmFsZTELMAkGA1UECAwCQ0ExHzAdBgNVBAoMFkFkdmFuY2Vk
-IE1pY3JvIERldmljZXMxDzANBgNVBAMMBkFNRFRQTTBZMBMGByqGSM49AgEGCCqG
-SM49AwEHA0IABCizRsNBd7qu5HKGWs0gJuOjVMoiCQuQ4DQD6NQn6z7J91LUZ4tQ
-8QtcWrDLbyKN4wFR2ZVbJgE9YNK+V4jW+ZqjggEWMIIBEjAOBgNVHQ8BAf8EBAMC
-AQYwIwYJKwYBBAGCNxUrBBYEFPIa0Pjoowbpy804foZyYxfbwb65MB0GA1UdDgQW
-BBTyGtD46KMG6cvNOH6GcmMX28G+uTAPBgNVHRMBAf8EBTADAQH/MDgGCCsGAQUF
-BwEBBCwwKjAoBggrBgEFBQcwAYYcaHR0cDovL2Z0cG0uYW1kLmNvbS9wa2kvb2Nz
-cDAsBgNVHR8EJTAjMCGgH6AdhhtodHRwOi8vZnRwbS5hbWQuY29tL3BraS9jcmww
-QwYDVR0gBDwwOjA4BgorBgEEAZx4ZRUKMCowKAYIKwYBBQUHAgEWHGh0dHBzOi8v
-ZnRwbS5hbWQuY29tL3BraS9jcHMwCgYIKoZIzj0EAwIDRwAwRAIgdC//Fcx0tGsf
-HFjnzGiI77v83f5UkEFaTtHmodwAqkUCIHZ+ONVyeqVYIkRFWGl9GTnhSfvmghKj
-Ra64ryoheLlO
------END CERTIFICATE-----
-""",
+''',
 ]
+# Bridge mint caps bound what a forged delivery can create. Governance raises
+# a cap at most doubling it per enacted proposal.
+# Most one bridge mint may carry through any route, whole TNZO. Each
+# route's own governed limit may be tighter.
 bridge_mint_per_mint_tnzo = 10000
-bridge_mint_per_epoch_tnzo = 100000
+# Most one bridge route may mint in one epoch (an hour), whole TNZO.
+bridge_mint_per_epoch_tnzo = 25000
+# The tighter caps of a route without a light client, whose
+# deliveries rest on its committee alone: one mint, and one epoch, whole TNZO
+# (a fifth of the light-client caps).
 bridge_attested_per_mint_tnzo = 2000
-bridge_attested_per_epoch_tnzo = 20000
-# What may leave over every bridge route together in one epoch, per unit, in
-# its smallest denomination: the starting cap of 100,000 TNZO. Governance gives
-# any other unit a cap.
+bridge_attested_per_epoch_tnzo = 5000
+# The most of each unit that may leave Tenzro over every bridge route
+# together in one epoch, in its smallest denomination (TNZO: 18 decimals,
+# USDC and OUSD: 6). A unit not named here cannot leave at all until
+# governance gives it a cap. Sized from genesis stake, not from expected
+# volume: 21 validators of 10,000 TNZO put a third of 210,000 TNZO at risk,
+# which at security.min_ratio_bps 1.5 over a day's attack window covers about
+# 1,945 TNZO an hour, split equally by USD at 0.10 USD per TNZO: 648 TNZO,
+# 64.82 USDC and 64.82 OUSD an hour. A raise is refused until stake secures
+# it; the caps other than TNZO's also shrink at once when stake loses value.
 bridge_outflow = [
-    { unit = "TNZO", per_epoch = "100000000000000000000000" },
+    { unit = "TNZO", per_epoch = "648000000000000000000" },
+    { unit = "USDC", per_epoch = "64820000" },
+    { unit = "OUSD", per_epoch = "64820000" },
 ]
+# The finality program (RISC Zero image id) whose wrapped proofs the chain
+# accepts: the guest as RISC Zero's guest-builder container builds it, which the
+# prover embeds; `tenzro-finality-prover image-id` prints the same id anywhere.
+finality_program = "84684b576dcba8ca62548bb2ef545eee3817bc5db36ac5a821847b5bd2b493a3"
+
+# Bridge routes the network starts with. Chain selectors are written as
+# strings, since TOML integers stop at 2^63 - 1. Every route below is a
+# PLACEHOLDER:
+# `placeholders` names the fields still to fill (committee sizes and
+# thresholds, contract, pool and ramp addresses, light-client anchors).
+# Committee members are never named here or in a proposal: they are drawn on
+# chain from the accounts bonded as attestors with a bridge signing key. A
+# placeholder route is closed with zero caps and starts disabled; a governance
+# vote fills it and another opens it, and opening is refused while any field
+# is still a placeholder (docs/BRIDGE.md, "Genesis routes" and "Route modes").
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "light_client", "lane_limits", "assets"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "evm"
+source_chain = "ethereum"
+# The CCIP chain selector of ethereum.
+source_chain_id = "5009297550715157269"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane_limits = { version = "2.0.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+# The beacon chain's genesis_validators_root and current fork version are
+# public; the trusted finalized block root is chosen at launch.
+light_client = { ethereum_sync_committee = { genesis_validators_root = [75, 54, 61, 185, 78, 40, 97, 32, 215, 110, 185, 5, 52, 15, 221, 78, 84, 191, 233, 240, 107, 243, 63, 246, 207, 90, 210, 127, 81, 27, 254, 149], fork_version = [6, 0, 0, 0], trusted_block_root = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] } }
+
+# USDC carried over the ethereum route by lock-and-mint: the token stays in the
+# route's vault on ethereum while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "USDC"
+name = "USD Coin (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:1/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# OUSD carried over the ethereum route by lock-and-mint: the token stays in the
+# route's vault on ethereum while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "OUSD"
+name = "Open USD (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:1/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "lane_limits", "assets"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "evm"
+source_chain = "base"
+# The CCIP chain selector of base.
+source_chain_id = "15971525489660198786"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane_limits = { version = "2.0.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+
+# USDC carried over the base route by lock-and-mint: the token stays in the
+# route's vault on base while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "USDC"
+name = "USD Coin (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:8453/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# OUSD carried over the base route by lock-and-mint: the token stays in the
+# route's vault on base while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "OUSD"
+name = "Open USD (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "eip155:8453/erc20:0x0000000000000000000000000000000000000000"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "lane_limits"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "evm"
+source_chain = "arbitrum"
+# The CCIP chain selector of arbitrum.
+source_chain_id = "4949039107694359620"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane_limits = { version = "2.0.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+
+[[economy.bridge_routes]]
+open = false
+placeholders = ["local_selector", "peer", "ramp", "local_endpoint", "remote_token", "verifiers", "blessing", "lane_limits", "assets"]
+[economy.bridge_routes.route]
+adapter = "ccip"
+family = "solana"
+source_chain = "solana"
+# The CCIP chain selector of solana.
+source_chain_id = "124615329519749607"
+local_selector = 0
+peer = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+local_endpoint = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+verifiers = { set_index = 0, size = 0, members = [], threshold = 0 }
+blessing = { set_index = 0, size = 0, members = [], threshold = 0 }
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+# Solana's CCIP router emits the 1.6.0 message layout.
+lane_limits = { version = "1.6.0", off_ramp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ccv_and_executor_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inbound = { capacity = 0, rate = 0 } }
+
+# USDC carried over the solana route by lock-and-mint: the token stays in the
+# route's vault on solana while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "USDC"
+name = "USD Coin (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:11111111111111111111111111111111"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# OUSD carried over the solana route by lock-and-mint: the token stays in the
+# route's vault on solana while its 1:1 representation circulates on Tenzro.
+# Pool and token addresses are placeholders; it starts disabled with zero caps.
+[[economy.bridge_routes.route.assets]]
+symbol = "OUSD"
+name = "Open USD (bridged)"
+decimals = 6
+pool = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+remote_token = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+caip19 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:11111111111111111111111111111111"
+transfer = "lock_and_mint"
+mint_limit = { per_mint = 0, per_epoch = 0 }
+outflow = { capacity = 0, rate = 0 }
+lane = { inbound = { capacity = 0, rate = 0 } }
+max_outstanding = "0"
+enabled = false
+
+# Chains agents hold accounts on: the agent account code's deterministic
+# deployment on each (docs/AGENT_ACCOUNTS.md). Every entry below is a
+# PLACEHOLDER: the deployment is filled and the chain opened by a governance
+# vote (SetAgentAccountChain) once the code is deployed there. Until then no
+# grant is issued for the chain. No chain proves its accounts' reports yet,
+# so a grant's whole budget counts as spent.
+[[economy.agent_account_chains]]
+caip2 = "eip155:1"
+open = false
+[economy.agent_account_chains.deployment]
+family = "eip155"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+init_code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "eip155:8453"
+open = false
+[economy.agent_account_chains.deployment]
+family = "eip155"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+init_code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "eip155:42161"
+open = false
+[economy.agent_account_chains.deployment]
+family = "eip155"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+init_code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+open = false
+[economy.agent_account_chains.deployment]
+family = "solana"
+program_id = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "sui:mainnet"
+open = false
+[economy.agent_account_chains.deployment]
+family = "sui"
+registry = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "aptos:1"
+open = false
+[economy.agent_account_chains.deployment]
+family = "aptos"
+creator = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "stellar:pubnet"
+open = false
+[economy.agent_account_chains.deployment]
+family = "stellar"
+network_passphrase = "Public Global Stellar Network ; September 2015"
+factory = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "cosmos:cosmoshub-4"
+open = false
+[economy.agent_account_chains.deployment]
+family = "cosmos"
+hrp = "cosmos"
+factory = []
+code_checksum = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[economy.agent_account_chains]]
+caip2 = "tvm:-239"
+open = false
+[economy.agent_account_chains.deployment]
+family = "tvm"
+workchain = 0
+code_hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+code_depth = 0
+
+# Guardian seats the network starts with. Protocol guardians pause governance
+# enactment, governance guardians veto a queued proposal; either takes
+# `governance.guardian_threshold` distinct seated guardians of the role, and a
+# pause lifts by itself after `governance.max_pause_ms`. Every seat is a human
+# identity and holds a hard term within one year of the genesis time; after
+# that only an enacted SetGuardian proposal seats guardians. PLACEHOLDER: the
+# genesis set and its terms are set at genesis; a placeholder seat is not
+# written, and governance fills it (docs/TOKENOMICS.md, "Tracks").
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "protocol"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "protocol"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "protocol"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "governance"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "governance"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "governance"
+term_ends_ms = 0
+
+# Foundation steward seats: Tenzro Foundation's stewards, each a human
+# passkey identity whose key is rooted in a different provider or device
+# (key_root), with a one-year term and an end no later than steward_sunset_ms.
+# PLACEHOLDER: filled with the Foundation's seat holders before genesis.
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "steward"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "steward"
+term_ends_ms = 0
+
+[[economy.guardians]]
+placeholder = true
+address = ""
+did = ""
+role = "steward"
+term_ends_ms = 0
+
+[[validators]]
+address = "00f58aee5c085f420b0e9185518006bd28a27613000000000000000000000000"
+ml_dsa_public_key = "e34d2be9160bc112c4c77f8fd5c07c32ec96a2a717a297a8a637e4dadd59cd4c7874eb30bd22089fbe9e389df91f07e0ec3efa260ac9cefab53ae510263703096313a96a6521390702ee55b80fa7cf62fea879a1e11fe02f6dbf0faa6ac9de64998e1f280d7b5647b02ddd573e9fe655e4366d97f4d3884465372541b55dc075f8dbce8ea5524f6f0d791d3434e10c8611565f52925e71fb964d2f45125f703b675bb6a96f6bb9e5328b20885af92fb1123a7e73e89699dbc5909777116edfa6be535f80dde1ebd795b82ce05a7d47dcfc954e93e307568ab92093fa9eacc7087c67f9051074c1743120aa0b6ba347ad87c579627e839e01e031c5c4b677df78add1275ce49b073ac05e3c861533613ec33077613729d8c70fb555e9510c027ef9edaea1c163bb745e82e84e8a5ac2751d8340b1464071228c5d004c6a69aa66f571bd6cafca67597b4154ad03ec480d7f23dfb0b2cb7e101d1f572f0ed668af976334b0b4dc24b9274fc1a44d83239f0785f72bb98854149dcab47232f1068ca1edf7466b104e7d5a4bf8d7130befb0bd789b112392f32702c946bdadbdb8f0deafb53a1faf9b819687d5fac2154ae6211adee8bb4c5304651cb7b2ba25d8c15347d7be1e5e4b82414b7e9e042261c4c4e2695207891411f23e6a7540457b32a63a12efaca314c885c3269055a40f41e48a8cda02f77129b827c3fb1f9a9a05316d3893f83ae1d0c9fc84eaf243fa4567a97c79c9ef5de3d385bb251ec851c8abe99437abe09908e05a04fc8f0a3af261a80ce480cb76c9433e458bfbc40ea4d9554784faf103afd308abe270e2ed57705c529cbc5940c20615fa63c07233899b036bad144ff670eaa33d60460474e3909596facd31684ae753e8f12505c6acce613a627177851d860e0a4f54a6abea01e54e93e116b0aaf2106fd3374ba7cca3ecbcae8d53afe0b5bd5c7df48e9efd78903db9e1fb1f75e79926bd1e871033998cb5aa117e118dad3123100b296ca6a7e8824b1450647ea66cce46008dc6adc22d865265e2b2cc0f30f1b3a82a549777c22deb1d18765c443d73c9ebddf21459164f235c133075d3e13c1138b158eb9bee216423274d4a9f7c2972a129606fc749a61389fb9604ced2fc0232d75f4a7dc398c5e4a0e0ff6dc23f3aebd0d5b8f30f115e053e32a5d0c2a537f733d374b4e961e4f5dec9a2ca9b66933e0e67aa5ff4ad4f307db7fed5cacf08e0411b03a32e62131c9424d566cdea736fe55a9d7d3d9c387b42871bde4546433160ec1ea71f62d4907e6f87af600747bf70fadc71191309db6cd49e52107dfea02f6af05fa1bc95028200c24fe142993f19080a577fe96a08f3fd3aaef1cf510c0f583a10a97f29df1951e66e7ca1e0da6f7c5f2f34dabf01a7d3d76ed7b761875bc9dc57bf1ac8d3d1920c077c278389ed083c162207f2f601378b12618bd5ba0b605661fee08a5fedbc8357f982091a87335b1553ea0acd48f84b12d702483c4632fd5f7348eba84ebd95002264dd4785dd201d96354baff8fb80c5ca074244a6b28fa8d39e59165028a5bcad4120df8a5c9e77f2f4ab1452bdec21ba57eaeae990c1c2de4e21d670d388a24839e869f6faa346856bb3545e23d43f1582fa927e568659fe02a19baffad1ad6876e6f2f5cd0c9f908eccf51736159e8cc5f67b1b0760855f51b8aec179596ed14632f6d7c2cdcf5ac36f3cbd5097b9bf65e9de32c485df64eec08bb244a678aacb336c588bb9b8d26965db05bf168e709a5fed3f89b9e0e6b6888220d0e3a1be9e07549a83c6b6852b4f10729464445fa2a880653edf0f936ff19039aeb4365c5a6f9fc015e4882f637cd1198f383fe9cbf20763dabe87a2057bec169a342c86b961f65403ac17d95ba69992b3613631acc53d68fcb6bf8a1f73ad0d3e36294af817920a53ae57722281e8730b9d23758211859e35d92c849508a8773e0cfeb9741b35dd5ff38750b133407cb447a5bc207aba2b11c95d38580eb039a76b860b83c204646c9aab6a2f5e2cd65e46bf1929caa3cbb661b36d74491fd430ec574e754c9e825f954c76bf6cf0acce7a92e41fcf5e8255f0845851130ce1594b319eef737cb5777b47ccfc7fa6ddd190ba5b4fa3483d835e2dd0a91fef00d4d37b4069c122fa117ff497726f4e188532ee33d18284215c1ed544d172c1232c2bdf353072ddf47873a5459edf1cf7fc85c5524a4af22ec4dc53e5f3f53925af87c672985f88a6f661864ab5c3e56325638a0c75d891a82f5f311b92ef3b9b8bcc45ee11478fd05253184375757dd8be6a2356ae4956a8d50924416d8928de13904a26c698e4d7d8593396d9a1dafc8e81a2edab531a24d7a37b39a2bf4338f107aefbd2f23b83e6bc0af033d02117d8c566739449a927cc52794eee0038d12877e39ee1c0a385d705a10283c80537ba5c36c5fde2c9e429108b3fa41ccdb40b71ab8418b2ae7f05de21dd812adb3de97a5e72373266816d361583ea8728edd967f249513c6561e0f2c4aeff9923d95c735f08774ab5d6b0775e51bcbd74c06410094f305253bcc25f5425705ab79875144c1e353820e64521ae6caa6a41087abcffbdc0c63994f25e7e1b11c9745996535da2bd60b58d0cdf44dfe1d60fb7387be268ea95950d2faafa37302bb758c5d400e5b1b7a9024b2fc715f7029c383fbe5fc30fc41b55a61de6b3859c84d44befc2c40c777636f06a688666b45e92142d6707dc534378d247"
+p256_public_key = "046dbfa5ccdfca74e53598dd973adb823a854bf6a2ca01a7ace4bb6dfdf0c29c5bd106d305006a83710c3f0c2a332f6e503ee8a6f7428e393dff35f9c52db8df36"
+node_key = "37fc4652b9ff9240a25b07285478ff00608a644570eb3e046e6c26bf759b459b"
+proof_of_possession = "ed0c000000000000f2075a319899c1045563b1e8d8ee0d4996d9b2e4be8c0962313f3586f9d799d37a3a27865fe845feef343fb79d1745093dbeee10724fdb46034993b0931d71310c2a6089ee899c556cfceb4bc7996b1f9b02b55809a5b389468291d5c335ab783d48d7ec9a0dd2180cd41c0116a227c485ee3a1db0b69be23130570f893181e3b9f02a008251e31e26ee3bfd9f49ac31db40e388ee5ee9e4b3621325509a3c591180f882707177c3a021d099adb832a902558781044876a94894ae6076a255901c5fd38e6d34bed7f8d8e4f80033d60198057aed77cb9b8545154f3e44003f919c017e88586ae724b846c2eaff22390fbdb8648451813daa11a83736668d6c1ef1eefabb479dcd859a6b5a966f1c9c00f62c2588a3c8af168bac664624ae0cfdbaa961e7111fbfdd9ecda76ad14a3466fedab2b2984585394c780c726c08e9d9449a4d94567723c53f20bea0776cfb57a04914c5f0a1a2bef7b771f64d15210258e57e91fd977465cc195b629da3337cc46df616361da8c51932c0d30c0af4175441d476cf919f7fa6b2c9d910ba582c09c0f543db10cb074e2b0d50658debcd5a8003275068f462e18f77981a298c97fe5b5dd01533ca59cb0e25c40d30440054a533ec50196f303d92ddc1a5e182d033da20de95c27b8ce4f48f866469e4301ff7004bd46d45c69b74a7e8de15aa61b591f949e25f30b51a152199e614972eba49cafffcc048d7a90f74d4fd649af501cce154811b9b57f2d71e13988d9c8c82889a5639163063a61e2ab552d36c58d2f0de3760a2752fc9bba3b739b40682b4eb27e5d4d17b260cc22e8fffbc1d6aec164880d2520dfc9ae563799f2fb141532c407a62f22f62bccf256918568720c6ea8a66e91d7aee3a15df903e3e79389d43a479cfad75263b212c3d551684f59384f8dce53a5448cfe7ccf78343beb8cccb700859730bcd252b4da7bd759ef61401a07c5a5a85d4cbd1114bb518726c7a683c9cbc1a350aa35bda8dec5356cf58db512f4cd126bf6fa4c41c87e5a42809e6c2ba7a3c4b1d4df1faaed3237d53ca02f3960d9448080cda9d3b5bd9fcfc5751e544be3b54171799682b713ee47323842ded575df5a62ab129029b333186248b2addb208e9ac2a140714dcbd9035ec986e467ded51ed8fb1fd51914a066eb6e1ee6624c4fa1bbc73dba3723229673171a62afb43f20ad78e74e0f62ec484ffe8dde1eb07ff66f331c7f5901748768c5b83b2bb9b42ea1a49fdc047ff8cc3b3d19ce3a997dcba3c7f2bff3059a1ca0ee5f615721db7523a8af1d9cdb616815cfd3790ba6ed542b222d78be33e8825c29d36ebfb986f89b79401d79223a22676a866ee96d2dc044fb1f886f4d434afef739a939a423b3afac17c742374532edc399738235aab299dbc9bb77c98ce2d0690dbba3b3eabd70191794c2bd6fedaa98d29514387f2dae21a4d209471248cf219dee89dc070035cd6e1e7f5ce88c9584f5819793f401307ba0b2b54c7cff26df71bcf9a5cfb212955910505e7fa1619e8388ecd8a4aefcd5f3c168d239c8425d3cfbdc5be7782134fc2997759ed818a5646abddf8224f8989c79e38a7d80e6578aea1ba576ca4910b4bc667d06edec96dd0b48e8826b9c39db27e929d7ec31f7c719d5d8f5e0eb4ce36bd7ca78c1aa8004630fdfaa020211a8e1ed2b317a441972904832850e18092920f435870aeddfa75665c9cf1f49ba9cca15fa07f27838dcc92f7b152f612f9dbcb88ac669e14caa1b332b4f65565ca79e06835618f6f7288e6e3d7c93139715768a54f9e90eabf5f16714c8ef0ecf0f934f1c9e2a74acfc0b9f8deb2648af1b6a5e3949ca4ca03eec094910fd7ff5cfdf0466b60497d0b64c1a5f4d669d94806caee0d829e7b683668ad1dcc05af341f4b45ad5ef1fe2ac6f322fef93e4687a8f289f6ca675f7a0dc2fe0d49da8e6d7eb80f48472c4278570fd356344a62e4c746d59d1786c3330527bc72d6af06c75ccd5d018ff379cda348cb03cbd3122c0722430e52b0f65a968e6b75260dfd6df307fd4810a211b8b7b10dca8ee6e35389260770aa911a14511f2d05885e78137de90156f137ee64525faf8c6edb39ff64034b4337f50e3338fef3c71329b6cd8fd74e47b8b2817fe7bfc2f5ff9f0769d2daca31a8692e3984951f3c261fc30d08ac3de26e04f0eeb233c7a7f41abf304d6df8df633aab894e80ed9be18121d2be9a53416c993265e8f13858e6ab85f55a7f361598532fe4abd6fa0478d55343cb4a64a30e537108a729ab24767e1279e18df606dae67d0a800e5b6dfca1261071f68e34ad3eb4040d62db8b21fe3b1adcda0638bd5e33c8b91e3aea76d405a949c47affb5aa11e2cfe617fcf7f61c04f2e61ea76a838795178388b2b48b839b25789d65353bd77ba4d290accc31f819fe536f5cde034d1a9abbae481c04b77fc39c95ed9ac503559ca4505a4552190a5abe3c0bb5e3c3ab33f0cbeeb1fd88f08bc443b75765aafe829f60f295477969a0d1851da4dce6bd84d4b3b70ead9c061d774ed686b9c7367cb7c28c94f03eb318c729b50e04966d8848fcd18dc1356aaa8d5cfd9819f61ab96d3b5abc28a1ae0753ff41d83ed15006b635424e6ee1af4b98eb9be21beadace9bdfec46c18bb6d62fd3c371f504adbf108e266fedf7d02e04810d5dcf56548fe33de05267feaf59690013d24aef58a3ccfa71d56e27a63b7c8a394b496c4103d465eb8981a26b00521009877aa37880ad64ac162e52ae4ec33a3bb40848aac329ede91c720ae2519256e92a711657c48411cdecdab5c69ccd3a2f5fd33af6e35a7a1db5ee722ab81497529b91e18a238b9aec1304fd0cc13b5f2347fbb811100921157754c2a5f3844da2bf9cb9d7cebe2a867d5bbe3774597404dcdfb82efce4c4b9096cdb854bf5772d70abc279e39b08f7095262202be3b47c8c2483bbdaab3386df268a9bd80f928f7a8c4b82b48716d33cfcff98401bc39670e0b0ae9785621fc12ec9404407245596c99c94251b4568dc0e7df63e1ea4ec6b4c25c1876128914032893872d2ff8822c5ca4b069bc062a30d1b2b446d62e8da2683fe34802d8db22f50599ce4aff6f860df518119bd9917fde0f59eedf94d5c55d2c64cbd259ffa2a7529f8537b5dad853fdcbaa963b91e966e894dd329356f34e315ac417c6f38a3ae8bd75ee4e4f46d101ba582ecc2715e23227bc0e031dc060f3201d29922c47b4b88f027fcdcd32ad5941e76280daa5305b1d1d4ba9c8f824c96acd4c34d6a12784493c60e99166490c8f6aafcdfe3a44518d835168f6b80d4b419482b59d24749fe4316952ff5afd1b6a0ff1535862ede209ba34922819b7b8e66c5a874f65a18ce8a216969c8827a25adeab5a7b1d338b66b7d56680c5afc05e6ce2bf1084854658898e25cf325f77b0f4c53f2a9209d5f9f040d6a891e3b01a753e4e91c7841adc19fef73b89123a17af53a68551421ece22a785f83837f56e3c7fcf07c840d76d02618124756799c903c69bd956f8b6fcfec534fb1441514acae12632a30dd26f57f8e050ddf7d245bb9451a0e469e061c3c7a1c76bcef8cc7be67576da09ffcaa7a040be676de6769dbac0b5bbf4b8150ebdbfcf5e4954d79e71766cbe5c1cc47ba2cca5b39f70955ce2b453a018e08176ee8d85ac2a56066d2e4c28857bb2390a9abadb8a802ac10e636ae592cb5d0024d37a6dcc9963690f5033efec52b686f8df0c4c65a37da7a1c6879eedfe5a72bc4d4879cbd8f79079c3623c6edbe4a70ccec381f01075be9bb2ae2ac994c6b2f1122883986a81e628d9437a0e20ded694461672ae8a696f4e6007d071c70866c0a2e14bf8277a0b7def853750d91bee6730ce8fea545f8e6585bec8170393518785e077f44800dbc0ba2969d57e3044306983a294389f43c2d9577220b70d2eaa3a4c477873d82c3d44102f7b08b179c5e0577cc0c2225bf52c1996c14363bc0a9d26b8544b848e200e861967bf2467c5185240458bfa7981aacf23e29e91a6af97db47c318c6230c9a23f79eb4f86cf717f9ad42b4e87782dd79fbae3b72e6456dc26dfbd59ad6871f1fae77c79e434718039b1c3f7dad85af05edfe36bc22c3b0039dff002fd9acd18a0c3c8f9db821dfbaec6b4bb88fe614d637467b9e3916e081750cdec95c6da0a310b6d04f18d0987e6559e10efb4bcb8cd0cec4777c694603312d911d0fd8a5f289515a75e02fdafa1dec77e5ea2243db264e47c05d453ff3cdcdd4f94e82122d6590643782dc868d115730643caec7938d7d9e3a3708274eb12a48e347224188b1535ddec05d2dd051decc396a0aa90570b841cc2ed41ced73cb8368ee843d1b921ad2e3cb0d024b64c5b87c6948505625b03b298d8cbfc77d13b74df0fa3ba9ce9e7e774b5f1d09f31bc1feb6d8d309e03edfebb52040dc1425fffb09eca4e90072105d5c3a7a9b187b04e6a03a405e96957c778b5f05475bbfe1d422d72fe0ff0aab2dfeb225dd663ddf0a2478a569024820ed7da2e263e25c8f02a7aa0792fc57b65da63c3ba4b6f1285878e5f2aaa82c77b79cd839efc5c970f404453686a6f799afe4656637387accae7e95496abb0daddff4282bae40f1522295e7ca2f000000000000000000000000000000000000a131a1e242640000000000000006caf38388b9885364821fe047568fc97042f6683deb6ae02d627975a6d63dcf1cc08aefaf5bf3077bb253b1fef6b61c72791684cf7c62620490f8ba55909c9fc"
+node_key_proof = "4acdc072f69deb5663ccc81d78a5d94bf0629c15b567c5c3bbb599f4bacaa8338526ff3093cbf8845290f367274da448d1e06d2eb852ed9cd73412ccdc8c5908"
+vrf_key = "d438d0bc00f0a33420e77cb7efa9058eb5cc54fda1290b8489c7121e71827f01"
+vrf_key_proof = "5448c1ec61cb1e12040a668c596fa55e47a9e5c2b766c09f65b05f7a1b4d4be37ff1e8da9da3b30eb952957aa75516a6cfdcccdb7dd6485be07a473f85b9a3b632461a1c54063966527485079c7a7503"
+stake = 50000
+relay = "https://relay.tenzro.com/"
+
+[[validators]]
+address = "62cc6f3cb3b6c730699b31b0ef4e0acd281ccd43000000000000000000000000"
+ml_dsa_public_key = "683b43c1ce1a177a9cfecfdacfff692286e4d113be40e04ef3679183dec2c1300b90c7a543226db4f515a3cdaabfb1f5272e8bb25cdcc52c1b074f6e56dbe06aef72458603eef66b07fd05bd961cbc427eecd584788e8ac6e0edcf858f830ae2212bfd940746a9ff6b74b42903ae097f460d1c009f59cb50d4e9d8c0337dc14f2b8fe7a99c076b5ba464a5d2bf2b8f8de40da58c83e205c246902d4b43011c08f17ce1bce1cbc54b0980355f6ca669c0698897de02d4a2503b99a090b7e6a08d04e0f13fdbe3033adbc930cf3273dcdee15b1c4de1998622fb109b845e6f7db2fe5d8993844dcc37a12dba34535453f6965f5b4fd51d9a5216f975cf8c897123e839dd0b3f5f6325a87cd3bd1bd230491f5b5260857789393fe1ba21f55b952234ad4a65ae2b36f0844ab164afe47c954f5597445db976949918f155c647f24bdb390b9f984745abaae3c85c57254a0b5b1a820ba559d343bc5e3a6d379634a0b321fa4264299f220b0b6f6a6a3678be1c4b76967faf5feef82f11e6c692a791f600bb640bd43de2e7dbf72985e1eced137ea9dd0a9070f5a44201d554c3a8b0c9ebf826b9002d453ded9581bd8b759c916330bb095a0faa6bbc958d09214f22d82dc961eca3a9ced60cd89a28a6806c91d73c86876c0c508010f396315223350e5512639acfc64579c03fec396b0cc69f9aff4fe2adc72f63f6cfc9efa284bdd281fea30c5378f68ed74a14f2f99afed047b2a538fe17add18646c97eb79d6768f47ed13f24b8ab9fa4783a519f8a8c6c3cb2fbfca4bd94e69d8a554e089948280077ac3447c29e362a5ebd0052acd09d9dd0dbf70c413af557d5bd72c159fa0ea08580464dfe25716988b549ec2fa87c25d8fae1df43988d256e14481e79bf8706defbbf43274b2d676a078d6c11c2b2f0ae3be3d0f28e97f9acddfc7999dae35b691bd1c9d3547e3dbd04c3d27cb6418fa9465e19a082a8553eb6411528db295b8bc5fa07eb2a81beb62ef3945ee100b7496fe1a1946f4bc526ae9b2a169042000ebc1f1e2d841ac76192f2037b7c6022109a47b62f1e5e1719803d52799d7737e6842623f2a5567e146e7989e20c1d327b7b5137762fde2ebe2628c9a221777ac8c375ee6c93a92bd9f1939df3f65e267618dae8de55fed4eb0bc917c4cb7d78dd769ec65903f4bd8d55827f03cbfe2f06feb3deb0e3483d4caf7b8cd54a7c225206fc38fba295287a164f539e69df177a723700a0e840587a50e160b5edb8dab6c9abe22a1ce0634e5b2042b028c1089a74f95c8378c682b158c100e1f7f4e3abc5835649d8e3a342cf2f2852cdfa76264707c88a77f3afc93b4342fcf0d1965c7908108c5e77658063d0a4532a3a16b3452a9931f7e281f086bb8ef8c1238e5c1d6cdf120b27e3ca13351daef96b3d8f43aee58d6b7d875245865d8c5846125d44aa538c1526cacb0370dc33250d6206afe1e22a0185b860583a2b6fc46e0a93b084d179e2101680e58d9a3c61090cae2e7657cf424bb6d1f02960f4030dc3495e208ac6af06959a09488e770ac518a0824eb892eabcd35b9dca23e597b29ca6f5904abb322aa0478001df0adbdbc01339138bb45cebacfbcccb899a45d3ccfed8ee5673ce16d2a8d917dd8d3544645024df4b7ec374b574bd162b5541bfc59e59d4f49f1408d34aa4a444b292b18beb48cec529bd849385a9e3fb906ea29ed5eb164dfcdea2b40209d5676f5b8935efdbeec92de0aeaa9b5461720e3e8e17b8f005aec4f4c0c2496e3018c2b0d0c612b72d5d03a59a28fd0d5c4f804592cb54bc7b84d56833b8ea50c372a10779768b34a38aea9d5f002197d5755e210be84b5e69b70b46f53af5f54ce00002036ada5e18ef2435fc3b3fe6314947256ebb79b0f812fc65e8bc511cae618df3b610024c3526cc3dc9e0f96ac436f32a7896b911aa8c0729c546c597f973737998b4e3d095b3d565ad79cfd58a2597f17b0b28a04985784216bfce0cf64de8abf625da38c44ab6ee5799b17595f98560b83129c41e17a3b7a8e44e6a500aaea963b779990bf2523727f1dc9bb368e822329ba3cfd2c4504b1d0e252564700a4f11ed53827de47b8a0e5904f27048ba0288a095267601c47dd57a8d94533afccdc4f2dd996ffde5c4469f202d61c51b6996d2e6925a0fffe8d50b4fd6f834d1ec2b77e5732cade2012dd42ff2cf42874b5099df2cf573afb5cb1e215b8032586a4b8ba933b062ddd1ced8dde01bc5783b957675229d5ec63557d6ef38601b23adbfa9df9da640d44e96fe6d1f5b632a047d9c1e2777bb586899422767cbc9f99d16d9066f600226d4640826cff8464efe0a91ae06376465b2fde1bf38feed223153c3dd82e411566a57ca65a7d8a51c071ab3aa72dee0e70d48a08a3120bcfad31b2e939b17b36d1ddf9a1916a664e62735dbbdaf7e894486f0ecf3963075b453da5a3c909e0b565dac42a234f491ed415d6463422c8a36af0041bff580c0dae7d1e5cc994cc310d28b9d92c59e939464de195433b21a25e7e2dee156fc9797ff45bc3e74af0bf620cf2448dd847843a4bece23498015d7b1754e15e9b036f061cf772e81ab5400826035f5e2f1c68492e20c08e53e1e413218cc9021ebbdd7192225f65a06c7a93f1536a4d0cc2ffc326930f6859db433fb43c89561d52888ec3f81870979f3ede01854521c03d072ccc9ef48843d6f2e66148c60aaac615a67c4e6fd6733923becd0d989f5d9792f06"
+p256_public_key = "04d5fc064ee90d01c1e8d7fceb9e009480e2e5a08ca0024a7755b6ee6247069f6915357326dd46e10a7681f098b930ea7285ab09c374d77e78a5b8f509548cf75a"
+node_key = "b84f2586f7fc057a50755293679a84fc17b708160e05d89de382669ee0059eb7"
+proof_of_possession = "ed0c000000000000c37979e88ffe45e7edfe98f9138ce1ae7bba547d5b7cf5d2d2fd05bfc2323df7640ea9b0fd7e3feb5d4074c1dfa944060711a83dee9a6b6410423f20f411a2a44e932ac23f512535ef7a8138597481770a39fb8eeac23e88a91297776068a4270e2b84b03e41d670dac1bc90adc671d41bc7b478b5199f4b63fe757768eb524dff61a72a95cd13a5e9ace6238e46138d3348ebb0a9c3c81bab1c0850316b5cec172e651ce84bd8b950727e7af8c91a523915e717f42135275bf4e9ceda71fe37340c642e551391186f2bf2decf8c80e6f7997973015afbe1f363a8897863938b7802a684995ccade4c05149f94e90afdd3c1b14ae8c5c39cfd3833ee01b135d9a98fc0dea3b139e7024e854cc5e2f361d5ef62387c0e16dbc524e6def5da99fc721f4240de6ed81cbaa2d557aa92c08220fd0b334447277f80b12e29bc4b4a5aa1bb002c86e7ffb403246d1af1fa184388dcf9a2a898e54c21a26ed056c4d634b9ba62ba5bd8bd502cce964a4332065f0109d0c0253b86d4fc7e31cdaac4cafc2b4aa6cc7207cb6e0a7d141e4feacdfc2e8bd8a2ffb7bf0b9fac2821091aab9804f8d582d3d76124c6a1490943c3fb6929714e7b9c623efca484610069b1864c36c4ec09ce4b0538950f04f14f0ae4e4a48c078f4e9cff68c2c070a2062685111988efb550f97cf88e10825923d609366f7e71f83cef70c5571ad355d38609b49c3110f9b36f948ef4177aa0d40d822a069ecaf3fb9ed55676665ce27cef71bdd5f5c89f5d4f94881cf4fb7aa37a353357e165d026834553e2c11fd897794a41f5e113d9776cd649adca4d6db7d5621e7717e2cfc182bc2ff833051ea7b0e7d02957af5e980f422fea1e044149cc44473fda56d52c2199d6485bf5dbd0917e18e23661ff53fbd8d41aea8bc94ce6ccba6c72a9cd163264dcb42c875a0acd49f588a3db146e757fec056e57171c44379a91f5aa055dcaa1daad33775bf87e702e76e37ca42aa606df474c28e75c1459e3192f5a62745cb4c936f0e3d53327ad0fc561afd1473095b849a4c2db014f8ac3c7df7a9ea3e2a58f8de644f2bb9540cabcdd08132f546faee7c56fd1069f2b44bb5d5fb5e076ec1ff5fdb1c71e428be21e98eed3fced89ed0d6bb81c6dd5c2cd3dcf90844c5b4f2267d4f16aa6e32c7040b79e1300e079339b411737566f3ec078c1f11e4c494dbfd15f16126bccc03c6d25e747d1b20a3584326eff48575d4e64f4162d603050e6cc2290ea9c63183d8f80c4cdc7aa51ebf7f34b2a81e77a86541b6a287bdac6e86680ea20b50b3f8eeddd026632761c8bcdb77705d8aeeb82b3676a341daa35d6c186d0c1108cdf1755f35a8befc5a8b222dba204d322956f87c9d7ce480dcfb9843813907b15f5bbb5c42a9cc5162512677a890183b317d7b951ffe5806fbbe0fd1108f1543263d84e41902557d1b89e9bcca118c5113feecf0a960caa24276a4db21a85c1642a5bf76edbfd4caf813276f18dae6eca985e76314f1b4ec2a7213e69e291f6839ab5eec02c6f0957890289f187e000acb6d5438fc982e114d649448d70248e96a0fafcf643b500c239333634fdb79760b1eb02e940fa94b2f92039ce2c9875dedb0251ac2a7851f2bc5a3e9d1b4220ccb2380728110f4779e626de86e2c67dbbc20a86ed0ce4aca856d4d14601fc108fecd58c7259f0d202f2118c0929416fc7ed03f588685f3748d53fe689ab042f70d41b996ae4d9ed29362cd8b045fa840a45b19c117c2bd70cea2aeb988e2bae50395ed9b088189f62c4212e23dc65ebe87ee840b3dce7e2d0d31ce376b65b9f9eaf68515aa74dcc40bca7b3f6fd581acf45042c89f2ebe6d1692cf8d9395f570cba6baa8ee036aba92c12e79e33757c434604dfe64acbec93da757e1ff5949dd80f9fd66a85a7cf74a2e3dddeaf8052858fb77d37d293942f30cd5e4dfa562b1938bc227b1129e46e1007d9644d743d7ec11c15ae3c896e9e05b13b231a3c535aa2ae813843c33579b5aee4986e64ed390fd6ba463f053a3013ec020ff3b790fa0bbce83c70ac9d57b93761d5d62355b0d03bc2e9324dfe4a1fc1e7b7ea0023af0d912de9da59f42bc520e848af6fbf3a03fc00842f8faae383e935f8fbd67826ba4ff058076a41c5cb263f64bde6008be521994f8274a3b8d402bf41a325bd0f0b2b7b87979fc6999a743a47a8d3e3d605cafa20a6f4f7847648b13e2fa7ff7d692edf819633733c9c87f91749ddf3f0d117f909335ae613282e7edf8004ef64c408efec86b0e6c05661a8153472243955e4ace0f8f3684e9ac04eb0f76475aaf8782e5d6036db9b00940eab62efc4d07e9772aa1aad9311f00ea02ff483ca3c81135496b0a5177a27f96531d5ef31d824a8f698ed8414f7c2f6f92855a6e949e940f14f18e6b5b392cea5053bca864ad41f5930138d02433c72fa65a5814af0a68cc8bef88487c97d3d8fc0f3da36d0762896396cecb7d1944a48d9795a6c195af04b114a667819ed4461b30ebbe26e6492f93bc9c2a299e6b8c5e6b21b8c4723b61c9484dfe32488662e657ebd2c12604583932fa335d416927f2fc4f23fb02d8015d6784d082ee69a070ed0655d5cc0c8518636b1dfc1851bb503749fe3dde60faaf27f45494d0f68bcc2b9d156d62af17f73bed984f0a085b91da8a797ca3b55c65c0968008871b18b68fc25a16672ce00d72c8cb1a9f4b7aa24a2967e40922f0c3133f984aa18b30cdabd0a84e4bde625f29dc527d10ab76c95771b5a9306e21b1eae10a26383193d6ed58ffbe352c4e182dbf84f0801f5b10e31c3fb2998224876b72d5ead77fa9c65e932585b61af2bbd8bf47d2382ac6caa979f2df444589eb074201c91d3f27aa6b0eeff43ea0f11f22b12a0b78006e7b62ad95397340a73874392a1c2609fa4cf57aaf353a24eb29796b060ce5f1c8cd0a8dec6ec641d91dee89f6f8dc72ea70f3a92879fb808e9ca6a8cb15e291f6ef5d58b042038110ee157ee319dcbd70dffbd6984854e14367f77b1329a26e0fd4b6b51686eefa82b9c0b484d1bacba8d27eb2aac979b52a95b2610e6a4058d5d4617eaa13918d2eacd21c9e84169b53fbf488a5bbb1acd66eb1ace94784d7cb5352b279e0b35d082396012b34cca626ed17830c5ff2d048ed8f31d6f90c934042d3f2ee3eb52884155f913a94eee7f742ea1f667ef412fc91e284acb88d1d8f357d257f7eaa7c5bef8a15028140dd13bf6dae426292e43890d5c1c87ad13f5b91df5a03b7c0051dacd094c72084dd589b8d3076bbf47e1cf0ac04eb8ac65574f7ffcde7985790650def706ec259075250ea83c70e1a262eea31fb2843d1e17321582230629444f70c8d21d64c4a05d95daecf7ef4ec68529661ccab91e09eebb8a0a65c9e9243e5f5ff1a6fe1527b6bd2b05a6a3cb3fdebd44223215b65475e0d8f888c4382b56dc1765d116ebfd12295da05a8ef3ffbb2440b3f73d18e3303a8fcaaab0c4f13f57f0bb264114f89eac871b225fc9fbc684a30abcfedd963fd94108e0cec13d27636f1038133a6c7fa311e65d1cff3a43c6bda8623cf3e067c381dc5c442962413566f7f0b33dfd855264c16fac974cb56685431f6ae53be452509d99bebf4908cbd5d3c474703a5e3ad66177a0eb248224ff0a575e716978111eed4f9dbca406f53108adb00350e1285741204026b096455cd0fc31c133190d785993d9b2c2b86e3dcdf461ac32cf288bc61837d3e44d83b13f974c627c9ee08ff58082653b775e40dad917119584c6533f0ad7274c363a69bf1750790b0b10d4e8b1d592b1b5737733c359493c6709d41cbf888b54687d57a24d3de55a85bd4363e480be7547d2305417e5f7450b0d7594e8422d866496d3f4ccc387e5d683d8efa136e2135c32e9e41489a7feaeab17a99f5b48adfde470ca0242ed4ec808b6c16cc2b30937fb66f5fe42a769d3090edfe1aa19c6c2290f2fdab977dfe327b3f78729a080ee010ae270ec20db0b90fc4b0250358324d5e40a46ba4bcc31e93f7dfa12f4d7dcb3569f1be498916b68dd09f1ba198a44cb4e6844743fa727b2d53b3b3acadffa1b00d232c3c0f29beeb94615dba079fe83ed96faaa2e72024b1b69a8d959de5135747f38529207c77ad9096f9bac0b2166896c76d8b1986994361be9a2e3d0ce708abd3854434d39b4d9151209f3c320d10aa31e597b766e7ab558b7ade665ac9bc06943b75546dcc02b207ddc6e20c3a06eef2e9f2a62aab60a31a9f7d944890e209fb00ee57bbe62b3d6c17ff21defb99a3a116820e446d2c29fbfb807b040de87d447dad8429328074ce1cbc67040f5215188f5603f5753182e16767bdc28d497d1a9bb660284a12549df68a1229b5b5f70ca67d731c3c0f4579850e3faf0626220c29f42ac2ab98a8e92655da11e3d75341c2dd1eba7f261fb91564c9f1e2bf68fa4e202e356e33601158a11ba36909e365b62453d02e51c8e23e9870b009cfefa1e2bd4ef1119adf346066f442b8a665b4799164eb6339f5662329487d8a478fa27891740af884a6afdb41750089eab686f9c20399afc7c80f6b97f48f34e8295bfd0e5ec015b738fbefc1707232681a2b6ceedfd0846576199282e468da3ccd2da00000000000000000000000000000000000000070d0e171c24400000000000000045981bdb900b6b76089ea3bcd731cb8d30390b8e09d30b27135517c97c5481bc6ddff801c58bda0bc15adada5c08f76ab550acf6518469139e1d364e3b3004e8"
+node_key_proof = "8019102b92e235cd5a555663987dead734c5e5856b91d97954aa329cc1a660f42c8b498e83d8d6bd99bbc9bbe73f89ef43e4c1923c900e4d5b911f249add6205"
+vrf_key = "78e8eb83cc92e12602184e81eb7a74d63304736a7147f6d5c94b3f462626d20a"
+vrf_key_proof = "1c37437c216a11d51c900cf69a8fa6ecb081d42280eed0aa86b53c7681a85819b143a6d8d034e641fd7fd9cec986bb33151cd39bb4eaf157f66fa4c84c97e927c188f4d7c6169a5788faac89d7da2908"
+stake = 50000
+relay = "https://relay.tenzro.com/"
+
+[[validators]]
+address = "3db173d07c03329f1e88aafbab3f026808ff637b000000000000000000000000"
+ml_dsa_public_key = "2b018525dc0c484bfbf8bfa90c69d054c408d07b567542f9aedf9d98f09b1194cf67c1d5efadebd12165e710529a9212f1103a2dac5f8389bb5449c04bd2366d1fe5ebac3c5c6088ef4adf9bb0d6b373f79d9140230080dda4bc8b49d0c5c82052cd56c96113ab9affe3b9f7ae669eedc53124c28dada31ff3f202ec11f943bde1696c6e7a059a59f9698cd1b76ffeb6427339d7821c4675c484dd1fd0c881508423d3e89143eadda6eff831828a6b46f1adb42a783b0a38ae4bef3644ef46abc616f5de8744af3055649ac7c6c8ecb037e5b1be1454596495c887bcb0332608aad8df853337970189431c3d34a7d57a114f8f58d46731fbfaad1746f7e1214c9e49bb79096f99d80bfc39140649db4a709919ee9256938a8475a19b699753d1155f987cc57c20fcefbd1528994d91eeed0ac4148eb859e0a0214b2044226653c1578cb8ca48fe33d89df4cb476b7c9bd497a1220ecae23e2ff2481945155e90049aeb30229f8c219e8996888c97fd06299b60298b566a8e5881cc93279297a2baa04ad00619d4b85978d6a91c4ac5c10b8199962bd0dccec435c738a6c33380fd64909ebf7e6ce1b71303e0cba1d425e744458376ffce41491c0c77a505cf1aef3179b703a2dab0eb68f29b0e6024f3a7690be007e1ac350e8fcd4811582d2d6c8e4b1c491cacf732e87923dab19ab2488458d2ea225bc103d692e6eb6d05dd3fbf11c2ba3ff79008d584c621bb570cc671c08c878f69d693b8752bbc3a5fd46e6577ddd812305277bfe730b72abee9ca13ecb920bbce2a45477773cfcea253b717b71ed07230b6e638ec68ea535575c3374b57cffbc0c9841c2a298354c17895aca3249e9c03ce664d18ed8f5b82a60f151269f8b652b337116a57fafc2f223fb39a19614616992d2492282d8cf6c6c8c6bfba387b05e732a917faaca4215b4bef1e37c698a183b4ae857e3378e72ac88cfad6f38132261502382ebd9fc03561b91906b0cc8ec2a091da654cc7cc3993f95a738c902a8e37894177f4f8ce96e92c7c4d5ca65988b0cfd31261cb1e9f662bf115116edded3ae335e6798e7f80a94ab8502a1017e423a86437f368be72444d61edbb99df6b9c9351ae87c5df69cb8369ff604173a708c7d2e211a9d6704763be906d49cc4cf17fafe746d1642fae005b9ab1a8f85e6ffc0bd5355ee548ac5ede0cdaa7c893d8ded115ef10c2f3f4355f2597751f2dbbdacf035010c365031a4f304906f3d43fa4b0bf3b9ed54040bb9ac182048ee79a67b52c49724f207d0eb435cba85b6ae5f49ed3df044f31a9a3ad95f840184a3acb3751fd53243324e44d2b5a183de944cb6a0dca9f47409149999b84df31aef81acca08be5fcd1045b48a5194c2a40d98c45a1d0b2edcef817b76a88e205b55c79ec2e8b6ed60c5a819a9dee1447f0d07ba6c40be77b8bc93314dd9ed19e14157e1dd9cb230a36a7ec6e11c3388d6ed59c2e81b9f585f91adc419d5fec525e5baa1a22522b088cb85f40bb2c385acf7b4609155cba827a8c1178145ad5127e1ee8f4f071a7df088712c084777af8e4e918f1a9d3de0771b20f571320f8d71b557b4898f48514aecb66ff082a3ce31dc2033f0ac08ddce869966efea88bcad67f82221b05a7aa68cb92c07a815a9e43a525f38a22e8dabb3221f0766556465e1517a8a611e36c5eb5965bca19a78693106d40786a83f650ee9982c3c5717cc8da1fb198aedb9ade7c8e9c6b8e544df98172d0413f5dd5642d618607204cd56861bf89ea6f0655eaed68e57776edfe4dadfa134a9a1e3c45a52deccc28915c452d3ecd7e12616db5ddced5d9625d10a9b5febbfb91da0188c0e8e62a6cea31931a3454d0f7e17e207946454b5fd4827526bafa53499abb8f3978211356107c1b9fbbe9fc1f04814c7dbc96537b4f3c6e586db6d41655c0233fbb113cdc790faa425b90c9d999cadfb5cf076bb9d6edddc8fd55aa8a0ce4c5fb83b37aa5d335e2123b85fa5b69b0837d3cc35dba4fbe8797139e6980d197a5391a7fe654ad7838d90d1989fbb12332b3deef3a85c3d306e4f3bb7611a1e15e871fcf382033c28dfe1dab59b99380064cb0df4710bba4698a79b2f9ebc5c4a4e3bb664a5d447544381127396e50f766ebe880f2d85d9d34deea8f98fb41f57e491b4a64ea9ee08f6faba74f8afe59f82c295668399e9387b2f00750309469e54e6c5db23de9c2f8dca620138c9533eef6ed008da72b4821fc0dc6b6e4481d8f60b6a0580452d2aa79fd2d2567a785fe8f195d3e96ae475dba9f075c065902df2d3c1f8f084739ae452859a3d8f70f93405217520e837f7bba58b45f93fbe629c4ff12c17bd8738ea01cd12c5e831c747dd84453fca57c2a0b5ac60c2c83c740b8b889202ea5c35a20bbda47b6c34dc08daa8f36ee4d06358b8d4b163598d350efa1f6439515ded78a0d2f81676327609ae7f51c8615945ff1734ecccb4e4c26c1e94ad58b4ddea38010e44e802a9ade7d9c2f4a150431195849bfcfba19ff65022a67538365044028c63a3bb494b12c7c0debfe8571feee24249fbcf225d0942ea072a952299d4e6402b11b9ce1a31a4d1cef6f90868c04203d7a62335a83e8e0e85c99ab2ad998486224320a29f4de5bb787a1fc36c26406eab4664a573272125f33aeccce00a2b0b070622b4641596d32e9cb47e3f3df09566d40e20d7121ab045de8c884f8b57e463a2674b0e344210ed6d6a3e0a08e4ee5cd9be992bdc8"
+p256_public_key = "04fd3078c34469b4b2eea8cf89714fc7592941e1c6cbd56adf1d51f08a1f334a6b10c5eff47f161bf35013af0075d63404c523b95395dba2055938b8fde7afc6fe"
+node_key = "dc285ecce93c916d94de2e2abce403193607c704920e66dbf2b5e7e4eceb8c7d"
+proof_of_possession = "ed0c00000000000062b3452762baa0c98e1db84848d7bec7c8d03220e1808e64db86eea89996e5b5cfe1300907fb56d7da430a83a79c390760c1b29b1efb28a366e61af54ecea7513e803f9fe467e858e49b1d3f5cc9078ffccbabe394a9752e12382daed584c03fab99c11784a1fc0ce9272db853501e4702a92787d058151b0a686beb6fa992de26655690077a88496d85c49d44f7afb84148c3d143996ffa41b07aab2a22b931dc49c2af72d22f9325810532075e7885959ea4acd669bf7bb6bf754322c2a76c53fb7770ebfbc16175fcc12bae324caf01dcd2a2a22235d01bb6cffe7ab20e2f7cab6c574cd45db8bf7ee898d4cb7b5b8cdd559c0c0a3b33c0d73acb668fe69d4617c34f1681d721609cc7024ddbf713cb49e70d960fa57e5f5f3c08ddbcce497945cc156aa7d9750335c17d22db159fe6f007bfb38c6f7b5c3571e1b4a162c2fef023889994121171a183721d45ba8cb78c659a32baefde9bb096891b012da9b3847ee8fbab809b66e9b6e765090010403174cbc903310d398812b18439818eb10b0a11c129f281349b47a7f1c351d6a51796d6b4aa1a80df46cfebc74f298ed342382cd6d9510e4b1611189202b20b7834cd47e3bf228fb7a1b06e91c4075b8d98d28bdf32339583be01d7530e9234246d7d374ee58c70a4a82fc11b10fe13d2f9bbddd6bfde2931635de706e1bff19ae9ca5e42fb06019ad6b6582f8554f270d0177ad0a6159102611feff45a198acac945da6a7fda02f6e74da58836018dcacce587a9de28f9772bc45b42cd0f005d0adae308a5952cf1f2ceb1ba7866941f5d22d83dc1fd30f2a5af41a2e4150903988cebc704a19356ac10355238500226a64067eacaa9f90b060c14a787a1d4128f76a1486b2a26d140a36796e5905131434244726e8d4822a9f7cda6c432b8d1275a6db52fbb9b0d740592ed26649794aefce0162cf74efab9a876308fbf3e57ddce356ebbefd7287870b47417299201ecc66847d0783a5fb9a9e9f8beda41f1b843e875214695d5f4d2b1151634ef357223bdc2fe27602089fd355573859e77840ef468afa3c7e847c240100d09c11e7f19cfc2965f77b32cc78ced9a4bd36bcec3179f4068f5e3c5331126f9f5b92233436c7691e83452ae9033d3da7bd6bae7c0e10ca4e1581c2fa8443d7bd73d41bd51fe79b6ba15b6f0d632a1049918792bfff697776ddea8b018af49507cdbdfca18b486130d8b8b2238f0016989fe233b0c521aabfc06b160b13cdbb45f0a409378bc66d8ec3ebe1862e16aa38d12382a0ced59ad2d0ab24f36c6711eba0d811dba0753abef1edf2554bb8511f75a9420a47b648528481dcf94ce9e7727af05dc9eb430cb74fedcdbb6baf2e10f4d98d413843e5dab005e4d3e8755acac25448f14f57f1dd0b931c3dd0401274078b473a99408ea6ef0695268dfaf2e724e67e5d23328b47bb367bfb3d597622f8680a589781b347dfe1be076bb8b2486b0a0281b059846888890f00429fea54e9489e025612ddb0f560b9af56c4cc6b352d184628d2480335227ea2f07f9ebc51f283670d0606d5dc8a1d7d3b4a02ffcd6866c8f9847380b1e4e5635681343d9b793e592610abb52f3c5a4bb600c56af31e1f90d75f0415231694e7cdbfcb9c1530e62373fd398d7dbd2f1a9bd3e630b9dc5a73f98af3d0e02447ea35540425fa0f00b8fbba6a175219f87ba0b9caf6317bf21d0474e64413f3b46bea8f86fe10b99856ff8535673780a4d522fa76ca53106f8c309299cfff15dc94e424d8a7ff27ee77a0ef850df8aebf02057805ec1122180289bf7c9fae8c5af1321ddbe224ccdf5ed1c2d4f6528dca018ea597ccc868859257284e7d2f85b3eb6bdeb118df36ae84b34838706a9a1c2df483ef7c1a4ee9df9a1dd03fbeb78643f6a3f73a17c48b10105ccd12afc74d8751a64a9fc13db271c7383cf256b669d2d10961927eb4db7cea52bd5a215691b15fa81bc3649e46f40e1a937c992316785a3c2c7957ae9553f47126c91f253419dc494e951c3d0694bae053005697868b5ea4fc20d05905646b99401463e2e0194995dd30d58b49a6665f0764ea8754a66be5f1243636c9ca2927cb81e6fb0e96ed3eed81835b051dae9ee0ce47ff8de1ed4d7a87cc2a626d8748dfc6f78efe1283b389a93384f1561abc5d00dd41c25a0f77cf08651eae6bd53e5415214c74516bc4d337198a498ee85aee0215589159c18c0a4b4b30f54f7b574744c75fe826b5e8678e57c61b332d5d1f6656aa76f71b8b969c70efffc667ee18558cc31bbec70f62f38c7fba2cec656485e4a3b33da3ec08722e606de2df072ea1ee436e51924c47265305ec7b0412e7ed59773bcfa7bd7ecc236675e109458f7c7f4267940311a09061624e10ae6719230fd2f9ed78b782a8c3903a7259f8137fd42202cd8dcbffdd6fdb708bc0c2a0dba81a5f5e1202d92aa3dd31d40136f637f24ebf65c58cd15a2c345ded0437790903a509be9ec9f5b5f145826d2de303fb0d10bb6e100e2f3d873bcddd69d41c3ef37ac15a10bef6a36df77783eb43fc28c7a682b982f04a0c9471a9f485024bf49e073c70b565453eb799e773cf13069ab4ec0a9362bec215a09c2a99e7444964bc4e421eabe95d18c02aa98dab3d604d564859f3674a24deac903ca827f018141a2e4c41b65977ae2aefb7eb621efe7b010426981be721b0f412937fa08d42670216f1330b011d45c3df2480d8e42acfdae715319516adc6a8034cc96692fc337efb9428e39a9de34431494c5ef9a8bf9f93bd51408a9c67a5f93191714a1f90ffb4969f365291556f3e46d1a7b95c40cb9a6e245476cb1bb2fbbe6a372d724b81e7817ac822a8829a67934951e8e7ee5e5c554ab0e581433ada3876538df44b95ab0d0754d517b2c5ca2e1ac84e049352637473ee88a0c560d369e5f14d8a69f375156d1c6cb9cd9966fa155aae039ac5ab7a4335e6e5fd6649ab024d64536a30983827b2a852cb74103f091349d8ae7c2b8d38b46ab991d4bfcf7b925909436e4140069cdd080aab3f08ae166c66460b00a8364797f5f1e5455a44fd6f972571f4ead229f1a1d61180f3bd084f6de3a83366ebe0829f916ef69668bfddbffc05057bfc71c5a9342147dfd50ffba3c2ed9e3027ceaa891fa8bdfb97bc3f414b9b1c0e4ee137b137f4ef5fc49bf66481e47b01dd0cd1f3ea81fc020f1fe6ac08a060ceff037e23e463ee17cdb9d849df8e8b70271a947a0dfb7fc61b8e595d29aea1788b146777d3822e39d0a369a184c68e9875b07ec9942eb8f490672af7d16216a401e5c5db950be11909336e7925a2b284ba3b69df067606580c56b13d09daa713ab1f72b59a1cce676c345323640e69b2f610bc5348e1eb5e9c9b6008b74a9b90486bc85dba51e7aa767ffea079362a40ef029260bdd06f38a4748114b912f839d261c233b6c2ab92cc5e27f6c0dc9b521cd332f44925936c067bf690287b932dda7e5b14c211193098dd268eecfbe739e436ad43e361a94b0f4138ce36f9d325e49b9fbeae0fdead48fddcd97848fab2cd085f61433097dd812443011cc5c5f9d1f6d9d70aad4b8c377ca4c6f9e151ec04fc11706f5d9e2494edd3e243e0a32ff23348629faa2739df50d0deb8e3e0e5c9c6624e088c9869a0698a11de3febf485652b4d44624140bad0ff2b4d1ab633a59147eb35bc85e2608d751223ed111580cb812e1e69afb978d8d933586782599c7b0a26ae3fd7ce055d535a3e335eb13725853ea150445545bd859fef601a739af8097efa25aeb095df779c47835af75518c0aba1e99cb0ed3817ad35a04bc6c19177cd2a6d12760e50b8474b5c6c51c5c17ca8590be83a65a12c8185b32b9c794efbbb0a7d9d8492779e96ca9be501572a512a4bc1edaba8b972a30d54928e6b46e028cde53f8d4450aa0de0b76d4a2df4b8cc6ae6010b52b8fe3d429c9390deba001e242000684f35dee6f2cccb1718c120ea5560a6c74203fd508a860dd34696ae1112b14351b2b500e3b7be822a56d82e5d715f698eda4fbbabe41978379d385e05357516be9aaffb808a8436e0190a4323650bd9f9274cb7cf312365ec32c43c014f2437889d5a2c54d73bd6b8a8f1f49dcaece988495c8a6a63f8f80d4b646c5473bb38a8ff284547276184cc43a9d3bee487105c6e64f90a763f567936842f2a25c87841f49fb400c5393ea802fb9f30a8bbedd535a5a975ae0e6b56874f2d9839a263658d64d75bc3ade2ad5018f4f25fb0559e3545d8a6cf4fc31fc91fe3cd80e554f0681c8ce7d14323f79212a456aad213ff0680853de60bbe889cdb39ea14851a0277733de84d7876273bde646b2e68bc0bb8a24467a31baf55544dc1f6e34f8300808d5f41d9cd75670a9b823371032385af5d5f60540c465d345ca081ba0a04f87a17fd1e74521ee07405e5734ea792cf430eb5577f8b0003c199cfa45f9e979e3e04f325a7772150005340a717b2ac77f2aac7b1f2a36fc3c5c2c1e300ed99bcc75b59ee57f4d55416946cd3c6cc0a336a0c017a7cddf127a669d177b45501eb1dfd652597df5954b97dbcc141f5f94b3becdf2f8075b87adbe0610349aa7abb8689ca1f6f9fd1847747ae91b2064777d9f0000000000000000000000000000000000000000060b12181d23400000000000000087abf7aa820a37cd4028bf974a3aa596860cf320b52c36fc33c659946645be9968dc57223c009e0976105d0750b98f2a8ba90f3691ba62e4ef9ab2ed7f62be37"
+node_key_proof = "1b50685c2820cbb999c1082d291bb62201d2b56da0a55a9e60e0ec64697d5736d5f18f0378eb88c0aa4c9db1187b2dc4c7ee6ff90719fc5638f887cacb8d100b"
+vrf_key = "d0643546e4e1305c43af19deaa82e95083c5ab259dbb19f7eb1820d25bbcb5c7"
+vrf_key_proof = "196ee90496d294c0038642b92c3c4e328e0a5021de5dfd84087a8326f92fe3e095fc3544e5a72e42b6b5c2480c400c9f2efaa8aeadf8996b49ddc46419d8cb2604f24216c011f227ff7b46fe6091f601"
+stake = 50000
+relay = "https://relay.tenzro.com/"
+
+[[validators]]
+address = "a6601ee533171cd227b6cb1a17b8b9322252ee9f000000000000000000000000"
+ml_dsa_public_key = "b8b36f9631d969529cc6499652b338c8fef71a381ba61a9ff901276997307a94c3fbea95adb1f2a8346a3883e542b9c9d9ba95f8c5b524a75bf2745d6ad4ef7064a367879d1484d17030736ce302533c40f0cff35c0ecc4dc1573a2bb53015dba463825125787d3f55a798b8072dfb4c83b915c12bff31614f8b04f68e43e068a4c2921b570a2981d41e51b4a93d088f4c073b45e070d8143d07fb5c559803c968a6efc18d25099c0c8ea033eab453cb59645c1a58e7864306d0e61356af6cf86958b92c22d209235f856bffe3ae6796ffbecedad89e72ae06c2100bb4753ce53986765b5141178a6df1e4bc98496cc0790405b20f38e198d0391cfe34d372bffc730acbff6a2c3d2aaee69c0c3bd0952538a9e502630486237cfa025dd50c02fae7b7c331514c3bfdb25a845c7a71f7c0ebd205502c766c8d03b5fed1534702ab0b0b27a73776f3d24ac7fe21997bc07f85e340939d0371ebff8bbcfaf5d3715cc645a40534f58aa199dffaba0aa5f74932ee6d73468e8881aa93e648468e6de8add8b4628f3117088a63953e7743f4b8a6ef9b8ca74edf667ebf9483701d2272ce9fe8816fb2072a3d1fe6792075ce8e130306ba9581522e0ea5572b60b7683c6840c441eda8ec2fbe61f6d35faa45a6f14c73a0fb9db0dea74a2c1abb9782277a36be4034fb5a90f850ab91534600947ead7e50ecb2ce7892e85eb633c2d805b3cb9766c6bdc65c5fa8904c66332430df558f6f5f6ed5dabd18d1a1368922c8b3d615e3cb9f8044c96a88f1d293f2f22e4599bd75405f01aca19f34661172379517c305913862fee64232748d1a47a5393e8626b6d679b71c284e6b77cad894d22b528f1b7122c159799bd270f77502713eb448c6246c13c57c9853bc65e87a0a22bc14e54f5e7efba3fe6c6a5a230b02c9f2e93374add39aca9f777f9237cdeace9a5cdac08db63d738d25d98ffc6b1ef3544c2aac3dfd917a581ace483b3904726f2e85cd31de430f3c35c9b49b451f5f57fa364d3b1928991c73dcfec943d5f0bc9c83b000470bb7bb4594dc8535acde8e9af2418234bacbd33dc27eb165b8113ab956d8f2d9ed1ca02e721d668b15947c08ac3237ffe8f955d27de1998647293cfb3f8942661933096379118574f8aaa31384c142fb049332f5527481dddea4adbedb89a92792a04725c8a4493f26b8b0097f851fafe394057e9868b812c88f7c6f6e1b11fd073ccada4f1013252b1d10b11d7a23e6e2867ee919eb66a9e17f2428b6693eb7d070b55b38c853a9df6f7ff5f0d4717db927c1325dcb28b8c51051596c0866fe775887c6adc162e50845e9db4401359b6b183819cbdc2631a70415f80611da1e3c594e7c5e904fcd66122467da32ed9736754d62b16e2f6380db04189a94c021a072c0a40d6f304fd53c0fd1936bf3f201001acbcb99caa72ab07b0c6207b92e1148845cb6baaa8092e877d8c36eb24c6c61d4c145b142f5a8200413296aef99fdae4e978fa461881934fece21bc0ab8d6e7f7a272d9500af297a02542c87d2df6bb99a7e75680a8f3bdde3b6d7ca5dde17c635d7254bb7ae11a32be0f2b89f51f5a382202b41fa65416bcb161b9f9a19d8a919baac35f2957459d1883d65dffee6d0ca6e521420e232beecbdbe2c4cf0ce77dbc556306d175af49ac7d8d72a048883963f352d9e20a8ceefa1d082b12576a54317c77da2a4c993120b2154c6f23e18dee1708fea1c313a0a25a93e428d4289c5e1451fce35ef1441dc133b95273049423537b969b0916d9950d8b9b883191ff82ae3c03ab7d6f9029c7db6a42ede1de1618d66a550a8aa52c679318c1a43dd26ce2c5de25285279ef1d4e21ba6f8556afda131f17898836d75fcab0350ed2723c401d07cd4ccfed7c855a9c3815db274f5a7d722354bf637b32728ae8f4346641e083b89aa73b7e8d4582a7801e67d0b9f8c4c5b1ea8b71ecc34eb46c6cbd0162b76a6f2f7c83a9e68c510e7efefb303c8304a0ee6f536569d259a4f6c015c29486746403f7df3747b5cae35ca3658989f0c65baebe29e4729228c968311df68f004b397f5b88c1f9b97bcf46341bd5fa5a4689958f0edb2393d577d9d3c98af35fb8df0f39afdf70fd23641d36b2af8c85e6f47815e0df8f8ffb2bae86b434c3984088aa1facce8a08ab2cfd8a920d0bd5b5f5f161b8691c290357611966f408d483aad709eab740701178c3631c03064849f8417eadc0b4b895ddceefc73ee3cdcfc31437811ac55a6409e0c4460d1f2ced652dd89ee901f062f6fcc3cb896a37d39fc47b4ed1c56c5f193786e630515584bc8ab411aa74c5c71e25d4832b5028c63af17b71330a3a010b9175fa03f12ab05db35f1118e9fbee65c70e3060f41f8c4a7b733e7ab10779c43c793dd923e1967d92ea78cb912e0936640c060baec30acade1c9ae78c5142defc131a7c20aad7aa0b19b7d91a3b0ff5852b71375eb5a12a1fd4b225409a7080ea7763b1d2d99e0a8e99d51b22b4688c1cc4483e179da1cf66ff0a79716243b48cda7e2face04fc45bc0f18b1710105c43143a94b8f6d63da6cabab3fd72de6db11c83f4e17b6f22411ebb4becebb04f17109d914bc2994dc8edfed444ed23027d2b2069b27831dcc52df0bbd6269d29ccacfe09f131283a321c23fda009d13968d65d14e83ff3bbc9e2e24f618bc809ce1ce9a65b232aa085ab982be2c02b673e734d0381b2b54db1af49c655ca14f3181cc151e4375ced"
+p256_public_key = "040229dd4e305596d6871cd2bb737ca727e56a1c10439eb2656576765083243304393bd2b82fd653c36a4470fd682c7db04ea2d68b8107dc77cdf2594ea95f901d"
+node_key = "32816af8dadae41938ced07a71a5059c302cc4ef270b29e0ee85d33f21bd60e0"
+proof_of_possession = "ed0c00000000000018a9309f3804083d2fc66047d39236a8369116f69ca229c72950f3eea2fec6bcf7b56d87bc86b8411a117f8f4479dc4b30689afdf8abcd62301908a3de5345fcce65f35b71c4f8952f185d5036dbf5e69cdaa96092f62631b632adeb5727cc4c60824cd653ddeaffe185a272a86cfa5d8245c77a51f65f06d01e4b271cba3187481a23576fef7c3a8c9778e99f7f8dd8986d7ef32767126abfdf132d9408a988c796bf21616b3b35a742fb67bc44b168ced18c5c7b270ed3676f8915b60903527b809465d41fb96751193e1dcc57add483b0a7e1552d1235338a8cd73427c632bd6b03d63697963d7ef06b299ab79453d5baacfd1dfd9981cc877b9b9bb0cacd3336a186edeed0b1e03f1629fbdfe3ed0ca22196a846cdf8f72302bfea88a3e919744fa20fe4b3fc59bcd3fe644fd7850da51896ffc9e76dfd78be45feadc7ac9d2488addf576c456a5831ccd260488aee1be13a31f546c26f9d9eca31ec132c45127234783ca3b8a9dbce29035eff1391f44d98905a2cca845b7a07016960a1f835c3fbcb0a2c0e28aa692dc545a1deca151ee2e832ed8a0742bcaef5011462c6433053a44933f9311ad75fedec767905e1749af8866d1059239e23f38056a29c59ecf6788e8b21b48beff448b972c479a891b664005d1ba0223f73e82269afe19ae21c1276aa96c3b0836f6fa77c029037bbddcdf20134c9a35f041899bc8a7b29af461b72aa397476c7a0736454173901c3e4dc50752f0381faa61f79fad7a007c8d7226fbe141239264b3bd5b42f2e6b043efb0501d3fbed77d50570ed03a78937d7df25ac5e82394e5626f467f009db02b72f80d31d84ed95568881932735ae9a31f859bc4991559e2180fa3212e468c01d83db0f14f8eb4a7972e1172e92de0b3608c3ee4c36d4d53677092c93ae8d66c889979e4158a989422510f23ed56c3414fc8ec1c76d94aa81b3b1f985cb29f0b9ce8e06e7c25b81a3cd7150e42ee6461f7dcb631917ea2d8714c07451f0802cbb3fd42811195255a96d7ca38e5678c4294e0d13b965c9a07701545c2b45c0bbf351603750c1b837db6b09be97e96f011b6d461c58049c6b5eb94197716140166260df31675665d8367b20557b3672bce79132eed291f5775deea8d534bc7bedf1baf3db284f31378fb80fe08f483d8769d5c2ffe560beedfbf0288e92ea06a468d0ed014d721359f3634ff93dcb0a379d275d8fb8559ac3d3b0605c6a9f5a195a1a43c6989cea963b32b97763c6cdd3538d4c6f33f5b4d0e6b7675fa2c70cc3140b2e37ba14428d23044ed5919fc972ae9048c43c1898e38c109195897850fa53d9578ae6e04e56ac0e5b91f62c39c3e14ede8cc45001180943f8f3a0b2baeab1b7c747ec76e01387c51cc126e94fd52dbdb06e14ea7b7e3a803cfbbc4975166c648874de679435ddc959ec567722e04b96d5639a9970352c8eb49bf361c284c25b42c76d8f735b06ad3c3c2739ee52771e8f29502907d7b932853c254fea39f0c49984c5a036b4bdff5e6fee8d15f04f769ef1086e42e5104a86594eb91d3252e35a34ef29556822018e8a6ce2ed49c2f2e62d2474f92713b326c02e6d5ad0b1fb78071b8c24bc0f2610e167c991e228df34ffe6c04ed8e83309c14a8c056aec5f5aa7c40daea491b2c46b8920f897623d57eb0db59a75475bceb18d6e2d260f539a3ca5b033aa0701ee40a9824f68aeb3d90f8eaf985b2266ad8ebb59c3061645d57c3d6aba47e3734e72443abecd562de39216711f146d3cd6a76f3aa4c7d5f18b709ca5e4d9528910a415a90b282eefab7d83807523dc7b55463e93b291127d055d08621de8017d2647ebee56489af3cc7ef7a1d4e36e9b4a5207e9936d23f7bec0b76afb528bbd1a658e45addf83b05639bdfe0b28c7ec7624a74fc2744de124952d8816998c7f9af6ddb31be786cded995c834a18bbddf9e52c886d90923c8256771e3ca9c63dd10e93e1a9a91b6b4b29ff9f9df8438abfb983b374ec86b936a42ad2881e80e5c52b9e374a6b038db6acd583ff767c18c2f8108adf9799b5f03f9101a1d71bc8fd448ad8c4f59a858d33eb19a7664a369eb9ca4137e5a0cc70cc3d06499c7bb8c039a0d90413d43d5f686b4a8b3343fb2f58dd33ed761a82e341165a13728b1a671d56c9935b14c4e23dc8e1f4b433b31229d9b7ae904107e74a7f911ead5416961876e3a9b5ce850e60fec89cf03ae1fbddbb53bc3698e4edfa54a43c52dfb734cd9317304084408d2c4de3a03e74d339f3c334afd8302aa35b1aaae122555f9c77fbe346e7d7d58518e0d8c065c99c2755a5ecf6a03c6e5beac5d886b3a2e94319a11986eec60d9f4565d65bf278be9725d1d2da1f15e08dcd50910c23ae546a5855b5159d4b3b3d59c3166629533c367035426c44ca8d3b25afe255446ebb959e9bcff110f37de00b62d1d518b92e597a041a4697808db316330ff9baf50aba9ac27a48312d8c543c0ba8ca5253dbcd5d31aa73543a458ba4bae199394cba6fdb9ca3787fd2ea1355137faba7883996aa395c7e3d78e8b756a7a17449e41fcb0493f329b2a1fb605bfae096bc186d0946100eda637781b0e7224d7753df4d35baaaf399d5a3731456f224b37f22c9b8278e3f97fb221c4a26fca4b69983b5aad9025bb5682a176acf4d81d64bf31223ad381bf483d743bf36df557c17c7e69a5cb304219f4035b8e5ef1e050a038b82ae4d1e59e8ece866595f786c07f4ac7be05fb29818f7361c2370d4a30ddb92b578c9ca26e039d3cfa46a1062fb5705191ef8f59ef4dc5d6baa5ce5f397e7767a3001d122653cbc5e42f832c9612c9b083dea940d6a373f1d84dde88a16b76ae22329e0042f19f5d4bec599d50fb2a69eb96fc48cd8ab64a0f772889f6c3b074fc191464bbb9ffc3e3cac8310b08469dce46250171aa14f0a8599a05a0ddae773d78f570f4c92cf329fc40ea4e5046bb4c31fbb96da0600d5b49bf71003eb668797e0a18f406df93324b6432b79d0db1162a2972464c961bcd540672e6557cc3c70c8d27922592b413776b7870dd134563f6bf40622ed03f3c4aaffddd90d7a2a1ad72bfba5a3f4472cb020ff6b74ee753d550721be6b8412d07cc38faccfb0e2a611ef33b42db5af4b6118a0fcf55690cec472a820cad9b12d3e426727b80411b3e5e04332110c98a1a5a91fa704bc269648a91bf9ab2a8d77062a1f41b2ddb9ef7228abe9894a1e76fceef046604f53c8d479e7faaebb1a65711c728d8f56be0def55f5414b8cc3e80d9bf27941731a16529888b10692277b1307e2f3b3561227794ff9f8b06a0c96f6d5772dff47d7d030c7612bbedd46d7e83c3cb809a006a90c5d658a7d7818f9072efa750fe60fb6a35e8eb78e3be9b99a932ad6e3942922f31f103753d1755c6f28128d8bdfcfb156aef2d63e3b0689a413572455abc9aa4422e442fb7b5b74bbe58573ff00492e1a1c7508a740958d86f5cbd4d0b1c785e817cfd60d8ad128f8f873935d7973af4194e17e0619093f79b02b070f3b74728469d03cae5a569170372c45ffabd1d505d76d1a41abcc8db765f5b9ddd89a0c382ea23f5a9d4366797fe911b64985cdcee4006b0d60221271d99bf0d4d9a920f62ae90cb5314b934709b2434dcb5207a8154f46d15a9ab68a731f299b88bcd27797b26c0423534acece38eef284bf3dc3a3c351657a1a833c29a86d31254b229b4bdd7727edd9da8ec1975428d9831fdc93df78cf1fad1ba4caf32a0132ee46259193e859dd6930d5c509919cc0a259d7d01b8ce64862cbcd8aec6be8a3a60f42b3d01f6d27beb89d70844ffaca8accfb7e355e34d58181cb2badcafa97906d87c23ae1ae9f5b471aa922294964a0f5079830a95b2d26711ecc83ff0d6660f560d39525c40c4f14dd3d30a51d8ddd488e66a98bc44c86549b05d267010fd309acafcba0bb57dcb5c029f394af658691756a7e41e7f83fe48433406378d0203a795a73bd34488850fe56aebf656891335f74ca65ffaedecf9f401befbb5ffeb5db9f754cd7484393f383e8ee1e77bd934c253c792e2d9bdb0f0c558999efd4fec701337f4acb6e471c1ec961dcccb7014adff778c60d70dc7a12bf32c0baaa03c1f7e64d3718a2d069f49c28fdd0fb0a26d315903c1c988d7fbcb423dc1507ac38b3fbdd216d380d0a4b3f8b9524dd05e801692a962a1b1be3f07159d1c29a49b0dc9ef49783256745174830f3bbeca78dc66123d94459163d7403798e1cbb236c6ac4714237e1e27948083f3299589980f8e86821ad2351d1868dae50b9a4c96dc083ab7d31a87d9228b849b7af8544807ee531ba94d458084ac43055fa46783a75d1d4fc0d7a169bda05016add473e652b6c3b547935a7c58d27b979e7e727b82bcda94ef720947ef9b8e25c736331017e76c7509cccba837a8a231b0da18f944c19505c71e6cae5e9e18f7a9a6f622f6c3ea8b330ef1f344009672c38767689652bf8cd4299c46462254dca83ab642493bdc12033fe8beed3ea71740a59e22c920f74b05c4f9d37b818d6b8ab2b2d8ac874232b46b7044ce1b31c50df048e173f418eb6c8e0f82a2d42f414a61638476174c2ced8467b9ce0e9f1446bafe6f40000000000000000000000000000000000000000000000070b0d151b204000000000000000c67eb584b7a1d8fcf9ea9a862f5cdd9841eafab91fdb1736d876b4289905ed07045301deedd8a08ec53c5a7d2fd0e251d8cc4e1490df91045352d1fa15627074"
+node_key_proof = "595c377739a52cf2de8bbdd9d5216ce0cfa95484a2291269951e0c47d498c1a45c2372ee755d6b3c12ffd95314350be9c523be22d008b4ca8a011d736201b701"
+vrf_key = "206cf6ffaa5d3884e4ecc69df1e23b447f3c9c642ea1c0fbaa4c03742582b92a"
+vrf_key_proof = "7404a5587f696fa98a2b919b2f8051b114f0ef637383d5ebf6e12d06c77c8f8ecb2998a2dd86553c8c8618aa0fb128fe8d123e1e834d75d7933c787bd2ccd153bf45e274e9ad29d4dc3aa4581dae4508"
+stake = 50000
+relay = "https://relay.tenzro.com/"
 
 [[accounts]]
-address = "0000000000000000000000000000000000000000000000000000000000000010"
+address = "00f58aee5c085f420b0e9185518006bd28a27613000000000000000000000000"
 balance = 1000000
 
 [[accounts]]
-address = "0000000000000000000000000000000000000000000000000000000000000011"
+address = "62cc6f3cb3b6c730699b31b0ef4e0acd281ccd43000000000000000000000000"
 balance = 1000000
+
+[[accounts]]
+address = "3db173d07c03329f1e88aafbab3f026808ff637b000000000000000000000000"
+balance = 1000000
+
+[[accounts]]
+address = "a6601ee533171cd227b6cb1a17b8b9322252ee9f000000000000000000000000"
+balance = 1000000
+
+# founders operations account
+[[accounts]]
+address = "f550d3ced9a981a7ad2fdacd91d07cf265cb173a000000000000000000000000"
+balance = 2000000
+
+# public node account (initial rpc operator)
+[[accounts]]
+address = "570cfa8892003dbd2c71913d2f3d32fa03d569a6000000000000000000000000"
+balance = 100
+
+# initial rpc operator bond at the governed stake.rpc_tnzo
+[[role_stakes]]
+address = "570cfa8892003dbd2c71913d2f3d32fa03d569a6000000000000000000000000"
+role = "rpc"

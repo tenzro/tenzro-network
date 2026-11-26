@@ -18,7 +18,6 @@ use tenzro_iroh::{
 };
 use tenzro_node::da_committee::{
     CommitteeMember, CommitteeView, DaCommitteeBackend, DaCommitteeStore, DaCommitteeSurface,
-    committee_address,
 };
 use tenzro_node::da_committee_surface::{DaCommitteeServer, IrohDaCommitteeSurface};
 use tenzro_storage::da::DaBackend;
@@ -127,6 +126,15 @@ fn session_of(seed: &u8) -> Arc<ImmediateRecordSigner> {
     )))
 }
 
+/// A validator's ledger account. It is not derived from the member's identity
+/// key: a node finds its own seat by key, never by address.
+fn validator_account(seed: u8) -> Address {
+    let mut account = [0u8; 32];
+    account[0] = 0xa0;
+    account[1] = seed;
+    Address::new(account)
+}
+
 #[tokio::test]
 async fn da_committee() {
     let keys: Vec<u8> = (1..=TOPOLOGY.len() as u8).collect();
@@ -137,7 +145,7 @@ async fn da_committee() {
                 let key = TestHybridSigner::p256_only(*seed).public_key().clone();
                 CommitteeMember {
                     index,
-                    address: committee_address(&key),
+                    address: validator_account(*seed),
                     public_key: Some(key),
                 }
             })
@@ -177,7 +185,9 @@ async fn da_committee() {
     cluster
         .on_every_route(|client, server| async move {
             let lookup = by_address.clone();
-            let local = committee.members()[client.index].address;
+            let local = TestHybridSigner::p256_only(keys[client.index])
+                .public_key()
+                .clone();
             let surface = Arc::new(IrohDaCommitteeSurface::new(
                 client.endpoint.clone(),
                 committee.clone(),

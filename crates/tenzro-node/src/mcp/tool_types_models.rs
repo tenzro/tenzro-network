@@ -771,6 +771,12 @@ pub struct InferenceChallengeOutput {
     /// `voting_commit`, `voting_reveal`, `upheld` or `dismissed`.
     pub status: String,
     pub chain_entropy: String,
+    /// Height of the block whose hash is `chain_entropy`.
+    pub entropy_height: u64,
+    /// The provider's signed receipt for the challenged response.
+    pub receipt: serde_json::Value,
+    /// Where seats ask for the challenged inputs.
+    pub holder_rpc: String,
     pub committee: Vec<ChallengeSeatOutput>,
     pub total_committee_stake: u128,
     pub votes: Vec<ChallengeVoteOutput>,
@@ -892,17 +898,36 @@ pub struct InferenceOfferOutput {
     /// card cannot price the units.
     pub base_wei: Option<String>,
     pub price_wei: Option<String>,
+    /// Indicative carbon intensity of the region's grid, grams CO2e per
+    /// kWh; null when the region is undeclared or not in the table.
+    pub grid_g_co2_per_kwh: Option<u32>,
     pub region: Option<String>,
     pub load: Option<OfferLoadOutput>,
 }
 
-/// Offers for one request, cheapest first.
+/// Offers for one request, cheapest first or cleanest grid first.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct InferenceQuoteOutput {
     pub model: String,
     pub verification: String,
     pub surcharge_bps: u64,
     pub offers: Vec<InferenceOfferOutput>,
+    /// With order=carbon, the cleanest offer weighed against the cheapest.
+    #[serde(default)]
+    pub carbon_effect: Option<CarbonEffectOutput>,
+}
+
+/// What putting the cleanest grid first costs against the cheapest offer.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CarbonEffectOutput {
+    /// The cleanest offer is also the cheapest.
+    pub same_offer: bool,
+    /// Grams CO2e per kWh saved; null when either region is unknown.
+    pub grid_g_co2_per_kwh_saved: Option<i64>,
+    /// Extra price, wei, decimal string (negative is cheaper).
+    pub extra_price_wei: Option<String>,
+    /// Extra wait for a warm model, ms (negative is sooner).
+    pub extra_warm_wait_ms: i64,
 }
 
 /// This node's price cards.
@@ -1201,54 +1226,6 @@ pub struct ProviderStatsOutput {
     pub role_stakes: Vec<ProviderRoleStakeOutput>,
     /// `Active` or `Idle`.
     pub utilization: String,
-}
-
-// ─── Routing feedback ───
-
-/// A reported routing outcome.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RouteOutcomeOutput {
-    /// False when the node has no difficulty index and discarded it.
-    pub retained: bool,
-    pub model_id: String,
-    pub cluster: u64,
-    /// `resolved`, `escalated` or `failed`.
-    pub outcome: String,
-}
-
-/// Prompts that landed in one cluster.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DifficultyClusterOutput {
-    pub cluster: u64,
-    pub prompts: u64,
-}
-
-/// One model's outcomes in one cluster.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DifficultyModelClusterOutput {
-    pub cluster: u64,
-    pub resolved: u64,
-    pub escalated: u64,
-    pub failed: u64,
-    pub error_rate: f32,
-}
-
-/// The node's difficulty index.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RouteDifficultyStatsOutput {
-    pub enabled: bool,
-    pub cluster_count: u64,
-    pub clusters: Vec<DifficultyClusterOutput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding_dim: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub split_threshold: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_clusters: Option<Vec<DifficultyModelClusterOutput>>,
 }
 
 // ─── Catalog specs ───
@@ -2211,238 +2188,4 @@ pub struct MoeForwardOutput {
     pub routed: Vec<MoeRoutedTokenOutput>,
     /// Base64 of little-endian f32 bytes.
     pub outputs: String,
-}
-
-// ─── Chat by intent ───
-
-/// Marks a text block as a prompt-cache breakpoint.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChatCacheControl {
-    Ephemeral,
-}
-
-/// A picture in a content block.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChatImageSource {
-    Base64 {
-        /// e.g. `image/png`.
-        media_type: String,
-        data: String,
-    },
-}
-
-/// What a tool returned: text, or content blocks.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum ChatToolResultContent {
-    Text(String),
-    Blocks(Vec<ChatContentBlock>),
-}
-
-/// One block of a chat turn.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChatContentBlock {
-    Text {
-        text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_control: Option<ChatCacheControl>,
-    },
-    Thinking {
-        thinking: String,
-    },
-    /// A call of a tool the caller defined; `input` is that tool's arguments.
-    ToolUse {
-        id: String,
-        name: String,
-        input: super::server::JsonValue,
-    },
-    ToolResult {
-        tool_use_id: String,
-        content: ChatToolResultContent,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        is_error: Option<bool>,
-    },
-    Image {
-        source: ChatImageSource,
-    },
-}
-
-/// A turn's content: text, or content blocks.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum ChatMessageContent {
-    Text(String),
-    Blocks(Vec<ChatContentBlock>),
-}
-
-/// One chat turn.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ChatMessageParam {
-    /// `user`, `assistant` or `system`.
-    pub role: String,
-    pub content: ChatMessageContent,
-}
-
-/// The inference commitment this answer stored, for challenges.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ChatCommitmentRef {
-    pub hash: String,
-    pub k: u8,
-    /// Committed steps.
-    pub steps: u64,
-}
-
-/// The jurisdiction a serving node declares.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct JurisdictionClaimOutput {
-    /// ISO 3166-1 alpha-2.
-    pub country: String,
-    #[serde(default)]
-    pub blocs: Vec<String>,
-    /// 32 byte values.
-    #[serde(default)]
-    pub attestation_hash: Option<Vec<u8>>,
-    /// Unix ms.
-    pub declared_at: i64,
-}
-
-/// A signed statement of where a response was served. Byte fields are arrays
-/// of byte values.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct JurisdictionReceiptOutput {
-    pub request_hash: Vec<u8>,
-    pub response_hash: Vec<u8>,
-    pub model_id: String,
-    /// 32 bytes.
-    pub provider: Vec<u8>,
-    pub jurisdiction: JurisdictionClaimOutput,
-    /// Unix ms.
-    pub signed_at: i64,
-    pub signer_public_key: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signer_pq_key: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batched: Option<Vec<u8>>,
-}
-
-/// Token counts of a rich answer.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ChatUsageOutput {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    #[serde(default)]
-    pub cache_creation_input_tokens: u32,
-    #[serde(default)]
-    pub cache_read_input_tokens: u32,
-}
-
-/// The answer to the rich shape (`messages`), served here or by a provider.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ChatRichAnswer {
-    pub id: String,
-    pub model: String,
-    /// `assistant`.
-    pub role: String,
-    pub content: Vec<ChatContentBlock>,
-    /// `end_turn`, `tool_use`, `max_tokens` or `stop_sequence`.
-    pub stop_reason: String,
-    #[serde(default)]
-    pub stop_sequence: Option<String>,
-    pub usage: ChatUsageOutput,
-    #[serde(default)]
-    pub tenzro_receipt: Option<InferenceReceiptOutput>,
-    pub units: ModelsUnits,
-    /// Wei, decimal string.
-    pub cost_wei: String,
-    pub settlement: InferenceSettlementOutput,
-    /// `local` or `network`.
-    pub location: String,
-    /// The serving provider, when a provider on the network served it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub commitment: Option<ChatCommitmentRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tenzro_jurisdiction: Option<JurisdictionReceiptOutput>,
-    #[serde(default)]
-    pub load: Option<ServingLoadOutput>,
-    /// How the intent was resolved.
-    pub route: super::server::RouteDecisionOutput,
-}
-
-/// The session a continuity-pinned turn belongs to.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ChatContinuityOutput {
-    pub session_id: String,
-    /// `none`, `standby` or `hot_successor`.
-    pub level: String,
-    /// This node's payee, `0x` hex.
-    pub primary: Option<String>,
-    pub successor: Option<String>,
-    pub successor_endpoint: Option<String>,
-}
-
-/// The answer to a turn of a continuity session served on this node.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ChatSessionAnswer {
-    pub output: String,
-    pub model_id: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    /// Prompt tokens served from the session's KV cache.
-    pub cached_tokens: u64,
-    /// `local`.
-    pub location: String,
-    /// Wei, decimal string.
-    pub cost_wei: String,
-    pub settlement: InferenceSettlementOutput,
-    pub continuity: ChatContinuityOutput,
-    pub route: super::server::RouteDecisionOutput,
-}
-
-/// The answer to the simple shape (`message`), served here or by a provider.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ChatSimpleAnswer {
-    pub output: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub units: ModelsUnits,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation_time_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens_per_second: Option<f64>,
-    /// Wei, decimal string.
-    pub cost_wei: String,
-    pub settlement: InferenceSettlementOutput,
-    pub model_id: String,
-    /// `local` or `network`.
-    pub location: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub load: Option<ServingLoadOutput>,
-    #[serde(rename = "tenzro_contentProvenance", default)]
-    pub tenzro_content_provenance: Option<super::tool_types_chain::ContentProvenanceOutput>,
-    #[serde(default)]
-    pub tenzro_jurisdiction: Option<JurisdictionReceiptOutput>,
-    #[serde(default)]
-    pub tenzro_receipt: Option<InferenceReceiptOutput>,
-    #[serde(default)]
-    pub commitment: Option<ChatCommitmentRef>,
-    pub route: super::server::RouteDecisionOutput,
-}
-
-/// A chat answer with the routing decision under `route`: the rich shape's
-/// answer, a continuity session's turn, or the simple shape's answer.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum ChatByIntentOutput {
-    Rich(ChatRichAnswer),
-    Session(ChatSessionAnswer),
-    Simple(ChatSimpleAnswer),
 }

@@ -412,6 +412,31 @@ pub struct SttStreamEvent {
     pub data: serde_json::Value,
 }
 
+/// Parameters for [`MultimodalClient::transcribe_recording`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscribeRecordingParams {
+    /// ASR model served by the node
+    pub model_id: String,
+    /// Base64-encoded 16-bit PCM WAV; its first channel is transcribed
+    pub audio_base64: String,
+    /// Language ISO code
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Milliseconds of audio fed to the stream at a time (200 when unset)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_ms: Option<u32>,
+    /// Verification level for each final segment: `none`, `receipt`,
+    /// `optimistic` or `tee`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+}
+
+/// Every event of a recording transcribed as a stream, in order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscribedRecording {
+    pub events: Vec<SttStreamEvent>,
+}
+
 /// Parameters for [`MultimodalClient::text_embed`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TextEmbedParams {
@@ -1305,6 +1330,19 @@ impl MultimodalClient {
     pub async fn transcribe(&self, params: &TranscribeParams) -> SdkResult<serde_json::Value> {
         self.rpc
             .call("tenzro_transcribe", serde_json::json!([params]))
+            .await
+    }
+
+    /// Transcribes a whole recording through the streaming transcription,
+    /// fed as a live stream would be, and answers every event in order:
+    /// `partial` transcripts, `final` segments (billed and receipted as
+    /// [`Self::transcribe`] is), then `done`.
+    pub async fn transcribe_recording(
+        &self,
+        params: &TranscribeRecordingParams,
+    ) -> SdkResult<TranscribedRecording> {
+        self.rpc
+            .call("tenzro_transcribeStream", serde_json::to_value(params)?)
             .await
     }
 

@@ -56,7 +56,7 @@ change the keystore is implied: the first passkey alone. Every change is a
 | set the policy | `single_credential` (any one passkey, the default) or `two_credentials` (two passkeys, which then also stops one passkey acting alone) |
 | set the recovery signers | the account's passkeys per its policy |
 | start a recovery | the recovery signers, by threshold of independent roots, plus the joining passkey's proof of possession |
-| cancel a recovery | any one passkey of the account |
+| cancel a recovery | any one passkey of the account; from `feature.recovery_cancel.activation_epoch`, a recovery the recovery signers started takes two independent passkeys of the account, or the signers by the same threshold |
 | complete a recovery | anyone, once its wait has passed |
 | set or turn off the recovery code | the account's passkeys per its policy |
 | claim the recovery code for a passkey | nobody: any account other than the locked one sends and pays for it |
@@ -92,9 +92,27 @@ passkey can unlink it; one stolen passkey cannot add a "second root" and
 spend. A recovery waits `keystore.recovery_wait_key_and_email_ms` (1 hour at
 genesis) when a recovery key and an email verifier approved,
 `keystore.recovery_wait_key_ms` (48 hours) for a recovery key alone and
-`keystore.recovery_wait_other_ms` (7 days) otherwise; any passkey still on
-the account can cancel it meanwhile. Every wait is a governed parameter.
-Recovery adds a passkey and removes nothing.
+`keystore.recovery_wait_other_ms` (7 days) otherwise. Any passkey still on
+the account can cancel a recovery meanwhile. From the epoch governance sets
+in `feature.recovery_cancel.activation_epoch`, a recovery the recovery
+signers started is cancelled by two independent passkeys of the account or
+by the signers themselves, by the threshold that started it, and the signers
+cannot be changed while it is pending: one stolen passkey neither stops the
+recovery nor swaps out who can, and an owner who still holds two devices
+stops a recovery they did not ask for. Every wait is a governed parameter.
+Until governance sets `feature.recovery_rotation.activation_epoch`, a recovery
+adds a passkey and removes nothing. From that epoch a completed recovery
+replaces the account's passkeys with the one it was started for: every
+passkey linked before it, lost or stolen, stops acting for the account, and
+the policy returns to `single_credential`. The account then holds one root,
+so it spends again once a second independent passkey is linked and has
+served its wait. From the same epoch every keystore change's
+`KeystoreUpdated` log names the owner (`owner_did`) and the credential ids it
+linked (`added`) and retired (`retired`); a completed recovery sets
+`recovered`, which tells the caller that every other device was retired and
+has to be linked again. A node that applies the block unbinds the devices
+bound under retired credentials, ends their sessions and, after a recovery,
+drops the access tokens the identity held.
 
 **The recovery code.** An account may hold one optional, one-time recovery
 code: a 32-byte secret its holder keeps, downloaded or written down, of which
@@ -109,6 +127,30 @@ after `keystore.recovery_code_reveal_delay_ms` and before
 `keystore.recovery_code_claim_ttl_ms`, the code and that passkey. The
 recovery then waits `keystore.recovery_code_wait_ms` (7 days at genesis) and
 spends the code; the holder sets a new one.
+
+## Where a key may live: what is decided
+
+Decided 21 Nov 2026. The rule is that a key lives in hardware; three places hold a secret in another
+form, and each is settled here.
+
+- **The consensus session key.** A validator's per-boot session key (`tenzro_consensus::session::SessionKey`)
+  is the one key that lives in a process's memory. It is made from the operating system's random source
+  when the node starts, certified for one epoch by the validator's hardware key, wiped when dropped, kept
+  out of core dumps by the node (`PR_SET_DUMPABLE` 0), and signs only checkpoint votes and channel
+  handshakes. It has no `Serialize`, `Clone` or `Debug`, and doctests on the type fail to compile if one
+  is added. Losing it costs nothing: the hardware key certifies a new one.
+- **Key material at rest.** No private key and no recovery code is stored in the clear. The derive root
+  is sealed to the machine's TPM (`tenzro-device-key`, `derive_tpm`). A recovery code is kept by its
+  holder; the ledger holds a commitment to it and a claim that reveals it, and nothing in the SDK's
+  keystore module touches the filesystem (a test checks that). The remote-TPM transport key is moved
+  into the TPM when the key holder is next changed; until then it is read from the operator's file.
+- **External signers.** `PluggableSigner` (Ledger, Trezor, GridPlus, YubiKey) is allowed. The key stays
+  in the external device, which is hardware; the node sends it a 32-byte hash and no constructor takes
+  key bytes. The bridge's EVM signer and the node's hardware EVM signer use it.
+
+Two recorded readings: section 13.6 of the specification is x402, and the facilitator stays in the node
+as it is today; and the zero-knowledge system counts two Plonky3 proof systems for k-of-n acceptance
+with an independent Halo2 implementation beside them (docs/SPECIFICATION.md, section 6.1).
 
 ## Multiple wallet providers
 

@@ -3,11 +3,11 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue)](https://python.org)
 
-The official [OpenClaw](https://github.com/openclaw/openclaw) skill for interacting with [Tenzro Network](https://tenzro.com) — a full blockchain and multi-chain toolkit for AI agents.
+The official [OpenClaw](https://github.com/openclaw/openclaw) skill for interacting with [Tenzro Network](https://tenzro.com) — a toolkit for agents on a network of compute of every kind: identity, payments, AI inference, storage, compute rental and multi-chain settlement.
 
 ## Overview
 
-TenzroClaw gives AI agents direct access to the Tenzro blockchain and the Chainlink MCP server (plus external 1inch) through a single Python script. Agents can manage identities, build transactions for their holders to sign, deploy contracts, bridge TNZO over governed routes, read Chainlink price feeds, run multi-modal AI inference, read AgentBonds, and more.
+TenzroClaw gives agents direct access to the Tenzro blockchain and the Chainlink MCP server (plus external 1inch) through a single Python script. Agents can manage identities, build transactions for their holders to sign, deploy contracts, bridge TNZO over governed routes, read Chainlink price feeds, run multi-modal AI inference, store content-addressed objects, read AgentBonds, and more.
 
 **Preview network:** `https://rpc.tenzro.com`
 
@@ -27,18 +27,15 @@ python3 tools/tenzro_rpc.py chainlink_list_feeds
 
 ## Installation
 
-No installation required. Just clone and run:
+The helper calls the node through the Tenzro Python SDK (the `tenzro` package,
+Python 3.10 or later), which this repository does not contain. Install it from
+its own repository: `requirements.txt` names it. Clone, install and run:
 
 ```bash
 git clone https://github.com/tenzro/TenzroClaw.git
 cd TenzroClaw
+pip install -r requirements.txt
 python3 tools/tenzro_rpc.py --help
-```
-
-Optional: install `requests` for better HTTP handling (falls back to `urllib` if not available):
-
-```bash
-pip install requests
 ```
 
 ## Configuration
@@ -68,7 +65,7 @@ export CHAINLINK_MCP_URL=https://chainlink-mcp.tenzro.com/mcp
 
 **Device Binding & Machine Ownership:** `bind_device`, `list_bound_devices`, `wallet_readiness`, `revoke_bound_device`, `transfer_machine_ownership`. A Tenzro identity links devices the way a platform account does, except the link is not a platform account — no Apple, Google or Microsoft sign-in is an identity authority here; what is trusted is a WebAuthn attestation verified against a vendor root the node pins. A device counts as hardware-bound only when its credential cannot sync **and** the attestation says the key is in a TEE or secure element, so backup-eligibility is disqualifying rather than informational. `wallet_readiness` exists because a wallet cannot sit behind one device: it names the blocker and its remedy so an agent tells the user to scan the pairing QR instead of retrying a call that will keep failing. `revoke_bound_device` unbinds and ends every session that device authorised in one action — doing only the first would leave a lost phone's access live. `transfer_machine_ownership` takes one of two non-interchangeable authorities, `controller` (a party delegated the machine) or `hardware_root` (nobody did), so holding the hardware cannot take a machine that has an accountable party.
 
-**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `route_intent`, `chat_by_intent`, `record_route_outcome`, `route_difficulty_stats`, `serve_model`, `stop_model`, `get_model_provenance`, `submit_trust_record`, `list_model_endpoints`, `get_provenance`. Intent routing replaces naming a model with stating a use case plus a budget, a quality floor and a cost-quality knob: `route_intent` returns the selection and its reasoning without dispatching, `chat_by_intent` selects and runs in one call with dispatch pinned to the offer that was scored, so the price quoted is the price settled and the provider share goes to the address that offer named. Selection also accounts for how hard the prompt is — the decision carries the difficulty cluster it landed in and the chosen model's observed error rate there. `record_route_outcome` reports an escalation back so those rates reflect what happened; `route_difficulty_stats` reads the cluster map as an operator diagnostic. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_cluster` to split even when it fits one host, `force_single` to pin it to one host, or set `visibility` to choose who may call it — `"network"` (the default) announces it and makes it reachable by any caller who pays, with no prior relationship; `"gated"` serves it only to callers the node's access policy names; `"private"` keeps it local/LAN-only. Model weights are content-addressed: a node fetches them peer-first over iroh blobs (BLAKE3-verified on transfer), and checks them against the catalog pins and the model's verified manifest before load; `get_model_provenance` reads a model's content-addressed manifests, the origins that observed them and whether they agree. `list_model_endpoints` returns each service's `iroh_endpoint_id` (the serving node's iroh `EndpointId`, empty for local-only); cross-node inference routes to it over the `tenzro/infer` ALPN. `get_provenance` resolves the cached synthetic-content manifest (EU AI Act Art. 50(2)) for generated output by its `content_hash`.
+**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `serve_model`, `stop_model`, `get_model_provenance`, `submit_trust_record`, `list_model_endpoints`, `get_provenance`. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_cluster` to split even when it fits one host, `force_single` to pin it to one host, or set `visibility` to choose who may call it — `"network"` (the default) announces it and makes it reachable by any caller who pays, with no prior relationship; `"gated"` serves it only to callers the node's access policy names; `"private"` keeps it local/LAN-only. Model weights are content-addressed: a node fetches them peer-first over iroh blobs (BLAKE3-verified on transfer), and checks them against the catalog pins and the model's verified manifest before load; `get_model_provenance` reads a model's content-addressed manifests, the origins that observed them and whether they agree. `list_model_endpoints` returns each service's `iroh_endpoint_id` (the serving node's iroh `EndpointId`, empty for local-only); cross-node inference routes to it over the `tenzro/infer` ALPN. `get_provenance` resolves the cached synthetic-content manifest (EU AI Act Art. 50(2)) for generated output by its `content_hash`.
 
 **Multi-Modal Inference (17 wrappers across 7 modalities):**
 
@@ -101,7 +98,7 @@ Every `load_*_model` takes a catalog `model_id` and an optional `visibility`; `l
 **Universal RPC Gateway:** `list_rpc_methods`, `call_rpc`, `supports` — the escape hatch for anything without a named wrapper above. `list_rpc_methods` enumerates every method the node serves, each entry carrying how it is gated (`admin`, `owner`, `open` or `reserved`) and its method class, so you can tell what a call needs without provoking the error first; narrow with `namespace` or `contains`, since unfiltered it is ~900 rows. `call_rpc` invokes one by name. `supports` asks the node whether it serves a method rather than checking a list in this file, so it stays correct against a node newer than this skill. Authorization is unchanged — a gateway call passes the same gates as a direct request and reaches exactly what your credentials already allow.
 
 
-**Decentralized Storage:** `storage_store_object`, `storage_set_pricing`, `storage_status` — content-addressed objects on the data plane, paid through storage compute claims that settle on possession-gated SLA verdicts.
+**Decentralized Storage:** `storage_store_object`, `storage_set_pricing`, `storage_status`, `get_storage_holding_receipt`, `list_storage_providers` — content-addressed objects on the data plane, paid through storage compute claims that settle on possession-gated SLA verdicts.
 
 **Compute Rental:** a rental is a stream escrow to the provider's bonded address (signed `CreateEscrow` with release `Stream`): it pays the provider by the epoch until its expiry, and an epoch validators judged unavailable is paid back to the renter from the insurance pool.
 
@@ -152,7 +149,7 @@ tenzro_rpc.py
     |-- MCP Streamable HTTP ---> chainlink-mcp.tenzro.com (Chainlink)
     |
     v
-Tenzro Network (decentralized) + External Chains
+Tenzro Network + External Chains
 ```
 
 ## Related

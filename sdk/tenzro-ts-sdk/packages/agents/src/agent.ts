@@ -11,6 +11,36 @@ import {
 } from "@tenzro/core";
 
 import type { AgentKeyResolution } from "@tenzro/core";
+import { signEnvelope, type EnvelopeSender } from "./a2a-extension";
+import { verifyAgentCard } from "./agent-card";
+
+/** Which of the sender's tasks `ListTasks` returns, and how much of each. */
+export interface A2aTaskFilter {
+  /** Only tasks of this context. */
+  contextId?: string;
+  /** Only tasks in this state, e.g. `TASK_STATE_COMPLETED`. */
+  status?: string;
+  /** Tasks per page (the node returns at most 100). */
+  pageSize?: number;
+  /** The `nextPageToken` of the page before. */
+  pageToken?: string;
+  /** Most recent messages to return with each task. */
+  historyLength?: number;
+  /** Whether each task carries its artifacts. */
+  includeArtifacts?: boolean;
+}
+
+/** One page of `ListTasks`. */
+export interface A2aTaskList {
+  /** The tasks on this page, ordered by id. */
+  tasks: A2aTask[];
+  /** Token of the next page; empty on the last one. */
+  nextPageToken: string;
+  /** Tasks per page the node used. */
+  pageSize: number;
+  /** How many of the sender's tasks match the filter. */
+  totalSize: number;
+}
 
 // Simple UUID v4 generator for browser/node compatibility
 function generateUUID(): string {
@@ -29,39 +59,83 @@ export class AgentClient {
   constructor(private rpc: RpcClient) {}
 
   /**
-   * Delegate a task to the node's A2A agent with an A2A v1.0 `SendMessage`.
+   * One A2A task call as `sender` to the node whose machine DID is
+   * `agentDid`, carrying the DID envelope its key signs. The node answers no
+   * task call without one, and none addressed to another node.
+   */
+  private async signedA2aCall<T>(
+    method: string,
+    params: Record<string, unknown>,
+    sender: EnvelopeSender,
+    agentDid: string,
+  ): Promise<T> {
+    return this.rpc.a2aCall<T>(method, await signEnvelope(agentDid, method, params, sender));
+  }
+
+  /**
+   * Delegate a task to the A2A agent of the node whose machine identity is
+   * `agentDid`, with an A2A v1.0 `SendMessage`. The task belongs to the
+   * sender: only it can read, continue or cancel it. The node's card is
+   * fetched and checked first (`getAgentCard`); when it does not prove
+   * the endpoint is `agentDid`'s, nothing is sent.
+   * @param sender - The DID the call is made as and the key that signs for it
+   * @param agentDid - Machine DID of the node the task is meant for
    * @param taskDescription - Description of the task to delegate
    * @returns Exactly one of `task` (created or updated) or `message`
+   * @throws AgentCardRefused when the card is unsigned, altered or another machine's
    */
-  async delegateTask(taskDescription: string): Promise<A2aSendMessageResponse> {
-    return this.rpc.a2aCall<A2aSendMessageResponse>(
+  async delegateTask(sender: EnvelopeSender, agentDid: string, taskDescription: string): Promise<A2aSendMessageResponse> {
+    await this.getAgentCard(agentDid);
+    return this.signedA2aCall<A2aSendMessageResponse>(
       "SendMessage",
-      a2aTextMessage(taskDescription, generateUUID()),
+      a2aTextMessage(taskDescription, generateUUID()) as unknown as Record<string, unknown>,
+      sender,
+      agentDid,
     );
   }
 
   /**
-   * Fetch the current state of an A2A task (`GetTask`).
+   * Fetch the current state of one of the sender's own A2A tasks (`GetTask`).
+   * A task another DID opened is reported as not found.
+   * @param sender - The DID the call is made as and the key that signs for it
+   * @param agentDid - Machine DID of the node that holds the task
    * @param taskId - Task identifier
    */
-  async getA2aTask(taskId: string): Promise<A2aTask> {
-    return this.rpc.a2aCall<A2aTask>("GetTask", { id: taskId });
+  async getA2aTask(sender: EnvelopeSender, agentDid: string, taskId: string): Promise<A2aTask> {
+    return this.signedA2aCall<A2aTask>("GetTask", { id: taskId }, sender, agentDid);
   }
 
   /**
-   * Cancel an A2A task (`CancelTask`).
-   * @param taskId - Task identifier
+   * List the A2A tasks the sender opened (`ListTasks`), and no others.
+   * @param sender - The DID the call is made as and the key that signs for it
+   * @param agentDid - Machine DID of the node that holds the tasks
+   * @param filter - Which of them, and how much of each
    */
-  async cancelA2aTask(taskId: string): Promise<A2aTask> {
-    return this.rpc.a2aCall<A2aTask>("CancelTask", { id: taskId });
+  async listA2aTasks(sender: EnvelopeSender, agentDid: string, filter: A2aTaskFilter = {}): Promise<A2aTaskList> {
+    return this.signedA2aCall<A2aTaskList>("ListTasks", { ...filter }, sender, agentDid);
   }
 
   /**
-   * Fetch the node's public A2A agent card from
-   * `/.well-known/agent-card.json`.
+   * Cancel one of the sender's own A2A tasks (`CancelTask`).
+   * @param sender - The DID the call is made as and the key that signs for it
+   * @param agentDid - Machine DID of the node that holds the task
+   * @param taskId - Task identifier
    */
-  async getAgentCard(): Promise<Record<string, unknown>> {
-    return this.rpc.get<Record<string, unknown>>(A2A_AGENT_CARD_PATH);
+  async cancelA2aTask(sender: EnvelopeSender, agentDid: string, taskId: string): Promise<A2aTask> {
+    return this.signedA2aCall<A2aTask>("CancelTask", { id: taskId }, sender, agentDid);
+  }
+
+  /**
+   * Fetch the node's A2A agent card from `/.well-known/agent-card.json` and
+   * check it was signed by the hardware key `agentDid` derives from. No card
+   * is returned unchecked.
+   * @param agentDid - Machine DID of the node the caller means to reach
+   * @throws AgentCardRefused when the card is unsigned, altered or another machine's
+   */
+  async getAgentCard(agentDid: string): Promise<Record<string, unknown>> {
+    const card = await this.rpc.get<Record<string, unknown>>(A2A_AGENT_CARD_PATH);
+    await verifyAgentCard(card, agentDid);
+    return card;
   }
 
   // ─── Discovery & Lifecycle ──────────────────────────────────────────────────
@@ -199,6 +273,22 @@ export class AgentClient {
    */
   recordAgentAuditSession(params: { session_id: string; mmr_root: string; count: number }): Promise<{ epoch: number; sessions: number }> {
     return this.rpc.call("tenzro_recordAgentAuditSession", params);
+  }
+
+  /** `tenzro_getAgentTermsCredential`: a delegated agent's Terms as an unsigned W3C VC 2.0 credential its controller signs; null when the agent has no Terms. */
+  getAgentTermsCredential<T = unknown>(agentDid: string): Promise<T> {
+    return this.rpc.call<T>("tenzro_getAgentTermsCredential", { agent_did: agentDid });
+  }
+
+  /** `tenzro_recordExecutionReceipt` (owner proof): record, once, a receipt an outside platform gave an agent for work it ran there; the receipt's SHA-256 enters the agent's signed audit log. */
+  recordExecutionReceipt<T = unknown>(params: {
+    agent_did: string;
+    platform: string;
+    receipt: string;
+    units?: number;
+    did_envelope: unknown;
+  }): Promise<T> {
+    return this.rpc.call<T>("tenzro_recordExecutionReceipt", params);
   }
 }
 

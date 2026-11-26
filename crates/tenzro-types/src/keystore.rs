@@ -404,7 +404,9 @@ pub fn recovery_code_claim(
 /// A recovery the recovery signers approved, waiting out its delay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRecovery {
-    /// The passkey that joins the account when the recovery completes.
+    /// The passkey that replaces the account's passkeys when the recovery
+    /// completes, once `feature.recovery_rotation.activation_epoch` is in
+    /// force.
     pub credential: KeystoreCredential,
     /// Indices into the recovery signers of those who approved.
     pub approvers: Vec<u32>,
@@ -559,16 +561,20 @@ pub enum KeystoreOp {
         /// Independent roots among them a recovery needs.
         threshold: u32,
     },
-    /// Start a recovery approved by the recovery signers, adding
-    /// `credential` once its wait has passed. The update carries the new
-    /// passkey's proof of possession.
+    /// Start a recovery approved by the recovery signers. Once its wait has
+    /// passed, and `feature.recovery_rotation.activation_epoch` is in force,
+    /// `credential` replaces every passkey of the account. The update
+    /// carries the new passkey's proof of possession.
     StartRecovery {
-        /// The passkey to add.
+        /// The passkey the account is left with.
         credential: KeystoreCredential,
     },
     /// Cancel the pending recovery.
     CancelRecovery,
-    /// Complete the pending recovery after its wait.
+    /// Complete the pending recovery after its wait: its passkey joins the
+    /// account, and once `feature.recovery_rotation.activation_epoch` is in force it
+    /// becomes the account's only passkey and the policy returns to one
+    /// passkey.
     FinishRecovery,
     /// Set the one-time recovery code's commitment, or turn it off with
     /// none.
@@ -585,13 +591,15 @@ pub enum KeystoreOp {
         claim: Vec<u8>,
     },
     /// Reveal the recovery code and the passkey it was claimed for, starting
-    /// a recovery that adds that passkey after its wait. The update carries
+    /// a recovery that, after its wait and once
+    /// `feature.recovery_rotation.activation_epoch` is in force, replaces
+    /// every passkey of the account with that passkey. The update carries
     /// the passkey's proof of possession.
     RecoverWithCode {
         /// The code.
         #[serde(with = "hex_bytes")]
         code: Vec<u8>,
-        /// The passkey to add.
+        /// The passkey the account is left with.
         credential: KeystoreCredential,
     },
 }

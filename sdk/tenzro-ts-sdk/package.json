@@ -23,7 +23,7 @@
   "license": "Apache-2.0",
   "author": "Tenzro <eng@tenzro.com>",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -72,8 +72,9 @@
     "@tenzro/chain": "0.9.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "typescript": "^5.9.3"
+    "@types/node": "^22.20.5",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "publishConfig": {
     "access": "public"

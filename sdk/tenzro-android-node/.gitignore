@@ -1,0 +1,4 @@
+build/
+.gradle/
+# The node library, built by cargo (see README.md).
+src/main/jniLibs/

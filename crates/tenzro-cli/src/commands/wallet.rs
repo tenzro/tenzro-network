@@ -133,10 +133,8 @@ pub struct WalletSendCmd {
     #[arg(long, default_value = "TNZO")]
     asset: String,
 
-    /// The signing account's hardware key namespace (a-z, 0-9, '-', '_').
-    /// Each namespace is its own account.
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -328,13 +326,13 @@ pub(crate) fn require_recipient_confirmation(
     Ok(())
 }
 
-/// A TNZO transfer signed in hardware as the client account of
-/// `key_namespace`, after the recipient check and the transfer check that
-/// every send goes through. `amount` is decimal TNZO (`100`, `0.5`) and is
-/// converted to wei exactly.
+/// A TNZO transfer signed in hardware by `signing` (a client account, or the
+/// node account through the TPM or the key holder), after the recipient
+/// check and the transfer check that every send goes through. `amount` is
+/// decimal TNZO (`100`, `0.5`) and is converted to wei exactly.
 pub async fn send_tnzo(
     rpc: &crate::rpc::RpcClient,
-    key_namespace: &str,
+    signing: &crate::keystore::SigningAccount,
     to: &str,
     amount: &str,
     confirm_address: Option<&str>,
@@ -342,17 +340,18 @@ pub async fn send_tnzo(
 ) -> Result<serde_json::Value> {
     let amount_wei = crate::units::parse_amount_wei(amount).map_err(|e| anyhow::anyhow!(e))?;
     let to = crate::keystore::address32(to)?;
-    let (from_hex, _) = crate::keystore::client_account(key_namespace)?;
+    let (signer, from) = signing.open()?;
+    let from_hex = format!("0x{}", hex::encode(from));
     let assessment = recipient_check(rpc, &from_hex, to).await?;
     require_recipient_confirmation(&assessment, confirm_address)?;
     transfer_policy_check(rpc, &from_hex, amount_wei, confirm_amount).await?;
     let tx_type = serde_json::json!({ "Transfer": { "amount": amount_wei.to_string() } });
-    crate::keystore::send_as_client(rpc, key_namespace, to, tx_type, 21_000).await
+    crate::keystore::SigningAccount::send(rpc, signer, to, tx_type, 21_000).await
 }
 
 impl WalletSendCmd {
-    /// A TNZO transfer signed in hardware as the client account and submitted
-    /// pre-signed; the node never signs for it.
+    /// A TNZO transfer signed in hardware by the signing account and
+    /// submitted pre-signed; the node never signs for it.
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Send Transaction");
         if self.asset != "TNZO" {
@@ -364,7 +363,7 @@ impl WalletSendCmd {
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let result = send_tnzo(
             &rpc,
-            &self.key_namespace,
+            &self.signing,
             &self.to,
             &self.amount,
             self.confirm_address.as_deref(),

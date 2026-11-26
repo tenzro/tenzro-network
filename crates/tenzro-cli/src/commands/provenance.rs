@@ -47,9 +47,9 @@ pub struct ProvenanceModelCmd {
     /// Genesis block hash, hex
     #[arg(long)]
     genesis_hash: String,
-    /// Root of the genesis committee, hex
+    /// Genesis file: the first committee is read from its validators
     #[arg(long)]
-    genesis_committee_root: String,
+    genesis: std::path::PathBuf,
     /// Image id of the handover program, hex, when the pack's checkpoint is
     /// certified from a handover chain proof
     #[arg(long)]
@@ -64,10 +64,11 @@ impl ProvenanceModelCmd {
         use super::evidence::hex32;
         let pack: tenzro_types::training_provenance::TrainingProvenancePack =
             serde_json::from_slice(&std::fs::read(&self.file)?)?;
-        let anchor = tenzro_consensus::light_client::GenesisAnchor {
+        let anchor = tenzro_light::TrustAnchor {
+            epoch: 0,
             chain_id: self.chain_id,
             genesis_hash: hex32(&self.genesis_hash, "--genesis-hash")?,
-            committee_root: hex32(&self.genesis_committee_root, "--genesis-committee-root")?,
+            committee_root: super::genesis_file::committee_root(&self.genesis)?,
         };
         let program = self
             .handover_program

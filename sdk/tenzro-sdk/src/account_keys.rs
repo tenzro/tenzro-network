@@ -75,12 +75,7 @@ impl AccountKeysClient {
             PQ_KEY_ENROLLMENT_SIGNATURE_CONTEXT,
             &pq_enrollment_message(&slot, &key),
         );
-        let (_, possession) = signer.sign_composite(&m_prime).await?;
-        let possession = possession.ok_or_else(|| {
-            SdkError::InvalidParameter(
-                "the hardware did not sign with its ML-DSA-65 key".to_string(),
-            )
-        })?;
+        let possession = signer.sign_ml_dsa_leg(&m_prime).await?;
         let tx = TypedTransaction::new(
             TxKind::AccountKeys,
             json!({ "op": enroll_pq_key_op(&key, &possession)? }),

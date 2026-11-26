@@ -458,6 +458,7 @@ pub async fn generate_local(
             stop_reason: match r.stop_reason.as_str() {
                 "max_tokens" => StopReason::Length,
                 "stop_sequence" => StopReason::StopSequence,
+                "pause_turn" => StopReason::Preempted,
                 _ => StopReason::Eos,
             },
             commitment: r.commitment,

@@ -62,6 +62,13 @@ const KIND_KEM_DECAPSULATE: u8 = 20;
 /// A provider's hardware signs the Merkle root of a batch (see [`crate::batch_signer`]).
 const KIND_SIGN_ROOT: u8 = 22;
 
+/// The provider's TPM attests for the key it holds under the label (see
+/// [`Attestor`]).
+const KIND_ATTEST: u8 = 23;
+
+/// The refusal of a request kind the provider does not know.
+const UNKNOWN_KIND: &str = "unknown request kind";
+
 const STATUS_OK: u8 = 0;
 const STATUS_REFUSED: u8 = 1;
 const STATUS_ERROR: u8 = 2;
@@ -259,6 +266,11 @@ impl<T: Transport> HardwareSigner for RemoteTpmSigner<T> {
         Ok(self.public_key)
     }
 
+    fn holder_attestation(&self, request: &[u8]) -> Result<Vec<u8>> {
+        let request = encode_request(KIND_ATTEST, &self.label, request)?;
+        decode_answer(&self.transport.call(&request)?)
+    }
+
     fn sign(&self, message: &[u8]) -> Result<DeviceSignature> {
         let request = encode_request(KIND_SIGN, &self.label, message)?;
         let sig: DeviceSignature = decode_answer(&self.transport.call(&request)?)?
@@ -321,6 +333,11 @@ pub struct Policy {
     pub allow_prehash: bool,
     /// Signatures per client per minute.
     pub per_minute: u32,
+    /// Requests of any kind per client per minute that may take a place in
+    /// the TPM line. Checked before a request joins it, so a client that
+    /// asks for keys or public halves without end cannot hold the TPM from
+    /// the others.
+    pub requests_per_minute: u32,
     /// A derived key's sub-label must begin with one of these.
     pub derived_prefixes: Vec<String>,
 }
@@ -335,6 +352,27 @@ pub trait KeyStore: Send + Sync {
     fn open(&self, label: &str) -> Result<Box<dyn HardwareSigner>>;
 }
 
+/// The refusal of a provider whose TPM does not attest for the asking
+/// client's keys: it attests for no client, or for another one.
+pub const NOT_ATTESTED: &str = "this provider's TPM does not attest for this client's keys";
+
+/// Whether `error` is a provider's [`NOT_ATTESTED`] refusal, or the refusal
+/// of a provider that knows no attestation request: asking again changes
+/// neither.
+pub fn holder_does_not_attest(error: &DeviceKeyError) -> bool {
+    let text = error.to_string();
+    text.contains(NOT_ATTESTED) || text.contains(UNKNOWN_KIND)
+}
+
+/// Makes the provider's TPM attest for a key it holds.
+pub trait Attestor: Send + Sync {
+    /// The answer to `request` about `key` (uncompressed SEC1), the public
+    /// key of the label the asking client is enrolled for. The attestor
+    /// builds every statement the TPM signs from `key` itself, so a client
+    /// obtains evidence about its own key and about nothing else.
+    fn attest(&self, key: &[u8; 65], request: &[u8]) -> Result<Vec<u8>>;
+}
+
 /// Answers requests on the machine that owns the TPM.
 pub struct Provider<K: KeyStore, A: Audit> {
     keys: K,
@@ -344,7 +382,13 @@ pub struct Provider<K: KeyStore, A: Audit> {
     /// swaps it while the provider runs, so enrolling a device needs no restart.
     clients: RwLock<HashMap<Vec<u8>, Grant>>,
     derive: Option<Arc<dyn RemoteDerive>>,
+    /// The one client label whose keys this machine's TPM attests for, and
+    /// what attests.
+    attestor: Option<(String, Arc<dyn Attestor>)>,
     window: Mutex<HashMap<Vec<u8>, (Instant, u32)>>,
+    /// Per client: when its request window opened and how many requests it
+    /// took a place in the TPM line for since.
+    request_window: Mutex<HashMap<Vec<u8>, (Instant, u32)>>,
     /// One TPM command at a time; the rest wait in a bounded line.
     queue: TpmQueue,
     issuance: Option<Issuance>,
@@ -365,7 +409,9 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
             clients: RwLock::new(policy.clients.clone()),
             policy,
             derive: None,
+            attestor: None,
             window: Mutex::new(HashMap::new()),
+            request_window: Mutex::new(HashMap::new()),
             queue: TpmQueue::new(QueueParams::default()),
             issuance: None,
             clock: Arc::new(SystemClock),
@@ -406,12 +452,35 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
         self
     }
 
+    /// Has this machine's TPM attest for the keys it holds for the client
+    /// enrolled under `label`, and for no other client: a TPM is admitted on
+    /// chain under one identity, so the operator names the one it answers
+    /// for. A provider whose TPM backs its own machine's identity names none.
+    pub fn with_attestor(mut self, label: &str, attestor: Arc<dyn Attestor>) -> Self {
+        self.attestor = Some((label.to_string(), attestor));
+        self
+    }
+
     /// Replaces the enrolled clients. Requests already running finish under
     /// the grant they were admitted with; rate windows, the TPM queue and
     /// everything else are untouched, so a client present before and after
     /// notices nothing.
     pub fn replace_clients(&self, clients: HashMap<Vec<u8>, Grant>) {
         *self.clients.write().expect("clients") = clients;
+    }
+
+    fn within_requests(&self, client: &[u8]) -> bool {
+        let mut window = self.request_window.lock().expect("request window");
+        let now = Instant::now();
+        let slot = window.entry(client.to_vec()).or_insert((now, 0));
+        if now.duration_since(slot.0) >= Duration::from_secs(60) {
+            *slot = (now, 0);
+        }
+        if slot.1 >= self.policy.requests_per_minute {
+            return false;
+        }
+        slot.1 += 1;
+        true
     }
 
     fn within_rate(&self, client: &[u8]) -> bool {
@@ -457,7 +526,8 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
             KIND_SIGN_PREHASH => "sign-prehash",
             KIND_ED_PUBLIC..=KIND_P256_SIGN => "derived",
             KIND_SIGN_ROOT => "sign-root",
-            _ => return refuse("unknown", "unknown request kind"),
+            KIND_ATTEST => "attest",
+            _ => return refuse("unknown", UNKNOWN_KIND),
         };
         let Some(grant) = self.clients.read().expect("clients").get(client).cloned() else {
             return refuse(kind, "client is not enrolled");
@@ -469,6 +539,9 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
                 .is_some_and(|rest| rest.starts_with('/'));
         if !own {
             return refuse(kind, "client may not use that key");
+        }
+        if !self.within_requests(client) {
+            return refuse(kind, "request limit");
         }
         // Everything below reaches the TPM: one command at a time, in order,
         // the rest waiting a bounded time in a bounded line.
@@ -506,7 +579,48 @@ impl<K: KeyStore, A: Audit> Provider<K, A> {
         if (KIND_ED_PUBLIC..=KIND_P256_SIGN).contains(&req.kind) {
             return Ok(self.handle_derived(client, grant, req));
         }
+        if req.kind == KIND_ATTEST {
+            return self.handle_attest(client, kind, grant, req, &refuse);
+        }
         Ok(self.base_request(client, kind, req, &refuse))
+    }
+
+    /// Has the TPM attest for the key the client holds under the label. `Err`
+    /// only for a TPM failure the queue may retry.
+    fn handle_attest(
+        &self,
+        client: &[u8],
+        kind: &str,
+        grant: &Grant,
+        req: &Request<'_>,
+        refuse: &dyn Fn(&str, &str) -> Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let Some((_, attestor)) = self
+            .attestor
+            .as_ref()
+            .filter(|(label, _)| *label == grant.label)
+        else {
+            return Ok(refuse(kind, NOT_ATTESTED));
+        };
+        if !self.within_rate(client) {
+            return Ok(refuse(kind, "rate limit"));
+        }
+        let attested = self
+            .keys
+            .open(req.label)
+            .and_then(|signer| signer.public_key_sec1())
+            .and_then(|key| attestor.attest(&key, req.body));
+        match attested {
+            Ok(evidence) => {
+                self.audit.record(client, kind, "ok");
+                Ok(answer(STATUS_OK, &evidence))
+            }
+            Err(e) if is_transient(&e.to_string()) => Err(e),
+            Err(e) => {
+                self.audit.record(client, kind, &format!("error: {e}"));
+                Ok(answer(STATUS_ERROR, e.to_string().as_bytes()))
+            }
+        }
     }
 
     fn base_request(
@@ -971,13 +1085,20 @@ impl<T: Transport> RemoteDerive for RemoteDeriveClient<T> {
 /// The key holder operation that carries a signing request to the provider.
 pub const HOLDER_OP_CALL: u8 = 1;
 
+/// The key holder operation that answers its transport endpoint id and the
+/// end of its grant.
+pub const HOLDER_OP_ID: u8 = 2;
+
+#[cfg(unix)]
 const HOLDER_STATUS_OK: u8 = 0;
 
 /// Largest frame either side of the holder socket sends.
+#[cfg(unix)]
 const HOLDER_MAX_FRAME: usize = 1 << 20;
 
 /// Longest one holder operation may take: the holder's own request timeout
 /// (20 s) with room for its retries.
+#[cfg(unix)]
 const HOLDER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Sends one operation to the key holder at `socket` and returns its answer.
@@ -1033,6 +1154,40 @@ pub fn holder_request(
     Err("the TPM key holder needs a Unix socket, which this platform does not have".into())
 }
 
+/// The key holder's transport endpoint id and the end of its grant (`None`
+/// when none is installed).
+pub fn holder_id(socket: &std::path::Path) -> std::result::Result<([u8; 32], Option<u64>), String> {
+    let b = holder_request(socket, HOLDER_OP_ID, &[])?;
+    if b.len() != 40 {
+        return Err("the key holder's answer is malformed".into());
+    }
+    let id: [u8; 32] = b[..32].try_into().expect("32 bytes");
+    let not_after = u64::from_be_bytes(b[32..].try_into().expect("8 bytes"));
+    Ok((id, (not_after != 0).then_some(not_after)))
+}
+
+/// Why a node cannot use its key holder yet, if it cannot: none answers at
+/// `socket`, or the one there holds no grant that still stands at `now_ms`.
+pub fn grant_wanted(socket: &std::path::Path, now_ms: u64) -> Option<String> {
+    match holder_id(socket) {
+        Err(e) => Some(format!(
+            "no key holder answers at {}: {e}",
+            socket.display()
+        )),
+        Ok((_, None)) => Some(
+            "the key holder has no grant: run `tenzro-node tpm grant-request`, approve it with \
+             the operator passkey, then `tenzro-node tpm grant-install`"
+                .into(),
+        ),
+        Ok((_, Some(end))) if end <= now_ms => Some(
+            "the key holder's grant has expired: run `tenzro-node tpm grant-request`, approve \
+             it with the operator passkey, then `tenzro-node tpm grant-install`"
+                .into(),
+        ),
+        Ok(_) => None,
+    }
+}
+
 /// Carries a request to the provider through the local key holder.
 #[derive(Debug, Clone)]
 pub struct HolderTransport {
@@ -1081,6 +1236,7 @@ mod tests {
     use p256::ecdsa::SigningKey;
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Keys(SigningKey);
     impl KeyStore for Keys {
@@ -1123,6 +1279,7 @@ mod tests {
             allowed_prefixes: vec![b"tenzro/".to_vec()],
             allow_prehash: prehash,
             per_minute,
+            requests_per_minute: u32::MAX,
             derived_prefixes: vec!["tenzro/".to_string()],
         }
     }
@@ -1160,6 +1317,102 @@ mod tests {
             &sig
         ));
         assert!(log.0.lock().unwrap().iter().any(|l| l == "sign: ok"));
+    }
+
+    /// Answers with the key it was asked about, then the request.
+    struct EchoAttestor;
+    impl Attestor for EchoAttestor {
+        fn attest(&self, key: &[u8; 65], request: &[u8]) -> Result<Vec<u8>> {
+            Ok([&key[..], request].concat())
+        }
+    }
+
+    #[test]
+    fn the_provider_attests_for_the_key_a_client_holds_and_for_no_other() {
+        let (mut t, log) = setup(b"pi", b"pi", false, 10);
+        t.provider = t.provider.with_attestor("pi-1", Arc::new(EchoAttestor));
+        let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let sec1 = key.verifying_key().to_sec1_point(false);
+        let signer = RemoteTpmSigner::open(t, "pi-1").unwrap();
+        assert_eq!(
+            signer.holder_attestation(b"request").unwrap(),
+            [sec1.as_bytes(), b"request"].concat()
+        );
+        assert!(log.0.lock().unwrap().iter().any(|l| l == "attest: ok"));
+
+        let other = encode_request(KIND_ATTEST, "pi-2", b"request").unwrap();
+        let err = decode_answer(&signer.transport.call(&other).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("may not use that key"), "{err}");
+    }
+
+    /// Counts the attestations in flight at once and fails the first few
+    /// with a temporary TPM error.
+    struct SlowAttestor {
+        inside: AtomicUsize,
+        most: AtomicUsize,
+        fail_first: AtomicUsize,
+    }
+    impl Attestor for SlowAttestor {
+        fn attest(&self, _key: &[u8; 65], request: &[u8]) -> Result<Vec<u8>> {
+            let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            self.inside.fetch_sub(1, Ordering::SeqCst);
+            if self
+                .fail_first
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(DeviceKeyError::Tpm("TPM_RC_RETRY".into()));
+            }
+            Ok(request.to_vec())
+        }
+    }
+
+    #[test]
+    fn attestations_wait_in_the_tpm_queue_one_at_a_time_and_a_temporary_error_is_retried() {
+        let (t, _) = setup(b"pi", b"pi", false, 100_000);
+        let attestor = Arc::new(SlowAttestor {
+            inside: 0.into(),
+            most: 0.into(),
+            fail_first: 2.into(),
+        });
+        let provider = Arc::new(t.provider.with_attestor("pi-1", attestor.clone()));
+        let threads: Vec<_> = (0..8u8)
+            .map(|i| {
+                let provider = provider.clone();
+                std::thread::spawn(move || {
+                    let req = encode_request(KIND_ATTEST, "pi-1", &[i]).unwrap();
+                    decode_answer(&provider.handle(b"pi", &req)).unwrap()
+                })
+            })
+            .collect();
+        for (i, th) in threads.into_iter().enumerate() {
+            assert_eq!(th.join().unwrap().len(), 1, "attestation {i}");
+        }
+        assert_eq!(attestor.most.load(Ordering::SeqCst), 1);
+    }
+
+    /// A provider attests for the one client its operator named. One that
+    /// names none, or another client, refuses, and so does a provider that
+    /// knows no attestation request; the client can tell each of them from a
+    /// failure worth asking again about.
+    #[test]
+    fn a_provider_attests_only_for_the_client_its_operator_named() {
+        let (t, _) = setup(b"pi", b"pi", false, 10);
+        let signer = RemoteTpmSigner::open(t, "pi-1").unwrap();
+        let err = signer.holder_attestation(b"request").unwrap_err();
+        assert!(holder_does_not_attest(&err), "{err}");
+
+        let (mut t, _) = setup(b"pi", b"pi", false, 10);
+        t.provider = t.provider.with_attestor("pi-9", Arc::new(EchoAttestor));
+        let signer = RemoteTpmSigner::open(t, "pi-1").unwrap();
+        let err = signer.holder_attestation(b"request").unwrap_err();
+        assert!(holder_does_not_attest(&err), "{err}");
+
+        let older = decode_answer(&answer(STATUS_REFUSED, UNKNOWN_KIND.as_bytes())).unwrap_err();
+        assert!(holder_does_not_attest(&older));
+        assert!(!holder_does_not_attest(&remote("tpm busy")));
     }
 
     #[test]
@@ -1209,6 +1462,41 @@ mod tests {
         let (t, _) = setup(b"pi", b"pi", true, 10);
         let signer = RemoteTpmSigner::open(t, "pi-1").unwrap();
         assert!(signer.sign_prehash(&[1u8; 32]).is_ok());
+    }
+
+    /// Every request takes a place in the client's request window before it
+    /// joins the TPM line, whatever it asks for; a client past it is refused
+    /// without touching the TPM, and another client is not affected.
+    #[test]
+    fn requests_of_any_kind_are_limited_per_client_before_the_tpm_line() {
+        let log = Arc::new(Log::default());
+        let mut policy = policy(b"pi", false, 1_000);
+        policy.requests_per_minute = 3;
+        policy.clients.insert(
+            b"pi-2".to_vec(),
+            Grant {
+                label: "pi-1".into(),
+                derived: true,
+            },
+        );
+        let provider = Arc::new(Provider::new(
+            Keys(SigningKey::from_slice(&[7u8; 32]).unwrap()),
+            log.clone(),
+            policy,
+        ));
+        let call = |client: &[u8], kind: u8, body: &[u8]| {
+            provider.handle(client, &encode_request(kind, "pi-1", body).unwrap())
+        };
+        let refused = |reply: &[u8]| reply.get(1) == Some(&STATUS_REFUSED);
+        assert!(!refused(&call(b"pi", KIND_PUBLIC_KEY, b"")));
+        assert!(!refused(&call(b"pi", KIND_PUBLIC_KEY, b"")));
+        assert!(!refused(&call(b"pi", KIND_SIGN, b"tenzro/a")));
+        let over = call(b"pi", KIND_PUBLIC_KEY, b"");
+        assert!(refused(&over));
+        assert!(String::from_utf8_lossy(&over[6..]).contains("request limit"));
+        assert!(refused(&call(b"pi", KIND_SIGN, b"tenzro/b")));
+        // Another client keeps its own window.
+        assert!(!refused(&call(b"pi-2", KIND_PUBLIC_KEY, b"")));
     }
 
     #[test]
@@ -1609,6 +1897,7 @@ mod delegation_tests {
             allowed_prefixes: vec![],
             allow_prehash: false,
             per_minute: 100_000,
+            requests_per_minute: u32::MAX,
             derived_prefixes: vec!["tenzro/test/".into()],
         };
         Arc::new(
@@ -1830,6 +2119,7 @@ mod consensus_label_tests {
                 allowed_prefixes: vec![b"tenzro/".to_vec()],
                 allow_prehash: false,
                 per_minute: 60,
+                requests_per_minute: u32::MAX,
                 derived_prefixes: vec!["tenzro/".to_string()],
             },
         )

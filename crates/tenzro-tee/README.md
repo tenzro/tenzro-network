@@ -8,7 +8,7 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
 
 ## Modules
 
-**23 modules:** certs, detection, error, measurements, registry, report_data, traits, verify, x509, hardware_identity, identity_evidence, nvidia_device, nvidia_rim, ocsp, tpm_attest, confidential_job, key_release, intel_tdx (feature), amd_sev_snp (feature), aws_nitro (feature), nvidia_gpu (feature), nvml (feature), intel_tiber (feature)
+**24 modules:** certs, detection, eat, error, measurements, registry, report_data, traits, verify, x509, hardware_identity, identity_evidence, nvidia_device, nvidia_rim, ocsp, tpm_attest, confidential_job, key_release, intel_tdx (feature), amd_sev_snp (feature), aws_nitro (feature), nvidia_gpu (feature), nvml (feature), intel_tiber (feature)
 
 ### TEE Provider Abstraction
 - `TeeProvider` trait - Unified interface for all TEE vendors
@@ -44,6 +44,7 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
 - TEE measurement verification
 - Validity period and key usage extension validation
 - Functions in `x509`: `parse()`, `parse_pem_chain()`, `verify_issued_by()`, `verify_chain()`
+- `eat` - the Entity Attestation Token claims of RFC 9711 (`eat_nonce`, `ueid`, `dbgstat`, `eat_profile`, `measurements`), read from the claims set of a JWT already verified against a pinned key and recorded on the `AttestationResult`. The Intel Tiber and NVIDIA attestation service verifiers read their tokens through it, beside each service's own claims. Only the JWT form is read: no evidence this crate verifies arrives as a CWT.
 
 ### Key release and confidential jobs
 

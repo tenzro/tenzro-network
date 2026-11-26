@@ -64,6 +64,7 @@ function fakeRpc({ tamper = false } = {}) {
       if (method === "tenzro_getNonce") return "0x3";
       if (method === "eth_chainId") return "0x539";
       if (method === "eth_gasPrice") return "0xee6b2800";
+      if (method === "tenzro_estimateGas") return "0x7a120";
       if (method === "tenzro_getSigningPayload") return plainPayload(params, tamper);
       if (method === "tenzro_sendRawTransaction") return { params };
       throw new Error(`unexpected rpc ${method}`);
@@ -102,7 +103,7 @@ test("signPlanPayment wraps the signed open transaction and submits nothing", as
   assert.equal(signer.calls.length, 1);
 
   assert.deepEqual(JSON.parse(Buffer.from(header, "base64").toString("utf8")), payload);
-  assert.deepEqual(rpc.methods.sort(), ["eth_chainId", "eth_gasPrice", "tenzro_getNonce", "tenzro_getSigningPayload"]);
+  assert.deepEqual(rpc.methods.sort(), ["eth_chainId", "eth_gasPrice", "tenzro_estimateGas", "tenzro_getNonce", "tenzro_getSigningPayload"]);
 });
 
 test("signPlanPayment refuses a digest the node altered, before signing", async () => {

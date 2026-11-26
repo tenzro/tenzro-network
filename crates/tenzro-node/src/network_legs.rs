@@ -509,11 +509,27 @@ pub(crate) async fn drive(node: Arc<TenzroNode>, payment_id: String) {
     }
 }
 
+/// What a forwarded leg is priced at: nothing for a model under a
+/// non-commercial licence, which a gateway may route but no one may sell, so
+/// the leg is recorded bound to the call at zero; otherwise the provider's
+/// card.
+fn leg_price(
+    non_commercial: bool,
+    card_charge: impl FnOnce() -> Result<u128, String>,
+) -> Result<u128, String> {
+    if non_commercial { Ok(0) } else { card_charge() }
+}
+
 /// Record the leg `work` owes and start paying it. The record is written
 /// before this returns; the payment proceeds in the background.
 pub(crate) fn owe(node: &Arc<TenzroNode>, work: LegWork<'_>) -> Option<NetworkLeg> {
-    let priced = crate::inference_pricing::charge_wei(node, work.card, work.units)
-        .map_err(|e| e.to_string());
+    let priced = leg_price(
+        crate::catalog_sync::non_commercial(node, work.model_id),
+        || {
+            crate::inference_pricing::charge_wei(node, work.card, work.units)
+                .map_err(|e| e.to_string())
+        },
+    );
     let leg = new_leg(&work, priced, crate::calendar::now_ms());
     let store = match node_store(node) {
         Ok(s) => s,
@@ -681,6 +697,23 @@ mod tests {
             output_hash: "output-a",
             receipt,
         }
+    }
+
+    /// A forwarded call to a non-commercially licensed model is recorded as a
+    /// zero-amount leg bound to the call, whatever the provider's card says.
+    #[test]
+    fn a_licence_restricted_forward_is_a_zero_amount_bound_leg() {
+        let card = RateCard::default();
+        let units = BillableUnits::new();
+        let priced = leg_price(true, || Ok(1_000));
+        assert_eq!(priced, Ok(0));
+        let leg = new_leg(&work(&card, &units, None, "n-1"), priced, 1);
+        assert_eq!(leg.cost_wei, 0);
+        assert_eq!(leg.status, LegStatus::Free);
+        assert_eq!(leg.payment_id, leg.request_digest);
+        // Even a card that cannot price the call does not fail the leg.
+        assert_eq!(leg_price(true, || Err("unpriced".into())), Ok(0));
+        assert_eq!(leg_price(false, || Ok(1_000)), Ok(1_000));
     }
 
     fn charge(n: u32) -> LedgerCharge {

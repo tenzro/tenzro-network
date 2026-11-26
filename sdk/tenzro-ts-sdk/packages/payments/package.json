@@ -1,7 +1,7 @@
 {
   "name": "@tenzro/payments",
   "version": "0.9.0",
-  "description": "Tenzro machine payments: x402 payers and the publisher gate, MPP, Permit2, funding and purchases",
+  "description": "Tenzro machine payments: x402 payers and the publisher gate, MPP, Permit2, funding and ledger payments in any accepted asset",
   "keywords": [
     "tenzro",
     "tenzro-sdk",

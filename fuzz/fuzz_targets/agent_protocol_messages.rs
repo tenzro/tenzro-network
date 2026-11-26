@@ -22,6 +22,8 @@ const METHODS: [&str; 6] = [
     "unknown",
 ];
 const NOW_MS: i64 = 1_790_000_000_000;
+/// The DID the fuzzed envelopes are addressed to; no fuzzed envelope names it.
+const AUDIENCE: &str = "did:tenzro:machine:fuzz-audience";
 
 fuzz_target!(|data: &[u8]| {
     let Some((&which, rest)) = data.split_first() else {
@@ -40,7 +42,10 @@ fuzz_target!(|data: &[u8]| {
             // 0x5a.. is no key's wallet slot: neither a derived address left-aligned nor a key digest.
             let wallet = tenzro_types::Address::new([0x5a; 32]);
             assert!(
-                did_envelope::verify_against_wallet(method, &params, wallet, NOW_MS).is_err(),
+                did_envelope::verify_against_wallet(
+                    AUDIENCE, method, &params, wallet, None, NOW_MS
+                )
+                .is_err(),
                 "a fuzzed envelope verified against a wallet nobody holds"
             );
         }
@@ -55,7 +60,9 @@ fuzz_target!(|data: &[u8]| {
             let (id, body) = rest.split_at(split);
             if let Ok(id) = std::str::from_utf8(id) {
                 let _ = client_metadata::parse_client_id_url(id);
-                if let Ok(doc) = client_metadata::parse_document(id, body.get(1..).unwrap_or_default()) {
+                if let Ok(doc) =
+                    client_metadata::parse_document(id, body.get(1..).unwrap_or_default())
+                {
                     let _ = doc.allows_redirect("https://example.org/callback");
                 }
             }

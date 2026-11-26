@@ -352,14 +352,12 @@ pub fn findings(m: &Machine, net: &Net, rpc_url: &str) -> Vec<Finding> {
         KeyRoot::NoSecureEnclave => {
             let mut x = f("Hardware key", Word::Action, "no usable Secure Enclave on this Mac");
             x.fix.push("A Mac with Apple silicon or a T2 chip is needed to run a node.".into());
-            x.fix.push("You can still use the network from here with a passkey.".into());
             x
         }
         KeyRoot::NoTpm => {
             let mut x = f("Hardware key", Word::Action, "no TPM 2.0 on this machine: it cannot hold a node's keys itself");
             x.fix.push("Turn the TPM on in the firmware settings (fTPM, PTT or Security Device), then reboot.".into());
             x.fix.push("Or keep the keys in another machine's TPM (a key holder), offered in the validator and provider paths.".into());
-            x.fix.push("Or use the network with a passkey, which needs no TPM.".into());
             x
         }
     });
@@ -436,6 +434,9 @@ mod tests {
             missing_tools: vec![],
             node_binary: None,
             keys_provisioned: Some(true),
+            package_managers: vec![],
+            clock_synced: None,
+            service: None,
         }
     }
 
@@ -476,14 +477,17 @@ mod tests {
     }
 
     #[test]
-    fn no_tpm_gives_what_why_and_three_ways_forward() {
+    fn no_tpm_gives_what_why_and_two_ways_forward() {
         let mut m = Machine::blank();
         m.root = KeyRoot::NoTpm;
         let all = findings(&m, &Net::Checking, "https://rpc.tenzro.com");
         let k = all.iter().find(|x| x.label == "Hardware key").unwrap();
         assert_eq!(k.word, Word::Action);
         assert!(k.text.contains("no TPM 2.0"));
-        assert!(k.fix.len() >= 3);
+        assert_eq!(k.fix.len(), 2);
+        assert!(k.fix[0].contains("firmware settings"));
+        assert!(k.fix[1].contains("key holder"));
+        assert!(!k.fix.iter().any(|x| x.contains("passkey")));
     }
 
     #[test]

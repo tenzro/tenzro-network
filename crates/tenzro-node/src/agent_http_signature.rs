@@ -85,7 +85,7 @@ pub(crate) fn resolve(
     let status = tenzro_vm::native::read_agent_quarantine(chain, agent_did);
     Some(AgentKeyResolution {
         agent_did: agent_did.to_string(),
-        root: tenzro_vm::funding::root_did(agent_did),
+        root: stored.terms.controller_did.clone(),
         keyid: keyid.to_string(),
         public_key: node.dpop_public_key.clone(),
         machine_did: node.machine_did.clone(),

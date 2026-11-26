@@ -290,6 +290,21 @@ mod tests {
         }
     }
 
+    /// A spot answer stopped early (pre-empted) commits exactly the steps it
+    /// produced, and its decode passes on those steps alone: stopping before
+    /// the token budget is never evidence against an honest provider.
+    #[test]
+    fn a_decode_stopped_early_passes_on_the_steps_it_produced() {
+        for keyed in [false, true] {
+            let s = sampling(if keyed { 0.8 } else { 0.0 }, keyed);
+            let mut stopped = honest(1, &s, 64, 1);
+            stopped.steps.truncate(7);
+            let r = check_decode(&stopped, &s);
+            assert_eq!(r.pass, Some(true), "{r:?}");
+            assert_eq!(r.consistent, 7);
+        }
+    }
+
     #[test]
     fn an_honest_greedy_decode_passes() {
         let s = sampling(0.0, false);

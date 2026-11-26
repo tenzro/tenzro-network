@@ -20,6 +20,15 @@ pub enum Behaviour {
     DoubleSign,
     /// Receives everything and sends nothing.
     Mute,
+    /// Sends one in four of its own messages with a field changed (a round,
+    /// epoch, index or sequence off by one, another author or signer, a
+    /// changed digest, a list cut short), and now and then an earlier message
+    /// again.
+    Mutate,
+    /// Runs a second signature implementation that disagrees with the first
+    /// on one in four valid votes and certificates it receives, and refuses
+    /// them, as a node that needs both implementations to accept would.
+    DivergentVerifier,
 }
 
 /// Seeded fault injection.
@@ -48,6 +57,10 @@ pub struct Faults {
     pub spike_ms: (u64, u64),
     /// Probability that a frame is dropped.
     pub frame_loss: f64,
+    /// Connections between two up validators that close per simulated
+    /// hour, as one lost to an idle timeout does; each is dialled again
+    /// after the usual connect delay.
+    pub link_drops_per_hour: f64,
     /// Largest clock offset a validator restarts with, milliseconds either
     /// way.
     pub max_skew_ms: u64,
@@ -64,6 +77,9 @@ pub struct Faults {
     pub slow_validators: u32,
     /// How many times slower a slow validator processes.
     pub slow_factor: u64,
+    /// Validators behind slow links, by id, with how many times the usual
+    /// latency every frame to or from each takes.
+    pub slow_links: Vec<(u32, u64)>,
     /// Share of the run during which faults start; the rest runs healed,
     /// every downtime and partition ending as scheduled, so the network is
     /// judged on recovering (1.0: faults until the end).
@@ -82,6 +98,29 @@ pub struct Faults {
     /// A validator that goes silent once its exit commits, to test that
     /// the epoch it leaves still certifies without it (false: off).
     pub exit_goes_mute: bool,
+    /// Stops of more validators at once than the committee tolerates, so
+    /// the chain halts until they return (none: off).
+    pub threshold_halts: Option<ThresholdHalts>,
+}
+
+/// Simultaneous stops that halt the chain. A halt stops honest validators
+/// of the running committee, drawn from the seed, until the ones left up
+/// are no quorum; a cold start stops every validator. The validators whose
+/// stop took the quorum away return when the halt ends; the ones stopped
+/// before them, which the committee still tolerated, stay down for the
+/// tail, so the chain resumes on exactly a quorum and joins, exits and
+/// governance run on it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThresholdHalts {
+    /// Halts per simulated hour, started only while a quorum is up.
+    pub per_hour: f64,
+    /// Share of halts that stop every validator.
+    pub cold_start_share: f64,
+    /// Shortest and longest halt, milliseconds.
+    pub down_ms: (u64, u64),
+    /// Shortest and longest time the tolerated stops outlast the halt,
+    /// milliseconds.
+    pub tail_ms: (u64, u64),
 }
 
 /// Crashes placed relative to epoch boundaries. Epochs end after a number
@@ -166,18 +205,21 @@ impl Faults {
             spike_factor: (3, 10),
             spike_ms: (1_000, 20_000),
             frame_loss: 0.0,
+            link_drops_per_hour: 0.0,
             max_skew_ms: 0,
             byzantine: Vec::new(),
             disk_stalls_per_node_hour: 0.0,
             disk_stall_ms: (200, 5_000),
             slow_validators: 0,
             slow_factor: 1,
+            slow_links: Vec::new(),
             faults_until_share: 1.0,
             sign_jitter_ms: 0,
             boundary_crashes: None,
             boundary_sign_burst: None,
             boundary_partitions: None,
             exit_goes_mute: false,
+            threshold_halts: None,
         }
     }
 
@@ -192,6 +234,7 @@ impl Faults {
             quorum_loss_share: 0.25,
             spikes_per_hour: 30.0,
             frame_loss: 0.002,
+            link_drops_per_hour: 60.0,
             max_skew_ms: 1_000,
             ..Self::none()
         }
@@ -324,6 +367,10 @@ pub struct SimConfig {
     /// Blocks each validator's node layer keeps in its block store, written
     /// and read back through the node's block codec (0: no node layer).
     pub node_blocks_kept: u64,
+    /// A second ledger, built from the same genesis, executes every block as
+    /// it is ordered, as a node replaying the chain from its first block
+    /// would; its root must equal the network's at every height.
+    pub replay_from_genesis: bool,
 }
 
 const DAY_MS: u64 = 86_400_000;
@@ -381,6 +428,7 @@ impl SimConfig {
             warmup_ms: 5_000,
             network_params: Default::default(),
             node_blocks_kept: 256,
+            replay_from_genesis: false,
         }
     }
 
@@ -389,6 +437,12 @@ impl SimConfig {
     /// - `ci`: 4 validators and 2 joining later, 30 calendar days at one
     ///   epoch per day, every fault class; minutes.
     /// - `years`: the same network over three calendar years.
+    /// - `years-upgrades`: `years` with a governed parameter changed every
+    ///   120 calendar days through a real proposal (leader lookahead, the
+    ///   remote-grant budget divisor), and every block replayed from genesis
+    ///   by a second ledger that must reach the same root. Lengths beyond
+    ///   three years are `--days` (3650, 7300, 10950 for 10, 20 and 30
+    ///   years).
     /// - `idle`: 4 validators, no load, the node's default epoch, six hours
     ///   of block time.
     /// - `restart-mid-epoch`: ten-minute epochs, validators down for tens of
@@ -410,6 +464,12 @@ impl SimConfig {
     /// - `lookahead-1`: 7 validators, two of them slow, under a governed
     ///   leader lookahead of one round.
     /// - `slow`: 7 validators, two of them eight times slower.
+    /// - `delays`, `delays-slow-link`, `delays-mute`: the commit path in
+    ///   message delays. 7 validators, one-way latency fixed at 100 ms
+    ///   (the simulator adds up to a fifth of jitter), no signing latency
+    ///   and batches cut every millisecond, so submit-to-ordered latency
+    ///   over 100 ms counts the delays. The second puts one validator
+    ///   behind links five times slower; the third makes one send nothing.
     /// - `epoch-edge-crash`: 7 validators, no random faults, one validator
     ///   crashed for 3 s per epoch at an offset from the boundary that
     ///   cycles through 1.5 s and 0.4 s before it and 0, 0.6 and 1.2 s
@@ -421,9 +481,19 @@ impl SimConfig {
     /// - `boundary-sign-burst-a`, `-b`: no restarts; two (a) or three (b)
     ///   validators sign the last two checkpoints of every epoch 2.5 s
     ///   late; certification may stand still at most 10 s.
+    /// - `mutate`: 7 validators, one of them sending its own messages with
+    ///   small changes drawn from the seed and replaying earlier ones; the
+    ///   others must hold every invariant.
     /// - `swarm`: every setting drawn from the seed (fault classes on or
     ///   off, rates, committee size, load), faults stopping at 70% of the
     ///   run; the explorer runs one seed after another.
+    /// - `threshold-halt`: 7 validators and 2 joining later; validators
+    ///   are stopped together until the rest are no quorum, or all at once,
+    ///   and the chain must resume when they return, on exactly a quorum
+    ///   while the others stay down, with joins, exits and governance
+    ///   running.
+    /// - `swarm-halt`: `swarm` with such halts, their rate, length and
+    ///   cold-start share drawn from the seed.
     pub fn profile(name: &str, seed: u64) -> Option<Self> {
         let mut c = Self::base(name, seed);
         match name {
@@ -436,6 +506,29 @@ impl SimConfig {
             "years" => {
                 c.calendar_days = 3.0 * 365.0;
                 c.faults = Faults::chaos();
+            }
+            "years-upgrades" => {
+                c.calendar_days = 3.0 * 365.0;
+                c.faults = Faults::chaos();
+                c.replay_from_genesis = true;
+                c.workload.governance_every_days = 0.0;
+                // Enough entries for thirty years; a run uses the ones its
+                // length reaches.
+                c.workload.param_schedule = (1..=91u64)
+                    .map(|k| {
+                        let (name, value) = match k % 4 {
+                            1 => ("consensus.leader_lookahead_rounds", 2),
+                            2 => ("agent.remote_grant_budget_divisor", 8),
+                            3 => ("consensus.leader_lookahead_rounds", 4),
+                            _ => ("agent.remote_grant_budget_divisor", 10),
+                        };
+                        ParamChange {
+                            day: 120.0 * k as f64,
+                            name: name.into(),
+                            value,
+                        }
+                    })
+                    .collect();
             }
             "idle" => {
                 c.epoch_checkpoints = 7_200;
@@ -485,6 +578,18 @@ impl SimConfig {
             "withhold" => {
                 c.calendar_days = 10.0;
                 c.faults.byzantine = vec![(3, Behaviour::WithholdLeaderVertex)];
+            }
+            "mutate" => {
+                c.validators = 7;
+                c.standby = 0;
+                c.calendar_days = 60.0;
+                c.faults.byzantine = vec![(6, Behaviour::Mutate)];
+            }
+            "nversion" => {
+                c.validators = 7;
+                c.standby = 0;
+                c.calendar_days = 30.0;
+                c.faults.byzantine = vec![(5, Behaviour::DivergentVerifier)];
             }
             "loss" => {
                 c.calendar_days = 10.0;
@@ -543,6 +648,27 @@ impl SimConfig {
                 c.faults.slow_validators = 2;
                 c.faults.slow_factor = 8;
                 c.workload.pipeline = 4;
+            }
+            "delays" | "delays-slow-link" | "delays-mute" => {
+                c.validators = 7;
+                c.standby = 0;
+                c.epoch_checkpoints = 120;
+                c.calendar_epoch_ms = 3_600_000;
+                c.calendar_days = 1.0;
+                c.max_sim_ms = 120_000;
+                c.warmup_ms = 15_000;
+                c.latency_ms = (100, 100);
+                c.sign_latency_ms = 0;
+                c.batch_interval_ms = 1;
+                c.tick_ms = 1;
+                c.workload.governance_every_days = 0.0;
+                c.workload.stake_every_days = 0.0;
+                c.node_blocks_kept = 0;
+                match name {
+                    "delays-slow-link" => c.faults.slow_links = vec![(6, 5)],
+                    "delays-mute" => c.faults.byzantine = vec![(6, Behaviour::Mute)],
+                    _ => {}
+                }
             }
             "epoch-edge-crash" => {
                 c.validators = 7;
@@ -713,6 +839,31 @@ impl SimConfig {
                 });
             }
             "swarm" => c.swarm(),
+            "threshold-halt" => {
+                c.validators = 7;
+                c.standby = 2;
+                c.calendar_days = 120.0;
+                c.workload.governance_every_days = 4.0;
+                c.workload.stake_every_days = 5.0;
+                c.faults.threshold_halts = Some(ThresholdHalts {
+                    per_hour: 60.0,
+                    cold_start_share: 0.3,
+                    down_ms: (2_000, 15_000),
+                    tail_ms: (0, 10_000),
+                });
+                c.faults.faults_until_share = 0.9;
+            }
+            "swarm-halt" => {
+                use rand::{Rng, SeedableRng};
+                c.swarm();
+                let mut r = rand::rngs::StdRng::seed_from_u64(seed ^ 0x4841_4C54_0000_0001);
+                c.faults.threshold_halts = Some(ThresholdHalts {
+                    per_hour: r.gen_range(5.0..90.0),
+                    cold_start_share: r.gen_range(0.0..0.6),
+                    down_ms: (1_000, r.gen_range(2_000..60_000)),
+                    tail_ms: (0, r.gen_range(1..30_000)),
+                });
+            }
             other => {
                 let n: u32 = other.strip_prefix("scale-")?.parse().ok()?;
                 c.validators = n;
@@ -818,6 +969,8 @@ impl SimConfig {
         "double-sign",
         "equivocate",
         "withhold",
+        "mutate",
+        "nversion",
         "loss",
         "idle",
         "node",
@@ -833,6 +986,7 @@ impl SimConfig {
         "param-activation-partition",
         "exit-mute",
         "slash-removal-partition",
+        "threshold-halt",
         "netcond-intercont",
         "netcond-loss",
     ];

@@ -1,0 +1,57 @@
+{
+  "description": "A tools/list result signed by a Tenzro node's machine identity key (crates/tenzro-node/src/mcp/tool_signature.rs), for clients to check their verifier against.",
+  "machine_did": "did:tenzro:machine:e3a1b94691c7cb337a54d37f24140d94929cbb45c531b2694b28d8d2ef0df031",
+  "result": {
+    "resultType": "complete",
+    "_meta": {
+      "tenzro/tools-signature": {
+        "protected": "eyJhbGciOiJFUzI1NiIsImp3ayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6IkI0RU9xWFRPcFhjLVk3aVg4MzQ3NmFDZWVsX3B1WEdrVFJCbHJDbzZreEUiLCJ5IjoiWTM1SHBQbVVaS0Q5emtTb2pzZlhBNmtZUEIwR1ZTMmVMV3QyQnBTQnhYYyJ9LCJraWQiOiJkaWQ6dGVuenJvOm1hY2hpbmU6ZTNhMWI5NDY5MWM3Y2IzMzdhNTRkMzdmMjQxNDBkOTQ5MjljYmI0NWM1MzFiMjY5NGIyOGQ4ZDJlZjBkZjAzMSNoYXJkd2FyZS1rZXkiLCJ0eXAiOiJKT1NFIn0",
+        "signature": "5Mrb7pCl9wEgaASARwIqzLeBUSc0SPw8wxywdVdW8xpnltoklWgSFh6p0zPkCeBUlR__o9gVsR-Ddlh3w9vg6w",
+        "issuedAtMs": 1790000000000,
+        "listVersion": "0.2.2"
+      }
+    },
+    "tools": [
+      {
+        "name": "get_balance",
+        "description": "Get the TNZO balance of an address",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string"
+            }
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "balance": {
+              "type": "string"
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      {
+        "name": "transfer",
+        "title": "Transfer",
+        "description": "Move TNZO to an address",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string"
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": true
+        }
+      }
+    ]
+  }
+}

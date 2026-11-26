@@ -1,6 +1,8 @@
+import { findings, noAlerts } from "./alerts.js";
 import type { Reading, Snapshot } from "./data.js";
 import { headline } from "./data.js";
 import { formatDuration, formatTnzo } from "./format.js";
+import type { Shown } from "./redact.js";
 
 function val<T>(r: Reading<T>): T | null {
   return r.state === "ok" ? r.value : r.state === "error" && r.last ? r.last.value : null;
@@ -11,12 +13,16 @@ function why<T>(r: Reading<T>): string {
 }
 
 /** The same answers as the screens, as plain lines: for pipes, scripts and screen readers. */
-export function plainReport(url: string, s: Snapshot): string {
+export function plainReport(url: Shown, s: Snapshot): string {
   const h = headline(s);
   const st = val(s.status);
   const lines: string[] = [];
   lines.push(`Tenzro node ${url}`);
   lines.push(`Status: ${h.word} - ${h.reason}`);
+  // One reading, so everything found in it is listed: there is no second one to wait for.
+  const found = findings(s, noAlerts, s.at, 0);
+  lines.push(`Needs attention: ${found.length}`);
+  for (const f of found) lines.push(`  ${f.level.toUpperCase()}  ${f.title}: ${f.detail}`);
   if (st) {
     lines.push(`State: ${st.state}, ${st.health_status}`);
     lines.push(`Uptime: ${formatDuration(st.uptime_secs)}`);

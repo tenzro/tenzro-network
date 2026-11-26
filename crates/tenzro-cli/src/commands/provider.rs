@@ -21,12 +21,18 @@ pub enum ProviderCommand {
     Scorecard(ProviderScorecardCmd),
     /// A provider's settlement statement for a window, by UTC day or month
     Statement(ProviderStatementCmd),
+    /// What an account paid each payee over a window, from the same settlement records
+    Invoice(ProviderInvoiceCmd),
     /// Provider pricing management
     #[command(subcommand)]
     Pricing(PricingCommand),
     /// Compute bond (admission collateral) management
     #[command(subcommand)]
     Bond(BondCommand),
+    /// Say this provider stops serving, from the next hour: hours it is away and owes to no held claim are not judged
+    Pause(PresenceCmd),
+    /// Say this provider serves again, from the next hour
+    Resume(PresenceCmd),
 }
 
 impl ProviderCommand {
@@ -38,7 +44,10 @@ impl ProviderCommand {
             Self::List(cmd) => cmd.execute().await,
             Self::Quote(cmd) => cmd.execute().await,
             Self::Scorecard(cmd) => cmd.execute().await,
+            Self::Pause(cmd) => cmd.execute(false).await,
+            Self::Resume(cmd) => cmd.execute(true).await,
             Self::Statement(cmd) => cmd.execute().await,
+            Self::Invoice(cmd) => cmd.execute().await,
             Self::Pricing(cmd) => cmd.execute().await,
             Self::Bond(cmd) => cmd.execute().await,
         }
@@ -157,9 +166,57 @@ async fn chain_facts(
         .map_err(anyhow::Error::msg)
 }
 
+/// Every call `provider` served in the window, from each node as one
+/// ledger, and whether those nodes still held all of them.
+async fn fetch_lines<'a>(
+    endpoints: impl Iterator<Item = &'a String>,
+    provider: &str,
+    from_ms: u64,
+    to_ms: u64,
+) -> Result<(Vec<tenzro_types::statement::Line>, bool)> {
+    use tenzro_types::statement::Line;
+    let mut sources = Vec::new();
+    let mut complete = true;
+    for endpoint in endpoints {
+        let rpc = crate::rpc::RpcClient::new(endpoint);
+        let mut lines = Vec::new();
+        let mut cursor = serde_json::Value::Null;
+        loop {
+            let page: serde_json::Value = rpc
+                .call(
+                    "tenzro_listSettlements",
+                    serde_json::json!({
+                        "provider": provider, "from_ms": from_ms, "to_ms": to_ms,
+                        "limit": 200, "cursor": cursor,
+                    }),
+                )
+                .await?;
+            for e in page["settlements"].as_array().into_iter().flatten() {
+                lines.push(Line::from_settlement(e).map_err(anyhow::Error::msg)?);
+            }
+            // The node keeps a bounded record; once it has dropped entries
+            // the window may be missing calls.
+            if page["recorded"].as_u64() > page["kept"].as_u64() {
+                complete = false;
+            }
+            match &page["cursor"] {
+                serde_json::Value::Null => break,
+                c => cursor = c.clone(),
+            }
+        }
+        sources.push((endpoint.clone(), lines));
+    }
+    let lines = if sources.len() == 1 {
+        sources.pop().map(|(_, l)| l).unwrap_or_default()
+    } else {
+        tenzro_types::statement::merge_sources(sources)
+    };
+    Ok((lines, complete))
+}
+
 impl ProviderStatementCmd {
     pub async fn execute(&self) -> Result<()> {
-        use tenzro_types::statement::{Line, Period, build, lines_csv, summary_csv, verify};
+        use tenzro_types::statement::{Period, build, lines_csv, summary_csv, verify};
         let period: Period = self.period.parse().map_err(anyhow::Error::msg)?;
         let (from_ms, to_ms) = (window_edge(&self.from)?, window_edge(&self.to)?);
         if from_ms >= to_ms {
@@ -168,42 +225,13 @@ impl ProviderStatementCmd {
         if self.format != "json" && self.format != "csv" {
             anyhow::bail!("--format is json or csv");
         }
-        let mut sources = Vec::new();
-        let mut complete = true;
-        for endpoint in std::iter::once(&self.rpc).chain(&self.also_rpc) {
-            let rpc = crate::rpc::RpcClient::new(endpoint);
-            let mut lines = Vec::new();
-            let mut cursor = serde_json::Value::Null;
-            loop {
-                let page: serde_json::Value = rpc
-                    .call(
-                        "tenzro_listSettlements",
-                        serde_json::json!({
-                            "provider": self.provider, "from_ms": from_ms, "to_ms": to_ms,
-                            "limit": 200, "cursor": cursor,
-                        }),
-                    )
-                    .await?;
-                for e in page["settlements"].as_array().into_iter().flatten() {
-                    lines.push(Line::from_settlement(e).map_err(anyhow::Error::msg)?);
-                }
-                // The node keeps a bounded record; once it has dropped entries
-                // the window may be missing calls.
-                if page["recorded"].as_u64() > page["kept"].as_u64() {
-                    complete = false;
-                }
-                match &page["cursor"] {
-                    serde_json::Value::Null => break,
-                    c => cursor = c.clone(),
-                }
-            }
-            sources.push((endpoint.clone(), lines));
-        }
-        let lines = if sources.len() == 1 {
-            sources.pop().map(|(_, l)| l).unwrap_or_default()
-        } else {
-            tenzro_types::statement::merge_sources(sources)
-        };
+        let (lines, complete) = fetch_lines(
+            std::iter::once(&self.rpc).chain(&self.also_rpc),
+            &self.provider,
+            from_ms,
+            to_ms,
+        )
+        .await?;
         let provider = format!(
             "0x{}",
             tenzro_types::statement::account_hex(&serde_json::json!(self.provider))
@@ -240,6 +268,124 @@ impl ProviderStatementCmd {
                 "Verified: {} settled line(s) match their payment records and receipts on chain, \
                  and every summary and total is recomputed from them.",
                 facts.len()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A payer's invoice over a window: what the paying account paid each payee,
+/// read from the settlement records each payee's node lists, summed by UTC day
+/// or month, by model and work class, with every call tied to its settlement
+/// transaction and payment reference. The totals equal the payee's own
+/// statement for the same window. With --verify, each settled line is re-read
+/// from the chain and every summary and total is recomputed; any difference is
+/// reported and the command exits non-zero.
+#[derive(Debug, Parser)]
+pub struct ProviderInvoiceCmd {
+    /// The paying account's address
+    #[arg(long)]
+    payer: String,
+    /// A payee's account address. Repeat for each.
+    #[arg(long = "payee", required = true)]
+    payees: Vec<String>,
+    /// Start of the window, inclusive: a UTC date (YYYY-MM-DD) or unix milliseconds
+    #[arg(long)]
+    from: String,
+    /// End of the window, exclusive: a UTC date (YYYY-MM-DD) or unix milliseconds
+    #[arg(long)]
+    to: String,
+    /// Period the invoice is cut into: day or month
+    #[arg(long, default_value = "day")]
+    period: String,
+    /// Output format: json or csv
+    #[arg(long, default_value = "json")]
+    format: String,
+    /// With csv, one row per call instead of the summary rows
+    #[arg(long)]
+    lines: bool,
+    /// Recompute the invoice from chain data and exit non-zero on any difference
+    #[arg(long)]
+    verify: bool,
+    /// Node to read the chain from when verifying [default: --rpc]
+    #[arg(long)]
+    verify_rpc: Option<String>,
+    /// RPC endpoint of the node that recorded the payees' settlements
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+    /// Another node the payees served through; its lines join the invoice. Repeat for each.
+    #[arg(long = "also-rpc")]
+    also_rpc: Vec<String>,
+}
+
+impl ProviderInvoiceCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use super::payer_invoice::{invoice, invoice_csv};
+        use tenzro_types::statement::{Period, verify};
+        let period: Period = self.period.parse().map_err(anyhow::Error::msg)?;
+        let (from_ms, to_ms) = (window_edge(&self.from)?, window_edge(&self.to)?);
+        if from_ms >= to_ms {
+            anyhow::bail!("--from must be before --to");
+        }
+        if self.format != "json" && self.format != "csv" {
+            anyhow::bail!("--format is json or csv");
+        }
+        let mut complete = true;
+        let mut per_payee = Vec::new();
+        for payee in &self.payees {
+            let (lines, whole) = fetch_lines(
+                std::iter::once(&self.rpc).chain(&self.also_rpc),
+                payee,
+                from_ms,
+                to_ms,
+            )
+            .await?;
+            complete &= whole;
+            let payee = format!(
+                "0x{}",
+                tenzro_types::statement::account_hex(&serde_json::json!(payee))
+            );
+            per_payee.push((payee, lines));
+        }
+        let payer = format!(
+            "0x{}",
+            tenzro_types::statement::account_hex(&serde_json::json!(self.payer))
+        );
+        let inv = invoice(&payer, from_ms, to_ms, period, complete, per_payee);
+
+        match self.format.as_str() {
+            "csv" => print!("{}", invoice_csv(&inv, self.lines)),
+            _ => println!("{}", serde_json::to_string_pretty(&inv)?),
+        }
+
+        if self.verify {
+            let chain = crate::rpc::RpcClient::new(self.verify_rpc.as_deref().unwrap_or(&self.rpc));
+            let mut differences = Vec::new();
+            let mut checked = 0usize;
+            for statement in &inv.payees {
+                let mut facts = std::collections::BTreeMap::new();
+                for line in statement.lines.iter().filter(|l| l.settled()) {
+                    if let Some(f) = chain_facts(&chain, line).await?
+                        && let Some(r) = &line.pay_ref
+                    {
+                        facts.insert(r.clone(), f);
+                    }
+                }
+                checked += facts.len();
+                differences.extend(verify(statement, &facts));
+            }
+            if !differences.is_empty() {
+                for d in &differences {
+                    eprintln!("{d}");
+                }
+                anyhow::bail!(
+                    "the invoice differs from the chain in {} place(s)",
+                    differences.len()
+                );
+            }
+            eprintln!(
+                "Verified: {checked} settled line(s) match their payment records and receipts on chain, \
+                 and every summary and total is recomputed from them."
             );
         }
         Ok(())
@@ -303,19 +449,22 @@ fn extract_tx_hash(result: &serde_json::Value) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
-/// Sign a compute-bond transaction in hardware as the client account under
-/// `key_namespace` and submit it pre-signed.
+/// Sign a compute-bond transaction as `account` and submit it pre-signed.
+/// The signing account is the bond's payout address, so it is printed before
+/// anything is signed.
 ///
 /// The bond RPCs are read-only; every mutation goes through consensus so the
 /// vault transfer and the on-chain marker land in the same block.
 async fn submit_bond_tx(
     rpc: &crate::rpc::RpcClient,
-    key_namespace: &str,
+    account: &crate::keystore::SigningAccount,
     gas_limit: u64,
     tx_type: serde_json::Value,
 ) -> Result<String> {
-    let result: serde_json::Value =
-        crate::keystore::send_as_client(rpc, key_namespace, [0u8; 32], tx_type, gas_limit).await?;
+    let (signer, from) = account.open()?;
+    output::print_field("Signing Account", &format!("0x{}", hex::encode(from)));
+    let result =
+        crate::keystore::SigningAccount::send(rpc, signer, [0u8; 32], tx_type, gas_limit).await?;
     Ok(extract_tx_hash(&result))
 }
 
@@ -353,9 +502,9 @@ pub struct BondPostCmd {
     #[arg(long)]
     did: String,
 
-    /// Provider wallet address (32-byte hex; with or without 0x)
-    #[arg(long)]
-    address: String,
+    /// The account that signs and pays; it is the bond's payout address
+    #[command(flatten)]
+    account: crate::keystore::SigningAccount,
 
     /// Bond amount in TNZO (decimal, e.g. "100" for 100 TNZO)
     #[arg(long)]
@@ -371,7 +520,6 @@ impl BondPostCmd {
         output::print_header("Post Compute Bond");
         let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
         output::print_field("Provider DID", &self.did);
-        output::print_field("Provider Address", &output::format_address(&self.address));
         output::print_field(
             "Amount",
             &format!("{} TNZO ({} wei)", self.amount, amount_wei),
@@ -382,7 +530,7 @@ impl BondPostCmd {
         let spinner = output::create_spinner("Posting compute bond...");
         let tx_hash = submit_bond_tx(
             &rpc,
-            "client",
+            &self.account,
             BOND_POST_GAS,
             serde_json::json!({
                 "PostComputeBond": {
@@ -409,9 +557,9 @@ pub struct BondIncreaseCmd {
     #[arg(long)]
     did: String,
 
-    /// Provider wallet address (32-byte hex; must match the bond's payout address)
-    #[arg(long)]
-    address: String,
+    /// The account that signs: the account the bond was posted from
+    #[command(flatten)]
+    account: crate::keystore::SigningAccount,
 
     /// Additional amount in TNZO
     #[arg(long)]
@@ -437,7 +585,7 @@ impl BondIncreaseCmd {
         let spinner = output::create_spinner("Increasing compute bond...");
         let tx_hash = submit_bond_tx(
             &rpc,
-            "client",
+            &self.account,
             BOND_INCREASE_GAS,
             serde_json::json!({
                 "IncreaseComputeBond": {
@@ -553,14 +701,62 @@ impl BondListCmd {
 }
 
 #[derive(Debug, Parser)]
+pub struct PresenceCmd {
+    /// Provider DID the compute bond is posted under
+    #[arg(long)]
+    did: String,
+
+    /// The account that signs: the account the bond was posted from
+    #[command(flatten)]
+    account: crate::keystore::SigningAccount,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl PresenceCmd {
+    pub async fn execute(&self, online: bool) -> Result<()> {
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let op = tenzro_native_ops::provider_presence::ProviderPresenceOp {
+            provider_did: self.did.clone(),
+            online,
+        };
+        op.validate().map_err(|e| anyhow::anyhow!(e))?;
+        let tx_hash = submit_bond_tx(
+            &rpc,
+            &self.account,
+            tenzro_native_ops::provider_presence::GAS,
+            serde_json::to_value(tenzro_types::transaction::TransactionType::NativeCall {
+                selector: tenzro_native_ops::SELECTOR_PROVIDER_PRESENCE,
+                data: tenzro_native_ops::encode(&op),
+            })?,
+        )
+        .await?;
+        output::print_success(if online {
+            "The provider serves again from the next hour"
+        } else {
+            "The provider stops serving from the next hour"
+        });
+        output::print_field("Transaction Hash", &tx_hash);
+        if !online {
+            output::print_info(
+                "Until then, and in every hour a held claim is delivered from this bond, it is judged as before.",
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
 pub struct BondWithdrawCmd {
     /// Provider DID
     #[arg(long)]
     did: String,
 
-    /// Provider wallet address (32-byte hex; must match the bond's payout address)
-    #[arg(long)]
-    address: String,
+    /// The account that signs: the account the bond was posted from
+    #[command(flatten)]
+    account: crate::keystore::SigningAccount,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -579,7 +775,7 @@ impl BondWithdrawCmd {
         let spinner = output::create_spinner("Submitting withdrawal...");
         let tx_hash = submit_bond_tx(
             &rpc,
-            "client",
+            &self.account,
             BOND_WITHDRAW_GAS,
             serde_json::json!({
                 "WithdrawComputeBond": { "provider_did": self.did }
@@ -632,9 +828,9 @@ pub struct BondFinalizeCmd {
     #[arg(long)]
     did: String,
 
-    /// Provider wallet address (32-byte hex; must match the bond's payout address)
-    #[arg(long)]
-    address: String,
+    /// The account that signs: the account the bond was posted from
+    #[command(flatten)]
+    account: crate::keystore::SigningAccount,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -653,7 +849,7 @@ impl BondFinalizeCmd {
         let spinner = output::create_spinner("Submitting finalization...");
         let tx_hash = submit_bond_tx(
             &rpc,
-            "client",
+            &self.account,
             BOND_FINALIZE_GAS,
             serde_json::json!({
                 "FinalizeComputeBondWithdrawal": { "provider_did": self.did }
@@ -1407,6 +1603,10 @@ pub struct ProviderQuoteCmd {
     /// Only this provider (address)
     #[arg(long)]
     provider: Option<String>,
+    /// Order: price (cheapest first) or carbon (cleanest grid first, for
+    /// spot work that can run anywhere)
+    #[arg(long, default_value = "price")]
+    order: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -1423,6 +1623,7 @@ impl ProviderQuoteCmd {
                     "units": { "input_tokens": self.input_tokens, "output_tokens": self.output_tokens },
                     "verification": self.verification,
                     "provider": self.provider,
+                    "order": self.order,
                 }),
             )
             .await?;
@@ -1433,6 +1634,8 @@ impl ProviderQuoteCmd {
 /// Provider commands that call one node RPC each and print its answer
 #[derive(Debug, clap::Subcommand)]
 pub enum ProviderRpcCommand {
+    /// Call tenzro_slaGetEnergy (sla get energy) and print the node's answer
+    SlaEnergy(ProviderSlaEnergyRpcCmd),
     /// Call tenzro_slaGetParams (sla get params) and print the node's answer
     SlaParams(ProviderSlaParamsRpcCmd),
     /// Call tenzro_slaIssueProbe (sla issue probe) and print the node's answer
@@ -1452,6 +1655,7 @@ pub enum ProviderRpcCommand {
 impl ProviderRpcCommand {
     pub async fn execute(&self) -> anyhow::Result<()> {
         match self {
+            Self::SlaEnergy(cmd) => cmd.execute().await,
             Self::SlaParams(cmd) => cmd.execute().await,
             Self::SlaProbe(cmd) => cmd.execute().await,
             Self::SlaProbes(cmd) => cmd.execute().await,
@@ -1460,6 +1664,24 @@ impl ProviderRpcCommand {
             Self::ComputePriceFeed(cmd) => cmd.execute().await,
             Self::SlaVerdict(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Call tenzro_slaGetEnergy (sla get energy)
+#[derive(Debug, clap::Parser)]
+pub struct ProviderSlaEnergyRpcCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ProviderSlaEnergyRpcCmd {
+    pub async fn execute(&self) -> anyhow::Result<()> {
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_slaGetEnergy", serde_json::json!([]))
+            .await?;
+        crate::output::print_json(&result)
     }
 }
 
@@ -1630,5 +1852,79 @@ impl ProviderSlaVerdictRpcCmd {
             )
             .await?;
         crate::output::print_json(&result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keystore::AccountSigner;
+
+    fn post(args: &[&str]) -> BondPostCmd {
+        let mut all = vec!["post", "--did", "did:tenzro:machine:ab", "--amount", "100"];
+        all.extend(args);
+        let mut cmd = BondPostCmd::try_parse_from(all).expect("the post arguments parse");
+        if !args.contains(&"--tpm-key-holder") {
+            cmd.account.delegated = crate::keystore::DelegatedKey::default();
+        }
+        cmd
+    }
+
+    #[test]
+    fn a_bond_is_posted_from_the_client_account_unless_the_node_account_is_asked_for() {
+        assert_eq!(
+            post(&[]).account.signer().unwrap(),
+            AccountSigner::Client("client")
+        );
+        assert_eq!(
+            post(&["--node-account"]).account.signer().unwrap(),
+            AccountSigner::Node(None)
+        );
+    }
+
+    #[test]
+    fn a_machine_without_a_tpm_posts_its_bond_through_the_key_holder() {
+        let cmd = post(&[
+            "--node-account",
+            "--tpm-key-holder",
+            "/run/holder.sock",
+            "--tpm-label",
+            "m1",
+        ]);
+        assert_eq!(cmd.account.signer().unwrap(), AccountSigner::Node(None));
+        assert_eq!(cmd.account.delegated.tpm_label.as_deref(), Some("m1"));
+
+        let refused = post(&["--tpm-key-holder", "/run/holder.sock", "--tpm-label", "m1"])
+            .account
+            .signer()
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("--node-account"), "{refused}");
+    }
+
+    #[test]
+    fn the_payout_address_is_the_signer_and_cannot_be_named_apart_from_it() {
+        let named = BondPostCmd::try_parse_from([
+            "post",
+            "--did",
+            "did:tenzro:machine:ab",
+            "--amount",
+            "100",
+            "--address",
+            "0x00",
+        ]);
+        assert!(named.is_err());
+        for cmd in ["increase", "withdraw", "finalize"] {
+            let mut args = vec![cmd, "--did", "did:tenzro:machine:ab", "--node-account"];
+            if cmd == "increase" {
+                args.extend(["--amount", "1"]);
+            }
+            let parsed = match cmd {
+                "increase" => BondIncreaseCmd::try_parse_from(args).map(|c| c.account),
+                "withdraw" => BondWithdrawCmd::try_parse_from(args).map(|c| c.account),
+                _ => BondFinalizeCmd::try_parse_from(args).map(|c| c.account),
+            };
+            assert!(parsed.expect(cmd).node_account, "{cmd}");
+        }
     }
 }

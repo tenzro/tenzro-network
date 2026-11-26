@@ -28,6 +28,7 @@ use url::Url;
 use crate::connection_limits::ConnectionLimits;
 use crate::discovery::{DiscoveryRequest, DiscoveryResponse, DiscoveryStore, ask};
 use crate::error::{IrohError, IrohResult};
+use crate::identity_gate::IdentityGate;
 use crate::identity_record::{BootIdentity, EndpointKey, EndpointRecord, RecordScope, RelayRef};
 use crate::reachability::{self, Connectivity, Observations};
 use crate::relay::{RelayCheck, RelayServer, check_relay, fetch_relay_record, now_ms};
@@ -36,6 +37,23 @@ use crate::relay::{RelayCheck, RelayServer, check_relay, fetch_relay_record, now
 /// waited for: nodes of a network start in no particular order, and one that
 /// starts first must still admit the relays that come up just after it.
 const RELAY_ADMISSION_WAIT: Duration = Duration::from_secs(60);
+
+/// How far ahead of the clock a saved record sequence may lie and still be
+/// followed: about a century.
+const SEQUENCE_CEILING_AHEAD_MS: u64 = 100 * 365 * 24 * 3_600 * 1_000;
+
+/// Flushes the directory that holds `path`, so a rename into it survives a
+/// power loss. Directories are opened for this on Unix only; elsewhere the
+/// file system orders the rename after the file's own flush.
+fn sync_parent(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
 
 /// [`fetch_relay_record`], retried with backoff while the relay is
 /// unreachable or has no record yet. A record that fails its checks is
@@ -372,18 +390,30 @@ pub fn relay_crypto_provider() -> rustls::crypto::CryptoProvider {
 /// relays. No relay, no address lookup, nothing beyond the local router that
 /// the operator did not choose.
 pub fn base_builder() -> Builder {
-    base_builder_with(&ConnectionLimits::default())
+    base_builder_with(&ConnectionLimits::default(), false)
+}
+
+/// `builder` bound to one IPv4 loopback socket on a port the system picks,
+/// with no port mapping: an endpoint that only talks to peers on this host.
+/// It opens nothing on another interface, so the host's firewall has no
+/// listener to ask the user about.
+pub fn on_loopback(builder: Builder) -> Builder {
+    builder
+        .clear_ip_transports()
+        .bind_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)))
+        .expect("a loopback socket address is a valid bind address")
+        .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
 }
 
 /// [`base_builder`] with the QUIC limits of `limits` (idle timeout, stream
 /// counts, receive window) on every connection the endpoint makes or accepts.
-pub fn base_builder_with(limits: &ConnectionLimits) -> Builder {
+pub fn base_builder_with(limits: &ConnectionLimits, serves_peer_relay: bool) -> Builder {
     Endpoint::builder(presets::Minimal)
         .crypto_provider(Arc::new(relay_crypto_provider()))
         .peer_crypto_provider(Arc::new(peer_crypto_provider()))
         .portmapper_config(iroh::endpoint::PortmapperConfig::default())
         .ca_tls_config(iroh_relay::tls::CaTlsConfig::system())
-        .transport_config(limits.transport_config())
+        .transport_config(limits.transport_config(serves_peer_relay))
 }
 
 /// A rustls client configuration that verifies servers against the
@@ -408,6 +438,12 @@ pub struct IdentityTransport {
     relays: Vec<RelayRef>,
     /// Relays admitted after the endpoint was bound.
     late: Mutex<Vec<RelayRef>>,
+    /// Where the sequence of the last record this machine signed is kept
+    /// across boots.
+    sequence_file: std::sync::OnceLock<std::path::PathBuf>,
+    /// The highest sequence saved there; below the current record's while a
+    /// save has failed, which the next round tries again.
+    saved_sequence_up_to: std::sync::atomic::AtomicU64,
     /// Relay URLs this node waits to admit: named at start or learned from a
     /// validator's record, and not answering yet.
     pending: Mutex<Vec<Url>>,
@@ -417,6 +453,8 @@ pub struct IdentityTransport {
     own_relay: Option<Url>,
     /// Held so the relay role keeps serving while the transport lives.
     _relay_server: Option<RelayServer>,
+    /// Who may use the relay this node serves, when it runs the role.
+    relay_admission: crate::relay::RelayAdmission,
     scope: Mutex<RecordScope>,
     accepted_licences: Mutex<Vec<String>>,
     /// The software this machine states in its record, once the node declared it.
@@ -437,9 +475,18 @@ pub struct IdentityTransport {
     machine_pq: std::sync::OnceLock<Arc<dyn crate::pq_endpoint::MachinePqKey>>,
     /// The records and ML-DSA endpoint key the versioned RPC ALPNs use.
     pq_channel: crate::pq_endpoint::PqChannel,
+    /// The peer gate whose rule ([`IdentityGate::may_dial`]) says which
+    /// peers this node reaches out to, once the node installs it.
+    dial_gate: std::sync::OnceLock<IdentityGate>,
 }
 
 impl IdentityTransport {
+    /// Who may use the relay this node serves; it lets everyone in until the
+    /// node installs its identity gate.
+    pub fn relay_admission(&self) -> &crate::relay::RelayAdmission {
+        &self.relay_admission
+    }
+
     /// What this node's relay is carrying, when it serves the relay role.
     pub fn relay_load(&self) -> Option<crate::relay::RelayLoad> {
         self._relay_server.as_ref().map(RelayServer::load)
@@ -479,6 +526,7 @@ impl IdentityTransport {
         relay_limits: crate::relay::RelayLimits,
     ) -> IrohResult<Arc<Self>> {
         let store = Arc::new(DiscoveryStore::new());
+        let relay_admission = crate::relay::RelayAdmission::default();
         let mut relays = Vec::new();
         let (relay_server, own_relay) = match relay_role {
             Some(role) => {
@@ -489,9 +537,14 @@ impl IdentityTransport {
                             .to_string(),
                     )
                 })?;
-                let server =
-                    RelayServer::spawn(role.bind_addr, store.clone(), did.clone(), relay_limits)
-                        .await?;
+                let server = RelayServer::spawn(
+                    role.bind_addr,
+                    store.clone(),
+                    did.clone(),
+                    relay_limits,
+                    relay_admission.clone(),
+                )
+                .await?;
                 tracing::info!(listen = %server.local_addr(), url = %role.public_url, "relay role serving");
                 relays.push(RelayRef {
                     did,
@@ -565,10 +618,13 @@ impl IdentityTransport {
             boot,
             relays,
             late: Mutex::new(Vec::new()),
+            sequence_file: std::sync::OnceLock::new(),
+            saved_sequence_up_to: std::sync::atomic::AtomicU64::new(0),
             pending: Mutex::new(pending),
             relay_operators: Mutex::new(relay_operators),
             own_relay,
             _relay_server: relay_server,
+            relay_admission,
             scope: Mutex::new(RecordScope::Network),
             accepted_licences: Mutex::new(Vec::new()),
             update: Mutex::new(None),
@@ -578,6 +634,7 @@ impl IdentityTransport {
             relay_checks: Mutex::new(std::collections::BTreeMap::new()),
             paths: crate::paths::Paths::new(),
             peer_relay: std::sync::OnceLock::new(),
+            dial_gate: std::sync::OnceLock::new(),
         });
         transport.publish_relay_hints();
         Ok(transport)
@@ -806,6 +863,73 @@ impl IdentityTransport {
         });
     }
 
+    /// Keeps the sequence of the last record this machine signed at `path`,
+    /// so the first record of a boot follows the last record of the boot
+    /// before it. Peers refuse a record with a lower sequence than the one
+    /// they hold, and a sequence read from the clock alone goes down when
+    /// the clock is set back between boots.
+    pub fn keep_record_sequence(&self, path: std::path::PathBuf) {
+        let _ = self.sequence_file.set(path);
+    }
+
+    /// The sequence saved by [`Self::keep_record_sequence`], if any. A file
+    /// that is there and holds no sequence is reported: the next record
+    /// then takes its sequence from the clock, which peers refuse when the
+    /// clock reads earlier than the record they hold.
+    fn saved_sequence(&self) -> Option<u64> {
+        let path = self.sequence_file.get()?;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "this machine's saved record sequence could not be read");
+                return None;
+            }
+        };
+        let sequence: Option<u64> = text.trim().parse().ok();
+        // A sequence comes from a clock reading plus one per record, so a
+        // value a century past the clock came from no clock: a corrupt or
+        // hand-written file. Followed, a value at the top of the range would
+        // freeze every later sequence. Anything nearer is followed, a value
+        // left by a clock that was set back included.
+        let ceiling = now_ms().saturating_add(SEQUENCE_CEILING_AHEAD_MS);
+        if let Some(far) = sequence.filter(|s| *s > ceiling) {
+            tracing::warn!(path = %path.display(), saved = far, "this machine's saved record sequence lies past any clock reading; it is not followed");
+            return None;
+        }
+        if sequence.is_none() {
+            tracing::warn!(path = %path.display(), "this machine's saved record sequence is not a number; the next record takes its sequence from the clock");
+        }
+        sequence
+    }
+
+    /// Saves `sequence` for the boots after this one: written beside the
+    /// file, flushed to disk and moved over it, so a crash or a power loss
+    /// leaves the old value or the new and never an empty file.
+    fn save_sequence(&self, sequence: u64) {
+        use std::io::Write as _;
+        let Some(path) = self.sequence_file.get() else {
+            return;
+        };
+        let tmp = path.with_extension("tmp");
+        let saved = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::File::create(&tmp))
+            .and_then(|mut file| {
+                file.write_all(sequence.to_string().as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|()| std::fs::rename(&tmp, path))
+            .and_then(|()| sync_parent(path));
+        if let Err(e) = saved {
+            tracing::warn!(error = %e, "this machine's record sequence was not saved; saving it again next round");
+            return;
+        }
+        self.saved_sequence_up_to
+            .fetch_max(sequence, std::sync::atomic::Ordering::AcqRel);
+    }
+
     /// This node's discovery store.
     pub fn store(&self) -> &Arc<DiscoveryStore> {
         &self.store
@@ -892,13 +1016,26 @@ impl IdentityTransport {
         }
     }
 
+    /// Holds every peer this transport reaches out to (discovery sync,
+    /// record fetches, relay forwarders) to `gate`'s rule: an isolated node
+    /// dials only the boot list and the validators' machines.
+    pub fn hold_dials_to(&self, gate: IdentityGate) {
+        let _ = self.dial_gate.set(gate);
+    }
+
+    /// Whether this node may reach out to the machine `did`.
+    fn may_dial(&self, did: &str) -> bool {
+        self.dial_gate.get().is_none_or(|g| g.may_dial(Some(did)))
+    }
+
     /// Whether this machine's record, under its current scope, may be
     /// published to `did`. A record scoped to the epoch set also goes to the
     /// machines on this node's own boot list, the entry points its operator
     /// chose: a boot machine admits this node in full, relays for it and
     /// dials it only when it holds the record that names this node's
     /// endpoint. A boot machine outside the set keeps the record and answers
-    /// it to no one.
+    /// it only to the members of the validator committee it reads from the
+    /// chain (see [`DiscoveryStore::set_committee`]).
     fn publishes_to(&self, did: &str) -> bool {
         match &*self.scope.lock() {
             RecordScope::Network => true,
@@ -926,21 +1063,49 @@ impl IdentityTransport {
     /// Fetches the record of `machine` from the peer itself, when that peer
     /// disclosed its endpoint `peer` to this node and no record of it naming
     /// that endpoint is held yet. A record scoped to the epoch set reaches
-    /// no one outside it but its owner's boot machines, which pass it on to
-    /// no one, so a member first learns the record of another
-    /// from that member: it reaches the endpoint through the relay the boot
-    /// list names for the machine, or else through its own relays, hands it
-    /// this node's record so the peer can certify it, and asks for the
-    /// peer's. True once a record naming `peer` is held.
+    /// no one outside it but its owner's boot machines, which pass it on
+    /// only to committee members, so a member outside the committee (or one
+    /// whose boot machines know no committee) first learns the record of
+    /// another from that member: it reaches the endpoint through the relay
+    /// the boot list names for the machine, or else through its own relays,
+    /// hands it this node's record so the peer can certify it, and asks for
+    /// the peer's. True once a record naming `peer` is held.
     pub async fn fetch_disclosed_record(
         &self,
         endpoint: &Endpoint,
         peer: EndpointId,
         machine: &str,
     ) -> bool {
+        self.fetch_record(endpoint, peer, machine, true).await
+    }
+
+    /// [`Self::fetch_disclosed_record`] even when a record naming `peer` is
+    /// held: for a peer the held record did not reach. The peer may have
+    /// moved to other relays in the same boot, which changes its record but
+    /// not the endpoint it names. The held record stays if no newer one
+    /// comes.
+    pub async fn refetch_disclosed_record(
+        &self,
+        endpoint: &Endpoint,
+        peer: EndpointId,
+        machine: &str,
+    ) -> bool {
+        self.fetch_record(endpoint, peer, machine, false).await
+    }
+
+    async fn fetch_record(
+        &self,
+        endpoint: &Endpoint,
+        peer: EndpointId,
+        machine: &str,
+        held_is_enough: bool,
+    ) -> bool {
         let names_peer = |r: &EndpointRecord| iroh_endpoint(r).is_ok_and(|id| id == peer);
-        if self.store.lookup(machine).is_some_and(|r| names_peer(&r)) {
+        if held_is_enough && self.store.lookup(machine).is_some_and(|r| names_peer(&r)) {
             return true;
+        }
+        if !self.may_dial(machine) {
+            return false;
         }
         let hinted: Vec<Url> = self
             .boot
@@ -948,17 +1113,16 @@ impl IdentityTransport {
             .filter(|b| b.did == machine)
             .filter_map(|b| b.relay.clone())
             .collect();
-        let relays = if hinted.is_empty() {
-            self.relays.iter().map(|r| r.url.clone()).collect()
-        } else {
-            hinted
-        };
-        if relays.is_empty() {
-            return false;
-        }
-        let addr = relays.into_iter().fold(EndpointAddr::new(peer), |a, url| {
+        let mut addr = hinted.into_iter().fold(EndpointAddr::new(peer), |a, url| {
             a.with_relay_url(RelayUrl::from(url))
         });
+        // The hinted relay may be the one that stopped: the admitted relays
+        // follow it so the dial has another way to the peer.
+        let admitted: Vec<Url> = self.relays.iter().map(|r| r.url.clone()).collect();
+        add_relays(&mut addr, &admitted);
+        if addr.relay_urls().next().is_none() {
+            return false;
+        }
         let own = self.current.lock().clone();
         if let Some(own) = own.filter(|_| self.publishes_to(machine)) {
             let publish = DiscoveryRequest::Publish(own);
@@ -1027,6 +1191,16 @@ impl IdentityTransport {
         // forwarder), a record would name no way to reach it, and a peer that
         // took it (a relay's `/identity` fetch at startup, say) could never dial
         // the endpoint to learn a better one. Sign none until it does.
+        // A record signed while its sequence could not be saved is saved now;
+        // until then a boot after this one would start below it.
+        if let Some(r) = current.as_ref()
+            && r.sequence
+                > self
+                    .saved_sequence_up_to
+                    .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.save_sequence(r.sequence);
+        }
         if relays.is_empty() && forwarders.is_empty() && !self.relays.is_empty() {
             return current.clone();
         }
@@ -1039,9 +1213,11 @@ impl IdentityTransport {
         }) {
             return Some(r.clone());
         }
-        let sequence = current
+        let last = current
             .as_ref()
-            .map_or(now, |r| r.sequence.max(now - 1) + 1);
+            .map(|r| r.sequence)
+            .max(self.saved_sequence());
+        let sequence = last.map_or(now, |s| s.max(now - 1).saturating_add(1));
         match EndpointRecord::sign(
             signer,
             iroh_endpoint_key(endpoint),
@@ -1071,6 +1247,7 @@ impl IdentityTransport {
                 if let Err(e) = self.store.offer(record.clone()) {
                     tracing::warn!(error = %e, "own endpoint record not kept");
                 }
+                self.save_sequence(record.sequence);
                 *current = Some(record.clone());
                 Some(record)
             }
@@ -1117,8 +1294,12 @@ impl IdentityTransport {
                 peers.push(r);
             }
         }
+        // A peer held by record only, outside what this node may dial (an
+        // isolated validator: the boot list and the validators' machines),
+        // is learned from the snapshots and never asked itself.
         peers.retain(|r| {
             Some(r.machine_did()) != own_did
+                && self.may_dial(&r.machine_did())
                 && iroh_endpoint(r).is_ok_and(|id| id != endpoint.id() && !silent.contains(&id))
         });
         peers.truncate(SYNC_FANOUT);
@@ -1284,11 +1465,17 @@ impl IdentityTransport {
         &self.paths
     }
 
+    /// Whether this node serves the relay role, and with it forwards for the
+    /// peer relay.
+    pub fn serves_peer_relay(&self) -> bool {
+        self.own_relay.is_some()
+    }
+
     /// The forwarding service of a node that serves the relay role: its
     /// endpoint also forwards packets between endpoints that cannot reach
     /// each other directly.
     pub fn peer_relay_service(&self) -> Option<crate::paths::PeerRelayService> {
-        self.own_relay.as_ref()?;
+        self.serves_peer_relay().then_some(())?;
         Some(
             self.peer_relay
                 .get_or_init(|| crate::paths::PeerRelayService::new(Default::default()))
@@ -1312,6 +1499,7 @@ impl IdentityTransport {
             .live_relays()
             .iter()
             .filter(|r| Some(&r.url) != self.own_relay.as_ref())
+            .filter(|r| self.may_dial(&r.did))
             .filter_map(|r| self.store.lookup(&r.did))
             .filter_map(|record| self.dial_addr(&record).ok())
             .filter(|addr| addr.id != endpoint.id())
@@ -1376,6 +1564,7 @@ impl IdentityTransport {
             &self.observations.lock(),
             &external,
             forwarders,
+            self.paths.latency(),
             punched,
             now_ms(),
         )
@@ -1429,10 +1618,15 @@ impl IdentityTransport {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 mod tests {
     use super::*;
     use crate::discovery::{ALPN_DISCOVERY, DiscoveryProtocol};
     use crate::identity_record::tests::TestMachineKey;
+    use crate::test_ports;
     use iroh::Watcher;
     use iroh::endpoint::Connection;
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -1444,14 +1638,14 @@ mod tests {
 
     impl ProtocolHandler for Echo {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-            let (mut send, mut recv) = conn.accept_bi().await.map_err(AcceptError::from_err)?;
-            let msg = recv
-                .read_to_end(1024)
-                .await
-                .map_err(AcceptError::from_err)?;
-            send.write_all(&msg).await.map_err(AcceptError::from_err)?;
-            send.finish().map_err(AcceptError::from_err)?;
-            conn.closed().await;
+            while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                let msg = recv
+                    .read_to_end(1024)
+                    .await
+                    .map_err(AcceptError::from_err)?;
+                send.write_all(&msg).await.map_err(AcceptError::from_err)?;
+                send.finish().map_err(AcceptError::from_err)?;
+            }
             Ok(())
         }
     }
@@ -1471,7 +1665,7 @@ mod tests {
 
         // A server that accepts nothing but the hybrid: the dial succeeds only
         // if the client negotiated X25519MLKEM768.
-        let server = Endpoint::builder(presets::Minimal)
+        let server = on_loopback(Endpoint::builder(presets::Minimal))
             .crypto_provider(Arc::new(peer_crypto_provider()))
             .bind()
             .await
@@ -1479,7 +1673,7 @@ mod tests {
         let router = Router::builder(server.clone())
             .accept(ECHO_ALPN, Echo)
             .spawn();
-        let client = base_builder().bind().await.unwrap();
+        let client = on_loopback(base_builder()).bind().await.unwrap();
         let conn = client
             .connect(server.addr(), ECHO_ALPN)
             .await
@@ -1492,12 +1686,131 @@ mod tests {
         router.shutdown().await.unwrap();
     }
 
+    /// Forwards datagrams between a client and `server` and logs each one:
+    /// `true` for client to server, with its length.
+    async fn logging_proxy(server: SocketAddr) -> (SocketAddr, Arc<Mutex<Vec<(bool, usize)>>>) {
+        let front = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let back = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let log: Arc<Mutex<Vec<(bool, usize)>>> = Arc::default();
+        let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
+        {
+            let (front, back, log, client) =
+                (front.clone(), back.clone(), log.clone(), client.clone());
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65_536];
+                while let Ok((n, from)) = front.recv_from(&mut buf).await {
+                    *client.lock() = Some(from);
+                    log.lock().push((true, n));
+                    back.send_to(&buf[..n], server).await.ok();
+                }
+            });
+        }
+        {
+            let (front, log) = (front.clone(), log.clone());
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65_536];
+                while let Ok(n) = back.recv(&mut buf).await {
+                    log.lock().push((false, n));
+                    let to = *client.lock();
+                    if let Some(to) = to {
+                        front.send_to(&buf[..n], to).await.ok();
+                    }
+                }
+            });
+        }
+        (front.local_addr().unwrap(), log)
+    }
+
+    /// The client's first flight (datagrams before the server's first) and
+    /// the server's answer to it (datagrams before the client's next), as
+    /// (datagrams, bytes) each.
+    fn first_flights(log: &[(bool, usize)]) -> ((usize, usize), (usize, usize)) {
+        let client: Vec<usize> = log
+            .iter()
+            .take_while(|(c, _)| *c)
+            .map(|(_, n)| *n)
+            .collect();
+        let server: Vec<usize> = log[client.len()..]
+            .iter()
+            .take_while(|(c, _)| !*c)
+            .map(|(_, n)| *n)
+            .collect();
+        (
+            (client.len(), client.iter().sum()),
+            (server.len(), server.iter().sum()),
+        )
+    }
+
+    /// Measures the first flights of the X25519MLKEM768 handshake through a
+    /// logging proxy, against classical X25519. The server must answer the
+    /// client's first flight within QUIC's anti-amplification limit (three
+    /// times what it received) and the hybrid client's first flight is at
+    /// most two datagrams. The sizes are printed as MEASURE lines.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_hybrid_handshake_first_flights_stay_within_the_amplification_limit() {
+        for hybrid in [true, false] {
+            let (server, client) = if hybrid {
+                let server = on_loopback(
+                    Endpoint::builder(presets::Minimal)
+                        .crypto_provider(Arc::new(peer_crypto_provider())),
+                )
+                .bind()
+                .await
+                .unwrap();
+                (server, on_loopback(base_builder()).bind().await.unwrap())
+            } else {
+                (classical_endpoint().await, classical_endpoint().await)
+            };
+            let router = Router::builder(server.clone())
+                .accept(ECHO_ALPN, Echo)
+                .spawn();
+            let port = server
+                .bound_sockets()
+                .iter()
+                .find(|s| s.is_ipv4())
+                .unwrap()
+                .port();
+            let (proxy, log) = logging_proxy(SocketAddr::from(([127, 0, 0, 1], port))).await;
+            let conn = client
+                .connect(
+                    EndpointAddr::new(server.id()).with_addrs([iroh::TransportAddr::Ip(proxy)]),
+                    ECHO_ALPN,
+                )
+                .await
+                .expect("handshake through the proxy");
+            let (mut send, mut recv) = conn.open_bi().await.unwrap();
+            send.write_all(b"pq").await.unwrap();
+            send.finish().unwrap();
+            assert_eq!(recv.read_to_end(64).await.unwrap(), b"pq");
+            let ((c_n, c_bytes), (s_n, s_bytes)) = first_flights(&log.lock());
+            let kind = if hybrid { "x25519mlkem768" } else { "x25519" };
+            eprintln!(
+                "MEASURE handshake {kind}: client first flight {c_n} datagrams {c_bytes} bytes; \
+                 server answer {s_n} datagrams {s_bytes} bytes; ratio {:.2}",
+                s_bytes as f64 / c_bytes as f64
+            );
+            assert!(
+                s_bytes <= 3 * c_bytes,
+                "{kind}: the server sent more than 3x before validation"
+            );
+            if hybrid {
+                assert!(
+                    c_n <= 2,
+                    "the hybrid client's first flight took {c_n} datagrams"
+                );
+            }
+            conn.close(0u32.into(), b"done");
+            router.shutdown().await.unwrap();
+            client.close().await;
+        }
+    }
+
     /// An endpoint that speaks only classical X25519, as a downgraded or
     /// non-Tenzro peer would.
     async fn classical_endpoint() -> Endpoint {
         let mut classical = rustls::crypto::aws_lc_rs::default_provider();
         classical.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
-        Endpoint::builder(presets::Minimal)
+        on_loopback(Endpoint::builder(presets::Minimal))
             .crypto_provider(Arc::new(classical))
             .bind()
             .await
@@ -1506,7 +1819,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_classical_only_peer_is_refused() {
-        let tenzro = base_builder().bind().await.unwrap();
+        let tenzro = on_loopback(base_builder()).bind().await.unwrap();
         let router = Router::builder(tenzro.clone())
             .accept(ECHO_ALPN, Echo)
             .spawn();
@@ -1682,7 +1995,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_endpoint_with_no_relays_reaches_no_relay_or_discovery_host() {
-        let endpoint = with_relays(base_builder(), &[], None).bind().await.unwrap();
+        let endpoint = with_relays(on_loopback(base_builder()), &[], None)
+            .bind()
+            .await
+            .unwrap();
         assert!(endpoint.addr().relay_urls().next().is_none());
         assert!(endpoint.home_relay_status().get().is_empty());
         endpoint.close().await;
@@ -1695,6 +2011,22 @@ mod tests {
         endpoint: Endpoint,
         _router: Router,
         key: &'static TestMachineKey,
+        /// The endpoints that opened the discovery protocol to this node.
+        asked_by: Arc<Mutex<std::collections::HashSet<EndpointId>>>,
+    }
+
+    /// The discovery protocol, noting each endpoint that opens it.
+    #[derive(Debug, Clone)]
+    struct NotedDiscovery {
+        inner: DiscoveryProtocol,
+        asked_by: Arc<Mutex<std::collections::HashSet<EndpointId>>>,
+    }
+
+    impl ProtocolHandler for NotedDiscovery {
+        async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+            self.asked_by.lock().insert(conn.remote_id());
+            self.inner.accept(conn).await
+        }
     }
 
     impl TestNode {
@@ -1720,33 +2052,47 @@ mod tests {
             let transport = IdentityTransport::start(boot, &[], role.as_ref(), Some(key.did()))
                 .await
                 .unwrap();
+            let base = match port {
+                // A NAT lab machine listens on its network namespace's
+                // interfaces, at the port the lab forwards.
+                Some(port) => {
+                    base_builder_with(&ConnectionLimits::default(), transport.serves_peer_relay())
+                        .clear_ip_transports()
+                        .bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], port)))
+                        .unwrap()
+                        .bind_addr(std::net::SocketAddr::from(([0u16; 8], port)))
+                        .unwrap()
+                }
+                None => on_loopback(base_builder_with(
+                    &ConnectionLimits::default(),
+                    transport.serves_peer_relay(),
+                )),
+            };
             let mut builder = transport.paths().install(with_relay_urls(
-                base_builder(),
+                base,
                 &transport.endpoint_relay_urls(),
                 Some(transport.store().clone()),
             ));
             if relay_only {
                 builder = builder.clear_ip_transports();
             }
-            if let Some(port) = port {
-                builder = builder
-                    .clear_ip_transports()
-                    .bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], port)))
-                    .unwrap()
-                    .bind_addr(std::net::SocketAddr::from(([0u16; 8], port)))
-                    .unwrap();
-            }
             let endpoint = builder.bind().await.unwrap();
-            transport.paths().attach(&endpoint);
+            transport
+                .paths()
+                .attach(&endpoint, &ConnectionLimits::default());
             if !transport.relays().is_empty() {
                 tokio::time::timeout(Duration::from_secs(20), endpoint.online())
                     .await
                     .expect("reaches its relay");
             }
+            let asked_by = Arc::new(Mutex::new(std::collections::HashSet::new()));
             let mut router = Router::builder(endpoint.clone())
                 .accept(
                     ALPN_DISCOVERY,
-                    DiscoveryProtocol::new(transport.store().clone()),
+                    NotedDiscovery {
+                        inner: DiscoveryProtocol::new(transport.store().clone()),
+                        asked_by: asked_by.clone(),
+                    },
                 )
                 .accept(ECHO_ALPN, Echo);
             if let Some(service) = transport.peer_relay_service() {
@@ -1762,6 +2108,7 @@ mod tests {
                 endpoint,
                 _router: router,
                 key,
+                asked_by,
             }
         }
 
@@ -1770,14 +2117,6 @@ mod tests {
                 .sync_once(&self.endpoint, Some(self.key))
                 .await;
         }
-    }
-
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
     }
 
     /// One machine of the NAT lab (`scripts/netlab/nat-lab.sh`), not a unit
@@ -1789,9 +2128,10 @@ mod tests {
     /// `NAT_LAB_RELAY_URL` and `NAT_LAB_RELAY_SEED` it joins through the
     /// relay of that machine. With `NAT_LAB_TARGET` set to another machine's
     /// seed it dials it and prints the path the connection settles on:
-    /// `PATH direct <addr>` or `PATH relay`.
+    /// `PATH direct <addr>` or `PATH relay`, after `PATHTIME`: the time from
+    /// the dial to that path.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
+    #[ignore = "runs as one node inside the NAT lab: scripts/netlab/nat-lab.sh starts it with --ignored"]
     async fn nat_lab_node() {
         let var = |k: &str| std::env::var(k).unwrap_or_default();
         let seed: u8 = var("NAT_LAB_SEED").parse().expect("NAT_LAB_SEED");
@@ -1851,6 +2191,7 @@ mod tests {
                     .filter(|_| start.elapsed() > dial_after)
             {
                 dialed = true;
+                let dialed_at = tokio::time::Instant::now();
                 let conn = node
                     .endpoint
                     .connect(node.transport.dial_addr(&record).unwrap(), ECHO_ALPN)
@@ -1877,8 +2218,21 @@ mod tests {
                             _ => None,
                         }
                     });
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if path.is_none() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
                 }
+                // From the dial to the first selected path that is not the
+                // relay, or how long it waited for one.
+                println!(
+                    "PATHTIME {} {}",
+                    if path.is_some() {
+                        "direct_after_ms"
+                    } else {
+                        "none_within_ms"
+                    },
+                    dialed_at.elapsed().as_millis()
+                );
                 println!("PATH {}", path.unwrap_or_else(|| "relay".to_string()));
                 let all: Vec<String> = conn
                     .paths()
@@ -1921,7 +2275,7 @@ mod tests {
     /// to dial the node. Once the node is homed at a relay, its record names it.
     #[tokio::test(flavor = "multi_thread")]
     async fn no_record_names_no_way_to_reach_the_node() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -1962,12 +2316,138 @@ mod tests {
         assert_eq!(transport.own_record(endpoint, &[], key), Some(record));
     }
 
+    /// A record signed while its sequence cannot be saved (here the file's
+    /// directory is a file) is saved on a later round once saving works, so
+    /// the next boot still starts above it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sequence_that_could_not_be_saved_is_saved_on_a_later_round() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenzro-record-sequence-retry-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let blocked = dir.join("iroh");
+        let path = blocked.join("record-sequence");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let key: &'static TestMachineKey = Box::leak(Box::new(TestMachineKey::from_seed(85)));
+        let port = test_ports::tcp();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let role = RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            public_url: url.clone(),
+        };
+        let transport = IdentityTransport::start(vec![], &[], Some(&role), Some(key.did()))
+            .await
+            .unwrap();
+        let endpoint = iroh::SecretKey::from_bytes(&[13; 32]).public();
+        transport.keep_record_sequence(path.clone());
+        let record = transport
+            .own_record(endpoint, std::slice::from_ref(&url), key)
+            .unwrap();
+        assert!(!path.exists(), "saved through a file");
+
+        std::fs::remove_file(&blocked).unwrap();
+        let again = transport
+            .own_record(endpoint, std::slice::from_ref(&url), key)
+            .unwrap();
+        assert_eq!(again.sequence, record.sequence, "a new record was signed");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            record.sequence.to_string()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A machine restarted with its clock set back signs a record that
+    /// follows the last one it signed before the restart, so the peers
+    /// holding that one take the new one; read from the clock alone, its
+    /// sequence would be lower and the record refused as stale.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_first_record_of_a_boot_follows_the_last_of_the_boot_before() {
+        let dir = std::env::temp_dir().join(format!(
+            "tenzro-record-sequence-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let path = dir.join("record-sequence");
+        let key: &'static TestMachineKey = Box::leak(Box::new(TestMachineKey::from_seed(84)));
+        let boot = |endpoint: u8| async move {
+            let port = test_ports::tcp();
+            let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+            let role = RelayRoleConfig {
+                bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+                public_url: url.clone(),
+            };
+            let transport = IdentityTransport::start(vec![], &[], Some(&role), Some(key.did()))
+                .await
+                .unwrap();
+            let endpoint = iroh::SecretKey::from_bytes(&[endpoint; 32]).public();
+            (transport, endpoint, url)
+        };
+        // The boot before ran with its clock an hour fast.
+        let fast = now_ms() + 3_600_000;
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, fast.to_string()).unwrap();
+
+        let (transport, endpoint, url) = boot(9).await;
+        transport.keep_record_sequence(path.clone());
+        let first = transport
+            .own_record(endpoint, std::slice::from_ref(&url), key)
+            .unwrap();
+        assert_eq!(first.sequence, fast + 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            (fast + 1).to_string()
+        );
+
+        // The next boot, a new endpoint: its record follows again.
+        let (transport, endpoint, url) = boot(10).await;
+        transport.keep_record_sequence(path.clone());
+        let second = transport
+            .own_record(endpoint, std::slice::from_ref(&url), key)
+            .unwrap();
+        assert_eq!(second.sequence, fast + 2);
+
+        // A value no peer can hold, at the top of the range, is not
+        // followed either: the sequence would never rise again.
+        std::fs::write(&path, u64::MAX.to_string()).unwrap();
+        let (transport, endpoint, url) = boot(14).await;
+        transport.keep_record_sequence(path.clone());
+        let after_max = transport
+            .own_record(endpoint, std::slice::from_ref(&url), key)
+            .unwrap();
+        assert!(after_max.sequence < fast, "a frozen sequence was followed");
+
+        // A file that holds no number is passed over, not followed.
+        std::fs::write(&path, "").unwrap();
+        let (transport, endpoint, url) = boot(12).await;
+        transport.keep_record_sequence(path.clone());
+        let after_empty = transport
+            .own_record(endpoint, std::slice::from_ref(&url), key)
+            .unwrap();
+        assert!(after_empty.sequence < fast);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            after_empty.sequence.to_string(),
+            "the file was not written again"
+        );
+
+        // With nothing kept, the sequence is the clock's reading.
+        let (transport, endpoint, url) = boot(11).await;
+        let unkept = transport
+            .own_record(endpoint, std::slice::from_ref(&url), key)
+            .unwrap();
+        assert!(unkept.sequence < fast);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Once the node binds its records with its machine ML-DSA key, the next
     /// record it signs carries the binding, verifies, and is the one it
     /// serves; the versioned RPC ALPNs then hold its ML-DSA endpoint key.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_node_that_binds_its_records_signs_them_with_the_binding() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2031,7 +2511,7 @@ mod tests {
     /// and the operator must learn the joining node's record in return.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_node_joining_through_a_relay_reaches_its_operator_and_back() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2087,7 +2567,7 @@ mod tests {
     /// other's record: neither record travels through the operator.
     #[tokio::test(flavor = "multi_thread")]
     async fn epoch_set_members_fetch_each_others_record_from_each_other() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2141,7 +2621,7 @@ mod tests {
     /// boots from the same machine never comes to hold it.
     #[tokio::test]
     async fn an_epoch_set_record_reaches_the_boot_machine_and_stops_there() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2212,6 +2692,232 @@ mod tests {
         );
     }
 
+    /// Two validators of a fresh network whose only shared entry point is a
+    /// boot machine outside the committee, each naming the other by identity
+    /// alone. While the boot machine knows no committee it answers their
+    /// epoch-set records to no one and neither resolves the other; once every
+    /// node reads the committee, the boot machine hands each member's record
+    /// to the other member and to no one else.
+    #[tokio::test]
+    async fn committee_members_meet_through_a_boot_machine_and_no_one_else_does() {
+        let port = test_ports::tcp();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let role = RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            public_url: url.clone(),
+        };
+        let operator_did = TestMachineKey::from_seed(110).did();
+        let (a_did, b_did) = (
+            TestMachineKey::from_seed(111).did(),
+            TestMachineKey::from_seed(112).did(),
+        );
+        let operator = TestNode::start(110, vec![], Some(role), true).await;
+        operator.sync().await;
+        let boot = |other: &str| {
+            vec![
+                format!("{operator_did}@{url}").parse().unwrap(),
+                other.parse().unwrap(),
+            ]
+        };
+        let a = TestNode::start(111, boot(&b_did), None, true).await;
+        let b = TestNode::start(112, boot(&a_did), None, true).await;
+        let bystander = TestNode::start(
+            113,
+            vec![format!("{operator_did}@{url}").parse().unwrap()],
+            None,
+            true,
+        )
+        .await;
+        for v in [&a, &b] {
+            v.transport
+                .share_within_epoch_set([v.key.did()].into_iter().collect());
+        }
+        let rounds = || async {
+            for _ in 0..3 {
+                a.sync().await;
+                b.sync().await;
+                bystander.sync().await;
+                operator.sync().await;
+            }
+        };
+        rounds().await;
+        assert!(
+            a.transport.store().lookup(&b_did).is_none()
+                && b.transport.store().lookup(&a_did).is_none(),
+            "with no committee known the boot machine hands neither record on"
+        );
+
+        let committee: std::collections::HashSet<String> =
+            [a_did.clone(), b_did.clone()].into_iter().collect();
+        for n in [&operator, &a, &b, &bystander] {
+            n.transport.store().set_committee(committee.clone());
+        }
+        rounds().await;
+        assert_eq!(
+            a.transport.store().lookup(&b_did).map(|r| r.machine_did()),
+            Some(b_did.clone()),
+            "the first member resolves the second through the boot machine"
+        );
+        assert_eq!(
+            b.transport.store().lookup(&a_did).map(|r| r.machine_did()),
+            Some(a_did.clone()),
+            "the second member resolves the first through the boot machine"
+        );
+        assert_eq!(
+            a.transport.boot_endpoints(a.endpoint.id()),
+            vec![operator.endpoint.id(), b.endpoint.id()],
+            "the first member links to the boot machine and the second member"
+        );
+        for did in [&a_did, &b_did] {
+            assert!(
+                bystander.transport.store().lookup(did).is_none(),
+                "a node outside the committee never holds a member's record"
+            );
+        }
+        let operator_record = bystander
+            .transport
+            .store()
+            .lookup(&operator_did)
+            .expect("the bystander holds the boot machine's record");
+        let answer = ask(
+            &bystander.endpoint,
+            bystander.transport.dial_addr(&operator_record).unwrap(),
+            &DiscoveryRequest::Lookup(a_did.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(answer, DiscoveryResponse::Record(None)),
+            "the boot machine answers a member's record to no one outside the committee"
+        );
+    }
+
+    /// A validator in enforce mode is isolated: it learns a non-validator
+    /// peer's record from its boot machine's snapshot and never dials that
+    /// peer, while it keeps syncing with the boot machine.
+    #[tokio::test]
+    async fn an_isolated_validator_never_dials_a_discovered_peer_off_its_boot_list() {
+        let port = test_ports::tcp();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let role = RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            public_url: url.clone(),
+        };
+        let operator_did = TestMachineKey::from_seed(98).did();
+        let operator = TestNode::start(98, vec![], Some(role), true).await;
+        operator.sync().await;
+        let boot = || vec![format!("{operator_did}@{url}").parse().unwrap()];
+        let validator = TestNode::start(99, boot(), None, true).await;
+        let full_node = TestNode::start(100, boot(), None, true).await;
+        let gate = IdentityGate::new(
+            tenzro_onboarding_types::onboarding::OnboardingPolicy::default(),
+            Some(validator.transport.store().clone()),
+        );
+        gate.protect([operator_did.clone()]);
+        gate.isolate(true);
+        validator.transport.hold_dials_to(gate);
+        validator
+            .transport
+            .share_within_epoch_set([validator.key.did()].into_iter().collect());
+        for _ in 0..3 {
+            full_node.sync().await;
+            operator.sync().await;
+            validator.sync().await;
+        }
+
+        assert!(
+            validator
+                .transport
+                .store()
+                .lookup(&full_node.key.did())
+                .is_some(),
+            "the validator discovered the full node through its boot machine"
+        );
+        assert!(
+            operator.asked_by.lock().contains(&validator.endpoint.id()),
+            "the validator syncs with its boot machine"
+        );
+        assert!(
+            !full_node.asked_by.lock().contains(&validator.endpoint.id()),
+            "the validator never dials a peer off its boot list and outside the validator set"
+        );
+    }
+
+    /// A member's record changes within one boot (here it states licences;
+    /// moving to other relays changes it the same way) while the other
+    /// already holds the earlier one, which still names the same endpoint.
+    /// A fetch is satisfied by the held record; a refetch, which the
+    /// dialler makes after a connection to the held address failed, brings
+    /// the newer one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refetch_brings_a_record_newer_than_the_one_held() {
+        let port = crate::test_ports::tcp();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let role = RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            public_url: url.clone(),
+        };
+        let operator_did = TestMachineKey::from_seed(86).did();
+        let operator = TestNode::start(86, vec![], Some(role), true).await;
+        operator.sync().await;
+        let boot = || vec![format!("{operator_did}@{url}").parse().unwrap()];
+        let a = TestNode::start(87, boot(), None, true).await;
+        let b = TestNode::start(88, boot(), None, true).await;
+        let set: std::collections::HashSet<String> =
+            [a.key.did(), b.key.did()].into_iter().collect();
+        a.transport.share_within_epoch_set(set.clone());
+        b.transport.share_within_epoch_set(set);
+        for _ in 0..2 {
+            a.sync().await;
+            b.sync().await;
+            operator.sync().await;
+        }
+        assert!(
+            a.transport
+                .fetch_disclosed_record(&a.endpoint, b.endpoint.id(), &b.key.did())
+                .await
+        );
+        let held = a.transport.store().lookup(&b.key.did()).unwrap();
+        assert!(held.accepted_licences.is_empty());
+
+        // b signs a newer record, which a does not hear of.
+        b.transport
+            .declare_accepted_licences(&["gemma".to_string()])
+            .unwrap();
+        let home: Vec<Url> = b
+            .endpoint
+            .addr()
+            .relay_urls()
+            .map(|u| Url::from(u.clone()))
+            .collect();
+        let newer = b
+            .transport
+            .own_record(b.endpoint.id(), &home, b.key)
+            .expect("b signs a newer record");
+        assert!(newer.sequence > held.sequence);
+
+        assert!(
+            a.transport
+                .fetch_disclosed_record(&a.endpoint, b.endpoint.id(), &b.key.did())
+                .await
+        );
+        assert_eq!(
+            a.transport.store().lookup(&b.key.did()).unwrap().sequence,
+            held.sequence,
+            "a fetch asked although a record was held"
+        );
+        assert!(
+            a.transport
+                .refetch_disclosed_record(&a.endpoint, b.endpoint.id(), &b.key.did())
+                .await
+        );
+        assert_eq!(
+            a.transport.store().lookup(&b.key.did()).unwrap().sequence,
+            newer.sequence,
+            "a refetch kept the older record"
+        );
+    }
+
     /// Two members that know each other's records; one restarts with the
     /// same machine key and a new endpoint, and scopes its record to the
     /// epoch set at once, as a restarted validator does. The other must come
@@ -2219,7 +2925,7 @@ mod tests {
     /// the same disclosure path members first met by.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_member_that_restarts_with_a_new_endpoint_is_found_again() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2284,7 +2990,7 @@ mod tests {
     /// its own client answers the forwarding check.
     #[tokio::test(flavor = "multi_thread")]
     async fn endpoints_reach_each_other_through_a_peer_relay() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2341,11 +3047,107 @@ mod tests {
         );
     }
 
+    /// Whether `conn` has a path through a forwarder.
+    fn has_forwarded_path(conn: &Connection) -> bool {
+        conn.paths()
+            .iter()
+            .any(|p| matches!(p.remote_addr(), iroh::TransportAddr::Custom(_)))
+    }
+
+    /// A connection that started on the relay gets a path through a
+    /// forwarder named afterwards: naming the path opens it on the connections
+    /// already open to that remote, not only on the next one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_path_named_after_a_connection_started_is_opened_on_it() {
+        let port = crate::test_ports::tcp();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let role = RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            public_url: url.clone(),
+        };
+        let forwarder = TestNode::start(140, vec![], Some(role), false).await;
+        forwarder.sync().await;
+        let boot: Vec<BootIdentity> =
+            vec![format!("{}@{}", forwarder.key.did(), url).parse().unwrap()];
+        // Both nodes keep their IP sockets: a forwards only over a connection
+        // to the forwarder that runs on a direct path, and b offers a path
+        // through the forwarder only when it reaches it directly. a joins
+        // first; b starts but has not yet published a record naming the
+        // forwarder, so a dials it over the relay.
+        let a = TestNode::start(141, boot.clone(), None, false).await;
+        a.sync().await;
+        assert!(
+            a.transport
+                .paths()
+                .connected_forwarders()
+                .contains(&forwarder.endpoint.id()),
+            "a holds a connection to the forwarder"
+        );
+        let b = TestNode::start(142, boot, None, false).await;
+        let over_relay = EndpointAddr::new(b.endpoint.id()).with_relay_url(url.clone().into());
+        let on_relay = tokio::time::timeout(
+            Duration::from_secs(20),
+            a.endpoint.connect(over_relay, ECHO_ALPN),
+        )
+        .await
+        .expect("dial in time")
+        .expect("dial over the relay");
+        assert!(
+            !has_forwarded_path(&on_relay),
+            "it starts with no path through the forwarder"
+        );
+        // Hole punching has found the direct path before the forwarder is
+        // named, so it opens no further path by itself: the named path
+        // reaches the connection only when naming it opens it there.
+        let direct = tokio::time::timeout(Duration::from_secs(20), async {
+            while !on_relay
+                .paths()
+                .iter()
+                .any(|p| p.is_selected() && p.is_ip())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(direct.is_ok(), "the connection never reached a direct path");
+
+        // b connects to the forwarder; the path through it is then named by a
+        // dial that names only it.
+        b.sync().await;
+        assert_eq!(
+            b.transport.paths().forwarders(),
+            vec![forwarder.endpoint.id()],
+            "b holds a path through the forwarder"
+        );
+        let through = crate::paths::peer_relay_addr(forwarder.endpoint.id(), b.endpoint.id());
+        let named =
+            EndpointAddr::new(b.endpoint.id()).with_addrs([iroh::TransportAddr::Custom(through)]);
+        let _through_forwarder = tokio::time::timeout(
+            Duration::from_secs(20),
+            a.endpoint.connect(named, ECHO_ALPN),
+        )
+        .await
+        .expect("dial in time")
+        .expect("dial through the forwarder");
+        // Well inside the five seconds between hole punching rounds, so a
+        // later round that opens the path by itself cannot pass for it.
+        let moved = tokio::time::timeout(Duration::from_secs(2), async {
+            while !has_forwarded_path(&on_relay) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            moved.is_ok(),
+            "the connection that started on the relay got no path through the forwarder"
+        );
+    }
+
     /// An external address peers confirmed, even one that cannot be reached,
     /// never stops a dial: the connection still opens on the relay.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unreachable_external_address_does_not_stop_a_dial() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2382,12 +3184,117 @@ mod tests {
         assert_eq!(recv.read_to_end(8).await.unwrap(), b"x");
     }
 
+    /// The answer of `to` to `request`. A connection that is lost before the
+    /// answer arrives (on a loaded machine one can time out mid-read) says
+    /// nothing about the answer, so the question is asked again on a new
+    /// connection, a few times at most.
+    async fn answer_of(
+        from: &Endpoint,
+        to: &EndpointAddr,
+        request: &DiscoveryRequest,
+    ) -> DiscoveryResponse {
+        let mut lost = Vec::new();
+        for _ in 0..5 {
+            match ask(from, to.clone(), request).await {
+                Ok(answer) => return answer,
+                Err(e) => lost.push(e.to_string()),
+            }
+        }
+        panic!("no answer on five connections in a row: {lost:?}");
+    }
+
+    /// A new connection to a known peer on the same network is on a direct
+    /// path within half a second, and until then the relay carries its
+    /// traffic: echoes sent every 20 ms never stop for as long as a second.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_connection_to_a_known_peer_goes_direct_within_half_a_second() {
+        let port = crate::test_ports::tcp();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let role = RelayRoleConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            public_url: url.clone(),
+        };
+        let relay = TestNode::start(160, vec![], Some(role), false).await;
+        relay.sync().await;
+        let boot: Vec<BootIdentity> = vec![format!("{}@{}", relay.key.did(), url).parse().unwrap()];
+        let a = TestNode::start(161, boot.clone(), None, false).await;
+        let b = TestNode::start(162, boot, None, false).await;
+        for _ in 0..2 {
+            for node in [&a, &b] {
+                node.sync().await;
+            }
+        }
+        let record = a.transport.store().lookup(&b.key.did()).unwrap();
+        let b_addr = a.transport.dial_addr(&record).unwrap();
+
+        let started = std::time::Instant::now();
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            a.endpoint.connect(b_addr, ECHO_ALPN),
+        )
+        .await
+        .expect("dial in time")
+        .expect("dial");
+        let replies = Arc::new(Mutex::new(vec![started]));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pinger = {
+            let (conn, replies, stop) = (conn.clone(), replies.clone(), stop.clone());
+            tokio::spawn(async move {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let echo = async {
+                        let (mut send, mut recv) = conn.open_bi().await.ok()?;
+                        send.write_all(b"ping").await.ok()?;
+                        send.finish().ok()?;
+                        recv.read_to_end(8).await.ok().filter(|r| r == b"ping")
+                    };
+                    if tokio::time::timeout(Duration::from_secs(2), echo)
+                        .await
+                        .is_ok_and(|r| r.is_some())
+                    {
+                        replies.lock().push(std::time::Instant::now());
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        let direct = tokio::time::timeout(Duration::from_secs(10), async {
+            while !conn.paths().iter().any(|p| p.is_selected() && p.is_ip()) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        let took = started.elapsed();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        pinger.await.unwrap();
+        assert!(direct.is_ok(), "no direct path within 10 s");
+        assert!(
+            took < Duration::from_millis(500),
+            "the direct path took {took:?}"
+        );
+        let replies = replies.lock();
+        let gap = replies
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .max()
+            .unwrap_or_default();
+        assert!(
+            replies.len() > 20,
+            "only {} echoes came back",
+            replies.len() - 1
+        );
+        assert!(
+            gap < Duration::from_secs(1),
+            "the echoes stopped for {gap:?}"
+        );
+    }
+
     /// A peer that reaches a node over a direct path tells it the address it
     /// sees; over a relay it can tell nothing. The node's connectivity report
     /// names the relay it is connected to.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_peer_reports_the_address_it_sees_on_a_direct_path_only() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2410,10 +3317,7 @@ mod tests {
         // one is found, which on a loaded machine can take a few attempts.
         let mut direct = None;
         for _ in 0..40 {
-            match ask(&a.endpoint, b_addr.clone(), &DiscoveryRequest::Observe)
-                .await
-                .unwrap()
-            {
+            match answer_of(&a.endpoint, &b_addr, &DiscoveryRequest::Observe).await {
                 DiscoveryResponse::Observed(Some(seen)) => {
                     direct = Some(seen);
                     break;
@@ -2436,10 +3340,7 @@ mod tests {
             "b sees a at one of a's own sockets: {seen} vs {a_ports:?}"
         );
         let b_addr = private.transport.dial_addr(&b_record).unwrap();
-        match ask(&private.endpoint, b_addr, &DiscoveryRequest::Observe)
-            .await
-            .unwrap()
-        {
+        match answer_of(&private.endpoint, &b_addr, &DiscoveryRequest::Observe).await {
             DiscoveryResponse::Observed(seen) => {
                 assert_eq!(seen, None, "a relayed connection shows no address")
             }
@@ -2462,7 +3363,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_node_that_knows_one_peer_finds_the_whole_cluster_through_tenzro_nodes_only() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2550,7 +3451,7 @@ mod tests {
         fn admit(&self, _: &str, _: EndpointId) -> crate::gossip::Verdict {
             crate::gossip::Verdict::Accept
         }
-        fn duplicate(&self, _: EndpointId) {}
+        fn duplicate(&self, _: &str, _: EndpointId, _: usize) {}
         fn check(&self, _: &str, _: EndpointId, _: &[u8]) -> crate::gossip::Verdict {
             crate::gossip::Verdict::Accept
         }
@@ -2583,7 +3484,7 @@ mod tests {
                 .unwrap();
             let gate = GossipGate::default();
             let endpoint = with_relays(
-                base_builder(),
+                on_loopback(base_builder()),
                 transport.relays(),
                 Some(transport.store().clone()),
             )
@@ -2623,7 +3524,7 @@ mod tests {
         // Three genesis validators. The first serves the relay its genesis
         // entry names; the other two are named by identity only. No node is
         // told any address or endpoint of another.
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2692,9 +3593,29 @@ mod tests {
         }
     }
 
+    /// [`ask`], tried again when the dial itself did not finish: a loaded host
+    /// can keep a loopback dial past its bound, which says nothing about what
+    /// the peer answers. An answer, a refusal included, is never asked again.
+    async fn ask_patiently(
+        endpoint: &Endpoint,
+        peer: EndpointAddr,
+        request: &DiscoveryRequest,
+    ) -> IrohResult<DiscoveryResponse> {
+        let mut last = ask(endpoint, peer.clone(), request).await;
+        for _ in 0..3 {
+            match &last {
+                Err(e) if e.to_string().contains("did not finish within") => {
+                    last = ask(endpoint, peer.clone(), request).await;
+                }
+                _ => break,
+            }
+        }
+        last
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_private_node_is_resolvable_only_by_its_counterparties() {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let role = RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
@@ -2760,7 +3681,7 @@ mod tests {
         let lookup = DiscoveryRequest::Lookup(private.key.did());
         for holder in [&private, &counterparty] {
             let holder_record = holder.transport.store().lookup(&holder.key.did()).unwrap();
-            let to_stranger = ask(
+            let to_stranger = ask_patiently(
                 &stranger.endpoint,
                 stranger.transport.dial_addr(&holder_record).unwrap(),
                 &lookup,
@@ -2771,7 +3692,7 @@ mod tests {
                 matches!(to_stranger, DiscoveryResponse::Record(None)),
                 "a non-counterparty cannot resolve it"
             );
-            let snapshot = ask(
+            let snapshot = ask_patiently(
                 &stranger.endpoint,
                 stranger.transport.dial_addr(&holder_record).unwrap(),
                 &DiscoveryRequest::Snapshot,
@@ -2788,7 +3709,7 @@ mod tests {
                 other => panic!("unexpected {other:?}"),
             }
         }
-        let to_counterparty = ask(
+        let to_counterparty = ask_patiently(
             &counterparty.endpoint,
             counterparty.transport.dial_addr(&held).unwrap(),
             &lookup,
@@ -2804,7 +3725,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn forged_and_stale_records_are_refused_by_a_peer() {
         let node = TestNode::start(50, vec![], None, false).await;
-        let asker = base_builder().bind().await.unwrap();
+        let asker = on_loopback(base_builder()).bind().await.unwrap();
         node.sync().await;
         let own = node.transport.store().lookup(&node.key.did()).unwrap();
 
@@ -2878,7 +3799,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_validator_serving_the_relay_stays_admissible_and_a_node_started_first_waits_for_it()
     {
-        let port = free_port();
+        let port = test_ports::tcp();
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let boot: Vec<BootIdentity> = vec![
             format!("{}@{}", TestMachineKey::from_seed(70).did(), url)
@@ -2927,8 +3848,8 @@ mod tests {
     async fn an_epoch_set_record_is_answered_only_to_a_member() {
         let validator = TestNode::start(60, vec![], None, false).await;
         let member_key = TestMachineKey::from_seed(61);
-        let member = base_builder().bind().await.unwrap();
-        let outsider = base_builder().bind().await.unwrap();
+        let member = on_loopback(base_builder()).bind().await.unwrap();
+        let outsider = on_loopback(base_builder()).bind().await.unwrap();
         let member_record = EndpointRecord::sign(
             &member_key,
             iroh_endpoint_key(member.id()),
@@ -3015,7 +3936,7 @@ mod tests {
     /// reaching each other, over relay-only paths, when the first stops.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_relay_that_joins_late_carries_the_nodes_when_the_first_relay_stops() {
-        let (p1, p2) = (free_port(), free_port());
+        let (p1, p2) = (test_ports::tcp(), test_ports::tcp());
         let url = |p: u16| Url::parse(&format!("http://127.0.0.1:{p}/")).unwrap();
         let role = |p: u16| RelayRoleConfig {
             bind_addr: format!("127.0.0.1:{p}").parse().unwrap(),
@@ -3034,9 +3955,12 @@ mod tests {
                 n.sync().await;
             }
         }
+        // The nodes hold each other's records now; the first echo through
+        // the relay is waited for, as the one through the second relay is
+        // below, rather than given a single attempt.
         assert!(
-            echo_reaches(&a, &b).await,
-            "reaches through the first relay"
+            reach_each_other(&a, &b, Duration::from_secs(30)).await,
+            "the nodes reach each other through the first relay"
         );
 
         // The second relay is added to the running endpoints.

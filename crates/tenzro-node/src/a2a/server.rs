@@ -3,7 +3,7 @@
 //! - `POST /a2a` — JSON-RPC dispatcher. `SendStreamingMessage` is answered
 //!   with a server-sent-event stream on the same route.
 //! - `GET /.well-known/agent-card.json` — the agent card, carrying a detached
-//!   JWS by the operator's wallet key. A node that cannot sign serves no card.
+//!   JWS by the machine's identity key. A node that cannot sign serves no card.
 //!
 //! Every JSON-RPC request declares the protocol version in the `A2A-Version`
 //! header. An absent header means 0.3, which this server does not speak, so
@@ -43,7 +43,8 @@ use tenzro_storage::KvStore;
 use super::agent_card::{self, AgentCard};
 use super::did_envelope::{self, VerifiedSender};
 use super::task_manager::{
-    A2aTask, CancelError, MessagePart, Role, TaskArtifact, TaskManager, TaskMessage, TaskState,
+    A2aTask, ArtifactError, CancelError, MessagePart, Role, TaskArtifact, TaskManager, TaskMessage,
+    TaskState,
 };
 use super::x402_extension::{self, MessageMetadataExt};
 use crate::node::TenzroNode;
@@ -54,11 +55,31 @@ pub struct A2aState {
     pub node: Arc<TenzroNode>,
     pub web_state: Arc<WebState>,
     pub task_manager: TaskManager,
-    /// The card as built from configuration, without signatures.
-    pub agent_card: AgentCard,
-    /// The card once the operator's wallet has signed it. Filled on the first
-    /// successful signing; until then every card request retries.
-    signed_card: tokio::sync::Mutex<Option<AgentCard>>,
+    /// The last card the machine key signed. Rebuilt from the node's state
+    /// at most every [`CARD_REBUILD_AFTER`], and signed again only when that
+    /// changed the card; until a signing succeeds every card request
+    /// retries.
+    signed_card: tokio::sync::Mutex<Option<SignedCard>>,
+    /// The machine DID envelopes must be addressed to: the DID the signed
+    /// card names. `None` on a node without a machine key, which answers no
+    /// task call.
+    audience: Option<String>,
+    /// When this node began serving, in Unix milliseconds: an envelope
+    /// stamped before it is refused.
+    started_at_ms: i64,
+}
+
+impl A2aState {
+    /// The unsigned card for what this node serves now: its roles as they
+    /// run (a role is held only with its bond) decide which skills it lists.
+    pub fn agent_card(&self) -> AgentCard {
+        let role = self.node.runtime_roles.read().to_string();
+        agent_card::build_agent_card(
+            agent_card::card_url(self.node.config()),
+            &role,
+            agent_card::Served::of(&self.node),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +123,41 @@ const VERSION_NOT_SUPPORTED: i32 = -32009;
 /// The DID envelope on a mutation was missing or did not verify. Chosen
 /// outside the block the A2A binding assigns.
 const ENVELOPE_REJECTED: i32 = -32050;
+/// The sender, or the node, already holds as many open tasks as it may.
+const TASK_LIMIT_REACHED: i32 = -32051;
+
+/// The reason an A2A error code names: its error type in upper snake case
+/// without the `Error` suffix.
+fn a2a_error_reason(code: i32) -> Option<&'static str> {
+    match code {
+        TASK_NOT_FOUND => Some("TASK_NOT_FOUND"),
+        TASK_NOT_CANCELABLE => Some("TASK_NOT_CANCELABLE"),
+        PUSH_NOTIFICATION_NOT_SUPPORTED => Some("PUSH_NOTIFICATION_NOT_SUPPORTED"),
+        UNSUPPORTED_OPERATION => Some("UNSUPPORTED_OPERATION"),
+        EXTENDED_AGENT_CARD_NOT_CONFIGURED => Some("EXTENDED_AGENT_CARD_NOT_CONFIGURED"),
+        VERSION_NOT_SUPPORTED => Some("VERSION_NOT_SUPPORTED"),
+        _ => None,
+    }
+}
+
+/// The `data` of an error: for an A2A error, an array holding one typed
+/// `google.rpc.ErrorInfo` that names the error, with `metadata` when there
+/// is any. Other errors carry no detail.
+fn error_details(
+    code: i32,
+    metadata: serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let reason = a2a_error_reason(code)?;
+    let mut info = serde_json::json!({
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": reason,
+        "domain": "a2a-protocol.org",
+    });
+    if !metadata.is_empty() {
+        info["metadata"] = serde_json::Value::Object(metadata);
+    }
+    Some(serde_json::json!([info]))
+}
 
 impl JsonRpcResponse {
     fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
@@ -114,14 +170,15 @@ impl JsonRpcResponse {
     }
 
     fn error(id: serde_json::Value, code: i32, message: impl Into<String>) -> Self {
-        Self::error_with_data(id, code, message, None)
+        Self::error_with_metadata(id, code, message, serde_json::Map::new())
     }
 
-    fn error_with_data(
+    /// An error whose detail, for an A2A error, carries `metadata`.
+    fn error_with_metadata(
         id: serde_json::Value,
         code: i32,
         message: impl Into<String>,
-        data: Option<serde_json::Value>,
+        metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
@@ -129,7 +186,7 @@ impl JsonRpcResponse {
             error: Some(JsonRpcError {
                 code,
                 message: message.into(),
-                data,
+                data: error_details(code, metadata),
             }),
             id,
         }
@@ -207,7 +264,12 @@ fn version_supported(declared: Option<&str>) -> bool {
 }
 
 fn version_not_supported(id: serde_json::Value, declared: Option<&str>) -> JsonRpcResponse {
-    JsonRpcResponse::error_with_data(
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "supportedVersions".to_string(),
+        agent_card::A2A_PROTOCOL_VERSION.into(),
+    );
+    JsonRpcResponse::error_with_metadata(
         id,
         VERSION_NOT_SUPPORTED,
         format!(
@@ -218,9 +280,7 @@ fn version_not_supported(id: serde_json::Value, declared: Option<&str>) -> JsonR
             A2A_VERSION_HEADER,
             agent_card::A2A_PROTOCOL_VERSION
         ),
-        Some(serde_json::json!({
-            "supportedVersions": [agent_card::A2A_PROTOCOL_VERSION],
-        })),
+        metadata,
     )
 }
 
@@ -231,7 +291,14 @@ fn verify_sender(
     params: &serde_json::Value,
     id: &serde_json::Value,
 ) -> Result<VerifiedSender, JsonRpcResponse> {
-    did_envelope::verify_envelope(&state.node, method, params).map_err(|err| {
+    did_envelope::verify_envelope(
+        &state.node,
+        state.audience.as_deref(),
+        state.started_at_ms,
+        method,
+        params,
+    )
+    .map_err(|err| {
         warn!(
             "A2A envelope rejected: method={} reason={}",
             method,
@@ -356,16 +423,48 @@ fn task_value(task: &A2aTask) -> serde_json::Value {
 // Route handlers
 // ---------------------------------------------------------------------------
 
-/// Serve the agent card signed by the operator's wallet key. A node that
+/// How long a request is answered from the card last served before the card
+/// is built from the node's state again.
+const CARD_REBUILD_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The card last served: when it was last checked against the node's state,
+/// the JSON of the unsigned card, and its signed form.
+struct SignedCard {
+    checked: std::time::Instant,
+    unsigned: String,
+    signed: AgentCard,
+}
+
+/// Serve the agent card signed by this machine's identity key. A node that
 /// cannot sign answers 503: a card without a signature is not served.
 async fn agent_card_handler(State(state): State<Arc<A2aState>>) -> Response {
     let mut cached = state.signed_card.lock().await;
-    if let Some(card) = cached.as_ref() {
-        return Json(card.clone()).into_response();
+    if let Some(last) = cached.as_ref()
+        && last.checked.elapsed() < CARD_REBUILD_AFTER
+    {
+        return Json(last.signed.clone()).into_response();
     }
-    match agent_card::sign_with_operator_wallet(&state.node, &state.agent_card).await {
+    let card = state.agent_card();
+    let unsigned = serde_json::to_string(&card).unwrap_or_default();
+    if let Some(last) = cached.as_mut()
+        && last.unsigned == unsigned
+    {
+        last.checked = std::time::Instant::now();
+        return Json(last.signed.clone()).into_response();
+    }
+    let signed = match crate::identity_bootstrap::machine_signer() {
+        Some(signer) => agent_card::sign_with_machine_key(signer, &card),
+        None => Err(agent_card::CardSignatureError::Signing(
+            "this machine has no identity key".to_string(),
+        )),
+    };
+    match signed {
         Ok(signed) => {
-            *cached = Some(signed.clone());
+            *cached = Some(SignedCard {
+                checked: std::time::Instant::now(),
+                unsigned,
+                signed: signed.clone(),
+            });
             Json(signed).into_response()
         }
         Err(e) => {
@@ -438,8 +537,20 @@ pub(crate) async fn dispatch_jsonrpc(
             };
             handle_cancel_task(state, req.params, req.id, &sender)
         }
-        Method::GetTask => handle_get_task(state, req.params, req.id),
-        Method::ListTasks => handle_list_tasks(state, req.params, req.id),
+        Method::GetTask => {
+            let sender = match verify_sender(state, &req.method, &req.params, &req.id) {
+                Ok(s) => s,
+                Err(resp) => return resp,
+            };
+            handle_get_task(state, req.params, req.id, &sender)
+        }
+        Method::ListTasks => {
+            let sender = match verify_sender(state, &req.method, &req.params, &req.id) {
+                Ok(s) => s,
+                Err(resp) => return resp,
+            };
+            handle_list_tasks(state, req.params, req.id, &sender)
+        }
         Method::SendStreamingMessage => JsonRpcResponse::error(
             req.id,
             UNSUPPORTED_OPERATION,
@@ -567,13 +678,18 @@ async fn accept_message(
 
     let Some(task_id) = params.message.task_id.clone() else {
         let task_id = uuid::Uuid::new_v4().to_string();
-        state.task_manager.create_task(
-            task_id.clone(),
-            params.message.context_id.clone(),
-            msg,
-            inbound_metadata,
-            &sender.did,
-        );
+        state
+            .task_manager
+            .create_task(
+                task_id.clone(),
+                params.message.context_id.clone(),
+                msg,
+                inbound_metadata,
+                &sender.did,
+            )
+            .map_err(|full| {
+                JsonRpcResponse::error(id.clone(), TASK_LIMIT_REACHED, full.to_string())
+            })?;
         state
             .task_manager
             .update_status(&task_id, TaskState::Working, None);
@@ -599,6 +715,18 @@ async fn accept_message(
             id.clone(),
             UNSUPPORTED_OPERATION,
             format!("Task {task_id} is in a terminal state and accepts no further messages"),
+        ));
+    }
+    if !state.task_manager.room_for_turn(&existing) {
+        return Err(JsonRpcResponse::error(
+            id.clone(),
+            TASK_LIMIT_REACHED,
+            format!(
+                "Task {task_id} holds {} messages and this node keeps at most {} for one \
+                 task; open a new task",
+                existing.history.len(),
+                state.task_manager.max_history()
+            ),
         ));
     }
 
@@ -699,7 +827,7 @@ async fn run_task(state: &A2aState, task_id: &str, sender: &VerifiedSender) -> O
         "task_id": task_id,
         disc_key: disc_val,
     });
-    state.task_manager.add_artifact(
+    let kept = state.task_manager.add_artifact(
         task_id,
         TaskArtifact {
             artifact_id: uuid::Uuid::new_v4().to_string(),
@@ -707,6 +835,17 @@ async fn run_task(state: &A2aState, task_id: &str, sender: &VerifiedSender) -> O
             parts: vec![MessagePart::data(data.clone())],
         },
     );
+    // An answer the task has no room for is not kept in part: the task
+    // fails and says why.
+    if let Err(ArtifactError::TooLarge { would_hold, max }) = kept {
+        let why = TaskMessage::agent(vec![MessagePart::text(format!(
+            "the answer would bring this task's artifacts to {would_hold} bytes and this node \
+             keeps at most {max} for one task; open a new task"
+        ))]);
+        return state
+            .task_manager
+            .update_status(task_id, TaskState::Failed, Some(why));
+    }
     let response_msg = TaskMessage::agent(vec![MessagePart::text(&text), MessagePart::data(data)]);
     state
         .task_manager
@@ -791,16 +930,19 @@ async fn handle_send_message(
     JsonRpcResponse::success(id, serde_json::json!({ "task": task_value(&task) }))
 }
 
+/// `GetTask`: the sender's own task. Another DID's task is reported as not
+/// found, so task ids cannot be probed.
 fn handle_get_task(
     state: &A2aState,
     params: serde_json::Value,
     id: serde_json::Value,
+    sender: &VerifiedSender,
 ) -> JsonRpcResponse {
     let params: GetTaskParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(e) => return JsonRpcResponse::invalid_params(id, format!("Invalid params: {}", e)),
     };
-    match state.task_manager.get_task(&params.id) {
+    match state.task_manager.task_of(&params.id, &sender.did) {
         Some(mut task) => {
             trim_history(&mut task, params.history_length);
             JsonRpcResponse::success(id, task_value(&task))
@@ -811,18 +953,16 @@ fn handle_get_task(
     }
 }
 
+/// `ListTasks`: the tasks the sender opened, and no others.
 fn handle_list_tasks(
     state: &A2aState,
     params: serde_json::Value,
     id: serde_json::Value,
+    sender: &VerifiedSender,
 ) -> JsonRpcResponse {
-    let params: ListTasksParams = if params.is_null() {
-        ListTasksParams::default()
-    } else {
-        match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => return JsonRpcResponse::invalid_params(id, format!("Invalid params: {}", e)),
-        }
+    let params: ListTasksParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return JsonRpcResponse::invalid_params(id, format!("Invalid params: {}", e)),
     };
     let offset = match params.page_token.as_deref().filter(|t| !t.is_empty()) {
         None => 0,
@@ -833,9 +973,10 @@ fn handle_list_tasks(
     };
     let page_size = params.page_size.unwrap_or(50).clamp(1, LIST_TASKS_MAX_PAGE);
 
-    let all = state
-        .task_manager
-        .list_tasks(params.context_id.as_deref(), params.status);
+    let all =
+        state
+            .task_manager
+            .list_tasks(&sender.did, params.context_id.as_deref(), params.status);
     let total = all.len();
     let include_artifacts = params.include_artifacts.unwrap_or(false);
     let page: Vec<serde_json::Value> = all
@@ -944,7 +1085,11 @@ async fn execute_read_events(
     sender: &VerifiedSender,
     op: &serde_json::Value,
 ) -> Result<String, String> {
-    crate::agent_delegation::check_agent_event_read(&state.node, &sender.did, op)?;
+    crate::agent_guardrails::counted(crate::agent_delegation::check_agent_event_read(
+        &state.node,
+        &sender.did,
+        op,
+    ))?;
     let log = state.node.event_log().ok_or("the event log is not open")?;
     let certified = state
         .node
@@ -1094,7 +1239,7 @@ fn answer_text(state: &A2aState, text: &str) -> String {
         Route::Network => handle_network_query(state),
         Route::Status => handle_status_query(state),
         Route::Help => "I'm the Tenzro Network Agent. I can help with:\n\
-             - Join as MicroNode (zero-install full network participant)\n\
+             - Join as MicroNode (an identity and wallet that use the network)\n\
              - Wallet & balance queries\n\
              - Block & chain info\n\
              - Node status & health\n\
@@ -1318,12 +1463,13 @@ fn handle_discovery_query(_state: &A2aState) -> String {
 }
 
 fn handle_storage_query(_state: &A2aState) -> String {
-    "Decentralized Storage (content-addressed, billed per byte-epoch, held to a proof of \
+    "Storage (content-addressed, billed per byte-epoch, held to a proof of \
      retrievability):\n\
      - Store an object, then pay for keeping it with a storage compute claim that\n\
        commits its descriptor digest; the claim settles hourly on SLA verdicts\n\
        that require a possession proof of the object.\n\n\
      RPC: tenzro_storageStatus, tenzro_storageStoreObject, tenzro_storageSetPricing, \
+     tenzro_getStorageHoldingReceipt, tenzro_listStorageProviders (ranked by record), \
      tenzro_computeGetClaim\n\
      CLI: `tenzro node storage status`"
         .to_string()
@@ -1722,39 +1868,41 @@ fn handle_bridge_query(_state: &A2aState) -> String {
 /// Shared by the HTTPS axum surface and the iroh-transport adapter
 /// ([`crate::a2a::iroh_transport::IrohA2aDispatcher`]) so tasks created over
 /// either transport land in the same task table.
-pub fn build_a2a_state(node: Arc<TenzroNode>, web_state: Arc<WebState>) -> Arc<A2aState> {
-    let role = node.config().roles.to_string();
-    let agent_card = agent_card::build_agent_card(agent_card::card_url(node.config()), &role);
-
+/// The A2A state of `node`, answering envelopes addressed to `audience`
+/// (the node's machine DID).
+pub fn build_a2a_state(
+    node: Arc<TenzroNode>,
+    web_state: Arc<WebState>,
+    audience: Option<String>,
+) -> Arc<A2aState> {
+    let task_manager = match node.storage() {
+        Some(store) => TaskManager::with_storage(
+            store.clone() as Arc<dyn KvStore>,
+            node.config().a2a_tasks.clone(),
+        ),
+        None => TaskManager::with_limits(node.config().a2a_tasks.clone()),
+    };
     Arc::new(A2aState {
         node,
         web_state,
-        task_manager: TaskManager::new(),
-        agent_card,
+        task_manager,
         signed_card: tokio::sync::Mutex::new(None),
+        audience,
+        started_at_ms: chrono::Utc::now().timestamp_millis(),
     })
-}
-
-/// Start the A2A protocol server
-/// Public API method for external use without shutdown signal
-pub async fn start_a2a_server(
-    listen_addr: String,
-    node: Arc<TenzroNode>,
-    web_state: Arc<WebState>,
-) -> crate::error::Result<()> {
-    let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-    let state = build_a2a_state(node, web_state);
-    start_a2a_server_with_shutdown(listen_addr, state, shutdown_rx).await
 }
 
 /// Start the A2A protocol server with graceful shutdown support.
 ///
 /// Takes a pre-built `Arc<A2aState>` so the same state can be shared with
-/// the iroh-transport adapter (see [`build_a2a_state`]).
+/// the iroh-transport adapter (see [`build_a2a_state`]). The address it
+/// bound goes to `addr_tx` when given, so a caller that asked for port 0
+/// learns the port.
 pub async fn start_a2a_server_with_shutdown(
     listen_addr: String,
     state: Arc<A2aState>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    addr_tx: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
 ) -> crate::error::Result<()> {
     let cors = crate::http_surface::cors_layer(&state.node.config().cors_allowed_origins);
 
@@ -1797,24 +1945,88 @@ pub async fn start_a2a_server_with_shutdown(
         .layer(ConcurrencyLimitLayer::new(200))
         // Request body size limit: 2 MB.
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
+    let app = crate::ip_rate_limit::public_edge(
+        app,
+        crate::rpc::governed_address_limits(&node),
+        node.http_surface().clone(),
+    );
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
-    info!(addr = %listen_addr, "A2A Protocol server listening");
+    let local_addr = listener.local_addr()?;
+    if let Some(tx) = addr_tx {
+        let _ = tx.send(local_addr);
+    }
+    info!(addr = %local_addr, "A2A Protocol server listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.recv().await;
-            info!("A2A server shutting down gracefully");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx.recv().await;
+        info!("A2A server shutting down gracefully");
+    })
+    .await?;
 
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::a2a::did_envelope::tests::TestSender;
+    use crate::a2a::did_envelope::tests::{TestSender, register, signed};
+
+    /// Two registered clients on one node that can sign its records, so
+    /// their messages run.
+    pub(crate) async fn two_clients() -> (Arc<A2aState>, TestSender, TestSender, tempfile::TempDir)
+    {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut node = TenzroNode::new(crate::config::NodeConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..crate::config::NodeConfig::default()
+        })
+        .await
+        .expect("node");
+        let id: Arc<dyn tenzro_crypto::composite::HybridSigner> =
+            Arc::new(tenzro_crypto::testing::TestHybridSigner::p256_only(41));
+        node.set_record_signer(tenzro_crypto::batch::ImmediateRecordSigner::new(id));
+        let alice = TestSender::new(&format!("did:tenzro:machine:{}", hex::encode([0xa1; 32])));
+        let bob = TestSender::new(&format!("did:tenzro:machine:{}", hex::encode([0xb0; 32])));
+        let registry = tenzro_identity::IdentityRegistry::new();
+        register(&registry, &alice);
+        register(&registry, &bob);
+        node.set_identity_registry(Arc::new(registry));
+        let state = build_a2a_state(
+            Arc::new(node),
+            Arc::new(WebState::new()),
+            Some(did_envelope::tests::TEST_AUDIENCE.to_string()),
+        );
+        (state, alice, bob, tmp)
+    }
+
+    /// A signed JSON-RPC request body for `method`.
+    pub(crate) fn signed_body(
+        sender: &TestSender,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": signed(sender, method, params),
+        })
+    }
+
+    /// The ids in a `ListTasks` reply.
+    pub(crate) fn listed_ids(reply: &serde_json::Value) -> Vec<String> {
+        reply["result"]["tasks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a task list: {reply}"))
+            .iter()
+            .map(|t| t["id"].as_str().expect("id").to_string())
+            .collect()
+    }
 
     #[test]
     fn a2a_1_0_method_names_parse_and_0_x_names_do_not() {
@@ -1912,7 +2124,11 @@ mod tests {
             ..crate::config::NodeConfig::default()
         };
         let node = TenzroNode::new(config).await.expect("node");
-        let state = build_a2a_state(Arc::new(node), Arc::new(WebState::new()));
+        let state = build_a2a_state(
+            Arc::new(node),
+            Arc::new(WebState::new()),
+            Some(did_envelope::tests::TEST_AUDIENCE.to_string()),
+        );
         (state, tmp)
     }
 
@@ -1935,6 +2151,66 @@ mod tests {
         })
     }
 
+    /// Every A2A error carries its detail as an array of typed objects: one
+    /// `google.rpc.ErrorInfo` naming the error. An error outside the A2A
+    /// block carries none.
+    #[tokio::test]
+    async fn a2a_errors_carry_a_typed_error_info() {
+        let (state, _tmp) = test_state().await;
+        let detail =
+            |resp: &JsonRpcResponse| serde_json::to_value(resp).unwrap()["error"]["data"].clone();
+
+        let unversioned =
+            dispatch_jsonrpc(&state, request("ListTasks", serde_json::json!({})), None).await;
+        assert_eq!(
+            detail(&unversioned),
+            serde_json::json!([{
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "VERSION_NOT_SUPPORTED",
+                "domain": "a2a-protocol.org",
+                "metadata": { "supportedVersions": agent_card::A2A_PROTOCOL_VERSION },
+            }])
+        );
+
+        let (signed_state, alice, _bob, _signed_tmp) = two_clients().await;
+        let read = signed_body(&alice, "GetTask", serde_json::json!({"id": "no-such-task"}));
+        let missing = dispatch_jsonrpc(
+            &signed_state,
+            serde_json::from_value(read).expect("a request"),
+            Some(agent_card::A2A_PROTOCOL_VERSION),
+        )
+        .await;
+        assert_eq!(error_code(&missing), TASK_NOT_FOUND);
+        assert_eq!(
+            detail(&missing),
+            serde_json::json!([{
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "TASK_NOT_FOUND",
+                "domain": "a2a-protocol.org",
+            }])
+        );
+
+        for code in [
+            TASK_NOT_FOUND,
+            TASK_NOT_CANCELABLE,
+            PUSH_NOTIFICATION_NOT_SUPPORTED,
+            UNSUPPORTED_OPERATION,
+            EXTENDED_AGENT_CARD_NOT_CONFIGURED,
+            VERSION_NOT_SUPPORTED,
+        ] {
+            let data = detail(&JsonRpcResponse::error(serde_json::json!(1), code, "x"));
+            let entries = data.as_array().expect("an array of details");
+            assert!(
+                entries.iter().all(|e| e["@type"].is_string()),
+                "{code}: {data}"
+            );
+        }
+        for code in [-32601, -32602, ENVELOPE_REJECTED] {
+            let data = detail(&JsonRpcResponse::error(serde_json::json!(1), code, "x"));
+            assert!(data.is_null(), "{code}: {data}");
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_refuses_requests_without_a_supported_version() {
         let (state, _tmp) = test_state().await;
@@ -1948,34 +2224,192 @@ mod tests {
         )
         .await;
         assert_eq!(error_code(&resp), VERSION_NOT_SUPPORTED);
+        // With the version accepted the request gets as far as the envelope
+        // check, which an unsigned read does not pass.
         let resp = dispatch_jsonrpc(
             &state,
             request("ListTasks", serde_json::json!({})),
             Some("1.0"),
         )
         .await;
-        assert!(resp.error.is_none());
-        assert_eq!(resp.result.unwrap()["totalSize"], 0);
+        assert_eq!(error_code(&resp), ENVELOPE_REJECTED);
     }
 
-    /// The HTTPS route answers the unary methods with the `A2A-Version`
-    /// header, refuses a message without the DID envelope, and refuses a
-    /// client that sends no version.
+    /// Two clients of one node over real HTTP requests: each opens a task,
+    /// and each lists and gets its own and never the other's. A read
+    /// without the envelope is refused, as is one signed for another
+    /// method or carrying another client's envelope.
     #[tokio::test]
-    async fn the_https_route_serves_tasks_and_refuses_unsigned_messages() {
-        let (state, _tmp) = test_state().await;
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
+    async fn over_http_a_client_reads_only_its_own_tasks_and_an_unsigned_read_is_refused() {
+        let (state, alice, bob, _tmp) = two_clients().await;
         let (_keep, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
-        let addr = format!("127.0.0.1:{port}");
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(start_a2a_server_with_shutdown(
-            addr,
+            "127.0.0.1:0".to_string(),
             state.clone(),
             shutdown_rx,
+            Some(addr_tx),
         ));
-        let base = format!("http://127.0.0.1:{port}");
+        let url = format!("http://{}/a2a", addr_rx.await.expect("bound address"));
+        let client = reqwest::Client::new();
+        let mut up = false;
+        for _ in 0..50 {
+            if client.get(&url).send().await.is_ok() {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(up, "the A2A server listens");
+        let post = |body: serde_json::Value| {
+            let (client, url) = (client.clone(), url.clone());
+            async move {
+                client
+                    .post(url)
+                    .header(A2A_VERSION_HEADER, "1.0")
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
+            }
+        };
+        let open = |who: &TestSender, text: &str| {
+            let mut params = send_params(serde_json::json!([{ "text": text }]));
+            params["message"]["contextId"] = serde_json::json!("shared-context");
+            post(signed_body(who, "SendMessage", params))
+        };
+
+        let a = open(&alice, "what is the node status? alice-private-question").await;
+        let a_id = a["result"]["task"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{a}"))
+            .to_string();
+        let b = open(&bob, "what is the node status? bob-private-question").await;
+        let b_id = b["result"]["task"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{b}"))
+            .to_string();
+        assert_ne!(a_id, b_id);
+        assert_eq!(state.task_manager.task_count(), 2);
+
+        // Each lists its own task and nothing of the other's, with every
+        // filter and with artifacts asked for.
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({ "contextId": "shared-context" }),
+            serde_json::json!({ "includeArtifacts": true, "historyLength": 100 }),
+            serde_json::json!({ "pageSize": 100, "pageToken": "0" }),
+        ] {
+            let mine = post(signed_body(&alice, "ListTasks", params.clone())).await;
+            assert_eq!(
+                listed_ids(&mine),
+                std::slice::from_ref(&a_id),
+                "{params}: {mine}"
+            );
+            assert_eq!(mine["result"]["totalSize"], 1, "{mine}");
+            assert!(!mine.to_string().contains("bob-private-question"), "{mine}");
+            let theirs = post(signed_body(&bob, "ListTasks", params.clone())).await;
+            assert_eq!(
+                listed_ids(&theirs),
+                std::slice::from_ref(&b_id),
+                "{params}: {theirs}"
+            );
+            assert!(
+                !theirs.to_string().contains("alice-private-question"),
+                "{theirs}"
+            );
+        }
+
+        // Each gets its own task; the other's reads exactly like one that
+        // does not exist.
+        let own = post(signed_body(
+            &alice,
+            "GetTask",
+            serde_json::json!({ "id": a_id }),
+        ))
+        .await;
+        assert_eq!(own["result"]["id"], a_id.as_str(), "{own}");
+        assert!(own.to_string().contains("alice-private-question"));
+        let other = post(signed_body(
+            &alice,
+            "GetTask",
+            serde_json::json!({ "id": b_id }),
+        ))
+        .await;
+        let missing = post(signed_body(
+            &alice,
+            "GetTask",
+            serde_json::json!({ "id": "no-such-task" }),
+        ))
+        .await;
+        assert_eq!(other["error"]["code"], TASK_NOT_FOUND, "{other}");
+        assert_eq!(missing["error"]["code"], TASK_NOT_FOUND, "{missing}");
+        assert!(!other.to_string().contains("bob-private-question"));
+        let reverse = post(signed_body(
+            &bob,
+            "GetTask",
+            serde_json::json!({ "id": a_id }),
+        ))
+        .await;
+        assert_eq!(reverse["error"]["code"], TASK_NOT_FOUND, "{reverse}");
+
+        // No envelope, no answer.
+        for (method, params) in [
+            ("ListTasks", serde_json::json!({})),
+            ("ListTasks", serde_json::Value::Null),
+            ("GetTask", serde_json::json!({ "id": a_id })),
+            ("GetTask", serde_json::json!({ "id": b_id })),
+        ] {
+            let unsigned = post(serde_json::json!({
+                "jsonrpc": "2.0", "id": 9, "method": method, "params": params,
+            }))
+            .await;
+            assert_eq!(
+                unsigned["error"]["code"], ENVELOPE_REJECTED,
+                "{method}: {unsigned}"
+            );
+            assert!(unsigned["result"].is_null(), "{unsigned}");
+        }
+
+        // An envelope signed for one read does not serve another: bob's
+        // list envelope moved onto a GetTask, and his GetTask envelope for
+        // his own task moved onto alice's.
+        let list = signed(&bob, "ListTasks", serde_json::json!({}));
+        let moved = post(serde_json::json!({
+            "jsonrpc": "2.0", "id": 9, "method": "GetTask",
+            "params": { "id": a_id, "metadata": list["metadata"] },
+        }))
+        .await;
+        assert_eq!(moved["error"]["code"], ENVELOPE_REJECTED, "{moved}");
+        let get = signed(&bob, "GetTask", serde_json::json!({ "id": b_id }));
+        let retargeted = post(serde_json::json!({
+            "jsonrpc": "2.0", "id": 9, "method": "GetTask",
+            "params": { "id": a_id, "metadata": get["metadata"] },
+        }))
+        .await;
+        assert_eq!(
+            retargeted["error"]["code"], ENVELOPE_REJECTED,
+            "{retargeted}"
+        );
+    }
+
+    /// The HTTPS route refuses a message without the DID envelope and a
+    /// client that sends no version.
+    #[tokio::test]
+    async fn the_https_route_refuses_unsigned_messages_and_unversioned_clients() {
+        let (state, _tmp) = test_state().await;
+        let (_keep, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(start_a2a_server_with_shutdown(
+            "127.0.0.1:0".to_string(),
+            state.clone(),
+            shutdown_rx,
+            Some(addr_tx),
+        ));
+        let base = format!("http://{}", addr_rx.await.expect("bound address"));
         let client = reqwest::Client::new();
         let mut up = false;
         for _ in 0..50 {
@@ -2003,18 +2437,6 @@ mod tests {
                     .unwrap()
             }
         };
-        let list = post(
-            Some("1.0"),
-            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"ListTasks","params":{}}),
-        )
-        .await;
-        assert_eq!(list["result"]["totalSize"], 0, "{list}");
-        let missing = post(
-            Some("1.0"),
-            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"nope"}}),
-        )
-        .await;
-        assert!(missing["error"].is_object(), "{missing}");
         let unsigned = post(
             Some("1.0"),
             serde_json::json!({"jsonrpc":"2.0","id":3,"method":"SendMessage","params":
@@ -2047,6 +2469,74 @@ mod tests {
             assert_eq!(error_code(&resp), -32601, "{method}");
             assert!(resp.result.is_none());
         }
+    }
+
+    /// A sender whose identity is suspended or revoked can neither open a
+    /// task nor read or cancel the ones it opened, though its key still
+    /// signs; reactivated, it can again. The other client is not affected.
+    #[tokio::test]
+    async fn a_suspended_or_revoked_sender_is_refused_every_task_call() {
+        use tenzro_identity::IdentityStatus;
+        let (state, alice, bob, _tmp) = two_clients().await;
+        let ask = |who: &TestSender, method: &str, params: serde_json::Value| {
+            let state = state.clone();
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: method.to_string(),
+                params: signed(who, method, params),
+                id: serde_json::json!(1),
+            };
+            async move { dispatch_jsonrpc(&state, req, Some("1.0")).await }
+        };
+        let opened = ask(
+            &alice,
+            "SendMessage",
+            send_params(serde_json::json!([{"text": "what is the node status?"}])),
+        )
+        .await;
+        let task_id = opened.result.expect("alice's task")["task"]["id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+
+        let registry = state.node.identity_registry().expect("registry").clone();
+        let set = |status: IdentityStatus| {
+            let mut identity = registry.resolve(&alice.did).expect("alice");
+            identity.status = status;
+            registry.upsert_identity_for_test(identity);
+        };
+        for status in [IdentityStatus::Suspended, IdentityStatus::Revoked] {
+            set(status);
+            for (method, params) in [
+                ("ListTasks", serde_json::json!({})),
+                ("GetTask", serde_json::json!({ "id": task_id })),
+                ("CancelTask", serde_json::json!({ "id": task_id })),
+                (
+                    "SendMessage",
+                    send_params(serde_json::json!([{"text": "what is the node status?"}])),
+                ),
+            ] {
+                let resp = ask(&alice, method, params).await;
+                assert_eq!(
+                    error_code(&resp),
+                    ENVELOPE_REJECTED,
+                    "{method} while {status}"
+                );
+                let why = &resp.error.as_ref().unwrap().message;
+                assert!(why.contains("only an active identity"), "{why}");
+            }
+            let other = ask(&bob, "ListTasks", serde_json::json!({})).await;
+            assert!(other.error.is_none(), "bob is unaffected");
+        }
+        assert_eq!(
+            state.task_manager.task_count(),
+            1,
+            "no task was opened meanwhile"
+        );
+
+        set(IdentityStatus::Active);
+        let mine = ask(&alice, "GetTask", serde_json::json!({ "id": task_id })).await;
+        assert_eq!(mine.result.expect("active again")["id"], task_id.as_str());
     }
 
     #[tokio::test]
@@ -2091,17 +2581,20 @@ mod tests {
             did: "did:tenzro:human:other".to_string(),
             wallet_address: tenzro_types::Address::new([2u8; 32]),
         };
-        state.task_manager.create_task(
-            "t-own".to_string(),
-            None,
-            TaskMessage {
-                message_id: "m-0".to_string(),
-                role: Role::User,
-                parts: vec![MessagePart::text("hello")],
-            },
-            Default::default(),
-            &owner.did,
-        );
+        state
+            .task_manager
+            .create_task(
+                "t-own".to_string(),
+                None,
+                TaskMessage {
+                    message_id: "m-0".to_string(),
+                    role: Role::User,
+                    parts: vec![MessagePart::text("hello")],
+                },
+                Default::default(),
+                &owner.did,
+            )
+            .expect("room");
         state
             .task_manager
             .update_status("t-own", TaskState::InputRequired, None);
@@ -2154,7 +2647,11 @@ mod tests {
         let id: Arc<dyn tenzro_crypto::composite::HybridSigner> =
             Arc::new(tenzro_crypto::testing::TestHybridSigner::p256_only(40));
         node.set_record_signer(tenzro_crypto::batch::ImmediateRecordSigner::new(id));
-        let state = build_a2a_state(Arc::new(node), Arc::new(WebState::new()));
+        let state = build_a2a_state(
+            Arc::new(node),
+            Arc::new(WebState::new()),
+            Some(did_envelope::tests::TEST_AUDIENCE.to_string()),
+        );
         let resp = handle_send_message(&state, params(), serde_json::json!(7), &sender).await;
         let task = &resp.result.expect("result")["task"];
         assert_eq!(task["status"]["state"], "TASK_STATE_COMPLETED");

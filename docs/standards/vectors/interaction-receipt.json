@@ -1,0 +1,239 @@
+{
+  "vectors": [
+    {
+      "label": "worked example: x402 payment settled on the ledger",
+      "record": {
+        "interaction_id": "int_1",
+        "kind": "inference",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "x402_payment",
+          "scheme": "exact"
+        },
+        "charge": {
+          "kind": "settlement",
+          "settlement_id": "s-1"
+        },
+        "amount_charged": 1000,
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "preimage_hex": "74656e7a726f2f696e746572616374696f6e2d6174746573746174696f6e2f763205000000696e745f3109000000696e666572656e6365180000006469643a74656e7a726f3a6d616368696e653a6167656e74160000006469643a74656e7a726f3a68756d616e3a616c696365170000006469643a74656e7a726f3a6d616368696e653a6e6f6465090000007177656e332d3237620c000000783430325f7061796d656e740500000065786163740a000000736574746c656d656e7403000000732d3104000000313030301700000074656e7a726f3a313333372f6e61746976653a746e7a6f080000000068e5cf8b010000",
+      "digest": "d6d89cd298efecf601be462c2a4e76878fbd021033753663db55af3728ab0bf7"
+    },
+    {
+      "label": "open access, free, nobody on whose behalf",
+      "record": {
+        "interaction_id": "int_2",
+        "kind": "access",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": null,
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "rpc",
+        "authority": {
+          "kind": "open"
+        },
+        "charge": {
+          "kind": "free"
+        },
+        "amount_charged": 0,
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "preimage_hex": "74656e7a726f2f696e746572616374696f6e2d6174746573746174696f6e2f763205000000696e745f3206000000616363657373180000006469643a74656e7a726f3a6d616368696e653a6167656e7400000000170000006469643a74656e7a726f3a6d616368696e653a6e6f646503000000727063040000006f70656e0000000004000000667265650000000001000000301700000074656e7a726f3a313333372f6e61746976653a746e7a6f080000000068e5cf8b010000",
+      "digest": "85c85956add64b956e070f9a1ad8f1d59ded00ebd589dc507ad3a36694b3bd9a"
+    },
+    {
+      "label": "delegated storage folded into a channel",
+      "record": {
+        "interaction_id": "int_3",
+        "kind": "storage",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "obj-1",
+        "authority": {
+          "kind": "delegation",
+          "controller_did": "did:tenzro:human:alice"
+        },
+        "charge": {
+          "kind": "channel",
+          "channel_id": "ch-9",
+          "nonce": 7
+        },
+        "amount_charged": 5000,
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "preimage_hex": "74656e7a726f2f696e746572616374696f6e2d6174746573746174696f6e2f763205000000696e745f330700000073746f72616765180000006469643a74656e7a726f3a6d616368696e653a6167656e74160000006469643a74656e7a726f3a68756d616e3a616c696365170000006469643a74656e7a726f3a6d616368696e653a6e6f6465050000006f626a2d310a00000064656c65676174696f6e160000006469643a74656e7a726f3a68756d616e3a616c696365070000006368616e6e656c0600000063682d393a3704000000353030301700000074656e7a726f3a313333372f6e61746976653a746e7a6f080000000068e5cf8b010000",
+      "digest": "597c11f741b2e4a769ae34d7cd3ce91e97c9281a7bd4ad3356c4fea58ec745da"
+    },
+    {
+      "label": "credential, accrued, an amount past 64 bits",
+      "record": {
+        "interaction_id": "int_4",
+        "kind": "rpc_brokerage",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "credential",
+          "digest": "abababababababababababababababababababababababababababababababab"
+        },
+        "charge": {
+          "kind": "accrued",
+          "accrued_wei": "123456789012345678901234567890"
+        },
+        "amount_charged": "123456789012345678901234567890",
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": -1
+      },
+      "preimage_hex": "74656e7a726f2f696e746572616374696f6e2d6174746573746174696f6e2f763205000000696e745f340d0000007270635f62726f6b6572616765180000006469643a74656e7a726f3a6d616368696e653a6167656e74160000006469643a74656e7a726f3a68756d616e3a616c696365170000006469643a74656e7a726f3a6d616368696e653a6e6f6465090000007177656e332d3237620a00000063726564656e7469616c400000006162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616207000000616363727565641e0000003132333435363738393031323334353637383930313233343536373839301e0000003132333435363738393031323334353637383930313233343536373839301700000074656e7a726f3a313333372f6e61746976653a746e7a6f08000000ffffffffffffffff",
+      "digest": "bae096a17feb37d21e4599d408a9c74425ecd2d8ad7b41599536c38961c85a9f"
+    },
+    {
+      "label": "the worked example with its amount as a decimal string",
+      "record": {
+        "interaction_id": "int_1",
+        "kind": "inference",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "x402_payment",
+          "scheme": "exact"
+        },
+        "charge": {
+          "kind": "settlement",
+          "settlement_id": "s-1"
+        },
+        "amount_charged": "1000",
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "preimage_hex": "74656e7a726f2f696e746572616374696f6e2d6174746573746174696f6e2f763205000000696e745f3109000000696e666572656e6365180000006469643a74656e7a726f3a6d616368696e653a6167656e74160000006469643a74656e7a726f3a68756d616e3a616c696365170000006469643a74656e7a726f3a6d616368696e653a6e6f6465090000007177656e332d3237620c000000783430325f7061796d656e740500000065786163740a000000736574746c656d656e7403000000732d3104000000313030301700000074656e7a726f3a313333372f6e61746976653a746e7a6f080000000068e5cf8b010000",
+      "digest": "d6d89cd298efecf601be462c2a4e76878fbd021033753663db55af3728ab0bf7"
+    }
+  ],
+  "refused": [
+    {
+      "label": "no payer",
+      "record": {
+        "interaction_id": "int_1",
+        "kind": "inference",
+        "payer_did": "",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "x402_payment",
+          "scheme": "exact"
+        },
+        "charge": {
+          "kind": "settlement",
+          "settlement_id": "s-1"
+        },
+        "amount_charged": 1000,
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "reason": "not_attestable"
+    },
+    {
+      "label": "free but charged",
+      "record": {
+        "interaction_id": "int_1",
+        "kind": "inference",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "x402_payment",
+          "scheme": "exact"
+        },
+        "charge": {
+          "kind": "free"
+        },
+        "amount_charged": 5,
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "reason": "not_attestable"
+    },
+    {
+      "label": "settled but nothing charged",
+      "record": {
+        "interaction_id": "int_1",
+        "kind": "inference",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "x402_payment",
+          "scheme": "exact"
+        },
+        "charge": {
+          "kind": "settlement",
+          "settlement_id": "s-1"
+        },
+        "amount_charged": 0,
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "reason": "not_attestable"
+    },
+    {
+      "label": "an unknown kind",
+      "record": {
+        "interaction_id": "int_1",
+        "kind": "teleport",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "x402_payment",
+          "scheme": "exact"
+        },
+        "charge": {
+          "kind": "settlement",
+          "settlement_id": "s-1"
+        },
+        "amount_charged": 1000,
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "reason": "malformed"
+    },
+    {
+      "label": "an amount string with a sign",
+      "record": {
+        "interaction_id": "int_1",
+        "kind": "inference",
+        "payer_did": "did:tenzro:machine:agent",
+        "on_behalf_of": "did:tenzro:human:alice",
+        "attester_did": "did:tenzro:machine:node",
+        "resource_id": "qwen3-27b",
+        "authority": {
+          "kind": "x402_payment",
+          "scheme": "exact"
+        },
+        "charge": {
+          "kind": "settlement",
+          "settlement_id": "s-1"
+        },
+        "amount_charged": "+1000",
+        "settled_asset": "tenzro:1337/native:tnzo",
+        "occurred_at": 1700000000000
+      },
+      "reason": "malformed"
+    }
+  ]
+}

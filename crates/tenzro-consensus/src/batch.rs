@@ -46,6 +46,18 @@ const PART_HEADER_BYTES: usize = 4;
 /// Largest part a batch can hold.
 pub const MAX_PART_BYTES: usize = MAX_BATCH_BYTES - PART_HEADER_BYTES;
 
+/// Bytes of the length prefix bincode writes before a part's transactions.
+const PART_VEC_PREFIX_BYTES: usize = 8;
+
+/// The most transaction bytes one part carries when batches are bounded by
+/// `batch_max_bytes`. A transaction that encodes to more fits in no part,
+/// so no block can take it.
+pub fn part_budget(batch_max_bytes: usize) -> usize {
+    batch_max_bytes
+        .min(MAX_PART_BYTES)
+        .saturating_sub(PART_VEC_PREFIX_BYTES)
+}
+
 /// A slice of one validator's mempool, cut by the caller: an opaque encoding
 /// of `transactions` transactions.
 #[derive(Debug, Clone, PartialEq, Eq)]

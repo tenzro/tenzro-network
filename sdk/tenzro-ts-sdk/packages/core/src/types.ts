@@ -567,6 +567,13 @@ export interface UpgradeActivation {
   activation_height: number;
 }
 
+/** The binaries of an upgrade built for several platforms, one per platform. */
+export interface UpgradePlatforms {
+  /** The proposal its `UpgradeActivation` names. */
+  proposal_id: string;
+  digests: { platform: string; code_hash: string }[];
+}
+
 /** How far a binary's readiness has got. Stake amounts are decimal strings. */
 export interface UpgradeReadiness {
   code_hash: string;
@@ -577,6 +584,8 @@ export interface UpgradeReadiness {
   met: boolean;
   signals: UpgradeReadySignal[];
   scheduled: UpgradeActivation | null;
+  /** Belongs to `scheduled` when their proposal ids match. */
+  scheduled_platforms: UpgradePlatforms | null;
   this_node_runs_it: boolean;
 }
 
@@ -954,7 +963,7 @@ export interface DidService {
   serviceEndpoint: string;
 }
 
-// MicroNode types (zero-install full network participants)
+// MicroNode types (an identity and wallet that use the network without running a node)
 
 export interface MicroNodeCapabilities {
   inference: boolean;
@@ -1083,6 +1092,21 @@ export type StakeCapacity =
   | { accelerators: Array<'integrated' | 'consumer' | 'workstation' | 'datacentre'> }
   | { terabytes: number }
   | { domain: string };
+
+/**
+ * The machines of a whole listing and the operators behind them: one
+ * operator per root identity, so machines a person or another machine
+ * delegated count once, and a machine nobody delegated counts as its own
+ * operator.
+ */
+export interface OperatorCounts {
+  /** Entries in the whole listing. */
+  machines: number;
+  /** Distinct root identities behind the entries that have one. */
+  distinct_operators: number;
+  /** Entries whose account has no identity on chain. */
+  without_identity: number;
+}
 
 /** One account's stake for one role. */
 export interface RoleStake {

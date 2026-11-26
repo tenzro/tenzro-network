@@ -27,7 +27,12 @@ fn sha(parts: &[&[u8]]) -> [u8; 32] {
 
 /// The tree key of `(namespace, key)`.
 pub fn tree_key(namespace: &str, key: &[u8]) -> [u8; 32] {
-    sha(&[TREE_KEY_DOMAIN, &(namespace.len() as u16).to_le_bytes(), namespace.as_bytes(), key])
+    sha(&[
+        TREE_KEY_DOMAIN,
+        &(namespace.len() as u16).to_le_bytes(),
+        namespace.as_bytes(),
+        key,
+    ])
 }
 
 /// The tree key of VM system storage slot `prefix || id_hex`, where
@@ -73,13 +78,17 @@ fn word(b: &[u8], at: usize) -> Option<[u8; 32]> {
 /// Whether, under `root`, the entry with tree key `tk` holds `value`
 /// (`Some`) or is absent (`None`), by the encoded proof `proof`.
 pub fn verify_at(root: &[u8; 32], tk: &[u8; 32], value: Option<&[u8]>, proof: &[u8]) -> bool {
-    let Some(len) = proof.get(..2) else { return false };
+    let Some(len) = proof.get(..2) else {
+        return false;
+    };
     let depth = u16::from_be_bytes([len[0], len[1]]) as usize;
     if depth > STEM_BITS {
         return false;
     }
     let terminal_at = 2 + 32 * depth;
-    let Some(&tag) = proof.get(terminal_at) else { return false };
+    let Some(&tag) = proof.get(terminal_at) else {
+        return false;
+    };
     let body = &proof[terminal_at + 1..];
     let stem = &tk[..STEM_LEN];
     let slot = tk[STEM_LEN];
@@ -92,7 +101,10 @@ pub fn verify_at(root: &[u8; 32], tk: &[u8; 32], value: Option<&[u8]>, proof: &[
         }
         1 if body.len() == STEM_LEN + 32 => {
             let other = &body[..STEM_LEN];
-            if value.is_some() || other == stem || !(0..depth).all(|d| bit(other, d) == bit(stem, d)) {
+            if value.is_some()
+                || other == stem
+                || !(0..depth).all(|d| bit(other, d) == bit(stem, d))
+            {
                 return false;
             }
             sha(&[&[0x02], other, &body[STEM_LEN..]])
@@ -102,7 +114,11 @@ pub fn verify_at(root: &[u8; 32], tk: &[u8; 32], value: Option<&[u8]>, proof: &[
             let mut index = slot as usize;
             for i in 0..8 {
                 let sib = word(body, 32 * i).expect("length checked");
-                s = if index & 1 == 0 { slot_pair(&s, &sib) } else { slot_pair(&sib, &s) };
+                s = if index & 1 == 0 {
+                    slot_pair(&s, &sib)
+                } else {
+                    slot_pair(&sib, &s)
+                };
                 index >>= 1;
             }
             if s == EMPTY {
@@ -114,12 +130,22 @@ pub fn verify_at(root: &[u8; 32], tk: &[u8; 32], value: Option<&[u8]>, proof: &[
     };
     for d in (0..depth).rev() {
         let sib = word(proof, 2 + 32 * d).expect("length checked");
-        acc = if bit(stem, d) == 0 { sha(&[&[0x01], &acc, &sib]) } else { sha(&[&[0x01], &sib, &acc]) };
+        acc = if bit(stem, d) == 0 {
+            sha(&[&[0x01], &acc, &sib])
+        } else {
+            sha(&[&[0x01], &sib, &acc])
+        };
     }
     &acc == root
 }
 
 /// [`verify_at`] for the entry `(namespace, key)`.
-pub fn verify(root: &[u8; 32], namespace: &str, key: &[u8], value: Option<&[u8]>, proof: &[u8]) -> bool {
+pub fn verify(
+    root: &[u8; 32],
+    namespace: &str,
+    key: &[u8],
+    value: Option<&[u8]>,
+    proof: &[u8],
+) -> bool {
     verify_at(root, &tree_key(namespace, key), value, proof)
 }

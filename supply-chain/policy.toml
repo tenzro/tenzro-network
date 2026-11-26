@@ -44,3 +44,18 @@ actions_pinned_by_sha = true
 # Install scripts do not run: every npm project carries an .npmrc with ignore-scripts=true, checked
 # by scripts/supply-chain/check-pins.sh (on branch c-sec-ux, merging with it).
 ignore_scripts = true
+
+[new_versions]
+# A lockfile takes a dependency version only once the registry has had it for this many days
+# (scripts/supply-chain/dependency_age.py, for Cargo.lock and package-lock.json): a compromised
+# release is usually found and withdrawn within days.
+min_age_days = 7
+
+# A version admitted younger than that, because it fixes a vulnerability that cannot wait. Each
+# entry is reviewed like code and names its reason:
+#
+# [[new_versions.exception]]
+# ecosystem = "cargo"        # or "npm"
+# name = "example"
+# version = "1.2.3"
+# reason = "fixes RUSTSEC-0000-0000"

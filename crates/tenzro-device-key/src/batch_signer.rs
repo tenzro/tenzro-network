@@ -176,7 +176,7 @@ impl RootSignature {
                 "not the keys the chain records for that version".into(),
             ));
         }
-        if resolver.is_revoked(&self.id()) {
+        if resolver.is_revoked(&self.identity, &self.id()) {
             return Err(DelegationError::Revoked);
         }
         self.verify_signatures()
@@ -207,6 +207,58 @@ impl Member {
             return Err(DelegationError::BadSignature("batch proof"));
         }
         self.signature.verify(resolver, now_ms, params)
+    }
+}
+
+/// The field of a record's JSON signature that holds a [`Member`]: the hex
+/// of the length-prefixed batch proof followed by the root signature.
+const MEMBER_FIELD: &str = "root_member";
+const MAX_PROOF_LEN: usize = 4096;
+
+impl Member {
+    /// `message` signed at once as a batch of one: for a record answered in
+    /// the same request, where waiting for a batch to fill is not possible.
+    pub fn sign_alone(
+        signer: &dyn RootSigner,
+        message: &[u8],
+        now_ms: u64,
+    ) -> DelegationResult<Self> {
+        let (root, mut proofs) = batch_members(&[message]);
+        let signature = signer.sign_root(&root, 1, now_ms)?;
+        Ok(Self {
+            proof: proofs.remove(0),
+            signature,
+        })
+    }
+
+    /// The JSON a record carries in its signature field.
+    pub fn to_json(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        put_lp(&mut bytes, &self.proof.to_bytes());
+        bytes.extend_from_slice(&self.signature.to_bytes());
+        serde_json::to_vec(&serde_json::json!({ MEMBER_FIELD: hex::encode(bytes) }))
+            .expect("a JSON object serializes")
+    }
+
+    /// The member a record's JSON signature field holds, or `None` when the
+    /// field holds a signature of another form.
+    pub fn from_json(raw: &[u8]) -> Option<DelegationResult<Self>> {
+        let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
+        let object = value.as_object()?;
+        let field = object.get(MEMBER_FIELD)?;
+        Some((|| {
+            if object.len() != 1 {
+                return Err(DelegationError::Malformed("a member carries one field"));
+            }
+            let bytes = field
+                .as_str()
+                .and_then(|h| hex::decode(h).ok())
+                .ok_or(DelegationError::Malformed("a member is hex"))?;
+            let mut r = Reader(&bytes);
+            let proof = BatchProof::from_bytes(r.lp(MAX_PROOF_LEN)?)?;
+            let signature = RootSignature::from_bytes(r.0)?;
+            Ok(Self { proof, signature })
+        })())
     }
 }
 
@@ -397,6 +449,34 @@ mod tests {
             fail: Default::default(),
         };
         (chain, Batcher::new(hw, P).unwrap())
+    }
+
+    #[test]
+    fn a_message_signed_alone_round_trips_through_its_json_and_verifies() {
+        let (chain, b) = rig();
+        let m = Member::sign_alone(&b.signer, b"record", 100).unwrap();
+        assert_eq!(m.signature.count, 1);
+        let again = Member::from_json(&m.to_json()).unwrap().unwrap();
+        assert_eq!(again, m);
+        again
+            .verify(b"record", chain.as_ref(), 200, VERIFY)
+            .unwrap();
+        assert!(again.verify(b"other", chain.as_ref(), 200, VERIFY).is_err());
+
+        // Another form of signature is not a member; a member that does not
+        // decode is an error, not another form.
+        assert!(Member::from_json(br#"{"batched":{}}"#).is_none());
+        assert!(Member::from_json(b"not json").is_none());
+        assert!(matches!(
+            Member::from_json(br#"{"root_member":"zz"}"#),
+            Some(Err(_))
+        ));
+        let mut extra: serde_json::Value = serde_json::from_slice(&m.to_json()).unwrap();
+        extra["more"] = serde_json::json!(1);
+        assert!(matches!(
+            Member::from_json(&serde_json::to_vec(&extra).unwrap()),
+            Some(Err(_))
+        ));
     }
 
     #[test]

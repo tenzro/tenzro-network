@@ -1150,3 +1150,109 @@ async fn a_kill_switch_needs_the_agents_real_controller() {
         .is_err()
     );
 }
+
+fn at_epoch(state: &mut StateAdapter, epoch: u64) {
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        PARAMS_EPOCH_KEY.as_bytes(),
+        epoch.to_le_bytes().to_vec(),
+    );
+}
+
+/// Before the deferred-removal rule is voted on, a slash records no held
+/// seat, and the slashed validator may exit as it always could.
+#[tokio::test]
+async fn a_slash_before_the_deferred_removal_rule_holds_no_seat() {
+    let ex = NativeExecutor::new(VmConfig::default()).unwrap();
+    let mut state = StateAdapter::new();
+    let who = [0x51u8; 32];
+    bond_validator(&mut state, &who, 1_000 * TNZO);
+    at_epoch(&mut state, 5);
+    let mut changes = Vec::new();
+    assert_eq!(
+        staking::hold_seat_after_slash(&mut state, &who, &mut changes),
+        None
+    );
+    assert!(changes.is_empty());
+    assert!(!staking::seat_held_after_slash(&state, &who, 5));
+    let exit = ex
+        .execute_transaction(
+            &tx(&who, SELECTOR_VALIDATOR_EXIT, Vec::new(), 0, 1_000),
+            &mut state,
+        )
+        .await
+        .unwrap();
+    assert!(exit.success, "{exit:?}");
+}
+
+/// Once the rule is live, a slashed validator holds its seat for the
+/// governed number of epochs and cannot exit; after them it exits like any
+/// other.
+#[tokio::test]
+async fn a_validator_holding_its_seat_after_a_slash_cannot_exit_until_the_hold_ends() {
+    let ex = NativeExecutor::new(VmConfig::default()).unwrap();
+    let mut state = StateAdapter::new();
+    let who = [0x52u8; 32];
+    bond_validator(&mut state, &who, 1_000 * TNZO);
+    set_genesis_param(&mut state, staking::DEFERRED_SLASH_REMOVAL_KEY, 0);
+    set_genesis_param(&mut state, staking::INACTIVITY_LIMIT_PARAM, 3);
+    at_epoch(&mut state, 5);
+    let mut changes = Vec::new();
+    let held = staking::hold_seat_after_slash(&mut state, &who, &mut changes).expect("live");
+    assert_eq!(held.cap_epochs, 3);
+    assert_eq!(staking::SeatHeld::decode(&held.encode()), Some(held));
+    assert_eq!(changes.len(), 1);
+    for epoch in 5..=8 {
+        assert!(
+            staking::seat_held_after_slash(&state, &who, epoch),
+            "epoch {epoch}"
+        );
+    }
+    assert!(!staking::seat_held_after_slash(&state, &who, 9));
+    assert!(!staking::seat_held_after_slash(&state, &[0x53u8; 32], 5));
+
+    let refused = ex
+        .execute_transaction(
+            &tx(&who, SELECTOR_VALIDATOR_EXIT, Vec::new(), 0, 1_000),
+            &mut state,
+        )
+        .await;
+    let refused = match refused {
+        Ok(r) => {
+            assert!(!r.success, "{r:?}");
+            format!("{:?}", r)
+        }
+        Err(e) => e.to_string(),
+    };
+    assert!(refused.contains("holds its seat"), "{refused}");
+
+    at_epoch(&mut state, 9);
+    let exit = ex
+        .execute_transaction(
+            &tx(&who, SELECTOR_VALIDATOR_EXIT, Vec::new(), 0, 2_000),
+            &mut state,
+        )
+        .await
+        .unwrap();
+    assert!(exit.success, "{exit:?}");
+}
+
+/// The seat-held log reads back as written, and anything not in its layout
+/// is not read as one.
+#[test]
+fn the_seat_held_log_reads_back_and_refuses_other_layouts() {
+    let held = staking::SeatHeld {
+        cap_epochs: 9,
+        absent: vec![[1; 32], [2; 32]],
+    };
+    let data = held.encode();
+    assert_eq!(data.len(), 8 + 64);
+    assert_eq!(staking::SeatHeld::decode(&data), Some(held));
+    let none = staking::SeatHeld {
+        cap_epochs: 0,
+        absent: Vec::new(),
+    };
+    assert_eq!(staking::SeatHeld::decode(&none.encode()), Some(none));
+    assert_eq!(staking::SeatHeld::decode(&data[..7]), None);
+    assert_eq!(staking::SeatHeld::decode(&data[..41]), None);
+}

@@ -5,9 +5,10 @@
 #
 # FLAVOUR is cpu or cuda. The packages are tenzro-cpu and tenzro-cuda; they
 # conflict with and replace each other and both provide `tenzro`.
-# Layout (the binaries' $ORIGIN/../lib run path is kept):
+# Layout:
 #   /usr/lib/tenzro/bin/{tenzro,tenzro-node,tenzro-check}
-#   /usr/lib/tenzro/lib/libonnxruntime*      (CUDA builds)
+#   /usr/lib/tenzro/bin/libonnxruntime_providers_*.so  (CUDA builds: the ONNX Runtime providers, which the
+#                                            node's statically linked runtime loads from its own folder)
 #   /usr/lib/tenzro/share/network/<chain_id>.toml  the network profile the node joins through
 #   /usr/lib/tenzro/PACKAGE-INFO             (version, source archive sha256, commits)
 #   /usr/bin/{tenzro,tenzro-node,tenzro-check}  symlinks into /usr/lib/tenzro/bin
@@ -54,7 +55,10 @@ if [ -f "$dist/SHA256SUMS" ]; then
     [ -z "$listed" ] || [ "$listed" = "$src_sha" ] || { echo "REFUSING: $archive does not match $dist/SHA256SUMS" >&2; exit 1; }
 fi
 release_commit=$(jq -r .commit "$dist/$name.buildenv.json" 2>/dev/null || echo unknown)
-public_commit=${PUBLIC_COMMIT:-$(jq -r '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit // empty' "$dist"/provenance-*.intoto.json 2>/dev/null | head -1)}
+# A release carries its provenance beside the archive; a local build has none, and the
+# commit is then unknown.
+provs=("$dist"/provenance-*.intoto.json); [ -f "${provs[0]}" ] || provs=()
+public_commit=${PUBLIC_COMMIT:-$([ ${#provs[@]} -eq 0 ] || jq -r '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit // empty' "${provs[@]}" | head -1)}
 public_commit=${public_commit:-unknown}
 packaging_commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo unknown)
 
@@ -81,8 +85,8 @@ glibc=$(need GLIBC_); glibcxx=$(need GLIBCXX_)
 gcc_for() { case "$1" in 3.4.2[0-8]) echo 10.1 ;; 3.4.29) echo 11.1 ;; 3.4.30) echo 12.1 ;; 3.4.31) echo 13.1 ;; 3.4.32) echo 13.2 ;; 3.4.33) echo 14.1 ;; 3.4.34) echo 15.1 ;; "") echo "" ;; *) echo "unknown GLIBCXX $1" >&2; return 1 ;; esac; }
 gcc_min=$(gcc_for "$glibcxx")
 cuda_rt=""
-if [ -e "$src/lib/libonnxruntime_providers_cuda.so" ]; then
-    cuda_rt=$(readelf -d "$src/lib/libonnxruntime_providers_cuda.so" | sed -n 's/.*\[libcudart\.so\.\([0-9]*\)\].*/\1/p' | head -1)
+if [ -e "$src/bin/libonnxruntime_providers_cuda.so" ]; then
+    cuda_rt=$(readelf -d "$src/bin/libonnxruntime_providers_cuda.so" | sed -n 's/.*\[libcudart\.so\.\([0-9]*\)\].*/\1/p' | head -1)
 fi
 echo "$name: glibc >= ${glibc:-none}, libstdc++ >= ${gcc_min:-none} (GLIBCXX_$glibcxx), cuda runtime ${cuda_rt:-none}"
 [ "$flavour" = cuda ] && [ -z "$cuda_rt" ] && { echo "REFUSING: a cuda archive without the CUDA provider" >&2; exit 1; }
@@ -92,7 +96,7 @@ echo "$name: glibc >= ${glibc:-none}, libstdc++ >= ${gcc_min:-none} (GLIBCXX_$gl
 root=$work/root
 install -d "$root/usr/lib/tenzro/bin" "$root/usr/bin" "$root/usr/share/doc/$pkg"
 install -m755 "$src/bin/tenzro" "$src/bin/tenzro-node" "$root/usr/lib/tenzro/bin/"
-if [ -d "$src/lib" ]; then cp -a "$src/lib" "$root/usr/lib/tenzro/lib"; fi
+for f in "$src"/bin/libonnxruntime_providers_*.so; do [ -e "$f" ] && install -m644 "$f" "$root/usr/lib/tenzro/bin/"; done
 # The network profile, found by the node at <bin dir>/../share/network.
 if [ -d "$src/share" ]; then cp -a "$src/share" "$root/usr/lib/tenzro/share"; fi
 install -m755 "$pk/common/tenzro-check" "$root/usr/lib/tenzro/bin/tenzro-check"
@@ -147,7 +151,7 @@ build_deb() {
       echo " Nothing is started and nothing joins the network when the package is"
       echo " installed. Open a terminal and run: tenzro"
     } > "$d/DEBIAN/control"
-    install -m755 "$here/deb/postinst" "$here/deb/postrm" "$d/DEBIAN/"
+    install -m755 "$here/deb/preinst" "$here/deb/postinst" "$here/deb/postrm" "$d/DEBIAN/"
     local f=$out/${pkg}_$version-${rev}_$deb_arch.deb
     dpkg-deb --root-owner-group -Zzstd -z15 --build "$d" "$f" >/dev/null
     echo "built $f"

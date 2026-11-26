@@ -48,6 +48,9 @@ pub enum PasskeyCommand {
     Enroll(EnrollCmd),
     /// Show an account's keystore from consensus state
     Keystore(KeystoreCmd),
+    /// Show the keys a P-256 key signs with for an account, as a block
+    /// judges a signature by it
+    SigningKey(SigningKeyCmd),
     /// Find the accounts whose keystore links a passkey credential id
     Resolve(ResolveCmd),
     /// Send a keystore change (link or unlink a passkey, policy, recovery
@@ -64,6 +67,7 @@ impl PasskeyCommand {
             Self::Login(cmd) => cmd.execute(&rpc, &url).await,
             Self::Enroll(cmd) => cmd.execute(&rpc).await,
             Self::Keystore(cmd) => cmd.execute(&rpc).await,
+            Self::SigningKey(cmd) => cmd.execute(&rpc).await,
             Self::Resolve(cmd) => cmd.execute(&rpc).await,
             Self::Update(cmd) => cmd.execute(&rpc).await,
         }
@@ -371,6 +375,23 @@ impl KeystoreCmd {
                 serde_json::from_str(raw.trim()).map_err(|e| anyhow::anyhow!("anchor: {e}"))?;
         }
         let result: Value = rpc.call("tenzro_getKeystore", params).await?;
+        crate::output::print_json(&result)
+    }
+}
+
+/// The keys a P-256 key signs with for an account.
+#[derive(Debug, Args)]
+pub struct SigningKeyCmd {
+    /// The P-256 public key, `x || y`, hex
+    pub public_key: String,
+    /// The account it would sign for, hex
+    pub account: String,
+}
+
+impl SigningKeyCmd {
+    pub async fn execute(&self, rpc: &RpcClient) -> Result<()> {
+        let params = json!({ "public_key": self.public_key, "account": self.account });
+        let result: Value = rpc.call("tenzro_getAccountSigningKey", params).await?;
         crate::output::print_json(&result)
     }
 }

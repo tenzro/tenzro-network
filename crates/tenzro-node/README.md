@@ -1,6 +1,6 @@
 # Tenzro Node
 
-Full node implementation for Tenzro Network — the AI-Native, Agentic Settlement Protocol. Tenzro Ledger is the settlement layer powered by the TNZO governance token.
+Full node implementation for Tenzro Network, the demand and settlement layer for compute of every kind: AI inference, rentable compute and storage run as roles of one node, each bonded separately from the same account. Tenzro Ledger is the settlement layer; TNZO is what fees are paid in and what roles are bonded with.
 
 ## Overview
 
@@ -25,10 +25,10 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 ## Node Roles
 
 `--roles` takes a comma-separated list. A node serves any combination of
-roles under a single stake.
+roles; each role is bonded separately from the same account.
 
 ### Validator
-Orders blocks and signs checkpoints with a hardware-held consensus key (TDC). A node without one follows the chain, importing blocks under checkpoint certificates.
+Orders blocks and signs checkpoints with a hardware-held consensus key (TDC), in the machine's TPM or Secure Enclave or, on a Linux or macOS machine without one, in another machine's TPM through the key holder (see `docs/NODE.md`, "Raspberry Pi and other edge devices", for the limits). A node without one follows the chain, importing blocks under checkpoint certificates.
 
 ```bash
 tenzro-node --roles validator --data-dir ./data/validator
@@ -112,6 +112,7 @@ rpc_addr = "127.0.0.1:8545"
 web_addr = "127.0.0.1:8080"
 mcp_addr = "127.0.0.1:3001"
 a2a_addr = "127.0.0.1:3002"
+paired_device_addr = "0.0.0.0:8543"
 tee_enabled = false
 metrics_enabled = true
 health_enabled = true
@@ -162,7 +163,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **Token**: tokenBalance, totalSupply
 - **Models**: listModels, inferenceRequest, serveModel, stopModel, chat, deleteModel, listModelEndpoints, getModelEndpoint
 - **Model loads**: every load (`loadForecastModel`, `loadVisionModel`, `loadTextEmbeddingModel`, `loadSegmentationModel`, `loadTextSegmentationModel`, `loadDetectionModel`, `loadAudioModel`, `loadMediaModel`, `loadSpeechModel`) takes `{ model_id, visibility? }` and nothing else: the node fetches and verifies the files the signed catalog entry names and takes every shape from the entry. The served record keeps the model id, the loader and the visibility override (access follows from visibility and the operator's price), and a restart reloads each model with exactly those. `loadVideoModel` composes a clip encoder over a loaded image encoder (`{ model_id, vision_model_id, num_frames?, visibility? }`). `listModels { loaded: true }` lists every loaded model of every type with its engine, visibility, access and loaded/serving state
-- **Intent Routing**: routeIntent, recordRouteOutcome, routeDifficultyStats, getRouterMetrics — a caller states what it wants (use case, budget, quality floor, token estimates) and the the inference router's intent tier picks the model. Candidates come from both the operator's own catalog and `network_catalog`, the gossiped set of signed offers other providers are serving, so the winning offer names its own payee and the settlement split follows from it. An announcement is smaller than the model it describes — it carries one category tag — so a gossiped offer has its capability tags recovered from the local catalog by model id before it is tiered, the same claim a locally served model gets. Everything the provider is actually asserting (price, endpoint, schedule, liveness) is taken from the announcement and never from the catalog; a model the catalog does not know keeps exactly what was announced. `routeIntent` clusters the prompt and scores each candidate against that cluster's observed outcome history, giving cold models an optimism bonus so they are tried rather than starved; `recordRouteOutcome` feeds the result back
+- **Router metrics**: getRouterMetrics — the inference router's request and hedge counters. Routing by intent (use case, budget, quality floor) is harness work over these public reads; the node serves no intent routing.
 - **Forecast**: listForecastCatalog, loadForecastModel, unloadForecastModel, forecast
 - **Vision**: listVisionCatalog, loadVisionModel, unloadVisionModel
 - **TextEmbedding**: listTextEmbeddingCatalog, loadTextEmbeddingModel, unloadTextEmbeddingModel, textEmbed
@@ -174,7 +175,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **Settlement**: settle
 - **Identity**: registerIdentity, resolveDidDocument, resolveIdentity, forgetIdentity (GDPR Article 17 right-to-erasure — DID must already be `Revoked`)
 - **Settlement rails**: settlementNetworks — the rails a payment can settle on, each with an indicative fee floor and the smallest worthwhile payment on it; pass `amount_wei` + `asset` to get the routing decision for a specific charge (accumulate / primary / secondary / no viable rail). Open
-- **Device binding**: bindDevice, listBoundDevices, walletReadiness, revokeBoundDevice, transferMachineOwnership — the devices that can authenticate as an identity, what each one's attestation proved about the hardware holding its key, and the authority under which a machine changes hands. `bindDevice` / `revokeBoundDevice` / `transferMachineOwnership` are admin-token gated; `listBoundDevices` / `walletReadiness` are open. Params are a **bare object**, not a one-element array
+- **Device binding**: bindDevice, listBoundDevices, walletReadiness, revokeBoundDevice, transferMachineOwnership — the devices that can authenticate as an identity, what each one's attestation proved about the hardware holding its key, and the authority under which a machine changes hands. `bindDevice` / `revokeBoundDevice` / `transferMachineOwnership` are admin-class (the operator DID or a policy admin); `listBoundDevices` / `walletReadiness` are open. Params are a **bare object**, not a one-element array
 - **Network**: peerCount, syncing
 - **Governance**: listProposals, getVotingPower
 - **Payments**: createPaymentChallenge, verifyPayment (checks a credential against its challenge without settling; reports the account it would debit and never reports success for a credential that would not pay). A receipt exists only after the settlement executed: TNZO settles with a payer-signed `PayerSettle` the VM verifies (10% network share), stablecoins on the optional Bridge rail. An operator that sets `[payments.x402_facilitator]` verifies EIP-3009 itself against its own `evm_rpc_url`; the node holds no EVM key, so the broadcast goes through the settlement facilitator it names and the node confirms on its own RPC that the transaction executed. Without that block those schemes resolve through the default facilitator
@@ -186,7 +187,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `127.0.0
 - **Stakes**: getRoleStakes, getWalletProvider (bonding, unbonding and withdrawal are signed `Stake` transactions; a node refuses to boot with a bonded role its operator has not bonded)
 - **Duties and evidence**: listDuties, getDuty, verifyEvidence
 - **TokenRegistry**: getToken, listTokens, getTokenBalance, deployContract
-- **Adaptive Burn**: getBurnRateConfig, getSupplyMetrics, getBurnRateRecommendation — dial surface; validators submit the `AutoProposalGenerator` drafts as on-chain `policy_update` proposals and every node applies enacted changes to the EIP-1559 fee-market consumer
+- **Adaptive Burn**: getBurnRateConfig, getSupplyMetrics — dial surface; validators submit the `AutoProposalGenerator` drafts as on-chain `policy_update` proposals and every node applies enacted changes to the EIP-1559 fee-market consumer
 - **AgentBond / Insurance**: get_agent_bond / get_insurance_pool — stake-bonding for agents, and the insurance pool that pays losses chain state proves
 - **Storage**: storageStatus, storageStoreObject, storageSetPricing — content-addressed storage on the iroh data plane; renters pay through storage compute claims that commit the object's descriptor digest and settle hourly on SLA verdicts that require a possession proof
 - **Compute**: computeGetClaim, computeListClaims (capacity is rented as physical compute claims) — rentable compute against stake, settled per elapsed epoch on an availability proof by the provider's billing loop; shares the storage coverage budget
@@ -400,9 +401,10 @@ device. Where the chain cannot be verified the grade is degraded
 (`chain_verified: false`) instead of the parse failing, so an operator who has
 pinned no roots gets an honest answer rather than a silent pass.
 
-The roots are `webauthn_trusted_roots` in the node config — base64 DER, one per
-entry. An entry that does not decode is dropped rather than trusted, so a typo
-narrows what the node accepts instead of widening it.
+The roots are the list governance put in force (`WebauthnRootsSet`), read from
+chain state: the one list registration checks against, with no node-local copy.
+An entry that does not parse is dropped rather than trusted, so a typo narrows
+what the node accepts instead of widening it.
 
 **A wallet cannot sit behind one device.** The machine the user is on is the
 first; a genuinely separate hardware-bound device must exist before there is

@@ -400,17 +400,21 @@ pub fn stake_ladder(state: &dyn VmState) -> StakeLadder {
 /// worth no less in USD than at that rate. A price crash does not make
 /// entry cheaper. Bonds already in place keep serving at [`stake_ladder`].
 pub fn entry_stake_ladder(state: &dyn VmState) -> StakeLadder {
-    let ladder = stake_ladder(state);
+    stake_ladder(state).map(|v| usd_floored(state, v))
+}
+
+/// `amount`, raised when TNZO is worth less than
+/// `stake.bond_floor_rate_nano_usd` at the safety rate, so that it is worth
+/// no less in USD than at that rate.
+pub fn usd_floored(state: &dyn VmState, amount: u128) -> u128 {
     let pin = u128::from(network_param(state, BOND_FLOOR_RATE_PARAM));
     let rate = super::economy::safety_rate(state).max(1);
     if pin <= rate {
-        return ladder;
+        return amount;
     }
-    ladder.map(|v| {
-        use revm::primitives::U256;
-        let scaled = (U256::from(v) * U256::from(pin)).div_ceil(U256::from(rate));
-        u128::try_from(scaled).unwrap_or(u128::MAX)
-    })
+    use revm::primitives::U256;
+    let scaled = (U256::from(amount) * U256::from(pin)).div_ceil(U256::from(rate));
+    u128::try_from(scaled).unwrap_or(u128::MAX)
 }
 
 fn move_balance(
@@ -646,6 +650,12 @@ impl NativeExecutor {
         if !role.requires_bond() {
             return Err(refuse(format!("the {role} role takes no bond")));
         }
+        if !matches!(op, StakeOp::Endpoint { .. }) {
+            crate::invariant_monitor::require_unfrozen(
+                state,
+                crate::invariant_monitor::GuardedModule::RoleStake,
+            )?;
+        }
         let cost = tx.gas_price.saturating_mul(u128::from(GAS_STAKE));
         let balance = state.get_balance(&tx.from);
         if balance < cost {
@@ -665,7 +675,7 @@ impl NativeExecutor {
         let mut stake: RoleStake = read_json(state, &key).unwrap_or_default();
         let bonded_before = stake.bonded;
         let vault = role_stake_vault().as_bytes().to_vec();
-        let now_ms = deterministic_now_ms(tx);
+        let now_ms = deterministic_now_ms(tx)?;
 
         let kind = match op {
             StakeOp::Bond {
@@ -910,6 +920,23 @@ mod tests {
         assert_eq!(entry_stake_ladder(&state), stake_ladder(&state));
         set_genesis_param(&mut state, BOND_FLOOR_RATE_PARAM, 1);
         assert_eq!(entry_stake_ladder(&state), stake_ladder(&state));
+    }
+
+    #[test]
+    fn a_new_compute_bond_keeps_its_usd_value_only_once_the_gate_is_live() {
+        let (_, mut state) = setup();
+        let min = super::super::compute_bond_min(&state);
+        let pin = u128::from(DEFAULT_BOND_FLOOR_RATE_NANO_USD);
+        super::super::economy::write_rate_for_tests(&mut state, 5, pin / 20, pin / 20);
+        assert_eq!(super::super::compute_bond_entry_min(&state), min, "dormant");
+        crate::native::set_governed_param_for_test(
+            &mut state,
+            super::super::USD_COMPUTE_BOND_KEY,
+            0,
+        );
+        assert_eq!(super::super::compute_bond_entry_min(&state), 20 * min);
+        set_genesis_param(&mut state, BOND_FLOOR_RATE_PARAM, 0);
+        assert_eq!(super::super::compute_bond_entry_min(&state), min);
     }
 
     #[tokio::test]
@@ -1326,3 +1353,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "role_stake_proptest.rs"]
+mod role_stake_proptest;

@@ -64,9 +64,8 @@ impl StakeCommand {
 /// Signing account and endpoint shared by the stake writes.
 #[derive(Debug, Parser)]
 pub struct StakeSigner {
-    /// The staking account's hardware key namespace
-    #[arg(long, default_value = "client")]
-    key_namespace: String,
+    #[command(flatten)]
+    signing: crate::keystore::SigningAccount,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -74,6 +73,9 @@ pub struct StakeSigner {
 }
 
 impl StakeSigner {
+    /// Signs and submits `op`, then waits for its receipt: a stake operation
+    /// the chain reverted fails with the reason.
+    ///
     /// `gate`: for a bond, the role it is for and the TNZO it needs, so a
     /// wallet below that in the initial phase gets the plain application
     /// message before anything is signed, and a refusal for lack of funds is
@@ -90,22 +92,19 @@ impl StakeSigner {
     ) -> Result<()> {
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let tx_type = serde_json::to_value(TransactionType::Stake { op })?;
-        let (account, _) = crate::keystore::client_account(&self.key_namespace)?;
+        let (signer, to) = self.signing.open()?;
+        let account = format!("0x{}", hex::encode(to));
         if let Some((label, role, required)) = gate {
             crate::onboarding::flow::gate(&self.rpc, &account, label, role, required).await?;
         }
-        let to: [u8; 32] = hex::decode(account.trim_start_matches("0x"))?
-            .try_into()
-            .map_err(|_| anyhow!("the client account is 32 bytes"))?;
-        let result =
-            crate::keystore::send_as_client(&rpc, &self.key_namespace, to, tx_type, 150_000)
-                .await
-                .map_err(|e| match gate {
-                    Some((label, role, required)) => crate::onboarding::flow::plain_send_error(
-                        e, label, role, required, &account,
-                    ),
-                    None => e,
-                })?;
+        let result = crate::keystore::SigningAccount::send(&rpc, signer, to, tx_type, 150_000)
+            .await
+            .map_err(|e| match gate {
+                Some((label, role, required)) => {
+                    crate::onboarding::flow::plain_send_error(e, label, role, required, &account)
+                }
+                None => e,
+            })?;
         output::print_success(&format!("{what} signed in hardware and submitted"));
         output::print_field("Account", &account);
         output::print_field(
@@ -114,7 +113,7 @@ impl StakeSigner {
                 .as_str()
                 .map_or_else(|| result.to_string(), str::to_string),
         );
-        Ok(())
+        crate::keystore::confirm_executed(&rpc, &result, what).await
     }
 }
 
@@ -544,7 +543,7 @@ mod tests {
             pq_public_key: None,
             pq_proof: None,
             signer: StakeSigner {
-                key_namespace: "client".into(),
+                signing: crate::keystore::SigningAccount::default(),
                 rpc: String::new(),
             },
         }

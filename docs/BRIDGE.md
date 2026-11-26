@@ -299,6 +299,33 @@ signatures, on top of whichever set binds it: the tighter value applies.
 Governance sets it with the same `BridgeMintLimitsSet` policy as the others,
 and a raise is bounded to one step like any other network limit.
 
+### Transfers sent before the sending chain's finality
+
+A CCIP `2.0.0` message carries the finality its sender asked for, encoded as
+CCIP's `FinalityCodec` encodes it: zero waits for the sending chain's
+finality, the low 16 bits are a block depth, and bit 16 waits for the sending
+chain's `safe` head. A CCIP token pool allows a lower finality only up to its
+`allowedFinality`, and those transfers draw on a separate bucket instead of
+its ordinary inbound one.
+
+A route does the same once `feature.ccip_finality_policy.activation_epoch` is
+live. A transfer that waited for finality draws on the lane as before. Any
+other is refused unless the route, or the carried asset on it, has a finality
+policy that allows the requested finality; it then draws on the policy's own
+bucket instead of the lane's inbound bucket. The policy is a governance
+action (`set_bridge_finality_policy`: adapter, source chain, optional asset,
+and the allowed finality with its bucket, or no policy to clear it). It is
+kept beside the route in its own state key, not in the route record, and it
+is refused on any route that is not a CCIP `2.0.0` lane or that has a light
+client: a light client proves every delivery final on its sending chain.
+
+No route mints before its sending chain's finality: every route waits for
+it. A policy is meant only for a route whose reorg loss an insurer or a bond
+covers, and no route has one. The network ships with the gate dormant and no
+policy on any route. Until the gate is live, the finality a
+message carries is not read, and the action is refused at submission and at
+enactment.
+
 ### What a route still depends on
 
 Tenzro's own acceptance of a delivery is post-quantum on every route: both
@@ -443,6 +470,69 @@ the route's vault, and builds the message that lets the other chain release
 the same amount. The message is stored on Tenzro for the route's relayers to
 carry. Nothing moves if any rule refuses the transfer.
 
+## Sending a message from an EVM contract (ERC-7786)
+
+From the epoch governance sets in `feature.erc7786_gateway.activation_epoch`,
+the address `0x0000000000000000000000000000000000001012` is an ERC-7786
+source gateway over the routes. A contract calls
+
+```solidity
+sendMessage(bytes recipient, bytes payload, bytes[] attributes) returns (bytes32 sendId)
+```
+
+with `recipient` an ERC-7930 interoperable address. The gateway serves the
+`eip155` chains a governed route reaches, supports no attribute
+(`supportsAttribute` answers false and a call that carries one reverts with
+`UnsupportedAttribute`), carries no value, and returns a zero `sendId`. It
+logs `MessageSent`, and the transaction's bridge log (`message_out`) names
+the route, the sequence and the message id, exactly as a native
+`SendMessage` does. The body the route carries is the 32-byte tag
+`keccak256("ERC7786GatewayMessage(bytes sender,bytes recipient,bytes payload)")`
+followed by `abi.encode(bytes sender, bytes recipient, bytes payload)`, with
+`sender` the calling contract's interoperable address on this chain. From the
+same epoch the native `SendMessage` refuses a payload that opens with the tag,
+so a tagged body on a route from this chain was sent by the contract it names.
+
+The message is queued under the same route rules as a native `SendMessage`:
+a route that refuses it fails the whole transaction. Until the gate is live
+the address is an account with no code.
+
+## Delivering a message to an EVM contract (ERC-7786)
+
+From the same epoch, and once native calls are in force
+(`feature.native_call.activation_epoch`), the native operation
+`GatewayDeliveryOp` hands a gateway message from an `eip155` chain to the
+contract it names. It travels as a `NativeCall` with selector `0x010000e3`
+and the JSON payload `{adapter, source_chain, delivery}` (`delivery` hex), as
+`tenzro-native-ops` defines it. Anyone may submit it with the delivery the
+route's committees attested (`tenzro bridge deliver-message`, which sets the gas
+limit to the bridge gas plus the governed delivery gas). The route admits
+the delivery under the rules of every inbound message, once; its body must be
+the tagged gateway body above, with a `sender` on the route's chain and a
+`recipient` on this chain. The gateway then calls, from its own address,
+
+```solidity
+receiveMessage(bytes32 receiveId, bytes sender, bytes payload) returns (bytes4)
+```
+
+on the recipient. `receiveId` is `keccak256(route key || nonce)` with the
+delivery's nonce as 8 big-endian bytes, and is in the transaction's bridge log
+(`message_delivered`). The recipient accepts by returning the function's
+selector, and it knows the message is genuine when `msg.sender` is the
+gateway's address.
+
+The call is given `feature.erc7786_gateway.delivery_gas` gas, a governed
+parameter. The operation's sender pays the bridge operation and the whole of
+that gas, whatever the recipient uses, and the operation is refused before the
+route is touched if its gas limit or the sender's balance does not cover it.
+A recipient that reverts, runs out of gas, has no code or returns anything
+else fails the whole operation: the fee is still charged, the delivery is not
+consumed, and it may be submitted again. While the call runs the gateway
+refuses `sendMessage`.
+
+A gateway on the external chain must keep the same rule this chain keeps:
+only its gateway may put a body that opens with the tag on the route.
+
 ## Receiving TNZO back
 
 A relayer submits the route committee's signed delivery as a `Bridge`
@@ -542,7 +632,7 @@ as its context and the built binary is committed
 (`crates/tenzro-finality-prover/methods/finality-guest.bin`; an ignored test
 rebuilds it and checks it is unchanged), so the prover builds on any host,
 aarch64 GPU hosts included, and every build has the same image
-id: `84684b576dcba8ca62548bb2ef545eee3817bc5db36ac5a821847b5bd2b493a3`, which
+id: `b55ad0d5b678ab4fda264abd31db0ccc779af98e367eede3feb18ceb6c2eae9d`, which
 the production genesis names (`tenzro-finality-prover image-id` prints it; a
 test of the prover fails if the two differ).
 

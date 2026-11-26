@@ -113,6 +113,7 @@ TX_KINDS = (
     "AttachMachineAttestation",
     "SponsoredBond",
     "AccountOutflow",
+    "NativeCall",
 )
 
 #: One consensus transaction type, a member of :data:`TX_KINDS`.

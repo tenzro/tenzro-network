@@ -12,6 +12,10 @@
 //! hosts.
 //!
 //! `cargo test -p tenzro-node --test network_contract`
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the test runner bounds every wait in a test"
+)]
 #![cfg(unix)]
 
 mod cluster;

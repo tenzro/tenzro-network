@@ -128,6 +128,24 @@ What the systems protect against, and what they do not:
 This follows the multi-proof direction of EIP-8025 (k-of-n independent proofs
 for execution), applied to application proofs.
 
+### Recording a proof on chain
+
+A proof envelope is larger than a block can carry (the sizes above, against a
+batch part and a gossip message of about 1 MiB), so a proof never travels in a
+transaction. A client hands it to a node with `tenzro_sendZkProof`, and the node
+sends it to every validator of the current committee over the iroh protocol
+`tenzro/zk-proof` (open to any peer, one envelope of at most 4 MiB per request,
+one answer per remote every 30 s; `crates/tenzro-iroh/src/zk_proof.rs`). Each
+validator runs `verify_proof_envelope` outside block execution and, when the
+proof verifies, sends a ZK verdict: a native call (selector `0x010000E7`, payload
+`tenzro_native_ops::zk_verdict::ZkVerdictOp`) naming the statement commitment,
+the proof commitment and the system. Once validators whose bonds hold two thirds
+of the bonded stake have stated the same verdict, the VM records the proof where
+the `ZK_VERIFY` precompile reads it (`crates/tenzro-vm/src/native/zk_verdict.rs`,
+the same writes as `zk_registry::record`). The rule is dormant behind
+`feature.zk_verdict.activation_epoch`; once it is in force, nodes refuse
+`AttestZkProof` at submission.
+
 ## 3. Soundness computation
 
 `crates/tenzro-zk/src/plonky3/soundness.rs`, reported live by

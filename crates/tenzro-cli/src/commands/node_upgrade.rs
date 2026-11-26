@@ -28,6 +28,10 @@ pub enum NodeUpgradeCommand {
     Apply(ApplyCmd),
     /// Hash node binaries, sign a release with your hardware key and submit it.
     Publish(PublishCmd),
+    /// Attest on chain, as a bonded builder, the binary you rebuilt from a release's source.
+    AttestBuild(AttestBuildCmd),
+    /// Order the restarts of validators so the rest keep certifying with a spare.
+    Plan(PlanCmd),
 }
 
 impl NodeUpgradeCommand {
@@ -36,6 +40,8 @@ impl NodeUpgradeCommand {
             Self::Check(c) => c.execute().await,
             Self::Apply(c) => c.execute().await,
             Self::Publish(c) => c.execute().await,
+            Self::AttestBuild(c) => c.execute().await,
+            Self::Plan(c) => c.execute(),
         }
     }
 }
@@ -64,6 +70,139 @@ impl CheckCmd {
             None => output::print_info("no newer release from a trusted publisher"),
         }
         output::print_json(&res)
+    }
+}
+
+/// `tenzro node upgrade attest-build --version <v> --platform <triple> --file <binary>`
+///
+/// A builder bonded in the attestor role rebuilds the release from its
+/// published source and records the SHA-256 it got with a build attestation
+/// transaction from its client account. Once builder attestations are in
+/// force on chain, a protocol upgrade enacts only when each binary it names
+/// has the governed number of them.
+#[derive(Debug, Parser)]
+pub struct AttestBuildCmd {
+    /// The release that was rebuilt, `major.minor.patch`.
+    #[arg(long)]
+    version: String,
+    /// The target triple it was built for, such as `x86_64-unknown-linux-gnu`.
+    #[arg(long)]
+    platform: String,
+    /// The binary the rebuild produced.
+    #[arg(long)]
+    file: PathBuf,
+    /// Hardware key namespace of the bonded builder's client account.
+    #[arg(long, default_value = "client")]
+    key_namespace: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl AttestBuildCmd {
+    async fn execute(&self) -> Result<()> {
+        let (_, sha256, _) = hash_file(&self.file)?;
+        let code_hash = hex::decode(&sha256).context("the file's SHA-256")?;
+        let op = tenzro_native_ops::build_attestation::BuildAttestationOp {
+            version: self.version.clone(),
+            platform: self.platform.clone(),
+            code_hash,
+        };
+        op.validate().map_err(|e| anyhow::anyhow!(e))?;
+        let tx = tenzro_types::transaction::TransactionType::NativeCall {
+            selector: tenzro_native_ops::SELECTOR_BUILD_ATTESTATION,
+            data: tenzro_native_ops::encode(&op),
+        };
+        let res = crate::keystore::send_as_client(
+            &RpcClient::new(&self.rpc),
+            &self.key_namespace,
+            [0u8; 32],
+            serde_json::to_value(tx)?,
+            200_000,
+        )
+        .await?;
+        output::print_field("Binary SHA-256", &sha256);
+        output::print_json(&res)
+    }
+}
+
+/// `tenzro node upgrade plan --validators <validators.tsv> [name...]`
+///
+/// Prints the order in which to restart validators onto a new binary: one
+/// validator alone first (the one with the least stake), then waves that can
+/// be down together while the validators left running still certify and
+/// still survive one more loss. Each wave is live again before the next is
+/// stopped. The arithmetic is the pre-stop check's
+/// (`scripts/validator-prestop-check.sh`), which still judges every stop
+/// when it is made.
+#[derive(Debug, Parser)]
+pub struct PlanCmd {
+    /// One validator per line: name, stake in whole TNZO, live (1 or 0),
+    /// separated by whitespace; lines starting with # are ignored. The file
+    /// the pre-stop check reads.
+    #[arg(long)]
+    validators: PathBuf,
+    /// The validators to restart; every live one when none is named.
+    names: Vec<String>,
+}
+
+/// The validators a `validators.tsv` lists.
+fn read_validators(text: &str) -> Result<Vec<tenzro_consensus::launch_check::LaunchValidator>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|line| {
+            let mut fields = line.split_whitespace();
+            let (Some(name), Some(stake), Some(live), None) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                bail!("'{line}' is not: name stake live");
+            };
+            Ok(tenzro_consensus::launch_check::LaunchValidator {
+                name: name.to_string(),
+                stake: stake
+                    .parse()
+                    .with_context(|| format!("the stake of {name}"))?,
+                live: match live {
+                    "1" => true,
+                    "0" => false,
+                    other => bail!("the live column of {name} is 1 or 0, not '{other}'"),
+                },
+                // The file lists validators of a running network, admitted
+                // with their hardware identities.
+                hardware_identity: true,
+            })
+        })
+        .collect()
+}
+
+impl PlanCmd {
+    fn execute(&self) -> Result<()> {
+        let text = std::fs::read_to_string(&self.validators)
+            .with_context(|| format!("reading {}", self.validators.display()))?;
+        let set = read_validators(&text)?;
+        let names: Vec<&str> = if self.names.is_empty() {
+            set.iter()
+                .filter(|v| v.live)
+                .map(|v| v.name.as_str())
+                .collect()
+        } else {
+            self.names.iter().map(String::as_str).collect()
+        };
+        let waves = tenzro_consensus::launch_check::plan_restarts(&set, &names)
+            .map_err(|e| anyhow!("no safe restart order: {e}"))?;
+        for (i, wave) in waves.iter().enumerate() {
+            let label = if i == 0 {
+                "Canary".to_string()
+            } else {
+                format!("Wave {i}")
+            };
+            output::print_field(&label, &wave.join(" "));
+        }
+        output::print_info(
+            "Restart one wave at a time, and start the next only when every validator of the \
+             last is live and certifying again. Stop after the canary if it does not come back.",
+        );
+        Ok(())
     }
 }
 
@@ -184,5 +323,41 @@ impl PublishCmd {
             .call("tenzro_submitTrustRecord", json!({ "record": record }))
             .await?;
         output::print_json(&res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_validators_file_is_read_as_the_pre_stop_check_reads_it() {
+        let set = read_validators(
+            "# name stake live\nalpha 5000000 1\n\n  beta\t5000000\t0\ngamma 7 1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            set.iter()
+                .map(|v| (v.name.as_str(), v.stake, v.live))
+                .collect::<Vec<_>>(),
+            [
+                ("alpha", 5_000_000, true),
+                ("beta", 5_000_000, false),
+                ("gamma", 7, true)
+            ]
+        );
+        for bad in ["alpha 5", "alpha five 1", "alpha 5 yes", "alpha 5 1 extra"] {
+            assert!(read_validators(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_plan_of_seven_equal_validators_is_one_at_a_time() {
+        let text: String = (0..7).map(|i| format!("v{i} 5 1\n")).collect();
+        let set = read_validators(&text).unwrap();
+        let names: Vec<&str> = set.iter().map(|v| v.name.as_str()).collect();
+        let waves = tenzro_consensus::launch_check::plan_restarts(&set, &names).unwrap();
+        assert_eq!(waves.len(), 7);
+        assert!(waves.iter().all(|w| w.len() == 1));
     }
 }

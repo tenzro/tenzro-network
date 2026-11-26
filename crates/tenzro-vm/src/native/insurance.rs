@@ -379,7 +379,7 @@ impl NativeExecutor {
             evidence,
             loss,
             paid,
-            paid_at_ms: deterministic_now_ms(tx),
+            paid_at_ms: deterministic_now_ms(tx)?,
         };
         write_json(state, &claim_key(&id), &claim, &mut changes)?;
         let mut ids = claim_ids(state);

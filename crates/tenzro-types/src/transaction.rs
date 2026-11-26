@@ -17,6 +17,16 @@ pub const MAX_TX_DATA_SIZE: usize = 131_072;
 /// every validator re-verifies the proof, so its bytes must be in the block.
 pub const MAX_ZK_PROOF_SIZE: usize = 4 * 1024 * 1024;
 
+/// Most bytes the certificate of a `RecordCheckpointSigners` carries: the
+/// largest for which the signed transaction, as an account with its
+/// ML-DSA-65 leg signs it, still travels in one gossip message (1,048,576
+/// bytes, of which the message's own framing takes 56) and so also fits the
+/// 1,048,564 bytes a batch part carries (the transaction's fields and
+/// signatures take 3,655 bytes beyond the certificate). A transaction the
+/// network cannot carry is in no block, so a certificate above this could
+/// never be recorded, and none below it is refused that a block could hold.
+pub const MAX_CHECKPOINT_RECORD_BYTES: usize = 1_044_865;
+
 /// Validity window [`Transaction::new`] gives a transaction: five minutes,
 /// inside both governed caps (`tx.max_validity_ms` and
 /// `tx.privileged_max_validity_ms`).
@@ -1413,6 +1423,19 @@ pub enum TransactionType {
         /// The operation, JSON.
         op: Vec<u8>,
     },
+    /// A native operation, named by its 4-byte `selector`, with `data` in
+    /// the operation's own format (JSON for the operations there are). The
+    /// operations it may name, their payloads and their rules are defined
+    /// outside this crate (`tenzro-native-ops` and `tenzro-vm`), so a new
+    /// operation needs no new kind here. Refused until
+    /// `feature.native_call.activation_epoch` is in force; a selector the
+    /// chain does not list is refused.
+    NativeCall {
+        /// The operation's selector.
+        selector: [u8; 4],
+        /// The operation's payload.
+        data: Vec<u8>,
+    },
 }
 
 /// An operation on governance-sponsored validator bonds.
@@ -1692,6 +1715,9 @@ pub enum ComputeClaimOp {
         /// Most the buyer agrees to pay, in wei
         #[serde(with = "crate::primitives::u128_serde")]
         max_total: u128,
+        /// Where the buyer allows the claim's capacity to sit. The purchase
+        /// is refused for a claim outside it, and the held claim records it.
+        placement: Option<ClaimPlacement>,
     },
     /// Settle whatever is due. Anyone may send it.
     Settle {
@@ -1707,6 +1733,20 @@ pub enum ComputeClaimOp {
         /// Hex of the new holder's address
         to: String,
     },
+}
+
+/// A buyer's rule for where a claim's capacity may sit: in one of the listed
+/// countries, with one of the listed operators, or both. An empty list does
+/// not constrain. A claim is judged by what its writer declared: the claim's
+/// own country code and the writer's account. A country code is a claim the
+/// operator makes, not a geolocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimPlacement {
+    /// Upper-case ISO 3166-1 alpha-2 country codes, one of which the claim's
+    /// region must be.
+    pub jurisdiction: Vec<String>,
+    /// Hex accounts, one of which must be the claim's writer.
+    pub operators: Vec<String>,
 }
 
 /// One provider's outcome in a [`TransactionType::SlaAttest`].
@@ -1986,8 +2026,8 @@ impl SignedTransaction {
                 }
             }
             TransactionType::RecordCheckpointSigners { certificate } => {
-                if certificate.is_empty() || certificate.len() > 1024 * 1024 {
-                    return Err("certificate must be 1 to 1048576 bytes");
+                if certificate.is_empty() || certificate.len() > MAX_CHECKPOINT_RECORD_BYTES {
+                    return Err("certificate must be 1 to 1044865 bytes");
                 }
             }
             TransactionType::AgentAuditCommit {
@@ -2024,6 +2064,11 @@ impl SignedTransaction {
             TransactionType::KeystoreUpdate { update } => update.validate()?,
             TransactionType::IdentityServices { op } => op.validate()?,
             TransactionType::RevokeIdentity { op } => op.validate()?,
+            TransactionType::NativeCall { data, .. } => {
+                if data.len() > MAX_TX_DATA_SIZE {
+                    return Err("a native call's payload is larger than a transaction carries");
+                }
+            }
             TransactionType::BeaconContribute { proof, .. } => {
                 if proof.len() != 80 {
                     return Err("a beacon contribution carries an 80-byte VRF proof");

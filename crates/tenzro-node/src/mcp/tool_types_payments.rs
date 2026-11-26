@@ -354,11 +354,6 @@ pub enum PayReleaseConditions {
     ConsumerSignature,
     BothSignatures,
     Timeout,
-    /// A custom condition.
-    Custom {
-        /// The condition.
-        condition: String,
-    },
     /// Release on the preimage of a hash.
     HashLock {
         /// The hash, 32 bytes.

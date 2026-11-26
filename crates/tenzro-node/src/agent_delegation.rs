@@ -250,10 +250,25 @@ impl TermsCheck for AgentTerms {
                 self.min_distinct_operators
             )));
         }
-        if let Some(at) = self.expires_at_ms
-            && at <= now_ms()
-        {
-            return Err(invalid("expires_at_ms is in the past"));
+        // An agent key is approved up to a stated ceiling and until a stated
+        // time: terms that leave either out would let the agent spend
+        // without limit, or for ever.
+        if s.max_daily_spend.is_none() {
+            return Err(invalid(
+                "the terms state no delegation_scope.max_daily_spend: an agent is approved up to \
+                 a daily ceiling (\"0\" for an agent that moves no value)",
+            ));
+        }
+        match self.expires_at_ms {
+            None => {
+                return Err(invalid(
+                    "the terms state no expires_at_ms: an agent is approved until a stated time",
+                ));
+            }
+            Some(at) if at <= now_ms() => {
+                return Err(invalid("expires_at_ms is in the past"));
+            }
+            Some(_) => {}
         }
         Ok(())
     }
@@ -1652,7 +1667,7 @@ pub(crate) fn check_agent_token(
     bearer_did: &str,
     jkt: Option<&str>,
     intent: Option<&tenzro_auth::AuthorityRequest>,
-) -> Result<(), String> {
+) -> Result<(), crate::agent_guardrails::Refused> {
     let Some((chain, stored)) = chain_terms(node, bearer_did) else {
         return Ok(());
     };
@@ -1660,17 +1675,20 @@ pub(crate) fn check_agent_token(
         &chain,
         bearer_did,
         chrono::Utc::now().timestamp_millis().max(0) as u64,
-    )?;
+    )
+    .map_err(crate::agent_guardrails::refused("status"))?;
     if stored.terms.expires_at_ms.is_some_and(|at| now_ms() >= at) {
-        return Err("outside the agent's approved terms: expiry".to_string());
+        return Err(crate::agent_guardrails::refused("expiry")(
+            "outside the agent's approved terms: expiry".to_string(),
+        ));
     }
     let assigned = jkt.is_some_and(|j| stored.terms.serving_nodes.iter().any(|n| n.dpop_jkt == j));
     if !assigned {
-        return Err(
+        return Err(crate::agent_guardrails::refused("serving_node")(
             "outside the agent's approved terms: serving node (the token is not bound to a node \
              the terms assign)"
                 .to_string(),
-        );
+        ));
     }
     crate::agent_guardrails::check_bearer_intent(node, bearer_did, intent)
 }
@@ -1684,7 +1702,7 @@ pub(crate) fn check_agent_key_request(
     subject: &str,
     method: &str,
     params: Option<&Value>,
-) -> Result<(), String> {
+) -> Result<(), crate::agent_guardrails::Refused> {
     let Some((chain, stored)) = chain_terms(node, subject) else {
         return Ok(());
     };
@@ -1692,12 +1710,16 @@ pub(crate) fn check_agent_key_request(
         &chain,
         subject,
         chrono::Utc::now().timestamp_millis().max(0) as u64,
-    )?;
+    )
+    .map_err(crate::agent_guardrails::refused("status"))?;
     if stored.terms.expires_at_ms.is_some_and(|at| now_ms() >= at) {
-        return Err("outside the agent's approved terms: expiry".to_string());
+        return Err(crate::agent_guardrails::refused("expiry")(
+            "outside the agent's approved terms: expiry".to_string(),
+        ));
     }
     if crate::event_index::EVENT_METHODS.contains(&method) {
-        check_event_filter(&stored.terms.delegation_scope, params)?;
+        check_event_filter(&stored.terms.delegation_scope, params)
+            .map_err(crate::agent_guardrails::refused("event_filter"))?;
         return crate::agent_guardrails::check_operation(
             node,
             subject,
@@ -1706,10 +1728,14 @@ pub(crate) fn check_agent_key_request(
         );
     }
     crate::agent_guardrails::check_agent(node, subject)?;
-    match crate::agent_guardrails::keyed_proposal(method, params)? {
+    match crate::agent_guardrails::keyed_proposal(method, params)
+        .map_err(crate::agent_guardrails::refused("intent"))?
+    {
         crate::agent_guardrails::Proposal::Operation { operation, model } => {
             if model.is_none() && !stored.terms.delegation_scope.allowed_models.is_empty() {
-                return Err("outside the agent's approved terms: model".to_string());
+                return Err(crate::agent_guardrails::refused("terms")(
+                    "outside the agent's approved terms: model".to_string(),
+                ));
             }
             crate::agent_guardrails::check_operation(node, subject, operation, model)
         }
@@ -1726,7 +1752,7 @@ pub(crate) fn check_agent_event_read(
     node: &Arc<TenzroNode>,
     did: &str,
     params: &Value,
-) -> Result<(), String> {
+) -> Result<(), crate::agent_guardrails::Refused> {
     let Some((chain, stored)) = chain_terms(node, did) else {
         return Ok(());
     };
@@ -1734,11 +1760,15 @@ pub(crate) fn check_agent_event_read(
         &chain,
         did,
         chrono::Utc::now().timestamp_millis().max(0) as u64,
-    )?;
+    )
+    .map_err(crate::agent_guardrails::refused("status"))?;
     if stored.terms.expires_at_ms.is_some_and(|at| now_ms() >= at) {
-        return Err("outside the agent's approved terms: expiry".to_string());
+        return Err(crate::agent_guardrails::refused("expiry")(
+            "outside the agent's approved terms: expiry".to_string(),
+        ));
     }
-    check_event_filter(&stored.terms.delegation_scope, Some(params))?;
+    check_event_filter(&stored.terms.delegation_scope, Some(params))
+        .map_err(crate::agent_guardrails::refused("event_filter"))?;
     crate::agent_guardrails::check_operation(
         node,
         did,
@@ -2365,6 +2395,7 @@ mod tests {
             agent_name: "buyer-1".into(),
             delegation_scope: TermsScope {
                 max_transaction_value: Some("1000".into()),
+                max_daily_spend: Some("5000".into()),
                 allowed_operations: vec!["transfer".into()],
                 allowed_chains: vec!["tenzro".into()],
                 ..Default::default()
@@ -2376,7 +2407,7 @@ mod tests {
                 ..Default::default()
             }],
             min_distinct_operators: 1,
-            expires_at_ms: None,
+            expires_at_ms: Some(u64::MAX / 2),
             trifecta_exception: false,
             auto_approve: None,
             credentials: Vec::new(),
@@ -2424,6 +2455,26 @@ mod tests {
         assert_ne!(t, models.target(None));
         assert_ne!(base.target(Some(false)), base.target(Some(true)));
         assert_ne!(t, base.target(Some(false)));
+    }
+
+    /// Terms are prepared for approval only with a daily ceiling and an end
+    /// time; the refusal names the one that is missing. A zero ceiling is a
+    /// ceiling.
+    #[test]
+    fn terms_without_a_daily_ceiling_or_an_end_time_are_refused() {
+        terms().check_shape().unwrap();
+        let mut unbounded = terms();
+        unbounded.delegation_scope.max_daily_spend = None;
+        let err = unbounded.check_shape().unwrap_err();
+        assert!(err.message.contains("max_daily_spend"), "{}", err.message);
+        let mut endless = terms();
+        endless.expires_at_ms = None;
+        let err = endless.check_shape().unwrap_err();
+        assert!(err.message.contains("expires_at_ms"), "{}", err.message);
+        let mut moves_nothing = terms();
+        moves_nothing.delegation_scope.max_transaction_value = None;
+        moves_nothing.delegation_scope.max_daily_spend = Some("0".into());
+        moves_nothing.check_shape().unwrap();
     }
 
     #[test]

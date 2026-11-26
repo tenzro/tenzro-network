@@ -1,14 +1,15 @@
-//! The catalog this process serves from.
+//! The catalog a node serves from.
 //!
 //! The catalog is data. A node assembles it from the signed entries its
-//! operator's trusted publishers have published and installs it here; it is
-//! replaced whole, atomically, whenever that set changes, so a newly
-//! published model is served without a rebuild or a restart. A client
-//! installs the catalog a node returns. Nothing is compiled in: before an
-//! install the catalog is empty.
+//! operator's trusted publishers have published and installs it in its own
+//! [`CatalogCell`]; it is replaced whole, atomically, whenever that set
+//! changes, so a newly published model is served without a rebuild or a
+//! restart. A client installs the catalog a node returns. Nothing is compiled
+//! in and nothing is process-wide: two nodes in one process each serve their
+//! own catalog, and a new cell is empty.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use crate::entry::{CatalogEntry, Component, EntryError};
 
@@ -135,23 +136,33 @@ impl Catalog {
     }
 }
 
-static CURRENT: LazyLock<RwLock<Arc<Catalog>>> =
-    LazyLock::new(|| RwLock::new(Arc::new(Catalog::default())));
+/// The catalog one node serves, shared by everything in that node that reads
+/// it. Cloning the cell shares it; installing replaces the catalog for every
+/// holder at once.
+#[derive(Clone, Debug, Default)]
+pub struct CatalogCell(Arc<RwLock<Arc<Catalog>>>);
 
-/// Replace the catalog this process serves from.
-pub fn install(catalog: Catalog) {
-    let next = Arc::new(catalog);
-    match CURRENT.write() {
-        Ok(mut g) => *g = next,
-        Err(poisoned) => *poisoned.into_inner() = next,
+impl CatalogCell {
+    /// A cell serving `catalog`.
+    pub fn new(catalog: Catalog) -> Self {
+        Self(Arc::new(RwLock::new(Arc::new(catalog))))
     }
-}
 
-/// The catalog as it is now. Holding the returned value keeps one consistent
-/// view even if a new catalog is installed meanwhile.
-pub fn current() -> Arc<Catalog> {
-    match CURRENT.read() {
-        Ok(g) => g.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
+    /// Replace the catalog this cell serves.
+    pub fn install(&self, catalog: Catalog) {
+        let next = Arc::new(catalog);
+        match self.0.write() {
+            Ok(mut g) => *g = next,
+            Err(poisoned) => *poisoned.into_inner() = next,
+        }
+    }
+
+    /// The catalog as it is now. Holding the returned value keeps one
+    /// consistent view even if a new catalog is installed meanwhile.
+    pub fn current(&self) -> Arc<Catalog> {
+        match self.0.read() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 }

@@ -6,6 +6,7 @@ target/
 apps/
 *.md
 !README.md
+!docs/*.md
 .DS_Store
 *.swp
 *.swo

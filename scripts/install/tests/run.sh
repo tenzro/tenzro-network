@@ -12,6 +12,10 @@ SITE=$(cd "${1:?usage: run.sh SITE_DIR [IMAGE ...]}" && pwd); shift
 IMAGES=("$@"); [ ${#IMAGES[@]} -gt 0 ] || IMAGES=(docker.io/library/ubuntu:24.04 docker.io/library/debian:12 docker.io/library/fedora:42)
 CT=$(command -v podman || command -v docker)
 INSTALL=$(cd "$HERE/.." && pwd)/install.sh
+# The release the site serves, as the release scripts name it.
+VERSION=${TENZRO_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$HERE/../../../crates/tenzro-node/Cargo.toml" | head -1)}
+[ -n "$VERSION" ] || { echo "no release version: set TENZRO_VERSION" >&2; exit 2; }
+VRE=${VERSION//./\\.}
 ARCH=tenzro-node-linux-x86_64-cpu.tar.gz
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 pass=0 failn=0
@@ -60,7 +64,7 @@ for img in "${IMAGES[@]}"; do
         *ubuntu*|*fedora*)
             # the links are in ~/.local/bin, which is not on PATH in a container: use the full path
             run "$tag" "$SITE" "$I; echo rc=\$?; echo ---; \$HOME/.local/bin/tenzro --version; \$HOME/.local/bin/tenzro-node --version; ls -l \$HOME/.local/bin"
-            check "$img happy path" 0 'rc=0' 'signature +verified' 'checksum +verified' 'self-check +build CPU' 'gate +accepted' 'tenzro 0\.2\.0' 'tenzro-node 0\.2\.0' 'is installed' 'export PATH=.*&& tenzro'
+            check "$img happy path" 0 'rc=0' 'signature +verified' 'checksum +verified' 'self-check +build CPU' 'gate +accepted' "tenzro $VRE" "tenzro-node $VRE" 'is installed' 'export PATH=.*&& tenzro'
             run "$tag" "$SITE" "$I >/dev/null; $I; echo rc=\$?; ls \$HOME/.tenzro/install/versions | wc -l"
             check "$img second run is an update no-op" 0 'already installed, nothing to download' 'rc=0' 'is installed' '^1$'
             run "$tag" "$SITE" "$I >/dev/null; sh /install.sh --uninstall; ls -A \$HOME/.local/bin \$HOME/.tenzro 2>&1; true"

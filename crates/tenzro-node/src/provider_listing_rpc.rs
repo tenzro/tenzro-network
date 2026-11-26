@@ -6,10 +6,14 @@
 //!   provider this node knows, a page at a time, with its coarse region,
 //!   jurisdiction and the live load of each model (this node's read now; a
 //!   peer's from its latest heartbeat, with the time it was taken).
-//! - `tenzro_quoteInference { model, units, verification?, provider? }`: the
-//!   price of one request at each provider serving `model`, priced on the
-//!   rate card the provider announced plus the governed surcharge for the
-//!   verification level, cheapest first.
+//! - `tenzro_quoteInference { model, units, verification?, provider?, order? }`:
+//!   the price of one request at each provider serving `model`, priced on
+//!   the rate card the provider announced plus the governed surcharge for
+//!   the verification level, with the carbon intensity of the provider's
+//!   region's grid. Cheapest first, or with `order: "carbon"` (for spot work
+//!   that can run anywhere) cleanest grid first and cheapest among equals,
+//!   with `carbon_effect`: the grid intensity saved and the extra price and
+//!   warm-up wait against the cheapest offer.
 
 use std::sync::Arc;
 
@@ -50,6 +54,14 @@ fn own_load(node: &TenzroNode, served: &[String]) -> Vec<ModelLoad> {
 /// A provider's hardware level and type as the chain derives them from
 /// verified attestation, never what the provider announced; null when the
 /// address does not parse or chain state is not available.
+/// The root id of the operator behind the account `address` (`0x` hex);
+/// `None` when the address does not parse, chain state is not available or
+/// no identity is registered to it.
+fn operator(chain: Option<&tenzro_vm::StateAdapter>, address: &str) -> Option<String> {
+    let address = tenzro_types::primitives::Address::parse(address).ok()?;
+    crate::operator_counts::operator_of_account(chain?, address.as_bytes())
+}
+
 fn attested_hardware(
     chain: Option<&tenzro_vm::StateAdapter>,
     address: &str,
@@ -63,18 +75,24 @@ fn attested_hardware(
         address.as_bytes(),
         crate::calendar::now_ms() as i64,
     );
-    serde_json::to_value(stamp)
-        .ok()
-        .and_then(|v| serde_json::from_value(v).ok())
+    Some(AttestedHardware::from_stamp(stamp))
 }
 
 /// The shape of a provider's attested hardware in a listing: the chain's
-/// derivation for the provider's account (`tenzro_types::hardware_level::HardwareStamp`).
+/// derivation for the provider's account (`tenzro_types::hardware_level::HardwareStamp`),
+/// plus whether any verified attestation stands behind it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AttestedHardware {
+    /// Whether verified attestation for the current or previous epoch
+    /// raises the account above `l0`. False means no hardware is proven yet
+    /// (no attestation record, or none fresh for this epoch); it says
+    /// nothing about what the key is held in, so show it as "not attested
+    /// yet", not as software.
+    pub attested: bool,
     /// The hardware level, `l0` upward.
     pub level: String,
-    /// The kind of hardware: `software` or `tpm2`.
+    /// The kind of hardware the chain derives: `tpm2`, or `software` when no
+    /// hardware is proven (see `attested`).
     pub kind: String,
     /// The TPM manufacturer from the endorsement certificate; empty when unknown.
     pub vendor: String,
@@ -82,6 +100,27 @@ pub struct AttestedHardware {
     pub spec: String,
     /// The attestation signature scheme, with `+ml-dsa-65` when the identity enrolled one.
     pub scheme: String,
+}
+
+/// A level or kind as its wire name (`l0`, `tpm2`).
+fn label(v: &impl Serialize) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+impl AttestedHardware {
+    fn from_stamp(stamp: tenzro_types::hardware_level::HardwareStamp) -> Self {
+        Self {
+            attested: stamp.level != tenzro_types::hardware_level::HardwareLevel::L0,
+            level: label(&stamp.level),
+            kind: label(&stamp.kind),
+            vendor: stamp.vendor,
+            spec: stamp.spec,
+            scheme: stamp.scheme,
+        }
+    }
 }
 
 /// Most providers one `tenzro_listProviders` page carries.
@@ -149,6 +188,9 @@ pub struct ModelProvider {
     /// The account the provider is paid to, `0x` hex; empty when this node
     /// has no operator payee.
     pub provider_address: String,
+    /// The root id of the operator behind that account as the chain derives
+    /// it; null when the account has no identity on chain.
+    pub operator: Option<String>,
     pub provider_type: String,
     pub served_models: Vec<String>,
     /// The served models a caller needs a key for.
@@ -168,6 +210,13 @@ pub struct ModelProvider {
     /// The kind of hardware its identity key is held in: `tpm`, `enclave`,
     /// `delegated_tpm` or `passkey`.
     pub identity_anchor: Option<String>,
+    /// The confidential-compute hardware the provider announces its
+    /// `tee`-level answers are attested by; null when it announces none.
+    /// `nvidia-gpu` is a GPU attested together with its confidential VM; any
+    /// other name is the processor alone, which leaves an accelerator's
+    /// memory outside. Announced, not proven here: every `tee` answer carries
+    /// the report its caller verifies.
+    pub confidential_compute: Option<String>,
     /// When the announcement was made, ms since the Unix epoch; absent for
     /// this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,6 +267,9 @@ impl ProviderEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderPage {
     pub providers: Vec<ProviderEntry>,
+    /// The machines of the whole listing, not of this page, and the
+    /// operators behind them.
+    pub operators: crate::operator_counts::OperatorCounts,
     /// Pass as `cursor` for the next page; absent on the last one.
     pub next_cursor: Option<String>,
 }
@@ -225,7 +277,12 @@ pub struct ProviderPage {
 /// Cut `entries` to the page after `cursor`, at most `limit` long.
 /// `cursor` is the key of the last entry a prior page ended on; one that
 /// names no entry ends the listing rather than silently restarting it.
-fn page_after(entries: Vec<ProviderEntry>, cursor: Option<&str>, limit: usize) -> ProviderPage {
+fn page_after(
+    entries: Vec<ProviderEntry>,
+    operators: crate::operator_counts::OperatorCounts,
+    cursor: Option<&str>,
+    limit: usize,
+) -> ProviderPage {
     let start = match cursor {
         None => 0,
         Some(c) => entries
@@ -237,6 +294,7 @@ fn page_after(entries: Vec<ProviderEntry>, cursor: Option<&str>, limit: usize) -
     let next_cursor = (rest.len() > limit).then(|| rest[limit - 1].key().to_string());
     ProviderPage {
         providers: rest.iter().take(limit).cloned().collect(),
+        operators,
         next_cursor,
     }
 }
@@ -305,6 +363,7 @@ pub(crate) async fn handle_list_providers(
         out.push(ProviderEntry::Model(ModelProvider {
             endpoint_id: endpoint,
             attested_hardware: attested_hardware(chain.as_ref(), &address),
+            operator: operator(chain.as_ref(), &address),
             provider_address: address,
             provider_type: tenzro_network::message::PROVIDER_TYPE_AI.to_string(),
             served_models: served,
@@ -317,6 +376,9 @@ pub(crate) async fn handle_list_providers(
             load_as_of_ms: Some(now),
             hardware_tier: Some(crate::work_settlements::local_tier().await.to_string()),
             identity_anchor: crate::network_rpc::local_anchor_kind().map(str::to_string),
+            confidential_compute: node
+                .tee_provider()
+                .map(|p| crate::verifiable_inference::tee_vendor_name(p.vendor()).to_string()),
             timestamp: None,
             reachability: None,
             source: "local".to_string(),
@@ -333,6 +395,7 @@ pub(crate) async fn handle_list_providers(
         peers.push(ProviderEntry::Model(ModelProvider {
             endpoint_id: a.iroh_endpoint_id.clone(),
             attested_hardware: attested_hardware(chain.as_ref(), &a.provider_address),
+            operator: operator(chain.as_ref(), &a.provider_address),
             provider_address: a.provider_address.clone(),
             provider_type: a.provider_type.clone(),
             served_models: a.served_models.clone(),
@@ -349,6 +412,8 @@ pub(crate) async fn handle_list_providers(
                 .then(|| crate::work_settlements::tier_name(a.hardware.class()).to_string()),
             identity_anchor: crate::network_rpc::anchor_kind(&a.trust_profile.identity_root)
                 .map(str::to_string),
+            confidential_compute: Some(a.trust_profile.tee_vendor.clone())
+                .filter(|v| !v.is_empty()),
             timestamp: Some(a.timestamp),
             reachability: Some(a.network_profile.reachability.clone()),
             source: "network".to_string(),
@@ -374,12 +439,26 @@ pub(crate) async fn handle_list_providers(
     if let Some(t) = &params.provider_type {
         out.retain(|e| e.provider_type() == Some(t.as_str()));
     }
-    serde_json::to_value(page_after(out, params.cursor.as_deref(), params.limit)).map_err(|e| {
-        JsonRpcError {
-            code: -32603,
-            message: e.to_string(),
-            data: None,
-        }
+    let operators: Vec<Option<String>> = out
+        .iter()
+        .map(|e| match e {
+            ProviderEntry::Model(p) => p.operator.clone(),
+            ProviderEntry::AgentServing(a) => chain
+                .as_ref()
+                .map(|c| crate::operator_counts::operator_of_did(c, &a.operator_did)),
+        })
+        .collect();
+    let counts = crate::operator_counts::count(operators.iter().map(Option::as_deref));
+    serde_json::to_value(page_after(
+        out,
+        counts,
+        params.cursor.as_deref(),
+        params.limit,
+    ))
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: e.to_string(),
+        data: None,
     })
 }
 
@@ -393,7 +472,66 @@ pub(crate) fn quote_card(
     crate::inference_pricing::charge_wei(node, card, units).ok()
 }
 
-/// `tenzro_quoteInference { model, units, verification?, provider? }`.
+/// How quoted offers are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuoteOrder {
+    /// Cheapest first.
+    Price,
+    /// Cleanest grid first, unknown regions last, cheapest among equals.
+    Carbon,
+}
+
+fn quote_order(v: Option<&Value>) -> Result<QuoteOrder, JsonRpcError> {
+    match v {
+        None | Some(Value::Null) => Ok(QuoteOrder::Price),
+        Some(v) if v.as_str() == Some("price") => Ok(QuoteOrder::Price),
+        Some(v) if v.as_str() == Some("carbon") => Ok(QuoteOrder::Carbon),
+        _ => Err(bad("'order' is \"price\" or \"carbon\"")),
+    }
+}
+
+/// Orders quoted offers in place.
+fn order_offers(offers: &mut [Value], order: QuoteOrder) {
+    let price = |o: &Value| {
+        o["price_wei"]
+            .as_str()
+            .and_then(|p| p.parse::<u128>().ok())
+            .unwrap_or(u128::MAX)
+    };
+    match order {
+        QuoteOrder::Price => offers.sort_by_key(price),
+        QuoteOrder::Carbon => offers.sort_by_key(|o| {
+            (
+                o["grid_g_co2_per_kwh"].as_u64().unwrap_or(u64::MAX),
+                price(o),
+            )
+        }),
+    }
+}
+
+/// What putting the cleanest grid first costs against the cheapest offer:
+/// grams CO2e per kWh saved, extra price and extra wait for a warm model
+/// (both signed; negative is a gain). Network latency between regions is
+/// not known here and not counted.
+fn carbon_effect(cheapest: &Value, cleanest: &Value) -> Value {
+    let grid = |o: &Value| o["grid_g_co2_per_kwh"].as_i64();
+    let price = |o: &Value| o["price_wei"].as_str().and_then(|p| p.parse::<i128>().ok());
+    let wait = |o: &Value| o["load"]["warm_eta_ms"].as_i64().unwrap_or(0);
+    json!({
+        "same_offer": cheapest["endpoint_id"] == cleanest["endpoint_id"],
+        "grid_g_co2_per_kwh_saved": match (grid(cheapest), grid(cleanest)) {
+            (Some(a), Some(b)) => Some(a - b),
+            _ => None,
+        },
+        "extra_price_wei": match (price(cheapest), price(cleanest)) {
+            (Some(a), Some(b)) => Some((b - a).to_string()),
+            _ => None,
+        },
+        "extra_warm_wait_ms": wait(cleanest) - wait(cheapest),
+    })
+}
+
+/// `tenzro_quoteInference { model, units, verification?, provider?, order? }`.
 pub(crate) async fn handle_quote_inference(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -422,6 +560,7 @@ pub(crate) async fn handle_quote_inference(
         }
     }
     let level = crate::verifiable_inference::level_param(params.get("verification"))?;
+    let order = quote_order(params.get("order"))?;
     let only = params
         .get("provider")
         .and_then(Value::as_str)
@@ -484,17 +623,22 @@ pub(crate) async fn handle_quote_inference(
     if only.is_some() {
         offers.retain(|o| o["source"] != "local");
     }
-    offers.sort_by_key(|o| {
-        o["price_wei"]
-            .as_str()
-            .and_then(|p| p.parse::<u128>().ok())
-            .unwrap_or(u128::MAX)
-    });
+    let cheapest = {
+        let mut by_price = offers.clone();
+        order_offers(&mut by_price, QuoteOrder::Price);
+        by_price.into_iter().next()
+    };
+    order_offers(&mut offers, order);
+    let effect = match (order, cheapest.as_ref(), offers.first()) {
+        (QuoteOrder::Carbon, Some(c), Some(g)) => carbon_effect(c, g),
+        _ => Value::Null,
+    };
     Ok(json!({
         "model": model,
         "verification": level.as_str(),
         "surcharge_bps": surcharge,
         "offers": offers,
+        "carbon_effect": effect,
         // The legs this node declares on top of a price it settles: the
         // payer signs each in its payment authorization.
         "declared_legs": node.declared_platform_fee().map(|f| vec![json!({
@@ -524,6 +668,7 @@ fn offer(
         "card": card,
         "base_wei": base.map(|b| b.to_string()),
         "price_wei": base.map(|b| crate::verifiable_inference::priced(b, surcharge).to_string()),
+        "grid_g_co2_per_kwh": region.as_deref().and_then(crate::grid_carbon::grid_g_per_kwh),
         "region": region,
         "load": load,
         "attested_hardware": hardware,
@@ -567,21 +712,111 @@ mod tests {
         let page = call(&node, json!({ "limit": 10 })).await;
         assert_eq!(page["result"]["providers"], json!([]), "{page}");
         assert!(page["result"]["next_cursor"].is_null(), "{page}");
+        assert_eq!(
+            page["result"]["operators"],
+            json!({ "machines": 0, "distinct_operators": 0, "without_identity": 0 }),
+            "{page}"
+        );
         let refused = call(&node, json!({ "limit": 0 })).await;
         assert_eq!(refused["error"]["code"], -32602, "{refused}");
     }
 
     #[test]
+    fn hardware_with_no_attestation_reads_as_not_attested() {
+        let chain = tenzro_vm::StateAdapter::new();
+        let none = attested_hardware(Some(&chain), &format!("0x{}", "11".repeat(20)))
+            .expect("a parsable address on available state is derived");
+        assert!(!none.attested, "{none:?}");
+        assert_eq!(
+            (none.level.as_str(), none.kind.as_str()),
+            ("l0", "software")
+        );
+        assert!(attested_hardware(Some(&chain), "not-an-address").is_none());
+        assert!(attested_hardware(None, &format!("0x{}", "11".repeat(20))).is_none());
+
+        use tenzro_types::hardware_level::{HardwareKind, HardwareLevel, HardwareStamp};
+        let tpm = AttestedHardware::from_stamp(HardwareStamp {
+            level: HardwareLevel::L2,
+            kind: HardwareKind::Tpm2,
+            vendor: "id:494E5443".into(),
+            spec: String::new(),
+            scheme: "ecdsa-p256+ml-dsa-65".into(),
+        });
+        assert!(tpm.attested);
+        assert_eq!((tpm.level.as_str(), tpm.kind.as_str()), ("l2", "tpm2"));
+        // The fields a quote copies keep the chain's derivation.
+        let stamp: HardwareStamp =
+            serde_json::from_value(serde_json::to_value(&tpm).unwrap()).unwrap();
+        assert_eq!(stamp.level, HardwareLevel::L2);
+        assert_eq!(stamp.kind, HardwareKind::Tpm2);
+    }
+
+    #[test]
     fn pages_follow_the_cursor_to_the_end() {
         let all: Vec<_> = ["a", "b", "c", "d", "e"].into_iter().map(agent).collect();
-        let first = page_after(all.clone(), None, 2);
+        let counts = crate::operator_counts::count(vec![Some("op"); 5]);
+        let first = page_after(all.clone(), counts, None, 2);
         assert_eq!(first.providers, all[..2]);
         assert_eq!(first.next_cursor.as_deref(), Some("b"));
-        let second = page_after(all.clone(), first.next_cursor.as_deref(), 2);
+        let second = page_after(all.clone(), counts, first.next_cursor.as_deref(), 2);
         assert_eq!(second.providers, all[2..4]);
-        let last = page_after(all.clone(), second.next_cursor.as_deref(), 2);
+        let last = page_after(all.clone(), counts, second.next_cursor.as_deref(), 2);
         assert_eq!(last.providers, all[4..]);
         assert_eq!(last.next_cursor, None);
-        assert!(page_after(all, Some("zz"), 2).providers.is_empty());
+        // Every page carries the counts of the whole listing.
+        assert_eq!(last.operators, counts);
+        assert_eq!((counts.machines, counts.distinct_operators), (5, 1));
+        assert!(page_after(all, counts, Some("zz"), 2).providers.is_empty());
+    }
+
+    #[test]
+    fn carbon_order_puts_the_cleanest_grid_first_and_unknown_regions_last() {
+        let o = |id: &str, price: u128, region: Option<&str>| {
+            json!({
+                "endpoint_id": id,
+                "price_wei": price.to_string(),
+                "grid_g_co2_per_kwh": region.and_then(crate::grid_carbon::grid_g_per_kwh),
+            })
+        };
+        let mut offers = vec![
+            o("pl", 1, Some("PL")),
+            o("fr-dear", 9, Some("FR")),
+            o("unknown", 0, None),
+            o("fr-cheap", 5, Some("FR")),
+            o("se", 7, Some("SE")),
+        ];
+        order_offers(&mut offers, quote_order(Some(&json!("carbon"))).unwrap());
+        let ids: Vec<&str> = offers
+            .iter()
+            .map(|o| o["endpoint_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["se", "fr-cheap", "fr-dear", "pl", "unknown"]);
+        order_offers(&mut offers, quote_order(None).unwrap());
+        let ids: Vec<&str> = offers
+            .iter()
+            .map(|o| o["endpoint_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["unknown", "pl", "fr-cheap", "se", "fr-dear"]);
+        assert_eq!(
+            quote_order(Some(&json!("price"))).unwrap(),
+            QuoteOrder::Price
+        );
+        assert!(quote_order(Some(&json!("green"))).is_err());
+    }
+
+    #[test]
+    fn the_carbon_effect_weighs_the_cleanest_offer_against_the_cheapest() {
+        let cheap = json!({"endpoint_id": "pl", "price_wei": "5", "grid_g_co2_per_kwh": 660,
+            "load": {"warm_eta_ms": 0}});
+        let clean = json!({"endpoint_id": "se", "price_wei": "7", "grid_g_co2_per_kwh": 40,
+            "load": {"warm_eta_ms": 1500}});
+        let e = carbon_effect(&cheap, &clean);
+        assert_eq!(e["same_offer"], false);
+        assert_eq!(e["grid_g_co2_per_kwh_saved"], 620);
+        assert_eq!(e["extra_price_wei"], "2");
+        assert_eq!(e["extra_warm_wait_ms"], 1500);
+        let unknown = json!({"endpoint_id": "x", "price_wei": null, "grid_g_co2_per_kwh": null});
+        let e = carbon_effect(&unknown, &clean);
+        assert!(e["grid_g_co2_per_kwh_saved"].is_null() && e["extra_price_wei"].is_null());
     }
 }

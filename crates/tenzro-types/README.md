@@ -58,14 +58,6 @@ Foundation crate providing shared types for the Tenzro Network.
 ### Wallet Types
 - `WalletInfo`, `WalletType` - Wallet management
 
-### Task & Marketplace Types
-- `TaskInfo`, `TaskStatus`, `TaskType`, `TaskPriority`, `TaskQuote`, `TaskFilter`
-- `AgentTemplate`, `AgentTemplateStatus`, `AgentTemplateType`, `AgentCapability`
-- `AgentRuntimeRequirements`, `AgentPricingModel`, `AgentExample`
-- `AgentTemplateFilter`, `AgentTemplateInstance`
-- `SkillDefinition`, `SkillStatus`, `SkillFilter`, `SkillInvocationResult`
-- `ToolDefinition`, `ToolStatus`, `ToolFilter`, `ToolInvocationResult`
-
 ### Runtime Types (adaptive execution)
 - `ModelClass`, `ExecutionMode`, `ArtifactCompleteness`, `ArtifactType`
 - `KVProfile`, `WorkerRole`, `ExecutionSupport`, `ModelTopology`
@@ -76,7 +68,7 @@ Foundation crate providing shared types for the Tenzro Network.
 ### Configuration & Fees
 - `NetworkConfig`, `NodeConfig` - Network configuration
 - `ServiceFeeSchedule` - Flat ledger service fees
-- `EconomicPolicy`, `NodeEconomicMode`, `PayeeRole` - The governance-set revenue split (see `docs/ECONOMICS.md`)
+- `EconomicPolicy`, `ConversionPolicy` - The governance-set default conversion and micro-settlement floor (see `docs/ECONOMICS.md`)
 - `AccessTier`, `PayerKind`, `RentableResource` - Subscriber / renter / user tiers
 - `InteractionProvenance` - Who, what, when, how, how much for every metered interaction
 - `MachineIdentity`, `IdentifierGrade` - Graded machine-identity sources

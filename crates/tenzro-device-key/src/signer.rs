@@ -40,7 +40,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```text
 //! let signer = tenzro_device_key::signer::open_or_create("tenzro/node/identity")?;
 //! let sig = signer.sign(b"message")?;
 //! assert!(tenzro_device_key::signer::verify_p256(&signer.public_key_sec1()?, b"message", &sig));
@@ -61,6 +61,9 @@ pub enum HardwareBackend {
     /// A TPM 2.0 in another machine the operator owns, reached through a
     /// provider (see [`crate::remote`]). The key never leaves that TPM.
     RemoteTpm,
+    /// The Android Keystore, in StrongBox or the trusted environment; a key
+    /// it holds in software is refused. Attests with its certificate chain.
+    AndroidKeystore,
 }
 
 impl HardwareBackend {
@@ -69,6 +72,7 @@ impl HardwareBackend {
             Self::Tpm => "tpm",
             Self::SecureEnclave => "secure-enclave",
             Self::RemoteTpm => "remote-tpm",
+            Self::AndroidKeystore => "android-keystore",
         }
     }
 }
@@ -97,6 +101,13 @@ pub trait HardwareSigner: Send + Sync {
     /// own evidence format. Backends that cannot attest return
     /// [`DeviceKeyError::AttestationUnsupported`].
     fn attest(&self) -> Result<crate::Attestation> {
+        Err(DeviceKeyError::AttestationUnsupported)
+    }
+
+    /// What the machine whose TPM holds this key answers to the attestation
+    /// `request` about it (see [`crate::remote::Attestor`]). Only a key held
+    /// by another machine has one; a machine attests its own TPM directly.
+    fn holder_attestation(&self, _request: &[u8]) -> Result<Vec<u8>> {
         Err(DeviceKeyError::AttestationUnsupported)
     }
 }
@@ -138,7 +149,17 @@ pub fn platform_backend() -> Option<HardwareBackend> {
     {
         crate::backend_tpm::available().then_some(HardwareBackend::Tpm)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", windows)))]
+    #[cfg(target_os = "android")]
+    {
+        crate::backend_android::available().then_some(HardwareBackend::AndroidKeystore)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        windows,
+        target_os = "android"
+    )))]
     {
         None
     }
@@ -148,12 +169,20 @@ type SignerFactory = Box<dyn Fn(&str) -> Result<Box<dyn HardwareSigner>> + Send 
 
 static REMOTE_SIGNERS: std::sync::OnceLock<SignerFactory> = std::sync::OnceLock::new();
 
-/// Makes every [`open_or_create`] in this process open the labelled key in
-/// another machine's TPM through `factory`. Set once, before any key use.
+/// Makes every [`open`] and [`open_or_create`] in this process open the
+/// labelled key in another machine's TPM through `factory`. Set once, before
+/// any key use.
 pub fn use_remote_signers(factory: SignerFactory) -> Result<()> {
     REMOTE_SIGNERS
         .set(factory)
         .map_err(|_| DeviceKeyError::Tpm("the remote signers are already set".into()))
+}
+
+/// Whether this process's hardware keys live in another machine's TPM
+/// ([`use_remote_signers`] was called): this machine's own TPM, if it has
+/// one, holds none of them and attests for none of them.
+pub fn keys_are_remote() -> bool {
+    REMOTE_SIGNERS.get().is_some()
 }
 
 /// Open the labelled hardware key, creating it on first use.
@@ -162,17 +191,30 @@ pub fn use_remote_signers(factory: SignerFactory) -> Result<()> {
 /// fallback: a caller that cannot get a hardware key must refuse the
 /// operation that needed one.
 pub fn open_or_create(label: &str) -> Result<Box<dyn HardwareSigner>> {
+    signer(label, true)
+}
+
+/// Open the labelled hardware key, which must exist already: a caller that
+/// proves who this machine is uses the key the machine has, never a new one.
+/// Fails with [`DeviceKeyError::NotFound`] when there is none.
+pub fn open(label: &str) -> Result<Box<dyn HardwareSigner>> {
+    signer(label, false)
+}
+
+fn signer(label: &str, create: bool) -> Result<Box<dyn HardwareSigner>> {
     if let Some(factory) = REMOTE_SIGNERS.get() {
         return factory(label);
     }
     let backend = platform_backend().ok_or_else(|| {
         DeviceKeyError::Enclave(
-            "this machine has no TPM 2.0 or Secure Enclave, so it cannot hold a key".into(),
+            "this machine has no TPM 2.0, Secure Enclave or hardware-backed Android Keystore, so \
+             it cannot hold a key"
+                .into(),
         )
     })?;
     let key = match crate::open(label) {
         Ok(k) => k,
-        Err(DeviceKeyError::NotFound(_)) => crate::create(label)?,
+        Err(DeviceKeyError::NotFound(_)) if create => crate::create(label)?,
         Err(e) => return Err(e),
     };
     Ok(Box::new(DeviceKeySigner { key, backend }))
@@ -472,6 +514,7 @@ impl HardwareMlDsaSigner for DerivedMlDsaSigner {
         match self.root.backend() {
             crate::derive::DeriveBackend::SecureEnclave => HardwareBackend::SecureEnclave,
             crate::derive::DeriveBackend::RemoteTpm => HardwareBackend::RemoteTpm,
+            crate::derive::DeriveBackend::AndroidKeystore => HardwareBackend::AndroidKeystore,
             _ => HardwareBackend::Tpm,
         }
     }
@@ -560,6 +603,33 @@ impl HardwareHybridSigner {
     pub fn has_ml_dsa(&self) -> bool {
         self.ml_dsa.is_some()
     }
+
+    /// The hardware the P-256 key lives in.
+    pub fn backend(&self) -> HardwareBackend {
+        self.p256.backend()
+    }
+
+    /// [`HardwareSigner::holder_attestation`] of the P-256 key.
+    pub fn holder_attestation(&self, request: &[u8]) -> Result<Vec<u8>> {
+        self.p256.holder_attestation(request)
+    }
+
+    /// Both legs over a composite message representative `m_prime` that the
+    /// caller built: the P-256 signature `r || s` over `SHA-256(m_prime)`,
+    /// and the ML-DSA-65 signature over `m_prime` when this signer carries
+    /// that leg. For signers whose interface hands over the representative
+    /// rather than the message and its context.
+    pub fn sign_representative(&self, m_prime: &[u8]) -> Result<([u8; 64], Option<Vec<u8>>)> {
+        // The hardware signs the message, not a digest of it: a remote TPM
+        // can then check what it is asked to sign, and a local one hashes
+        // the same bytes (`sign` is SHA-256 then `sign_prehash`).
+        let rs = self.p256.sign(m_prime)?;
+        let pq = match &self.ml_dsa {
+            Some(k) => Some(k.sign(tenzro_crypto::composite::LABEL_MLDSA65_P256, m_prime)?),
+            None => None,
+        };
+        Ok((rs, pq))
+    }
 }
 
 impl tenzro_crypto::HybridSigner for HardwareHybridSigner {
@@ -568,26 +638,18 @@ impl tenzro_crypto::HybridSigner for HardwareHybridSigner {
         context: tenzro_crypto::SignatureContext,
         msg: &[u8],
     ) -> tenzro_crypto::Result<tenzro_crypto::CompositeSignature> {
-        use tenzro_crypto::composite::{LABEL_MLDSA65_P256, message_representative};
-        let hw = |e: DeviceKeyError| {
-            tenzro_crypto::CryptoError::Other(format!("hardware signing failed: {e}"))
-        };
-        // The hardware signs the message, not a digest of it: a remote TPM
-        // can then check what it is asked to sign, and a local one hashes
-        // the same bytes (`sign` is SHA-256 then `sign_prehash`).
-        let rs = self
-            .p256
-            .sign(&message_representative(context, msg))
-            .map_err(hw)?;
+        let (rs, pq) = self
+            .sign_representative(&tenzro_crypto::composite::message_representative(
+                context, msg,
+            ))
+            .map_err(|e| {
+                tenzro_crypto::CryptoError::Other(format!("hardware signing failed: {e}"))
+            })?;
         let classical = tenzro_crypto::ClassicalProof::Raw {
             signature: rs.to_vec(),
         };
-        Ok(match &self.ml_dsa {
-            Some(k) => tenzro_crypto::CompositeSignature::hybrid(
-                classical,
-                k.sign(LABEL_MLDSA65_P256, &message_representative(context, msg))
-                    .map_err(hw)?,
-            ),
+        Ok(match pq {
+            Some(pq) => tenzro_crypto::CompositeSignature::hybrid(classical, pq),
             None => tenzro_crypto::CompositeSignature::classical(classical),
         })
     }
@@ -632,6 +694,11 @@ pub struct PasskeyController {
     pub public_key_sec1: Vec<u8>,
     /// The relying-party id the passkey was registered under.
     pub rp_id: String,
+    /// Android app origins (`android:apk-key-hash:<hash>`) accepted in place
+    /// of `https://<rp_id>`: an app has no web origin and reports the hash of
+    /// the certificate it is signed with. An entry that is not an app origin
+    /// admits nothing.
+    pub app_origins: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -667,9 +734,10 @@ fn b64url_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Verify that `authz` is the enrolled passkey approving exactly
 /// `challenge`, with user verification, from a device-bound credential, on
-/// the relying party's own origin `https://<rp_id>`. Any page whose domain
-/// sits under the RP ID can ask for an assertion with a matching rpIdHash, so
-/// the origin is what tells the relying party's page from the others.
+/// the relying party's own origin `https://<rp_id>` or in an Android app the
+/// controller lists. Any page whose domain sits under the RP ID can ask for an
+/// assertion with a matching rpIdHash, so the origin is what tells the
+/// relying party's page from the others.
 pub fn verify_authorization(
     controller: &PasskeyController,
     challenge: &[u8; 32],
@@ -703,7 +771,9 @@ pub fn verify_authorization(
         .get("origin")
         .and_then(|v| v.as_str())
         .ok_or(AuthorizationError::MalformedClientData)?;
-    if origin != format!("https://{}", controller.rp_id) {
+    let listed_app = tenzro_crypto::webauthn::is_android_app_origin(origin)
+        && controller.app_origins.iter().any(|listed| listed == origin);
+    if origin != format!("https://{}", controller.rp_id) && !listed_app {
         return Err(AuthorizationError::WrongOrigin);
     }
     let presented = client
@@ -819,6 +889,7 @@ pub(crate) mod tests {
         PasskeyController {
             public_key_sec1: sec1(k),
             rp_id: "tenzro.com".into(),
+            app_origins: Vec::new(),
         }
     }
 
@@ -907,6 +978,45 @@ pub(crate) mod tests {
                 "{origin}"
             );
         }
+    }
+
+    /// An Android app has no web origin: its assertion is accepted only when
+    /// the controller lists that app's origin, and a listed entry that is not
+    /// an app origin admits nothing.
+    #[test]
+    fn an_assertion_from_an_android_app_needs_the_app_listed() {
+        let passkey = key(3);
+        let ch = [6u8; 32];
+        let app = format!("android:apk-key-hash:{}", "A".repeat(43));
+        let at = |origin: &str| {
+            assertion_at(
+                &passkey,
+                "tenzro.com",
+                origin,
+                FLAG_UP | FLAG_UV,
+                &ch,
+                false,
+            )
+        };
+        let mut listing = controller(&passkey);
+        assert_eq!(
+            verify_authorization(&listing, &ch, &at(&app)),
+            Err(AuthorizationError::WrongOrigin)
+        );
+        listing.app_origins = vec![app.clone(), "https://evil.example".to_string()];
+        assert_eq!(verify_authorization(&listing, &ch, &at(&app)), Ok(()));
+        let other = format!("android:apk-key-hash:{}", "B".repeat(43));
+        for origin in [other.as_str(), "https://evil.example"] {
+            assert_eq!(
+                verify_authorization(&listing, &ch, &at(origin)),
+                Err(AuthorizationError::WrongOrigin),
+                "{origin}"
+            );
+        }
+        assert_eq!(
+            verify_authorization(&listing, &ch, &at("https://tenzro.com")),
+            Ok(())
+        );
     }
 
     #[test]

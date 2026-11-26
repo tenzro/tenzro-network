@@ -10,7 +10,9 @@ use tenzro_finality::step::FinalityStep;
 use tenzro_finality_prover::StarkProof;
 
 #[derive(Parser)]
-#[command(about = "Proves Tenzro checkpoint finality as a quantum-safe STARK, with an optional Groth16 wrap")]
+#[command(
+    about = "Proves Tenzro checkpoint finality as a quantum-safe STARK, with an optional Groth16 wrap"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -95,17 +97,31 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::ImageId => println!("0x{}", hex::encode(tenzro_finality_prover::image_id())),
         Command::Stark { step, out } => {
-            let bytes = std::fs::read(&step).with_context(|| format!("reading {}", step.display()))?;
-            let step: FinalityStep = bincode::deserialize(&bytes).context("the step does not decode")?;
+            let bytes =
+                std::fs::read(&step).with_context(|| format!("reading {}", step.display()))?;
+            let step: FinalityStep =
+                bincode::deserialize(&bytes).context("the step does not decode")?;
             let proof = tenzro_finality_prover::prove(&step)?;
             std::fs::write(&out, serde_json::to_vec_pretty(&proof.to_json())?)?;
             println!("{}", out.display());
         }
         Command::HandoverProgram => {
-            println!("0x{}", hex::encode(tenzro_finality_prover::handover_program()))
+            println!(
+                "0x{}",
+                hex::encode(tenzro_finality_prover::handover_program())
+            )
         }
-        Command::Handover { handover, members, genesis_root, prev, out, chain_proof } => {
-            let read = |p: &std::path::PathBuf| std::fs::read(p).with_context(|| format!("reading {}", p.display()));
+        Command::Handover {
+            handover,
+            members,
+            genesis_root,
+            prev,
+            out,
+            chain_proof,
+        } => {
+            let read = |p: &std::path::PathBuf| {
+                std::fs::read(p).with_context(|| format!("reading {}", p.display()))
+            };
             let handover: EpochHandover =
                 bincode::deserialize(&read(&handover)?).context("the handover does not decode")?;
             let members: Vec<Member> =
@@ -119,7 +135,10 @@ fn main() -> Result<()> {
                 .transpose()?;
             let prev_journal = prev
                 .as_ref()
-                .map(|r| HandoverChainJournal::decode(&r.journal.bytes).context("the previous receipt commits no chain journal"))
+                .map(|r| {
+                    HandoverChainJournal::decode(&r.journal.bytes)
+                        .context("the previous receipt commits no chain journal")
+                })
                 .transpose()?;
             let cp = &handover.certificate.checkpoint;
             let link = HandoverLink {
@@ -137,13 +156,19 @@ fn main() -> Result<()> {
             let receipt = tenzro_finality_prover::prove_handover(&link, prev.as_ref())?;
             let bytes = tenzro_finality_prover::write_receipt(&receipt)?;
             std::fs::write(&out, &bytes)?;
-            let proof = HandoverChainProof { members: handover.next_members, receipt: bytes };
+            let proof = HandoverChainProof {
+                members: handover.next_members,
+                receipt: bytes,
+            };
             std::fs::write(&chain_proof, bincode::serialize(&proof)?)?;
             println!("{}", out.display());
         }
         Command::WrapHandover { receipt, out } => {
-            let bytes = std::fs::read(&receipt).with_context(|| format!("reading {}", receipt.display()))?;
-            let proof = tenzro_finality_prover::wrap_receipt(&tenzro_finality_prover::read_receipt(&bytes)?)?;
+            let bytes = std::fs::read(&receipt)
+                .with_context(|| format!("reading {}", receipt.display()))?;
+            let proof = tenzro_finality_prover::wrap_receipt(
+                &tenzro_finality_prover::read_receipt(&bytes)?,
+            )?;
             std::fs::write(&out, serde_json::to_vec_pretty(&proof.to_json())?)?;
             println!("{}", out.display());
         }

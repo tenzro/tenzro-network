@@ -168,10 +168,11 @@ pub(crate) async fn get_price_card(
 /// operator's card for the model with the model's weights hash. `None` when
 /// the latest published version already says the same.
 pub fn card_to_publish(node: &TenzroNode, model_id: &str, provider: &Address) -> Option<PriceCard> {
-    let entry = tenzro_model::catalog::entry(model_id)?;
+    let catalog = node.catalog();
+    let entry = catalog.entry(model_id)?;
     let card = PriceCard {
         model_id: model_id.to_string(),
-        model_hash: crate::inference_receipt::model_hash_of(&entry),
+        model_hash: crate::inference_receipt::model_hash_of(entry),
         rates: node.provider_pricing.read().card_for(model_id).clone(),
     };
     let published = node.chain_state().and_then(|s| {
@@ -203,7 +204,7 @@ pub(crate) async fn price_card_to_publish(
         .and_then(|v| v.as_str())
         .and_then(|h| Address::from_hex(h).ok())
         .ok_or_else(|| err(-32602, "provider must be a hex address"))?;
-    if tenzro_model::catalog::entry(model_id).is_none() {
+    if node.catalog().entry(model_id).is_none() {
         return Err(err(
             -32004,
             format!("{model_id} is not in this node's catalog"),

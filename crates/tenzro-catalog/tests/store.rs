@@ -47,25 +47,43 @@ fn gguf(id: &str, repo: &str, file: &str, sha: char) -> CatalogEntry {
 
 #[test]
 fn an_installed_catalog_is_served_and_a_new_install_replaces_it() {
+    let cell = CatalogCell::default();
+    assert!(cell.current().is_empty(), "a new cell serves nothing");
     let (catalog, errors) = Catalog::build([gguf("m-one", "o/r", "one.gguf", 'a')]);
     assert!(errors.is_empty());
-    store::install(catalog);
-    assert!(get_model_by_id("m-one").is_some());
-    assert!(get_model_by_id("m-two").is_none());
+    cell.install(catalog);
+    let held = cell.current();
+    assert!(held.get_model_by_id("m-one").is_some());
+    assert!(held.get_model_by_id("m-two").is_none());
 
     let (catalog, _) = Catalog::build([
         gguf("m-one", "o/r", "one.gguf", 'a'),
         gguf("m-two", "o/r", "two.gguf", 'b'),
     ]);
-    store::install(catalog);
-    assert!(get_model_by_id("m-two").is_some());
-    let (e, c) = file("o/r", "two.gguf").expect("the new entry's file is known");
+    cell.clone().install(catalog);
+    assert!(cell.current().get_model_by_id("m-two").is_some());
+    assert!(
+        held.get_model_by_id("m-two").is_none(),
+        "a catalog already read keeps its view"
+    );
+    let current = cell.current();
+    let (e, c) = current
+        .file("o/r", "two.gguf")
+        .expect("the new entry's file is known");
     assert_eq!(e.id(), "m-two");
     assert_eq!(c.sha256, "b".repeat(64));
 
-    store::install(Catalog::build([]).0);
-    assert!(get_model_catalog().is_empty());
-    assert!(file("o/r", "two.gguf").is_none());
+    cell.install(Catalog::build([]).0);
+    assert!(cell.current().get_model_catalog().is_empty());
+    assert!(cell.current().file("o/r", "two.gguf").is_none());
+}
+
+#[test]
+fn two_cells_serve_their_own_catalogs() {
+    let a = CatalogCell::new(Catalog::build([gguf("m-a", "o/r", "a.gguf", 'a')]).0);
+    let b = CatalogCell::new(Catalog::build([gguf("m-b", "o/r", "b.gguf", 'b')]).0);
+    assert!(a.current().entry("m-a").is_some() && a.current().entry("m-b").is_none());
+    assert!(b.current().entry("m-b").is_some() && b.current().entry("m-a").is_none());
 }
 
 #[test]
@@ -156,6 +174,7 @@ fn network(id: &str, file: &str, blake3: &str) -> CatalogEntry {
         built_from: SourceCheckpoint {
             repo: "o/upstream".into(),
             revision: "c".repeat(40),
+            tensor_digests_blake3: None,
         },
         recipe: "tools/build/convert.sh".into(),
     };

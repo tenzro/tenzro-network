@@ -24,7 +24,10 @@ bad() { echo "$1"; fail=1; }
 allowed() { grep -v -E '^[[:space:]]*(#|$)' "$list" | awk -v k="$1" '$1 == k {print $2}' | sort -u; }
 
 # 1. Environment variables read by non-test Rust code.
-files=$(find crates sdk apps -name '*.rs' -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
+# Every tree that holds Rust: the crates, the SDKs and the operator apps, those of them that exist.
+roots=$(for d in crates sdk apps; do [ -d "$d" ] && echo "$d"; done)
+# shellcheck disable=SC2086
+files=$(find $roots -name '*.rs' -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
   | grep -v -E '/(tests|benches|examples)/|test_support|tests\.rs$' | sort)
 current_env=$(for f in $files; do
   awk -v F="$f" '/#\[cfg\(test\)\]/ {exit} {l=$0; while (match(l, /"TENZRO_[A-Z0-9_]+"/)) {print substr(l, RSTART+1, RLENGTH-2), F; l=substr(l, RSTART+RLENGTH)}}' "$f"
@@ -78,7 +81,8 @@ done
 # 4. Test-only key features: never in a `default` set, never turned on by a release, package or
 # container build.
 tf='test-(passkey|signer|keys|ca|root|support)'
-for t in $(find crates sdk apps -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null); do
+# shellcheck disable=SC2086
+for t in $(find $roots -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null); do
   hit=$(awk -v tf="$tf" '/^\[features\]/ {f=1; next} /^\[/ {f=0} f && /^default *=/ && $0 ~ tf {print FILENAME ":" FNR ": " $0}' "$t")
   [ -n "$hit" ] && bad "a test-only feature is in a default feature set: $hit"
 done

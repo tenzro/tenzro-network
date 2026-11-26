@@ -47,7 +47,7 @@ use tracing::{debug, error, info, warn};
 
 use tenzro_types::tenzro_uri::TenzroUri;
 
-use crate::catalog::HfModelEntry;
+use crate::catalog::{Catalog, CatalogCell, HfModelEntry};
 use crate::error::{ModelError, Result};
 
 /// Maximum allowable size deviation (5%) before flagging a download as corrupt.
@@ -222,6 +222,47 @@ pub trait BlobFetcher: Send + Sync {
             "this blob fetcher cannot bind {uri} to the licence {licence}"
         ))
     }
+    /// Let go of the store's copies of the blobs with these BLAKE3 hashes,
+    /// whether they were published from this node or fetched from a peer.
+    /// Called when the files they came from are deleted.
+    async fn release(&self, hashes: &[[u8; 32]]) -> std::result::Result<(), String>;
+}
+
+/// The BLAKE3 hash of a file, read in 1 MiB pieces. It is the hash the blob
+/// store names the file's bytes by.
+fn blake3_file(path: &Path) -> std::io::Result<[u8; 32]> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// The regular files that make up the downloaded model `model_id`: its
+/// shards, its single GGUF and its projector. Symlinks are not followed, so
+/// a link to another model's file never counts as this model's.
+fn model_files(storage_path: &Path, model_id: &str, mmproj: &Path) -> Vec<PathBuf> {
+    let is_file = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(storage_path.join(model_id)) {
+        files.extend(entries.flatten().map(|e| e.path()).filter(|p| is_file(p)));
+    }
+    for p in [
+        storage_path.join(format!("{model_id}.gguf")),
+        mmproj.to_path_buf(),
+    ] {
+        if is_file(&p) {
+            files.push(p);
+        }
+    }
+    files
 }
 
 /// Generic artifact downloader for HuggingFace Hub.
@@ -240,6 +281,9 @@ pub struct HfArtifactDownloader {
     storage_path: PathBuf,
     blob_fetcher: Option<Arc<dyn BlobFetcher>>,
     accepted_licences: Vec<String>,
+    /// The node's catalog: a file is downloaded only against the hash an
+    /// entry in it pins.
+    catalog: CatalogCell,
 }
 
 /// Manages downloading GGUF models from HuggingFace Hub.
@@ -257,15 +301,19 @@ pub struct HfDownloader {
     storage_path: PathBuf,
     blob_fetcher: Option<Arc<dyn BlobFetcher>>,
     accepted_licences: Vec<String>,
+    /// The node's catalog: a file is downloaded only against the hash an
+    /// entry in it pins.
+    catalog: CatalogCell,
 }
 
 impl HfDownloader {
     /// Create a new downloader that stores models at the given path.
-    pub fn new(storage_path: PathBuf) -> Self {
+    pub fn new(storage_path: PathBuf, catalog: CatalogCell) -> Self {
         Self {
             storage_path,
             blob_fetcher: None,
             accepted_licences: Vec::new(),
+            catalog,
         }
     }
 
@@ -484,7 +532,12 @@ impl HfDownloader {
         let dest_path = self.model_path(&entry.id);
         let tmp_path = dest_path.with_extension("gguf.tmp");
         // Whatever the source, the bytes must be the ones the catalog pins.
-        let pin = require_pin(&entry.hf_repo, &entry.hf_filename, &self.accepted_licences)?;
+        let pin = require_pin(
+            &self.catalog.current(),
+            &entry.hf_repo,
+            &entry.hf_filename,
+            &self.accepted_licences,
+        )?;
         let source = fetch_pinned(
             &entry.id,
             &pin,
@@ -547,7 +600,12 @@ impl HfDownloader {
         }
         let tmp_path = dest_path.with_extension("gguf.tmp");
 
-        let fetched = match require_pin(&entry.hf_repo, &mmproj.filename, &self.accepted_licences) {
+        let fetched = match require_pin(
+            &self.catalog.current(),
+            &entry.hf_repo,
+            &mmproj.filename,
+            &self.accepted_licences,
+        ) {
             Ok(pin) => fetch_pinned(
                 &format!("{}/mmproj", entry.id),
                 &pin,
@@ -614,22 +672,26 @@ impl HfDownloader {
             let shard_dest = tmp_dir.join(&shard_name);
             let shard_tmp = tmp_dir.join(format!("{}.tmp", shard_name));
 
-            let fetched =
-                match require_pin(&entry.hf_repo, &remote_filename, &self.accepted_licences) {
-                    Ok(pin) => fetch_pinned(
-                        &format!("{}/{}", entry.id, shard_name),
-                        &pin,
-                        None,
-                        self.blob_fetcher.as_ref(),
-                        policy,
-                        &shard_dest,
-                        &shard_tmp,
-                        &progress_tx,
-                    )
-                    .await
-                    .map(|_| ()),
-                    Err(e) => Err(e),
-                };
+            let fetched = match require_pin(
+                &self.catalog.current(),
+                &entry.hf_repo,
+                &remote_filename,
+                &self.accepted_licences,
+            ) {
+                Ok(pin) => fetch_pinned(
+                    &format!("{}/{}", entry.id, shard_name),
+                    &pin,
+                    None,
+                    self.blob_fetcher.as_ref(),
+                    policy,
+                    &shard_dest,
+                    &shard_tmp,
+                    &progress_tx,
+                )
+                .await
+                .map(|_| ()),
+                Err(e) => Err(e),
+            };
             fetched.inspect_err(|_| {
                 // Only the shard that failed is dropped; the set is renamed
                 // into place only once every shard is there.
@@ -735,8 +797,52 @@ impl HfDownloader {
     /// Delete a downloaded model from local storage.
     ///
     /// Removes the GGUF file from the persistent models directory and any
-    /// partial `.tmp` download files.
-    pub fn delete_model(&self, model_id: &str) -> Result<()> {
+    /// partial `.tmp` download files. With a blob fetcher, the blob store's
+    /// copies of the deleted files are released too, so the space comes back
+    /// once the store sweeps. Returns the number of files whose store copies
+    /// were released.
+    pub async fn delete_model(&self, model_id: &str) -> Result<usize> {
+        let hashes = match &self.blob_fetcher {
+            Some(_) => {
+                let files = model_files(&self.storage_path, model_id, &self.mmproj_path(model_id));
+                tokio::task::spawn_blocking(move || {
+                    files
+                        .iter()
+                        .map(|p| {
+                            blake3_file(p).map_err(|e| {
+                                ModelError::DownloadError(format!(
+                                    "Failed to hash {}: {e}",
+                                    p.display()
+                                ))
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .await
+                .map_err(|e| ModelError::DownloadError(format!("Hashing model files: {e}")))??
+            }
+            None => Vec::new(),
+        };
+        self.delete_model_files(model_id)?;
+        if let Some(fetcher) = &self.blob_fetcher
+            && !hashes.is_empty()
+        {
+            fetcher.release(&hashes).await.map_err(|e| {
+                ModelError::DownloadError(format!(
+                    "Deleted the files of {model_id}, but releasing their blob store copies \
+                     failed: {e}"
+                ))
+            })?;
+            info!(
+                "Released the blob store copies of {} files of {}",
+                hashes.len(),
+                model_id
+            );
+        }
+        Ok(hashes.len())
+    }
+
+    fn delete_model_files(&self, model_id: &str) -> Result<()> {
         // Sharded models live in a per-id directory — remove the whole set
         // (shards + any leftover .tmp) in one shot.
         let shard_dir = self.storage_path.join(model_id);
@@ -811,11 +917,12 @@ impl HfDownloader {
 
 impl HfArtifactDownloader {
     /// Create a new artifact downloader rooted at `storage_path`.
-    pub fn new(storage_path: PathBuf) -> Self {
+    pub fn new(storage_path: PathBuf, catalog: CatalogCell) -> Self {
         Self {
             storage_path,
             blob_fetcher: None,
             accepted_licences: Vec::new(),
+            catalog,
         }
     }
 
@@ -1043,7 +1150,12 @@ impl HfArtifactDownloader {
         policy: SourcePolicy,
         progress_tx: &watch::Sender<DownloadProgress>,
     ) -> Result<()> {
-        let pin = require_pin(hf_repo, hf_filename, &self.accepted_licences)?;
+        let pin = require_pin(
+            &self.catalog.current(),
+            hf_repo,
+            hf_filename,
+            &self.accepted_licences,
+        )?;
         fetch_pinned(
             progress_label,
             &pin,
@@ -1370,13 +1482,25 @@ async fn write_bytes_atomic(
     Ok(())
 }
 
-/// The origin's base URL. Tests point it at a local server.
-fn hub_base() -> String {
+/// The origin the model hub is reached at: `TENZRO_HUB_URL`, else the
+/// `HF_ENDPOINT` the Hugging Face tools read, else the public hub. An operator
+/// who mirrors the hub, or runs one of their own, points every download,
+/// listing and catalogue fetch at it. Tests point it at a local server.
+pub fn hub_base() -> String {
     #[cfg(test)]
     if let Some(base) = tests::HUB_BASE.lock().unwrap().clone() {
         return base;
     }
-    "https://huggingface.co".to_string()
+    hub_base_from(|name| std::env::var(name).ok())
+}
+
+fn hub_base_from(get: impl Fn(&str) -> Option<String>) -> String {
+    ["TENZRO_HUB_URL", "HF_ENDPOINT"]
+        .iter()
+        .filter_map(|name| get(name))
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .find(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://huggingface.co".to_string())
 }
 
 /// Turn an origin HTTP failure into something that names the actual problem.
@@ -1425,14 +1549,17 @@ impl Pin {
 /// this node runs. A file its origin gates behind a licence is cleared only
 /// when the operator accepted that licence (`accepted`, from
 /// `--accept-license`); it is then fetched from network providers alone.
-pub fn require_pin(repo: &str, path: &str, accepted: &[String]) -> Result<Pin> {
-    let (entry, file) = crate::catalog::file(repo, path).ok_or_else(|| {
+pub fn require_pin(catalog: &Catalog, repo: &str, path: &str, accepted: &[String]) -> Result<Pin> {
+    let (entry, file) = catalog.file(repo, path).ok_or_else(|| {
         ModelError::DownloadError(format!(
             "{repo}/{path} is hashed by no entry in this node's catalog; refusing to download it"
         ))
     })?;
     let licence = accepted_gate(entry.id(), entry.gating_licence(), accepted)?;
-    Ok(Pin { file, licence })
+    Ok(Pin {
+        file: file.clone(),
+        licence,
+    })
 }
 
 /// The licence `model_id`'s origin gates it behind, once the operator has
@@ -1656,11 +1783,28 @@ async fn download_one_file(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_hub_origin_is_the_operators_when_one_is_set() {
+        assert_eq!(hub_base_from(|_| None), "https://huggingface.co");
+        let both = |n: &str| match n {
+            "TENZRO_HUB_URL" => Some("https://hub.mirror.example/".to_string()),
+            _ => Some("https://other.example".to_string()),
+        };
+        assert_eq!(hub_base_from(both), "https://hub.mirror.example");
+        let only_hf =
+            |n: &str| (n == "HF_ENDPOINT").then(|| " https://hf.mirror.example ".to_string());
+        assert_eq!(hub_base_from(only_hf), "https://hf.mirror.example");
+        assert_eq!(
+            hub_base_from(|_| Some("  ".to_string())),
+            "https://huggingface.co"
+        );
+    }
     use super::*;
 
     #[test]
     fn test_model_path() {
-        let dl = HfDownloader::new(PathBuf::from("/tmp/models"));
+        let dl = HfDownloader::new(PathBuf::from("/tmp/models"), CatalogCell::default());
         assert_eq!(
             dl.model_path("qwen3-4b"),
             PathBuf::from("/tmp/models/qwen3-4b.gguf")
@@ -1714,7 +1858,7 @@ mod tests {
         std::fs::write(dir.join("Kimi-K2-00001-of-00003.gguf"), b"x").unwrap();
         std::fs::write(dir.join("Kimi-K2-00003-of-00003.gguf"), b"x").unwrap();
 
-        let dl = HfDownloader::new(tmp.clone());
+        let dl = HfDownloader::new(tmp.clone(), CatalogCell::default());
         assert_eq!(
             dl.model_path("kimi-k2"),
             dir.join("Kimi-K2-00001-of-00003.gguf")
@@ -1727,7 +1871,7 @@ mod tests {
 
     #[test]
     fn artifact_path_single_file() {
-        let dl = HfArtifactDownloader::new(PathBuf::from("/tmp/models"));
+        let dl = HfArtifactDownloader::new(PathBuf::from("/tmp/models"), CatalogCell::default());
         let spec = ArtifactSpec::SingleFile {
             filename: "model.onnx".to_string(),
             extension: "onnx".to_string(),
@@ -1741,7 +1885,7 @@ mod tests {
 
     #[test]
     fn artifact_path_bundle() {
-        let dl = HfArtifactDownloader::new(PathBuf::from("/tmp/models"));
+        let dl = HfArtifactDownloader::new(PathBuf::from("/tmp/models"), CatalogCell::default());
         let spec = ArtifactSpec::Bundle {
             files: vec!["encoder.onnx".to_string(), "decoder.onnx".to_string()],
             dir_name: "whisper-large-v3-turbo".to_string(),
@@ -1756,7 +1900,7 @@ mod tests {
     #[test]
     fn is_downloaded_bundle_requires_all_files() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let dl = HfArtifactDownloader::new(tmp.path().to_path_buf());
+        let dl = HfArtifactDownloader::new(tmp.path().to_path_buf(), CatalogCell::default());
         let spec = ArtifactSpec::Bundle {
             files: vec!["a.onnx".to_string(), "b.onnx".to_string()],
             dir_name: "bundle".to_string(),
@@ -1828,6 +1972,70 @@ mod tests {
         async fn publish_file(&self, _path: &Path) -> std::result::Result<TenzroUri, String> {
             Err("read-only".into())
         }
+        async fn release(&self, _hashes: &[[u8; 32]]) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A blob store that records the hashes it is asked to release.
+    #[derive(Default)]
+    struct Releases(std::sync::Mutex<Vec<[u8; 32]>>);
+
+    #[async_trait]
+    impl BlobFetcher for Releases {
+        async fn fetch(&self, _uri: &TenzroUri) -> std::result::Result<Bytes, String> {
+            Err("empty".into())
+        }
+        async fn publish(&self, _bytes: Bytes) -> std::result::Result<TenzroUri, String> {
+            Err("read-only".into())
+        }
+        async fn publish_file(&self, _path: &Path) -> std::result::Result<TenzroUri, String> {
+            Err("read-only".into())
+        }
+        async fn release(&self, hashes: &[[u8; 32]]) -> std::result::Result<(), String> {
+            self.0.lock().unwrap().extend_from_slice(hashes);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_model_releases_the_store_copies_of_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let shards = dir.path().join("m");
+        std::fs::create_dir(&shards).unwrap();
+        std::fs::write(shards.join("m-00001-of-00002.gguf"), b"first shard").unwrap();
+        std::fs::write(shards.join("m-00002-of-00002.gguf"), b"second shard").unwrap();
+        std::fs::write(dir.path().join("n.gguf"), b"another model").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("n.gguf"), dir.path().join("m.gguf")).unwrap();
+
+        let store = Arc::new(Releases::default());
+        let downloader = HfDownloader::new(dir.path().to_path_buf(), CatalogCell::default())
+            .with_blob_fetcher(store.clone());
+        assert_eq!(downloader.delete_model("m").await.unwrap(), 2);
+
+        let mut released = store.0.lock().unwrap().clone();
+        released.sort();
+        let mut want = vec![
+            *blake3::hash(b"first shard").as_bytes(),
+            *blake3::hash(b"second shard").as_bytes(),
+        ];
+        want.sort();
+        assert_eq!(
+            released, want,
+            "a linked file of another model is not released"
+        );
+        assert!(!shards.exists());
+        assert!(dir.path().join("n.gguf").exists());
+    }
+
+    #[tokio::test]
+    async fn without_a_blob_store_deleting_releases_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("m.gguf"), b"weights").unwrap();
+        let downloader = HfDownloader::new(dir.path().to_path_buf(), CatalogCell::default());
+        assert_eq!(downloader.delete_model("m").await.unwrap(), 0);
+        assert!(!dir.path().join("m.gguf").exists());
     }
 
     fn store(bytes: Option<&'static [u8]>) -> Arc<dyn BlobFetcher> {
@@ -1848,6 +2056,7 @@ mod tests {
                     built_from: crate::catalog::SourceCheckpoint {
                         repo: "o/r".into(),
                         revision: "c".repeat(40),
+                        tensor_digests_blake3: None,
                     },
                     recipe: "tools/build.sh".into(),
                 },
@@ -1914,6 +2123,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((uri.to_string(), licence.to_string()));
+            Ok(())
+        }
+        async fn release(&self, _hashes: &[[u8; 32]]) -> std::result::Result<(), String> {
             Ok(())
         }
     }
@@ -2254,7 +2466,8 @@ mod tests {
         const BYTES: &[u8] = b"trained adapter";
         let (b3, sha) = hashes(BYTES);
         let dir = tempfile::tempdir().unwrap();
-        let dl = HfDownloader::new(dir.path().to_path_buf()).with_blob_fetcher(store(Some(BYTES)));
+        let dl = HfDownloader::new(dir.path().to_path_buf(), CatalogCell::default())
+            .with_blob_fetcher(store(Some(BYTES)));
         let path = dl
             .fetch_network_file("trained-ab", &b3, &sha, BYTES.len() as u64)
             .await
@@ -2270,7 +2483,7 @@ mod tests {
         let (b3, sha) = hashes(BYTES);
         let dir = tempfile::tempdir().unwrap();
         // Same length, different bytes: the content address does not match.
-        let dl = HfDownloader::new(dir.path().to_path_buf())
+        let dl = HfDownloader::new(dir.path().to_path_buf(), CatalogCell::default())
             .with_blob_fetcher(store(Some(b"trained adaptex")));
         let err = dl
             .fetch_network_file("trained-ab", &b3, &sha, BYTES.len() as u64)
@@ -2279,7 +2492,8 @@ mod tests {
         assert!(err.to_string().contains("BLAKE3"), "{err}");
         assert!(!dir.path().join("trained-ab.gguf").exists());
         // The served bytes are the addressed ones, but the pinned SHA-256 is not theirs.
-        let dl = HfDownloader::new(dir.path().to_path_buf()).with_blob_fetcher(store(Some(BYTES)));
+        let dl = HfDownloader::new(dir.path().to_path_buf(), CatalogCell::default())
+            .with_blob_fetcher(store(Some(BYTES)));
         let err = dl
             .fetch_network_file("trained-ab", &b3, &"0".repeat(64), BYTES.len() as u64)
             .await
@@ -2292,13 +2506,14 @@ mod tests {
     async fn a_network_file_no_provider_holds_errors() {
         let (b3, sha) = hashes(b"x");
         let dir = tempfile::tempdir().unwrap();
-        let dl = HfDownloader::new(dir.path().to_path_buf()).with_blob_fetcher(store(None));
+        let dl = HfDownloader::new(dir.path().to_path_buf(), CatalogCell::default())
+            .with_blob_fetcher(store(None));
         let err = dl
             .fetch_network_file("trained-ab", &b3, &sha, 1)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no provider holds it"), "{err}");
-        let dl = HfDownloader::new(dir.path().to_path_buf());
+        let dl = HfDownloader::new(dir.path().to_path_buf(), CatalogCell::default());
         let err = dl
             .fetch_network_file("trained-ab", &b3, &sha, 1)
             .await

@@ -11,8 +11,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
-    panic_with_error, token,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
+    panic_with_error, token, Address, Bytes, BytesN, Env,
 };
 use tenzro_finality_verifier::settlement::{self, LegError, LegState, DECISION_LEN};
 
@@ -133,17 +133,25 @@ fn to_state(s: Stage) -> LegState {
 
 fn id_of(env: &Env, plan_id: &BytesN<32>, index: u32) -> Result<BytesN<32>, Error> {
     let index = u8::try_from(index).map_err(|_| Error::BadIndex)?;
-    Ok(BytesN::from_array(env, &settlement::leg_id(&plan_id.to_array(), index)))
+    Ok(BytesN::from_array(
+        env,
+        &settlement::leg_id(&plan_id.to_array(), index),
+    ))
 }
 
 fn load(env: &Env, id: &BytesN<32>) -> Result<Leg, Error> {
-    env.storage().persistent().get(&Key::Leg(id.clone())).ok_or(Error::NotLocked)
+    env.storage()
+        .persistent()
+        .get(&Key::Leg(id.clone()))
+        .ok_or(Error::NotLocked)
 }
 
 fn store(env: &Env, id: &BytesN<32>, leg: &Leg) {
     let k = Key::Leg(id.clone());
     env.storage().persistent().set(&k, leg);
-    env.storage().persistent().extend_ttl(&k, ENTRY_TTL, ENTRY_TTL);
+    env.storage()
+        .persistent()
+        .extend_ttl(&k, ENTRY_TTL, ENTRY_TTL);
 }
 
 fn copy<'a>(env: &Env, b: &Bytes, buf: &'a mut [u8]) -> &'a [u8] {
@@ -197,10 +205,25 @@ impl SettlementLock {
         if amount <= 0 {
             return Err(Error::BadAmount);
         }
-        let horizon: u64 = env.storage().instance().get(&Key::Horizon).ok_or(Error::Malformed)?;
+        let horizon: u64 = env
+            .storage()
+            .instance()
+            .get(&Key::Horizon)
+            .ok_or(Error::Malformed)?;
         let escape_at = env.ledger().timestamp().saturating_add(horizon);
-        token::TokenClient::new(&env, &token).transfer(&payer, &env.current_contract_address(), &amount);
-        let leg = Leg { payer, recipient, token, amount, escape_at, stage: Stage::Locked };
+        token::TokenClient::new(&env, &token).transfer(
+            &payer,
+            &env.current_contract_address(),
+            &amount,
+        );
+        let leg = Leg {
+            payer,
+            recipient,
+            token,
+            amount,
+            escape_at,
+            stage: Stage::Locked,
+        };
         store(&env, &id, &leg);
         record(&env, &plan_id, &id, LOCKED, amount);
         Locked {
@@ -229,8 +252,14 @@ impl SettlementLock {
     ) -> Result<(), Error> {
         let id = id_of(&env, &plan_id, index)?;
         let mut leg = load(&env, &id)?;
-        let client: Address = env.storage().instance().get(&Key::Client).ok_or(Error::Malformed)?;
-        let root = FinalityClient::new(&env, &client).state_root(&checkpoint).to_array();
+        let client: Address = env
+            .storage()
+            .instance()
+            .get(&Key::Client)
+            .ok_or(Error::Malformed)?;
+        let root = FinalityClient::new(&env, &client)
+            .state_root(&checkpoint)
+            .to_array();
         if decision.len() as usize != DECISION_LEN {
             return Err(Error::Unproven);
         }
@@ -238,7 +267,13 @@ impl SettlementLock {
         decision.copy_into_slice(&mut db);
         let mut pb = [0u8; MAX_PROOF];
         let proof_s = copy(&env, &proof, &mut pb);
-        let next = settlement::settle_leg(to_state(leg.stage), &root, &plan_id.to_array(), &db, proof_s)?;
+        let next = settlement::settle_leg(
+            to_state(leg.stage),
+            &root,
+            &plan_id.to_array(),
+            &db,
+            proof_s,
+        )?;
         pay(&env, plan_id, id, &mut leg, next, false);
         Ok(())
     }
@@ -259,13 +294,21 @@ impl SettlementLock {
     pub fn escape(env: Env, plan_id: BytesN<32>, index: u32) -> Result<(), Error> {
         let id = id_of(&env, &plan_id, index)?;
         let mut leg = load(&env, &id)?;
-        let next = settlement::escape_leg(to_state(leg.stage), env.ledger().timestamp(), leg.escape_at)?;
+        let next =
+            settlement::escape_leg(to_state(leg.stage), env.ledger().timestamp(), leg.escape_at)?;
         pay(&env, plan_id, id, &mut leg, next, true);
         Ok(())
     }
 }
 
-fn pay(env: &Env, plan_id: BytesN<32>, id: BytesN<32>, leg: &mut Leg, next: LegState, escaped: bool) {
+fn pay(
+    env: &Env,
+    plan_id: BytesN<32>,
+    id: BytesN<32>,
+    leg: &mut Leg,
+    next: LegState,
+    escaped: bool,
+) {
     let (to, stage) = match next {
         LegState::Released => (leg.recipient.clone(), Stage::Released),
         LegState::Refunded => (leg.payer.clone(), Stage::Refunded),
@@ -273,12 +316,33 @@ fn pay(env: &Env, plan_id: BytesN<32>, id: BytesN<32>, leg: &mut Leg, next: LegS
     };
     leg.stage = stage;
     store(env, &id, leg);
-    token::TokenClient::new(env, &leg.token).transfer(&env.current_contract_address(), &to, &leg.amount);
-    let kind = if stage == Stage::Released { RELEASED } else { REFUNDED };
+    token::TokenClient::new(env, &leg.token).transfer(
+        &env.current_contract_address(),
+        &to,
+        &leg.amount,
+    );
+    let kind = if stage == Stage::Released {
+        RELEASED
+    } else {
+        REFUNDED
+    };
     record(env, &plan_id, &id, kind, leg.amount);
     match stage {
-        Stage::Released => Released { plan_id, leg_id: id, to, amount: leg.amount }.publish(env),
-        _ => Refunded { plan_id, leg_id: id, to, amount: leg.amount, escaped }.publish(env),
+        Stage::Released => Released {
+            plan_id,
+            leg_id: id,
+            to,
+            amount: leg.amount,
+        }
+        .publish(env),
+        _ => Refunded {
+            plan_id,
+            leg_id: id,
+            to,
+            amount: leg.amount,
+            escaped,
+        }
+        .publish(env),
     }
 }
 
@@ -288,7 +352,10 @@ const RELEASED: u8 = 2;
 const REFUNDED: u8 = 3;
 
 fn recon(env: &Env) -> (u64, BytesN<32>) {
-    env.storage().instance().get(&Key::Recon).unwrap_or((0, BytesN::from_array(env, &[0u8; 32])))
+    env.storage()
+        .instance()
+        .get(&Key::Recon)
+        .unwrap_or((0, BytesN::from_array(env, &[0u8; 32])))
 }
 
 /// Fold one entry into the running reconciliation hash:
@@ -305,7 +372,9 @@ fn record(env: &Env, plan_id: &BytesN<32>, id: &BytesN<32>, kind: u8, amount: i1
     b.push_back(kind);
     b.extend_from_array(&word);
     let next: BytesN<32> = env.crypto().sha256(&b).into();
-    env.storage().instance().set(&Key::Recon, &(count + 1, next));
+    env.storage()
+        .instance()
+        .set(&Key::Recon, &(count + 1, next));
 }
 
 #[cfg(test)]

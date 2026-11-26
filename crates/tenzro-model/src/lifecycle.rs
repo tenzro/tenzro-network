@@ -280,6 +280,9 @@ impl Entry {
 struct Inner {
     entries: HashMap<String, Entry>,
     pinned: HashMap<String, ()>,
+    /// How long a model may go without a request before it is unloaded, for
+    /// the models whose operator asked for that when serving them.
+    idle_limits: HashMap<String, Duration>,
 }
 
 /// Tracks which models are warm and decides which to evict.
@@ -301,6 +304,7 @@ impl ModelLifecycle {
             inner: Arc::new(Mutex::new(Inner {
                 entries: HashMap::new(),
                 pinned: HashMap::new(),
+                idle_limits: HashMap::new(),
             })),
         }
     }
@@ -330,6 +334,47 @@ impl ModelLifecycle {
     /// Remove a pin, returning the model to eviction candidacy.
     pub fn unpin(&self, model_id: &str) {
         self.inner.lock().pinned.remove(model_id);
+    }
+
+    /// Unload `model_id` after it has gone `limit` without a request, or never
+    /// for `None`. The model stays served: its next request loads it again.
+    pub fn set_idle_limit(&self, model_id: &str, limit: Option<Duration>) {
+        let mut inner = self.inner.lock();
+        match limit {
+            Some(limit) => inner.idle_limits.insert(model_id.to_string(), limit),
+            None => inner.idle_limits.remove(model_id),
+        };
+    }
+
+    /// The models that have gone longer than their idle limit without a
+    /// request and can be unloaded now: warm, not being unloaded, serving
+    /// nothing and not pinned.
+    pub fn idle_expired(&self) -> Vec<String> {
+        self.expired_at(Instant::now())
+    }
+
+    fn expired_at(&self, now: Instant) -> Vec<String> {
+        let inner = self.inner.lock();
+        let mut expired: Vec<String> = inner
+            .idle_limits
+            .iter()
+            .filter(|(id, limit)| {
+                let Some(entry) = inner.entries.get(*id) else {
+                    return false;
+                };
+                let idle = entry
+                    .last_used
+                    .map_or(Duration::ZERO, |used| now.saturating_duration_since(used));
+                entry.warm
+                    && !entry.evicting
+                    && entry.in_flight == 0
+                    && !inner.pinned.contains_key(*id)
+                    && idle >= **limit
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        expired.sort();
+        expired
     }
 
     /// Whether `model_id` is pinned.
@@ -533,6 +578,55 @@ impl ModelLifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_unloads_only_after_its_idle_limit_and_only_when_free() {
+        let lc = ModelLifecycle::new();
+        warm_up(&lc, "a", 10);
+        warm_up(&lc, "b", 10);
+        let minute = Duration::from_secs(60);
+        let later = Instant::now() + 2 * minute;
+        assert!(lc.expired_at(later).is_empty(), "no limit, never idle");
+
+        lc.set_idle_limit("a", Some(minute));
+        lc.set_idle_limit("b", Some(10 * minute));
+        lc.set_idle_limit("cold", Some(minute));
+        assert!(lc.expired_at(Instant::now()).is_empty());
+        assert_eq!(lc.expired_at(later), ["a"]);
+
+        let guard = ready(lc.admit("a"));
+        assert!(lc.expired_at(later).is_empty(), "a request is running");
+        drop(guard);
+        assert!(
+            lc.expired_at(Instant::now() + minute / 2).is_empty(),
+            "just used"
+        );
+        assert_eq!(lc.expired_at(Instant::now() + 2 * minute), ["a"]);
+
+        lc.pin("a");
+        assert!(
+            lc.expired_at(Instant::now() + 2 * minute).is_empty(),
+            "pinned"
+        );
+        lc.unpin("a");
+        assert!(lc.begin_evict("a"));
+        assert!(
+            lc.expired_at(Instant::now() + 2 * minute).is_empty(),
+            "being unloaded"
+        );
+        lc.finish_evict("a");
+        assert!(
+            lc.expired_at(Instant::now() + 2 * minute).is_empty(),
+            "already cold"
+        );
+
+        assert_eq!(lc.expired_at(Instant::now() + 11 * minute), ["b"]);
+        lc.set_idle_limit("b", None);
+        assert!(
+            lc.expired_at(Instant::now() + 11 * minute).is_empty(),
+            "limit cleared"
+        );
+    }
 
     fn ready(a: Admission) -> InFlightGuard {
         match a {

@@ -75,6 +75,11 @@ pub enum SdkError {
     /// body or as a frame inside a stream.
     #[error("Node error: {0}")]
     Api(#[from] ApiError),
+
+    /// The light client refused what the node served (feature `light`).
+    #[cfg(feature = "light")]
+    #[error("Light client: {0}")]
+    Light(#[from] tenzro_light::LightError),
 }
 
 impl SdkError {
@@ -114,6 +119,19 @@ impl NodeError {
                 .and_then(|d| d.get("build"))
                 .and_then(serde_json::Value::as_str)
                 == Some("light")
+    }
+
+    /// True when the node refused a chat call because no serving node meets
+    /// its jurisdiction pin (code -32024).
+    pub fn is_jurisdiction_unmet(&self) -> bool {
+        self.code == -32024
+    }
+
+    /// True when the call metered less than the network's micro-settlement
+    /// floor (code -32026): it cannot settle as its own transaction. Open a
+    /// payment channel and pass a signed `channel_voucher` instead.
+    pub fn is_below_settlement_floor(&self) -> bool {
+        self.code == -32026
     }
 }
 

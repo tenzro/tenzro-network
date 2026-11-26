@@ -126,7 +126,7 @@ fn check_both_legs(
     sig: &CompositeSignature,
     digest: &[u8],
 ) -> Result<()> {
-    let now_ms = crate::native::deterministic_now_ms(tx).max(0) as u64;
+    let now_ms = crate::native::deterministic_now_ms(tx)?.max(0) as u64;
     crate::keystore::account_signing_key(state, p256_xy, &tx.from, now_ms)?;
     let Some(enrolled) = enrolled_pq_key(state, p256_xy) else {
         return Err(VmError::InvalidTransaction(
@@ -361,7 +361,7 @@ pub fn apply(
         AccountKeysOp::RequirePqLeg {} => {
             // The signing key names the account, or is a passkey its
             // keystore lets act for it.
-            let now_ms = crate::native::deterministic_now_ms(tx).max(0) as u64;
+            let now_ms = crate::native::deterministic_now_ms(tx)?.max(0) as u64;
             crate::keystore::account_signing_key(state, p256_xy, &tx.from, now_ms)?;
             let Some(enrolled) = enrolled_pq_key(state, p256_xy) else {
                 return Err(VmError::InvalidTransaction(
@@ -423,12 +423,4 @@ pub fn pq_required(state: &dyn VmState, account: &[u8]) -> bool {
             .get_storage(&SYSTEM_ADDRESS, pq_required_storage_key(&a).as_bytes())
             .is_some_and(|v| !v.is_empty())
     })
-}
-
-/// How strictly a signature acting for `account` is held to the ML-DSA-65
-/// leg: always [`PqPolicy::Required`]. An account that has not enrolled an
-/// ML-DSA-65 key signs nothing until it does, so the first transaction of a
-/// new account is its enrolment ([`AccountKeysOp::EnrollPqKey`]).
-pub fn account_pq_policy(_state: &dyn VmState, _account: &[u8]) -> PqPolicy {
-    PqPolicy::default()
 }

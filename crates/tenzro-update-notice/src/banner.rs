@@ -27,6 +27,24 @@ pub struct Prefs {
     /// Whether to show notices. On by default.
     #[serde(default = "yes")]
     pub notices: bool,
+    /// Whether the operator allowed a verified newer release to install by
+    /// itself. Off unless turned on. A node that serves a staked role stages
+    /// the release but is still restarted by its operator at an epoch-safe
+    /// moment, so turning this on never restarts a validator on its own.
+    #[serde(default)]
+    pub auto_install: bool,
+    /// The window an ordinary release's automatic install is staggered over,
+    /// in hours ([`crate::rollout`]).
+    #[serde(default = "default_stagger_hours")]
+    pub stagger_hours: u16,
+    /// The hours (UTC) in which an automatic install may start; any hour when
+    /// unset. A security release ignores them.
+    #[serde(default)]
+    pub install_hours: Option<crate::rollout::InstallHours>,
+}
+
+fn default_stagger_hours() -> u16 {
+    crate::rollout::DEFAULT_STAGGER_HOURS
 }
 
 fn yes() -> bool {
@@ -35,7 +53,12 @@ fn yes() -> bool {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Self { notices: true }
+        Self {
+            notices: true,
+            auto_install: false,
+            stagger_hours: default_stagger_hours(),
+            install_hours: None,
+        }
     }
 }
 
@@ -102,15 +125,19 @@ pub fn line(notice: &Notice, running: Version, epoch: Option<EpochView>) -> Opti
 }
 
 /// What an operator is told to do to take a release: run `tenzro update`
-/// (introduced by `lead`, e.g. "Run"), or on Windows, where the running
-/// program cannot be replaced, install the release with its MSI.
+/// (introduced by `lead`, e.g. "Run"). On Windows that updates an install
+/// made with install.ps1; the files of an MSI install belong to the MSI, so
+/// the line also says to install the release with its MSI there.
 pub fn install_hint(os: &str, lead: &str) -> String {
     if os == "windows" {
-        "Install the new release with its MSI".to_string()
+        format!("{lead}: tenzro update ({MSI_HINT})")
     } else {
         format!("{lead}: tenzro update")
     }
 }
+
+/// The Windows addition to [`install_hint`].
+pub const MSI_HINT: &str = "for an MSI install, install the new release with its MSI";
 
 /// [`line`] for the operating system named `os` (`std::env::consts::OS`).
 pub fn line_for_os(
@@ -345,7 +372,7 @@ mod tests {
             "the next day"
         );
         // A newer release shows at once, the same day.
-        let newer = notice("0.2.3", Severity::Normal);
+        let newer = notice("0.2.9", Severity::Normal);
         assert!(show(d.path(), &newer, TTY, NOTICE_NOW + DAY_MS + 5).is_some());
     }
 
@@ -374,7 +401,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let n = notice("0.2.2", Severity::Normal);
         assert!(banner(d.path(), &n, running(), None, TTY, Some("off"), NOTICE_NOW).is_none());
-        Prefs { notices: false }.save(d.path()).unwrap();
+        Prefs {
+            notices: false,
+            ..Prefs::default()
+        }
+        .save(d.path())
+        .unwrap();
         assert!(show(d.path(), &n, TTY, NOTICE_NOW).is_none());
         Prefs::default().save(d.path()).unwrap();
         assert!(show(d.path(), &n, TTY, NOTICE_NOW).is_some());
@@ -414,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn on_windows_the_line_points_at_the_msi_and_never_at_the_command() {
+    fn on_windows_the_line_names_the_command_and_the_msi_for_an_msi_install() {
         for severity in [
             Severity::Normal,
             Severity::Security,
@@ -433,8 +465,7 @@ mod tests {
                 }),
             ] {
                 let l = line_for_os(&n, running(), epoch, "windows").unwrap();
-                assert!(l.ends_with("Install the new release with its MSI"), "{l}");
-                assert!(!l.contains("tenzro update"), "{l}");
+                assert!(l.ends_with(&format!(": tenzro update ({MSI_HINT})")), "{l}");
             }
         }
         assert_eq!(install_hint("linux", "Run"), "Run: tenzro update");

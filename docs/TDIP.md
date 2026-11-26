@@ -14,7 +14,7 @@
 
 The Tenzro Decentralized Identity Protocol (TDIP) is the native identity standard for the Tenzro Network, providing a unified, W3C-compatible decentralized identity system for humans, machines, and autonomous AI agents. TDIP defines how identities are created, managed, delegated, verified, and revoked on the Tenzro Ledger.
 
-TDIP is designed for the AI age — where autonomous agents act on behalf of humans, conduct financial transactions, access intelligence services, and interact with other agents. Every identity on Tenzro is a TDIP identity. The protocol recognizes **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — under fine-grained delegation scopes, verifiable credentials with inheritance, cascading revocation, and auto-provisioned wallets bound to the identity's own hardware key.
+TDIP is designed for the machine economy — where autonomous agents act on behalf of humans, conduct financial transactions, access compute, storage and intelligence services, and interact with other agents. Every identity on Tenzro is a TDIP identity. The protocol recognizes **three identity classes** — humans, delegated agents (machines under a human controller), and autonomous agents (self-sovereign machines) — under fine-grained delegation scopes, verifiable credentials with inheritance, cascading revocation, and auto-provisioned wallets bound to the identity's own hardware key.
 
 ---
 
@@ -24,7 +24,7 @@ TDIP is designed for the AI age — where autonomous agents act on behalf of hum
 TDIP registers machines and AI agents on the same terms as humans. Machine identities have capabilities, delegation scopes, reputation scores, and can inherit credentials from their human controllers. Autonomous machines can operate without a human controller.
 
 ### 1.2 Single-Step Onboarding
-Every TDIP identity is auto-provisioned with a wallet whose signing key is the identity's own hardware key: a passkey for a human, a TPM 2.0 or Secure Enclave key for a machine. No seed phrases, no key shares, no manual key management. Users and agents get an identity + wallet in a single step.
+Every TDIP identity is auto-provisioned with a wallet whose signing key is the identity's own hardware key: a passkey for a human, a TPM 2.0 or Secure Enclave key for a machine (for a machine without one, a key in another machine's TPM reached through a key holder; see [NODE.md](NODE.md#raspberry-pi-and-other-edge-devices)). No seed phrases, no key shares, no manual key management. Users and agents get an identity + wallet in a single step.
 
 ### 1.3 W3C Compatible
 TDIP identities are fully compatible with the W3C Decentralized Identifiers (DID) Core specification and the W3C Verifiable Credentials Data Model. Any TDIP identity can be exported as a standard DID Document and consumed by any W3C DID-compatible system.
@@ -299,6 +299,8 @@ Every approval a root gives (creating, changing or revoking an agent's Terms, a 
 
 A machine cannot approve Terms for another machine's agent: the approving key must be the one the controller DID derives from and is registered with. Pausing, quarantining, lifting and revoking an agent are transactions sent from the root's own account (the account the root's identity is registered with), so a machine root does them with its hardware-signed transactions.
 
+Once the root pause is live (`feature.root_pause.activation_epoch`, dormant until a vote sets it), a root stops every agent it delegated with one pause that names the root itself as both agent and controller, sent from the wallet the root is registered with (`tenzro agent pause` with the root's DID). One record is written whatever the number of agents; each agent's actions and payments are refused while it runs, and its bond stays. It ends at its `until` time, and a later pause with an earlier time lifts it. Grants the agents already hold on other chains are not voided by it and run to their expiry; revoking the root is the step that voids them.
+
 On the node, `tenzro_createCustodyChallenge` (`delegate_agent`, `update_agent_terms`, `revoke_identity`) accepts either root and names the account the approval covers: a human's smart account, or for a machine root the account its hardware key names. A machine root then passes `authorization` = `{challenge_id, signature}`, the composite JSON its hardware produced over `challenge_hex` under the account-owner context (`tenzro agent delegation sign` in the CLI; `machine_root_authorization` and `machine_root_step_up` in the Rust SDK; `machineRootAuthorization` and `machineRootStepUp` in the TypeScript SDK). The node verifies it exactly as validators do before it submits the Terms. Which roots an application accepts is that application's policy, not a chain rule.
 
 No node keeps a second authority store: there are no node-side spending policies, delegation-scope setters, mandate stores, or DID-to-wallet indexes beside the identity record. `tenzro_getAgentTerms` reads an agent's full Terms, its root kind (passkey or machine), its status, and its spend today and this hour against each limit from consensus.
@@ -342,13 +344,13 @@ The VM keeps the day's and the hour's spend and action counts in chain state, so
 
 **Typed actions only.** Everything a delegated agent asks a node to do is a typed proposal (an operation, and the model it names) that the scope check validates against the terms before anything runs:
 
-- With the agent's access token: `tenzro_agentAct` (checked in full, then by the VM), a model call (`tenzro_chat`, `tenzro_textEmbed`, `tenzro_chatByIntent`: the `inference` operation), a tool or skill invocation, or a read (`get*`, `list*`, `estimate*`, `eth_call` and the like). Any other method is refused.
+- With the agent's access token: `tenzro_agentAct` (checked in full, then by the VM), a model call (`tenzro_chat`, `tenzro_textEmbed`: the `inference` operation), a tool or skill invocation, or a read (`get*`, `list*`, `estimate*`, `eth_call` and the like). Any other method is refused.
 - With the agent's bearer token: the request must carry a typed intent, either `inference` or a free tool or skill invocation. A request without an intent, a paid invocation, a workflow or other resource class, and any value-moving intent are refused: an agent's value moves only through `tenzro_agentAct`.
 - A tool or skill invocation is checked again once the node knows what it runs: `url_fetch` and remote tools are `fetch`, `web_search` is `web_search`, `file-manager` is `files`, `code-executor` and sandboxed bundles are `execute`, the model-backed skills are `inference`. The operation must be in `allowed_operations`.
 
 A refusal is recorded in the agent's audit trail as a policy decision.
 
-**Untrusted input.** When an operation that brings in outside content (`fetch`, `web_search`, `browse`, `inbound_messages`) runs for an agent, or the agent receives a message from a sender that is neither its controller nor in `allowed_counterparties`, the node labels the agent. For an hour after the last such input, every action the agent proposes through that node is marked `tainted`; the mark is part of the action digest the serving node signs, and the agent can set it itself but never clear it. The VM holds a tainted action for the controller's step-up when it moves more than `tainted_value_limit` (absent: any value) or pays a counterparty the agent has not paid before; without the step-up it is refused. `tenzro_getAgentQuarantine` reports the current label under `guardrails.tainted`. The label is kept in the node's metadata store (key prefix `agent_taint:`) as well as in memory, so a node that restarts inside the hour still holds it; a label past its hour is dropped at start. The label belongs to the serving node: another node serving the same agent does not see it, and it covers only input that passes through this node (the four operations above and inbound messages), not content an agent reads through its own MCP client.
+**Untrusted input.** When an operation that brings in outside content (`fetch`, `web_search`, `browse`, `inbound_messages`) runs for an agent, the node labels the agent. For an hour after the last such input, every action the agent proposes through that node is marked `tainted`; the mark is part of the action digest the serving node signs, and the agent can set it itself but never clear it. The VM holds a tainted action for the controller's step-up when it moves more than `tainted_value_limit` (absent: any value) or pays a counterparty the agent has not paid before; without the step-up it is refused. `tenzro_getAgentQuarantine` reports the current label under `guardrails.tainted`. The label is kept in the node's metadata store (key prefix `agent_taint:`) as well as in memory, so a node that restarts inside the hour still holds it; a label past its hour is dropped at start. The label belongs to the serving node: another node serving the same agent does not see it, and it covers only input that passes through this node (the four operations above), not content an agent reads through its own MCP client. The node's `/metrics` counts these events since it started: `tenzro_agent_taint_events_total{source}` for each label by the operation that brought the input in, and `tenzro_agent_refusals_total{reason}` for each request refused to a delegated agent by the rule that stopped it (`status` for a revoked, quarantined or paused agent, `expiry`, `serving_node`, `intent`, `event_filter`, `exposure`, `step_up`, `terms`). `tenzro_agent_daily_spend_agents{used}` counts the delegated agents the node has served most recently (at most 4096) by the share of their daily spend limit used (`uncapped`, `under_50_percent`, `from_50_percent`, `from_80_percent`, `at_limit`); it names no agent.
 
 **Private data, untrusted input and egress together.** An agent that can read private data, takes in content from outside its terms, and can send data off the network can be steered by injected content into leaking that data. Each operation and capability in the terms counts toward three exposures:
 
@@ -501,6 +503,8 @@ When a human identity is revoked:
 
 **Revocation does NOT cascade upward** — revoking a machine does not affect its controller.
 
+In chain state a root's revocation marks the root and every agent it delegated. A machine the root registered without agent terms is in no index the revocation walks. Once the reach rule is live (`feature.root_revocation_reach.activation_epoch`, dormant until a vote sets it), every check that refuses a revoked identity, or releases hardware a revoked identity held, also treats an identity whose DID is derived under a revoked root (`did:tenzro:machine:{root}:{id}`) as revoked.
+
 ### 10.3 Suspension
 
 Suspension is temporary and reversible. Suspended identities:
@@ -528,7 +532,7 @@ Every TDIP identity is automatically provisioned with a wallet bound to the iden
 | Signing key | P-256 key held in a passkey (human) or a TPM 2.0 / Secure Enclave (machine) |
 | Post-quantum key | Hardware ML-DSA-65 verifying key; an identity whose hardware has none is not registered |
 | Key shares | None: the key never leaves the device and the network holds no part of it |
-| Recovery | Any linked passkey, or the account's recovery signers after a wait any passkey can cancel; never a stored share |
+| Recovery | Any linked passkey, or the account's recovery signers after a wait during which the recovery can be cancelled; never a stored share |
 
 ### 12.2 Wallet Binding
 
@@ -615,7 +619,7 @@ TDIP identities can have registrations on multiple chains:
 
 - Human identity registration requires TNZO fee (economic barrier)
 - KYC tiers provide graduated trust levels
-- Governance voting is weighted by staked TNZO balance
+- Governance voting is weighted by the stake bonded when the vote is cast
 
 ### 15.3 Delegation Security
 
@@ -645,10 +649,10 @@ TDIP identities can have registrations on multiple chains:
 | `tenzro_revokeIdentity` | Admit a signed `RevokeIdentity` transaction (any account may send it; the root's approval inside authorises it) after checking the approval against chain state; every validator re-verifies it, every node revokes the identity's tokens when it applies the block, and a root's revocation also revokes the agents it delegated |
 | `tenzro_forgetIdentity` | Right-to-erasure: drop the identity's off-chain record |
 | `tenzro_verifyDidEnvelope` | Verify a DID-signed envelope (also served at `POST /verify/did-envelope`) |
-| `tenzro_bindDevice` | Bind a device from a WebAuthn registration; grades what the attestation actually proved (admin-token gated) |
+| `tenzro_bindDevice` | Bind a device from a WebAuthn registration; grades what the attestation actually proved (admin-class: the operator DID or a policy admin) |
 | `tenzro_listBoundDevices` | The devices that can authenticate as an identity, and each one's grade |
 | `tenzro_walletReadiness` | Whether a wallet may be created for this identity yet, and if not, the blocker and its remedy |
-| `tenzro_revokeBoundDevice` | Unbind a device and end every session it authorised, in one action (admin-token gated) |
+| `tenzro_revokeBoundDevice` | Unbind a device and end every session it authorised, in one action (admin-class: the operator DID or a policy admin) |
 | `tenzro_transferMachineOwnership` | Move a machine to another identity under `controller` authority (a controller device assertion) or `machine_key` authority (the machine's own signature) |
 
 The five device methods take their params as a **bare object**, not a
@@ -659,10 +663,10 @@ Reachable from every surface: CLI `tenzro device {list,wallet-readiness,revoke,t
 Rust SDK `client.device()`, TypeScript SDK `client.device()`, MCP tools
 `list_bound_devices` / `wallet_readiness`.
 
-The roots an operator pins for attestation verification are
-`webauthn_trusted_roots` in `NodeConfig` — base64 DER, one per entry. An entry
-that does not decode is dropped rather than trusted, so a typo narrows what the
-node will accept instead of widening it.
+The roots attestation verification uses are the list governance put in force
+(`WebauthnRootsSet`), read from chain state: the one list registration checks
+against, with no node-local copy. An entry that does not parse is dropped rather
+than trusted, so a typo narrows what the node will accept instead of widening it.
 
 ---
 
@@ -828,6 +832,108 @@ credentials on it; a window with none would leave an unowned machine still
 holding keys. Authorisations carry an expiry so a signed transfer cannot be
 replayed later against a machine that has since changed hands.
 
+## Identity key history
+
+An identity signs what it issues (delegations, batch roots, receipts) with an
+Ed25519 and an ML-DSA-65 key. The chain records every such key with a version
+that rises by one and the block time it took effect, so a verifier judges a
+record by the key that was in force when the record was made, and a rotation
+does not invalidate what was signed before it.
+
+A key change, sent as a `NativeCall` under the identity-keys selector, carries one change, approved by the identity's
+root (the identity itself when it is a root, the controller a delegated
+agent's terms name, or the root a delegated machine's DID is derived under):
+
+| Change | Effect | Log |
+|---|---|---|
+| `update` | records the next key (`version`, `ed25519`, `ml_dsa`) and, optionally, `next_commitment` | `IdentityKeyUpdated` |
+| `compromised` | declares the key of `version` compromised from this block on; it vouches for nothing made afterwards | `IdentityKeyCompromised` |
+| `revoke_delegation` | records that the identity revoked the delegation `delegation_id`; it vouches for nothing made afterwards | `IdentityDelegationRevoked` |
+
+**Pre-rotation.** `next_commitment` is `SHA-256("tenzro/identity/next-key/v1" ‖
+ed25519 ‖ len(ml_dsa) ‖ ml_dsa)` of the key that will replace the one being
+recorded. While the key in force carries a commitment, the next update must
+reveal exactly the committed key or it is refused. A commitment is a hash, so
+it still decides the successor when the key in force is broken. One case
+lifts it: the approving root's account completed a recovery at or after the
+committed key took effect, since the committed key may have been on a device
+the recovery retired.
+
+**One head per identity.** Under the system account the chain keeps
+`identity_head:<did>` = `{sequence, head, previous}`. Every log about the
+identity advances it: its registration (`IdentityRegister`), each change to
+its passkeys including a completed recovery (`KeystoreUpdated`), its
+revocation (`IdentityRevoked`) and each key change above. The head after the
+n-th log is `SHA-256("tenzro/identity/event/v1" ‖ len(did) ‖ did ‖ n ‖
+head(n-1) ‖ len(topic) ‖ topic ‖ SHA-256(data))`, lengths as 4 bytes and `n`
+as 8 bytes big-endian, with a zero head before the first. Folding an
+identity's logs in order and comparing the result with one state proof of the
+head shows that the history is complete and in order.
+
+The keys themselves are in `identity_keys:<did>`, and a revoked delegation in
+`identity_delegation_revoked:<did>:<id>` with the block time of its
+revocation. A revocation is recorded under the identity that made it, so only
+the issuer of a delegation can revoke it.
+
+## Hardware evidence at registration
+
+A registration proves its submitter holds the controller key; it does not
+prove the key lives in hardware. From the epoch governance sets in
+`feature.registration_attestation.activation_epoch`, a root registers only
+with evidence the chain checks itself:
+
+- an autonomous machine (`did:tenzro:machine:{id}`) carries, under its
+  `tpm_attestation` metadata, a TPM quote by the attestation key its DID
+  derives from, vouching for the controller key;
+- a human (`did:tenzro:human:{id}`) carries the WebAuthn registration of its
+  passkey (`webauthn_attestation_object` and `webauthn_client_data_json`,
+  base64): a registration ceremony on an https origin over the challenge
+  `SHA-256("tenzro/registration-attestation/v1" ‖ len(did) ‖ did ‖ len(key) ‖
+  key)`, for the relying party that origin names, whose attestation chains
+  to a root governance set with the `WebauthnRootsSet` policy, for a
+  credential that cannot sync (not backup eligible), made with user
+  verification, whose key is the controller key and is held in hardware.
+
+Delegated identities answer to the root they are derived under, which is
+itself held to this rule. Institutions are not changed by it. Until the vote,
+registration is as before, and a `WebauthnRootsSet` proposal is refused.
+
+Consequences, for whoever switches it on:
+
+- synced platform passkeys (iCloud Keychain, Google Password Manager) can no
+  longer register a human root;
+- a machine with only a Secure Enclave and no TPM can no longer register an
+  autonomous machine root;
+- no human can register a root until governance has set the attestation
+  roots.
+
+### Records signed with a machine's identity key
+
+A machine derives its identity key per version from its hardware root;
+`tenzro-node identity-key --version N` prints the `Update` change that records
+version N and commits to N+1, which the machine's root approves with
+`tenzro identity keys`. Once `feature.root_signatures.activation_epoch` is
+live and the chain records, at the machine's latest version, the key the
+machine derives for that version, the node signs its jurisdiction receipts
+with that key. Each receipt is a batch of one whose root the key signs. The
+signature sits in the receipt's `batched` field as `{"root_member": hex}`,
+and the receipt still names the node's hardware key. Before then, or while the
+chain records another key or the key is declared compromised, receipts carry
+the hardware record signature as before. Both forms verify.
+
+A verifier checks the identity key form against its chain view. The root
+signature must be made for the machine DID the named hardware key derives, at
+the receipt's own time, by the key the chain recorded for that machine at the
+version it names. That key must not be declared compromised and the machine
+must not have revoked the signature. A receipt is judged by the key in force
+when it was made, so a rotation does not retire receipts made before it. A
+chain view older than `feature.root_signatures.max_gap_ms` is refused, and so
+is a receipt with no chain view to check it against. The routing node checks
+forwarded receipts this way, the trust ledger checks receipts in violation
+evidence this way, and `tenzro_verifyJurisdictionReceipt` reports either form
+for any holder. Inference receipts keep the record signature, because a
+fault filed in consensus checks theirs.
+
 ## Devices bound to an identity
 
 A Tenzro identity links devices the way an Apple ID does — a phone, a laptop, a
@@ -838,6 +944,13 @@ attestation: a signature, from a key the vendor put in hardware, over a
 challenge we chose, verifiable against a root we pin — through the FIDO
 Metadata Service by AAGUID, or the platform's own root. The platform is a
 conduit, not an authority.
+
+Bound devices are node-local records: `tenzro_listBoundDevices` reads them
+from the node that bound them and answers with each device's credential id,
+label, AAGUID and grade, never a public key. A relying party that needs the
+keys an identity's account signs with reads them from consensus state with
+`tenzro_getKeystore`: the account's linked passkeys, policy and recovery
+signers.
 
 Types: `tenzro_types::device_binding`
 (`BoundDevice`, `BindingPolicy`, `AttestationEvidence`, `KeyProtection`,
@@ -903,6 +1016,78 @@ takes both. Only device-bound (`BE=0`) credentials bind, because a syncable
 credential would make the second factor an account rather than a device.
 
 An identity may bind many devices, and each of them authenticates.
+
+## What cannot be recovered
+
+Nobody holds a copy of a key: not the network, not a node operator, not a
+wallet provider. Recovery therefore works only through what the holder set up
+beforehand, and each way back needs something the holder still has.
+
+**Passkeys still on the account.** A passkey approves a change to the
+account's keystore (linking a device, naming recovery signers, setting a
+recovery code) once it is past its add-device wait, and only as many passkeys
+as the policy asks for approve one: one under `single_credential`, two
+different ones under `two_credentials`. So:
+
+- under `single_credential`, one remaining passkey that counts links a new
+  device and resets the account's recovery. It does not spend alone unless
+  the account still holds two independent roots that count; a newly linked
+  device counts after `keystore.add_device_wait_ms`;
+- under `two_credentials`, one remaining passkey approves nothing and spends
+  nothing. With one passkey left, such an account comes back only through
+  its recovery signers or its recovery code.
+
+**Recovery signers.** Signers whose approvals reach the account's threshold
+in *independent* roots start a recovery for a new passkey; signers that share
+a root count once, and a kind of signer governance has paused approves
+nothing while it is paused. The recovery completes after its wait.
+
+**The recovery code.** The one-time code is claimed for a new passkey, by a
+transaction another account sends, and revealed after the claim has aged; the
+recovery completes after its wait. Recovery by code can also be paused by
+governance.
+
+Until governance sets `feature.recovery_rotation.activation_epoch`, a
+completed recovery adds the recovered passkey beside the ones already linked.
+From that epoch it leaves the account with the recovered passkey alone and
+the `single_credential` policy: every passkey linked before it is retired and
+has to be linked again. The account then holds one root, so it spends again
+once a second independent passkey is linked and has served its wait.
+
+**When no passkeys that can approve are left, the remaining recovery signers
+do not reach the threshold in independent roots, and there is no recovery
+code, the account is unrecoverable.** Its balance stays on the ledger at an
+address nothing can sign for. No node operator, wallet provider or support
+channel can move it, and governance has no action that does: a governance
+revocation of an identity (`revoke_identity`) records the revocation and
+moves no balance, and `recover_unowned_funds` draws only from system-held
+addresses, never a user account, and pays only the treasury.
+
+The same holds below the account:
+
+- A recovery code works once. After it is used, or lost, the account has
+  none until its passkeys set a new one.
+- A recovery signer that is lost approves nothing, and only the account's
+  passkeys can name new signers.
+- A wallet with one passkey and no recovery signers or code is lost with
+  that device.
+- A machine's identity key lives in that machine's TPM or Secure Enclave and
+  is lost with the hardware. A *delegated* machine, whose DID is derived
+  under a root, is revoked by that root, which registers the replacement
+  hardware as a new machine. A *hardware-rooted* machine has no controller:
+  it is revoked by a signature of its own hardware key, so once the hardware
+  is gone nothing of its own revokes it, and the only revocation left is a
+  governance `revoke_identity` proposal. Whatever its account holds stays
+  there.
+
+So the time to act is before anything is lost: link a second, separate
+device, name recovery signers on devices kept apart from the passkeys, set a
+recovery code and keep it offline. `tenzro_getKeystore` returns the account's
+keystore (its passkeys, policy, recovery signers and threshold, whether a
+recovery code is set, any pending recovery) with its count of independent
+roots and whether it may spend. `tenzro_walletReadiness` reports the devices
+bound to an identity on that node and what blocks a wallet there; it says
+nothing about recovery signers or a code.
 
 ## Sessions
 

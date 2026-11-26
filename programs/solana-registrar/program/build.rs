@@ -6,8 +6,8 @@ const MAINNET_BETA: &str = "45296998a6f8e2a784db5d9f95e18fc23f70441a103944680108
 
 fn main() {
     println!("cargo:rerun-if-env-changed=TENZRO_SVM_CLUSTER_GENESIS");
-    let hex = std::env::var("TENZRO_SVM_CLUSTER_GENESIS")
-        .unwrap_or_else(|_| MAINNET_BETA.to_string());
+    let hex =
+        std::env::var("TENZRO_SVM_CLUSTER_GENESIS").unwrap_or_else(|_| MAINNET_BETA.to_string());
     assert!(
         hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
         "TENZRO_SVM_CLUSTER_GENESIS must be 64 hex characters"

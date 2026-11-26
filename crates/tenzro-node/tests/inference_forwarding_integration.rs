@@ -89,7 +89,7 @@ impl Gateway {
         // A loopback endpoint that publishes nowhere: providers are made
         // known to it directly by `announce`.
         let iroh = tenzro_iroh::TenzroIrohConfig {
-            bind_addr: free_udp_port(),
+            bind_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
             ..Default::default()
         };
         let mut config = NodeConfig {
@@ -273,13 +273,6 @@ impl Gateway {
     }
 }
 
-/// A UDP port on loopback that was free a moment ago.
-fn free_udp_port() -> std::net::SocketAddr {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .expect("a free loopback port")
-}
-
 /// A provider on its own endpoint serving `tenzro/infer`: records the body
 /// of each request it serves and answers with `reply`.
 struct MockProvider {
@@ -311,17 +304,16 @@ impl RequestHandler for Recorder {
 async fn mock_provider(reply: Value) -> MockProvider {
     let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
     // A provider speaks the node endpoints' TLS: the hybrid key exchange only.
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .crypto_provider(Arc::new(
-            tenzro_iroh::identity_transport::peer_crypto_provider(),
-        ))
-        // Loopback only, as the gateway is: a provider bound to every address
-        // advertises 0.0.0.0, which Windows does not route to this machine.
-        .bind_addr("127.0.0.1:0")
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
+    // Loopback only, as the gateway is: a provider bound to every address
+    // advertises 0.0.0.0, which Windows does not route to this machine.
+    let endpoint =
+        tenzro_iroh::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .crypto_provider(Arc::new(
+                tenzro_iroh::identity_transport::peer_crypto_provider(),
+            ))
+            .bind()
+            .await
+            .unwrap();
     let handler = Arc::new(Recorder {
         reply,
         seen: seen.clone(),
@@ -926,20 +918,19 @@ impl RequestHandler for ReceiptingProvider {
 async fn receipting_provider() -> MockProvider {
     let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
     // A provider speaks the node endpoints' TLS: the hybrid key exchange only.
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .crypto_provider(Arc::new(
-            tenzro_iroh::identity_transport::peer_crypto_provider(),
-        ))
-        // Loopback only, as the gateway is: a provider bound to every address
-        // advertises 0.0.0.0, which Windows does not route to this machine.
-        .bind_addr("127.0.0.1:0")
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
+    // Loopback only, as the gateway is: a provider bound to every address
+    // advertises 0.0.0.0, which Windows does not route to this machine.
+    let endpoint =
+        tenzro_iroh::identity_transport::on_loopback(Endpoint::builder(presets::Minimal))
+            .crypto_provider(Arc::new(
+                tenzro_iroh::identity_transport::peer_crypto_provider(),
+            ))
+            .bind()
+            .await
+            .unwrap();
     let handler = Arc::new(ReceiptingProvider {
         signer: tenzro_crypto::batch::ImmediateRecordSigner::new(Arc::new(
-            tenzro_crypto::composite::testing::TestHybridSigner::random(),
+            tenzro_crypto::composite::testing::TestHybridSigner::hybrid(0x51),
         )),
         seen: seen.clone(),
     });

@@ -1,6 +1,6 @@
 [package]
 name = "tenzro-node"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -19,6 +19,7 @@ required-features = ["test-passkey"]
 # (single_instance.rs) — flock on Unix, LockFileEx on Windows.
 fs4 = { workspace = true }
 tenzro-types = { workspace = true }
+tenzro-native-ops = { workspace = true }
 tenzro-onboarding-types = { workspace = true }
 tenzro-update-notice = { workspace = true }
 tenzro-crypto = { workspace = true }
@@ -34,6 +35,7 @@ tenzro-wallet = { workspace = true, features = ["gridplus-signer"] }
 tenzro-keystore-unlock = { workspace = true }
 tenzro-keygen = { workspace = true }
 tenzro-consensus = { workspace = true }
+tenzro-light = { workspace = true }
 tenzro-vm = { workspace = true }
 tenzro-token = { workspace = true }
 tenzro-identity = { workspace = true }
@@ -67,9 +69,10 @@ tower-http = { workspace = true }
 tower = { workspace = true }
 qrcode = { workspace = true }
 chrono = { workspace = true }
-chrono-tz = { workspace = true }
+jiff = { workspace = true }
 maxminddb = { workspace = true }
 toml = { workspace = true }
+toml_edit = "0.22"
 hex = { workspace = true }
 bs58 = { workspace = true }
 sha2 = { workspace = true }
@@ -100,6 +103,18 @@ libc = { workspace = true }
 portmapper = { workspace = true }
 prometheus-client = { workspace = true }
 rustls = { workspace = true }
+# The listener paired devices reach the node on (paired_listener.rs), with the
+# `paired-devices` feature: TLS over TCP, HTTP/1.1, and this machine's
+# addresses on private networks.
+tokio-rustls = { workspace = true, optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio", "service"], optional = true }
+netdev = { workspace = true, optional = true }
+# Self-signed certificates a client pins by hash (pinned_cert.rs), with the
+# `pinned-cert` feature.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "aws_lc_rs", "pem"], optional = true }
+time = { version = "0.3", optional = true }
+wtransport = { workspace = true, optional = true }
 aws-lc-rs = { workspace = true }
 ed25519-dalek = { workspace = true }
 zeroize = { workspace = true }
@@ -118,7 +133,17 @@ required-features = ["inference"]
 # TEST FIXTURE ONLY: builds the examples/test_passkey software passkey that signs transport grants for private
 # test networks. Never in default, never enabled by a release or deploy build.
 test-passkey = []
-default = ["inference", "mcp-output-schemas"]
+# The app transport: a WebTransport listener for the devices of applications
+# (app_transport/). Off unless built in and configured.
+app-transport = ["pinned-cert", "dep:wtransport"]
+# Short-lived self-signed certificates a listener serves and its clients pin
+# by hash (pinned_cert.rs).
+pinned-cert = ["dep:rcgen", "dep:time"]
+# The listener paired devices reach the node on over the local network
+# (paired_listener.rs). On in every default build; an edge or embedded build
+# that leaves it out pairs devices only through the node's RPC address.
+paired-devices = ["pinned-cert", "dep:tokio-rustls", "dep:hyper", "dep:hyper-util", "dep:netdev"]
+default = ["inference", "mcp-output-schemas", "paired-devices"]
 # The model engines and every surface that runs a model on this machine:
 # local chat and completions, embeddings, rerank, speech, vision, media
 # generation, training, MoE expert hosting and the layer pipeline. Required by
@@ -162,12 +187,16 @@ onnx-coreml = ["inference", "tenzro-model/onnx-coreml"]
 svm-full = ["tenzro-vm/svm-full"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 
 [dev-dependencies]
-tenzro-update-notice = { workspace = true, features = ["fixture"] }
+ciborium = { workspace = true }
+tenzro-iroh = { workspace = true, features = ["test-support"] }
+tenzro-update-notice = { workspace = true, features = ["test-keys"] }
 # tests/tls_roots.rs: a local TLS server under a test authority.
 rcgen = "0.14"
+# The pinned certificate tests read back what was minted.
+x509-parser = "0.18"
 tokio-rustls = { workspace = true }
 # External wallet transactions in tests are built as the wallets build them.
 rlp = { workspace = true }
@@ -191,7 +220,7 @@ reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tenzro-auth = { workspace = true }
-tenzro-identity = { workspace = true }
+tenzro-identity = { workspace = true, features = ["test-support"] }
 ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }

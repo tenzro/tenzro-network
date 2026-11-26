@@ -75,14 +75,11 @@ const TOOLS_JSON: &str = r#"[
 ]"#;
 
 #[test]
-#[ignore = "reads the local GGUFs under ~/.tenzro/models"]
+#[ignore = "reads the GGUFs of the models directory"]
 fn every_local_model_renders_tools_through_its_own_template() {
     let dir = models_dir();
     let models = ggufs(&dir);
-    if models.is_empty() {
-        eprintln!("no GGUFs under {} — nothing to check", dir.display());
-        return;
-    }
+    assert!(!models.is_empty(), "no GGUFs under {}", dir.display());
 
     let backend = LlamaBackend::init().expect("backend");
     let mut with_tools = 0usize;

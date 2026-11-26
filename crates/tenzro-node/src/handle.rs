@@ -76,7 +76,8 @@ struct HandleInner {
     /// Join handle for the background task. `Mutex` so the first
     /// [`shutdown_and_wait`](NodeHandle::shutdown_and_wait) call can take
     /// it; subsequent calls return `Ok(())` immediately.
-    join: Mutex<Option<JoinHandle<()>>>,
+    /// Ends with why the node's event loop failed, if it did.
+    join: Mutex<Option<JoinHandle<Option<String>>>>,
 }
 
 impl NodeHandle {
@@ -110,18 +111,25 @@ impl NodeHandle {
         let _ = self.inner.shutdown_tx.send(true);
     }
 
-    /// Signal shutdown and wait for the background task to drain.
-    /// Subsequent calls return `Ok(())` because the join handle is taken
-    /// on first call.
+    /// Signal shutdown and wait for the background task to drain. Fails
+    /// when the node's event loop had failed (an error or a panic) rather
+    /// than being asked to stop. Subsequent calls return `Ok(())` because
+    /// the join handle is taken on first call.
     pub async fn shutdown_and_wait(&self) -> Result<()> {
         let _ = self.inner.shutdown_tx.send(true);
         let join = self.inner.join.lock().await.take();
-        if let Some(join) = join
-            && let Err(e) = join.await
-        {
-            warn!("NodeHandle background task panicked: {}", e);
+        match join {
+            Some(join) => match join.await {
+                Ok(None) => Ok(()),
+                Ok(Some(why)) => Err(crate::error::NodeError::Other(format!(
+                    "the node's event loop failed: {why}"
+                ))),
+                Err(e) => Err(crate::error::NodeError::Other(format!(
+                    "the node's background task panicked: {e}"
+                ))),
+            },
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -229,18 +237,23 @@ async fn spawn_in_background_inner(
     // no experts.
     #[cfg(feature = "inference")]
     crate::moe::spawn_moe_repair_loop(node.clone());
+    crate::storage_placement::spawn_storage_repair_loop(node.clone());
     crate::compute_index_reporter::spawn_fee_rate_reporter(node.clone());
+    crate::challenge_notice::spawn(node.clone());
     crate::sla_attest::spawn_probe_scheduler(node.clone());
     crate::sla_attest::spawn_attestation_submitter(node.clone());
     crate::sla_attest::spawn_burst_challenge_scheduler(node.clone());
     crate::optimistic::spawn_reviewer(node.clone());
     crate::da_retention::spawn(node.clone());
     crate::beacon::spawn_contributor(node.clone());
+    crate::role_bonds::spawn_watch(node.clone());
     crate::hardware_possession::spawn(node.clone());
+    crate::operator_alert::spawn(node.clone());
     crate::identity_bootstrap::keep_chain_policies(node.clone());
 
     let join = tokio::spawn(async move {
         info!("NodeHandle background task started");
+        let mut failure = None;
         let mut ticker = tokio::time::interval(STATUS_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -255,6 +268,19 @@ async fn spawn_in_background_inner(
                         // the channel went quiet.
                         debug!("NodeHandle status watch channel has no receivers");
                     }
+                }
+                // The node stopped itself (`tenzro_gracefulExit`, an error).
+                end = node_for_task.event_loop_stopped() => {
+                    match end {
+                        crate::node::EventLoopEnd::Shutdown => {
+                            info!("NodeHandle: the node's event loop stopped")
+                        }
+                        crate::node::EventLoopEnd::Failed(why) => {
+                            error!(reason = %why, "NodeHandle: the node's event loop failed");
+                            failure = Some(why);
+                        }
+                    }
+                    break;
                 }
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() {
@@ -284,6 +310,7 @@ async fn spawn_in_background_inner(
         // drain consensus / network / RPC state cleanly.
         tokio::time::sleep(SHUTDOWN_GRACE).await;
         info!("NodeHandle background task exited");
+        failure
     });
 
     Ok(NodeHandle {

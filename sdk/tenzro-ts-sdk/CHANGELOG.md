@@ -5,12 +5,25 @@
 First release.
 
 ### Added
+- `TenzroClient.clientVersion()` (`web3_clientVersion`) and
+  `MultimodalClient.transcribeRecording` (`tenzro_transcribeStream`): a whole
+  recording through the streaming transcription, every event in order;
+  `ValidatorClient.fleetHostEvidence` (`tenzro_fleetHostEvidence`). Both
+  SDKs now bind the same node methods; the methods neither binds on purpose
+  are listed in the README.
+- `ComputeClient` (`client.compute`): typed compute bonds, compute claims and
+  the observed price feed, and `rent`, which signs a `CreateEscrow` with stream
+  release to a provider's bonded address (`rentTransaction`). The compute
+  reads moved here from `ProviderClient`.
+- `DaClient` (`client.da`): typed data-availability committee, blob and
+  challenge reads, moved from `StorageClient`.
 - `NetworkPreset`, `PREVIEW_NETWORK`, `PREVIEW_CONFIG` and
   `TenzroClient.preview()`.
 - `TypedTxClient.prepare(from, tx)`: a dry run that has the node encode the
   signing payload, checks it and returns the unsigned request and digest.
 - `RpcCallError.isLightBuild`, for the light build's refusal of calls that
-  need a local model.
+  need a local model; `isJurisdictionUnmet` (-32024) and
+  `isBelowSettlementFloor` (-32026, a charge below the micro-settlement floor).
 - Typed results for the admin audit log, kill-switch receipts and pages,
   treasury accounts, ZK proofs and verification, TEE providers, finality and
   checkpoint certificates, provider stats and inference results.

@@ -77,6 +77,19 @@ pub async fn settle_for_resource(
         quantity: 1,
         unit_price: price,
     }];
+    settle_metered(node, credential, resource, lines, price).await
+}
+
+/// Verify and settle `credential` as payment for `lines` served from
+/// `resource`, together `charge`: metered as [`settle_for_resource`] meters
+/// one request.
+pub async fn settle_metered(
+    node: &Arc<TenzroNode>,
+    credential: &PaymentCredential,
+    resource: &str,
+    lines: Vec<tenzro_payments::metering::UsageLine>,
+    charge: u128,
+) -> PaymentResult<PaymentReceipt> {
     let metered = meter(node, credential, lines)?;
     let credential = metered.as_ref().map(|(c, _)| c).unwrap_or(credential);
     let payments = &node.config().payments;
@@ -86,7 +99,7 @@ pub async fn settle_for_resource(
             PaymentExpectation::Resource {
                 resource,
                 payee: &payments.recipient,
-                min_amount: price,
+                min_amount: charge,
                 asset: &payments.default_asset,
             },
         )

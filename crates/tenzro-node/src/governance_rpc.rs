@@ -204,6 +204,9 @@ pub(crate) fn handle_get_treasury_payouts(
             "per_grantee_yearly_max_tnzo": param_of(gates::GRANTEE_YEARLY_PARAM),
             "combined_yearly_max_tnzo": param_of(gates::COMBINED_YEARLY_PARAM),
         },
+        "sponsorship_usage": tenzro_vm::native::sponsorship_end::usage_trigger(&chain),
+        "intake_waived": tenzro_vm::native::settlement_asset::intake_waived_report(&chain),
+        "affiliated": gates::affiliated_report(&chain, chrono::Utc::now().timestamp_millis()),
         "address": address,
     }))
 }
@@ -362,6 +365,7 @@ pub(crate) fn handle_get_upgrade_readiness(
         "met": r.met(),
         "signals": r.signals,
         "scheduled": tenzro_vm::native::read_upgrade_activation(&chain),
+        "scheduled_platforms": tenzro_vm::native::read_upgrade_platforms(&chain),
         "this_node_runs_it": runs,
     }))
 }

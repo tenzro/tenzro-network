@@ -8,7 +8,10 @@
 //! is lowered, so the list only shrinks. The goal is an empty list.
 //!
 //! Entries with the reason `one operation` derive a key from hardware output,
-//! use it once and wipe it; they stay. Entries with any other reason are
+//! use it once and wipe it; they stay. Entries with the reason `session key`
+//! hold a key the machine's hardware identity certified for a bounded time,
+//! as the consensus session key does; the key zeroizes on drop and never
+//! outlives its certificate; they stay. Entries with any other reason are
 //! migration work: each is removed by moving its record type to the hardware
 //! batch signer (`tenzro_device_key::batch_signer`).
 
@@ -34,6 +37,14 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "tenzro-node/src/tpm_key_holder.rs",
         1,
         "transport key K of the key holder link to a remote provider: ephemeral, never written, usable for transport only (cannot sign records, votes or funds), bound by a passkey grant until T; the local socket uses the kernel peer credentials (peer_cred) and an allowed-uid list and holds no key. Residual stated in docs/CHANNEL-AUTHENTICATION.md",
+    ),
+    // A session key the hardware identity certified once: random per boot, signs
+    // heartbeats only, renewed at half its certificate's life (at most the governed
+    // `heartbeat.session_max_lifetime_ms`), zeroized on drop (checked below).
+    (
+        "tenzro-crypto/src/heartbeat_session.rs",
+        1,
+        "session key: in-memory Ed25519 key certified by the machine identity for a bounded time, signs heartbeats only, zeroized on drop",
     ),
     // A key made for one operation, consumed or wiped; the type zeroizes on drop (checked below).
     (
@@ -62,9 +73,9 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "one operation: key derived from hardware output, used for one signature, wiped",
     ),
     (
-        "tenzro-device-key/src/backend_tpm.rs",
+        "tenzro-device-key/src/hpke.rs",
         1,
-        "one operation: ephemeral agreement for one TPM import, dropped at once",
+        "one operation: ephemeral agreement for one HPKE seal (the TPM import and every other seal go through it), dropped at once",
     ),
 ];
 
@@ -80,7 +91,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
             rs_files(&p, out);
         } else if p.extension().is_some_and(|x| x == "rs") {
             let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if n.ends_with("_tests.rs") || n == "test_support.rs" {
+            if n.ends_with("_tests.rs") || n == "tests.rs" || n == "test_support.rs" {
                 continue;
             }
             out.push(p);
@@ -106,6 +117,9 @@ fn counts() -> BTreeMap<String, usize> {
         let mut skipping = false;
         let mut depth: i32 = 0;
         let mut opened = false;
+        // Parenthesis depth of the attribute lines of a skipped item: a `,` ending a line inside
+        // `#[allow(` .. `)]` does not end the skip.
+        let mut paren: i32 = 0;
         for line in text.lines() {
             let t = line.trim_start();
             if t.starts_with("#[cfg(test)]") && !skipping && depth == 0 && !t.contains("mod ") {
@@ -132,15 +146,20 @@ fn counts() -> BTreeMap<String, usize> {
                             opened = true;
                         }
                         '}' => depth -= 1,
+                        '(' if !opened => paren += 1,
+                        ')' if !opened => paren -= 1,
                         _ => {}
                     }
                 }
                 // A test-only struct field or argument is one line ending in `,`; without this
                 // the skip would run on to the closing brace of the enclosing literal and leave
                 // the depth off, so later test modules would be scanned as production code.
-                if (opened && depth <= 0) || (!opened && (t.ends_with(';') || t.ends_with(','))) {
+                if (opened && depth <= 0)
+                    || (!opened && paren <= 0 && (t.ends_with(';') || t.ends_with(',')))
+                {
                     skipping = false;
                     depth = 0;
+                    paren = 0;
                 }
                 continue;
             }
@@ -217,7 +236,9 @@ fn test_only_key_features_are_enabled_only_from_dev_dependencies() {
             let tool_crate = ["tenzro-sim", "tenzro-econsim", "tenzro-settlement-fuzz"]
                 .iter()
                 .any(|n| c.path().ends_with(n));
+            // `required-features` only gates a bench or example target; it enables nothing.
             if names_feature
+                && !t.starts_with("required-features")
                 && !tool_crate
                 && t.contains("features")
                 && !section.contains("dev-dependencies")
@@ -284,11 +305,6 @@ const ALLOWED_FILE_OPS: &[(&str, usize, &str)] = &[
         "tenzro-econsim/src/bin/tenzro-econsim.rs",
         1,
         "not a key: reads seeds.jsonl, simulation seeds of a tool binary",
-    ),
-    (
-        "tenzro-cli/src/commands/update/tests.rs",
-        3,
-        "compiled only under cfg(test) (update/mod.rs gates the module); writes placeholder bytes named like a key handle and a hybrid key record into a temporary directory to check an update leaves the device-keys folder and that record alone; no key is generated or read",
     ),
     (
         "tenzro-openshell/src/gateway_auth.rs",

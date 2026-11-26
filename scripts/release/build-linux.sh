@@ -4,14 +4,18 @@
 # any of them.
 #
 #   cpu   Dockerfile        (Ubuntu 24.04, glibc 2.39 floor)
-#   cuda  Dockerfile.cuda   (Ubuntu 24.04, CUDA 13, glibc 2.39 floor); it also
-#                           compiles ONNX Runtime with the CUDA and TensorRT
-#                           providers for the host architecture
+#   cuda  Dockerfile.cuda   (Ubuntu 24.04, CUDA 13, glibc 2.39 floor); ONNX
+#                           Runtime linked statically from the pinned cuda13
+#                           archive, its CUDA and TensorRT providers in bin/
 #   edge  Dockerfile with NODE_BUILD=edge (aarch64 only): the light build for
 #         the edge tier, no model engines, the edge profile; the CLI as for cpu
 #   vulkan Dockerfile.vulkan (Ubuntu 24.04, glibc 2.39 floor); llama.cpp's
 #                           Vulkan backend for AMD, Intel and NVIDIA GPUs,
 #                           linked against the Vulkan loader (libvulkan.so.1)
+#   cpu-bookworm Dockerfile.cpu-bookworm (aarch64 only; Debian 12, glibc 2.36
+#         floor): the light build under the edge profile for boards on
+#         Raspberry Pi OS or Debian Bookworm, the archive install.sh takes on
+#         an aarch64 machine whose glibc is older than 2.39
 #
 # x86_64 artifacts build on an x86_64 host, aarch64 artifacts on an aarch64 host.
 #
@@ -29,11 +33,11 @@
 # After the archive, the script builds its container image with
 # scripts/release/build-image.sh (from the archive's binaries; IMAGE=0 skips).
 #
-# Usage: scripts/release/build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|edge> [ref] [dist-dir]
+# Usage: scripts/release/build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|rocm|edge|cpu-bookworm> [ref] [dist-dir]
 set -euo pipefail
 
-ARCH=${1:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|edge> [ref] [dist-dir]}
-FLAVOUR=${2:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|edge> [ref] [dist-dir]}
+ARCH=${1:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|rocm|edge|cpu-bookworm> [ref] [dist-dir]}
+FLAVOUR=${2:?usage: build-linux.sh <x86_64|aarch64> <cpu|cuda|vulkan|rocm|edge|cpu-bookworm> [ref] [dist-dir]}
 REF=${3:-HEAD}
 DIST=${4:-$HOME/dist}
 MEM=${MEM:-24g}
@@ -47,13 +51,14 @@ ORT_JOBS=${ORT_JOBS:-$(( cap_gb / 8 ))}
 [ "$ORT_JOBS" -ge 1 ] || ORT_JOBS=1
 
 case "$ARCH/$FLAVOUR" in
-    x86_64/cpu|x86_64/cuda|x86_64/vulkan|aarch64/cpu|aarch64/cuda|aarch64/vulkan|aarch64/edge) ;;
+    x86_64/cpu|x86_64/cuda|x86_64/vulkan|x86_64/rocm|x86_64/cpu-bookworm|aarch64/cpu|aarch64/cuda|aarch64/vulkan|aarch64/edge|aarch64/cpu-bookworm) ;;
     *) echo "REFUSING: unknown target $ARCH/$FLAVOUR"; exit 1 ;;
 esac
 [ "$(uname -m)" = "$ARCH" ] || { echo "REFUSING: build host is $(uname -m), not $ARCH"; exit 1; }
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
+scripts/supply-chain/check-build-host.sh
 . scripts/release/lib.sh
 CT=$(release_container)
 
@@ -62,7 +67,7 @@ stamp=$(git rev-parse --short "$commit")
 epoch=$(release_epoch "$commit")
 name="tenzro-node-linux-$ARCH-$FLAVOUR"
 features=""
-case "$FLAVOUR" in cpu) ;; edge) features="light (no default features, edge profile)" ;; *) features="tenzro-node/$FLAVOUR" ;; esac
+case "$FLAVOUR" in cpu) ;; edge|cpu-bookworm) features="light (no default features, edge profile)" ;; *) features="tenzro-node/$FLAVOUR" ;; esac
 
 ctx=$(mktemp -d)
 stage=$(mktemp -d)/$name
@@ -102,11 +107,12 @@ $CT cp "$cid:/usr/local/share/tenzro-debug/." "$dbg/"
 # The installer travels with the archive it installs.
 install -m 755 "$ctx/scripts/release/tenzro-node-install" "$stage/tenzro-node-install"
 release_network_profile "$ctx" "$stage"
+release_console "$ctx" "$stage"
 if [ "$FLAVOUR" = cuda ]; then
-    mkdir -p "$stage/lib"
-    # ONNX Runtime and its providers, symlinks kept; stdout carries only the tar.
-    $CT run --rm --entrypoint /bin/sh "$image" -c 'cd /usr/local/lib && tar -c libonnxruntime*' \
-        | tar -x -C "$stage/lib"
+    # The ONNX Runtime providers, which the statically linked runtime loads from
+    # the binary's own folder; stdout carries only the tar.
+    $CT run --rm --entrypoint /bin/sh "$image" -c 'cd /usr/local/bin && tar -c libonnxruntime_providers_*.so' \
+        | tar -x -C "$stage/bin"
 fi
 echo "built in $(( ($(date +%s) - started) / 60 )) min"
 
@@ -116,8 +122,10 @@ want=x86-64; [ "$ARCH" = aarch64 ] && want=aarch64
 file "$node" | grep -q "$want" || { echo "REFUSING: not a $ARCH ELF"; exit 1; }
 if [ "$FLAVOUR" = cuda ]; then
     grep -qa ggml_cuda_init "$node" || { echo "REFUSING: no ggml_cuda symbols in a cuda build"; exit 1; }
-    for lib in libonnxruntime.so.1 libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
-        [ -e "$stage/lib/$lib" ] || { echo "REFUSING: lib/$lib missing from a cuda build"; exit 1; }
+    ! readelf -d "$node" | grep -q 'NEEDED.*libonnxruntime\.so' \
+        || { echo "REFUSING: the cuda node links a shared ONNX Runtime, not the pinned static one"; exit 1; }
+    for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so libonnxruntime_providers_tensorrt.so; do
+        [ -e "$stage/bin/$lib" ] || { echo "REFUSING: bin/$lib missing from a cuda build"; exit 1; }
     done
 else
     ! grep -qa ggml_cuda_init "$node" || { echo "REFUSING: ggml_cuda symbols in a $FLAVOUR build"; exit 1; }
@@ -138,12 +146,37 @@ for bin in "$stage/bin/tenzro-node" "$stage/bin/tenzro"; do
         echo "REFUSING: $(basename "$bin") links the CUDA driver library"; exit 1
     fi
 done
-if [ "$FLAVOUR" = edge ]; then
-    ! grep -qa ggml_init "$node" || { echo "REFUSING: the model engines in an edge build"; exit 1; }
+if [ "$FLAVOUR" = edge ] || [ "$FLAVOUR" = cpu-bookworm ]; then
+    ! grep -qa ggml_init "$node" || { echo "REFUSING: the model engines in a $FLAVOUR build"; exit 1; }
     # Built on the target architecture, so its own check runs here.
-    "$node" hardware 2>/dev/null | grep -qx "build: light" || { echo "REFUSING: an edge build that does not report the light build"; exit 1; }
+    "$node" hardware 2>/dev/null | grep -qx "build: light" || { echo "REFUSING: a $FLAVOUR build that does not report the light build"; exit 1; }
 fi
-echo "glibc floor: $(objdump -T "$node" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+floor=$(for bin in "$node" "$stage/bin/tenzro"; do objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*'; done | sort -uV | tail -1)
+echo "glibc floor: $floor"
+if [ "$FLAVOUR" = cpu-bookworm ] && [ "$(printf '%s\n' GLIBC_2.36 "$floor" | sort -V | tail -1)" != GLIBC_2.36 ]; then
+    echo "REFUSING: a Bookworm build that needs $floor"; exit 1
+fi
+# Tenzro Control, the desktop app (GTK 4, libadwaita), beside the node in every
+# archive but the edge one. The packaging step makes it its own package, so the
+# node's package never needs GTK. It is built in its own image, from its own
+# folder with the pinned toolchain file.
+if [ "$FLAVOUR" != edge ]; then
+    cctx=$ctx/apps/tenzro-control/linux
+    cp "$ctx/rust-toolchain.toml" "$cctx/"
+    cimage="tenzro-control:$ARCH-$stamp"
+    $CT build "${limits[@]}" --file "$cctx/Dockerfile" --tag "$cimage" \
+        --build-arg "CARGO_BUILD_JOBS=$JOBS" --build-arg "SOURCE_DATE_EPOCH=$epoch" "$cctx"
+    ccid=$($CT create "$cimage")
+    mkdir -p "$stage/control"
+    $CT cp "$ccid:/out/tenzro-control" "$stage/control/tenzro-control"
+    $CT rm -f "$ccid" >/dev/null
+    for f in com.tenzro.Control.desktop com.tenzro.Control.metainfo.xml com.tenzro.Control.svg; do
+        install -m644 "$cctx/data/$f" "$stage/control/$f"
+    done
+    file "$stage/control/tenzro-control" | grep -q "$want" || { echo "REFUSING: tenzro-control is not a $ARCH ELF"; exit 1; }
+    readelf -d "$stage/control/tenzro-control" | grep -q 'NEEDED.*\[libadwaita-1\.so' \
+        || { echo "REFUSING: tenzro-control does not link libadwaita"; exit 1; }
+fi
 
 mkdir -p "$DIST"
 release_pack "$stage" "$DIST/$name.tar.gz" "$epoch"
@@ -154,5 +187,5 @@ release_buildenv "$DIST/$name.buildenv.json" "$name" "$commit" "$FLAVOUR" "$ARCH
 echo "BUILD OK: $DIST/$name.tar.gz"
 
 # The container image of this archive, from its binaries (IMAGE=0 skips it).
-# An edge archive has none: edge machines run the archive itself.
-[ "${IMAGE:-1}" = 0 ] || [ "$FLAVOUR" = edge ] || bash scripts/release/build-image.sh "$ARCH" "$FLAVOUR" "$DIST"
+# An edge or Bookworm archive has none: those machines run the archive itself.
+[ "${IMAGE:-1}" = 0 ] || [ "$FLAVOUR" = edge ] || [ "$FLAVOUR" = cpu-bookworm ] || bash scripts/release/build-image.sh "$ARCH" "$FLAVOUR" "$DIST"

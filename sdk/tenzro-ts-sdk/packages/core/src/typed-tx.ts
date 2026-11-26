@@ -1,5 +1,6 @@
 import type { RpcClient } from "./rpc";
 import { readQuantity } from "./rpc";
+import { parseExact } from "./exact-json";
 import {
   HybridSigner,
   TRANSACTION_SIGNATURE_CONTEXT,
@@ -106,6 +107,7 @@ export const TX_KINDS = [
   "AttachMachineAttestation",
   "SponsoredBond",
   "AccountOutflow",
+  "NativeCall",
 ] as const;
 
 /** One consensus transaction type. */
@@ -256,7 +258,7 @@ export async function checkSigningPayload(
   if (payload.kind === "plain") {
     const encoded = payload.tx_type_json;
     if (typeof encoded !== "string") throw mismatch("no tx_type encoding");
-    if (!sameJson(JSON.parse(encoded), type)) throw mismatch("tx_type");
+    if (!sameJson(parseExact(encoded), type)) throw mismatch("tx_type");
     digest = await sha256(
       concat([
         le(env.chainId, 8),
@@ -383,15 +385,37 @@ export class TypedTxClient {
     const chainId = await readQuantity(this.rpc, "eth_chainId", [], "chain id");
     const gasPrice = tx.gasPrice ?? (await readQuantity(this.rpc, "eth_gasPrice", [], "gas price"));
     const timestamp = Date.now();
+    const validUntil = timestamp + VALIDITY_MS;
+    // The node's estimate for the transaction when the caller names no
+    // gas limit.
+    const gasLimit =
+      tx.gasLimit ??
+      (await readQuantity(
+        this.rpc,
+        "tenzro_estimateGas",
+        [
+          {
+            from: fromHex,
+            to: "0x" + hex(to),
+            nonce,
+            chain_id: chainId,
+            gas_price: gasPrice,
+            timestamp,
+            valid_until: validUntil,
+            tx_type: type,
+          },
+        ],
+        "gas estimate",
+      ));
     const env: Envelope = {
       chainId,
       from,
       to,
       nonce,
-      gasLimit: tx.gasLimit ?? 500_000,
+      gasLimit,
       gasPrice,
       timestamp,
-      validUntil: timestamp + VALIDITY_MS,
+      validUntil,
     };
     const request: Record<string, unknown> = {
       from: fromHex,

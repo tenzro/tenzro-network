@@ -17,13 +17,11 @@ use ed25519_dalek::{
 };
 #[cfg(any(test, feature = "test-keys"))]
 use k256::ecdsa::SigningKey as Secp256k1SigningKey;
-#[cfg(any(test, feature = "test-keys"))]
-use rand::rngs::OsRng;
 // `getrandom 0.4` exposes `SysRng: TryCryptoRng` over `rand_core 0.10`,
 // which is the `CryptoRng` flavour `ecdsa 0.17-rc.18` consumes. Wrapping with
 // `rand_core::UnwrapErr(SysRng)` adapts the fallible `TryCryptoRng` to the
-// infallible `CryptoRng` that `SigningKey::random` requires. `rand::rngs::OsRng`
-// stays for ed25519-dalek 2.x, which still pins `rand_core 0.6`.
+// infallible `CryptoRng` that `SigningKey::random` requires. ed25519-dalek 3
+// builds its key from 32 random bytes (`from_bytes`), so it needs no RNG trait.
 #[cfg(any(test, feature = "test-keys"))]
 use getrandom_0_4::{SysRng, rand_core::UnwrapErr};
 use serde::{Deserialize, Serialize};
@@ -222,7 +220,7 @@ impl KeyPair {
     pub fn generate(key_type: KeyType) -> Result<Self> {
         match key_type {
             KeyType::Ed25519 => {
-                let signing_key = Ed25519SigningKey::generate(&mut OsRng);
+                let signing_key = Ed25519SigningKey::from_bytes(&rand::random());
                 let verifying_key = signing_key.verifying_key();
 
                 let secret_key = SecretKey::new(KeyType::Ed25519, signing_key.to_bytes().to_vec());
@@ -378,6 +376,33 @@ impl std::fmt::Debug for KeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 8032 section 7.1 test 1: the key encoding, the public key and the
+    /// signature bytes are fixed by the standard, so a library upgrade that
+    /// changed any of them fails here.
+    #[test]
+    fn ed25519_bytes_match_rfc_8032_test_1() {
+        use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+        let seed: [u8; 32] =
+            hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let key = SigningKey::from_bytes(&seed);
+        assert_eq!(key.to_bytes(), seed);
+        assert_eq!(
+            hex::encode(key.verifying_key().to_bytes()),
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        );
+        let signature = key.sign(b"");
+        assert_eq!(
+            hex::encode(signature.to_bytes()),
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        );
+        let public = VerifyingKey::from_bytes(&key.verifying_key().to_bytes()).unwrap();
+        public.verify_strict(b"", &signature).unwrap();
+        assert!(public.verify_strict(b"x", &signature).is_err());
+    }
 
     #[test]
     fn test_generate_ed25519_keypair() {

@@ -45,6 +45,7 @@ async fn serve(listener: tokio::net::TcpListener, count: usize, skew_nonce: u64)
             "tenzro_getNonce" => serde_json::json!("0x7"),
             "eth_chainId" => serde_json::json!("0x539"),
             "eth_gasPrice" => serde_json::json!("0x1"),
+            "tenzro_estimateGas" => serde_json::json!("0x7a120"),
             "tenzro_getSigningPayload" => {
                 let pre = serde_json::json!({
                     "chain_id": p["chain_id"],
@@ -83,7 +84,7 @@ async fn prepare_with(
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(serve(listener, 4, skew_nonce));
+    let server = tokio::spawn(serve(listener, 5, skew_nonce));
     let rpc = Arc::new(RpcClient::new(&url, Duration::from_secs(10), None).unwrap());
     let tx = TypedTransaction::new(TxKind::Transfer, serde_json::json!({ "amount": 5 }))
         .unwrap()
@@ -108,6 +109,7 @@ async fn prepare_checks_the_node_encoding_and_sends_nothing() {
             "tenzro_getNonce",
             "eth_chainId",
             "eth_gasPrice",
+            "tenzro_estimateGas",
             "tenzro_getSigningPayload"
         ]
     );

@@ -34,6 +34,7 @@ affect `cargo build --workspace`.
 | `ml_dsa_differential` | tenzro-crypto | the RustCrypto and libcrux ML-DSA-65 verifiers give the same verdict on every key, message, context and signature, starting from real signatures and editing them |
 | `proof_decode` | tenzro-finality, tenzro-cert-stark, tenzro-zk | finality journals, compact certificates, their claims and ML-DSA keys and signatures, proof envelopes of every system (alone and as legs of a diverse statement) and Groth16 finality seals never panic; a journal or claim that decodes re-encodes to exactly the input; no fuzzed proof, legs or seal verifies |
 | `agent_protocol_messages` | tenzro-node (light build) | A2A requests and their signed DID envelopes, A2A agent cards and MCP client metadata documents never panic; no fuzzed envelope verifies against a wallet nobody holds |
+| `record_signature_form` | tenzro-crypto | a signed record (`RecordSignature`) has one JSON encoding: an accepted input re-encodes to a form that decodes to the same record and encodes to the same bytes again; nothing panics the decoder |
 
 ## Scheduled runs
 

@@ -253,6 +253,89 @@ pub fn check_stop(set: &[LaunchValidator], stopping: &str) -> Result<(), LaunchR
     check_stops(set, &[stopping])
 }
 
+/// The order in which to restart the validators named in `restart`, as
+/// waves: every validator of a wave is stopped together and is live again
+/// before the next wave starts. Each wave passes [`check_stops`] against the
+/// set as it stands, so the validators left running still certify and still
+/// survive one more loss while a wave is down.
+///
+/// The first wave is one validator alone, the one with the least stake: a
+/// canary, so a release that does not come back up costs the least and is
+/// seen before anything else is stopped. Later waves take the remaining
+/// validators by rising stake, as many together as the check allows.
+///
+/// Refused when a named validator is not in `set`, and with the check's own
+/// refusal when one of them cannot be stopped even alone.
+pub fn plan_restarts(
+    set: &[LaunchValidator],
+    restart: &[&str],
+) -> Result<Vec<Vec<String>>, RestartPlanRefusal> {
+    let mut pending: Vec<&LaunchValidator> = Vec::new();
+    for name in restart {
+        let v = set
+            .iter()
+            .find(|v| v.name == *name)
+            .ok_or_else(|| RestartPlanRefusal::Unknown((*name).to_string()))?;
+        if !pending.iter().any(|p| p.name == v.name) {
+            pending.push(v);
+        }
+    }
+    pending.sort_by(|a, b| a.stake.cmp(&b.stake).then_with(|| a.name.cmp(&b.name)));
+    let mut waves: Vec<Vec<String>> = Vec::new();
+    while !pending.is_empty() {
+        let mut wave: Vec<&str> = Vec::new();
+        for v in &pending {
+            // The canary goes alone.
+            if waves.is_empty() && !wave.is_empty() {
+                break;
+            }
+            let mut with = wave.clone();
+            with.push(&v.name);
+            if check_stops(set, &with).is_ok() {
+                wave = with;
+            }
+        }
+        if wave.is_empty() {
+            let blocked = pending[0];
+            return Err(RestartPlanRefusal::Unsafe {
+                validator: blocked.name.clone(),
+                refusal: check_stop(set, &blocked.name)
+                    .expect_err("no wave was found for it alone"),
+            });
+        }
+        pending.retain(|v| !wave.contains(&v.name.as_str()));
+        waves.push(wave.into_iter().map(str::to_string).collect());
+    }
+    Ok(waves)
+}
+
+/// Why no restart order exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartPlanRefusal {
+    /// A validator to restart is not in the set.
+    Unknown(String),
+    /// A validator cannot be stopped even alone.
+    Unsafe {
+        /// The validator.
+        validator: String,
+        /// Why stopping it is refused.
+        refusal: LaunchRefusal,
+    },
+}
+
+impl std::fmt::Display for RestartPlanRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(name) => write!(f, "{name} is not a validator of the set"),
+            Self::Unsafe { validator, refusal } => {
+                write!(f, "{validator} cannot be stopped, even alone: {refusal}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RestartPlanRefusal {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +350,91 @@ mod tests {
                 hardware_identity: true,
             })
             .collect()
+    }
+
+    fn staked(stakes: &[u128]) -> Vec<LaunchValidator> {
+        stakes
+            .iter()
+            .enumerate()
+            .map(|(i, stake)| LaunchValidator {
+                name: format!("v{i}"),
+                stake: *stake,
+                live: true,
+                hardware_identity: true,
+            })
+            .collect()
+    }
+
+    /// Every wave of a plan, stopped together, leaves a set the stop check
+    /// accepts; the first wave is the smallest validator alone; and every
+    /// validator asked for is restarted exactly once.
+    #[test]
+    fn a_restart_plan_starts_with_a_canary_and_never_stops_an_unsafe_wave() {
+        for stakes in [
+            vec![5u128; 7],
+            vec![5; 10],
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            vec![3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 30],
+        ] {
+            let set = staked(&stakes);
+            let names: Vec<&str> = set.iter().map(|v| v.name.as_str()).collect();
+            let Ok(waves) = plan_restarts(&set, &names) else {
+                // A set with no order at all has a validator that cannot be
+                // stopped alone.
+                assert!(names.iter().any(|n| check_stop(&set, n).is_err()));
+                continue;
+            };
+            assert_eq!(waves[0].len(), 1, "{stakes:?}");
+            let least = set.iter().map(|v| v.stake).min().unwrap();
+            assert_eq!(
+                set.iter().find(|v| v.name == waves[0][0]).unwrap().stake,
+                least
+            );
+            for wave in &waves {
+                let wave: Vec<&str> = wave.iter().map(String::as_str).collect();
+                check_stops(&set, &wave).unwrap();
+            }
+            let mut restarted: Vec<&str> = waves.iter().flatten().map(String::as_str).collect();
+            restarted.sort_unstable();
+            let mut asked = names.clone();
+            asked.sort_unstable();
+            assert_eq!(restarted, asked, "{stakes:?}");
+        }
+    }
+
+    #[test]
+    fn ten_equal_validators_restart_in_waves_that_keep_a_spare() {
+        // Ten equal: quorum needs seven live, and one spare beyond that, so
+        // two may be down together.
+        let set = staked(&[5; 10]);
+        let names: Vec<&str> = set.iter().map(|v| v.name.as_str()).collect();
+        let waves = plan_restarts(&set, &names).unwrap();
+        assert_eq!(
+            waves.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 2, 2, 2, 2, 1]
+        );
+    }
+
+    #[test]
+    fn a_plan_is_refused_for_an_unknown_validator_or_one_that_cannot_stop() {
+        let set = staked(&[5; 7]);
+        assert_eq!(
+            plan_restarts(&set, &["v0", "nobody"]),
+            Err(RestartPlanRefusal::Unknown("nobody".into()))
+        );
+        // One validator is already down: six of seven live leaves one spare,
+        // and stopping another would leave none.
+        let mut degraded = set.clone();
+        degraded[6].live = false;
+        assert!(matches!(
+            plan_restarts(&degraded, &["v0"]),
+            Err(RestartPlanRefusal::Unsafe { validator, .. }) if validator == "v0"
+        ));
+        // Asking for one validator twice restarts it once.
+        assert_eq!(
+            plan_restarts(&set, &["v1", "v1"]).unwrap(),
+            vec![vec!["v1".to_string()]]
+        );
     }
 
     #[test]

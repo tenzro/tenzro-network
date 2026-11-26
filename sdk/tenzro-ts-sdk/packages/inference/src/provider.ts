@@ -2,7 +2,7 @@ import { RpcClient } from "@tenzro/core";
 import type { ToolCall } from "./chat";
 import type { RateCard } from "./pricing";
 import { ModelLoadInfo, ModelEndpoint } from "@tenzro/core";
-import type { RoleStake } from "@tenzro/core";
+import type { OperatorCounts, RoleStake } from "@tenzro/core";
 
 /**
  * Who can find a resource and who may use it.
@@ -27,6 +27,8 @@ export interface ServeOptions {
 	maxConcurrent?: number;
 	/** Load the model's catalog drafter for multi-token prediction; the node loads it unless this is false. */
 	loadDrafter?: boolean;
+	/** Context per request in tokens, kept within the catalog's and no shorter than 2048; omitted, the catalog's. */
+	contextLength?: number;
 }
 
 /** `tenzro_getProviderStats`: measured performance, advertised capacity and role bonds of one provider. */
@@ -88,38 +90,6 @@ function chatResponse(result: unknown): ChatResponse {
 		model_id: r.model ?? "",
 		tokens_used: (r.usage?.input_tokens ?? 0) + (r.usage?.output_tokens ?? 0),
 	};
-}
-
-/**
- * A provider's compute bond — the admission collateral `register` checks
- * before it will accept a provider onto a rung.
- */
-export interface ComputeBond {
-	provider_did: string;
-	provider_address: string;
-	/** Bonded amount in wei (10^-18 TNZO) as a decimal string. */
-	amount: string;
-	/** "Active", "Cooldown", "Returned", or "Slashed". */
-	status: string;
-	/** Unix ms at which a withdrawal may be finalized; null unless in Cooldown. */
-	cooldown_until: number | null;
-	/** The bond vault address, hex. */
-	vault: string;
-	/** Whether this bond can currently back a provider registration. */
-	is_eligible: boolean;
-	/** Amount counting toward admission in wei — zero once the bond leaves Active. */
-	effective_amount: string;
-}
-
-/** The admission dials a provider needs before it posts a compute bond. */
-export interface ComputeBondParams {
-	/**
-	 * Minimum bond in wei the node accepts for admission. The operative
-	 * requirement is the higher of this floor and the target rung's own bond.
-	 */
-	min_bond_wei: string;
-	/** Milliseconds a withdrawal sits in Cooldown before it can be finalized. */
-	cooldown_ms: number;
 }
 
 export interface ChatMessage {
@@ -230,6 +200,11 @@ export interface NetworkProvider {
 	/** Wallet/account address of the provider */
 	provider_address: string;
 	/**
+	 * Root id of the operator behind that account as the chain derives it;
+	 * null when the account has no identity on chain
+	 */
+	operator: string | null;
+	/**
 	 * Provider class: "ai", "tee", "storage", "compute", "general".
 	 *
 	 * "ai" covers every model class — text, multimodal, image, video,
@@ -252,6 +227,13 @@ export interface NetworkProvider {
 	model_load?: ProviderModelLoad[] | null;
 	/** When the load was read, ms since the Unix epoch */
 	load_as_of_ms?: number | null;
+}
+
+/** The providers serving models, with the operators behind every provider listed. */
+export interface ProviderListing {
+	providers: NetworkProvider[];
+	/** Counted over the whole listing, delegated-agent hosts included. */
+	operators: OperatorCounts;
 }
 
 /** The live load of one model at a provider, as listProviders reports it. */
@@ -294,6 +276,8 @@ export class ProviderClient {
 	 * - `maxConcurrent`: the concurrent requests admitted for this model.
 	 * - `loadDrafter`: `false` skips loading the catalog drafter for
 	 *   multi-token prediction.
+	 * - `contextLength`: tokens of context per request; omitted, the
+	 *   catalog's.
 	 *
 	 * Use {@link Discovery.clusterPlan} to preview the layer split and
 	 * {@link ProviderClient.previewServe} to preview the memory it takes.
@@ -312,6 +296,7 @@ export class ProviderClient {
 		if (opts.visibility) params.visibility = opts.visibility;
 		if (opts.maxConcurrent !== undefined) params.max_concurrent = opts.maxConcurrent;
 		if (opts.loadDrafter !== undefined) params.load_drafter = opts.loadDrafter;
+		if (opts.contextLength !== undefined) params.context_length = opts.contextLength;
 		await this.rpc.call("tenzro_serveModel", params);
 	}
 
@@ -420,7 +405,7 @@ export class ProviderClient {
 	}
 
 	/**
-	 * Set this node's active roles. One stake backs every role.
+	 * Set this node's active roles. Each role is bonded separately from the same account.
 	 *
 	 * @param roles - Comma-separated role tokens: `validator`, `ai`, `storage`,
 	 *   `tee`, `user`. The empty string resolves to a client node.
@@ -483,46 +468,6 @@ export class ProviderClient {
 	}
 
 	/**
-	 * Read the compute-bond floor and withdrawal cooldown this node enforces.
-	 *
-	 * Call this before {@link register} — a registration whose backing bond is
-	 * below the floor is refused at admission.
-	 *
-	 * @example
-	 * ```typescript
-	 * const params = await client.provider.computeBondParams();
-	 * console.log("Minimum bond:", params.min_bond_wei, "wei");
-	 * ```
-	 */
-	async computeBondParams(): Promise<ComputeBondParams> {
-		return await this.rpc.call<ComputeBondParams>(
-			"tenzro_computeBondParams",
-			[],
-		);
-	}
-
-	/**
-	 * Fetch the compute bond posted against `providerDid`, or null when that
-	 * provider has never posted one.
-	 *
-	 * @param providerDid - Provider DID (e.g. "did:tenzro:machine:...")
-	 */
-	async getComputeBond(providerDid: string): Promise<ComputeBond | null> {
-		return await this.rpc.call<ComputeBond | null>("tenzro_getComputeBond", [
-			{ provider_did: providerDid },
-		]);
-	}
-
-	/** List every compute bond this node knows about. */
-	async listComputeBonds(): Promise<ComputeBond[]> {
-		const result = await this.rpc.call<{ count: number; bonds: ComputeBond[] }>(
-			"tenzro_listComputeBonds",
-			[],
-		);
-		return result.bonds ?? [];
-	}
-
-	/**
 	 * List all model service endpoints with load information
 	 *
 	 * @returns Array of model endpoints with load data
@@ -577,12 +522,14 @@ export class ProviderClient {
 	 *
 	 * @param providerType - Optional filter by provider class (e.g. "ai",
 	 * "tee", "storage"), applied to the node's full list.
-	 * @returns Array of discovered network providers
+	 * @returns The providers serving models, every page of them, and the
+	 * operators behind the whole listing
 	 *
 	 * @example
 	 * ```typescript
 	 * // List all providers
-	 * const providers = await client.provider.listProviders();
+	 * const { providers, operators } = await client.provider.listProviders();
+	 * console.log(`${operators.machines} machines, ${operators.distinct_operators} operators`);
 	 * for (const p of providers) {
 	 *   console.log(`${p.endpoint_id}:${p.provider_type} — models: ${p.served_models.join(", ")}`);
 	 * }
@@ -591,31 +538,52 @@ export class ProviderClient {
 	 * const aiProviders = await client.provider.listProviders("ai");
 	 * ```
 	 */
-	async listProviders(providerType?: string): Promise<NetworkProvider[]> {
-		const all = await this.rpc.call<NetworkProvider[]>("tenzro_listProviders", {});
-		return providerType === undefined
-			? all
-			: all.filter((p) => p.provider_type === providerType);
+	async listProviders(providerType?: string): Promise<ProviderListing> {
+		type Page = {
+			providers: Array<NetworkProvider | { machine_did: string }>;
+			operators: OperatorCounts;
+			next_cursor: string | null;
+		};
+		const providers: NetworkProvider[] = [];
+		let cursor: string | null = null;
+		for (;;) {
+			const page: Page = await this.rpc.call<Page>("tenzro_listProviders", {
+				limit: 200,
+				cursor,
+				...(providerType === undefined ? {} : { provider_type: providerType }),
+			});
+			// Nodes that serve delegated agents are listed by identity only;
+			// this lists the providers that serve models.
+			for (const p of page.providers) {
+				if ("endpoint_id" in p) providers.push(p);
+			}
+			if (page.next_cursor === null) return { providers, operators: page.operators };
+			cursor = page.next_cursor;
+		}
 	}
 
 	/**
-	 * Price one request for `model` at every provider serving it, cheapest
-	 * first, on each provider's announced rate card plus the governed
-	 * surcharge for the verification level.
+	 * Price one request for `model` at every provider serving it, on each
+	 * provider's announced rate card plus the governed surcharge for the
+	 * verification level, with the carbon intensity of its region's grid.
 	 * @param units - Billable units, e.g. `{ input_tokens: 800, output_tokens: 200 }`
 	 * @param verification - none, receipt, optimistic or tee
+	 * @param order - price (cheapest first) or carbon (cleanest grid first,
+	 *   for spot work that can run anywhere)
 	 */
 	async quoteInference(
 		model: string,
 		units: Record<string, number>,
 		verification: "none" | "receipt" | "optimistic" | "tee" = "none",
 		provider?: string,
+		order: "price" | "carbon" = "price",
 	): Promise<unknown> {
 		return await this.rpc.call("tenzro_quoteInference", {
 			model,
 			units,
 			verification,
 			provider: provider ?? null,
+			order,
 		});
 	}
 
@@ -710,21 +678,6 @@ export class ProviderClient {
 			{ instance_id: instanceId },
 		]);
 	}
-
-  /** `tenzro_computeGetClaim`. */
-  computeGetClaim<T = unknown>(params: { claim_id?: unknown } = {}): Promise<T> {
-    return this.rpc.call<T>("tenzro_computeGetClaim", params);
-  }
-
-  /** `tenzro_computeListClaims`. */
-  computeListClaims<T = unknown>(params: { party: string; limit?: number }): Promise<T> {
-    return this.rpc.call<T>("tenzro_computeListClaims", params);
-  }
-
-  /** `tenzro_computePriceFeed`. */
-  computePriceFeed<T = unknown>(params: { attested_only?: unknown; limit?: unknown; model_id?: unknown; region?: unknown } = {}): Promise<T> {
-    return this.rpc.call<T>("tenzro_computePriceFeed", params);
-  }
 
   /**
    * A meter's bond by its 32-byte id (hex): owner, amount, withdrawal request

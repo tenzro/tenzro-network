@@ -20,7 +20,8 @@ use crate::credential::{CREDENTIAL_TYPE, Credential, CredentialState, Subject};
 use crate::manifest::{MANIFEST_TYPE, ModelManifest};
 use crate::origin::{ORIGIN_TYPE, OriginAttestation, ProvenanceStatus};
 use crate::policy::{
-    OperatorPolicy, POLICY_TYPE, ProvenViolation, VIOLATION_TYPE, verify_violation,
+    IdentityKeyReceipts, OperatorPolicy, POLICY_TYPE, ProvenViolation, VIOLATION_TYPE,
+    verify_violation_with,
 };
 use crate::release::{ENGINE_RELEASE_TYPE, EngineRelease};
 use crate::status_list::{
@@ -29,6 +30,24 @@ use crate::status_list::{
 use crate::{Result, TrustError, has_type, invalid, record_digest};
 
 const KEY_PREFIX: &str = "trust/";
+
+/// The identity that authored `doc`: the DID the record names as its issuer,
+/// operator, observer or publisher, whose signature over the record has been
+/// verified here. `None` for the two kinds nobody authors: a model manifest is
+/// named by the hash of its own content, and violation evidence is proven by
+/// the operator's signatures inside it, whoever hands it in.
+pub fn author(doc: &Value) -> Result<Option<String>> {
+    Ok(match RecordKind::of(doc)? {
+        RecordKind::Credential => Some(Credential::parse(doc)?.issuer),
+        RecordKind::Revocation => Some(Revocation::parse(doc)?.issuer),
+        RecordKind::IssuerRevocation => Some(IssuerRevocation::parse(doc)?.issuer),
+        RecordKind::Policy => Some(OperatorPolicy::parse(doc)?.operator),
+        RecordKind::Origin => Some(OriginAttestation::parse(doc)?.observer),
+        RecordKind::CatalogEntry => Some(CatalogRecord::parse(doc)?.publisher),
+        RecordKind::EngineRelease => Some(EngineRelease::parse(doc)?.publisher),
+        RecordKind::Manifest | RecordKind::Violation => None,
+    })
+}
 
 /// What kind of record was applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -94,11 +113,34 @@ pub struct Applied {
     pub violation: Option<ProvenViolation>,
 }
 
+/// Most manifests kept for one model name.
+pub const MAX_MANIFESTS_PER_NAME: usize = 16;
+/// Most manifests kept that no origin attestation names yet, and their bytes.
+/// They are held in memory only, oldest dropped first.
+pub const MAX_UNREFERENCED_MANIFESTS: usize = 1024;
+pub const MAX_UNREFERENCED_MANIFEST_BYTES: usize = 64 << 20;
+
+/// A manifest kept in memory until an origin attestation names its model.
+struct Unreferenced {
+    digest: String,
+    root: String,
+    name: String,
+    bytes: usize,
+    doc: Value,
+}
+
 /// Every trust record this holder has seen.
+///
+/// A model manifest is unsigned: anyone may hand one in. It is usable at
+/// once, but it is kept on disk only when an origin attestation, which its
+/// author signed, names the model. Until then it is one of a bounded number
+/// held in memory, and the oldest is dropped when the bound is reached. A
+/// model name holds at most [`MAX_MANIFESTS_PER_NAME`] manifests.
 #[derive(Default)]
 pub struct TrustLedger {
     store: Option<Arc<dyn KvStore>>,
     seen: DashMap<String, ()>,
+    unreferenced: std::sync::Mutex<std::collections::VecDeque<Unreferenced>>,
     credentials: DashMap<String, Credential>,
     by_subject: DashMap<String, BTreeSet<String>>,
     revoked: DashMap<String, BTreeSet<u32>>,
@@ -113,6 +155,9 @@ pub struct TrustLedger {
     catalog: DashMap<(String, String), CatalogRecord>,
     /// Each (publisher, version) release. A version is published once.
     releases: DashMap<(String, String), EngineRelease>,
+    /// The check of receipts signed with an identity key, in violation
+    /// evidence. Without it such a receipt proves nothing here.
+    identity_keys: Option<IdentityKeyReceipts>,
 }
 
 impl TrustLedger {
@@ -121,10 +166,16 @@ impl TrustLedger {
     }
 
     /// A ledger persisted in `store`, reloaded from it. Every stored record
-    /// is verified again on load.
-    pub fn with_storage(store: Arc<dyn KvStore>) -> Result<Self> {
+    /// is verified again on load, receipts signed with an identity key by
+    /// `identity_keys`; a record that does not verify yet (the chain view
+    /// behind) stays in the store and is judged again on the next load.
+    pub fn with_storage(
+        store: Arc<dyn KvStore>,
+        identity_keys: Option<IdentityKeyReceipts>,
+    ) -> Result<Self> {
         let ledger = TrustLedger {
             store: None,
+            identity_keys,
             ..Default::default()
         };
         let rows = store
@@ -134,11 +185,13 @@ impl TrustLedger {
             .into_iter()
             .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
             .collect();
-        // Violations are judged against policies, so they load last.
-        docs.sort_by_key(|d| {
-            RecordKind::of(d)
-                .map(|k| k == RecordKind::Violation)
-                .unwrap_or(true)
+        // Origin attestations load before the manifests they made durable;
+        // violations are judged against policies, so they load last.
+        docs.sort_by_key(|d| match RecordKind::of(d) {
+            Ok(RecordKind::Origin) => 0,
+            Ok(RecordKind::Manifest) => 2,
+            Ok(RecordKind::Violation) | Err(_) => 3,
+            Ok(_) => 1,
         });
         for d in &docs {
             if let Err(e) = ledger.apply(d) {
@@ -160,6 +213,11 @@ impl TrustLedger {
                 .map_err(|e| TrustError::Storage(e.to_string()))?;
         }
         Ok(())
+    }
+
+    /// Whether the ledger already holds `doc`.
+    pub fn holds(&self, doc: &Value) -> bool {
+        self.seen.contains_key(&record_digest(doc))
     }
 
     /// Verify `doc` and fold it into the ledger.
@@ -214,15 +272,36 @@ impl TrustLedger {
             RecordKind::Manifest => {
                 let m = ModelManifest::from_json(doc)?;
                 key = m.root_hex();
+                let named = self.roots_by_name.get(&m.name).map_or(0, |r| r.len());
+                if named >= MAX_MANIFESTS_PER_NAME {
+                    return Err(TrustError::Stale(format!(
+                        "{} already has {MAX_MANIFESTS_PER_NAME} manifests",
+                        m.name
+                    )));
+                }
+                let referenced = self.origins.contains_key(&m.name);
+                let name = m.name.clone();
                 self.roots_by_name
-                    .entry(m.name.clone())
+                    .entry(name.clone())
                     .or_default()
                     .insert(key.clone());
                 self.manifests.insert(key.clone(), m);
+                if !referenced {
+                    self.seen.insert(digest.clone(), ());
+                    self.hold(digest, key.clone(), name, doc);
+                    return Ok(Applied {
+                        kind,
+                        key,
+                        new: true,
+                        violation: None,
+                    });
+                }
             }
             RecordKind::Origin => {
                 let a = OriginAttestation::parse(doc)?;
-                self.origins.entry(a.name.clone()).or_default().push(a);
+                let name = a.name.clone();
+                self.origins.entry(name.clone()).or_default().push(a);
+                self.keep_manifests_named(&name)?;
             }
             RecordKind::Violation => {
                 let operator = doc
@@ -230,7 +309,7 @@ impl TrustLedger {
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("the evidence names no operator"))?;
                 let history = self.policies(operator);
-                let v = verify_violation(doc, &history)?;
+                let v = verify_violation_with(doc, &history, self.identity_keys.as_ref())?;
                 if !history.iter().any(|p| p.digest == v.policy) {
                     return Err(invalid("the policy in the evidence was never published"));
                 }
@@ -279,6 +358,53 @@ impl TrustLedger {
             new: true,
             violation,
         })
+    }
+
+    /// Hold a manifest no origin attestation names yet, dropping the oldest
+    /// held while the count or the bytes are above their bound.
+    fn hold(&self, digest: String, root: String, name: String, doc: &Value) {
+        let bytes = serde_json::to_vec(doc).map_or(0, |b| b.len());
+        let mut held = self.unreferenced.lock().unwrap_or_else(|e| e.into_inner());
+        held.push_back(Unreferenced {
+            digest,
+            root,
+            name,
+            bytes,
+            doc: doc.clone(),
+        });
+        let mut total: usize = held.iter().map(|h| h.bytes).sum();
+        while held.len() > MAX_UNREFERENCED_MANIFESTS || total > MAX_UNREFERENCED_MANIFEST_BYTES {
+            let Some(old) = held.pop_front() else { break };
+            total -= old.bytes;
+            self.manifests.remove(&old.root);
+            if let Some(mut roots) = self.roots_by_name.get_mut(&old.name) {
+                roots.remove(&old.root);
+            }
+            self.seen.remove(&old.digest);
+        }
+    }
+
+    /// Keep on disk every held manifest of `name`, now that an origin
+    /// attestation names it.
+    fn keep_manifests_named(&self, name: &str) -> Result<()> {
+        let kept: Vec<Unreferenced> = {
+            let mut held = self.unreferenced.lock().unwrap_or_else(|e| e.into_inner());
+            let (kept, rest): (Vec<_>, Vec<_>) = held.drain(..).partition(|h| h.name == name);
+            held.extend(rest);
+            kept
+        };
+        for h in kept {
+            self.persist(RecordKind::Manifest, &h.digest, &h.doc)?;
+        }
+        Ok(())
+    }
+
+    /// How many manifests are held in memory, waiting for an origin.
+    pub fn unreferenced_manifests(&self) -> usize {
+        self.unreferenced
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Where `c` stands at `now`. `did_revoked` reports DIDs revoked outside
@@ -536,6 +662,111 @@ mod tests {
 
     fn never(_: &str) -> bool {
         false
+    }
+
+    /// The author of each record kind, one test per kind.
+    mod author_of {
+        use super::*;
+        use crate::release::Artifact;
+
+        #[test]
+        fn a_credential_is_its_issuers() {
+            let k = TestKey::new(1);
+            let claim = claim(ClaimKind::Certification, "iso-iec-42001", None);
+            let doc = issue(&k, &model(1), &claim, 42);
+            assert_eq!(author(&doc).unwrap(), Some(k.did()));
+        }
+
+        #[test]
+        fn a_revocation_is_its_issuers() {
+            let k = TestKey::new(2);
+            let doc = k.sign(Revocation::unsigned(&k.did(), &[42], now()));
+            assert_eq!(author(&doc).unwrap(), Some(k.did()));
+        }
+
+        #[test]
+        fn an_issuer_revocation_is_the_issuers_own() {
+            let k = TestKey::new(3);
+            let doc = k.sign(IssuerRevocation::unsigned(&k.did(), now(), "lost"));
+            assert_eq!(author(&doc).unwrap(), Some(k.did()));
+        }
+
+        #[test]
+        fn a_policy_is_its_operators() {
+            let op = TestKey::new(4);
+            let rs = ReceiptSigner::new();
+            let doc = policy_doc(&op, 1, "2026-01-01T00:00:00Z", &[&rs], &["m"], None);
+            assert_eq!(author(&doc).unwrap(), Some(op.did()));
+        }
+
+        #[test]
+        fn an_origin_attestation_is_its_observers() {
+            let k = TestKey::new(5);
+            let m = sample("org/model");
+            let files: Vec<ObservedFile> = m
+                .files
+                .iter()
+                .map(|f| ObservedFile {
+                    path: f.path.clone(),
+                    size: f.size,
+                    sha256: f.sha256.clone(),
+                    blake3: Some(f.blake3.clone()),
+                })
+                .collect();
+            let doc = k.sign(OriginAttestation::unsigned(
+                &k.did(),
+                OriginKind::Mirror,
+                "https://a.example/m",
+                &m.name,
+                &files,
+                now(),
+            ));
+            assert_eq!(author(&doc).unwrap(), Some(k.did()));
+        }
+
+        #[test]
+        fn a_catalog_entry_is_its_publishers() {
+            let k = TestKey::new(6);
+            let body = serde_json::json!({"model": {"engine": "gguf", "spec": {"id": "m"}}});
+            let doc = k.sign(CatalogRecord::unsigned(&k.did(), "m", 1, Some(&body)));
+            assert_eq!(author(&doc).unwrap(), Some(k.did()));
+        }
+
+        #[test]
+        fn an_engine_release_is_its_publishers() {
+            let k = TestKey::new(7);
+            let artifact = Artifact {
+                platform: "x86_64-linux".into(),
+                size: 10,
+                sha256: "a".repeat(64),
+                blake3: "b".repeat(64),
+            };
+            let doc = k.sign(EngineRelease::unsigned(&k.did(), "1.4.0", &[artifact]));
+            assert_eq!(author(&doc).unwrap(), Some(k.did()));
+        }
+
+        #[test]
+        fn a_manifest_has_no_author() {
+            assert_eq!(author(&sample("org/model").to_json()).unwrap(), None);
+        }
+
+        #[test]
+        fn violation_evidence_has_no_author() {
+            let op = TestKey::new(8);
+            let rs = ReceiptSigner::new();
+            let policy = policy_doc(&op, 1, "2026-01-01T00:00:00Z", &[&rs], &["m"], None);
+            let receipt = rs.receipt("other", "DE", "2026-02-01T00:00:00Z");
+            let evidence = violation_evidence(&policy, &receipt, Clause::ServesModels);
+            assert_eq!(author(&evidence).unwrap(), None);
+        }
+
+        #[test]
+        fn a_record_signed_by_another_key_has_no_author_to_name() {
+            let (k, other) = (TestKey::new(9), TestKey::new(10));
+            let forged = other.sign(Revocation::unsigned(&k.did(), &[1], now()));
+            assert!(author(&forged).is_err());
+            assert!(author(&serde_json::json!({"type": ["Unknown"]})).is_err());
+        }
     }
     fn now() -> chrono::DateTime<chrono::Utc> {
         t("2026-09-24T00:00:00Z")
@@ -824,13 +1055,114 @@ mod tests {
     }
 
     #[test]
+    fn a_ledger_says_whether_it_holds_a_record() {
+        let ledger = TrustLedger::new();
+        let k = TestKey::new(1);
+        let doc = k.sign(Revocation::unsigned(&k.did(), &[42], now()));
+        assert!(!ledger.holds(&doc));
+        ledger.apply(&doc).unwrap();
+        assert!(ledger.holds(&doc));
+    }
+
+    fn manifest(name: &str, n: usize) -> ModelManifest {
+        let bytes = n.to_le_bytes();
+        ModelManifest::new(
+            name,
+            vec![crate::manifest::tests::entry("model.gguf", &bytes)],
+        )
+        .unwrap()
+    }
+
+    fn origin_naming(name: &str, m: &ModelManifest, seed: u8) -> Value {
+        let files: Vec<ObservedFile> = m
+            .files
+            .iter()
+            .map(|f| ObservedFile {
+                path: f.path.clone(),
+                size: f.size,
+                sha256: f.sha256.clone(),
+                blake3: Some(f.blake3.clone()),
+            })
+            .collect();
+        let k = TestKey::new(seed);
+        k.sign(OriginAttestation::unsigned(
+            &k.did(),
+            OriginKind::Mirror,
+            "https://a.example/m",
+            name,
+            &files,
+            now(),
+        ))
+    }
+
+    #[test]
+    fn a_manifest_no_origin_names_is_usable_but_kept_only_in_memory() {
+        let store: Arc<dyn KvStore> = Arc::new(tenzro_storage::kv::MemoryStore::new());
+        let held = manifest("org/held", 1);
+        let named = manifest("org/named", 2);
+        {
+            let ledger = TrustLedger::with_storage(store.clone(), None).unwrap();
+            assert!(ledger.apply(&held.to_json()).unwrap().new);
+            assert!(ledger.apply(&named.to_json()).unwrap().new);
+            assert!(ledger.provenance(&held.root_hex()).is_some());
+            assert_eq!(ledger.unreferenced_manifests(), 2);
+            // An origin that names one makes it durable.
+            ledger
+                .apply(&origin_naming("org/named", &named, 31))
+                .unwrap();
+            assert_eq!(ledger.unreferenced_manifests(), 1);
+            // Handed in again, a held manifest is not new.
+            assert!(!ledger.apply(&held.to_json()).unwrap().new);
+        }
+        let reloaded = TrustLedger::with_storage(store, None).unwrap();
+        assert!(reloaded.provenance(&named.root_hex()).is_some());
+        assert!(reloaded.provenance(&held.root_hex()).is_none());
+    }
+
+    #[test]
+    fn the_oldest_unreferenced_manifest_is_dropped_at_the_bound() {
+        let ledger = TrustLedger::new();
+        let first = manifest("org/m0", 0);
+        ledger.apply(&first.to_json()).unwrap();
+        for i in 1..=MAX_UNREFERENCED_MANIFESTS {
+            ledger
+                .apply(&manifest(&format!("org/m{i}"), i).to_json())
+                .unwrap();
+        }
+        assert_eq!(ledger.unreferenced_manifests(), MAX_UNREFERENCED_MANIFESTS);
+        assert!(ledger.provenance(&first.root_hex()).is_none());
+        assert!(ledger.manifests_named("org/m0").is_empty());
+        let last = manifest(
+            &format!("org/m{MAX_UNREFERENCED_MANIFESTS}"),
+            MAX_UNREFERENCED_MANIFESTS,
+        );
+        assert!(ledger.provenance(&last.root_hex()).is_some());
+        // Dropped, it can be handed in again.
+        assert!(ledger.apply(&first.to_json()).unwrap().new);
+    }
+
+    #[test]
+    fn a_model_name_holds_a_bounded_number_of_manifests() {
+        let ledger = TrustLedger::new();
+        for i in 0..MAX_MANIFESTS_PER_NAME {
+            ledger.apply(&manifest("org/one", i).to_json()).unwrap();
+        }
+        let err = ledger
+            .apply(&manifest("org/one", MAX_MANIFESTS_PER_NAME).to_json())
+            .unwrap_err();
+        assert!(err.to_string().contains("already has"), "{err}");
+        // The same manifest again is not a new one.
+        assert!(!ledger.apply(&manifest("org/one", 0).to_json()).unwrap().new);
+    }
+
+    #[test]
     fn a_ledger_reloads_and_reverifies_its_records() {
         let store: Arc<dyn KvStore> = Arc::new(tenzro_storage::kv::MemoryStore::new());
         let issuer = TestKey::new(1);
         let op = TestKey::new(4);
         let rs = ReceiptSigner::new();
         {
-            let ledger = TrustLedger::with_storage(store.clone()).unwrap();
+            let ledger = TrustLedger::with_storage(store.clone(), None).unwrap();
             ledger
                 .apply(&issue(
                     &issuer,
@@ -849,7 +1181,7 @@ mod tests {
                 ))
                 .unwrap();
         }
-        let reloaded = TrustLedger::with_storage(store).unwrap();
+        let reloaded = TrustLedger::with_storage(store, None).unwrap();
         assert_eq!(reloaded.credentials_for(&model(1)).len(), 1);
         assert_eq!(reloaded.policies(&op.did()).len(), 1);
         assert_eq!(reloaded.violations_of(&op.did()).len(), 1);

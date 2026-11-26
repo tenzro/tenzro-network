@@ -1,15 +1,20 @@
 #!/bin/bash
 # Write the release manifest over a dist directory the build scripts filled:
 #
-#   SHA256SUMS     one line per archive, `sha256sum -c` format
+#   SHA256SUMS     one line per archive and per debug archive, `sha256sum -c`
+#                  format
 #   matrix.json    every artifact's build record (.buildenv.json), digest and
-#                  install gate record (.install.json, install-gate.sh),
+#                  install gate record (.install.json, install-gate.sh), its
+#                  debug archive (symbol files for reading crash reports),
 #                  and every container image saved beside the archives
 #                  (tenzro-node-image-*.tar, built by build-image.sh from them)
 #
 # Every artifact must come from the same commit. The full matrix is
 # MATRIX below; a missing entry is listed, and refused with --complete, as is
-# an archive without a passing install gate record for its own sha256.
+# an archive without a passing install gate record for its own sha256. Each
+# archive's debug archive (<name>-debug.tar.gz or <name>-debug.zip, written by
+# the build scripts beside it) is required and published with it; it holds
+# symbols only.
 # Signing is a separate, later step over these files
 # (scripts/supply-chain/release.sh, with the release hardware token).
 #
@@ -46,6 +51,13 @@ for a in "${present[@]}"; do
     [ -f "$env" ] || { echo "REFUSING: $a has no $env"; exit 1; }
     sha=$(release_sha256 < "$a")
     printf '%s  %s\n' "$sha" "$a" >> SHA256SUMS.tmp
+    case "$a" in
+        *.tar.gz) dbg="${a%.tar.gz}-debug.tar.gz" ;;
+        *.zip) dbg="${a%.zip}-debug.zip" ;;
+    esac
+    [ -f "$dbg" ] || { echo "REFUSING: $a has no $dbg"; exit 1; }
+    dbg_sha=$(release_sha256 < "$dbg")
+    printf '%s  %s\n' "$dbg_sha" "$dbg" >> SHA256SUMS.tmp
     gate="${env%.buildenv.json}.install.json" install=null
     if [ -f "$gate" ] && [ "$(jq -r .verdict "$gate")" = pass ] && [ "$(jq -r .sha256 "$gate")" = "$sha" ]; then
         install=$(jq -c '{role, host, checked}' "$gate")
@@ -53,7 +65,8 @@ for a in "${present[@]}"; do
         ungated+=("$a")
     fi
     records=$(jq -c --arg f "$a" --arg s "$sha" --slurpfile e "$env" --argjson g "$install" \
-        '. + [($e[0] + {file: $f, sha256: $s, install_gate: $g})]' <<<"$records")
+        --arg df "$dbg" --arg ds "$dbg_sha" \
+        '. + [($e[0] + {file: $f, sha256: $s, install_gate: $g, debug: {file: $df, sha256: $ds}})]' <<<"$records")
 done
 if [ ${#ungated[@]} -gt 0 ]; then
     echo "no passing install gate for its sha256: ${ungated[*]}"

@@ -342,4 +342,91 @@ impl DeviceClient {
             )
             .await
     }
+
+    /// Calls `tenzro_requestDeviceCode`: a device with no passkey or hardware
+    /// key of its own asks to be signed in. `dpop_jkt` is the thumbprint of the
+    /// key its tokens will be bound to.
+    pub async fn request_device_code(
+        &self,
+        dpop_jkt: Option<&str>,
+        label: Option<&str>,
+    ) -> SdkResult<Value> {
+        self.rpc
+            .call(
+                "tenzro_requestDeviceCode",
+                serde_json::json!({ "dpop_jkt": dpop_jkt, "label": label }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_pollDeviceCode`: whether the device with `device_code` is
+    /// signed in (`authorization_pending`, `slow_down`, `access_denied`,
+    /// `expired_token`, or an access token).
+    pub async fn poll_device_code(&self, device_code: &str) -> SdkResult<Value> {
+        self.rpc
+            .call(
+                "tenzro_pollDeviceCode",
+                serde_json::json!({ "device_code": device_code }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_approveDeviceCode` (operator only): answer the device
+    /// waiting with `user_code`. Approving needs the operator's passkey
+    /// `assertion`; without it the node answers with the challenge to sign.
+    pub async fn approve_device_code(
+        &self,
+        user_code: &str,
+        approve: bool,
+        assertion: Option<Value>,
+    ) -> SdkResult<Value> {
+        self.rpc
+            .call(
+                "tenzro_approveDeviceCode",
+                serde_json::json!({
+                    "user_code": user_code,
+                    "approve": approve,
+                    "assertion": assertion,
+                }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_listPairedDevices` (operator only): the devices paired
+    /// with this node and which one is the caller.
+    pub async fn list_paired_devices(&self) -> SdkResult<Value> {
+        self.rpc.call("tenzro_listPairedDevices", Value::Null).await
+    }
+
+    /// Calls `tenzro_pairDevice`: with no arguments an administrator starts a
+    /// pairing; with `id` it reads where one stands; with `secret`, `label`
+    /// and `kind` (phone, tablet, tv, car, browser or desktop) a device
+    /// redeems the code.
+    pub async fn pair_device(
+        &self,
+        id: Option<&str>,
+        secret: Option<&str>,
+        label: Option<&str>,
+        kind: Option<&str>,
+    ) -> SdkResult<Value> {
+        self.rpc
+            .call(
+                "tenzro_pairDevice",
+                serde_json::json!({
+                    "id": id,
+                    "secret": secret,
+                    "label": label,
+                    "kind": kind,
+                }),
+            )
+            .await
+    }
+
+    /// Calls `tenzro_unpairDevice` (operator only): end a paired device's
+    /// access and drop its record; a paired device removes only itself.
+    pub async fn unpair_device(&self, id: &str) -> SdkResult<Value> {
+        self.rpc
+            .call("tenzro_unpairDevice", serde_json::json!({ "id": id }))
+            .await
+    }
 }

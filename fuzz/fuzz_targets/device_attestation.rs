@@ -35,9 +35,7 @@ fuzz_target!(|data: &[u8]| {
                 if let Some(ak) = tail.get(64..129) {
                     attestation_key.copy_from_slice(ak);
                 }
-                assert!(
-                    key_certification::verify(&cert, key, b"fuzz", &attestation_key).is_err()
-                );
+                assert!(key_certification::verify(&cert, key, b"fuzz", &attestation_key).is_err());
                 assert_eq!(
                     KeyCertification::from_bytes(&cert.to_bytes()).map(|(c, _)| c),
                     Ok(cert)

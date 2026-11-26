@@ -57,7 +57,9 @@ pub(crate) async fn handle_load(
 ) -> Result<Value, JsonRpcError> {
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = catalog_load_params(&p)?;
-    let entry = tenzro_model::get_decision_model_by_id(&model_id)
+    let entry = node
+        .catalog()
+        .get_decision_model_by_id(&model_id)
         .ok_or_else(|| not_in_catalog("decision", &model_id))?;
     let (bundle_dir, provenance) = fetch_catalog_bundle(
         node,
@@ -105,9 +107,12 @@ pub(crate) async fn handle_unload(
 }
 
 /// `tenzro_listDecisionCatalog`.
-pub(crate) async fn handle_catalog() -> Result<Value, JsonRpcError> {
+pub(crate) async fn handle_catalog(node: &Arc<TenzroNode>) -> Result<Value, JsonRpcError> {
     Ok(json!({
-        "models": crate::catalog_rpc::with_licence(&tenzro_model::get_decision_catalog()),
+        "models": crate::catalog_rpc::with_licence(
+            &node.catalog(),
+            tenzro_model::Catalog::get_decision_catalog,
+        ),
     }))
 }
 
@@ -321,7 +326,7 @@ async fn decide_here(node: &Arc<TenzroNode>, p: Value) -> Result<Value, JsonRpcE
     let units = BillableUnits::default()
         .with_decision_questions(u32::try_from(n_questions).unwrap_or(u32::MAX));
     let bytes_out = (n_questions * std::mem::size_of::<f64>()) as u64;
-    let (cost_wei, settlement) = bill_local_units(
+    let (cost_wei, settlement, generation_id) = bill_local_units(
         node,
         &p,
         model_id,
@@ -343,6 +348,7 @@ async fn decide_here(node: &Arc<TenzroNode>, p: Value) -> Result<Value, JsonRpcE
         obj.insert("units".to_string(), units_to_json(&units));
         obj.insert("cost_wei".to_string(), json!(cost_wei.to_string()));
         obj.insert("settlement".to_string(), settlement.to_json());
+        obj.insert("generation_id".to_string(), Value::String(generation_id));
     }
     Ok(out)
 }

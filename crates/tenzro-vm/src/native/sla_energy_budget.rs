@@ -5,13 +5,13 @@
 //!
 //! The operator-earnings design
 //! recommends per-tier Poisson challenge rates (warm 1-8/day, cool 0.5-2/day)
-//! against readiness tiers that are not built on chain yet (no `warm`/`cool`/
-//! `cold` concept exists anywhere in consensus state today -- that is a
-//! separate build item, not invented here). What exists on chain today is a
-//! single governed cadence, [`super::SLA_PROBE_INTERVAL_PARAM`], that
-//! probes every eligible compute bond at the same rate. This module
-//! enforces the energy budget against *that* real mechanism, untiered,
-//! rather than against a tier concept that does not exist yet.
+//! per readiness tier. A readiness tier exists on chain as a subject's own
+//! declaration ([`super::availability_reward::ReadinessTier`]) that scales
+//! its availability reward; the probe cadence does not read it. A single
+//! governed cadence, [`super::SLA_PROBE_INTERVAL_PARAM`], probes every
+//! eligible compute bond at the same rate. This module enforces the energy
+//! budget against *that* mechanism, untiered, and [`energy_report`] counts
+//! the fleet by declared tier under the same tier-blind figures.
 //!
 //! # What is governed, what is a physical constant, and what is real chain state
 //!
@@ -27,7 +27,7 @@
 //!   section 9 recommends (1-8/day), not for this untiered liveness-style
 //!   cadence. Shipping a genesis value that the network already violates
 //!   would not be enforcement, it would be a lie the chain starts in. Once
-//!   readiness tiers exist and the probe cadence can drop to their
+//!   the probe cadence follows the declared tier and can drop to the
 //!   recommended rates, governance can turn this on at whatever figure the
 //!   then-current cadence actually supports.
 //! - **Physical constants, not governed**: [`SLA_CHALLENGE_JOULES_PER_PROBE`]
@@ -39,10 +39,10 @@
 //!   decided it should be adjustable at runtime." Both are deliberately the
 //!   *worst-case* GPU figures in that table (the cool-tier reload cost and
 //!   the cool-tier idle baseline, the smallest denominator and largest
-//!   numerator among the GPU rows) because nothing on chain today
-//!   distinguishes which tier a given compute bond is in, and a single
-//!   untiered estimate must not understate the energy a probe actually
-//!   costs.
+//!   numerator among the GPU rows) because a bond's tier is its owner's
+//!   own unverified declaration and every bond is probed at one cadence, so
+//!   a single untiered estimate must not understate the energy a probe
+//!   actually costs.
 //! - **Real on-chain state, not a static number**: the fleet size this module
 //!   multiplies both the budget and the challenge cost by is
 //!   [`super::economy::compute_bonds`] filtered to
@@ -73,6 +73,7 @@
 //!   measurement (or a verified hardware-class declaration per bond) before
 //!   the energy side of the ratio can be anything but an estimate.
 
+use super::availability_reward::{ReadinessTier, declared_readiness_tier};
 use super::*;
 
 /// Governed key: most of a basis point (1/10,000) of the bonded compute
@@ -102,6 +103,28 @@ pub const SLA_CHALLENGE_JOULES_PER_PROBE: u128 = 4_000;
 /// denominators. Not governed -- see the module doc.
 pub const SLA_FLEET_JOULES_PER_UNIT_PER_DAY: u128 = 6_200_000;
 
+/// Probe rounds between burst challenges of a unit declared warm. A burst
+/// asks every unit of a multi-unit operator for a matrix proof, which wakes
+/// the model; the hourly probe between bursts is a liveness check.
+pub const WARM_BURST_ROUNDS_BETWEEN: u64 = 36;
+/// Probe rounds between burst challenges of a unit declared cool, which pays
+/// a model reload to answer one: a quarter as often as warm.
+pub const COOL_BURST_ROUNDS_BETWEEN: u64 = WARM_BURST_ROUNDS_BETWEEN * 4;
+/// Probe rounds between burst challenges of a unit declared cold, whose host
+/// wakes from standby to answer one: once a week at the ten-minute interval.
+pub const COLD_BURST_ROUNDS_BETWEEN: u64 = COOL_BURST_ROUNDS_BETWEEN * 7;
+
+/// Rounds between burst challenges of a unit declared `tier`. Each is a
+/// multiple of the warmer ones, so a round that bursts a colder unit bursts
+/// its operator's warmer units with it.
+pub fn burst_rounds_between(tier: ReadinessTier) -> u64 {
+    match tier {
+        ReadinessTier::Warm => WARM_BURST_ROUNDS_BETWEEN,
+        ReadinessTier::Cool => COOL_BURST_ROUNDS_BETWEEN,
+        ReadinessTier::Cold => COLD_BURST_ROUNDS_BETWEEN,
+    }
+}
+
 /// Milliseconds in a day, the basis this module compares against (the
 /// research doc's own table is per-day; [`super::MARKET_EPOCH_MS`] is one
 /// hour and divides it exactly, but every figure here is computed directly
@@ -126,19 +149,118 @@ fn probes_per_unit_per_day(probe_interval_ms: u64) -> u64 {
     MS_PER_DAY.div_ceil(interval)
 }
 
-/// The whole fleet's own energy over a day, joules: real on-chain fleet size
-/// times the governance-fixed per-unit baseline.
+/// Gate of the wake-cost rule: from its epoch a scheduled probe is charged
+/// [`SLA_LIVENESS_JOULES_PER_PROBE`] (it wakes no model) and a burst
+/// challenge the wake cost of the unit's declared tier at that tier's burst
+/// cadence, against the tier's own idle energy. Before it every scheduled
+/// probe is charged the cool-tier wake figure against the cool-tier idle
+/// baseline. Never at genesis.
+pub const SLA_WAKE_ENERGY_KEY: &str = "feature.sla_wake_energy.activation_epoch";
+
+/// Energy one scheduled liveness probe costs the answering unit, joules: a
+/// signed reply over the network with no model work, an upper estimate.
+pub const SLA_LIVENESS_JOULES_PER_PROBE: u128 = 50;
+
+/// Energy one burst challenge costs a unit of `tier`, joules (the research
+/// doc's section 4 table): a warm model computes in place (about 1 kJ), a
+/// cool one reloads (4 kJ), a cold host boots (taken at 100 kJ, the middle of
+/// the table's unconfirmed 50-150 kJ).
+pub fn burst_joules(tier: ReadinessTier) -> u128 {
+    match tier {
+        ReadinessTier::Warm => 1_000,
+        ReadinessTier::Cool => 4_000,
+        ReadinessTier::Cold => 100_000,
+    }
+}
+
+/// One unit's own energy over a day when it holds `tier`, joules (the same
+/// table): warm idle with its model loaded 10.5 MJ, cool 6.2 MJ, cold host
+/// standby 0.5 MJ.
+pub fn idle_joules_per_day(tier: ReadinessTier) -> u128 {
+    match tier {
+        ReadinessTier::Warm => 10_500_000,
+        ReadinessTier::Cool => SLA_FLEET_JOULES_PER_UNIT_PER_DAY,
+        ReadinessTier::Cold => 500_000,
+    }
+}
+
+/// Wake energy one unit of `tier` spends on burst challenges per day at
+/// `probe_interval_ms`, joules, prorated over the days between bursts and
+/// rounded up.
+fn burst_joules_per_day(tier: ReadinessTier, probe_interval_ms: u64) -> u128 {
+    let between_ms = u128::from(
+        probe_interval_ms
+            .max(1)
+            .saturating_mul(burst_rounds_between(tier)),
+    );
+    (u128::from(MS_PER_DAY) * burst_joules(tier)).div_ceil(between_ms)
+}
+
+/// One unit of `tier`'s challenge energy over a day at `probe_interval_ms`,
+/// joules, under the rule in force.
+fn unit_challenge_joules_per_day(
+    state: &dyn VmState,
+    tier: ReadinessTier,
+    probe_interval_ms: u64,
+) -> u128 {
+    let probes = u128::from(probes_per_unit_per_day(probe_interval_ms));
+    if !crate::feature_gate::is_live_now(state, SLA_WAKE_ENERGY_KEY) {
+        return probes * SLA_CHALLENGE_JOULES_PER_PROBE;
+    }
+    probes * SLA_LIVENESS_JOULES_PER_PROBE + burst_joules_per_day(tier, probe_interval_ms)
+}
+
+/// One unit of `tier`'s own energy over a day, joules, under the rule in
+/// force.
+fn unit_idle_joules_per_day(state: &dyn VmState, tier: ReadinessTier) -> u128 {
+    if !crate::feature_gate::is_live_now(state, SLA_WAKE_ENERGY_KEY) {
+        return SLA_FLEET_JOULES_PER_UNIT_PER_DAY;
+    }
+    idle_joules_per_day(tier)
+}
+
+/// Eligible compute bonds by the readiness tier their provider declared,
+/// indexed by the tier's value (an undeclared provider counts as warm).
+fn units_by_tier(state: &dyn VmState) -> [u64; 3] {
+    let mut counts = [0u64; 3];
+    for bond in economy::compute_bonds(state) {
+        if bond.is_eligible() {
+            counts[declared_readiness_tier(state, &bond.provider_did) as usize] += 1;
+        }
+    }
+    counts
+}
+
+const TIERS: [ReadinessTier; 3] = [
+    ReadinessTier::Cold,
+    ReadinessTier::Cool,
+    ReadinessTier::Warm,
+];
+
+/// The fleet's challenge energy and own energy over a day, joules, for the
+/// tier counts `counts` at `probe_interval_ms` under the rule in force.
+fn fleet_totals(state: &dyn VmState, counts: &[u64; 3], probe_interval_ms: u64) -> (u128, u128) {
+    TIERS.iter().fold((0, 0), |(c, f), t| {
+        let n = u128::from(counts[*t as usize]);
+        (
+            c + n * unit_challenge_joules_per_day(state, *t, probe_interval_ms),
+            f + n * unit_idle_joules_per_day(state, *t),
+        )
+    })
+}
+
+/// The whole fleet's own energy over a day, joules: each declared tier's
+/// eligible units times that tier's per-unit figure under the rule in force.
 pub fn total_fleet_energy_joules_per_day(state: &dyn VmState) -> u128 {
-    u128::from(fleet_unit_count(state)) * SLA_FLEET_JOULES_PER_UNIT_PER_DAY
+    let interval = network_param(state, super::SLA_PROBE_INTERVAL_PARAM);
+    fleet_totals(state, &units_by_tier(state), interval).1
 }
 
 /// The whole fleet's SLA challenge energy over a day at `probe_interval_ms`,
-/// joules: real on-chain fleet size times probes/unit/day times the
-/// governance-fixed per-probe cost.
+/// joules: each declared tier's eligible units times that tier's per-unit
+/// challenge energy under the rule in force.
 pub fn total_challenge_energy_joules_per_day(state: &dyn VmState, probe_interval_ms: u64) -> u128 {
-    u128::from(fleet_unit_count(state))
-        * u128::from(probes_per_unit_per_day(probe_interval_ms))
-        * SLA_CHALLENGE_JOULES_PER_PROBE
+    fleet_totals(state, &units_by_tier(state), probe_interval_ms).0
 }
 
 /// Whether probing the fleet at `probe_interval_ms` stays within
@@ -153,12 +275,16 @@ pub fn challenge_energy_within_budget(
     if budget_bps == 0 {
         return true;
     }
-    let fleet = total_fleet_energy_joules_per_day(state);
-    if fleet == 0 {
-        return true;
-    }
-    let challenge = total_challenge_energy_joules_per_day(state, probe_interval_ms);
-    challenge.saturating_mul(10_000) <= fleet.saturating_mul(u128::from(budget_bps))
+    let (challenge, fleet) = fleet_totals(state, &units_by_tier(state), probe_interval_ms);
+    within_budget(challenge, fleet, budget_bps)
+}
+
+/// Whether `challenge` joules stay within `budget_bps` of `fleet` joules.
+/// Zero budget is disabled; an empty fleet spends nothing.
+fn within_budget(challenge: u128, fleet: u128, budget_bps: u64) -> bool {
+    budget_bps == 0
+        || fleet == 0
+        || challenge.saturating_mul(10_000) <= fleet.saturating_mul(u128::from(budget_bps))
 }
 
 /// Refuse a `ParameterChange` of `key` to `value` that, together with
@@ -205,6 +331,102 @@ fn fleet_energy_budget_joules_per_day(state: &dyn VmState, budget_bps: u64) -> u
     total_fleet_energy_joules_per_day(state) * u128::from(budget_bps) / 10_000
 }
 
+/// The eligible bonds that declared one readiness tier, and the energy this
+/// module's figures put on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierEnergy {
+    pub tier: ReadinessTier,
+    /// Eligible compute bonds whose provider declared this tier (an
+    /// undeclared provider counts as warm).
+    pub units: u64,
+    /// Probe rounds between this tier's burst challenges.
+    pub burst_rounds_between: u64,
+    /// Challenge energy one unit of this tier spends per day, joules.
+    pub challenge_joules_per_unit_per_day: u128,
+    /// One unit of this tier's own energy per day, joules.
+    pub idle_joules_per_unit_per_day: u128,
+    /// These units' own energy over a day, joules.
+    pub fleet_joules_per_day: u128,
+    /// SLA challenge energy these units spend over a day, joules.
+    pub challenge_joules_per_day: u128,
+}
+
+/// What SLA challenges cost the bonded compute fleet in energy at the probe
+/// cadence in force, under the figures the budget check uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnergyReport {
+    /// [`super::SLA_PROBE_INTERVAL_PARAM`] in force, ms.
+    pub probe_interval_ms: u64,
+    /// Probes one unit answers per day at that interval.
+    pub probes_per_unit_per_day: u64,
+    /// Whether the wake-cost rule ([`SLA_WAKE_ENERGY_KEY`]) prices these
+    /// figures; before it every probe is charged a cool-tier wake.
+    pub wake_rule_live: bool,
+    /// Challenge energy as a share of the fleet's own energy, basis points,
+    /// rounded up; for an empty fleet, that of one warm unit.
+    pub challenge_share_bps: u64,
+    /// [`SLA_CHALLENGE_ENERGY_BUDGET_BPS_PARAM`] in force; zero is disabled.
+    pub budget_bps: u64,
+    /// Whether the cadence in force holds within that budget.
+    pub within_budget: bool,
+    /// Eligible compute bonds.
+    pub units: u64,
+    /// The whole fleet's own energy over a day, joules.
+    pub fleet_joules_per_day: u128,
+    /// The whole fleet's challenge energy over a day, joules.
+    pub challenge_joules_per_day: u128,
+    /// The fleet by declared tier, cold first. The rows sum to the totals.
+    pub tiers: [TierEnergy; 3],
+}
+
+/// The energy report for the fleet and parameters in `state`. Reads the
+/// compute-bond register once: every count, total and the budget check come
+/// from that one pass, since anyone may ask for it.
+pub fn energy_report(state: &dyn VmState) -> EnergyReport {
+    let probe_interval_ms = network_param(state, super::SLA_PROBE_INTERVAL_PARAM);
+    let budget_bps = network_param(state, SLA_CHALLENGE_ENERGY_BUDGET_BPS_PARAM);
+    let counts = units_by_tier(state);
+    let tiers = TIERS.map(|tier| {
+        let units = counts[tier as usize];
+        let challenge = unit_challenge_joules_per_day(state, tier, probe_interval_ms);
+        let idle = unit_idle_joules_per_day(state, tier);
+        TierEnergy {
+            tier,
+            units,
+            burst_rounds_between: burst_rounds_between(tier),
+            challenge_joules_per_unit_per_day: challenge,
+            idle_joules_per_unit_per_day: idle,
+            fleet_joules_per_day: u128::from(units) * idle,
+            challenge_joules_per_day: u128::from(units) * challenge,
+        }
+    });
+    let units: u64 = counts.iter().sum();
+    let fleet: u128 = tiers.iter().map(|t| t.fleet_joules_per_day).sum();
+    let challenge: u128 = tiers.iter().map(|t| t.challenge_joules_per_day).sum();
+    let (num, den) = if fleet == 0 {
+        let warm = &tiers[ReadinessTier::Warm as usize];
+        (
+            warm.challenge_joules_per_unit_per_day,
+            warm.idle_joules_per_unit_per_day,
+        )
+    } else {
+        (challenge, fleet)
+    };
+    let share = num.saturating_mul(10_000).div_ceil(den.max(1));
+    EnergyReport {
+        probe_interval_ms,
+        probes_per_unit_per_day: probes_per_unit_per_day(probe_interval_ms),
+        wake_rule_live: crate::feature_gate::is_live_now(state, SLA_WAKE_ENERGY_KEY),
+        challenge_share_bps: u64::try_from(share).unwrap_or(u64::MAX),
+        budget_bps,
+        within_budget: within_budget(challenge, fleet, budget_bps),
+        units,
+        fleet_joules_per_day: fleet,
+        challenge_joules_per_day: challenge,
+        tiers,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +461,215 @@ mod tests {
             b"compute_bond_index",
             serde_json::to_vec(&index).unwrap(),
         );
+    }
+
+    /// The report's tier rows sum to the totals the budget check uses, and
+    /// its share is the ratio that check compares against the budget.
+    #[test]
+    fn the_energy_report_sums_to_the_budget_formula() {
+        let mut state = StateAdapter::new();
+        fleet_of(&mut state, 10);
+        for (i, tier) in [
+            (0, ReadinessTier::Cold),
+            (1, ReadinessTier::Cool),
+            (2, ReadinessTier::Cool),
+        ] {
+            state.set_storage(
+                &SYSTEM_ADDRESS,
+                format!("readiness_tier:did:tenzro:machine:fleet-{i}").as_bytes(),
+                vec![tier as u8],
+            );
+        }
+        let report = energy_report(&state);
+        let interval = crate::governance::genesis_param(SLA_PROBE_INTERVAL_PARAM);
+        assert_eq!(report.probe_interval_ms, interval);
+        assert_eq!(report.units, fleet_unit_count(&state));
+        assert_eq!(
+            report.tiers.iter().map(|t| t.units).collect::<Vec<_>>(),
+            vec![1, 2, 7]
+        );
+        assert_eq!(
+            report
+                .tiers
+                .iter()
+                .map(|t| t.fleet_joules_per_day)
+                .sum::<u128>(),
+            total_fleet_energy_joules_per_day(&state)
+        );
+        assert_eq!(
+            report
+                .tiers
+                .iter()
+                .map(|t| t.challenge_joules_per_day)
+                .sum::<u128>(),
+            total_challenge_energy_joules_per_day(&state, interval)
+        );
+        assert_eq!(
+            report.fleet_joules_per_day,
+            total_fleet_energy_joules_per_day(&state)
+        );
+        assert_eq!(
+            report.challenge_joules_per_day,
+            report
+                .tiers
+                .iter()
+                .map(|t| u128::from(t.units) * t.challenge_joules_per_unit_per_day)
+                .sum::<u128>()
+        );
+        assert!(!report.wake_rule_live);
+        // 144 probes a day at 4 kJ against 6.2 MJ: 9.29%, rounded up.
+        assert_eq!(report.challenge_share_bps, 930);
+        assert_eq!(report.budget_bps, 0);
+        assert!(report.within_budget);
+        // The share is the smallest budget the cadence holds within.
+        assert!(challenge_energy_within_budget(
+            &state,
+            interval,
+            report.challenge_share_bps
+        ));
+        assert!(!challenge_energy_within_budget(
+            &state,
+            interval,
+            report.challenge_share_bps - 1
+        ));
+    }
+
+    /// A state that counts reads of the compute-bond register's index.
+    struct CountingState {
+        inner: StateAdapter,
+        index_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl VmState for CountingState {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+        fn get_code(&self, a: &[u8]) -> Option<Vec<u8>> {
+            self.inner.get_code(a)
+        }
+        fn set_code(&mut self, a: &[u8], c: Vec<u8>) {
+            self.inner.set_code(a, c)
+        }
+        fn get_storage(&self, a: &[u8], k: &[u8]) -> Option<Vec<u8>> {
+            if k == b"compute_bond_index" {
+                self.index_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.inner.get_storage(a, k)
+        }
+        fn set_storage(&mut self, a: &[u8], k: &[u8], v: Vec<u8>) {
+            self.inner.set_storage(a, k, v)
+        }
+        fn get_balance(&self, a: &[u8]) -> u128 {
+            self.inner.get_balance(a)
+        }
+        fn set_balance(&mut self, a: &[u8], b: u128) {
+            self.inner.set_balance(a, b)
+        }
+        fn get_nonce(&self, a: &[u8]) -> u64 {
+            self.inner.get_nonce(a)
+        }
+        fn set_nonce(&mut self, a: &[u8], n: u64) {
+            self.inner.set_nonce(a, n)
+        }
+        fn exists(&self, a: &[u8]) -> bool {
+            self.inner.exists(a)
+        }
+        fn native_total_supply(&self) -> u128 {
+            self.inner.native_total_supply()
+        }
+        fn record_native_burn(&mut self, amount: u128) {
+            self.inner.record_native_burn(amount)
+        }
+    }
+
+    /// One report call walks the compute-bond register once, however many
+    /// bonds it holds: the method is open to anyone.
+    #[test]
+    fn one_energy_report_reads_the_bond_register_once() {
+        let mut inner = StateAdapter::new();
+        fleet_of(&mut inner, 25);
+        let state = CountingState {
+            inner,
+            index_reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let report = energy_report(&state);
+        assert_eq!(report.units, 25);
+        assert_eq!(
+            state.index_reads.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// From the wake-cost gate a scheduled probe costs a liveness reply and
+    /// a burst the tier's wake at the tier's cadence, against the tier's own
+    /// energy: at the ten-minute interval a warm unit spends 144 x 50 J plus
+    /// 4 x 1 kJ a day against 10.5 MJ, a cold one 144 x 50 J plus one
+    /// 100 kJ boot a week (14,286 J a day, rounded up) against 0.5 MJ.
+    #[test]
+    fn from_the_wake_gate_challenges_are_priced_per_tier() {
+        let mut state = StateAdapter::new();
+        fleet_of(&mut state, 3);
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            b"readiness_tier:did:tenzro:machine:fleet-0",
+            vec![ReadinessTier::Cold as u8],
+        );
+        set_genesis_param(&mut state, SLA_WAKE_ENERGY_KEY, 0);
+        let r = energy_report(&state);
+        assert!(r.wake_rule_live);
+        let warm = &r.tiers[ReadinessTier::Warm as usize];
+        let cold = &r.tiers[ReadinessTier::Cold as usize];
+        assert_eq!((warm.units, cold.units), (2, 1));
+        assert_eq!(warm.burst_rounds_between, 36);
+        assert_eq!(warm.challenge_joules_per_unit_per_day, 144 * 50 + 4 * 1_000);
+        assert_eq!(warm.idle_joules_per_unit_per_day, 10_500_000);
+        assert_eq!(cold.burst_rounds_between, 1_008);
+        assert_eq!(cold.challenge_joules_per_unit_per_day, 144 * 50 + 14_286);
+        assert_eq!(cold.idle_joules_per_unit_per_day, 500_000);
+        let challenge = 2 * (144 * 50 + 4_000) + (144 * 50 + 14_286);
+        let fleet = 2 * 10_500_000 + 500_000;
+        assert_eq!(r.challenge_joules_per_day, challenge);
+        assert_eq!(r.fleet_joules_per_day, fleet);
+        assert_eq!(
+            r.challenge_share_bps,
+            (challenge * 10_000).div_ceil(fleet) as u64
+        );
+        // About 0.2%: the 9.3% came from charging every probe a wake. A cold
+        // unit's own share stays high (its idle energy is tiny), which is
+        // what the per-tier rows show.
+        assert!(r.challenge_share_bps < 200);
+        let interval = crate::governance::genesis_param(SLA_PROBE_INTERVAL_PARAM);
+        assert!(challenge_energy_within_budget(
+            &state,
+            interval,
+            r.challenge_share_bps
+        ));
+        assert!(!challenge_energy_within_budget(
+            &state,
+            interval,
+            r.challenge_share_bps - 1
+        ));
+    }
+
+    #[test]
+    fn the_wake_gate_is_dormant_at_genesis() {
+        let gate = crate::governance::governed_param(SLA_WAKE_ENERGY_KEY).unwrap();
+        assert!(crate::feature_gate::follows_convention(gate));
+        assert_eq!(gate.genesis, crate::feature_gate::NEVER);
+    }
+
+    /// An empty fleet reports the per-unit figures and no energy.
+    #[test]
+    fn the_energy_report_of_an_empty_fleet_is_per_unit_only() {
+        let report = energy_report(&StateAdapter::new());
+        assert_eq!(report.units, 0);
+        assert_eq!(report.fleet_joules_per_day, 0);
+        assert_eq!(report.challenge_joules_per_day, 0);
+        assert_eq!(report.challenge_share_bps, 930);
     }
 
     #[test]
@@ -330,7 +761,7 @@ mod tests {
     }
 
     /// A tier-blind per-probe figure is exactly the module's intended
-    /// scope: without a tier concept on chain, one figure applies to every
+    /// scope: with one probe cadence for every tier, one figure applies to every
     /// bonded unit, and it is the worst-case GPU figure from the research
     /// doc's table, not the cheaper warm-tier one.
     #[test]

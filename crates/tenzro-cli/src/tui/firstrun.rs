@@ -19,7 +19,7 @@ use crate::progress::widget::Panel;
 use super::detect::{self, Finding, Machine, Net};
 use super::journey::{self, Action, Blocked, Gate, Offer, Opts, Path, Plan, Step};
 use super::keys::{self, Act, SETUP};
-use super::runner::{self, Msg, Running};
+use super::runner::{self, Begun, Msg, Running};
 use super::theme::{Theme, Word};
 use super::ui;
 
@@ -32,9 +32,6 @@ pub enum Outcome {
         next: String,
     },
 }
-
-/// How many times the wait for a node's RPC checks before it gives up.
-const WAIT_CHECKS: u32 = 30;
 
 /// Results sent back from background work.
 pub enum Probe {
@@ -153,8 +150,7 @@ impl App {
             Probe::Net(n) => self.net = n,
             Probe::Attempt(n) => {
                 if let Some(id) = self.panel_task {
-                    self.panel
-                        .message(id, &format!("check {n} of {WAIT_CHECKS}"));
+                    self.panel.message(id, &runner::wait_message(n));
                 }
             }
             Probe::Waited(ok) => {
@@ -165,8 +161,7 @@ impl App {
                         self.states[self.idx] = StepState::Done;
                         self.log.push("The node answers.".into());
                     } else {
-                        self.states[self.idx] =
-                            StepState::Failed("the node did not answer within a minute".into());
+                        self.states[self.idx] = StepState::Failed(runner::NODE_SILENT.into());
                         self.log.push("The node did not answer within a minute. Look at its log, then press Enter to wait again.".into());
                     }
                 }
@@ -241,39 +236,15 @@ impl App {
 
     fn finish_step(&mut self, code: Option<i32>) {
         self.end_activity();
-        let step = self.step().cloned();
-        let Some(step) = step else { return };
-        if code == Some(0) {
-            if let Action::Exec {
-                save_as: Some(name),
-                ..
-            } = &step.action
-            {
-                let dir = self
-                    .opts
-                    .as_ref()
-                    .map(|o| o.data_dir.clone())
-                    .unwrap_or_default();
-                match runner::save_output(&dir, name, &self.captured.join("\n")) {
-                    Ok(p) => self.log.push(format!("Kept the list in {}", p.display())),
-                    Err(e) => self.log.push(format!("Could not keep the list: {e}")),
-                }
+        let (Some(step), Some(o)) = (self.step().cloned(), self.opts.clone()) else {
+            return;
+        };
+        match runner::finish(&step, code, &self.captured, &o) {
+            Ok(said) => {
+                self.log.extend(said);
+                self.states[self.idx] = StepState::Done;
             }
-            if step.id == "holder-check"
-                && let Some(o) = &self.opts
-            {
-                let mut cfg = crate::config::load_config();
-                cfg.key_holder_socket = Some(o.holder_socket.clone());
-                cfg.key_holder_label = Some(o.holder_label.clone());
-                let _ = crate::config::save_config(&cfg);
-            }
-            self.states[self.idx] = StepState::Done;
-        } else {
-            let why = match code {
-                Some(c) => format!("it stopped with exit code {c}"),
-                None => "it was stopped".into(),
-            };
-            self.states[self.idx] = StepState::Failed(why);
+            Err(why) => self.states[self.idx] = StepState::Failed(why),
         }
     }
 
@@ -518,74 +489,36 @@ impl App {
     fn run_step(&mut self, step: &Step) {
         self.log.clear();
         self.captured.clear();
-        match &step.action {
-            Action::None => {}
-            Action::Exec {
-                prog,
-                args,
-                detached: true,
-                ..
-            } => {
-                let dir = self
-                    .opts
-                    .as_ref()
-                    .map(|o| o.data_dir.clone())
-                    .unwrap_or_default();
-                let log = dir.join("node.log");
-                match runner::spawn_detached(prog, args, &log) {
-                    Ok(pid) => {
-                        self.log.push(format!(
-                            "Started (process {pid}). Its log: {}",
-                            log.display()
-                        ));
-                        self.states[self.idx] = StepState::Done;
-                    }
-                    Err(e) => self.states[self.idx] = StepState::Failed(e.to_string()),
-                }
+        let Some(o) = self.opts.clone() else {
+            return;
+        };
+        match runner::begin(step, &o) {
+            Begun::Done(said) => {
+                self.log.extend(said);
+                self.states[self.idx] = StepState::Done;
             }
-            Action::Exec { prog, args, .. } => match runner::spawn(prog, args) {
-                Ok(r) => {
-                    self.running = Some(r);
-                    self.start_activity(&step.title, "starting");
-                }
-                Err(e) => {
-                    self.log.push(e.to_string());
-                    self.states[self.idx] = StepState::Failed(e.to_string());
-                }
-            },
-            Action::WaitRpc { url } => {
+            Begun::Failed(why) => {
+                self.log.push(why.clone());
+                self.states[self.idx] = StepState::Failed(why);
+            }
+            Begun::Running(r) => {
+                self.running = Some(r);
+                self.start_activity(&step.title, "starting");
+            }
+            Begun::Waiting(url) => {
                 if let Some(h) = self.handle.clone() {
                     self.waiting = true;
                     self.log.push(format!("Waiting for {url} ..."));
                     self.start_activity(&step.title, &format!("waiting for the node at {url}"));
                     let tx = self.tx.clone();
-                    let url = url.clone();
                     h.spawn(async move {
-                        let mut ok = false;
-                        for attempt in 1..=WAIT_CHECKS {
-                            let _ = tx.send(Probe::Attempt(attempt));
-                            if detect::check_network(&url).await.is_reachable() {
-                                ok = true;
-                                break;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        }
+                        let heard = tx.clone();
+                        let ok = runner::wait_for_node(&url, move |attempt| {
+                            let _ = heard.send(Probe::Attempt(attempt));
+                        })
+                        .await;
                         let _ = tx.send(Probe::Waited(ok));
                     });
-                }
-            }
-            Action::SaveLocalConfig => {
-                let mut cfg = crate::config::load_config();
-                cfg.endpoint = Some(crate::endpoint::LOCAL_RPC.to_string());
-                match crate::config::save_config(&cfg) {
-                    Ok(()) => {
-                        self.log.push(format!(
-                            "Saved to {}",
-                            crate::config::config_path().display()
-                        ));
-                        self.states[self.idx] = StepState::Done;
-                    }
-                    Err(e) => self.states[self.idx] = StepState::Failed(e.to_string()),
                 }
             }
         }
@@ -743,7 +676,7 @@ impl App {
         let t = &self.theme;
         let mut lines = vec![
             Line::from(""),
-            Line::from(Span::styled(" What do you want to do?", t.title())),
+            Line::from(Span::styled(format!(" {}", journey::QUESTION), t.title())),
             Line::from(""),
         ];
         for (i, p) in Path::ALL.iter().enumerate() {
@@ -1153,7 +1086,7 @@ mod tests {
     #[test]
     fn local_path_walks_to_one_next_command() {
         let mut a = app(KeyRoot::TpmReady, Net::NotResolving);
-        keys(&mut a, &["Enter", "Enter", "4"]);
+        keys(&mut a, &["Enter", "Enter", "3"]);
         assert_eq!(a.stage, Stage::Steps);
         // about, hardware-key, save
         keys(&mut a, &["Enter"]);
@@ -1166,7 +1099,7 @@ mod tests {
     #[test]
     fn a_wait_shows_its_progress_on_the_steps_screen_and_clears_when_it_ends() {
         let mut a = app(KeyRoot::TpmReady, Net::NotResolving);
-        keys(&mut a, &["Enter", "Enter", "4"]);
+        keys(&mut a, &["Enter", "Enter", "3"]);
         assert_eq!(a.stage, Stage::Steps);
         a.start_activity(
             "Waiting for the node",
@@ -1190,7 +1123,7 @@ mod tests {
                 chain_id: "0x1".into(),
             },
         );
-        keys(&mut a, &["Enter", "Enter", "3"]);
+        keys(&mut a, &["Enter", "Enter", "2"]);
         assert_eq!(a.stage, Stage::Steps);
         // hardware (info), precheck (skip), then provision.
         keys(&mut a, &["Enter", "s"]);
@@ -1219,7 +1152,7 @@ mod tests {
                 chain_id: "0x1".into(),
             },
         );
-        keys(&mut a, &["Enter", "Enter", "3"]);
+        keys(&mut a, &["Enter", "Enter", "2"]);
         let ids: Vec<_> = a
             .plan
             .as_ref()
@@ -1262,7 +1195,7 @@ mod tests {
                 chain_id: "0x1".into(),
             },
         );
-        keys(&mut a, &["Enter", "Enter", "3"]);
+        keys(&mut a, &["Enter", "Enter", "2"]);
         let n = a.states.len();
         for i in 0..n {
             a.idx = i;

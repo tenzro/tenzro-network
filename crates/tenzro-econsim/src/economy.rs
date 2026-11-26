@@ -205,6 +205,9 @@ pub struct Assumptions {
     /// Gap between chain rate and market, as a share, that outside price
     /// evidence counts as a successful challenge.
     pub challenge_band: f64,
+    /// Days a hold may last while the reported median stays off the market
+    /// before governance puts its own rate in force instead.
+    pub hold_escalate_days: f64,
     /// Whether governance keeps the fee rate at the market price.
     pub governance_tracks_price: bool,
     /// Most the fully diluted value may be as a multiple of the network's
@@ -334,6 +337,7 @@ impl Default for Assumptions {
             running_cost_ask_usd_month: 18_000.0,
             reserve_seed_tnzo: 0.0,
             challenge_band: 0.10,
+            hold_escalate_days: 2.0,
             governance_tracks_price: true,
             max_price_to_revenue: 0.0,
             max_fdv_usd: 0.0,
@@ -433,6 +437,7 @@ impl Assumptions {
             "validator_exit_yield" => self.validator_exit_yield = v,
             "validator_join_yield" => self.validator_join_yield = v,
             "challenge_band" => self.challenge_band = v,
+            "hold_escalate_days" => self.hold_escalate_days = v,
             "governance_tracks_price" => self.governance_tracks_price = v != 0.0,
             "max_price_to_revenue" => self.max_price_to_revenue = v,
             "max_fdv_usd" => self.max_fdv_usd = v,
@@ -680,6 +685,47 @@ pub struct RunConfig {
     /// exits, and skewed rate reports.
     #[serde(skip)]
     pub chaos: Option<std::sync::Arc<crate::chaos::Plan>>,
+    /// Hour-resolution quotes of the stable unit on each venue, laid over
+    /// the chaos plan's day-resolution peg (the rate epoch is an hour).
+    #[serde(skip)]
+    pub stable_quotes: Vec<StableQuote>,
+}
+
+/// The stable token's state after one block, read from the chain.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct StableHour {
+    /// Hours since the run's start, at the block.
+    pub hour: f64,
+    /// Whether the peg breaker has the token suspended.
+    pub suspended: bool,
+    /// Suspensions the breaker has counted so far.
+    pub suspensions: u64,
+    /// The token's validator rate in force, nano-USD (0 before the first).
+    pub rate_nano_usd: u64,
+    /// The treasury's balance of the token, base units.
+    pub treasury_units: u128,
+    /// Treasury legs providers have sent in the token so far, base units.
+    pub legs_sent: u128,
+    /// Share of the treasury's value (TNZO at the rate in force, the token
+    /// at the market) the token makes up, bps.
+    pub exposure_bps: f64,
+}
+
+/// The stable unit's quote on each of the two venues between two points in
+/// time, moving in a straight line from the first figure to the second.
+/// Hours are counted from the run's start. Outside every segment a venue
+/// quotes the chaos plan's peg (1.0 with none). Where segments overlap the
+/// lowest quote counts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StableQuote {
+    /// First hour, inclusive.
+    pub from_hour: f64,
+    /// Last hour, exclusive.
+    pub to_hour: f64,
+    /// Venue a's USD quote at the start and the end of the segment.
+    pub venue_a: (f64, f64),
+    /// Venue b's USD quote at the start and the end of the segment.
+    pub venue_b: (f64, f64),
 }
 
 impl RunConfig {
@@ -703,6 +749,7 @@ impl RunConfig {
             policy: crate::decision::Policy::default(),
             decision_agents: 1,
             chaos: None,
+            stable_quotes: Vec::new(),
         }
     }
 }
@@ -998,6 +1045,10 @@ pub struct RunOutcome {
     pub applied: u64,
     /// Transactions refused, by reason (first 200 characters).
     pub refusals: BTreeMap<String, u64>,
+    /// One sample of the stable token's peg breaker and the treasury's
+    /// holding of it after every block (a block is an hour; so is a rate
+    /// epoch), empty without a stable token.
+    pub stable_hours: Vec<StableHour>,
     /// Blocks the ledger refused or whose duties failed.
     pub ledger_failures: Vec<String>,
     /// Running-cost reserve rules the chain broke, by block.
@@ -1122,6 +1173,12 @@ pub struct Economy {
     next_sponsor_ms: i64,
     off_band_days: u32,
     in_band_days: u32,
+    /// Days the rate has been held while the reported median sat off the
+    /// market.
+    held_off_days: u32,
+    /// Whether governance put its own rate in force against reports that
+    /// stayed off the market through a hold.
+    rate_overridden: bool,
     /// TNZO the pool traded on its last trading day, both sides.
     volume_day_tnzo: f64,
     /// Running-cost TNZO the desk holds and has not sold yet.
@@ -1507,6 +1564,8 @@ impl Economy {
             next_sponsor_ms: 0,
             off_band_days: 0,
             in_band_days: 0,
+            held_off_days: 0,
+            rate_overridden: false,
             volume_day_tnzo: 0.0,
             desk_inventory: 0,
             desk_proceeds_usd: 0.0,
@@ -1889,7 +1948,24 @@ impl Economy {
 
     /// The stable unit's market value on `day`, USD.
     fn peg_at(&self, day: f64) -> f64 {
-        self.cfg.chaos.as_ref().map_or(1.0, |p| p.peg(day))
+        let plan = self.cfg.chaos.as_ref().map_or(1.0, |p| p.peg(day));
+        plan.min(self.venue_quote(day, false).unwrap_or(1.0))
+    }
+
+    /// What `venue_a` (or venue b) quotes for the stable unit at `day`
+    /// under the run's hour-resolution quotes, if one is in force.
+    fn venue_quote(&self, day: f64, venue_a: bool) -> Option<f64> {
+        let hour = day * 24.0;
+        self.cfg
+            .stable_quotes
+            .iter()
+            .filter(|q| hour >= q.from_hour && hour < q.to_hour)
+            .map(|q| {
+                let (a, b) = if venue_a { q.venue_a } else { q.venue_b };
+                let t = (hour - q.from_hour) / (q.to_hour - q.from_hour).max(1e-9);
+                a + (b - a) * t
+            })
+            .reduce(f64::min)
     }
 
     /// A chaos plan's exits at a day's open: a share of bonded stake asks
@@ -2678,6 +2754,7 @@ impl Economy {
         // the current one.
         let closed = epoch;
         let walk = crate::attack::rate_walk(self);
+        let reveal_withhold = crate::attack::reveal_withhold(self);
         let skew = crate::attack::rate_skew(self);
         // A chaos rate shock: the lowest-id share of bonded validators
         // skews both venues, or one venue's quote is manipulated for all.
@@ -2696,6 +2773,12 @@ impl Economy {
                 Some((cartel, rate, false)) if v < cartel => Some(rate),
                 _ => None,
             };
+            let walked = match reveal_withhold {
+                Some((cartel, rate, _)) if v < cartel => Some(rate),
+                _ => walked,
+            };
+            let withhold_my_reveal =
+                matches!(reveal_withhold, Some((cartel, _, true)) if v < cartel);
             let factor = match self.cfg.rate_cartel {
                 Some((n, f, from))
                     if v < n
@@ -2725,8 +2808,10 @@ impl Economy {
             if self.stable.is_some() {
                 // The stable token's market value, which the registry
                 // checks against its peg.
-                let peg = ((self.peg_at(day) * 1e9).max(1.0)) as u128;
                 for venue in ["venue-a", "venue-b"] {
+                    let own = self.cfg.chaos.as_ref().map_or(1.0, |p| p.peg(day));
+                    let peg_v = own.min(self.venue_quote(day, venue == "venue-a").unwrap_or(1.0));
+                    let peg = ((peg_v * 1e9).max(1.0)) as u128;
                     quotes.push((crate::stable::SYMBOL.to_string(), venue.to_string(), peg));
                 }
             }
@@ -2756,6 +2841,10 @@ impl Economy {
                         "salt": hex::encode(salt),
                     })
                 });
+            // The coalition always seals; it only sometimes withholds the
+            // reveal of what it sealed the epoch before, forfeiting that
+            // seal's unopened-report slash instead of opening it.
+            let reveal = if withhold_my_reveal { None } else { reveal };
             self.validators[v as usize].sealed = Some((closed, quotes, salt));
             let payload = serde_json::json!({
                 "epoch": closed,
@@ -3074,18 +3163,37 @@ impl Economy {
             .fold(0u128, |a, q| a.saturating_add(q.remaining))
     }
 
-    /// A rate hold to propose from outside price evidence, in the full
+    /// A rate action to propose from outside price evidence, in the full
     /// design only: hold once the chain rate sat off the market by more
     /// than the band for a day, release once the reported median is back
-    /// inside it for two.
-    fn challenge_action(&self) -> Option<u64> {
+    /// inside it for two. Reports that stay off the market through
+    /// `hold_escalate_days` of hold come from a stake majority a hold cannot
+    /// wait out, so governance puts its own rate (kept at the market) in
+    /// force, lifts the hold it no longer needs, and sets validator mode
+    /// again once the median has been back inside the band for two days.
+    fn challenge_action(&self) -> Option<(&'static str, u64)> {
         if !self.cfg.rate_reports || self.cfg.ablation != Ablation::Full {
             return None;
         }
         let held = self.chain.param("fees.usd_rate_frozen") == 1;
-        match (held, self.off_band_days >= 1, self.in_band_days >= 2) {
-            (false, true, _) => Some(1),
-            (true, _, true) => Some(0),
+        let in_band = self.in_band_days >= 2;
+        if self.rate_overridden {
+            return if held {
+                Some(("fees.usd_rate_frozen", 0))
+            } else if in_band {
+                Some(("fees.usd_rate_mode", 1))
+            } else {
+                None
+            };
+        }
+        match (held, self.off_band_days >= 1, in_band) {
+            (false, true, _) => Some(("fees.usd_rate_frozen", 1)),
+            (true, _, true) => Some(("fees.usd_rate_frozen", 0)),
+            (true, _, false)
+                if f64::from(self.held_off_days) >= self.cfg.assumptions.hold_escalate_days =>
+            {
+                Some(("fees.usd_rate_mode", 0))
+            }
             _ => None,
         }
     }
@@ -3116,10 +3224,18 @@ impl Economy {
                 let challenge = self.challenge_action();
                 let action = if let Some(entry) = self.asset_entry.clone() {
                     Some(("settlement asset", entry))
-                } else if self.rate_breaker_tripped() {
+                } else if self.rate_breaker_tripped()
+                    && ((self.chain.param("fees.tnzo_usd_nano") as f64 / 1e9 / self.price - 1.0)
+                        .abs()
+                        > 0.05
+                        || self.chain.param("fees.usd_rate_mode") == 0)
+                {
                     // The dispersion breaker put the governance rate in
                     // force: governance brings that rate to the market it
-                    // fell behind, then sets validator mode again.
+                    // fell behind, then sets validator mode again. Validator
+                    // mode is only re-armed once governance has set its own,
+                    // so no proposal holds the slot for a change that is
+                    // already in force.
                     let gov = self.chain.param("fees.tnzo_usd_nano") as f64 / 1e9;
                     if (gov / self.price - 1.0).abs() > 0.05 {
                         let v = ((self.price * 1e9) as u64).max(1);
@@ -3133,11 +3249,8 @@ impl Economy {
                             ledger::parameter_change("fees.usd_rate_mode", 1),
                         ))
                     }
-                } else if let Some(v) = challenge {
-                    Some((
-                        "rate hold",
-                        ledger::parameter_change("fees.usd_rate_frozen", v),
-                    ))
+                } else if let Some((key, v)) = challenge {
+                    Some(("rate hold", ledger::parameter_change(key, v)))
                 } else if a.leg_proposal_bps > 0.0
                     && self.legs_filed < 2
                     && self.day() >= a.leg_proposal_day
@@ -3218,7 +3331,7 @@ impl Economy {
                 } else {
                     None
                 };
-                if let Some((_, action)) = action {
+                if let Some((lbl, action)) = action {
                     let sent = action.clone();
                     let ok = self
                         .chain
@@ -3227,6 +3340,9 @@ impl Economy {
                             action,
                             nonce,
                         });
+                    if std::env::var("ECON_DBG").is_ok() {
+                        eprintln!("day {:.1} propose submit lbl={} ok={}", self.day(), lbl, ok);
+                    }
                     if ok {
                         self.proposal = Some(Proposal {
                             claim: None,
@@ -3446,7 +3562,37 @@ impl Economy {
         }
     }
 
+    /// Records the stable token's breaker and treasury holding after a
+    /// block.
+    fn sample_stable_hour(&mut self) {
+        let Some(s) = self.stable.as_ref() else {
+            return;
+        };
+        let (token, legs_sent) = (s.token, s.legs_sent);
+        let st = self.chain.state();
+        let b = n::settlement_asset::read_breaker(st, &token);
+        let rate =
+            n::economy::read_symbol_rate(st, crate::stable::SYMBOL).map_or(0, |r| r.0 as u64);
+        let treasury = n::derive_treasury_address();
+        let units = tenzro_vm::token_ledger::balance(st, &token, treasury.as_bytes());
+        let tnzo_usd = tnzo(st.get_balance(treasury.as_bytes()))
+            * n::read_fee_rate(st).rate_nano_usd as f64
+            / 1e9;
+        let hour = self.chain.now_ms() as f64 / (DAY_MS as f64 / 24.0);
+        let stable_usd = crate::stable::usd(units) * self.peg_at(hour / 24.0);
+        self.out.stable_hours.push(StableHour {
+            hour,
+            suspended: b.suspended,
+            suspensions: b.suspensions,
+            rate_nano_usd: rate,
+            treasury_units: units,
+            legs_sent,
+            exposure_bps: 1e4 * stable_usd / (stable_usd + tnzo_usd).max(1e-9),
+        });
+    }
+
     fn after_block(&mut self, results: &[TxResult]) {
+        self.sample_stable_hour();
         let now = self.chain.now_ms();
         let rules = tenzro_vm::governance::GovernanceRules::GENESIS;
         for r in results {
@@ -4151,6 +4297,18 @@ impl Economy {
             .and_then(|r| r.median_nano_usd.parse::<f64>().ok())
             .is_some_and(|m| (m / 1e9 / self.price - 1.0).abs() <= a.challenge_band);
         self.in_band_days = if median_ok { self.in_band_days + 1 } else { 0 };
+        let held = self.chain.param("fees.usd_rate_frozen") == 1;
+        self.held_off_days = if held && !median_ok {
+            self.held_off_days + 1
+        } else {
+            0
+        };
+        let mode = self.chain.param("fees.usd_rate_mode");
+        if mode == 0 && self.cfg.rate_reports {
+            self.rate_overridden = true;
+        } else if mode == 1 {
+            self.rate_overridden = false;
+        }
         let (treasury_stable_usd, stable_legs_usd_total, stable_outside_usd) =
             self.check_stable(day);
         let peg = self.peg_at(day);

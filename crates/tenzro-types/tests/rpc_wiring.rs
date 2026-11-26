@@ -30,9 +30,31 @@ const SURFACES: &[(&str, &[&str], &[&str])] = &[
 /// reason). Every entry must match at least one dispatched method.
 const NODE_INTERNAL: &[(&str, &str)] = &[
     (
+        "tenzro_accessChallenge",
+        "the CLI signs in through tenzro-auth's client (graceful-exit, node commands), which makes this call; no command of its own",
+    ),
+    (
+        "tenzro_issueAccessToken",
+        "the CLI signs in through tenzro-auth's client (graceful-exit, node commands), which makes this call; no command of its own",
+    ),
+    (
         "tenzro_getHandoverChain",
         "node to node: a restoring node (tenzro-node restore --proof-from) and a prover's input export (tenzro-node prover-inputs) read it",
     ),
+    (
+        "tenzro_getChallengeInputs",
+        "a validator re-executing a challenged block reads the inputs; committee-internal, no user command",
+    ),
+    (
+        "tenzro_reexecuteChallenge",
+        "a validator re-executes a challenged block; committee-internal, no user command",
+    ),
+    (
+        "tenzro_listSeatDuties",
+        "a validator reads the duties of its consensus seats; committee-internal, no user command",
+    ),
+    ("tenzro_getRpcProviderLeg", "no user surface in 0.2.2"),
+    ("tenzro_sendZkProof", "no user surface in 0.2.2"),
     (
         "eth_",
         "Ethereum JSON-RPC namespace served to EVM wallets and libraries; those clients are its surface",
@@ -116,6 +138,31 @@ const SURFACE_EXEMPT: &[(&str, &[&str], &str)] = &[
         "tenzro_refreshToken",
         &["mcp-rust"],
         "refuses any Authorization header and wants a DPoP proof over its own request; an MCP client refreshes the token its session uses at this server's OAuth token endpoint (grant_type=refresh_token), and the Rust MCP tool for it was removed when refresh became key-bound",
+    ),
+    (
+        "tenzro_requestDeviceCode",
+        &["cli"],
+        "a television or other device with no keys makes this call to ask for a code to show; an operator's terminal is never that device",
+    ),
+    (
+        "tenzro_pollDeviceCode",
+        &["cli"],
+        "the device that asked for the code polls with its device code until the operator answers; an operator's terminal is never that device",
+    ),
+    (
+        "tenzro_approveDeviceCode",
+        &["cli"],
+        "the operator's passkey signs the approval on this call, which the Control app on a paired device and the web console collect; a terminal makes no passkey assertion",
+    ),
+    (
+        "tenzro_installUpdate",
+        &["cli"],
+        "a paired device asks the node to start its installed updater with the operator's passkey; `tenzro update` runs the same update on the machine itself",
+    ),
+    (
+        "tenzro_recordExecutionReceipt",
+        &["cli"],
+        "the agent signs the call with its own DID envelope, which only its runtime holds; an operator's terminal records nothing in an agent's name",
     ),
 ];
 

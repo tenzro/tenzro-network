@@ -279,6 +279,155 @@ impl Mechanisms {
     }
 }
 
+/// How the burn a release is measured against is formed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Basis {
+    /// Each tick's own burn: the per-job cap, since every job settles in the tick it is paid.
+    PerTick,
+    /// The mean of the trailing days' burn: a pooled period cap.
+    Window(u32),
+    /// Exponential smoothing: 6/7 of the prior budget and 1/7 of the tick's burn.
+    Helium,
+}
+
+/// Pool release bound to the fee burn. Release stays tied to verified paid
+/// work (the pegged weights); this caps the total at a ratio of the burn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Recycle {
+    /// Release in a period is at most `ratio` times the TNZO burned.
+    pub ratio: f64,
+    /// The cap is held in USD at the tick's rate (true) or as a TNZO count.
+    pub usd_cap: bool,
+    pub basis: Basis,
+    /// Matched ratio on the tick's own burn at the start, falling in a straight line to
+    /// `ratio` over `boot_days`; at or under `ratio`: off.
+    pub boot_ratio: f64,
+    pub boot_days: f64,
+    /// Most the matched part may release in total, share of the genesis pool.
+    pub boot_budget_frac: f64,
+    /// Release a day for verified availability on a tick with no burn at all, TNZO.
+    /// Not tied to paid work; zero is the charter's rule.
+    pub floor_tnzo_day: f64,
+    /// Unused room under the cap carried forward, spent only on ticks with no burn, TNZO.
+    pub accrual_max_tnzo: f64,
+    /// Release in a year is at most this share of the pool at the year's start.
+    pub yearly_limit_frac: Option<f64>,
+    /// Under this share of the genesis pool, operators are paid in stable from the fees kept
+    /// instead of from the pool.
+    pub fee_direct_below: Option<f64>,
+    /// Steps of the ratio as the pool falls: under each share of the genesis pool the
+    /// ratio is the one named with it; the lowest share reached applies.
+    pub ratio_steps: Vec<(f64, f64)>,
+}
+
+impl Recycle {
+    pub fn new(ratio: f64) -> Recycle {
+        Recycle {
+            ratio,
+            usd_cap: true,
+            basis: Basis::PerTick,
+            boot_ratio: 0.0,
+            boot_days: 0.0,
+            boot_budget_frac: 0.0,
+            floor_tnzo_day: 0.0,
+            accrual_max_tnzo: 0.0,
+            yearly_limit_frac: None,
+            fee_direct_below: None,
+            ratio_steps: Vec::new(),
+        }
+    }
+
+    /// The ratio in force with this share of the genesis pool left.
+    pub fn ratio_at(&self, pool_share: f64) -> f64 {
+        self.ratio_steps
+            .iter()
+            .filter(|(under, _)| pool_share < *under)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(self.ratio, |(_, r)| *r)
+    }
+}
+
+/// A TNZO price set from outside the pool, USD.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum PricePath {
+    /// One price for the whole run.
+    Held(f64),
+    /// `from` until `at_day`, then a straight move over `over_days` to `from * factor`,
+    /// held from there.
+    Shock {
+        from: f64,
+        factor: f64,
+        at_day: f64,
+        over_days: f64,
+    },
+    /// A geometric random walk from `from` with this yearly volatility and no drift,
+    /// one step a day.
+    Walk {
+        from: f64,
+        annual_vol: f64,
+        seed: u64,
+    },
+}
+
+impl PricePath {
+    /// The price on each of `days` days.
+    pub fn daily(&self, days: usize) -> Vec<f64> {
+        match *self {
+            PricePath::Held(p) => vec![p; days],
+            PricePath::Shock {
+                from,
+                factor,
+                at_day,
+                over_days,
+            } => (0..days)
+                .map(|d| {
+                    let done = ((d as f64 - at_day) / over_days.max(1e-9)).clamp(0.0, 1.0);
+                    from * (1.0 + (factor - 1.0) * done)
+                })
+                .collect(),
+            PricePath::Walk {
+                from,
+                annual_vol,
+                seed,
+            } => {
+                let sd = annual_vol / 365f64.sqrt();
+                let mut state = seed;
+                let mut unit = || {
+                    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    (((z ^ (z >> 31)) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+                };
+                let mut p = from;
+                (0..days)
+                    .map(|_| {
+                        let now = p;
+                        let normal =
+                            (-2.0 * unit().ln()).sqrt() * (std::f64::consts::TAU * unit()).cos();
+                        p *= (sd * normal - sd * sd / 2.0).exp();
+                        now
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+/// Validators in capability tiers: the income of the set is split by tier weight
+/// and each tier has its own running cost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tiers {
+    /// Weight of tier 0, 1, 2.
+    pub weights: [f64; 3],
+    /// Running cost of tier 0, 1, 2 over the base validator cost.
+    pub cost_mult: [f64; 3],
+    /// Tier of each validator slot in turn (genesis slots first, then standby), repeated.
+    pub pattern: Vec<usize>,
+    /// Largest share of the split one validator may take.
+    pub share_cap: f64,
+}
+
 /// Inputs of the accounting beyond the trace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rules {
@@ -324,6 +473,16 @@ pub struct Rules {
     pub extra_shocks: Vec<ShockEntry>,
     /// Regions validators are placed in, in turn, over the trace's regions.
     pub validator_regions: Option<Vec<String>>,
+    /// Release bound to the fee burn; none: the pegged releases alone.
+    pub recycle: Option<Recycle>,
+    /// Validator tiers; none: equal validators.
+    pub tiers: Option<Tiers>,
+    /// TNZO priced from outside the pool; none: the pool sets it.
+    pub price_path: Option<PricePath>,
+    /// Ticks in which no payment settles (a launch with no paid usage).
+    pub blackout: Option<(u64, u64)>,
+    /// Rewards pool at the start, TNZO, over the manifest's.
+    pub pool_tnzo: Option<f64>,
 }
 
 impl Default for Rules {
@@ -352,6 +511,11 @@ impl Default for Rules {
             rails: None,
             extra_shocks: Vec::new(),
             validator_regions: None,
+            recycle: None,
+            tiers: None,
+            price_path: None,
+            blackout: None,
+            pool_tnzo: None,
         }
     }
 }
@@ -482,6 +646,34 @@ pub struct Outcome {
     pub availability_over_fees: f64,
     pub paths: BTreeMap<Payout, PathBook>,
     pub charter_violations: u64,
+    /// Validators bonded, mean over the run after warmup; and the least number of
+    /// regions they sat in.
+    pub validators_mean: f64,
+    pub validator_regions_min: u32,
+    /// Fewest validators whose pay weight passes a third of the set's, least over the run;
+    /// and the largest share one validator held.
+    pub nakamoto_min: u32,
+    pub max_weight_share: f64,
+    /// Spread of a validator's daily income over the run after warmup (stdev over mean).
+    pub income_cv: f64,
+    /// Mean income of an active validator a day, USD, after warmup.
+    pub validator_income_day_usd: f64,
+    /// Released over burned, TNZO; the part released on ticks with no burn, and the part
+    /// above the ratio from the matched start.
+    pub release_over_burn: f64,
+    pub floor_released_tnzo: f64,
+    pub boot_released_tnzo: f64,
+    pub accrual_released_tnzo: f64,
+    /// Stable paid straight from the fees kept once the pool was low, USD.
+    pub direct_paid_usd: f64,
+    /// Rewards pool at the start, TNZO.
+    pub pool_start_tnzo: f64,
+    /// Pool left at the end of each year of the run, TNZO.
+    pub pool_year_end: Vec<f64>,
+    /// Total supply change over the run: the burn netted, TNZO (never above zero).
+    pub supply_change_tnzo: f64,
+    /// Highest the circulating supply stood above its start, releases less burns, TNZO.
+    pub circulating_peak_tnzo: f64,
     pub pass_floor: bool,
     pub pass_treasury: bool,
     pub pass_operators: bool,
@@ -500,6 +692,8 @@ pub struct Outcome {
 pub struct TickBook {
     /// Settled paid usage, USD, and the units it bought.
     pub paid_usd: f64,
+    /// The settlement fee of the tick's payments, USD.
+    pub fee_usd: f64,
     pub units: f64,
     /// Of the units, those bought by the regulated, critical segment.
     pub critical_units: f64,
@@ -513,6 +707,12 @@ pub struct TickBook {
     pub validators_active: u32,
     pub validator_income_each_usd: f64,
     pub validator_cost_each_usd: f64,
+    /// Stable fees the treasury kept in the tick after the cover reserve took its fill,
+    /// USD; and the running cost the cover reserve paid, USD.
+    pub treasury_surplus_usd: f64,
+    /// Stable fees kept in the tick, whole: the settlement fee's treasury part and the leg.
+    pub fees_kept_usd: f64,
+    pub cover_paid_usd: f64,
     /// The trace's providers: capacity online and marginal cost of what they
     /// served, USD, and what each served, units.
     pub provider_capacity_units: f64,
@@ -551,6 +751,51 @@ struct Validator {
     region: String,
     bonded: bool,
     income: Vec<f64>,
+    weight: f64,
+    cost_mult: f64,
+}
+
+/// Shares of an income split by weight, no one over `cap` while that is possible.
+fn split_shares(weights: &[f64], cap: f64) -> Vec<f64> {
+    let n = weights.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let total: f64 = weights.iter().sum();
+    let mut s: Vec<f64> = weights.iter().map(|w| w / total.max(1e-12)).collect();
+    if cap * n as f64 <= 1.0 + 1e-9 {
+        return vec![1.0 / n as f64; n];
+    }
+    for _ in 0..n {
+        let over: f64 = s.iter().map(|x| (x - cap).max(0.0)).sum();
+        if over <= 1e-12 {
+            break;
+        }
+        let room: f64 = s.iter().filter(|x| **x < cap).sum();
+        for x in s.iter_mut() {
+            if *x >= cap {
+                *x = cap;
+            } else {
+                *x += over * *x / room.max(1e-12);
+            }
+        }
+    }
+    s
+}
+
+/// Fewest members whose weight passes a third of the whole.
+fn nakamoto(weights: &[f64]) -> u32 {
+    let total: f64 = weights.iter().sum();
+    let mut w = weights.to_vec();
+    w.sort_by(|a, b| b.total_cmp(a));
+    let mut acc = 0.0;
+    for (i, x) in w.iter().enumerate() {
+        acc += x;
+        if acc * 3.0 > total {
+            return i as u32 + 1;
+        }
+    }
+    w.len() as u32
 }
 
 /// Replays `trace` under `rules`.
@@ -601,10 +846,24 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
     let mut pool_tnzo = pool_usd / price0;
     let mut treasury_tnzo = m.num("treasury_tnzo", 100_000_000.0);
     let mut treasury_stable = 0.0f64;
-    let mut pool = m.num(
-        "rewards_pool_tnzo",
-        tenzro_token::rewards::NETWORK_REWARDS_POOL as f64 / 1e18,
-    );
+    let mut pool = rules.pool_tnzo.unwrap_or_else(|| {
+        m.num(
+            "rewards_pool_tnzo",
+            tenzro_token::rewards::NETWORK_REWARDS_POOL as f64 / 1e18,
+        )
+    });
+    let pool0 = pool;
+    let mut burn_hist: Vec<f64> = Vec::new();
+    let mut burn_usd_hist: Vec<f64> = Vec::new();
+    let (mut ema_tnzo, mut ema_usd) = (0.0f64, 0.0f64);
+    let mut accrual = 0.0f64;
+    let mut boot_spent = 0.0f64;
+    let mut surplus_stable = 0.0f64;
+    let (mut last_year, mut year_start_pool, mut year_released) = (-1.0f64, pool, 0.0f64);
+    let mut circ = 0.0f64;
+    let mut circ_max = 0.0f64;
+    let mut n_post = 0.0f64;
+    let (mut val_sum, mut inc_sum, mut inc_sq) = (0.0f64, 0.0f64, 0.0f64);
     let mut cover_reserve = 0.0f64;
     let mut cc_reserve = 0.0f64;
     let mut rails = m.rails();
@@ -629,10 +888,23 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
         .collect();
 
     let mut vals: Vec<Validator> = (0..rules.validators + rules.standby)
-        .map(|i| Validator {
-            region: regions[i as usize % regions.len().max(1)].clone(),
-            bonded: i < rules.validators,
-            income: Vec::new(),
+        .map(|i| {
+            let tier = rules
+                .tiers
+                .as_ref()
+                .map(|t| t.pattern[i as usize % t.pattern.len().max(1)])
+                .unwrap_or(0);
+            let (weight, cost_mult) = match &rules.tiers {
+                Some(t) => (t.weights[tier], t.cost_mult[tier]),
+                None => (1.0, 1.0),
+            };
+            Validator {
+                region: regions[i as usize % regions.len().max(1)].clone(),
+                bonded: i < rules.validators,
+                income: Vec::new(),
+                weight,
+                cost_mult,
+            }
         })
         .collect();
 
@@ -644,6 +916,9 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
         treasury_tnzo_min: f64::INFINITY,
         price_min: f64::INFINITY,
         operators_min: u32::MAX,
+        validator_regions_min: u32::MAX,
+        nakamoto_min: u32::MAX,
+        pool_start_tnzo: pool0,
         ..Outcome::default()
     };
     for path in Payout::ALL {
@@ -666,7 +941,13 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
     let mut last_change: Option<u64> = None;
     let mut availability_paid_usd = 0.0;
 
+    let held = rules
+        .price_path
+        .map(|p| p.daily((trace.ticks.len() as f64 / ticks_per_day) as usize + 1));
     for (t, rows) in trace.ticks.iter().enumerate() {
+        let held_now = held
+            .as_ref()
+            .map(|h| h[(t as f64 / ticks_per_day) as usize]);
         let t = t as u64;
         let after_warmup = t >= rules.warmup_ticks;
         let shocks: Vec<&ShockEntry> = all_shocks.iter().filter(|s| s.on(t)).collect();
@@ -739,6 +1020,9 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
             asked += r.demand;
             unmet += r.unmet_demand;
             if offline.contains(&r.region) {
+                continue;
+            }
+            if rules.blackout.is_some_and(|(a, b)| t >= a && t < b) {
                 continue;
             }
             let units = (r.demand - r.unmet_demand).max(0.0);
@@ -905,7 +1189,7 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
 
         // Fees: the settlement fee and the treasury leg, in the stable
         // assets they were paid in.
-        let price = pool_usd / pool_tnzo;
+        let price = held_now.unwrap_or(pool_usd / pool_tnzo);
         let fee = paid_tick * fee_bps;
         let leg = paid_tick * leg_bps;
         let burn_eq_usd = fee * burn_bps;
@@ -943,15 +1227,37 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
             o.finality_lost_ticks += 1;
         }
         let n_active = if finalizes { reachable.len() } else { 0 };
+        let active: Vec<usize> = if finalizes {
+            reachable.clone()
+        } else {
+            Vec::new()
+        };
+        let cost_units: f64 = active.iter().map(|i| vals[*i].cost_mult).sum();
+        let active_w: Vec<f64> = active.iter().map(|i| vals[*i].weight).collect();
+        let share_cap = rules.tiers.as_ref().map_or(1.0, |t| t.share_cap);
+        let active_share = split_shares(&active_w, share_cap);
+        if after_warmup {
+            let bw: Vec<f64> = bonded.iter().map(|i| vals[*i].weight).collect();
+            let bshare = split_shares(&bw, share_cap);
+            o.nakamoto_min = o.nakamoto_min.min(nakamoto(&bshare));
+            o.max_weight_share = o
+                .max_weight_share
+                .max(bshare.iter().copied().fold(0.0, f64::max));
+            let rg: BTreeSet<&str> = bonded.iter().map(|i| vals[*i].region.as_str()).collect();
+            o.validator_regions_min = o.validator_regions_min.min(rg.len() as u32);
+            val_sum += bonded.len() as f64;
+            n_post += 1.0;
+        }
 
         // Cover: fill from the stable fees kept, then pay each active
         // validator its cost as far as the reserve goes.
         let target =
-            validator_cost_tick * n_active.max(1) as f64 * ticks_per_year / 12.0 * target_months;
+            validator_cost_tick * cost_units.max(1.0) * ticks_per_year / 12.0 * target_months;
         let fill = (kept_left * cover_share).min((target - cover_reserve).max(0.0));
         cover_reserve += fill;
         treasury_stable += kept_left - fill;
-        let need = validator_cost_tick * n_active as f64;
+        surplus_stable += kept_left - fill;
+        let need = validator_cost_tick * cost_units;
         let cover_paid = need.min(cover_reserve);
         cover_reserve -= cover_paid;
         let cover_each = if n_active > 0 {
@@ -1003,8 +1309,112 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
                 base *= k;
             }
         }
+        let mut direct = false;
+        let mut direct_val_usd = 0.0;
+        let mut floor_tnzo = 0.0;
+        if let Some(rc) = &rules.recycle {
+            if year != last_year {
+                if last_year >= 0.0 {
+                    o.pool_year_end.push(pool);
+                }
+                last_year = year;
+                year_start_pool = pool;
+                year_released = 0.0;
+            }
+            burn_hist.push(burn_eq_tnzo);
+            burn_usd_hist.push(burn_eq_usd);
+            let (basis_tnzo, basis_usd) = match rc.basis {
+                Basis::PerTick => (burn_eq_tnzo, burn_eq_usd),
+                Basis::Window(n) => {
+                    let w = (n as f64 * ticks_per_day) as usize;
+                    (mean_tail(&burn_hist, w), mean_tail(&burn_usd_hist, w))
+                }
+                Basis::Helium => {
+                    ema_tnzo = ema_tnzo * 6.0 / 7.0 + burn_eq_tnzo / 7.0;
+                    ema_usd = ema_usd * 6.0 / 7.0 + burn_eq_usd / 7.0;
+                    (ema_tnzo, ema_usd)
+                }
+            };
+            let age_days = t as f64 / ticks_per_day;
+            let ratio = rc.ratio_at(pool / pool0);
+            let extra_ratio = if rc.boot_ratio > ratio && age_days < rc.boot_days {
+                (rc.boot_ratio - ratio) * (1.0 - age_days / rc.boot_days)
+            } else {
+                0.0
+            };
+            let base_cap = if rc.usd_cap {
+                ratio * basis_usd / price
+            } else {
+                ratio * basis_tnzo
+            };
+            let boot_room = (rc.boot_budget_frac * pool0 - boot_spent).max(0.0);
+            let extra_cap = (extra_ratio * burn_eq_tnzo).min(boot_room);
+            let total = pr + er + vr_ + base;
+            let mut allowed = base_cap + extra_cap;
+            let mut from_accrual = 0.0;
+            if burn_eq_tnzo <= 0.0 {
+                from_accrual = accrual.min((total - allowed).max(0.0));
+                allowed += from_accrual;
+            }
+            if total > allowed && total > 0.0 {
+                let k = allowed / total;
+                pr *= k;
+                er *= k;
+                vr_ *= k;
+                base *= k;
+            } else if burn_eq_tnzo > 0.0 {
+                accrual = (accrual + (base_cap - total).max(0.0)).min(rc.accrual_max_tnzo);
+            }
+            accrual -= from_accrual;
+            o.accrual_released_tnzo += from_accrual;
+            if let Some(f) = rc.yearly_limit_frac {
+                let room = (f * year_start_pool - year_released).max(0.0);
+                let g = pr + er + vr_ + base;
+                if g > room && g > 0.0 {
+                    let k = room / g;
+                    pr *= k;
+                    er *= k;
+                    vr_ *= k;
+                    base *= k;
+                }
+            }
+            let g = pr + er + vr_ + base;
+            if g > base_cap && g > 0.0 {
+                let matched = (g - base_cap).min(extra_cap);
+                boot_spent += matched;
+                o.boot_released_tnzo += matched;
+            }
+            if burn_eq_tnzo <= 0.0 && n_active > 0 && rc.floor_tnzo_day > 0.0 {
+                floor_tnzo = (rc.floor_tnzo_day / ticks_per_day).min(pool);
+            }
+            if let Some(fd) = rc.fee_direct_below
+                && pool < fd * pool0
+            {
+                direct = true;
+                let due = (pr + er + vr_ + base) * price;
+                let pay = due.min(surplus_stable.max(0.0));
+                let k = if due > 0.0 { pay / due } else { 0.0 };
+                pr *= k;
+                er *= k;
+                vr_ *= k;
+                base *= k;
+                surplus_stable -= pay;
+                treasury_stable -= pay;
+                direct_val_usd = (vr_ + base) * price;
+                o.direct_paid_usd += pay;
+            }
+        }
         let gross = pr + er + vr_ + base;
-        if gross > pool && gross > 0.0 {
+        if !direct && gross + floor_tnzo > pool && gross + floor_tnzo > 0.0 {
+            let k = (pool / (gross + floor_tnzo)).min(1.0);
+            pr *= k;
+            er *= k;
+            vr_ *= k;
+            base *= k;
+            floor_tnzo *= k;
+        }
+        let gross = pr + er + vr_ + base;
+        if !direct && gross > pool && gross > 0.0 {
             let k = pool / gross;
             pr *= k;
             er *= k;
@@ -1013,9 +1423,14 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
         }
         let gross = pr + er + vr_ + base;
         // The burn's netted share withholds releases; it never mints.
-        pool -= gross;
-        o.released_tnzo += gross;
-        o.circulating_change_tnzo += gross - burn_eq_tnzo;
+        let drawn = if direct { 0.0 } else { gross } + floor_tnzo;
+        pool -= drawn;
+        year_released += drawn;
+        o.released_tnzo += drawn;
+        o.floor_released_tnzo += floor_tnzo;
+        o.circulating_change_tnzo += drawn - burn_eq_tnzo;
+        circ += drawn - burn_eq_tnzo;
+        circ_max = circ_max.max(circ);
         let release_price = price;
         book(
             &mut o,
@@ -1083,9 +1498,21 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
         }
 
         // TNZO income is sold into the pool; the price is what is left.
-        let validator_tnzo = vr_ + base + avail_paid_tnzo;
-        let sell = (pr + er) * rules.provider_sell + validator_tnzo * rules.validator_sell;
-        let mut usd_out = sell_into(&mut pool_usd, &mut pool_tnzo, sell);
+        if floor_tnzo > 0.0 {
+            book(
+                &mut o,
+                Payout::Availability,
+                floor_tnzo * price,
+                n_active > 0,
+            );
+        }
+        let validator_tnzo = if direct { 0.0 } else { vr_ + base } + avail_paid_tnzo + floor_tnzo;
+        let sold_pe = if direct { 0.0 } else { pr + er };
+        let sell = sold_pe * rules.provider_sell + validator_tnzo * rules.validator_sell;
+        let mut usd_out = match held_now {
+            Some(p) => sell * p,
+            None => sell_into(&mut pool_usd, &mut pool_tnzo, sell),
+        };
         if rules.mechanisms.leverage {
             let p_now = pool_usd / pool_tnzo;
             price_high = price_high.max(p_now);
@@ -1105,30 +1532,41 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
         let _ = usd_out;
 
         // Each active validator's income, USD, against its cost.
-        let each_income = cover_each
-            + cc_each
-            + if n_active > 0 {
-                validator_usd_from_tnzo / n_active as f64
-            } else {
-                0.0
-            };
+        let total_income = if n_active > 0 {
+            cover_paid + cc_each * n_active as f64 + validator_usd_from_tnzo + direct_val_usd
+        } else {
+            0.0
+        };
+        let each_income = if n_active > 0 {
+            total_income / n_active as f64
+        } else {
+            0.0
+        };
         for (i, v) in vals.iter_mut().enumerate() {
             if !v.bonded {
                 continue;
             }
-            let earns = reachable.contains(&i) && finalizes;
-            v.income.push(if earns { each_income } else { 0.0 });
+            let pos = active.iter().position(|a| *a == i);
+            v.income.push(match pos {
+                Some(k) => total_income * active_share[k],
+                None => 0.0,
+            });
+        }
+        if after_warmup && n_active > 0 {
+            inc_sum += each_income;
+            inc_sq += each_income * each_income;
         }
         let window = (30.0 * ticks_per_day) as usize;
         let settled = last_change.is_none_or(|c| t >= c + window as u64);
         if after_warmup {
-            let cost_w = validator_cost_tick * window as f64;
+            let cost_w0 = validator_cost_tick * window as f64;
             let mut ratio_min = f64::INFINITY;
             let mut leave: Option<usize> = None;
             for (i, v) in vals.iter().enumerate() {
                 if !v.bonded || v.income.len() < window {
                     continue;
                 }
+                let cost_w = cost_w0 * v.cost_mult;
                 let r: f64 = v.income[v.income.len() - window..].iter().sum::<f64>() / cost_w;
                 ratio_min = ratio_min.min(r);
                 if r < rules.exit_ratio && leave.is_none() {
@@ -1159,7 +1597,7 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
         }
         o.validators_end = count;
 
-        let price = pool_usd / pool_tnzo;
+        let price = held_now.unwrap_or(pool_usd / pool_tnzo);
         o.price_min = o.price_min.min(price);
         o.price_max = o.price_max.max(price);
         o.price_end = price;
@@ -1171,6 +1609,7 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
         o.ticks += 1;
         o.tick_book.push(TickBook {
             paid_usd: paid_tick,
+            fee_usd: fee,
             units: units_tick,
             critical_units: critical_units_tick,
             provider_share: 1.0 - fee_bps - leg_bps,
@@ -1179,12 +1618,36 @@ pub fn replay(trace: &Trace, rules: &Rules) -> Outcome {
             validators_active: n_active as u32,
             validator_income_each_usd: each_income,
             validator_cost_each_usd: validator_cost_tick,
+            treasury_surplus_usd: kept_left - fill,
+            fees_kept_usd: kept,
+            cover_paid_usd: cover_paid,
             provider_capacity_units: capacity_units,
             provider_cost_usd,
             served_by,
         });
     }
 
+    o.pool_year_end.push(pool);
+    o.circulating_peak_tnzo = circ_max;
+    o.supply_change_tnzo = -o.burned_tnzo_eq;
+    o.release_over_burn = if o.burned_tnzo_eq > 0.0 {
+        o.released_tnzo / o.burned_tnzo_eq
+    } else {
+        0.0
+    };
+    if n_post > 0.0 {
+        o.validators_mean = val_sum / n_post;
+        let mean = inc_sum / n_post;
+        o.validator_income_day_usd = mean * ticks_per_day;
+        let var = (inc_sq / n_post - mean * mean).max(0.0);
+        o.income_cv = if mean > 0.0 { var.sqrt() / mean } else { 0.0 };
+    }
+    if o.validator_regions_min == u32::MAX {
+        o.validator_regions_min = 0;
+    }
+    if o.nakamoto_min == u32::MAX {
+        o.nakamoto_min = 0;
+    }
     o.unmet_share = if asked > 0.0 { unmet / asked } else { 0.0 };
     o.utilisation_mean = if util_n > 0.0 { util_sum / util_n } else { 0.0 };
     let w = 30usize;

@@ -77,7 +77,7 @@ use crate::checkpoint::{
     Certificate, CertificateContext, Checkpoint, CheckpointEquivocation, CheckpointVote,
     VoteCollector, VoteOutcome, checkpoint_state_height, merkle_root, state_root_height,
 };
-use crate::committee::{Committee, SeatSet, ValidatorIndex};
+use crate::committee::{Committee, FaultBound, SeatSet, ValidatorIndex};
 use crate::dag::Dag;
 use crate::ordering::{OrderingState, Resumed};
 use crate::rbc::{RbcAction, RbcStats, ReliableBroadcast, Signal};
@@ -145,6 +145,12 @@ pub struct CoreConfig {
     /// Least time between two rounds this validator proposes while no
     /// transaction waits to be ordered.
     pub idle_round_interval_ms: u64,
+    /// First epoch whose reliable broadcast counts the faulty seats as whole
+    /// members ([`FaultBound::WholeMembers`]); earlier epochs count `f`
+    /// seats. Every validator of a network must hold the same value, so it
+    /// comes from the chain's governed state, not from a node's own
+    /// configuration.
+    pub whole_member_fault_bound_from: u64,
 }
 
 /// What a validator must persist before sending what came with it, to be
@@ -590,6 +596,9 @@ pub struct Core {
     // This validator's votes for checkpoints not yet certified, re-sent to a
     // peer that missed them.
     own_votes: BTreeMap<u64, CheckpointVote>,
+    /// Since when this validator has held a vote of its own with no
+    /// certificate formed for it or for a later checkpoint.
+    vote_waiting_since_ms: Option<u64>,
     // When this validator last asked its peers for what its round lacks.
     last_repair_ms: u64,
     // The ordering state right after each of the latest decided checkpoints.
@@ -631,8 +640,9 @@ impl Core {
         }
         // Fixed once the epoch's last checkpoint is decided.
         let handover_index = u64::MAX;
+        let fault_bound = FaultBound::of_epoch(committee.epoch, cfg.whole_member_fault_bound_from);
         Self {
-            rbc: ReliableBroadcast::new(me),
+            rbc: ReliableBroadcast::new(me, fault_bound),
             dag: Dag::with_vouching(
                 committee.members().iter().map(|m| m.seats).collect(),
                 committee.validity(),
@@ -705,6 +715,7 @@ impl Core {
             connected: SeatSet::new(),
             started: false,
             own_votes: BTreeMap::new(),
+            vote_waiting_since_ms: None,
             last_repair_ms: 0,
             ordering_states: BTreeMap::new(),
             history: HashMap::new(),
@@ -1302,6 +1313,12 @@ impl Core {
         &self.committee
     }
 
+    /// The bound on the faulty seats this epoch's reliable broadcast counts
+    /// with.
+    pub fn fault_bound(&self) -> FaultBound {
+        self.rbc.bound()
+    }
+
     /// This validator's index.
     pub fn me(&self) -> ValidatorIndex {
         self.me
@@ -1633,17 +1650,23 @@ impl Core {
         }
     }
 
-    /// Asks every peer for what this validator's round lacks once the round
-    /// has not advanced for a while: a message lost while a channel was
-    /// being replaced is repaired rather than waited on.
+    /// Asks every peer for what this validator lacks once its round has
+    /// not advanced for a while, or a vote of its own has waited that long
+    /// for a certificate while rounds went on: a message lost while a
+    /// channel was being replaced is repaired rather than waited on. The
+    /// answer to a frontier carries the peer's votes and its latest
+    /// certificate, and a peer short of this validator's vote asks the same
+    /// way.
     fn repair_stall(&mut self, now_ms: u64) {
         if self.halted || self.round.is_none() {
             return;
         }
         let after = self.stall_after_ms();
-        if now_ms < self.round_entered_ms.saturating_add(after)
-            || now_ms < self.last_repair_ms.saturating_add(after)
-        {
+        let round_stalled = now_ms >= self.round_entered_ms.saturating_add(after);
+        let vote_stalled = self
+            .vote_waiting_since_ms
+            .is_some_and(|since| now_ms >= since.saturating_add(after));
+        if !(round_stalled || vote_stalled) || now_ms < self.last_repair_ms.saturating_add(after) {
             return;
         }
         self.last_repair_ms = now_ms;
@@ -1963,6 +1986,7 @@ impl Core {
         }
         if !self.certificates.contains_key(&vote.checkpoint.index) {
             self.own_votes.insert(vote.checkpoint.index, vote.clone());
+            self.vote_waiting_since_ms.get_or_insert(self.now_ms);
         }
         self.send(Target::All, Message::Vote(vote.clone()));
         self.count_vote(vote);
@@ -3132,6 +3156,7 @@ impl Core {
         }
         self.votes.prune_below(index.saturating_sub(16));
         self.own_votes = self.own_votes.split_off(&(index + 1));
+        self.vote_waiting_since_ms = (!self.own_votes.is_empty()).then_some(self.now_ms);
         if index == self.handover_index || index == self.certified_handover_index {
             self.complete_epoch(c);
         } else {
@@ -4081,10 +4106,10 @@ mod tests {
         for core in cores.iter_mut() {
             core.start(0);
         }
-        for a in 0..N {
+        for (a, core) in cores.iter_mut().enumerate() {
             for b in 0..N {
                 if a != b {
-                    cores[a].on_peer_up(b as ValidatorIndex, 0);
+                    core.on_peer_up(b as ValidatorIndex, 0);
                 }
             }
         }
@@ -4096,7 +4121,7 @@ mod tests {
         let mut lost = 0usize;
         let mut now = 0u64;
         while now <= 60_000 {
-            if now % 500 == 0 {
+            if now.is_multiple_of(500) {
                 for (i, core) in cores.iter_mut().enumerate() {
                     core.submit_part(BatchPart {
                         transactions: 1,
@@ -4106,8 +4131,8 @@ mod tests {
             }
             loop {
                 let mut frames: Vec<(usize, usize, Message)> = Vec::new();
-                for i in 0..N {
-                    for (t, m) in cores[i].take_outbox() {
+                for (i, core) in cores.iter_mut().enumerate() {
+                    for (t, m) in core.take_outbox() {
                         let to: Vec<usize> = match t {
                             Target::All => (0..N).filter(|p| *p != i).collect(),
                             Target::One(p) => vec![p as usize],
@@ -4376,6 +4401,75 @@ mod tests {
             1,
             "votes for checkpoints far beyond this validator's are held"
         );
+    }
+
+    /// Rounds go on while a checkpoint this validator voted for gathers no
+    /// quorum (a vote was lost with a replaced channel): the validator asks
+    /// its peers where they stand, as it does when its round stalls, and
+    /// stops asking when it has no vote waiting.
+    #[test]
+    fn a_vote_waiting_for_its_certificate_while_rounds_advance_is_repaired() {
+        use crate::checkpoint::test_support::{MemoryHighWater, checkpoint};
+        use crate::validator_key::ValidatorSigner;
+        let (c, signers) = committee(4, 4);
+        let signer = &signers[3];
+        let who = (0..4)
+            .find(|i| {
+                c.member(*i)
+                    .is_some_and(|m| &m.public_key == signer.public_key())
+            })
+            .expect("seated");
+        let cfg = ConsensusConfig::default().core(7, [1; 32], &crate::TimeRules::default());
+        let mut me = Core::new(cfg, c, who, genesis_start());
+        me.start(0);
+        // Its round starts once a quorum is connected.
+        for peer in 0..4 {
+            me.on_peer_up(peer, 0);
+        }
+        assert!(me.round.is_some());
+        let session = crate::session::SessionKey::generate().unwrap();
+        let cert = crate::session::sign_certificate(
+            &**signer,
+            7,
+            [1; 32],
+            0,
+            session.public_key().clone(),
+        )
+        .unwrap();
+        let marks = MemoryHighWater::default();
+        let vote =
+            crate::checkpoint::sign_checkpoint(&session, &cert, &marks, who, &checkpoint(1, 3))
+                .unwrap();
+        let after = me.stall_after_ms();
+        let asked = |me: &mut Core| {
+            me.take_outbox()
+                .iter()
+                .any(|(_, m)| matches!(m, Message::Frontier(_)))
+        };
+        // The round keeps advancing: every tick below finds it just entered.
+        let tick = |me: &mut Core, now: u64| {
+            me.round_entered_ms = now;
+            me.on_tick(now);
+        };
+        tick(&mut me, 10);
+        me.on_own_vote(vote);
+        assert_eq!(me.vote_waiting_since_ms, Some(10));
+        assert_eq!(me.stall_after_ms(), after);
+        assert!(!me.is_halted());
+        let _ = me.take_outbox();
+        tick(&mut me, 10 + after - 1);
+        assert!(!asked(&mut me), "asked before the vote waited long");
+        tick(&mut me, 10 + after);
+        assert!(asked(&mut me), "a waiting vote was never repaired");
+        tick(&mut me, 10 + after + 1);
+        assert!(!asked(&mut me), "asked again within the interval");
+        tick(&mut me, 10 + 2 * after);
+        assert!(asked(&mut me), "the repair was not repeated");
+        // No vote waits: advancing rounds ask for nothing.
+        me.own_votes.clear();
+        me.vote_waiting_since_ms = None;
+        tick(&mut me, 10 + 4 * after);
+        assert!(!asked(&mut me), "asked with no vote waiting");
     }
 
     #[test]

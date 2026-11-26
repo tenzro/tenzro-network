@@ -269,6 +269,145 @@ fn one_tpm_backs_one_live_identity() {
     assert_eq!(level(&state, &second), HardwareLevel::L1);
 }
 
+/// The hardware derivation reads an identity derived under a revoked root as
+/// revoked from the reach rule's epoch, and not before.
+#[test]
+fn a_revoked_roots_machine_reads_revoked_from_the_reach_rules_epoch() {
+    let mut state = genesis_state();
+    let (ev, _) = evidence(&SoftTpm::new(0x71), &[0; 32]);
+    let att = MachineAttestation {
+        evidence: ev,
+        nonce: vec![0; 32],
+        activated: true,
+    };
+    let wallet = register(
+        &mut state,
+        0x71,
+        "did:tenzro:machine:aa:m1",
+        vec![0x71; 33],
+        att,
+    );
+    revoke(&mut state, "did:tenzro:machine:aa");
+    set_governed_param_for_test(&mut state, ROOT_REVOCATION_REACH_KEY, 5);
+    let why = |s: &StateAdapter| {
+        hardware_level::explain(s, wallet.as_bytes(), NOW_MS)
+            .3
+            .unwrap_or_default()
+    };
+    begin_block_params(&mut state, 4).unwrap();
+    assert!(
+        !why(&state).contains("is revoked"),
+        "dormant: {}",
+        why(&state)
+    );
+    begin_block_params(&mut state, 5).unwrap();
+    assert!(why(&state).contains("is revoked"), "{}", why(&state));
+}
+
+/// Once the reward-root rule is live, an epoch's work earns only under a
+/// passkey human root or a machine root with a manufacturer-endorsed TPM;
+/// before, every work record stands.
+#[test]
+fn coupons_go_only_to_endorsed_or_passkey_roots_once_the_rule_is_live() {
+    use super::reward_root::{KEY, issuable, may_earn};
+    let mut state = genesis_state();
+    let (endorsed, endorsed_did) = machine(&mut state, 0x81, &SoftTpm::new(0x81), None);
+    let (ev, _) = evidence(&SoftTpm::new(0x82), &[0; 32]);
+    let att = || MachineAttestation {
+        evidence: ev.clone(),
+        nonce: vec![0; 32],
+        activated: true,
+    };
+    let human = register(
+        &mut state,
+        0x83,
+        "did:tenzro:human:hh",
+        vec![0x83; 33],
+        att(),
+    );
+    let agent = register(
+        &mut state,
+        0x84,
+        "did:tenzro:machine:hh:a1",
+        vec![0x84; 33],
+        att(),
+    );
+    let nobody = Address::new([0x85; 32]);
+    let work: Vec<_> = [endorsed, human, agent, nobody]
+        .into_iter()
+        .map(|address| tenzro_token::rewards::WorkRecord {
+            address,
+            class: WorkClass::InferenceServed,
+            weight: 10,
+        })
+        .collect();
+    set_governed_param_for_test(&mut state, KEY, 5);
+
+    begin_block_params(&mut state, 4).unwrap();
+    assert_eq!(issuable(&state, work.clone(), NOW_MS).len(), 4, "dormant");
+
+    begin_block_params(&mut state, 5).unwrap();
+    let earners = |s: &StateAdapter| -> Vec<Address> {
+        issuable(s, work.clone(), NOW_MS)
+            .into_iter()
+            .map(|w| w.address)
+            .collect()
+    };
+    assert_eq!(earners(&state), vec![endorsed, human, agent]);
+    assert!(may_earn(&state, nobody.as_bytes(), NOW_MS).is_err());
+
+    // A machine root whose TPM no recognised root endorses earns nothing.
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        funding::ENDORSEMENT_ROOTS_KEY.as_bytes(),
+        serde_json::to_vec(&Vec::<String>::new()).unwrap(),
+    );
+    assert_eq!(earners(&state), vec![human, agent]);
+    // A revoked root takes its agents with it.
+    revoke(&mut state, "did:tenzro:human:hh");
+    assert!(earners(&state).is_empty());
+    assert!(
+        may_earn(&state, endorsed.as_bytes(), NOW_MS).is_err(),
+        "{endorsed_did}"
+    );
+}
+
+/// The readiness read names unmatched work of every bucket in the open epoch,
+/// and an epoch whose work the rule leaves entirely unmatched closes without
+/// coupons, with no division by a weight of nothing.
+#[test]
+fn unmatched_work_of_every_bucket_is_named_and_an_epoch_of_it_closes_empty() {
+    use super::reward_root::{KEY, pending_verdicts};
+    let mut state = genesis_state();
+    set_governed_param_for_test(&mut state, KEY, 5);
+    begin_block_params(&mut state, 5).unwrap();
+    let nobody = Address::new([0x85; 32]);
+    for class in [WorkClass::BlockProposal, WorkClass::InferenceServed] {
+        rewards::record_settled_work(
+            &mut state,
+            nobody,
+            class,
+            tenzro_token::rewards::ONE_TNZO,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+    let verdicts = pending_verdicts(&state, NOW_MS).unwrap();
+    let buckets: Vec<_> = verdicts.iter().map(|(_, b, _)| *b).collect();
+    assert_eq!(buckets, vec!["validator", "provider"]);
+    assert!(verdicts.iter().all(|(a, _, v)| *a == nobody && v.is_err()));
+
+    close_epoch(&mut state, 0, &[]);
+    assert!(rewards::read_coupons(&state, &nobody).unwrap().is_empty());
+    assert_eq!(
+        rewards::read_epoch_summary(&state, 0)
+            .unwrap()
+            .unwrap()
+            .coupon_count,
+        0
+    );
+}
+
 /// The level and type a quote and a delivery receipt carry are the attested
 /// record's; a stamp that claims more than the attestation shows is refused.
 #[test]
@@ -330,6 +469,48 @@ fn a_machine_without_a_possession_quote_for_the_epoch_is_level_0() {
     serve_epoch(&mut state, 0, &[machine], 1, &[]);
     let record = hardware_level::read_record(&state, machine.as_bytes()).unwrap();
     assert_eq!(record.stamp.level, HardwareLevel::L0);
+}
+
+/// A machine with no TPM keeps its identity key in the TPM of another
+/// machine. That TPM attests the machine root the key derives and answers
+/// its possession challenge, and the root is level 1: the chain checks the
+/// same evidence whichever machine the TPM sits in.
+#[test]
+fn a_machine_whose_key_another_machines_tpm_holds_is_level_1_through_that_tpm() {
+    use tenzro_tee::holder_attest::{HolderAttestor, admission, possession};
+    let mut state = genesis_state();
+    let holder = HolderAttestor(SoftTpm::new(0x91));
+    let key = p256::ecdsa::SigningKey::from_slice(&[0x93; 32])
+        .unwrap()
+        .verifying_key()
+        .to_sec1_point(false)
+        .as_bytes()
+        .to_vec();
+    let did = tenzro_types::did_derivation::machine_did(&key);
+    let ask = |request: &[u8]| holder.answer(&key, request).map_err(|e| e.to_string());
+
+    let att = admission(ask, &key, [0x94; 32]).unwrap();
+    let (_, root) = evidence(&holder.0, &[0; 32]);
+    let wallet = register(&mut state, 0x93, &did, key.clone(), att);
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        funding::ENDORSEMENT_ROOTS_KEY.as_bytes(),
+        serde_json::to_vec(&vec![pem(&root)]).unwrap(),
+    );
+
+    rewards::begin_block(&mut state, 0, &Address::new([0xee; 32]), NOW_MS).unwrap();
+    beacon::record_for_test(&mut state, NOW_MS + 1);
+    let (epoch, round, mix) = hardware_level::current_draw(&state).unwrap();
+    let quoted = possession(ask, &key, epoch, round, &mix).unwrap();
+    let payload = serde_json::to_vec(&HardwareProofOp::Possession {
+        epoch,
+        quote: quoted.quote,
+        signature: quoted.quote_signature,
+    })
+    .unwrap();
+    prove(&mut state, &wallet, &payload).unwrap();
+    let (stamp, ..) = hardware_level::derive(&state, wallet.as_bytes(), NOW_MS + 2);
+    assert_eq!(stamp.level, HardwareLevel::L1);
 }
 
 /// Possession is shown again every epoch: the level holds while the TPM
@@ -1321,6 +1502,71 @@ fn an_nvl72_rack_is_one_unit_with_per_gpu_certificates() {
     }
 }
 
+/// The proof the operator's tooling assembles from its hosts' evidence, each
+/// host's read back from the JSON its node gave, is one this check accepts
+/// whole, at the gas the assembler states. A host named twice is refused
+/// before it is sent.
+#[test]
+fn an_assembled_fleet_proof_is_accepted_at_the_gas_the_assembler_states() {
+    let mut state = genesis_state();
+    let (op_wallet, op) = operator(&mut state, 0x0d);
+    let rack = hosts(&mut state, 0xb0, 2, 1, 0);
+    let lone = hosts(&mut state, 0xc0, 1, 1, 2);
+    set_gpu_roots(&mut state, &[&rack[0].gpus[0].root_pem]);
+    open_epoch(&mut state, 0);
+    let from_node = |h: &Host| -> FleetHost {
+        let json = serde_json::to_string(&fleet_host(&state, &op, h, true, true)).unwrap();
+        serde_json::from_str(&json).unwrap()
+    };
+    let racked: Vec<FleetHost> = rack.iter().map(from_node).collect();
+    let alone = from_node(&lone[0]);
+    let issuers = gpu_root_der(&rack[0].gpus[0]);
+
+    let twice = tenzro_fleet_proof::assemble(
+        vec![alone.clone(), alone.clone()],
+        Vec::new(),
+        issuers.clone(),
+    );
+    assert!(twice.unwrap_err().contains("appears twice"));
+
+    let assembled = tenzro_fleet_proof::assemble(
+        vec![alone],
+        vec![tenzro_fleet_proof::Rack {
+            label: "hall-b/rack-1".into(),
+            hosts: racked,
+        }],
+        issuers,
+    )
+    .unwrap();
+    let payload = serde_json::to_vec(&assembled).unwrap();
+    assert_eq!(
+        (
+            tenzro_fleet_proof::GAS_PROOF,
+            tenzro_fleet_proof::GAS_QUOTE,
+            tenzro_fleet_proof::GAS_GPU
+        ),
+        (
+            hardware_level::GAS_HARDWARE_PROOF,
+            hardware_level::GAS_FLEET_QUOTE,
+            hardware_level::GAS_FLEET_GPU
+        )
+    );
+    assert_eq!(
+        tenzro_fleet_proof::gas_limit(&assembled),
+        hardware_level::proof_gas(&payload)
+    );
+    let (_, logs) =
+        hardware_level::prove(&mut state, op_wallet.as_bytes(), NOW_MS, &payload).unwrap();
+    let log = fleet_log(&logs);
+    assert_eq!(log["accepted"].as_array().unwrap().len(), 3, "{log}");
+    assert_eq!(log["refused"].as_array().unwrap().len(), 0, "{log}");
+    let id = hardware_level::rack_id(&op, "hall-b/rack-1");
+    assert_eq!(
+        hardware_level::read_rack(&state, &id).unwrap().hosts.len(),
+        2
+    );
+}
+
 /// The shape limits hold at admission: at most 8 GPUs a host, 18 hosts and
 /// 72 GPUs a rack, and an NVL72 rack's real evidence (NVIDIA's sample H100
 /// report and device certificates, 18 hosts' quotes) fits one proof whose
@@ -1472,6 +1718,7 @@ fn the_availability_reward_pays_each_gpu_of_a_host() {
         availability_reward::AVAILABILITY_REWARD_REQUIRE_HARDWARE_PARAM,
         1,
     );
+    availability_reward::tests::earn_paid_work(&mut state, &[7u8; 20]);
     let treasury: [u8; 32] = derive_treasury_address().as_bytes().try_into().unwrap();
     state.set_balance(&treasury, 1_000_000);
     let mut pay = |did: &str| {
@@ -1491,4 +1738,41 @@ fn the_availability_reward_pays_each_gpu_of_a_host() {
     let three = pay(&fleet[0].did);
     assert!(one > 0);
     assert_eq!(three, 3 * one);
+}
+
+/// Level 0 comes with the first piece of evidence that is missing or
+/// refused; a proven level comes with none.
+#[test]
+fn a_level_0_derivation_says_which_evidence_is_missing() {
+    let why = |s: &StateAdapter, a: &Address| {
+        let (stamp, _, _, why) = hardware_level::explain(s, a.as_bytes(), NOW_MS);
+        assert_eq!(stamp.level == HardwareLevel::L0, why.is_some(), "{why:?}");
+        why.unwrap_or_default()
+    };
+    let mut state = genesis_state();
+    assert!(why(&state, &Address::new([0x99; 32])).contains("not the wallet of a registered"));
+
+    let tpm = SoftTpm::new(0x91);
+    let (proven, proven_did) = machine(&mut state, 0x91, &tpm, None);
+    let (unanswered, _) = machine(&mut state, 0x92, &SoftTpm::new(0x92), None);
+    let (copy, _) = machine(&mut state, 0x93, &SoftTpm::new(0x93), Some(&tpm));
+    serve_epoch(
+        &mut state,
+        0,
+        &[proven, unanswered, copy],
+        1,
+        &[(proven, &tpm), (copy, &SoftTpm::new(0x93))],
+    );
+    assert_eq!(why(&state, &proven), "");
+    assert!(why(&state, &unanswered).contains("no possession quote"));
+    assert!(why(&state, &copy).contains("admitted under another identity"));
+
+    state.set_storage(
+        &SYSTEM_ADDRESS,
+        funding::ENDORSEMENT_ROOTS_KEY.as_bytes(),
+        serde_json::to_vec(&Vec::<String>::new()).unwrap(),
+    );
+    assert!(why(&state, &proven).contains("endorsement is not recognised"));
+    revoke(&mut state, &proven_did);
+    assert!(why(&state, &proven).contains("is revoked"));
 }

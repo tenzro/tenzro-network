@@ -2,11 +2,11 @@
 //! BN254 computed in software, for chains without curve natives, with the
 //! Ethereum precompile encodings.
 
+use crate::Bn254;
 use ark_bn254::{Bn254 as Curve, Fq, Fq2, Fr, G1Affine, G2Affine};
 use ark_ec::pairing::Pairing;
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, PrimeField, Zero};
-use crate::Bn254;
 
 fn fq(b: &[u8]) -> Option<Fq> {
     let v = Fq::from_be_bytes_mod_order(b);

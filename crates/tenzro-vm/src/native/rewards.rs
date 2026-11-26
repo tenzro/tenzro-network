@@ -68,12 +68,15 @@ fn pending_key(epoch: u64) -> String {
     format!("reward_pending:{epoch:016x}")
 }
 
+/// The work recorded so far in open epoch `epoch`, every bucket.
+pub(super) fn pending_records(state: &dyn VmState, epoch: u64) -> Result<Vec<WorkRecord>> {
+    Ok(read_record(state, &pending_key(epoch))?.unwrap_or_default())
+}
+
 /// The work recorded so far in open epoch `epoch`.
 #[cfg(test)]
 pub(crate) fn pending_work(state: &dyn VmState, epoch: u64) -> Vec<WorkRecord> {
-    read_record(state, &pending_key(epoch))
-        .unwrap()
-        .unwrap_or_default()
+    pending_records(state, epoch).unwrap()
 }
 
 fn summary_key(epoch: u64) -> String {
@@ -501,6 +504,16 @@ pub(super) fn provider_class(state: &dyn VmState, payee: &[u8], stream: bool) ->
 /// machine one human passkey or one autonomous device delegated maps to that
 /// root's id, and so does the root itself.
 pub fn root_identity(state: &dyn VmState, did: &str) -> String {
+    let did = self_controlled(state, did);
+    match tenzro_types::identity::delegated_root_id(&did) {
+        Some(root) => root.to_string(),
+        None => did.rsplit(':').next().unwrap_or(&did).to_string(),
+    }
+}
+
+/// `did` followed through the controllers agent terms on chain record, to an
+/// identity no terms place under another.
+pub(super) fn self_controlled(state: &dyn VmState, did: &str) -> String {
     let mut did = did.to_string();
     for _ in 0..8 {
         match super::agent_terms::read_agent_terms(state, &did) {
@@ -510,31 +523,40 @@ pub fn root_identity(state: &dyn VmState, did: &str) -> String {
             _ => break,
         }
     }
-    match tenzro_types::identity::delegated_root_id(&did) {
-        Some(root) => root.to_string(),
-        None => did.rsplit(':').next().unwrap_or(&did).to_string(),
-    }
+    did
 }
 
+/// Gate of the rule that settled work counts only between two registered
+/// identities: the first epoch from which a plan whose payer, or the payee
+/// reporting it, is not a registered identity earns no provider work.
+pub const SETTLED_WORK_REGISTERED_GATE: &str = "feature.settled_work_registered.activation_epoch";
+
 /// Whether the payer of a plan (`payer`, and the agent that opened it from
-/// its wallet, if one did) and the account `provider` are one party: the
-/// same account, or identities that share a root, however many agents
-/// stand between each and its root.
-fn same_party(
+/// its wallet, if one did) and the account `provider` are two parties:
+/// different accounts whose identities do not share a root, however many
+/// agents stand between each and its root. With `registered_only` (the rule
+/// behind [`SETTLED_WORK_REGISTERED_GATE`]) each must also be a registered
+/// identity: an account with no identity is nobody's counterparty, it costs
+/// nothing to make. Without it, an account with no identity is a party of
+/// its own.
+fn distinct_parties(
     state: &dyn VmState,
     payer: &Address,
     payer_agent: Option<&str>,
     provider: &Address,
+    registered_only: bool,
 ) -> bool {
     if payer == provider {
-        return true;
+        return false;
     }
     let payer_did = payer_agent
         .map(str::to_string)
         .or_else(|| identity_did_of(state, payer.as_bytes()));
     let provider_did = identity_did_of(state, provider.as_bytes());
-    matches!((payer_did, provider_did), (Some(a), Some(b))
-        if root_identity(state, &a) == root_identity(state, &b))
+    match (payer_did, provider_did) {
+        (Some(a), Some(b)) => root_identity(state, &a) != root_identity(state, &b),
+        _ => !registered_only,
+    }
 }
 
 /// Governed key: share of an epoch's burn that funds validators' base
@@ -673,6 +695,12 @@ fn record_work(
     if weight == 0 {
         return Ok(());
     }
+    // A validator that holds its seat after a slash earns nothing for it.
+    if class.bucket() == tenzro_token::rewards::RoleBucket::Validator
+        && super::staking::seat_held_after_slash(state, address.as_bytes(), epoch)
+    {
+        return Ok(());
+    }
     if rs.last_closed_epoch.is_some_and(|last| epoch <= last) {
         return Err(refuse(format!("reward epoch {epoch} is already closed")));
     }
@@ -684,6 +712,38 @@ fn record_work(
         rs.open_epochs.insert(at, epoch);
     }
     Ok(())
+}
+
+/// The provider work `address` earned in reward epoch `from` and later: the
+/// weight recorded in epochs still open, and the weight behind the provider
+/// coupons closed epochs issued it.
+pub(super) fn provider_work_since(
+    state: &dyn VmState,
+    address: &Address,
+    from: u64,
+) -> Result<u128> {
+    use tenzro_token::rewards::RoleBucket;
+    let mut earned = 0u128;
+    for epoch in read_reward_state(state)?
+        .open_epochs
+        .into_iter()
+        .filter(|e| *e >= from)
+    {
+        let rows: Vec<WorkRecord> = read_record(state, &pending_key(epoch))?.unwrap_or_default();
+        for r in rows
+            .iter()
+            .filter(|r| r.address == *address && r.class.bucket() == RoleBucket::Provider)
+        {
+            earned = earned.saturating_add(r.weight);
+        }
+    }
+    for c in read_coupons(state, address)?
+        .iter()
+        .filter(|c| c.epoch >= from && c.bucket == RoleBucket::Provider)
+    {
+        earned = earned.saturating_add(c.work_weight);
+    }
+    Ok(earned)
 }
 
 /// Credits `address` with `weight` of `class` work, the most one settlement
@@ -705,6 +765,29 @@ pub(super) fn record_settled_work(
     Ok(())
 }
 
+/// First epoch from which a validator's consensus work is weighted by its
+/// bonded stake when an epoch closes, so a root's validator reward follows its
+/// stake times its participation however many validators it splits into.
+pub const VALIDATOR_STAKE_WEIGHT_GATE: &str = "feature.validator_stake_weight.activation_epoch";
+
+/// `work` with each validator row weighted by its account's bonded stake
+/// once [`VALIDATOR_STAKE_WEIGHT_GATE`] is live; a validator with no bond
+/// weighs nothing. Other rows are unchanged.
+fn stake_weighted(state: &dyn VmState, work: Vec<WorkRecord>) -> Vec<WorkRecord> {
+    if !crate::feature_gate::is_live_now(state, VALIDATOR_STAKE_WEIGHT_GATE) {
+        return work;
+    }
+    work.into_iter()
+        .map(|mut w| {
+            if w.class.bucket() == tenzro_token::rewards::RoleBucket::Validator {
+                let stake = super::staking::bonded_stake_of(state, w.address.as_bytes());
+                w.weight = w.weight.saturating_mul(stake);
+            }
+            w
+        })
+        .collect()
+}
+
 /// Closes `epoch`: settles its work into coupons, then expires coupons
 /// whose claim window has passed.
 fn close_epoch(
@@ -717,6 +800,7 @@ fn close_epoch(
 ) -> Result<()> {
     let pending = pending_key(epoch);
     let work: Vec<WorkRecord> = read_record(state, &pending)?.unwrap_or_default();
+    let work = super::reward_root::issuable(state, work, now_ms);
     let schedule = read_reward_schedule(state)?;
     let mut policy = mint_policy(state, rs);
     let validators: Vec<Address> = work
@@ -760,7 +844,8 @@ fn close_epoch(
         .map(|w| w.address.0)
         .collect::<std::collections::BTreeSet<_>>();
     let levels = super::hardware_level::record_epoch(state, epoch, &providers, now_ms, changes)?;
-    let (summary, coupons) = tenzro_token::rewards::settle_epoch_with_levels(
+    let work = stake_weighted(state, work);
+    let (mut summary, mut coupons) = tenzro_token::rewards::settle_epoch_with_levels(
         &schedule,
         &policy,
         rs.cumulative_rights_issued,
@@ -769,6 +854,18 @@ fn close_epoch(
         &levels,
         Timestamp::new(now_ms),
     );
+    if crate::feature_gate::is_live_now(state, super::burn_bound_release::KEY) {
+        super::burn_bound_release::bound_epoch(
+            state,
+            epoch,
+            &schedule,
+            rs.cumulative_rights_issued
+                .saturating_sub(rs.cumulative_expired),
+            &mut summary,
+            &mut coupons,
+            changes,
+        )?;
+    }
 
     let mut issued = Vec::with_capacity(coupons.len());
     for coupon in &coupons {
@@ -935,7 +1032,10 @@ fn prune_receipts(
 /// the sender, at most the governed share of the TNZO protocol fee the plan
 /// paid outside the trade. A plan the sender paid itself, or one whose payer
 /// (or the agent that opened it) shares the sender's root identity, counts
-/// nothing: two agents of one human pay each other for no reward. Each plan
+/// nothing: two agents of one human pay each other for no reward. Once
+/// [`SETTLED_WORK_REGISTERED_GATE`] is live, neither does a plan whose payer
+/// or sender is not a registered identity: an account made for the purpose
+/// earns nothing. Each plan
 /// counts once, and only while it is recent: a plan decided no later than
 /// the latest plan whose record was deleted past the claim window counts
 /// nothing.
@@ -953,6 +1053,7 @@ pub(super) fn report_settled_work(
     let mut counted = 0u64;
     let mut credited: u128 = 0;
     let through: Option<u64> = read_record(state, RECEIPTS_DECIDED_THROUGH_KEY)?;
+    let registered_only = crate::feature_gate::is_live_now(state, SETTLED_WORK_REGISTERED_GATE);
     for leg in legs {
         let Some((plan_id, paid)) =
             super::payment_settlement::plan::settled_party(state, leg, &from)
@@ -971,7 +1072,13 @@ pub(super) fn report_settled_work(
         else {
             continue;
         };
-        if same_party(state, &payer, payer_agent.as_deref(), &from) {
+        if !distinct_parties(
+            state,
+            &payer,
+            payer_agent.as_deref(),
+            &from,
+            registered_only,
+        ) {
             continue;
         }
         let amount =
@@ -1025,7 +1132,7 @@ pub(super) fn claim_rewards(
     logs: &mut Vec<Log>,
 ) -> Result<Vec<u8>> {
     let from = account_address(&tx.from)?;
-    let now_ms = deterministic_now_ms(tx);
+    let now_ms = deterministic_now_ms(tx)?;
     let mut rs = read_reward_state(state)?;
     let keys: Vec<String> = read_record(state, &coupons_of_key(&from))?.unwrap_or_default();
     let mut total: u128 = 0;
@@ -1104,6 +1211,50 @@ pub(super) fn claim_rewards(
     Ok(blob)
 }
 
+/// First epoch from which a slash also takes the same share of what the
+/// offender's reward schedules still hold in vesting escrow, back to the
+/// rewards pool.
+pub const REWARD_CLAWBACK_GATE: &str = "feature.reward_clawback.activation_epoch";
+
+/// Once [`REWARD_CLAWBACK_GATE`] is live, moves `bps` basis points of what
+/// each reward schedule of `addr` still holds in vesting escrow back to the
+/// rewards pool, shrinking the schedule by the same amount. Returns the
+/// amount taken. Grants and contributor schedules are not rewards and stay.
+pub(super) fn claw_back_rewards(
+    state: &mut dyn VmState,
+    addr: &[u8],
+    bps: u16,
+    changes: &mut Vec<StateChange>,
+) -> Result<u128> {
+    if bps == 0 || !crate::feature_gate::is_live_now(state, REWARD_CLAWBACK_GATE) {
+        return Ok(0);
+    }
+    let Ok(beneficiary) = account_address(addr) else {
+        return Ok(0);
+    };
+    let key = vesting_list_key(&beneficiary);
+    let mut list: Vec<VestingSchedule> = read_record(state, &key)?.unwrap_or_default();
+    let mut taken: u128 = 0;
+    for s in list.iter_mut().filter(|s| s.kind == VestingKind::Reward) {
+        let share = super::staking::bps_share(s.outstanding(), u128::from(bps));
+        s.total -= share;
+        taken = taken.saturating_add(share);
+    }
+    if taken == 0 {
+        return Ok(0);
+    }
+    drop_released(&mut list);
+    write_json(state, &key, &list, changes)?;
+    move_balance(
+        state,
+        vesting_escrow_address().as_bytes(),
+        rewards_pool_address().as_bytes(),
+        taken,
+        changes,
+    )?;
+    Ok(taken)
+}
+
 /// `ReleaseVesting`: pays the sender everything its schedules have accrued
 /// and not yet released, out of vesting escrow.
 pub(super) fn release_vesting(
@@ -1113,7 +1264,7 @@ pub(super) fn release_vesting(
     logs: &mut Vec<Log>,
 ) -> Result<Vec<u8>> {
     let from = account_address(&tx.from)?;
-    let now_ms = deterministic_now_ms(tx);
+    let now_ms = deterministic_now_ms(tx)?;
     let key = vesting_list_key(&from);
     let mut list: Vec<VestingSchedule> = read_record(state, &key)?.unwrap_or_default();
     let mut released: u128 = 0;
@@ -1169,6 +1320,67 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap();
+    }
+
+    /// A validator that holds its seat after a slash, under the
+    /// deferred-removal rule, has none of its validator work recorded; other
+    /// classes of its work, and validator work after the hold, are.
+    #[test]
+    fn a_seat_held_after_a_slash_records_no_validator_work() {
+        let mut state = StateAdapter::new();
+        let slashed = addr(7);
+        set_genesis_param(
+            &mut state,
+            super::super::staking::DEFERRED_SLASH_REMOVAL_KEY,
+            0,
+        );
+        set_genesis_param(&mut state, super::super::staking::INACTIVITY_LIMIT_PARAM, 2);
+        super::super::staking::hold_seat_after_slash(
+            &mut state,
+            slashed.as_bytes(),
+            &mut Vec::new(),
+        );
+        let rows = |state: &StateAdapter, epoch: u64| -> Vec<WorkRecord> {
+            read_record(state, &pending_key(epoch))
+                .unwrap()
+                .unwrap_or_default()
+        };
+        let mut rs = read_reward_state(&state).unwrap();
+        for epoch in [0, 2] {
+            record_work(
+                &mut state,
+                &mut rs,
+                epoch,
+                slashed,
+                WorkClass::ConsensusVote,
+                5,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(rows(&state, epoch).is_empty(), "epoch {epoch}");
+        }
+        record_work(
+            &mut state,
+            &mut rs,
+            2,
+            slashed,
+            WorkClass::InferenceServed,
+            5,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(rows(&state, 2).len(), 1);
+        record_work(
+            &mut state,
+            &mut rs,
+            3,
+            slashed,
+            WorkClass::ConsensusVote,
+            5,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(rows(&state, 3).len(), 1);
     }
 
     /// Chain state holding the schedule genesis writes, for one-day epochs.
@@ -1230,6 +1442,328 @@ mod tests {
         let rs = read_reward_state(&state).unwrap();
         assert!(rs.issued_epochs.iter().all(|e| *e != 0));
         assert!(rs.cumulative_expired >= one[0].amount + two[0].amount);
+    }
+
+    /// A slash takes the slashed share of what the offender's reward
+    /// schedules still hold in vesting escrow once the rule is live, and no
+    /// grant.
+    #[test]
+    fn a_slash_claws_back_vesting_rewards_once_the_rule_is_live() {
+        let mut state = genesis_state();
+        let who = addr(9);
+        let source = addr(8);
+        state.set_balance(source.as_bytes(), 1_000_000);
+        let mut changes = Vec::new();
+        for kind in [VestingKind::Reward, VestingKind::Grant] {
+            open_vesting(
+                &mut state,
+                source.as_bytes(),
+                who,
+                kind,
+                1_000,
+                0,
+                0,
+                10,
+                &mut changes,
+            )
+            .unwrap();
+        }
+        let escrow = vesting_escrow_address();
+        let pool = rewards_pool_address();
+        let slash = |state: &mut StateAdapter| {
+            let mut changes = Vec::new();
+            super::super::staking::slash_to_insurance(
+                state,
+                who.as_bytes(),
+                super::super::staking::SlashedStake::Validator,
+                1_000,
+                &mut changes,
+            )
+            .unwrap();
+        };
+        let totals = |state: &StateAdapter| {
+            read_vesting(state, &who)
+                .unwrap()
+                .iter()
+                .map(|s| s.total)
+                .collect::<Vec<_>>()
+        };
+
+        // Dormant: a slash leaves vesting rewards where they are.
+        slash(&mut state);
+        assert_eq!(totals(&state), vec![1_000, 1_000]);
+        assert_eq!(state.get_balance(escrow.as_bytes()), 2_000);
+
+        set_genesis_param(&mut state, REWARD_CLAWBACK_GATE, 0);
+        let pool_before = state.get_balance(pool.as_bytes());
+        slash(&mut state);
+        // The reward schedule loses the slashed share; the grant does not.
+        assert_eq!(totals(&state), vec![900, 1_000]);
+        assert_eq!(state.get_balance(escrow.as_bytes()), 1_900);
+        assert_eq!(state.get_balance(pool.as_bytes()), pool_before + 100);
+    }
+
+    /// Once its gate is live a validator's work counts times its bonded
+    /// stake: two blocks on one bond weigh less than one block on four times
+    /// that bond, and before the gate the blocks alone count.
+    #[test]
+    fn validator_work_is_weighted_by_bond_once_the_rule_is_live() {
+        for live in [false, true] {
+            let mut state = genesis_state();
+            if live {
+                set_genesis_param(&mut state, VALIDATOR_STAKE_WEIGHT_GATE, 0);
+            }
+            let bond = 1_000 * tenzro_token::ONE_TNZO;
+            super::super::staking::add_bond(&mut state, addr(1).as_bytes(), bond, 0).unwrap();
+            super::super::staking::add_bond(&mut state, addr(2).as_bytes(), 4 * bond, 0).unwrap();
+            begin_block(&mut state, 0, &addr(1), 1_000).unwrap();
+            begin_block(&mut state, 0, &addr(1), 2_000).unwrap();
+            begin_block(&mut state, 0, &addr(2), 3_000).unwrap();
+            paid_work(&mut state, 1_000_000_000_000_000_000_000);
+            begin_block(&mut state, 1, &addr(2), 4_000).unwrap();
+            let one = read_coupons(&state, &addr(1)).unwrap();
+            let two = read_coupons(&state, &addr(2)).unwrap();
+            if live {
+                assert_eq!(one[0].work_weight, 2 * bond);
+                assert_eq!(two[0].work_weight, 4 * bond);
+                assert!(two[0].amount > one[0].amount);
+            } else {
+                assert_eq!(one[0].work_weight, 2);
+                assert_eq!(two[0].work_weight, 1);
+                assert!(one[0].amount > two[0].amount);
+            }
+        }
+    }
+
+    use crate::native::burn_bound_release as bound;
+
+    fn set_param(state: &mut StateAdapter, key: &str, value: u64) {
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            governed_param_key(key).as_bytes(),
+            value.to_le_bytes().to_vec(),
+        );
+    }
+
+    /// Epoch 0 with three proposals by two validators, a paid settlement and
+    /// `burn` burned, closed by the first block of epoch 1 under `params`.
+    /// Returns the state, the epoch's summary and what each of the three
+    /// earners holds in coupons.
+    fn closed_epoch(
+        burn: u128,
+        params: &[(&str, u64)],
+    ) -> (StateAdapter, EpochRewardSummary, [u128; 3]) {
+        let mut state = genesis_state();
+        for (key, value) in params {
+            set_param(&mut state, key, *value);
+        }
+        // Each block runs the parameter schedule first, as the node does, so
+        // a gate reads the epoch of the block being executed.
+        let block = |state: &mut StateAdapter, epoch, proposer, at| {
+            crate::native::begin_block_params(state, epoch).unwrap();
+            begin_block(state, epoch, &addr(proposer), at).unwrap();
+        };
+        block(&mut state, 0, 1, 1_000);
+        block(&mut state, 0, 1, 2_000);
+        block(&mut state, 0, 2, 3_000);
+        paid_work(&mut state, 1_000_000_000_000_000_000_000);
+        let activity = crate::native::economy::EpochActivity {
+            burned: burn,
+            ..Default::default()
+        };
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            crate::native::economy::activity_key(0).as_bytes(),
+            serde_json::to_vec(&activity).unwrap(),
+        );
+        block(&mut state, 1, 2, 4_000);
+        let summary = read_epoch_summary(&state, 0).unwrap().unwrap();
+        let held = [1, 2, 99].map(|a| {
+            read_coupons(&state, &addr(a))
+                .unwrap()
+                .iter()
+                .map(|c| c.amount)
+                .sum::<u128>()
+        });
+        (state, summary, held)
+    }
+
+    const TNZO: u128 = 1_000_000_000_000_000_000;
+
+    /// Until its gate's epoch the burn-bound rule changes nothing: an epoch
+    /// closes as it does with no gate set, whatever it burned, and the rule
+    /// writes no record.
+    #[test]
+    fn a_dormant_burn_bound_rule_leaves_the_epoch_close_as_it_was() {
+        let (plain, summary, held) = closed_epoch(TNZO, &[]);
+        assert!(summary.matched > TNZO, "{}", summary.matched);
+        assert!(bound::read_book(&plain).is_none());
+        // Set for a later epoch, with every tunable at its tightest.
+        let (later, later_summary, later_held) = closed_epoch(
+            TNZO,
+            &[
+                (bound::KEY, 5),
+                (bound::RATIO_PARAM, 0),
+                (bound::SHARE_CAP_PARAM, 1),
+            ],
+        );
+        assert_eq!(later_summary, summary);
+        assert_eq!(later_held, held);
+        assert!(bound::read_book(&later).is_none());
+    }
+
+    /// The gate reads the epoch of the block that closes an epoch: epoch 0
+    /// closes in the first block of epoch 1, so a gate of 1 binds that close
+    /// and a gate of 2 does not.
+    #[test]
+    fn a_gate_of_g_first_binds_the_close_of_epoch_g_minus_one() {
+        let (_, plain, held) = closed_epoch(TNZO, &[]);
+        let shut = |gate| [(bound::KEY, gate), (bound::RATIO_PARAM, 0)];
+        let (next, next_summary, next_held) = closed_epoch(TNZO, &shut(2));
+        assert_eq!((next_summary, next_held), (plain, held));
+        assert!(bound::read_book(&next).is_none());
+        let (now, now_summary, now_held) = closed_epoch(TNZO, &shut(1));
+        assert_eq!(now_summary.matched, 0);
+        assert_eq!(now_held, [0; 3]);
+        assert_eq!(bound::read_book(&now).unwrap().first_epoch, 0);
+    }
+
+    /// Rights the rule cut stayed in the pool, so they do not count against
+    /// the pool left: with the floor at the whole pool, an epoch after one
+    /// whose release was cut to nothing still releases.
+    #[test]
+    fn rights_the_rule_cut_still_count_as_in_the_pool() {
+        let (mut state, first, _) = closed_epoch(
+            TNZO,
+            &[
+                (bound::KEY, 0),
+                (bound::RATIO_PARAM, 0),
+                (bound::FLOOR_POOL_PARAM, 10_000),
+                (bound::SHARE_CAP_PARAM, 10_000),
+            ],
+        );
+        assert_eq!((first.matched, first.withheld), (0, 0));
+        assert!(first.rights_issued > 0);
+        set_param(&mut state, bound::RATIO_PARAM, 10_000);
+        begin_block(&mut state, 1, &addr(1), 5_000).unwrap();
+        begin_block(&mut state, 1, &addr(2), 6_000).unwrap();
+        paid_work(&mut state, 1_000_000_000_000_000_000_000);
+        let activity = crate::native::economy::EpochActivity {
+            burned: 1_000_000 * TNZO,
+            ..Default::default()
+        };
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            crate::native::economy::activity_key(1).as_bytes(),
+            serde_json::to_vec(&activity).unwrap(),
+        );
+        begin_block(&mut state, 2, &addr(2), 7_000).unwrap();
+        let second = read_epoch_summary(&state, 1).unwrap().unwrap();
+        assert!(second.matched > 0);
+    }
+
+    /// Live, an epoch releases at most the ratio of what it burned, cut in
+    /// proportion across its coupons; the cut stays in the pool as unmatched
+    /// rights. An epoch whose release is under the ceiling closes as before.
+    #[test]
+    fn a_live_burn_bound_rule_holds_the_release_to_the_ratio_of_the_burn() {
+        let open = [(bound::KEY, 0), (bound::SHARE_CAP_PARAM, 10_000)];
+        let (_, plain, plain_held) = closed_epoch(1_000_000 * TNZO, &[]);
+        let (state, roomy, roomy_held) = closed_epoch(1_000_000 * TNZO, &open);
+        assert_eq!(roomy, plain);
+        assert_eq!(roomy_held, plain_held);
+        let book = bound::read_book(&state).unwrap();
+        assert_eq!(book.budget, 1_000_000 * TNZO);
+        assert_eq!(book.year_released, roomy.matched);
+        assert_eq!(book.boot_spent, 0);
+
+        let (_, unbound, _) = closed_epoch(TNZO, &[]);
+        assert!(unbound.matched > TNZO);
+        for (ratio_bps, most) in [(10_000, TNZO), (5_000, TNZO / 2)] {
+            let mut params = open.to_vec();
+            params.push((bound::RATIO_PARAM, ratio_bps));
+            let (state, bounded, held) = closed_epoch(TNZO, &params);
+            assert!(bounded.matched <= most, "{}", bounded.matched);
+            assert!(bounded.matched > most - 3);
+            assert_eq!(held.iter().sum::<u128>(), bounded.matched);
+            assert!(held.iter().all(|h| *h > 0));
+            assert_eq!(bounded.rights_issued, unbound.rights_issued);
+            assert_eq!(
+                bounded.expired_unmatched,
+                bounded.rights_issued - bounded.matched
+            );
+            // The pool is drawn as the schedule says; the cut is not paid out.
+            let rs = read_reward_state(&state).unwrap();
+            assert_eq!(rs.cumulative_matched, bounded.matched);
+        }
+    }
+
+    /// Live, an epoch that burned nothing releases nothing, a ratio of zero
+    /// releases nothing, and so does a pool under its floor.
+    #[test]
+    fn a_live_burn_bound_rule_releases_nothing_without_a_burn_or_under_the_floor() {
+        let (_, unbound, _) = closed_epoch(0, &[]);
+        assert!(unbound.matched > 0);
+        let (state, none, held) = closed_epoch(0, &[(bound::KEY, 0)]);
+        assert_eq!((none.matched, none.coupon_count), (0, 0));
+        assert_eq!(held, [0, 0, 0]);
+        assert_eq!(
+            read_reward_state(&state).unwrap().issued_epochs,
+            Vec::<u64>::new()
+        );
+
+        let (_, zero, _) = closed_epoch(TNZO, &[(bound::KEY, 0), (bound::RATIO_PARAM, 0)]);
+        assert_eq!(zero.matched, 0);
+
+        // A floor at the whole pool: the first close finds the pool full and
+        // releases, the next finds it drawn and releases nothing.
+        let (mut state, first, _) = closed_epoch(
+            1_000_000 * TNZO,
+            &[(bound::KEY, 0), (bound::FLOOR_POOL_PARAM, 10_000)],
+        );
+        assert!(first.matched > 0);
+        paid_work(&mut state, 1_000 * TNZO);
+        let activity = crate::native::economy::EpochActivity {
+            burned: 1_000_000 * TNZO,
+            ..Default::default()
+        };
+        state.set_storage(
+            &SYSTEM_ADDRESS,
+            crate::native::economy::activity_key(1).as_bytes(),
+            serde_json::to_vec(&activity).unwrap(),
+        );
+        begin_block(&mut state, 2, &addr(1), 5_000).unwrap();
+        let second = read_epoch_summary(&state, 1).unwrap().unwrap();
+        assert!(second.rights_issued > 0);
+        assert_eq!(second.matched, 0);
+    }
+
+    /// Live, no address takes more than the governed share of an epoch's
+    /// bounded release; what is cut from it goes to nobody.
+    #[test]
+    fn a_live_burn_bound_rule_holds_each_address_to_its_share() {
+        let (_, plain, plain_held) = closed_epoch(1_000_000 * TNZO, &[]);
+        let most = plain.matched / 10;
+        assert!(plain_held.iter().any(|h| *h > most));
+        let (_, capped, held) = closed_epoch(
+            1_000_000 * TNZO,
+            &[(bound::KEY, 0), (bound::SHARE_CAP_PARAM, 1_000)],
+        );
+        for (was, now) in plain_held.iter().zip(&held) {
+            assert!(*now <= most && *now <= *was, "{now} over {most} or {was}");
+            if *was <= most {
+                assert_eq!(now, was);
+            } else {
+                // `pro_rata` drops low bits of amounts above 64 bits, so the cut
+                // lands within a part in 10^12 under the share.
+                assert!(
+                    *now >= most - most / 1_000_000_000_000,
+                    "{now} under {most}"
+                );
+            }
+        }
+        assert_eq!(capped.matched, held.iter().sum::<u128>());
+        assert!(capped.matched < plain.matched);
     }
 
     /// A schedule paid out in full leaves the list once a release or a new
@@ -1577,6 +2111,85 @@ mod tests {
         // moved value or burned it.
         let (balances, supply) = state.pending_block_delta();
         assert_eq!(balances - funded as i128, supply);
+        assert!(supply <= 0, "supply rose by {supply}");
+    }
+
+    /// A validator's reward life end to end: work closes into a coupon, the
+    /// claim pays part liquid and escrows the rest, and an offence then
+    /// takes the slashed share of the bond into the insurance pool, recorded
+    /// as a slash credit, and the same share of the escrowed reward back to
+    /// the rewards pool. Nothing is minted on the way.
+    #[test]
+    fn a_slashed_validator_forfeits_bond_to_insurance_and_vesting_reward_to_the_pool() {
+        use super::super::staking::{SlashedStake, add_bond, bonded_stake_of, slash_to_insurance};
+        let mut state = genesis_state();
+        set_genesis_param(&mut state, REWARD_CLAWBACK_GATE, 0);
+        let pool = rewards_pool_address();
+        let funded = tenzro_token::rewards::NETWORK_REWARDS_POOL;
+        state.set_balance(pool.as_bytes(), funded);
+        let validator = addr(7);
+        let bond = 1_000_000u128;
+        state.set_balance(&STAKING_VAULT_ADDRESS, bond);
+        add_bond(&mut state, validator.as_bytes(), bond, 0).unwrap();
+        super::super::economy::write_rate_for_tests(&mut state, 1, 100_000_000, 100_000_000);
+        begin_block(&mut state, 0, &validator, 0).unwrap();
+        paid_work(&mut state, 1_000_000_000_000_000_000_000);
+        super::super::economy::record_burn(&mut state, 1_000_000_000_000_000_000_000).unwrap();
+        begin_block(&mut state, 1, &addr(8), 10).unwrap();
+        let coupon = read_coupons(&state, &validator).unwrap()[0].amount;
+
+        let tx = VmTransaction::new(
+            validator.as_bytes().to_vec(),
+            None,
+            0,
+            Vec::new(),
+            0,
+            0,
+            0,
+            crate::traits::VmType::Tenzro,
+            1,
+        )
+        .with_block_timestamp_ms(100);
+        let (mut changes, mut logs) = (Vec::new(), Vec::new());
+        let out = claim_rewards(&tx, &mut state, &mut changes, &mut logs).unwrap();
+        let outcome: ClaimOutcome = serde_json::from_slice(&out).unwrap();
+        assert!(outcome.vesting > 0, "part of the coupon vests");
+        let escrow = vesting_escrow_address();
+        let insurance = super::super::insurance::pool_address();
+        let (insured_before, credited_before) = (
+            state.get_balance(insurance.as_bytes()),
+            super::super::insurance::read_totals(&state).from_slashes,
+        );
+
+        let taken = slash_to_insurance(
+            &mut state,
+            validator.as_bytes(),
+            SlashedStake::Validator,
+            1_000,
+            &mut changes,
+        )
+        .unwrap();
+        assert_eq!(taken, bond / 10);
+        assert_eq!(bonded_stake_of(&state, validator.as_bytes()), bond - taken);
+        assert_eq!(
+            state.get_balance(insurance.as_bytes()),
+            insured_before + taken
+        );
+        assert_eq!(
+            super::super::insurance::read_totals(&state).from_slashes,
+            credited_before + taken
+        );
+        let clawed = outcome.vesting / 10;
+        assert_eq!(
+            state.get_balance(escrow.as_bytes()),
+            outcome.vesting - clawed
+        );
+        assert_eq!(state.get_balance(pool.as_bytes()), funded - coupon + clawed);
+        assert_eq!(state.get_balance(validator.as_bytes()), outcome.liquid);
+
+        // The pool and vault funding are the only unrecorded writes.
+        let (balances, supply) = state.pending_block_delta();
+        assert_eq!(balances - (funded + bond) as i128, supply);
         assert!(supply <= 0, "supply rose by {supply}");
     }
 }

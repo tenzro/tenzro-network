@@ -36,11 +36,14 @@ fn models_dir() -> PathBuf {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "downloads a catalog model (a few hundred MB) and runs it on CPU; run with --ignored on a host with Hub access"]
 async fn a_small_catalog_model_calls_declared_tools_with_valid_arguments() {
-    tenzro_catalog::install_test_seed();
+    let catalog = tenzro_model::CatalogCell::new(tenzro_model::Catalog::test_seed());
     let model_id = std::env::var("TENZRO_LIVE_MODEL").unwrap_or_else(|_| "qwen3-0.6b".into());
-    let entry = tenzro_model::catalog::get_model_by_id(&model_id).expect("catalog entry");
+    let entry = catalog
+        .current()
+        .get_model_by_id(&model_id)
+        .expect("catalog entry");
     let dir = models_dir();
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -53,7 +56,7 @@ async fn a_small_catalog_model_calls_declared_tools_with_valid_arguments() {
         downloaded_bytes: 0,
         total_bytes: 0,
     });
-    let downloader = HfDownloader::new(dir.clone());
+    let downloader = HfDownloader::new(dir.clone(), catalog.clone());
     let path = if downloader.is_downloaded(&model_id) {
         downloader.model_path(&model_id)
     } else {
@@ -63,7 +66,7 @@ async fn a_small_catalog_model_calls_declared_tools_with_valid_arguments() {
             .expect("pinned download")
     };
 
-    let runtime = Arc::new(ModelRuntime::new().expect("runtime"));
+    let runtime = Arc::new(ModelRuntime::new(catalog).expect("runtime"));
     runtime.load_model(&model_id, &path).await.expect("load");
 
     let tools: Vec<OpenAITool> = serde_json::from_value(json!([

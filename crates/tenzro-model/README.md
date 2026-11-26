@@ -4,7 +4,7 @@ AI model registry, inference routing, and provider management for Tenzro Network
 
 ## Overview
 
-The `tenzro-model` crate provides the core infrastructure for managing AI models and inference providers on Tenzro Network. It enables a decentralized marketplace for AI inference services with intelligent routing, dynamic pricing, provider management, and durable catalog persistence.
+The `tenzro-model` crate provides the core infrastructure for managing AI models and inference providers on Tenzro Network. It routes each call to a provider by price, latency and standing, prices calls from the rate cards providers publish (the network sets no provider price), and manages providers and the durable model catalog.
 
 ## Features
 
@@ -118,14 +118,6 @@ All ONNX runtimes build their sessions through the open-source Praecise engine; 
 ### Modality-Aware Inference Routing
 
 `InferenceRouter::route()` reads `model.modality` from the registry and dispatches a typed `InferencePayload` enum (`Chat | Forecast | VisionEmbed | VisionSimilarity | TextEmbed | Segment | Detect | Transcribe | VideoEmbed`) to the correct runtime handle. Pricing/latency/reputation strategies apply per-modality with independent provider pools.
-
-### Intent Routing and Per-Query Difficulty
-
-Model selection and provider selection are two tiers. The intent tier of `InferenceRouter` (`routing::intent`, configured once with an `IntentPolicy`) takes a `RouteIntent` — a use case, a per-request cost cap, and a quality floor — and resolves it to a concrete `model_id`; the same router then picks the operator deployment for that model. The intent tier owns use-case→modality mapping, candidate discovery over `ModelRegistry`, quality-tier resolution, budget pre-filtering, usage-stat scoring, and the cross-model fallback order. Three independent ceilings apply: the per-request `Budget` enforced at discovery, a per-DID rolling-window cap through a `BudgetGate`, and a hard wallet-balance ceiling read through a `BalanceProvider` so no model priced above what the payer can settle is ever selected.
-
-**Quality tiers.** `quality_tier()` sorts a candidate into `Strong` or `Cheap` on two facts only: it is `Strong` at or above a 30B parameter count, or at or above 7B while carrying a `code` or `reasoning` capability tag. Deliberately absent is context length — used as an independent term it classified every model shipping today as `Strong`, which inverted the ladder, because the cost term then picked the smallest candidate for every rung. Both inputs are catalog-owned: the catalog entry's `capabilities` field states the tag claim, `to_model_info()` stamps it on a locally served model, `refresh_catalog_fields()` re-derives it on a stored row, and `network_catalog` recovers it on a gossiped offer. A model between the two floors reaches the strong tier by its tag alone, so a candidate that loses those tags anywhere along that path silently drops out of every `quality_floor = strong` request — and surfaces to the caller as an unsatisfiable budget rather than a missing tag.
-
-Declared metadata says nothing about whether a *specific* prompt needs the expensive model, so `difficulty` supplies the measured signal. Prompts are embedded through a `PromptEmbedder` (backed by `TextEmbeddingRuntime`) and grouped by an online sequential k-means map that grows on demand — no training corpus and no offline fit step. Each model accrues per-cluster outcome counters from real serving results, so a model's strength is a measured property per prompt neighborhood. A newly registered model starts at the neutral prior with an optimism bonus so it stays explorable, and earns its per-cluster error rates from observations. Both the cluster map and the per-model counters write through to `CF_MODELS` and hydrate on startup.
 
 ### Latency-Tail Estimation
 
@@ -353,8 +345,6 @@ The crate is organized into several key modules:
 - `registry`: Model catalog and metadata management with durable persistence
 - `provider`: Inference provider registration, metrics, and health monitoring
 - `routing`: Request routing with multiple strategies and circuit breakers
-- `routing::intent`: Intent → `model_id` resolution with budget, quality floor, and balance ceilings
-- `difficulty`: Per-query difficulty estimation over online prompt clusters
 - `latency`: Streaming quantile estimator for provider latency tails
 - `pricing`: Cost calculation and market analysis
 - `library`: Model discovery and browsing
@@ -363,7 +353,6 @@ The crate is organized into several key modules:
 - `toploc`: Top-k logit inference commitments and fuzzy re-execution verification
 - `sla`: VRF-driven liveness probes and provider fault detection
 - `provenance` / `jurisdiction`: Signed inference provenance and locality receipts
-- `provisioning`: Hardware-aware model provisioning recommendations and peer discovery
 - `gguf_shape`: GGUF metadata-header parse for layer count, hidden dim, and size
 - `hf_download`: peer-first artifact downloader (`BlobFetcher` → iroh blobs, HuggingFace Hub fallback)
 - `runtime`: Local inference via llama.cpp with GPU acceleration and MTP speculative decoding

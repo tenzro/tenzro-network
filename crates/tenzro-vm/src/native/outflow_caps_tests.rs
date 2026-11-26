@@ -48,6 +48,12 @@ fn inventory() -> BTreeMap<(&'static str, &'static str), Use> {
         (("native/economy.rs", "posted_fee"), Use::Payer),
         (("native/economy.rs", "fee_params"), Use::Payer),
         (("native/economy.rs", "check_agent_bond"), Use::Valuation),
+        // A payment made off the ledger, valued to count as settled value;
+        // nothing moves.
+        (
+            ("native/economy.rs", "record_external_payment"),
+            Use::Valuation,
+        ),
         (("native/inference_fault.rs", "penalty_due"), Use::Payer),
         (
             ("native/payment_settlement.rs", "usd_e6_to_wei"),
@@ -277,5 +283,80 @@ fn tnzo_paid_out_per_epoch_never_passes_the_sum_of_ceilings_over_10000_rate_gaps
             "seed {seed}: claims {claims} over {claim_ceiling}"
         );
         assert!(base + claims <= base_ceiling + claim_ceiling, "seed {seed}");
+    }
+}
+
+/// Spec: "every outflow path enabled at its maximum parameters." The fuzz
+/// above samples each ceiling-governing parameter from a wide but arbitrary
+/// range; this one instead pins every parameter that can raise either
+/// payout -- `fees.validator_burn_share_bps`, `validator.base_cost_usd_month`,
+/// `validator.base_cap_tnzo_month`, `insurance.max_paid_tnzo_epoch` and
+/// `insurance.max_claim_tnzo` -- at its own registered maximum, read live
+/// from the governed-parameter registry rather than restated here: the
+/// single most permissive configuration the network could ever vote into
+/// force. The random chain-to-market rate gap, burn, activity and loss
+/// sizes still vary across the same 10,000 seeds; the sum of the two pools'
+/// payouts for the epoch must still never pass the sum of the ceilings that
+/// same maximal configuration implies.
+#[test]
+fn tnzo_paid_out_per_epoch_never_passes_the_sum_of_ceilings_with_every_cap_at_its_governed_maximum()
+{
+    use super::{economy, insurance, rewards, set_governed_param_for_test};
+    let max_of = |key: &'static str| crate::governance::governed_param(key).unwrap().max;
+    let share = max_of(rewards::VALIDATOR_BURN_SHARE_PARAM);
+    let base_cost = max_of(rewards::VALIDATOR_BASE_COST_PARAM);
+    let base_cap = max_of(rewards::VALIDATOR_BASE_CAP_PARAM);
+    let epoch_cap = max_of(insurance::MAX_PAID_EPOCH_PARAM);
+    let claim_max = max_of(insurance::MAX_CLAIM_TNZO_PARAM);
+
+    for seed in 0..10_000u64 {
+        let mut r = Rng::new(seed);
+        let mut state = StateAdapter::new();
+        // Market $0.01..$10 a TNZO; the chain rate 0.05x..20x of it.
+        let market = r.log_e6(0.01, 10.0) * 1_000;
+        let gap_e6 = r.log_e6(0.05, 20.0);
+        let chain = (market * gap_e6 / 1_000_000).max(1);
+        economy::write_rate_for_tests(&mut state, 1, chain, chain);
+
+        // Validator base rewards: every raising parameter at its maximum.
+        let burned = u128::from(r.below(1_000_000)) * ONE;
+        economy::book_for_tests(&mut state, burned, 0);
+        set_governed_param_for_test(&mut state, rewards::VALIDATOR_BURN_SHARE_PARAM, share);
+        set_governed_param_for_test(&mut state, rewards::VALIDATOR_BASE_COST_PARAM, base_cost);
+        set_governed_param_for_test(&mut state, rewards::VALIDATOR_BASE_CAP_PARAM, base_cap);
+        let active = 1 + r.below(300);
+        let epoch = economy::read_current_epoch(&state);
+        let base = rewards::validator_base_rights(&state, epoch, active, 8_760);
+        let base_ceiling = burned * u128::from(share) / 10_000;
+
+        // Insurance claims: every raising parameter at its maximum.
+        let pool = insurance::pool_address();
+        state.set_balance(pool.as_bytes(), u128::from(r.below(1_000_000_000)) * ONE);
+        set_governed_param_for_test(&mut state, insurance::MAX_PAID_EPOCH_PARAM, epoch_cap);
+        set_governed_param_for_test(&mut state, insurance::MAX_CLAIM_TNZO_PARAM, claim_max);
+        let mut claims = 0u128;
+        for _ in 0..1 + r.below(20) {
+            let loss = crate::native::usd_e6_to_wei(&state, r.below(1_000_000_000_000));
+            let paid = insurance::payable(&state, loss);
+            let held = state.get_balance(pool.as_bytes());
+            assert!(paid <= held);
+            state.set_balance(pool.as_bytes(), held - paid);
+            insurance::book_paid(&mut state, paid, &mut Vec::new()).unwrap();
+            claims += paid;
+        }
+        let claim_ceiling = u128::from(epoch_cap) * ONE;
+
+        assert!(
+            base <= base_ceiling,
+            "seed {seed}: base {base} over {base_ceiling} at the governed maximum"
+        );
+        assert!(
+            claims <= claim_ceiling,
+            "seed {seed}: claims {claims} over {claim_ceiling} at the governed maximum"
+        );
+        assert!(
+            base + claims <= base_ceiling + claim_ceiling,
+            "seed {seed}: aggregate payout over the sum of per-path ceilings at the governed maximum"
+        );
     }
 }

@@ -100,7 +100,9 @@ pub async fn passkey_register_handler(
 ) -> Response {
     use super::passkey_registry::{CoseAlgorithm, PasskeyCredential};
 
-    let full_uri = full_request_uri(&headers, "/wallet/passkey/register");
+    let Some(full_uri) = full_request_uri(&headers, "/wallet/passkey/register") else {
+        return (StatusCode::BAD_REQUEST, "the request names no Host header").into_response();
+    };
     if let Err(resp) =
         validate_wallet_auth(&state, &headers, "POST", &full_uri, REGISTER_ACTION).await
     {

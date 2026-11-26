@@ -256,14 +256,12 @@ impl MirrorPlan {
     /// `reachable` is supplied by the caller rather than read from the
     /// settlement registry alone, because Tenzro reaches far more chains than
     /// it settles on natively. The registry holds the nine networks with a
-    /// direct settlement path; the bridge adapters — LayerZero, Chainlink
-    /// CCIP, Wormhole, deBridge, Li.Fi, Hyperlane, Axelar, Stargate, IBC
-    /// Eureka, Hyperbridge, NEAR chain signatures — reach well over a
-    /// hundred more between them. Validating against the registry alone would
-    /// refuse a mirror to almost everywhere Tenzro can actually write.
+    /// direct settlement path; the governed bridge routes (CCIP lanes, IBC
+    /// and light-client routes) reach more. Validating against the registry
+    /// alone would refuse a mirror to a chain a route serves.
     ///
     /// The node builds this set from both sources: `settlement_networks` plus
-    /// every registered adapter's `supported_chains()`. Passing it in keeps
+    /// the source chain of every installed bridge route. Passing it in keeps
     /// this module from holding a second chain list that drifts from the
     /// router's.
     ///
@@ -599,11 +597,9 @@ mod tests {
 
     #[test]
     fn a_bridge_reachable_chain_is_accepted_even_though_it_is_not_a_settlement_network() {
-        // Tenzro settles natively on nine networks and *reaches* well over a
-        // hundred through LayerZero, CCIP, Wormhole, deBridge, Li.Fi,
-        // Hyperlane, Axelar and the rest. Validating against the settlement
-        // registry alone would refuse a mirror to almost everywhere it can
-        // actually write.
+        // Tenzro settles natively on nine networks and reaches more through
+        // its governed bridge routes. Validating against the settlement
+        // registry alone would refuse a mirror to a chain a route serves.
         let reachable = ["eip155:10", "avalanche", "sui:mainnet"];
         let p = MirrorPlan::new(
             vec![

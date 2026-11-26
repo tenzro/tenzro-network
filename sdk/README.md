@@ -1,7 +1,9 @@
 # Tenzro SDKs
 
-Three SDKs, one shape: a thin core and the same capability packages in
-TypeScript, Rust and Python. The core never depends on a capability.
+The three main SDKs share one shape: a thin core and the same capability
+packages in TypeScript, Rust and Python. The core never depends on a
+capability. Smaller clients for other languages are listed under
+[Other languages](#other-languages).
 
 | | TypeScript | Rust (`tenzro-sdk`) | Python (`tenzro`) |
 | --- | --- | --- | --- |
@@ -51,13 +53,14 @@ id and a balance and dry-runs a transfer (`TypedTxClient.prepare`).
   the publisher gate that answers a paid path with 402 and serves it only after
   the facilitator settles (TypeScript `web.PublisherGate`, Rust tower layer,
   Python ASGI and WSGI middleware), with the RSL licence and robots.txt line
-  from the same policy. TypeScript and Rust add the MPP, Permit2, funding and
-  purchase clients.
+  from the same policy. TypeScript and Rust add the MPP, Permit2 and funding
+  clients, and ledger payments quoted per accepted asset, so an app can pay
+  in a permitted stablecoin without holding or pricing TNZO.
 - **Settlement**: the split engine, settlement plans and the x402 `plan`
   payment, escrow, refunds and the payee's standing split rule.
 - **Agents**: delegated agents under Terms granted by one root, actions and
   vouchers within them; TypeScript and Rust add registration, agent wallets
-  and bonds, payments, governance, lifecycle and the task market. All three
+  and bonds, payments, governance and lifecycle. All three
   carry the NVIDIA OpenShell helpers: sandbox policy to Terms, credentials
   under Terms, and sandbox session records verified offline
   (`sdk/fixtures/openshell`).
@@ -67,12 +70,30 @@ id and a balance and dry-runs a transfer (`TypedTxClient.prepare`).
   as events (over `sdk/fixtures/chat-stream`); TypeScript and Rust add models,
   multimodal and media generation, providers, training and the model catalog.
 - **Chain**: governance receipts verified offline against a certified state
-  root; TypeScript and Rust add tokens, staking, validators, contracts, TEE,
-  ZK, storage and files, events with proofs and the network's other registries.
+  root; storage (objects priced per byte-epoch and held to proofs of
+  retrievability) and compute rental (bonds, compute claims, the observed price
+  feed, and renting as a stream escrow held to availability proofs and billed
+  per epoch) in all three; TypeScript and Rust add tokens, staking, validators,
+  contracts, TEE, ZK, files, events with proofs and the network's other
+  registries.
 
 The Python capability packages carry the logic a client must run itself
 (signing, verification, payment gates, stream assembly); every other node
 method is a typed method on `tenzro.RpcClient`.
+
+## Other languages
+
+Smaller clients for platforms the three SDKs above do not reach. Each covers
+the calls its README lists, and nothing else.
+
+- [tenzro-cpp-sdk](tenzro-cpp-sdk/README.md): a C library with a C++
+  wrapper (CMake).
+- [tenzro-dotnet-sdk](tenzro-dotnet-sdk/README.md): a .NET client
+  (`Tenzro.Sdk`), usable from Unity.
+- [tenzro-swift-sdk](tenzro-swift-sdk/README.md): a Swift package for
+  Apple platforms and Linux.
+- [tenzro-kotlin-sdk](tenzro-kotlin-sdk/README.md): Kotlin/JVM account
+  keys, with the Android Keystore through JCA.
 
 ## Terminal console
 

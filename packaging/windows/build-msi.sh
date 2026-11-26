@@ -21,6 +21,10 @@
 #                    commit in the archive's buildenv.json, and the commit named by
 #                    provenance-*.intoto.json beside the archive)
 #   TZ_COMPRESSION   low | medium | high (default high)
+#   TENZRO_WINDOWS_SIGN_CERT, TENZRO_WINDOWS_TIMESTAMP_URL   the code-signing certificate (by
+#                    thumbprint, in the Windows machine's certificate store) and the RFC 3161
+#                    timestamp service the MSI is signed with; passed to build-msi.ps1, since ssh
+#                    carries no environment. Unset: the MSI is not signed.
 set -euo pipefail
 
 dist=${1:?usage: build-msi.sh <dist-dir> <out-dir>}
@@ -41,6 +45,13 @@ src_commit=${TZ_SOURCE_COMMIT:-$(jq -r '.commit // empty' "$dist/${zip%.zip}.bui
 src_commit=${src_commit:-unknown}
 pub_commit=${TZ_PUBLIC_COMMIT:-$(jq -r '.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit // empty' "$dist"/provenance-*.intoto.json 2>/dev/null | head -1 || true)}
 pub_commit=${pub_commit:-unknown}
+sign_env=
+if [ -n "${TENZRO_WINDOWS_SIGN_CERT:-}" ]; then
+    [[ $TENZRO_WINDOWS_SIGN_CERT =~ ^[0-9A-Fa-f]{40}$ ]] || { echo "TENZRO_WINDOWS_SIGN_CERT is not a certificate thumbprint" >&2; exit 1; }
+    [[ ${TENZRO_WINDOWS_TIMESTAMP_URL:-} =~ ^https?://[A-Za-z0-9./:_-]+$ ]] \
+        || { echo "TENZRO_WINDOWS_SIGN_CERT is set without a TENZRO_WINDOWS_TIMESTAMP_URL (http or https)" >&2; exit 1; }
+    sign_env="\$env:TENZRO_WINDOWS_SIGN_CERT='$TENZRO_WINDOWS_SIGN_CERT'; \$env:TENZRO_WINDOWS_TIMESTAMP_URL='$TENZRO_WINDOWS_TIMESTAMP_URL'; "
+fi
 mkdir -p "$out"
 
 ssh_opts=(-o BatchMode=yes -o ServerAliveInterval=30)
@@ -62,7 +73,12 @@ scp "${ssh_opts[@]}" -q "$dist/$zip" "$host:$scratch/$zip"
 
 msi="tenzro-$version-windows-x86_64-cuda.msi"
 w=$(winpath "$scratch")
-winsh "powershell -NoProfile -ExecutionPolicy Bypass -File $w\\pkg\\build-msi.ps1 -ZipPath $w\\$zip -ExpectedZipSha256 $zip_sha -OutMsi $w\\out\\$msi -WorkDir $w\\work -Version $version -SourceCommit $src_commit -PublicCommit $pub_commit -Compression $compression"
+build="$w\\pkg\\build-msi.ps1 -ZipPath $w\\$zip -ExpectedZipSha256 $zip_sha -OutMsi $w\\out\\$msi -WorkDir $w\\work -Version $version -SourceCommit $src_commit -PublicCommit $pub_commit -Compression $compression"
+if [ -n "$sign_env" ]; then
+    winsh "powershell -NoProfile -ExecutionPolicy Bypass -Command \"${sign_env}& $build\""
+else
+    winsh "powershell -NoProfile -ExecutionPolicy Bypass -File $build"
+fi
 
 scp "${ssh_opts[@]}" -q "$host:$scratch/out/$msi" "$out/$msi"
 echo "wrote $out/$msi"

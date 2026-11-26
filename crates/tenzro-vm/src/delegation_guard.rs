@@ -156,7 +156,7 @@ pub fn check(tx: &VmTransaction, state: &dyn VmState) -> Result<()> {
     let multi = network_param(state, MULTI_SIGNER_ENTRIES_PARAM) != 0;
     let enforced = network_param(state, ALLOWLIST_ENFORCED_PARAM) != 0;
     let ceiling = network_param(state, CHANGES_PER_WINDOW_PARAM);
-    let now = crate::native::deterministic_now_ms(tx);
+    let now = crate::native::deterministic_now_ms(tx)?;
     let mut seen = BTreeSet::new();
     let mut entries: std::collections::BTreeMap<[u8; 20], u64> = Default::default();
     for a in &tx.authorization_list {
@@ -260,8 +260,8 @@ pub fn record(
     state: &mut dyn VmState,
     before: &[([u8; 20], Vec<u8>, u64)],
     result: &mut ExecutionResult,
+    now: i64,
 ) {
-    let now = crate::native::deterministic_now_ms(tx);
     for (signer, old_code, old_nonce) in before {
         let new_code = state.get_code(signer).unwrap_or_default();
         // An applied entry spends its signer's nonce, so a repeat of the same

@@ -10,7 +10,6 @@ Thank you for your interest in contributing to Tenzro Network! This document pro
 - [Making Changes](#making-changes)
 - [Testing Requirements](#testing-requirements)
 - [Crate-Specific Guidelines](#crate-specific-guidelines)
-- [Control App Development](#control-app-development)
 - [Reporting Issues](#reporting-issues)
 - [License](#license)
 
@@ -25,10 +24,6 @@ Thank you for your interest in contributing to Tenzro Network! This document pro
 - cargo (comes with Rust)
 - git
 
-**Control App Development:**
-- Node.js 24 (the version CI uses)
-- npm or yarn
-- System dependencies for Tauri (see [Tauri prerequisites](https://tauri.app/v1/guides/getting-started/prerequisites))
 
 **Platform Support:**
 - Linux (x86_64, aarch64)
@@ -68,14 +63,6 @@ cargo run --bin tenzro-node -- --roles validator
 
 ```bash
 cargo run --bin tenzro -- --help
-```
-
-### Run the Control App
-
-```bash
-cd apps/tenzro-control
-npm install
-npm run tauri dev
 ```
 
 ---
@@ -392,9 +379,9 @@ tenzro-auth -> device-key, storage, tee, types
 tenzro-bridge -> crypto, types, wallet
 tenzro-catalog -> types
 tenzro-cert-stark -> (none)
-tenzro-cli -> bridge, catalog, consensus, crypto, device-key, events, finality, identity, keygen, model, onboarding-types, storage, tee, trust, types, update-notice, zk
+tenzro-cli -> bridge, catalog, consensus, crypto, device-key, events, finality, identity, keygen, light, model, native-ops, onboarding-types, storage, tee, trust, types, update-notice, zk
 tenzro-cluster -> device-key, types
-tenzro-consensus -> cert-stark, crypto, finality, onboarding-types, storage, types
+tenzro-consensus -> cert-stark, crypto, finality, light, onboarding-types, storage, types
 tenzro-crypto -> types
 tenzro-device-key -> crypto, types
 tenzro-econsim -> consensus, sim, token, types, vm
@@ -405,9 +392,12 @@ tenzro-identity -> crypto, storage, types, wallet
 tenzro-iroh -> crypto, device-key, onboarding-types, storage, types
 tenzro-keygen -> crypto, device-key
 tenzro-keystore-unlock -> (none)
+tenzro-light -> cert-stark, finality, state-proof, types
+tenzro-mailbox -> crypto, types
 tenzro-model -> catalog, cluster, crypto, device-key, storage, types
+tenzro-native-ops -> crypto, types
 tenzro-network -> crypto, device-key, iroh, onboarding-types, types
-tenzro-node -> auth, bridge, cluster, consensus, crypto, device-key, events, identity, iroh, keygen, keystore-unlock, model, network, onboarding-types, payments, settlement, storage, storage-provider, tee, token, trust, types, update-notice, vm, wallet, zk
+tenzro-node -> auth, bridge, cluster, consensus, crypto, device-key, events, identity, iroh, keygen, keystore-unlock, light, model, native-ops, network, onboarding-types, payments, settlement, storage, storage-provider, tee, token, trust, types, update-notice, vm, wallet, zk
 tenzro-onboarding-types -> (none)
 tenzro-openshell -> crypto, device-key, payments, tee, types
 tenzro-payments -> bridge, crypto, identity, settlement, storage, types, wallet
@@ -415,14 +405,15 @@ tenzro-secure-enclave -> device-key
 tenzro-settlement -> crypto, storage, token, types, wallet
 tenzro-settlement-fuzz -> types
 tenzro-sim -> consensus, storage, token, types, vm
-tenzro-storage -> types
+tenzro-state-proof -> types
+tenzro-storage -> state-proof, types
 tenzro-storage-provider -> cluster, iroh, settlement, storage, types
 tenzro-tee -> crypto, device-key, secure-enclave, types
 tenzro-token -> crypto, storage, types
 tenzro-trust -> crypto, identity, storage, types
 tenzro-types -> (none)
 tenzro-update-notice -> (none)
-tenzro-vm -> bridge, consensus, crypto, finality, settlement, storage, tee, token, trust, types, zk
+tenzro-vm -> bridge, consensus, crypto, finality, native-ops, settlement, storage, tee, token, trust, types, zk
 tenzro-wallet -> crypto, types
 tenzro-zk -> types
 ```
@@ -487,28 +478,6 @@ pub type Result<T> = std::result::Result<T, MyCrateError>;
 
 ---
 
-## Control App Development
-
-`apps/tenzro-control` is the operator's desktop app: React and TypeScript in
-`src/` (pages, components, `lib/api.ts` for the node's RPC), a Tauri backend in
-`src-tauri/src/` (Tauri commands, the node and wallet bridges, the machine
-identity), Tailwind CSS 4 and lucide-react.
-
-```bash
-cd apps/tenzro-control
-npm install
-npm run tauri dev      # develop; frontend changes hot-reload
-npm run test           # frontend unit tests (Vitest)
-npm run tauri build    # production build
-(cd src-tauri && cargo test)
-```
-
-A new Tauri command is a `#[tauri::command]` function in `src-tauri/src`,
-registered in the app builder and called from the frontend with
-`invoke` from `@tauri-apps/api`.
-
----
-
 ## Reporting Issues
 
 ### Before Reporting
@@ -518,7 +487,6 @@ registered in the app builder and called from the frontend with
 3. Collect relevant information:
    - Operating system and version
    - Rust version (`rustc --version`)
-   - Node.js version (for the control app)
    - Steps to reproduce
    - Expected vs actual behavior
    - Error messages and stack traces

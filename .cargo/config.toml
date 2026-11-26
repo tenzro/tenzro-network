@@ -12,6 +12,12 @@
 # - llama.cpp native CPU detection is controlled via CMAKE_ARGS env var.
 
 [env]
+# ONNX Runtime is linked from the pinned library (packaging/onnxruntime.tsv) that
+# `python3 scripts/release/fetch-onnxruntime.py` places at .onnxruntime/host in
+# this checkout; nothing is fetched at build time. A build that sets
+# ORT_LIB_LOCATION itself (the GPU builds, a cross build) keeps its own value.
+ORT_LIB_LOCATION = { value = ".onnxruntime/host", relative = true }
+
 # Force GGML_NATIVE=OFF to prevent llama-cpp-sys-2 from passing -mcpu=native
 # to Apple Clang. Metal GPU acceleration is unaffected (auto-enabled on macOS).
 # On Linux x86_64, AVX2/AVX-512 are still auto-detected by the compiler.
@@ -127,3 +133,8 @@ rustflags = ["-C", "target-cpu=x86-64-v3"]
 # opens far more than the common default of 1024 files across its parallel tests.
 [target.'cfg(unix)']
 runner = "scripts/test-runner.sh"
+
+# The WebAssembly light client: getrandom 0.3 and 0.4 read the browser's
+# random source only under this backend.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="wasm_js"']

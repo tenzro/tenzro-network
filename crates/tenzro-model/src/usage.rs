@@ -22,7 +22,13 @@ use tracing::{debug, info, warn};
 const INFERENCE_DA_NAMESPACE: &[u8] = b"tenzro/inference";
 
 /// Prefix for usage records in storage
-const USAGE_RECORD_PREFIX: &[u8] = b"model_usage:";
+const USAGE_RECORD_PREFIX: &[u8] = b"model_usage2:";
+
+/// The prefix under which receipts of the earlier envelope layout were
+/// written. Positional bincode may decode such a row to a valid but wrong
+/// envelope, so rows under it are never read: the tracker deletes them when it
+/// loads.
+const EARLIER_LAYOUT_PREFIX: &[u8] = b"model_usage:";
 
 /// Prefix for aggregated stats in storage
 const STATS_PREFIX: &[u8] = b"model_stats:";
@@ -81,6 +87,11 @@ pub struct UsageRecord {
     pub latency_ms: u64,
     /// Timestamp of the inference
     pub timestamp: Timestamp,
+    /// The account that paid, when the caller knows it. Not part of the
+    /// stored record: it is written to the receipt summary, and the node keeps
+    /// the payer and its delegation path under a key of its own.
+    #[serde(skip)]
+    pub payer: Option<String>,
 }
 
 impl UsageRecord {
@@ -107,6 +118,7 @@ impl UsageRecord {
             cost,
             latency_ms,
             timestamp,
+            payer: None,
         }
     }
 
@@ -120,6 +132,12 @@ impl UsageRecord {
     /// timestamp-plus-UUID string the consumer never sees.
     pub fn with_record_id(mut self, record_id: String) -> Self {
         self.record_id = record_id;
+        self
+    }
+
+    /// Names the account that paid for this record's call.
+    pub fn with_payer(mut self, payer: Option<String>) -> Self {
+        self.payer = payer;
         self
     }
 
@@ -681,11 +699,10 @@ impl UsageTracker {
             // 32-byte digest (the rest of the protocol indexes receipts by
             // Hash, not by free-form string).
             receipt_id: compute_commitment(record.record_id.as_bytes()),
-            payer: None,
+            payer: record.payer.clone(),
             payee: Some(format!("{}", record.provider_id)),
             amount_wei: Some(record.cost),
             timestamp: record.timestamp,
-            principal_chain_summary: None,
         };
 
         let kind = ReceiptKind::Inference;
@@ -857,6 +874,17 @@ impl UsageTracker {
 
         let prune_at = self.max_recent_records.saturating_mul(2);
         let mut newest: Vec<UsageRecord> = Vec::new();
+        let mut dropped = 0usize;
+
+        for key in storage
+            .get_keys_with_prefix(CF_MODELS, EARLIER_LAYOUT_PREFIX)
+            .map_err(|e| ModelError::StorageError(e.to_string()))?
+        {
+            storage
+                .delete(CF_MODELS, &key)
+                .map_err(|e| ModelError::StorageError(e.to_string()))?;
+            dropped += 1;
+        }
 
         for key in keys {
             let record_id =
@@ -872,6 +900,16 @@ impl UsageTracker {
             else {
                 continue;
             };
+            // A receipt written under an earlier envelope layout cannot be read
+            // by this one, and one such record must not stop the tracker from
+            // loading the rest: it is dropped, and the loss is stated once.
+            if bincode::deserialize::<ReceiptEnvelope>(&value).is_err() {
+                storage
+                    .delete(CF_MODELS, &key)
+                    .map_err(|e| ModelError::StorageError(e.to_string()))?;
+                dropped += 1;
+                continue;
+            }
             newest.push(self.decode_record(record_id, &value)?);
             if newest.len() >= prune_at {
                 newest.sort_by_key(|r| std::cmp::Reverse(r.timestamp.as_millis()));
@@ -887,6 +925,9 @@ impl UsageTracker {
         let loaded = newest.len();
         *self.recent_records.write() = newest;
         info!("Loaded {} recent usage records from storage", loaded);
+        if dropped > 0 {
+            info!("Dropped {dropped} usage records written under an earlier receipt layout");
+        }
 
         Ok(())
     }
@@ -986,6 +1027,108 @@ mod tests {
         assert_eq!(record.total_bytes(), 2560);
         assert_eq!(record.cost, 1000);
         assert_eq!(record.latency_ms, 250);
+    }
+
+    /// The payer goes into the receipt summary, while the stored record keeps
+    /// its layout: it reads back as before, without the payer.
+    #[test]
+    fn the_payer_is_written_to_the_receipt_summary_and_not_to_the_record() {
+        let storage = Arc::new(MemoryStore::new());
+        let tracker = UsageTracker::with_storage(storage.clone())
+            .unwrap()
+            .with_max_recent_records(0);
+        let record = UsageRecord::new(
+            "qwen3-4b".to_string(),
+            Address::zero(),
+            BillableUnits::tokens(10, 20),
+            1,
+            2,
+            300,
+            40,
+        )
+        .with_record_id("paid-1".to_string())
+        .with_payer(Some("0xabcd".to_string()));
+        let unpaid_layout = bincode::serialize(&record.clone().with_payer(None)).unwrap();
+        assert_eq!(
+            bincode::serialize(&record).unwrap(),
+            unpaid_layout,
+            "record layout unchanged"
+        );
+        tracker.record_usage(record).unwrap();
+
+        let key = [USAGE_RECORD_PREFIX, b"paid-1".as_slice()].concat();
+        let stored = storage.get(CF_MODELS, &key).unwrap().expect("envelope");
+        let envelope: ReceiptEnvelope = bincode::deserialize(&stored).unwrap();
+        assert_eq!(envelope.inline_summary.payer.as_deref(), Some("0xabcd"));
+        let back = tracker.get_record("paid-1").expect("the record reads back");
+        assert_eq!(back.payer, None);
+        assert_eq!(back.cost, 300);
+    }
+
+    #[test]
+    fn a_usage_record_in_an_earlier_receipt_layout_is_dropped_and_the_rest_load() {
+        let storage = Arc::new(MemoryStore::new());
+        let tracker = UsageTracker::with_storage(storage.clone()).unwrap();
+        tracker
+            .record_usage(UsageRecord::new(
+                "m".to_string(),
+                Address::zero(),
+                BillableUnits::tokens(10, 5),
+                100,
+                200,
+                300,
+                20,
+            ))
+            .unwrap();
+        let old = [USAGE_RECORD_PREFIX, b"old-layout".as_slice()].concat();
+        storage.put(CF_MODELS, &old, &[7u8; 5]).unwrap();
+        assert!(
+            tracker.get_record("old-layout").is_none(),
+            "an unreadable row reads as no record"
+        );
+        let reloaded = UsageTracker::with_storage(storage.clone())
+            .expect("an unreadable old record does not stop the tracker loading");
+        assert_eq!(reloaded.get_recent_usage(10).len(), 1);
+        assert!(
+            storage.get(CF_MODELS, &old).unwrap().is_none(),
+            "the old record is gone"
+        );
+    }
+
+    /// Positional bincode can read a row of the earlier layout as a valid but
+    /// wrong envelope, so such rows live under another prefix and are never
+    /// read: even a row that would decode cleanly reads as no record, and the
+    /// tracker deletes it when it loads.
+    #[test]
+    fn a_row_under_the_earlier_layout_prefix_is_never_decoded() {
+        let storage = Arc::new(MemoryStore::new());
+        let tracker = UsageTracker::with_storage(storage.clone()).unwrap();
+        tracker
+            .record_usage(
+                UsageRecord::new(
+                    "m".to_string(),
+                    Address::zero(),
+                    BillableUnits::tokens(10, 5),
+                    100,
+                    200,
+                    300,
+                    20,
+                )
+                .with_record_id("r1".to_string()),
+            )
+            .unwrap();
+        let current = [USAGE_RECORD_PREFIX, b"r1".as_slice()].concat();
+        let valid = storage.get(CF_MODELS, &current).unwrap().expect("envelope");
+        let earlier = [EARLIER_LAYOUT_PREFIX, b"r2".as_slice()].concat();
+        storage.put(CF_MODELS, &earlier, &valid).unwrap();
+
+        let fresh = UsageTracker::with_storage(storage.clone()).unwrap();
+        assert!(fresh.get_record("r2").is_none(), "never decoded");
+        assert!(fresh.get_record("r1").is_some());
+        assert!(
+            storage.get(CF_MODELS, &earlier).unwrap().is_none(),
+            "the earlier-layout row is deleted on load"
+        );
     }
 
     #[test]

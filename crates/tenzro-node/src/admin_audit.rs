@@ -627,6 +627,8 @@ pub struct Origin {
     pub user_agent: Option<String>,
     /// `X-Tenzro-Client`.
     pub client: Option<String>,
+    /// `Origin`: the web page a browser sent the request from.
+    pub web_origin: Option<String>,
     /// `X-Request-Id`.
     pub client_request_id: Option<String>,
     /// Fingerprint of the `Authorization` header's token.
@@ -665,6 +667,7 @@ impl Origin {
             overlay_peer: None,
             user_agent: header("user-agent"),
             client: header("x-tenzro-client"),
+            web_origin: header("origin"),
             client_request_id: header("x-request-id"),
             token_fingerprint: headers
                 .get(axum::http::header::AUTHORIZATION)
@@ -703,7 +706,9 @@ pub async fn capture_http(
     with_origin(origin, next.run(req)).await
 }
 
-/// The configured local identity service, checked at open.
+/// The configured local identity service, checked at open. It is reached
+/// over a Unix socket, so it exists only on Unix systems.
+#[cfg(unix)]
 #[derive(Debug, Clone)]
 struct PeerIdentityResolver {
     socket: PathBuf,
@@ -714,6 +719,7 @@ struct PeerIdentityResolver {
     networks: Vec<Cidr>,
 }
 
+#[cfg(unix)]
 impl PeerIdentityResolver {
     fn from_config(cfg: &PeerIdentityConfig) -> Result<Self, String> {
         if !cfg.request.starts_with('/') || !cfg.request.contains("{addr}") {
@@ -771,7 +777,6 @@ impl PeerIdentityResolver {
 
     /// Ask the service who `addr` is. `None` when it does not answer within
     /// half a second or answers something unreadable.
-    #[cfg(unix)]
     async fn lookup(&self, addr: SocketAddr) -> Option<PeerIdentity> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let ask = async {
@@ -797,11 +802,6 @@ impl PeerIdentityResolver {
             .await
             .ok()
             .flatten()
-    }
-
-    #[cfg(not(unix))]
-    async fn lookup(&self, _addr: SocketAddr) -> Option<PeerIdentity> {
-        None
     }
 }
 
@@ -870,6 +870,7 @@ pub struct AdminAudit {
     also: BTreeSet<String>,
     skip: BTreeSet<String>,
     networks: Vec<Cidr>,
+    #[cfg(unix)]
     peer_identity: Option<PeerIdentityResolver>,
     chain_id: u64,
     head: Mutex<Head>,
@@ -917,11 +918,21 @@ impl AdminAudit {
                 ));
             }
         }
+        #[cfg(unix)]
         let peer_identity = cfg
             .peer_identity
             .as_ref()
             .map(PeerIdentityResolver::from_config)
             .transpose()?;
+        #[cfg(not(unix))]
+        {
+            if cfg.peer_identity.is_some() {
+                return Err(
+                    "admin peer_identity reaches its service over a Unix socket, which this system does not have"
+                        .into(),
+                );
+            }
+        }
         let dir = data_dir.join(AUDIT_DIR);
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let audit = Self {
@@ -931,6 +942,7 @@ impl AdminAudit {
             also: cfg.audit_also.iter().cloned().collect(),
             skip: cfg.audit_skip.iter().cloned().collect(),
             networks,
+            #[cfg(unix)]
             peer_identity,
             chain_id,
             head: Mutex::new(Head {
@@ -1005,6 +1017,9 @@ impl AdminAudit {
     /// The source of a call from `origin`, asking the configured local
     /// identity service who the client address belongs to.
     pub async fn source_of(&self, origin: &Origin) -> Source {
+        #[cfg(not(unix))]
+        let peer_identity = None;
+        #[cfg(unix)]
         let peer_identity = match (&self.peer_identity, origin.client_ip) {
             (Some(resolver), Some(ip)) if resolver.asks_about(ip) => {
                 let port = origin
@@ -1546,7 +1561,7 @@ impl AdminAudit {
 
 /// `operator` or `policy_admin` for a DID that administers `node`.
 pub(crate) fn role_of(node: &TenzroNode, did: &str) -> Option<String> {
-    if node.config().operator_did.as_deref() == Some(did) {
+    if node.administrator_did().as_deref() == Some(did) {
         Some("operator".to_string())
     } else if node.access().policy().admins.iter().any(|a| a == did) {
         Some("policy_admin".to_string())
@@ -2723,6 +2738,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn from_peer(peer: &str) -> Origin {
         let peer: SocketAddr = peer.parse().unwrap();
         Origin {
@@ -2867,6 +2883,21 @@ mod tests {
             );
             assert!(r.is_err(), "{bad:?} was accepted");
         }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn an_identity_service_is_refused_where_there_are_no_unix_sockets() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = AdminAudit::open(
+            dir.path(),
+            &AdminConfig {
+                peer_identity: Some(identity_cfg(dir.path().join("identity.sock"))),
+                ..cfg()
+            },
+            1,
+        );
+        assert!(r.expect_err("refused").contains("Unix socket"));
     }
 
     #[test]

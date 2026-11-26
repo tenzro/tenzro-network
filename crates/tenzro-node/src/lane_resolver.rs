@@ -391,4 +391,35 @@ impl tenzro_consensus::mempool::AccountStateReader for NodeAccountStateReader {
     fn block_base_fee(&self) -> u128 {
         tenzro_vm::ledger::block_base_fee(&tenzro_vm::StateAdapter::reader(self.storage.clone()))
     }
+
+    fn fee_waived(&self, tx: &tenzro_types::transaction::SignedTransaction) -> bool {
+        let t = &tx.transaction;
+        tenzro_vm::native::first_registration::waives_sender(
+            &tenzro_vm::StateAdapter::reader(self.storage.clone()),
+            t.from.as_bytes(),
+            t.gas_limit,
+        )
+    }
+
+    fn waiver_room(&self, sender: &tenzro_types::primitives::Address) -> (u64, u64) {
+        tenzro_vm::native::first_registration::waiver_room(
+            &tenzro_vm::StateAdapter::reader(self.storage.clone()),
+            sender.as_bytes(),
+        )
+    }
+
+    fn refused_kind(&self, tx_type: &tenzro_types::transaction::TransactionType) -> Option<String> {
+        tenzro_vm::feature_gate::refuse_dormant_kind(
+            &tenzro_vm::StateAdapter::reader(self.storage.clone()),
+            tx_type,
+        )
+        .err()
+    }
+
+    fn fee_payer_live(&self) -> bool {
+        tenzro_vm::feature_gate::is_live_now(
+            &tenzro_vm::StateAdapter::reader(self.storage.clone()),
+            tenzro_vm::ledger::FEE_PAYER_GATE,
+        )
+    }
 }

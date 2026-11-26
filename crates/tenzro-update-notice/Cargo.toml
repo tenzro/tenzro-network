@@ -12,6 +12,14 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 p256 = { workspace = true }
+# The RustCrypto 0.14 release candidates do not keep semver between
+# candidates: p256 and k256 build only against the exact candidates the
+# workspace names. Naming them here carries those pins into every build of
+# this crate, not only builds that use the workspace's lock file.
+elliptic-curve = { workspace = true }
+ecdsa = { workspace = true }
+primeorder = { workspace = true }
+primefield = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -21,5 +29,6 @@ tempfile = { workspace = true }
 workspace = true
 
 [features]
-# Test keys and sample notices for other crates' tests.
-fixture = []
+# In-memory test keys and sample notices for other crates' tests; enabled
+# only from dev-dependencies.
+test-keys = []

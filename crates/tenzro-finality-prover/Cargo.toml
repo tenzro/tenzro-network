@@ -35,7 +35,7 @@ clap = { version = "4", features = ["derive"] }
 bincode = "1"
 tenzro-types = { path = "../tenzro-types" }
 ml-dsa = { version = "0.1.1" }
-p256 = { version = "=0.14.0-rc.12", features = ["ecdsa"] }
+p256 = { version = "0.14.0", features = ["ecdsa"] }
 sha2 = "0.10"
 revm = { version = "19.7", default-features = false, features = ["std"] }
 sha3 = "0.10"

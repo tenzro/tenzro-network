@@ -151,6 +151,24 @@ impl ConsensusClient {
             .await
     }
 
+    /// Calls `tenzro_fleetHostEvidence` (operator only): this machine's
+    /// evidence for the fleet hardware proof `operator` sends this reward
+    /// epoch, with `bind` the quote that joins it to the operator's fleet and
+    /// with `gpu` its GPU's report. Nothing is submitted.
+    pub async fn fleet_host_evidence(
+        &self,
+        operator: &str,
+        bind: bool,
+        gpu: bool,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc
+            .call(
+                "tenzro_fleetHostEvidence",
+                serde_json::json!({ "operator": operator, "bind": bind, "gpu": gpu }),
+            )
+            .await
+    }
+
     /// Calls `tenzro_getVesting`: get vesting.
     pub async fn get_vesting(&self, address: &str) -> crate::error::SdkResult<serde_json::Value> {
         self.rpc

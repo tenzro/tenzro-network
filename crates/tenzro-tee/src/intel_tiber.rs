@@ -557,11 +557,21 @@ pub fn claims_to_attestation_result(claims: &TiberClaims) -> Result<AttestationR
         .as_deref()
         .map(|s| s == "OK")
         .unwrap_or(false);
-    let dbg_off = claims
-        .dbgstat
-        .as_deref()
-        .map(|s| s == "disabled")
-        .unwrap_or(false);
+    // The RFC 9711 claims, read by the reader every EAT verifier shares.
+    let mut rfc_claims = serde_json::Value::Object(claims.extras.clone());
+    if let Some(profile) = &claims.eat_profile {
+        rfc_claims["eat_profile"] = profile.clone().into();
+    }
+    if let Some(dbg) = &claims.dbgstat {
+        rfc_claims["dbgstat"] = dbg.clone().into();
+    }
+    // A standard claim in the wrong form leaves the token invalid, as an
+    // unknown debug status always has, rather than failing the projection.
+    let (eat, eat_error) = match crate::eat::EatClaims::from_json(&rfc_claims) {
+        Ok(eat) => (eat, None),
+        Err(e) => (crate::eat::EatClaims::default(), Some(e.to_string())),
+    };
+    let dbg_off = eat.debug_disabled();
     let valid = tcb_ok && dbg_off;
 
     let mut measurements: Vec<Measurement> = Vec::new();
@@ -597,12 +607,6 @@ pub fn claims_to_attestation_result(claims: &TiberClaims) -> Result<AttestationR
     if let Some(date) = &claims.attester_tcb_date {
         details.insert("attester_tcb_date".to_string(), date.clone());
     }
-    if let Some(dbg) = &claims.dbgstat {
-        details.insert("dbgstat".to_string(), dbg.clone());
-    }
-    if let Some(eat) = &claims.eat_profile {
-        details.insert("eat_profile".to_string(), eat.clone());
-    }
     if let Some(svn) = claims.tdx_seamsvn {
         details.insert("tdx_seamsvn".to_string(), svn.to_string());
     }
@@ -612,7 +616,7 @@ pub fn claims_to_attestation_result(claims: &TiberClaims) -> Result<AttestationR
         details.insert("attester_advisory_ids".to_string(), advisories.join(","));
     }
 
-    Ok(AttestationResult {
+    let mut result = AttestationResult {
         valid,
         vendor: TeeVendor::IntelTdx,
         tcb_version: claims.attester_tcb_status.clone().unwrap_or_default(),
@@ -623,7 +627,15 @@ pub fn claims_to_attestation_result(claims: &TiberClaims) -> Result<AttestationR
         details,
         verified_at: tenzro_types::Timestamp::now(),
         ..Default::default()
-    })
+    };
+    eat.record(&mut result);
+    if let Some(e) = eat_error {
+        result.details.insert("eat_error".to_string(), e);
+        if let Some(dbg) = &claims.dbgstat {
+            result.details.insert("dbgstat".to_string(), dbg.clone());
+        }
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Deserialize)]
@@ -811,6 +823,20 @@ mod tests {
     fn projection_invalid_when_debug_enabled() {
         let r = claims_to_attestation_result(&claims_with(Some("OK"), Some("enabled"))).unwrap();
         assert!(!r.valid);
+    }
+
+    /// Only exactly "disabled" counts as debug off, as before the shared
+    /// reader; a status outside RFC 9711 leaves the token invalid, with the
+    /// reason, rather than failing the projection.
+    #[test]
+    fn projection_valid_only_for_exactly_disabled_debug() {
+        let r = claims_to_attestation_result(&claims_with(Some("OK"), Some("disabled-since-boot")))
+            .unwrap();
+        assert!(!r.valid);
+        let r = claims_to_attestation_result(&claims_with(Some("OK"), Some("off"))).unwrap();
+        assert!(!r.valid);
+        assert_eq!(r.details.get("dbgstat").map(String::as_str), Some("off"));
+        assert!(r.details.contains_key("eat_error"));
     }
 
     #[test]

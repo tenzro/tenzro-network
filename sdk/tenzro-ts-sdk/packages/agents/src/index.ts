@@ -16,10 +16,18 @@ export {
   ENVELOPE_SIGNATURE_KEY,
   ENVELOPE_NONCE_KEY,
   ENVELOPE_TIMESTAMP_KEY,
+  ENVELOPE_PQ_SIGNATURE_KEY,
+  A2A_ENVELOPE_CONTEXT,
   envelopePreimage,
   extractTenzroDidEnvelope,
+  canonicalJson,
+  envelopeTaskId,
+  paramsDigestHex,
+  signEnvelope,
 } from "./a2a-extension";
-export type { TenzroDidEnvelope } from "./a2a-extension";
+export type { TenzroDidEnvelope, EnvelopeSender, EnvelopeSigner } from "./a2a-extension";
+export type { A2aTaskFilter, A2aTaskList } from "./agent";
+export { AgentCardRefused, machineDid, verifyAgentCard } from "./agent-card";
 export { BondClient } from "./bond";
 export type { AgentBond, ControllerBonds } from "./bond";
 export { LifecycleClient } from "./lifecycle";

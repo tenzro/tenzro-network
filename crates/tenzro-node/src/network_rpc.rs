@@ -204,13 +204,14 @@ pub(crate) async fn handle_transaction_history(
 }
 
 /// The kind of hardware a node's identity key is held in, as it declared
-/// it: `tpm`, `enclave`, `delegated_tpm` or `passkey`.
+/// it: `tpm`, `enclave`, `delegated_tpm`, `passkey` or `android_keystore`.
 pub(crate) fn anchor_kind(identity_root: &str) -> Option<&'static str> {
     match identity_root {
         "tpm" => Some("tpm"),
         "secure-enclave" => Some("enclave"),
         "tpm-delegated" => Some("delegated_tpm"),
         "passkey-delegated" => Some("passkey"),
+        "android-keystore" => Some("android_keystore"),
         _ => None,
     }
 }
@@ -220,18 +221,29 @@ pub(crate) fn local_anchor_kind() -> Option<&'static str> {
     tenzro_network::service::identity_root().and_then(|r| anchor_kind(r.as_str()))
 }
 
-fn roles_of(a: &tenzro_network::ProviderAnnouncementMessage, validator: bool) -> Vec<String> {
+/// The roles a node declared, from its announced provider type, capabilities
+/// and worker roles. `validator` appears only for a node that both announces
+/// consensus and whose account is in the validator set: an operator's other
+/// machines share the account without validating.
+fn roles_of(
+    provider_type: &str,
+    capabilities: &[String],
+    worker_roles: &[tenzro_types::WorkerRole],
+    account_in_validator_set: bool,
+) -> Vec<String> {
     let mut roles = Vec::new();
-    if validator {
+    if account_in_validator_set
+        && capabilities
+            .iter()
+            .any(|c| c == crate::node::CONSENSUS_CAPABILITY)
+    {
         roles.push("validator".to_string());
     }
-    if !a.provider_type.is_empty() {
-        roles.push(format!("provider:{}", a.provider_type));
+    if !provider_type.is_empty() {
+        roles.push(format!("provider:{provider_type}"));
     }
-    for c in &a.capabilities {
-        roles.push(c.clone());
-    }
-    for w in &a.worker_roles {
+    roles.extend(capabilities.iter().cloned());
+    for w in worker_roles {
         if let Ok(Value::String(s)) = serde_json::to_value(w) {
             roles.push(format!("worker:{s}"));
         }
@@ -254,13 +266,18 @@ pub(crate) async fn handle_list_peers(node: &Arc<TenzroNode>) -> Result<Value, J
     let mut peers = Vec::new();
     let own_endpoint = node.iroh_resolver().map(|r| r.endpoint_id().to_string());
     let own_account = node.operator_payee().map(|a| hex_addr(&a));
-    let mut own_roles: Vec<String> = Vec::new();
-    if own_account.as_deref().is_some_and(is_validator) {
-        own_roles.push("validator".to_string());
-    }
-    if !node.served_models.is_empty() {
-        own_roles.push("provider:ai".to_string());
-    }
+    let own_roles = node
+        .own_announced_services()
+        .map(|(provider_type, capabilities)| {
+            // No worker roles: this node's announcement carries none.
+            roles_of(
+                provider_type,
+                &capabilities,
+                &[],
+                own_account.as_deref().is_some_and(is_validator),
+            )
+        })
+        .unwrap_or_default();
     peers.push(json!({
         "peer_id": own_endpoint,
         "self": true,
@@ -289,7 +306,12 @@ pub(crate) async fn handle_list_peers(node: &Arc<TenzroNode>) -> Result<Value, J
             "self": false,
             "account": (!a.provider_address.is_empty()).then(|| a.provider_address.clone()),
             "machine_did": (!a.machine_did.is_empty()).then(|| a.machine_did.clone()),
-            "roles": roles_of(a, is_validator(&a.provider_address)),
+            "roles": roles_of(
+                &a.provider_type,
+                &a.capabilities,
+                &a.worker_roles,
+                is_validator(&a.provider_address),
+            ),
             "hardware_tier": tier,
             "identity_anchor": anchor_kind(&a.trust_profile.identity_root),
             "region": a.region,
@@ -314,8 +336,68 @@ fn quantile(sorted: &[u64], q: f64) -> Option<u64> {
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// `tenzro_getProviderScorecard { provider }`: a provider's standing on
-/// chain, its announced price cards, and the latency and volume of the
+/// Most reward coupons a scorecard lists.
+const SCORECARD_COUPONS: usize = 48;
+
+/// What consensus state holds on `provider`'s verified work: its latest
+/// reward coupons, newest epoch first (the work weight an epoch's close
+/// verified in a role bucket and the reward it issued for it), and the
+/// hardware level the last close derived. Every node at the same height
+/// reads the same.
+fn verified_work(
+    chain: &dyn tenzro_vm::traits::VmState,
+    provider: &Address,
+) -> Result<Value, String> {
+    let coupons: Vec<Value> = tenzro_vm::native::read_coupons(chain, provider)
+        .map_err(|e| format!("reward coupons: {e}"))?
+        .iter()
+        .take(SCORECARD_COUPONS)
+        .map(|c| {
+            json!({
+                "epoch": c.epoch,
+                "bucket": c.bucket,
+                "work_weight": c.work_weight.to_string(),
+                "reward": c.amount.to_string(),
+                "status": c.status,
+            })
+        })
+        .collect();
+    let level = tenzro_vm::native::hardware_level::read_record(chain, provider.as_bytes());
+    Ok(json!({
+        "coupons": coupons,
+        "hardware_level": level,
+        "source": "chain",
+    }))
+}
+
+/// The models `loads` reports loaded and serving.
+fn warm_models(loads: &[tenzro_types::provider_listing::ModelLoad]) -> Vec<String> {
+    loads
+        .iter()
+        .filter(|l| l.state == tenzro_types::provider_listing::ModelServingState::Warm)
+        .map(|l| l.model_id.clone())
+        .collect()
+}
+
+/// A provider's settled value as consensus state keeps it, once the
+/// provider revenue rule is live: the same answer from every node.
+fn revenue_json(earned: Option<tenzro_vm::native::economy::ProviderEarned>) -> Value {
+    let epoch = |epoch: Option<u64>, value: u128, settlements: u64| {
+        epoch.map(|e| json!({ "epoch": e, "value": value.to_string(), "settlements": settlements }))
+    };
+    match earned {
+        Some(e) => json!({
+            "last_epoch": epoch(Some(e.epoch), e.value, e.settlements),
+            "prior_epoch": epoch(e.prior_epoch, e.prior_value, e.prior_settlements),
+            "source": "chain",
+        }),
+        None => json!({ "last_epoch": null, "prior_epoch": null, "source": "chain" }),
+    }
+}
+
+/// `tenzro_getProviderScorecard { provider }`: a provider's standing and
+/// settled revenue on chain, its announced price cards, the models its
+/// latest heartbeat reports warm, and the latency and volume of the
 /// settlements this node recorded for it over the last day and week.
 pub(crate) async fn handle_provider_scorecard(
     node: &Arc<TenzroNode>,
@@ -349,6 +431,7 @@ pub(crate) async fn handle_provider_scorecard(
     let reputation = node
         .provider_manager()
         .and_then(|pm| pm.get_reputation(&provider));
+    let verified = verified_work(&chain, &provider).map_err(internal)?;
 
     let key = norm(&hex_addr(&provider));
     let mut cards = serde_json::Map::new();
@@ -370,6 +453,27 @@ pub(crate) async fn handle_provider_scorecard(
                 });
         }
     }
+
+    let revenue = revenue_json(tenzro_vm::native::economy::read_provider_earned(
+        &chain,
+        provider.as_bytes(),
+    ));
+    let warm = if node.operator_payee().as_ref() == Some(&provider) {
+        json!({ "models": node.lifecycle().warm_models(), "as_of_ms": null, "source": "node_local" })
+    } else {
+        let latest = node
+            .network_providers_snapshot()
+            .into_iter()
+            .filter(|p| norm(&p.announcement.provider_address) == key)
+            .filter_map(|p| p.live_load)
+            .max_by_key(|(at, _)| *at);
+        match latest {
+            Some((at, loads)) => {
+                json!({ "models": warm_models(&loads), "as_of_ms": at, "source": "heartbeat" })
+            }
+            None => json!({ "models": [], "as_of_ms": null, "source": "heartbeat" }),
+        }
+    };
 
     let store = node
         .storage()
@@ -407,8 +511,11 @@ pub(crate) async fn handle_provider_scorecard(
             "validator": validator,
             "source": "chain",
         },
+        "verified_work": verified,
         "reputation": { "score": reputation, "source": "node_local" },
         "price_cards": cards,
+        "revenue": revenue,
+        "warm_models": warm,
         "settled": {
             "last_24h": window(now.saturating_sub(DAY_MS)),
             "last_7d": window(now.saturating_sub(7 * DAY_MS)),
@@ -509,6 +616,120 @@ pub(crate) fn decode_signers(
 mod tests {
     use super::*;
 
+    /// The verified-work part of a scorecard is read from consensus state
+    /// alone: the provider's coupons, newest epoch first, with the work
+    /// weight each close verified, and nothing for an account that earned
+    /// none.
+    #[test]
+    fn verified_work_is_the_providers_coupons_in_consensus_state() {
+        use tenzro_token::rewards::{CouponStatus, RewardCoupon, RoleBucket};
+        use tenzro_vm::traits::VmState;
+        let provider = Address::new([7u8; 32]);
+        let mut state = tenzro_vm::StateAdapter::new();
+        let mut keys = Vec::new();
+        for (epoch, weight, amount) in [(3u64, 500u128, 40u128), (5, 900, 70)] {
+            let key = format!("test_coupon:{epoch}");
+            let coupon = RewardCoupon {
+                epoch,
+                address: provider,
+                bucket: RoleBucket::Provider,
+                work_weight: weight,
+                amount,
+                issued_at: tenzro_types::primitives::Timestamp::new(1_000 + epoch as i64),
+                status: CouponStatus::Issued,
+                claimed_at: None,
+                level_bonus: 0,
+                base: 0,
+            };
+            state.set_storage(
+                &tenzro_vm::native::SYSTEM_ADDRESS,
+                key.as_bytes(),
+                serde_json::to_vec(&coupon).unwrap(),
+            );
+            keys.push(key);
+        }
+        state.set_storage(
+            &tenzro_vm::native::SYSTEM_ADDRESS,
+            format!("reward_coupons_of:{}", hex::encode(provider.as_bytes())).as_bytes(),
+            serde_json::to_vec(&keys).unwrap(),
+        );
+
+        let work = verified_work(&state, &provider).unwrap();
+        assert_eq!(work["source"], "chain");
+        assert_eq!(work["hardware_level"], Value::Null);
+        let coupons = work["coupons"].as_array().unwrap();
+        assert_eq!(coupons.len(), 2);
+        assert_eq!(coupons[0]["epoch"], 5);
+        assert_eq!(coupons[0]["bucket"], "provider");
+        assert_eq!(coupons[0]["work_weight"], "900");
+        assert_eq!(coupons[0]["reward"], "70");
+        assert_eq!(coupons[1]["epoch"], 3);
+
+        let other = verified_work(&state, &Address::new([8u8; 32])).unwrap();
+        assert_eq!(other["coupons"], json!([]));
+    }
+
+    #[test]
+    fn validator_role_needs_announced_consensus_and_set_membership() {
+        let serving = ["inference".to_string()];
+        let validating = [crate::node::CONSENSUS_CAPABILITY.to_string()];
+        // A provider run under an account that also bonds a validator.
+        assert_eq!(
+            roles_of("ai", &serving, &[], true),
+            ["inference", "provider:ai"]
+        );
+        // Configured to validate, account not in the set: it follows.
+        assert_eq!(
+            roles_of("general", &validating, &[], false),
+            ["consensus", "provider:general"]
+        );
+        assert_eq!(
+            roles_of("general", &validating, &[], true),
+            ["consensus", "provider:general", "validator"]
+        );
+    }
+
+    #[test]
+    fn only_models_a_heartbeat_reports_warm_are_listed_warm() {
+        use tenzro_types::provider_listing::{ModelLoad, ModelServingState};
+        let load = |id: &str, state| ModelLoad {
+            model_id: id.into(),
+            state,
+            in_flight: 0,
+            max_concurrent: 1,
+            queue_depth: 0,
+            warm_eta_ms: None,
+        };
+        let loads = [
+            load("cold", ModelServingState::Cold),
+            load("warming", ModelServingState::Warming),
+            load("warm", ModelServingState::Warm),
+            load("evicting", ModelServingState::Evicting),
+        ];
+        assert_eq!(warm_models(&loads), vec!["warm".to_string()]);
+    }
+
+    #[test]
+    fn revenue_is_read_from_the_chain_record() {
+        let none = revenue_json(None);
+        assert_eq!(none["last_epoch"], Value::Null);
+        assert_eq!(none["source"], "chain");
+        let earned = tenzro_vm::native::economy::ProviderEarned {
+            epoch: 4,
+            value: u128::MAX,
+            settlements: 2,
+            prior_epoch: Some(1),
+            prior_value: 5,
+            prior_settlements: 1,
+        };
+        let v = revenue_json(Some(earned));
+        assert_eq!(v["last_epoch"]["epoch"], 4);
+        assert_eq!(v["last_epoch"]["value"], u128::MAX.to_string());
+        assert_eq!(v["last_epoch"]["settlements"], 2);
+        assert_eq!(v["prior_epoch"]["epoch"], 1);
+        assert_eq!(v["prior_epoch"]["value"], "5");
+    }
+
     #[test]
     fn large_integers_become_strings_and_byte_lists_become_hex() {
         let v = json!({
@@ -560,7 +781,18 @@ mod tests {
         assert_eq!(anchor_kind("secure-enclave"), Some("enclave"));
         assert_eq!(anchor_kind("tpm-delegated"), Some("delegated_tpm"));
         assert_eq!(anchor_kind("passkey-delegated"), Some("passkey"));
+        assert_eq!(anchor_kind("android-keystore"), Some("android_keystore"));
         assert_eq!(anchor_kind(""), None);
+        // Every root a node can declare has a kind.
+        use tenzro_network::service::IdentityRoot;
+        for root in [
+            IdentityRoot::Tpm,
+            IdentityRoot::SecureEnclave,
+            IdentityRoot::TpmDelegated,
+            IdentityRoot::AndroidKeystore,
+        ] {
+            assert!(anchor_kind(root.as_str()).is_some(), "{root:?}");
+        }
     }
 
     #[test]

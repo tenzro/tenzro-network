@@ -9,7 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
 use serde_json::{Value, json};
 use tenzro_auth::DpopProof;
 use tenzro_types::Address;
@@ -25,7 +24,7 @@ pub struct DpopHolder {
 
 impl DpopHolder {
     pub fn new() -> Self {
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::from_bytes(&rand::random());
         let x = URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes());
         let jwk_json = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{}"}}"#, x);
         let jkt = DpopProof::compute_jkt(&jwk_json).expect("jkt");
@@ -219,6 +218,21 @@ impl OperatorKey {
 
     /// Sign in at the node serving `url` and return the operator's bearer.
     pub async fn sign_in(&self, client: &reqwest::Client, url: &str) -> Bearer {
+        match self.sign_in_with(client, url, None).await {
+            Ok((bearer, _)) => bearer,
+            Err(resp) => panic!("sign-in failed: {resp}"),
+        }
+    }
+
+    /// Sign in at the node serving `url`, presenting `pairing_code` when
+    /// there is one: the bearer with what the node said of its token, or the
+    /// node's whole answer when it issued none.
+    pub async fn sign_in_with(
+        &self,
+        client: &reqwest::Client,
+        url: &str,
+        pairing_code: Option<&str>,
+    ) -> Result<(Bearer, Value), Value> {
         use p256::ecdsa::signature::Signer as _;
         let holder = DpopHolder::new();
         let issued = call(
@@ -229,35 +243,34 @@ impl OperatorKey {
         )
         .await;
         let r = &issued["result"];
-        let digest = hex::decode(
-            r["device_digest"]
+        let message = hex::decode(
+            r["device_message"]
                 .as_str()
                 .unwrap_or_else(|| panic!("challenge: {issued}")),
         )
-        .expect("digest hex");
-        let sig: p256::ecdsa::Signature = self.key.sign(&digest);
-        let resp = call(
-            client,
-            url,
-            "tenzro_issueAccessToken",
-            json!({
-                "challenge_id": r["challenge_id"],
-                "proof": {
-                    "kind": "device",
-                    "public_key": hex::encode(self.public_key()),
-                    "signature": hex::encode(sig.to_bytes()),
-                },
-            }),
-        )
-        .await;
-        Bearer {
-            address: Address::new([0u8; 32]),
-            token: resp["result"]["access_token"]
-                .as_str()
-                .unwrap_or_else(|| panic!("sign-in failed: {resp}"))
-                .to_string(),
-            holder,
+        .expect("message hex");
+        let sig: p256::ecdsa::Signature = self.key.sign(&message);
+        let mut params = json!({
+            "challenge_id": r["challenge_id"],
+            "proof": {
+                "kind": "device",
+                "public_key": hex::encode(self.public_key()),
+                "signature": hex::encode(sig.to_bytes()),
+            },
+        });
+        if let Some(code) = pairing_code {
+            params["pairing_code"] = json!(code);
         }
+        let resp = call(client, url, "tenzro_issueAccessToken", params).await;
+        let Some(token) = resp["result"]["access_token"].as_str() else {
+            return Err(resp);
+        };
+        let bearer = Bearer {
+            address: Address::new([0u8; 32]),
+            token: token.to_string(),
+            holder,
+        };
+        Ok((bearer, resp["result"].clone()))
     }
 }
 

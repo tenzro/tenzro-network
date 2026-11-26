@@ -20,11 +20,11 @@
 //! the 08-wasm protobuf types, with this client's own data (JSON) inside.
 
 use cosmwasm_std::{
-    Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Storage, entry_point, from_json, to_json_binary,
+    entry_point, from_json, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response,
+    StdError, StdResult, Storage,
 };
 use serde::{Deserialize, Serialize};
-use tenzro_finality_verifier::{Error as ProofError, JOURNAL_LEN, Journal, Params, Store};
-
+use tenzro_finality_verifier::{Error as ProofError, Journal, Params, Store, JOURNAL_LEN};
 
 /// An IBC height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,8 +51,12 @@ pub struct InstantiateMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SudoMsg {
-    UpdateState { client_message: Binary },
-    UpdateStateOnMisbehaviour { client_message: Binary },
+    UpdateState {
+        client_message: Binary,
+    },
+    UpdateStateOnMisbehaviour {
+        client_message: Binary,
+    },
     VerifyUpgradeAndUpdateState {
         upgrade_client_state: Binary,
         upgrade_consensus_state: Binary,
@@ -197,21 +201,31 @@ fn final_key(index: u64) -> Vec<u8> {
 }
 
 fn load_client(storage: &dyn Storage) -> StdResult<ClientData> {
-    from_json(storage.get(CLIENT_DATA).ok_or_else(|| StdError::msg("the client is not instantiated"))?)
+    from_json(
+        storage
+            .get(CLIENT_DATA)
+            .ok_or_else(|| StdError::msg("the client is not instantiated"))?,
+    )
 }
 
 fn save_client(storage: &mut dyn Storage, c: &ClientData) -> StdResult<()> {
     let data = cosmwasm_std::to_json_vec(c)?;
     storage.set(CLIENT_DATA, &data);
     let checksum = storage.get(CHECKSUM).unwrap_or_default();
-    storage.set(CLIENT_STATE, &wasm_client_state(&data, &checksum, c.latest_height));
+    storage.set(
+        CLIENT_STATE,
+        &wasm_client_state(&data, &checksum, c.latest_height),
+    );
     Ok(())
 }
 
 fn save_consensus(storage: &mut dyn Storage, height: u64, c: &ConsensusData) -> StdResult<()> {
     let data = cosmwasm_std::to_json_vec(c)?;
     storage.set(&consensus_key(height), &wasm_consensus_state(&data));
-    storage.set(&[b"tenzro/consensus/".as_slice(), &height.to_be_bytes()].concat(), &data);
+    storage.set(
+        &[b"tenzro/consensus/".as_slice(), &height.to_be_bytes()].concat(),
+        &data,
+    );
     Ok(())
 }
 
@@ -230,7 +244,9 @@ struct ContractStore<'a> {
 
 impl Store for ContractStore<'_> {
     fn committee_root(&self, epoch: u64) -> Option<[u8; 32]> {
-        self.storage.get(&committee_key(epoch)).and_then(|v| v.try_into().ok())
+        self.storage
+            .get(&committee_key(epoch))
+            .and_then(|v| v.try_into().ok())
     }
 
     fn set_committee_root(&mut self, epoch: u64, root: [u8; 32]) {
@@ -251,7 +267,9 @@ struct ReadStore<'a>(&'a dyn Storage);
 
 impl Store for ReadStore<'_> {
     fn committee_root(&self, epoch: u64) -> Option<[u8; 32]> {
-        self.0.get(&committee_key(epoch)).and_then(|v| v.try_into().ok())
+        self.0
+            .get(&committee_key(epoch))
+            .and_then(|v| v.try_into().ok())
     }
     fn set_committee_root(&mut self, _: u64, _: [u8; 32]) {}
     fn is_final(&self, index: u64) -> bool {
@@ -261,7 +279,11 @@ impl Store for ReadStore<'_> {
 }
 
 fn params(c: &ClientData) -> Params {
-    Params { image_id: c.image_id, chain_id: c.chain_id, genesis_hash: c.genesis_hash }
+    Params {
+        image_id: c.image_id,
+        chain_id: c.chain_id,
+        genesis_hash: c.genesis_hash,
+    }
 }
 
 fn split_message(m: &[u8]) -> StdResult<(&[u8], &[u8])> {
@@ -276,12 +298,18 @@ fn proof_err(e: ProofError) -> StdError {
 }
 
 #[entry_point]
-pub fn instantiate(deps: DepsMut, _env: Env, _info: MessageInfo, msg: InstantiateMessage) -> StdResult<Response> {
+pub fn instantiate(
+    deps: DepsMut,
+    _env: Env,
+    _info: MessageInfo,
+    msg: InstantiateMessage,
+) -> StdResult<Response> {
     let mut client: ClientData = from_json(&msg.client_state)?;
     let consensus: ConsensusData = from_json(&msg.consensus_state)?;
     client.frozen = false;
     deps.storage.set(CHECKSUM, &msg.checksum);
-    deps.storage.set(&committee_key(0), &client.genesis_committee_root);
+    deps.storage
+        .set(&committee_key(0), &client.genesis_committee_root);
     save_client(deps.storage, &client)?;
     save_consensus(deps.storage, client.latest_height, &consensus)?;
     Ok(Response::new())
@@ -296,20 +324,36 @@ pub fn sudo(deps: DepsMut, _env: Env, msg: SudoMsg) -> StdResult<Response> {
                 return Err(StdError::msg("the client is frozen"));
             }
             let (journal, seal) = split_message(&client_message)?;
-            let mut store = ContractStore { storage: deps.storage };
-            let j = tenzro_finality_verifier::submit(&tenzro_finality_verifier::arkworks::Arkworks, &params(&client), &mut store, journal, seal)
-                .map_err(proof_err)?;
+            let mut store = ContractStore {
+                storage: deps.storage,
+            };
+            let j = tenzro_finality_verifier::submit(
+                &tenzro_finality_verifier::arkworks::Arkworks,
+                &params(&client),
+                &mut store,
+                journal,
+                seal,
+            )
+            .map_err(proof_err)?;
             save_consensus(
                 deps.storage,
                 j.state_height,
-                &ConsensusData { index: j.index, checkpoint_digest: j.checkpoint_digest, state_root: j.state_root, timestamp_ms: j.timestamp_ms },
+                &ConsensusData {
+                    index: j.index,
+                    checkpoint_digest: j.checkpoint_digest,
+                    state_root: j.state_root,
+                    timestamp_ms: j.timestamp_ms,
+                },
             )?;
             if j.state_height > client.latest_height {
                 client.latest_height = j.state_height;
                 client.latest_index = j.index;
             }
             save_client(deps.storage, &client)?;
-            let heights = vec![Height { revision_number: 0, revision_height: j.state_height }];
+            let heights = vec![Height {
+                revision_number: 0,
+                revision_height: j.state_height,
+            }];
             Ok(Response::new().set_data(to_json_binary(&UpdateStateResult { heights })?))
         }
         SudoMsg::UpdateStateOnMisbehaviour { .. } => {
@@ -317,18 +361,38 @@ pub fn sudo(deps: DepsMut, _env: Env, msg: SudoMsg) -> StdResult<Response> {
             save_client(deps.storage, &client)?;
             Ok(Response::new())
         }
-        SudoMsg::VerifyMembership { height, proof, merkle_path, value, .. } => {
-            verify_entry(deps.storage, &client, height, &proof, &merkle_path, Some(&value))?;
+        SudoMsg::VerifyMembership {
+            height,
+            proof,
+            merkle_path,
+            value,
+            ..
+        } => {
+            verify_entry(
+                deps.storage,
+                &client,
+                height,
+                &proof,
+                &merkle_path,
+                Some(&value),
+            )?;
             Ok(Response::new())
         }
-        SudoMsg::VerifyNonMembership { height, proof, merkle_path, .. } => {
+        SudoMsg::VerifyNonMembership {
+            height,
+            proof,
+            merkle_path,
+            ..
+        } => {
             verify_entry(deps.storage, &client, height, &proof, &merkle_path, None)?;
             Ok(Response::new())
         }
-        SudoMsg::VerifyUpgradeAndUpdateState { .. } => {
-            Err(StdError::msg("Tenzro clients are not upgraded: a new finality program is a new client"))
+        SudoMsg::VerifyUpgradeAndUpdateState { .. } => Err(StdError::msg(
+            "Tenzro clients are not upgraded: a new finality program is a new client",
+        )),
+        SudoMsg::MigrateClientStore {} => {
+            Err(StdError::msg("this client's store does not migrate"))
         }
-        SudoMsg::MigrateClientStore {} => Err(StdError::msg("this client's store does not migrate")),
     }
 }
 
@@ -355,7 +419,11 @@ fn hex(b: &[u8]) -> String {
 /// `path`: route state entry `ibc/{hex(path)}` of the governed-state account.
 pub fn ibc_store_entry(path: &[u8]) -> String {
     let entry = format!("ibc/{}", hex(path));
-    format!("storage:{}:{}", hex(&IBC_STORE_ACCOUNT), hex(entry.as_bytes()))
+    format!(
+        "storage:{}:{}",
+        hex(&IBC_STORE_ACCOUNT),
+        hex(entry.as_bytes())
+    )
 }
 
 fn verify_entry(
@@ -380,8 +448,16 @@ fn verify_entry(
         return Err(StdError::msg("Tenzro's commitment prefix is 'ibc'"));
     }
     let key = ibc_store_entry(ibc_path);
-    if !tenzro_finality_verifier::state_proof::verify(&consensus.state_root, STATE_NAMESPACE, key.as_bytes(), value, proof) {
-        return Err(StdError::msg("the state proof does not verify under the checkpoint's root"));
+    if !tenzro_finality_verifier::state_proof::verify(
+        &consensus.state_root,
+        STATE_NAMESPACE,
+        key.as_bytes(),
+        value,
+        proof,
+    ) {
+        return Err(StdError::msg(
+            "the state proof does not verify under the checkpoint's root",
+        ));
     }
     Ok(())
 }
@@ -390,25 +466,46 @@ fn verify_entry(
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     let client = load_client(deps.storage)?;
     match msg {
-        QueryMsg::Status {} => to_json_binary(&StatusResult { status: if client.frozen { "Frozen" } else { "Active" }.into() }),
+        QueryMsg::Status {} => to_json_binary(&StatusResult {
+            status: if client.frozen { "Frozen" } else { "Active" }.into(),
+        }),
         QueryMsg::TimestampAtHeight { height } => {
             let c = load_consensus(deps.storage, height.revision_height)?;
-            to_json_binary(&TimestampAtHeightResult { timestamp: c.timestamp_ms.saturating_mul(1_000_000) })
+            to_json_binary(&TimestampAtHeightResult {
+                timestamp: c.timestamp_ms.saturating_mul(1_000_000),
+            })
         }
         QueryMsg::VerifyClientMessage { client_message } => {
             let (journal, seal) = split_message(&client_message)?;
-            tenzro_finality_verifier::check(&tenzro_finality_verifier::arkworks::Arkworks, &params(&client), &ReadStore(deps.storage), journal, seal)
-                .map_err(proof_err)?;
+            tenzro_finality_verifier::check(
+                &tenzro_finality_verifier::arkworks::Arkworks,
+                &params(&client),
+                &ReadStore(deps.storage),
+                journal,
+                seal,
+            )
+            .map_err(proof_err)?;
             to_json_binary(&())
         }
         QueryMsg::CheckForMisbehaviour { client_message } => {
             // A proven checkpoint at an index that already holds another one
             // is misbehaviour of the committee that certified both.
             let (journal, seal) = split_message(&client_message)?;
-            let j = tenzro_finality_verifier::check(&tenzro_finality_verifier::arkworks::Arkworks, &params(&client), &ReadStore(deps.storage), journal, seal)
-                .map_err(proof_err)?;
-            let found = deps.storage.get(&final_key(j.index)).is_some_and(|d| d.as_slice() != j.checkpoint_digest.as_slice());
-            to_json_binary(&CheckForMisbehaviourResult { found_misbehaviour: found })
+            let j = tenzro_finality_verifier::check(
+                &tenzro_finality_verifier::arkworks::Arkworks,
+                &params(&client),
+                &ReadStore(deps.storage),
+                journal,
+                seal,
+            )
+            .map_err(proof_err)?;
+            let found = deps
+                .storage
+                .get(&final_key(j.index))
+                .is_some_and(|d| d.as_slice() != j.checkpoint_digest.as_slice());
+            to_json_binary(&CheckForMisbehaviourResult {
+                found_misbehaviour: found,
+            })
         }
     }
 }

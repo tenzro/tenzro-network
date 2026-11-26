@@ -34,6 +34,7 @@ fn a_governed_rpc_bond_change_moves_the_registry_minimum_at_the_next_boundary() 
         epoch_manager,
         registry: registry.clone(),
         store: Some(store.clone()),
+        seat_budget: 64_000,
     };
     stager.stage_next_epoch().unwrap();
     let chain = tenzro_vm::StateAdapter::with_storage(store.clone());
@@ -102,6 +103,7 @@ fn a_staging_that_is_undone_is_not_applied_twice_on_the_retry() {
         epoch_manager,
         registry: registry.clone(),
         store: None,
+        seat_budget: 64_000,
     };
     let token = stager.stage_next_epoch().unwrap();
     assert_eq!(status(), ValidatorRegistryStatus::PendingActive);

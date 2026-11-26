@@ -1,5 +1,14 @@
 //! A validator's inputs to consensus prices: signs what this node's router
-//! observed and shares it over gossip, and reports fee rates.
+//! observed and shares it over gossip, and reports fee rates and the compute
+//! price index.
+//!
+//! The compute price index is reported through the same sealed-then-opened
+//! rate oracle as the fee rate, one symbol per hardware class
+//! ([`tenzro_vm::native::economy::compute_index_symbol`]), in nano-USD per
+//! compute-hour: the chain holds the
+//! stake-weighted, bounded median of the validators' readings of what routed
+//! calls actually cost. Only calls a router served and metered are observed,
+//! so no reward or fee paid outside a served call enters it.
 //!
 //! The observation window itself lives in [`crate::compute_observations`].
 //!
@@ -13,6 +22,7 @@ use crate::compute_observations::{
     ObservationDraft, ObservationError, ObservationSink, ObservationWindow, SignedObservation,
 };
 use tenzro_network::{MessagePayload, NetworkMessage, NetworkService, TenzroNetworkService};
+use tenzro_types::hardware::HardwareClass;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -130,7 +140,10 @@ pub fn spawn(
             let MessagePayload::Custom { data, .. } = msg.payload else {
                 continue;
             };
-            let Ok(obs) = bincode::deserialize::<SignedObservation>(&data) else {
+            let Ok(obs) = tenzro_network::wire::decode_bounded::<SignedObservation>(
+                &data,
+                tenzro_iroh::gossip::MAX_GOSSIP_MESSAGE,
+            ) else {
                 continue;
             };
             if let Err(e) = inbound_window.ingest(obs, now_ms()) {
@@ -376,10 +389,99 @@ fn quotes_by_provider(rates: Vec<(String, String, u128)>) -> Vec<tenzro_types::F
         .collect()
 }
 
-/// On a validator with sources from at least two providers configured for
-/// some symbol, report the USD rates for each epoch as it closes, one quote
-/// per symbol and answering provider. A symbol with fewer than two answering
-/// providers is left out of that epoch's report.
+/// `quotes` without the symbols fewer than `min_sources` sources quote: the
+/// chain refuses the opening of a report when any one symbol falls short,
+/// and a report left unopened forfeits part of the reporter's stake.
+fn openable(
+    quotes: Vec<tenzro_types::FeeRateQuote>,
+    min_sources: usize,
+) -> Vec<tenzro_types::FeeRateQuote> {
+    let mut count: std::collections::BTreeMap<String, usize> = Default::default();
+    for q in &quotes {
+        *count.entry(q.symbol.clone()).or_default() += 1;
+    }
+    quotes
+        .into_iter()
+        .filter(|q| count[&q.symbol] >= min_sources)
+        .collect()
+}
+
+/// Every class with a compute price index.
+const INDEXED_CLASSES: [HardwareClass; 4] = [
+    HardwareClass::Cpu,
+    HardwareClass::ConsumerGpu,
+    HardwareClass::DatacenterGpu,
+    HardwareClass::MultiAccelerator,
+];
+
+const WEI_PER_TNZO: u128 = tenzro_types::price_card::WEI_PER_TNZO;
+
+/// `wei_per_second` as nano-USD per compute-hour at `tnzo_nano_usd` nano-USD
+/// per TNZO; `None` when it overflows or rounds to zero.
+pub(crate) fn compute_hour_nano_usd(wei_per_second: u128, tnzo_nano_usd: u128) -> Option<u128> {
+    let per_hour = wei_per_second.checked_mul(3600)?;
+    let whole = (per_hour / WEI_PER_TNZO).checked_mul(tnzo_nano_usd)?;
+    let part = (per_hour % WEI_PER_TNZO).checked_mul(tnzo_nano_usd)? / WEI_PER_TNZO;
+    let nano = whole.checked_add(part)?;
+    (nano > 0).then_some(nano)
+}
+
+/// The compute price index quotes `window` supports, at most `room` of them:
+/// for each indexed class, one quote per attested provider (the lower middle
+/// of its models' prices), the provider's address as the source. A class is
+/// left out unless at least `min_sources` providers price it, and when room
+/// runs short only the providers nearest the middle are kept, so every symbol
+/// passes the check the chain applies when the report is opened.
+pub(crate) fn index_quotes(
+    window: &crate::compute_observations::ObservationWindow,
+    tnzo_nano_usd: u128,
+    min_sources: usize,
+    mut room: usize,
+    now_ms: i64,
+) -> Vec<tenzro_types::FeeRateQuote> {
+    let mut out = Vec::new();
+    for class in INDEXED_CLASSES {
+        let Some(symbol) = tenzro_vm::native::economy::compute_index_symbol(class) else {
+            continue;
+        };
+        let mut by: std::collections::BTreeMap<String, Vec<u128>> = Default::default();
+        for c in window.index(class, None, now_ms).constituents {
+            if let Some(rate) = compute_hour_nano_usd(c.price_per_compute_second_wei, tnzo_nano_usd)
+            {
+                by.entry(hex::encode(c.provider.as_bytes()))
+                    .or_default()
+                    .push(rate);
+            }
+        }
+        let mut rates: Vec<(u128, String)> = by
+            .into_iter()
+            .map(|(source, mut r)| {
+                r.sort_unstable();
+                (r[(r.len() - 1) / 2], source)
+            })
+            .collect();
+        rates.sort();
+        let keep = rates.len().min(room);
+        if keep < min_sources {
+            continue;
+        }
+        let skip = (rates.len() - keep) / 2;
+        for (rate, source) in rates.into_iter().skip(skip).take(keep) {
+            out.push(tenzro_types::FeeRateQuote {
+                symbol: symbol.to_string(),
+                source,
+                rate_nano_usd: rate,
+            });
+        }
+        room -= keep;
+    }
+    out
+}
+
+/// On a validator, report for each epoch as it closes the USD rates its
+/// configured sources give, one quote per symbol and answering provider (a
+/// symbol with fewer than two answering providers is left out), and the
+/// compute price index its observation window supports ([`index_quotes`]).
 pub fn spawn_fee_rate_reporter(node: Arc<crate::node::TenzroNode>) {
     let configured = node.config().fee_rate_sources.clone();
     if !node.config().roles.is_validator() {
@@ -393,17 +495,15 @@ pub fn spawn_fee_rate_reporter(node: Arc<crate::node::TenzroNode>) {
             .or_default()
             .insert(s.name.trim().to_ascii_lowercase());
     }
-    if !providers
-        .values()
-        .any(|p| p.len() >= tenzro_vm::native::economy::MIN_RATE_SOURCES)
+    if !configured.is_empty()
+        && !providers
+            .values()
+            .any(|p| p.len() >= tenzro_vm::native::economy::MIN_RATE_SOURCES)
     {
-        if !configured.is_empty() {
-            warn!(
-                providers = providers.len(),
-                "fee rate reporting needs sources from at least two providers; not reporting"
-            );
-        }
-        return;
+        warn!(
+            providers = providers.len(),
+            "fee rate reporting needs sources from at least two providers; reporting the compute index only"
+        );
     }
     let mut sources = Vec::with_capacity(configured.len());
     for s in configured
@@ -443,13 +543,26 @@ pub fn spawn_fee_rate_reporter(node: Arc<crate::node::TenzroNode>) {
                     Err(e) => warn!(source = %name, %symbol, error = %e, "rate source failed"),
                 }
             }
-            let quotes = quotes_by_provider(rates);
+            let Some(state) = state.as_ref() else {
+                warn!(epoch = closed, "no chain state to report rates against");
+                continue;
+            };
+            use tenzro_vm::native::economy;
+            let min_sources = economy::rate_min_sources_at_opening(state);
+            let mut quotes = openable(quotes_by_provider(rates), min_sources);
+            quotes.extend(index_quotes(
+                node.compute_observations(),
+                economy::read_fee_rate(state).rate_nano_usd,
+                min_sources,
+                economy::MAX_RATE_QUOTES.saturating_sub(quotes.len()),
+                now_ms(),
+            ));
             if quotes.is_empty() {
-                warn!(
-                    epoch = closed,
-                    answered = quotes.len(),
-                    "too few rate sources answered"
-                );
+                if sources.is_empty() {
+                    debug!(epoch = closed, "nothing to report this epoch");
+                } else {
+                    warn!(epoch = closed, "too few rate sources answered");
+                }
                 continue;
             }
             let Some(from) = node.ledger_submitter().map(|s| s.address()) else {
@@ -579,5 +692,102 @@ mod tests {
             crate::node::BILLING_EPOCH_INTERVAL_SECS as i64 * 1000,
             tenzro_vm::native::MARKET_EPOCH_MS
         );
+    }
+
+    fn window_with(prices: &[(u8, u128)]) -> crate::compute_observations::ObservationWindow {
+        use crate::compute_observations::{ObservationDraft, ObservationWindow, SignedObservation};
+        use tenzro_crypto::signatures::Ed25519SignerImpl;
+        use tenzro_types::hardware::HardwareClass;
+        let w = ObservationWindow::new();
+        w.set_observer_filter(std::sync::Arc::new(|_| true));
+        let observers = [
+            Ed25519SignerImpl::generate().unwrap(),
+            Ed25519SignerImpl::generate().unwrap(),
+        ];
+        for (p, price) in prices {
+            for (i, s) in observers.iter().enumerate() {
+                let draft = ObservationDraft {
+                    model_id: "qwen3-8b".into(),
+                    provider: tenzro_types::primitives::Address::new([*p; 32]),
+                    hardware_class: HardwareClass::DatacenterGpu,
+                    region: "SG".into(),
+                    success: true,
+                    latency_ms: 1000,
+                    price_wei: *price,
+                    input_tokens: 10,
+                    output_tokens: 10,
+                };
+                let obs = SignedObservation::sign(draft, NOW - i as i64, s).unwrap();
+                w.ingest(obs, NOW).unwrap();
+            }
+        }
+        w
+    }
+
+    const NOW: i64 = 1_800_000_000_000;
+    /// 0.10 USD per TNZO.
+    const TNZO_NANO_USD: u128 = 100_000_000;
+
+    #[test]
+    fn compute_seconds_convert_to_nano_usd_per_hour() {
+        // 1e15 wei/s is 3.6 TNZO an hour, 0.36 USD at 0.10 USD per TNZO.
+        assert_eq!(
+            super::compute_hour_nano_usd(1_000_000_000_000_000, TNZO_NANO_USD),
+            Some(360_000_000)
+        );
+        assert_eq!(super::compute_hour_nano_usd(1, TNZO_NANO_USD), None);
+        assert_eq!(super::compute_hour_nano_usd(u128::MAX, TNZO_NANO_USD), None);
+    }
+
+    /// Two attested providers make an index the chain's opening check
+    /// accepts, priced per compute-hour; one provider makes none.
+    #[test]
+    fn the_index_is_reported_only_when_the_chain_would_open_it() {
+        let two = window_with(&[(1, 1_000_000_000_000_000), (2, 3_000_000_000_000_000)]);
+        let quotes = super::index_quotes(&two, TNZO_NANO_USD, 2, 64, NOW);
+        assert_eq!(quotes.len(), 2);
+        assert!(quotes.iter().all(|q| q.symbol == "IDXDCGPU"));
+        assert_eq!(quotes[0].rate_nano_usd, 360_000_000);
+        assert_eq!(quotes[1].rate_nano_usd, 1_080_000_000);
+        tenzro_vm::native::economy::check_rate_report(&quotes, 2, None).unwrap();
+
+        // A raised source count leaves the symbol out rather than sealing a
+        // report its opening would refuse.
+        assert!(super::index_quotes(&two, TNZO_NANO_USD, 3, 64, NOW).is_empty());
+
+        let one = window_with(&[(1, 1_000_000_000_000_000)]);
+        assert!(super::index_quotes(&one, TNZO_NANO_USD, 2, 64, NOW).is_empty());
+    }
+
+    /// Short of room, the providers nearest the middle are kept, and a class
+    /// that cannot keep enough is left out.
+    #[test]
+    fn short_room_keeps_the_middle_providers() {
+        let w = window_with(&[
+            (1, 1_000_000_000_000_000),
+            (2, 2_000_000_000_000_000),
+            (3, 3_000_000_000_000_000),
+            (4, 4_000_000_000_000_000),
+            (5, 5_000_000_000_000_000),
+        ]);
+        let quotes = super::index_quotes(&w, TNZO_NANO_USD, 2, 3, NOW);
+        let rates: Vec<u128> = quotes.iter().map(|q| q.rate_nano_usd).collect();
+        assert_eq!(rates, vec![720_000_000, 1_080_000_000, 1_440_000_000]);
+        assert!(super::index_quotes(&w, TNZO_NANO_USD, 2, 1, NOW).is_empty());
+    }
+
+    /// A fee-rate symbol fewer sources quote than the opening needs is left
+    /// out, so it cannot take the index quotes down with it.
+    #[test]
+    fn a_short_symbol_is_left_out_of_the_report() {
+        let q = |symbol: &str, source: &str| tenzro_types::FeeRateQuote {
+            symbol: symbol.into(),
+            source: source.into(),
+            rate_nano_usd: 1_000,
+        };
+        let kept = super::openable(vec![q("TNZO", "a"), q("TNZO", "b"), q("ETH", "a")], 2);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|k| k.symbol == "TNZO"));
+        tenzro_vm::native::economy::check_rate_report(&kept, 2, None).unwrap();
     }
 }

@@ -486,6 +486,7 @@ impl X402Facilitator {
                             amount: credential.amount,
                             currency: &requirement.asset,
                             chain: &requirement.network,
+                            nonce: &challenge.challenge_id,
                         },
                         None,
                         keys.as_ref(),
@@ -502,6 +503,12 @@ impl X402Facilitator {
                 })
             }
             SettlementLeg::Voucher(voucher) => {
+                // A voucher a serving node signed for an agent charges that
+                // agent: its Terms decide the charge as they decide a ledger
+                // payment's.
+                if let Some(agent) = &voucher.agent {
+                    self.authorize(&agent.agent_did, credential.amount, requirement)?;
+                }
                 let rail = self.vouchers.as_ref().ok_or_else(|| {
                     PaymentError::VerificationFailed(
                         "this facilitator reads no escrow state, so it accepts no vouchers"
@@ -1491,6 +1498,118 @@ mod escrow_scheme_tests {
         );
     }
 
+    /// A voucher credential that attributes its payment carries the call
+    /// chain into the voucher the ledger claims with. A payer's own signature
+    /// covers it: a voucher signed without the attribution, or with another,
+    /// is refused, and so is a malformed attribution.
+    #[test]
+    fn a_voucher_credential_carries_its_attribution() {
+        use crate::payer_auth::{
+            AGENT_DID_KEY, ATTRIBUTION_KEY, CUMULATIVE_AMOUNT_KEY, PUBLIC_KEY_KEY,
+            challenge_chain_id, verify_escrow_voucher,
+        };
+        use tenzro_crypto::composite::{HybridSigner, SignatureContext};
+        use tenzro_types::payment_authorization::{
+            attributed_voucher_preimage, escrow_voucher_preimage,
+        };
+        use tenzro_types::settlement::CallAttribution;
+
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../sdk/fixtures/payments/x402_agent_voucher.json"
+        ))
+        .unwrap();
+        let payload =
+            X402PaymentPayload::from_base64(v["payment_signature"].as_str().unwrap()).unwrap();
+        let requirement: X402PaymentRequirement =
+            serde_json::from_value(v["requirement"].clone()).unwrap();
+        let challenge =
+            wire::challenge_from_requirement(&requirement, "https://pub.example/articles/1")
+                .unwrap();
+        let attribution = CallAttribution {
+            app_did: Some("did:tenzro:human:app".into()),
+            agent_did: None,
+            tool_did: Some("did:tenzro:machine:tool".into()),
+        };
+        let keys = crate::test_support::SeedKeys;
+
+        // A serving node's voucher for an agent.
+        let mut by_agent = wire::credential_from_payload(&payload).unwrap();
+        assert_eq!(
+            verify_escrow_voucher(&keys, &challenge, &by_agent)
+                .unwrap()
+                .attribution,
+            None
+        );
+        by_agent.extra.insert(
+            ATTRIBUTION_KEY.to_string(),
+            serde_json::to_value(&attribution).unwrap(),
+        );
+        assert_eq!(
+            verify_escrow_voucher(&keys, &challenge, &by_agent)
+                .unwrap()
+                .attribution,
+            Some(attribution.clone())
+        );
+        let mut twice = by_agent.clone();
+        twice.extra.insert(
+            ATTRIBUTION_KEY.to_string(),
+            serde_json::json!({
+                "app_did": "did:tenzro:human:app",
+                "tool_did": "did:tenzro:human:app",
+            }),
+        );
+        assert!(verify_escrow_voucher(&keys, &challenge, &twice).is_err());
+        let mut empty = by_agent.clone();
+        empty
+            .extra
+            .insert(ATTRIBUTION_KEY.to_string(), serde_json::json!({}));
+        assert!(verify_escrow_voucher(&keys, &challenge, &empty).is_err());
+
+        // A payer's own voucher: the signature covers the attribution.
+        let signer = crate::test_support::signer();
+        let unattributed = verify_escrow_voucher(&keys, &challenge, &by_agent).unwrap();
+        let cumulative: u128 = by_agent.extra[CUMULATIVE_AMOUNT_KEY]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let preimage = escrow_voucher_preimage(
+            challenge_chain_id(&challenge).unwrap(),
+            &unattributed.escrow_id,
+            cumulative,
+            &unattributed.binding,
+        );
+        let sign = |a: Option<&CallAttribution>| {
+            signer
+                .sign(
+                    SignatureContext::EscrowVoucher,
+                    &attributed_voucher_preimage(preimage.clone(), a),
+                )
+                .unwrap()
+        };
+        let mut by_payer = by_agent.clone();
+        by_payer.extra.remove(AGENT_DID_KEY);
+        by_payer.extra.insert(
+            PUBLIC_KEY_KEY.to_string(),
+            serde_json::json!(hex::encode(&signer.public_key().p256)),
+        );
+        by_payer.signature = Some(sign(Some(&attribution)));
+        assert_eq!(
+            verify_escrow_voucher(&keys, &challenge, &by_payer)
+                .unwrap()
+                .attribution,
+            Some(attribution.clone())
+        );
+        by_payer.signature = Some(sign(None));
+        assert!(verify_escrow_voucher(&keys, &challenge, &by_payer).is_err());
+        let other = CallAttribution {
+            app_did: Some("did:tenzro:human:other".into()),
+            ..attribution.clone()
+        };
+        by_payer.signature = Some(sign(Some(&other)));
+        assert!(verify_escrow_voucher(&keys, &challenge, &by_payer).is_err());
+    }
+
     /// The payer SDKs' agent voucher payload decodes into the credential and
     /// agent voucher the facilitator and the ledger check.
     #[test]
@@ -1528,6 +1647,67 @@ mod escrow_scheme_tests {
         assert_eq!(agent.agent_did, "did:tenzro:agent:a");
         assert_eq!(agent.machine_did, "did:tenzro:machine:m");
         assert_eq!(agent.as_of_ms, 1_800_000_000_000);
+    }
+
+    /// An agent's voucher is held to the agent's Terms before the rail is
+    /// asked, as an agent's ledger payment is.
+    #[tokio::test]
+    async fn an_agents_voucher_charge_is_held_to_its_terms() {
+        struct AcceptAll;
+        #[async_trait::async_trait]
+        impl VoucherRail for AcceptAll {
+            async fn accept(
+                &self,
+                _: &tenzro_types::payment_authorization::EscrowVoucher,
+                _: &Address,
+                _: u128,
+            ) -> Result<RailOutcome> {
+                Ok(RailOutcome::Settled {
+                    reference: "voucher".into(),
+                })
+            }
+            async fn check(
+                &self,
+                _: &tenzro_types::payment_authorization::EscrowVoucher,
+                _: &Address,
+                _: u128,
+            ) -> Result<RailOutcome> {
+                Ok(RailOutcome::Settled {
+                    reference: "voucher".into(),
+                })
+            }
+        }
+        struct Cap(u128);
+        impl TermsGate for Cap {
+            fn authorize(&self, intent: &PaymentIntent<'_>) -> Result<()> {
+                assert_eq!(intent.payer_did, "did:tenzro:agent:a");
+                if intent.amount > self.0 {
+                    return Err(PaymentError::VerificationFailed(
+                        "over the per-transaction limit".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../sdk/fixtures/payments/x402_agent_voucher.json"
+        ))
+        .unwrap();
+        let payload =
+            X402PaymentPayload::from_base64(v["payment_signature"].as_str().unwrap()).unwrap();
+        let requirement: X402PaymentRequirement =
+            serde_json::from_value(v["requirement"].clone()).unwrap();
+        let with = |cap: u128| {
+            X402Facilitator::new(1337, vec![], Arc::new(crate::test_support::SeedKeys))
+                .with_voucher_rail(Arc::new(AcceptAll))
+                .with_terms_gate(Arc::new(Cap(cap)))
+        };
+        let err = with(1).verify(&requirement, &payload).await.unwrap_err();
+        assert!(err.to_string().contains("per-transaction limit"), "{err}");
+        with(u128::MAX)
+            .verify(&requirement, &payload)
+            .await
+            .expect("within the Terms");
     }
 
     #[tokio::test]

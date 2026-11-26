@@ -6,7 +6,10 @@
 //!   is the governance-set `fees.tnzo_usd_nano`; in mode 1 it is the
 //!   stake-weighted median of the rates bonded validators seal and then open
 //!   each epoch, each report the median of at least
-//!   `fees.usd_rate_min_sources` independent sources;
+//!   `fees.usd_rate_min_sources` independent sources (once
+//!   `feature.report_agreement.activation_epoch` is live, a report whose
+//!   two middle quotes spread wider than `fees.usd_rate_breaker_spread_bps`
+//!   carries no rate for that symbol);
 //!   it moves only into the band between the stake-weighted
 //!   `fees.usd_rate_quantile_low_bps` and `fees.usd_rate_quantile_high_bps`
 //!   quantiles of the reports, rising at most `fees.usd_rate_max_change_bps`
@@ -199,8 +202,13 @@ pub const FEE_RATE_HELD_TOPIC: &[u8] = b"FeeRateHeld";
 pub const RATE_MIN_SOURCES_PARAM: &str = "fees.usd_rate_min_sources";
 /// Governed: widest spread between the low and high stake-weighted quantiles
 /// of an epoch's reports, bps of the low quantile, before the epoch holds the
-/// rate instead of moving it.
+/// rate instead of moving it; also the widest spread between the two middle
+/// quotes of an even-count report before it carries no rate for the symbol.
 pub const RATE_BREAKER_SPREAD_PARAM: &str = "fees.usd_rate_breaker_spread_bps";
+/// Gate of the report agreement rule: the first epoch from which a report
+/// whose two middle quotes for a symbol spread wider than
+/// [`RATE_BREAKER_SPREAD_PARAM`] carries no rate for that symbol.
+pub const REPORT_AGREEMENT_GATE: &str = "feature.report_agreement.activation_epoch";
 /// Governed: widest gap between an epoch's TNZO median and the governance
 /// rate, bps of the governance rate, before the epoch holds the rate.
 pub const RATE_BREAKER_GAP_PARAM: &str = "fees.usd_rate_breaker_gap_bps";
@@ -326,7 +334,8 @@ fn governance_rate(state: &dyn VmState) -> u128 {
     u128::from(network_param(state, GOVERNANCE_RATE_PARAM).max(1))
 }
 
-fn live_key(symbol: &str) -> String {
+/// Where the rate in force of `symbol` is stored.
+pub fn live_key(symbol: &str) -> String {
     format!("fxr_live:{symbol}")
 }
 
@@ -601,6 +610,20 @@ pub fn read_symbol_rate(state: &dyn VmState, symbol: &str) -> Option<(u128, Opti
     live_rate(state, &symbol).map(|(r, e)| (r, Some(e)))
 }
 
+/// The rate symbol the compute price index of `class` is reported under, in
+/// nano-USD per compute-hour: what validators' routers observed served calls
+/// cost. An undeclared class has no index.
+pub fn compute_index_symbol(class: tenzro_types::hardware::HardwareClass) -> Option<&'static str> {
+    use tenzro_types::hardware::HardwareClass;
+    match class {
+        HardwareClass::Unknown => None,
+        HardwareClass::Cpu => Some("IDXCPU"),
+        HardwareClass::ConsumerGpu => Some("IDXCGPU"),
+        HardwareClass::DatacenterGpu => Some("IDXDCGPU"),
+        HardwareClass::MultiAccelerator => Some("IDXMULTI"),
+    }
+}
+
 /// TNZO base units worth `amount` smallest units of `symbol` (with
 /// `decimals` decimals) at the rates in force, rounded up. `None` when
 /// validators have not priced `symbol`.
@@ -746,10 +769,17 @@ pub fn normalize_symbol(symbol: &str) -> Result<String> {
     Ok(s)
 }
 
-/// One symbol's rate in a report: the median of its quotes (the lower
-/// middle for an even count), refused unless at least `min_sources`
-/// distinct sources quote it.
-fn report_rate(quotes: &[&RateQuote], min_sources: usize) -> Result<(u128, Vec<String>)> {
+/// One symbol's rate in a report: the median of its quotes, refused unless
+/// at least `min_sources` distinct sources quote it. An even count has two
+/// middle quotes and the lower is the median. Under the agreement rule
+/// (`spread_bound_bps` given), when those two spread wider than the bound no
+/// quote has a majority of the sources around it, and the report carries no
+/// rate for the symbol (`None`).
+fn report_rate(
+    quotes: &[&RateQuote],
+    min_sources: usize,
+    spread_bound_bps: Option<u64>,
+) -> Result<Option<(u128, Vec<String>)>> {
     let mut sources: Vec<String> = Vec::with_capacity(quotes.len());
     let mut rates = Vec::with_capacity(quotes.len());
     for q in quotes {
@@ -778,13 +808,17 @@ fn report_rate(quotes: &[&RateQuote], min_sources: usize) -> Result<(u128, Vec<S
         )));
     }
     rates.sort_unstable();
-    Ok((rates[(rates.len() - 1) / 2], sources))
+    let (lower, upper) = (rates[(rates.len() - 1) / 2], rates[rates.len() / 2]);
+    let disagree = spread_bound_bps.is_some_and(|bound| dispersed(lower, upper, bound));
+    Ok((!disagree).then_some((lower, sources)))
 }
 
-/// A report's quotes grouped by symbol, each group checked.
+/// A report's quotes grouped by symbol, each group checked. Under the
+/// agreement rule a symbol whose sources disagree on the median is left out.
 fn report_rates(
     quotes: &[RateQuote],
     min_sources: usize,
+    spread_bound_bps: Option<u64>,
 ) -> Result<Vec<(String, u128, Vec<String>)>> {
     if quotes.len() > MAX_RATE_QUOTES {
         return Err(refuse(format!(
@@ -798,12 +832,49 @@ fn report_rates(
     if by.is_empty() {
         return Err(refuse("a rate report quotes at least one symbol"));
     }
-    by.into_iter()
-        .map(|(symbol, qs)| {
-            let (rate, sources) = report_rate(&qs, min_sources)?;
-            Ok((symbol, rate, sources))
+    let mut rates = Vec::with_capacity(by.len());
+    for (symbol, qs) in by {
+        if let Some((rate, sources)) = report_rate(&qs, min_sources, spread_bound_bps)? {
+            rates.push((symbol, rate, sources));
+        }
+    }
+    Ok(rates)
+}
+
+/// Gate of the rule that judges each symbol of an opened report on its own:
+/// from its epoch a symbol that fails its check is left out and the others
+/// count; before it, one failing symbol refuses the whole opening.
+pub const RATE_SYMBOL_ISOLATION_KEY: &str = "feature.rate_symbol_isolation.activation_epoch";
+
+/// [`report_rates`] with every symbol judged on its own: a symbol whose name
+/// or quotes fail is left out rather than refusing the report. Only a report
+/// with no quotes or more than [`MAX_RATE_QUOTES`] is refused.
+fn report_rates_isolated(
+    quotes: &[RateQuote],
+    min_sources: usize,
+    spread_bound_bps: Option<u64>,
+) -> Result<Vec<(String, u128, Vec<String>)>> {
+    if quotes.len() > MAX_RATE_QUOTES {
+        return Err(refuse(format!(
+            "a rate report carries at most {MAX_RATE_QUOTES} quotes"
+        )));
+    }
+    if quotes.is_empty() {
+        return Err(refuse("a rate report quotes at least one symbol"));
+    }
+    let mut by: std::collections::BTreeMap<String, Vec<&RateQuote>> = Default::default();
+    for q in quotes {
+        if let Ok(symbol) = normalize_symbol(&q.symbol) {
+            by.entry(symbol).or_default().push(q);
+        }
+    }
+    Ok(by
+        .into_iter()
+        .filter_map(|(symbol, qs)| {
+            let (rate, sources) = report_rate(&qs, min_sources, spread_bound_bps).ok()??;
+            Some((symbol, rate, sources))
         })
-        .collect()
+        .collect())
 }
 
 /// `median` reached from `prior` rising at most `max_rise_bps` and falling
@@ -984,7 +1055,20 @@ pub(super) fn submit_rate(
         write_json(state, &pk, &prior, &mut changes)?;
         let sk = opened_symbols_key(prev);
         let mut symbols: Vec<String> = read_json(state, &sk).unwrap_or_default();
-        for (symbol, rate, sources) in report_rates(&r.quotes, min_rate_sources(state))? {
+        let report = if crate::feature_gate::is_live_now(state, RATE_SYMBOL_ISOLATION_KEY) {
+            report_rates_isolated(
+                &r.quotes,
+                min_rate_sources(state),
+                report_agreement_bound(state),
+            )?
+        } else {
+            report_rates(
+                &r.quotes,
+                min_rate_sources(state),
+                report_agreement_bound(state),
+            )?
+        };
+        for (symbol, rate, sources) in report {
             let subs_key = format!("fxr_sub:{symbol}:{prev}");
             let mut subs: Vec<RateSubmission> = read_json(state, &subs_key).unwrap_or_default();
             subs.push(RateSubmission {
@@ -1011,10 +1095,48 @@ pub(super) fn submit_rate(
     Ok((changes, logs))
 }
 
+/// The spread bound a report's two middle quotes must agree within, once
+/// [`REPORT_AGREEMENT_GATE`] is live; `None` before, when the lower middle
+/// quote is the report's rate whatever the other says.
+fn report_agreement_bound(state: &dyn VmState) -> Option<u64> {
+    crate::feature_gate::is_live_now(state, REPORT_AGREEMENT_GATE)
+        .then(|| network_param(state, RATE_BREAKER_SPREAD_PARAM))
+}
+
 /// `fees.usd_rate_min_sources` in force.
 fn min_rate_sources(state: &dyn VmState) -> usize {
     network_param(state, RATE_MIN_SOURCES_PARAM)
         .clamp(MIN_RATE_SOURCES as u64, MAX_RATE_MIN_SOURCES) as usize
+}
+
+/// The source count a report sealed now must still meet when it is opened
+/// an epoch later: the larger of `fees.usd_rate_min_sources` in force and an
+/// enacted change to it still waiting to apply, so a report built to the
+/// count in force is not refused at its opening by a change applied between.
+pub fn rate_min_sources_at_opening(state: &dyn VmState) -> usize {
+    let pending = pending_param(state, RATE_MIN_SOURCES_PARAM).map_or(0, |p| p.value);
+    min_rate_sources(state)
+        .max(pending.clamp(MIN_RATE_SOURCES as u64, MAX_RATE_MIN_SOURCES) as usize)
+}
+
+/// Whether `quotes` pass the check an opening applies to them with
+/// `min_sources`. The opening refuses a report when any one of its symbols
+/// fails, every other symbol with it, so a reporter checks before it seals.
+pub fn check_rate_report(
+    quotes: &[tenzro_types::FeeRateQuote],
+    min_sources: usize,
+    spread_bound_bps: Option<u64>,
+) -> Result<()> {
+    // As the transaction carries them: each rate a decimal string.
+    let quotes: Vec<RateQuote> = quotes
+        .iter()
+        .map(|q| RateQuote {
+            symbol: q.symbol.clone(),
+            source: q.source.clone(),
+            rate_nano_usd: q.rate_nano_usd.to_string(),
+        })
+        .collect();
+    report_rates(&quotes, min_sources, spread_bound_bps).map(|_| ())
 }
 
 /// Key of the first market epoch whose sealed and opened reports are kept.
@@ -1673,7 +1795,8 @@ mod u128_string {
     }
 }
 
-pub(super) fn activity_key(epoch: u64) -> String {
+/// Where one market epoch's settlement activity is stored.
+pub fn activity_key(epoch: u64) -> String {
     format!("econ_epoch:{epoch:016x}")
 }
 
@@ -1683,6 +1806,69 @@ fn fees_paid_key(root: &str) -> String {
 
 fn payer_key(root: &str) -> String {
     format!("econ_payer:{root}")
+}
+
+/// First epoch whose settlements keep each provider's settled value in
+/// consensus state ([`ProviderEarned`]).
+pub const PROVIDER_REVENUE_KEY: &str = "feature.provider_revenue.activation_epoch";
+
+fn earned_key(payee: &[u8]) -> String {
+    format!("econ_earned:{}", hex::encode(payee))
+}
+
+/// What one payee was paid in settlements that carry provider work: in the
+/// last reward epoch it was paid in, and in the one before that. Two
+/// epochs, so the record per provider stays the same size.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderEarned {
+    /// The last reward epoch it was paid in.
+    pub epoch: u64,
+    /// Value settled to it in `epoch`, in the unit epoch activity counts.
+    #[serde(with = "u128_string")]
+    pub value: u128,
+    /// Settlements in `epoch`.
+    pub settlements: u64,
+    /// The reward epoch it was last paid in before `epoch`.
+    pub prior_epoch: Option<u64>,
+    /// Value settled to it in `prior_epoch`.
+    #[serde(with = "u128_string")]
+    pub prior_value: u128,
+    /// Settlements in `prior_epoch`.
+    pub prior_settlements: u64,
+}
+
+/// The provider settlement record of `payee`, once the rule behind
+/// [`PROVIDER_REVENUE_KEY`] has written one.
+pub fn read_provider_earned(state: &dyn VmState, payee: &[u8]) -> Option<ProviderEarned> {
+    read_json(state, &earned_key(payee))
+}
+
+/// Adds one settlement of `value` in reward epoch `epoch` to `payee`'s
+/// record, moving the last epoch into the prior one when `epoch` is new.
+fn note_earned(
+    state: &mut dyn VmState,
+    payee: &[u8],
+    epoch: u64,
+    value: u128,
+    changes: &mut Vec<StateChange>,
+) -> Result<()> {
+    let mut earned = match read_provider_earned(state, payee) {
+        Some(e) if e.epoch == epoch => e,
+        Some(e) => ProviderEarned {
+            epoch,
+            prior_epoch: Some(e.epoch),
+            prior_value: e.value,
+            prior_settlements: e.settlements,
+            ..Default::default()
+        },
+        None => ProviderEarned {
+            epoch,
+            ..Default::default()
+        },
+    };
+    earned.value = earned.value.saturating_add(value);
+    earned.settlements += 1;
+    write_json(state, &earned_key(payee), &earned, changes).map(|_| ())
 }
 
 /// Settlement fees a root paid in the last reward epoch it paid in.
@@ -1733,6 +1919,36 @@ fn update_activity(
     Ok(epoch)
 }
 
+/// Gate of the rule that a payment made off the ledger and recorded on it
+/// (proven on its own chain, or attested by a bonded attestor) counts in its
+/// epoch's settled value, at its signed USD price converted at the rate in
+/// force. Before it such a payment is recorded with no activity, so paid
+/// demand read from activity misses it.
+pub const EXTERNAL_PAYMENT_ACTIVITY_GATE: &str =
+    "feature.external_payment_activity.activation_epoch";
+
+/// Counts a payment made off the ledger and recorded on it in the current
+/// epoch's activity, once [`EXTERNAL_PAYMENT_ACTIVITY_GATE`] is live: its
+/// value, `usd_e6` micro-USD at the rate in force, is settled value, and
+/// unattributed, since its payer is an account on another chain that no
+/// Tenzro identity stands behind. It paid no fee on Tenzro, so it earns no
+/// reward weight.
+pub(super) fn record_external_payment(
+    state: &mut dyn VmState,
+    usd_e6: u64,
+    changes: &mut Vec<StateChange>,
+) -> Result<()> {
+    if !crate::feature_gate::is_live_now(state, EXTERNAL_PAYMENT_ACTIVITY_GATE) {
+        return Ok(());
+    }
+    let value = usd_to_wei(state, u128::from(usd_e6).saturating_mul(ATTO_PER_MICRO_USD));
+    update_activity(state, changes, |a| {
+        a.settled_value = a.settled_value.saturating_add(value);
+        a.unattributed_value = a.unattributed_value.saturating_add(value);
+    })?;
+    Ok(())
+}
+
 /// Test seam: prices TNZO at 1e21 nano-USD so one base unit counts as one
 /// micro-unit of account, for tests written with spend limits in base units.
 #[cfg(test)]
@@ -1768,10 +1984,15 @@ pub fn record_burn(state: &mut dyn VmState, burned: u128) -> Result<()> {
     Ok(())
 }
 
-/// The root identity behind an account: a delegated identity's controller,
-/// otherwise the identity itself. `None` for an unregistered account.
-fn root_of(state: &dyn VmState, addr: &[u8]) -> Option<String> {
+/// The root identity behind an account: [`rewards::root_identity`] of its
+/// identity once the single operator derivation is live; before that a
+/// delegated identity's controller read from the DID's text, otherwise the
+/// identity itself. `None` for an unregistered account.
+pub(super) fn root_of(state: &dyn VmState, addr: &[u8]) -> Option<String> {
     let did = identity_did_of(state, addr)?;
+    if crate::feature_gate::is_live_now(state, operator::KEY) {
+        return Some(rewards::root_identity(state, &did));
+    }
     let root = match did.strip_prefix("did:tenzro:machine:") {
         Some(rest) => match rest.split_once(':') {
             Some((controller, _)) => controller.to_string(),
@@ -1799,6 +2020,10 @@ pub(super) struct Earning {
     /// The payment already paid the network its HTTP-402 share in a separate
     /// escrow, so it pays no settlement fee: one payment pays one network fee.
     pub network_share_paid: bool,
+    /// Block time of a payment for a request the payee served (a voucher,
+    /// a hash-locked response or a plan's payee), which shows the payee
+    /// ready that hour; `None` for payments that do not answer a request.
+    pub paid_at_ms: Option<i64>,
 }
 
 /// What a settled payout leaves the payee, and what it burned.
@@ -1811,6 +2036,9 @@ pub(super) struct Payout {
     pub burned: u128,
     /// The treasury leg of the payee's work class, paid beside the fee.
     pub treasury_leg: u128,
+    /// The leg paid to the validator a non-validating payee named
+    /// ([`super::rpc_provider_leg`]), out of the payee's credit.
+    pub rpc_leg: u128,
 }
 
 /// The fee the network takes from a settlement of `value` under the
@@ -1900,10 +2128,13 @@ pub(super) fn settle_payout(
         tenzro_types::split::bps_of(value - fee.fee, u128::from(treasury_leg_bps(state, class)))
     });
     record_fee(state, payer, payee, value, &fee, leg, earning, changes)?;
+    let left = value - fee.fee - leg;
+    let rpc_leg = super::rpc_provider_leg::pay(state, payee, left, changes)?;
     Ok(Payout {
-        credit: value - fee.fee - leg,
+        credit: left - rpc_leg,
         burned: fee.burn,
         treasury_leg: leg,
+        rpc_leg,
     })
 }
 
@@ -2085,7 +2316,7 @@ pub(super) fn record_fee_in(
     // The fee a registered root paid, for fee-weighted distributions. The
     // treasury never accrues it.
     let fee_root = if fee > 0 && payer != derive_treasury_address().as_bytes() {
-        identity_did_of(state, payer).map(|did| crate::funding::root_did(&did))
+        identity_did_of(state, payer).map(|did| operator::root_did_in_force(state, &did))
     } else {
         None
     };
@@ -2114,6 +2345,9 @@ pub(super) fn record_fee_in(
             a.unattributed_value = a.unattributed_value.saturating_add(value);
         }
     })?;
+    if earning.provider.is_some() && crate::feature_gate::is_live_now(state, PROVIDER_REVENUE_KEY) {
+        note_earned(state, payee, epoch, value, changes)?;
+    }
     // Provider work needs two parties told apart: a payer and a payee that
     // are both registered under different roots.
     if organic && let (Some(class), Some(payee_at)) = (earning.provider, Address::from_bytes(payee))
@@ -2121,6 +2355,9 @@ pub(super) fn record_fee_in(
         let weight =
             tenzro_token::rewards::provider_work_weight(value - outside, outside, provider_bps);
         rewards::record_settled_work(state, payee_at, class, weight, changes)?;
+        if let (Some(at), Some(did)) = (earning.paid_at_ms, &payee_did) {
+            super::paid_readiness::record(state, did, at, changes)?;
+        }
     }
     let activity_each = tenzro_types::split::bps_of(outside, u128::from(activity_bps)) / n.max(1);
     for creator in creators {
@@ -2566,13 +2803,356 @@ mod tests {
         }
     }
 
+    /// The three forms the older derivation and the single one disagree on
+    /// keep their old root until the gate's epoch and take
+    /// [`rewards::root_identity`] from it; every other form reads the same
+    /// on both sides.
+    #[test]
+    fn an_accounts_root_changes_only_at_the_single_derivations_epoch() {
+        let mut state = crate::state_adapter::StateAdapter::new();
+        set_governed_param_for_test(&mut state, operator::KEY, 5);
+        let forms: [(u8, &str, &str, &str); 6] = [
+            (1, "did:tenzro:human:aa", "aa", "aa"),
+            (2, "did:tenzro:machine:bb", "bb", "bb"),
+            (3, "did:tenzro:machine:aa:m1", "aa", "aa"),
+            (
+                4,
+                "did:tenzro:institution:cc",
+                "did:tenzro:institution:cc",
+                "cc",
+            ),
+            (5, "did:pdis:guardian:dd", "did:pdis:guardian:dd", "dd"),
+            (6, "did:tenzro:machine:aa:m1:x", "aa", "x"),
+        ];
+        for (who, did, _, _) in forms {
+            state.set_storage(
+                &SYSTEM_ADDRESS,
+                identity_wallet_index_key(&[who; 32]).as_bytes(),
+                did.as_bytes().to_vec(),
+            );
+        }
+        begin_block_params(&mut state, 4).unwrap();
+        for (who, did, dormant, _) in forms {
+            assert_eq!(
+                root_of(&state, &[who; 32]).as_deref(),
+                Some(dormant),
+                "{did}"
+            );
+        }
+        begin_block_params(&mut state, 5).unwrap();
+        for (who, did, _, live) in forms {
+            assert_eq!(root_of(&state, &[who; 32]).as_deref(), Some(live), "{did}");
+            assert_eq!(rewards::root_identity(&state, did), live, "{did}");
+        }
+        assert_eq!(root_of(&state, &[9; 32]), None);
+    }
+
+    /// The distinct-payer mark is kept per root and reward epoch, and the
+    /// gate's epoch need not start a reward epoch. A payer whose root reads
+    /// differently under the single derivation, and who already paid in the
+    /// reward epoch the gate goes live in, is counted once more in that
+    /// epoch and never again; a payer of an ordinary form is counted once.
+    #[test]
+    fn an_odd_form_payer_is_counted_once_more_in_the_activation_epoch_only() {
+        let mut state = crate::state_adapter::StateAdapter::new();
+        set_governed_param_for_test(&mut state, operator::KEY, 5);
+        let payee = [9u8; 32];
+        for (who, did) in [
+            (1u8, "did:tenzro:human:aa"),
+            (4, "did:tenzro:institution:cc"),
+            (9, "did:tenzro:human:payee"),
+        ] {
+            state.set_storage(
+                &SYSTEM_ADDRESS,
+                identity_wallet_index_key(&[who; 32]).as_bytes(),
+                did.as_bytes().to_vec(),
+            );
+        }
+        let pay = |state: &mut crate::state_adapter::StateAdapter, who: u8| {
+            record_fee(
+                state,
+                &[who; 32],
+                &payee,
+                10,
+                &tenzro_types::split::FeeAllocation::default(),
+                0,
+                &Earning::default(),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        };
+        let payers = |state: &crate::state_adapter::StateAdapter| {
+            read_epoch_activity(state, current_epoch(state).unwrap()).unique_payers
+        };
+
+        begin_block_params(&mut state, 4).unwrap();
+        pay(&mut state, 1);
+        pay(&mut state, 4);
+        pay(&mut state, 4);
+        assert_eq!(payers(&state), 2, "dormant: each root once");
+
+        // The gate goes live inside the same reward epoch.
+        begin_block_params(&mut state, 5).unwrap();
+        pay(&mut state, 1);
+        assert_eq!(payers(&state), 2, "an ordinary form keeps its mark");
+        pay(&mut state, 4);
+        assert_eq!(payers(&state), 3, "the odd form is counted once more");
+        pay(&mut state, 4);
+        pay(&mut state, 1);
+        assert_eq!(payers(&state), 3, "and only once");
+    }
+    /// A payment made off the ledger counts in its epoch's settled value,
+    /// unattributed, once its gate is live; before, it records nothing.
+    #[test]
+    fn an_external_payment_counts_as_settled_value_once_live() {
+        let mut st = crate::StateAdapter::new();
+        count_wei_as_units_for_tests(&mut st);
+        let usd_e6 = 2_500_000;
+        let value = usd_to_wei(&st, u128::from(usd_e6) * ATTO_PER_MICRO_USD);
+        assert!(value > 0);
+        let mut changes = Vec::new();
+
+        record_external_payment(&mut st, usd_e6, &mut changes).unwrap();
+        let a = read_epoch_activity(&st, current_epoch(&st).unwrap());
+        assert_eq!((a.settled_value, a.unattributed_value), (0, 0));
+        assert!(changes.is_empty());
+
+        set_genesis_param(&mut st, EXTERNAL_PAYMENT_ACTIVITY_GATE, 0);
+        record_external_payment(&mut st, usd_e6, &mut changes).unwrap();
+        record_external_payment(&mut st, usd_e6, &mut changes).unwrap();
+        let a = read_epoch_activity(&st, current_epoch(&st).unwrap());
+        assert_eq!(a.settled_value, 2 * value);
+        assert_eq!(a.unattributed_value, 2 * value);
+        assert_eq!(a.organic_value, 0);
+        assert_eq!(a.settlement_fees, 0);
+    }
+
+    fn wire(symbol: &str, source: &str, rate: u128) -> tenzro_types::FeeRateQuote {
+        tenzro_types::FeeRateQuote {
+            symbol: symbol.into(),
+            source: source.into(),
+            rate_nano_usd: rate,
+        }
+    }
+
+    /// The check a reporter runs before it seals is the opening's own: one
+    /// symbol short of its sources fails the report, the TNZO quotes beside
+    /// it included.
+    #[test]
+    fn the_seal_check_is_the_opening_check() {
+        let quotes = vec![
+            wire("TNZO", "a", 1_000),
+            wire("TNZO", "b", 1_002),
+            wire("IDXCPU", "p1", 500),
+        ];
+        assert!(check_rate_report(&quotes, 2, None).is_err());
+        assert!(check_rate_report(&quotes[..2], 2, None).is_ok());
+        assert!(check_rate_report(&quotes[..2], 3, None).is_err());
+    }
+
+    /// A report sealed now is checked against a raised source count waiting
+    /// to apply, not only the count in force.
+    #[test]
+    fn the_opening_source_count_includes_a_pending_raise() {
+        let mut st = crate::StateAdapter::new();
+        assert_eq!(rate_min_sources_at_opening(&st), MIN_RATE_SOURCES);
+        set_genesis_param(&mut st, RATE_MIN_SOURCES_PARAM, 3);
+        assert_eq!(rate_min_sources_at_opening(&st), 3);
+        let pending = PendingParam {
+            value: 4,
+            activates_epoch: 9,
+            proposal_id: "p".into(),
+        };
+        st.set_storage(
+            &SYSTEM_ADDRESS,
+            pending_param_key(RATE_MIN_SOURCES_PARAM).as_bytes(),
+            serde_json::to_vec(&pending).unwrap(),
+        );
+        assert_eq!(rate_min_sources_at_opening(&st), 4);
+    }
+
+    /// Seals `quotes` for epoch 10 and opens them during epoch 12, as one
+    /// bonded validator; the opening's result.
+    fn seal_and_open(st: &mut crate::StateAdapter, quotes: serde_json::Value) -> Result<()> {
+        const TNZO: u128 = 1_000_000_000_000_000_000;
+        let v = [9u8; 32];
+        super::super::staking::add_bond(st, &v, 10_000 * TNZO, 0).unwrap();
+        let parsed: Vec<(String, String, u128)> = quotes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| {
+                (
+                    q["symbol"].as_str().unwrap().to_string(),
+                    q["source"].as_str().unwrap().to_string(),
+                    q["rate_nano_usd"].as_str().unwrap().parse().unwrap(),
+                )
+            })
+            .collect();
+        let salt = [3u8; 32];
+        let commitment = tenzro_types::fee_rate_commitment(
+            &v,
+            10,
+            &salt,
+            parsed.iter().map(|(a, b, r)| (a.as_str(), b.as_str(), *r)),
+        );
+        let ms = MARKET_EPOCH_MS;
+        let seal = serde_json::json!({ "epoch": 10, "commitment": hex::encode(commitment) });
+        submit_rate(st, &v, &serde_json::to_vec(&seal).unwrap(), 11 * ms).unwrap();
+        let open = serde_json::json!({
+            "epoch": 11,
+            "commitment": hex::encode([0u8; 32]),
+            "reveal": { "quotes": quotes, "salt": hex::encode(salt) },
+        });
+        submit_rate(st, &v, &serde_json::to_vec(&open).unwrap(), 12 * ms).map(|_| ())
+    }
+
+    fn mixed_report() -> serde_json::Value {
+        serde_json::json!([
+            { "symbol": "TNZO", "source": "a", "rate_nano_usd": "1000" },
+            { "symbol": "TNZO", "source": "b", "rate_nano_usd": "1002" },
+            { "symbol": "IDXCPU", "source": "p1", "rate_nano_usd": "500" },
+        ])
+    }
+
+    /// Before the gate: one symbol short of its sources refuses the whole
+    /// opening, and the TNZO quote beside it is not counted.
+    #[test]
+    fn before_isolation_one_failing_symbol_refuses_the_opening() {
+        let mut st = crate::StateAdapter::new();
+        set_genesis_param(&mut st, RATE_MODE_PARAM, 1);
+        assert!(seal_and_open(&mut st, mixed_report()).is_err());
+        assert!(read_json::<Vec<RateSubmission>>(&st, "fxr_sub:TNZO:10").is_none());
+    }
+
+    /// From the gate: the failing symbol is left out and the TNZO quote of
+    /// the same report counts.
+    #[test]
+    fn after_isolation_a_failing_symbol_is_left_out_and_tnzo_counts() {
+        let mut st = crate::StateAdapter::new();
+        set_genesis_param(&mut st, RATE_MODE_PARAM, 1);
+        set_genesis_param(&mut st, RATE_SYMBOL_ISOLATION_KEY, 0);
+        seal_and_open(&mut st, mixed_report()).unwrap();
+        let tnzo: Vec<RateSubmission> = read_json(&st, "fxr_sub:TNZO:10").unwrap();
+        assert_eq!(tnzo.len(), 1);
+        assert_eq!(tnzo[0].rate, "1000");
+        assert!(read_json::<Vec<RateSubmission>>(&st, "fxr_sub:IDXCPU:10").is_none());
+        let symbols: Vec<String> = read_json(&st, &opened_symbols_key(10)).unwrap();
+        assert_eq!(symbols, vec!["TNZO".to_string()]);
+    }
+
+    /// The gate is dormant at genesis and follows the feature convention.
+    #[test]
+    fn the_isolation_gate_is_dormant_at_genesis() {
+        let p = crate::governance::governed_param(RATE_SYMBOL_ISOLATION_KEY).unwrap();
+        assert!(crate::feature_gate::follows_convention(p));
+        assert_eq!(p.genesis, crate::feature_gate::NEVER);
+        assert!(!crate::feature_gate::is_live_now(
+            &crate::StateAdapter::new(),
+            RATE_SYMBOL_ISOLATION_KEY
+        ));
+    }
+
+    /// Isolation still refuses a report with no quotes or too many.
+    #[test]
+    fn isolation_still_refuses_an_empty_or_oversized_report() {
+        assert!(report_rates_isolated(&[], 2, None).is_err());
+        let many: Vec<RateQuote> = (0..=MAX_RATE_QUOTES)
+            .map(|i| q(&i.to_string(), 5))
+            .collect();
+        assert!(report_rates_isolated(&many, 2, None).is_err());
+        let bad_name = RateQuote {
+            symbol: "?".into(),
+            source: "a".into(),
+            rate_nano_usd: "5".into(),
+        };
+        let ok = report_rates_isolated(&[q("a", 5), q("b", 6), bad_name], 2, None).unwrap();
+        assert_eq!(ok.len(), 1);
+    }
+
     #[test]
     fn a_report_needs_two_distinct_sources() {
-        assert!(report_rates(&[q("a", 5)], MIN_RATE_SOURCES).is_err());
-        assert!(report_rates(&[q("a", 5), q("A", 6)], MIN_RATE_SOURCES).is_err());
+        assert!(report_rates(&[q("a", 5)], MIN_RATE_SOURCES, Some(5_000)).is_err());
+        assert!(report_rates(&[q("a", 5), q("A", 6)], MIN_RATE_SOURCES, Some(5_000)).is_err());
         assert_eq!(
-            report_rates(&[q("a", 5), q("b", 9), q("c", 7)], MIN_RATE_SOURCES).unwrap()[0].1,
+            report_rates(
+                &[q("a", 5), q("b", 9), q("c", 7)],
+                MIN_RATE_SOURCES,
+                Some(5_000)
+            )
+            .unwrap()[0]
+                .1,
             7
+        );
+    }
+
+    /// Two sources that disagree beyond the bound give no rate: neither
+    /// quote is the report's rate, so one failed venue cannot lower it. A
+    /// third source restores a majority and the median stands.
+    #[test]
+    fn two_sources_that_disagree_report_no_rate() {
+        let bound = Some(DEFAULT_RATE_BREAKER_SPREAD_BPS);
+        let crashed = [q("a", 100), q("b", 1_000)];
+        assert!(
+            report_rates(&crashed, MIN_RATE_SOURCES, bound)
+                .unwrap()
+                .is_empty()
+        );
+        // Within the bound the lower middle quote is the rate.
+        let close = [q("a", 1_000), q("b", 1_050)];
+        assert_eq!(
+            report_rates(&close, MIN_RATE_SOURCES, bound).unwrap()[0].1,
+            1_000
+        );
+        let three = [q("a", 100), q("b", 1_000), q("c", 1_010)];
+        assert_eq!(
+            report_rates(&three, MIN_RATE_SOURCES, bound).unwrap()[0].1,
+            1_000
+        );
+        // Four sources, one failed: the middle two agree.
+        let four = [q("a", 100), q("b", 1_000), q("c", 1_010), q("d", 1_020)];
+        assert_eq!(
+            report_rates(&four, MIN_RATE_SOURCES, bound).unwrap()[0].1,
+            1_000
+        );
+        // Four sources split two against two: no majority, no rate.
+        let split = [q("a", 100), q("b", 110), q("c", 1_000), q("d", 1_010)];
+        assert!(
+            report_rates(&split, MIN_RATE_SOURCES, bound)
+                .unwrap()
+                .is_empty()
+        );
+        // A symbol left out does not take the report's other symbols with it.
+        let mut eth = q("a", 3_000);
+        eth.symbol = "ETH".into();
+        let mut eth2 = q("b", 3_100);
+        eth2.symbol = "ETH".into();
+        let mixed = [q("a", 100), q("b", 1_000), eth, eth2];
+        let r = report_rates(&mixed, MIN_RATE_SOURCES, bound).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].0, "ETH");
+    }
+
+    /// The agreement rule is dormant until its gate is live: before, a
+    /// report of two sources that disagree still reports the lower quote.
+    #[test]
+    fn the_agreement_rule_waits_for_its_gate() {
+        let mut st = rate_state(300);
+        assert_eq!(report_agreement_bound(&st), None);
+        let crashed = [q("a", 100), q("b", 1_000)];
+        assert_eq!(
+            report_rates(&crashed, MIN_RATE_SOURCES, report_agreement_bound(&st)).unwrap()[0].1,
+            100
+        );
+        set_genesis_param(&mut st, REPORT_AGREEMENT_GATE, 0);
+        assert_eq!(
+            report_agreement_bound(&st),
+            Some(DEFAULT_RATE_BREAKER_SPREAD_BPS)
+        );
+        assert!(
+            report_rates(&crashed, MIN_RATE_SOURCES, report_agreement_bound(&st))
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -2581,10 +3161,22 @@ mod tests {
         let mut eth = q("a", 3_000);
         eth.symbol = "eth".into();
         // TNZO is quoted twice but ETH only once: the report is refused.
-        assert!(report_rates(&[q("a", 5), q("b", 6), eth.clone()], MIN_RATE_SOURCES).is_err());
+        assert!(
+            report_rates(
+                &[q("a", 5), q("b", 6), eth.clone()],
+                MIN_RATE_SOURCES,
+                Some(5_000)
+            )
+            .is_err()
+        );
         let mut eth2 = q("b", 3_100);
         eth2.symbol = "ETH".into();
-        let r = report_rates(&[q("a", 5), q("b", 6), eth, eth2], MIN_RATE_SOURCES).unwrap();
+        let r = report_rates(
+            &[q("a", 5), q("b", 6), eth, eth2],
+            MIN_RATE_SOURCES,
+            Some(5_000),
+        )
+        .unwrap();
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].0, "ETH");
         assert_eq!(r[0].1, 3_000);
@@ -2995,10 +3587,10 @@ mod tests {
     /// count is not counted once the count is raised.
     #[test]
     fn a_report_below_the_governed_source_count_is_refused_and_not_counted() {
-        assert!(report_rates(&[q("a", 5), q("b", 6)], 3).is_err());
-        assert!(report_rates(&[q("a", 5), q("b", 6), q("c", 7)], 3).is_ok());
+        assert!(report_rates(&[q("a", 5), q("b", 6)], 3, Some(5_000)).is_err());
+        assert!(report_rates(&[q("a", 5), q("b", 6), q("c", 7)], 3, Some(5_000)).is_ok());
         // Below the floor counts as the floor.
-        assert!(report_rates(&[q("a", 5)], 1).is_err());
+        assert!(report_rates(&[q("a", 5)], 1, Some(5_000)).is_err());
 
         let mut st = rate_state(300);
         set_genesis_param(&mut st, GOVERNANCE_RATE_PARAM, 1_000);

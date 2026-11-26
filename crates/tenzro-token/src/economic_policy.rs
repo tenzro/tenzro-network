@@ -1,6 +1,6 @@
 //! The live [`EconomicPolicy`], persisted and governance-settable.
 //!
-//! Every rate the network charges lives in one block. This manager is what
+//! The economic values governance sets live in one block. This manager is what
 //! makes it *live*: it holds the policy the node is currently applying, writes
 //! each change through to `CF_TOKENS`, and hydrates on boot so a restart does
 //! not silently revert to defaults.
@@ -13,13 +13,6 @@
 //! until someone reconciles two receipts. Governance sets this instead, and the
 //! change takes effect at the next settlement on every node that has applied
 //! the proposal.
-//!
-//! # A rejected policy is not applied
-//!
-//! [`EconomicPolicyManager::apply`] validates before it stores. A proposal that
-//! would strand value, pay out more than came in, or leave the serving operator
-//! a minority is refused and the previous policy stays live. Governance can
-//! move the numbers; it cannot make them incoherent.
 
 use std::sync::Arc;
 
@@ -50,27 +43,15 @@ impl EconomicPolicyManager {
 
     /// A manager backed by `storage`, hydrating any previously applied policy.
     ///
-    /// A stored policy that no longer validates is refused and the default is
-    /// used instead — loudly. Applying an incoherent policy because it happened
-    /// to be on disk would let one bad proposal outlive the release that
-    /// tightened the rules.
+    /// A stored policy that cannot be decoded is replaced by the default,
+    /// with a warning.
     pub fn with_storage(storage: Arc<dyn KvStore>) -> Self {
         let policy = match storage.get(CF_TOKENS, ECONOMIC_POLICY_KEY.as_bytes()) {
             Ok(Some(bytes)) => match serde_json::from_slice::<EconomicPolicy>(&bytes) {
-                Ok(stored) => match stored.validate() {
-                    Ok(()) => {
-                        info!("Hydrated economic policy from storage");
-                        stored
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Stored economic policy is invalid ({e}); falling back to the default. \
-                             The network will charge default rates until governance sets a valid \
-                             policy."
-                        );
-                        EconomicPolicy::default()
-                    }
-                },
+                Ok(stored) => {
+                    info!("Hydrated economic policy from storage");
+                    stored
+                }
                 Err(e) => {
                     warn!("Stored economic policy could not be decoded ({e}); using the default");
                     EconomicPolicy::default()
@@ -97,13 +78,8 @@ impl EconomicPolicyManager {
     ///
     /// # Errors
     ///
-    /// Refuses a policy that fails [`EconomicPolicy::validate`], leaving the
-    /// previous one live.
+    /// Fails when the policy cannot be encoded or stored.
     pub fn apply(&self, policy: EconomicPolicy) -> Result<()> {
-        policy
-            .validate()
-            .map_err(|e| TokenError::InvalidAmount(format!("economic policy rejected: {e}")))?;
-
         *self.policy.write() = policy;
 
         if let Some(ref storage) = self.storage {
@@ -118,9 +94,8 @@ impl EconomicPolicyManager {
         }
 
         info!(
-            operator_validating_bps = policy.validating.operator_bps,
-            operator_delegated_bps = policy.delegated.operator_bps,
-            rpc_provider_bps = policy.delegated.rpc_provider_bps,
+            default_conversion = %policy.default_conversion,
+            micro_settlement_floor = %policy.micro_settlement_floor,
             "Applied economic policy"
         );
         Ok(())
@@ -136,7 +111,7 @@ impl Default for EconomicPolicyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_types::economics::{DelegatedSchedule, ValidatingSchedule};
+    use tenzro_types::economics::ConversionPolicy;
 
     #[test]
     fn a_fresh_manager_holds_the_default_policy() {
@@ -145,35 +120,13 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_policy_becomes_live() {
+    fn an_applied_policy_becomes_live() {
         let mgr = EconomicPolicyManager::new();
         let policy = EconomicPolicy {
-            delegated: DelegatedSchedule {
-                operator_bps: 7_000,
-                rpc_provider_bps: 2_000,
-                treasury_bps: 1_000,
-            },
-            ..EconomicPolicy::default()
+            default_conversion: ConversionPolicy::KeepInbound,
+            micro_settlement_floor: 5,
         };
         mgr.apply(policy).unwrap();
-        assert_eq!(mgr.current().delegated.rpc_provider_bps, 2_000);
-    }
-
-    /// Governance can move the numbers; it cannot make them incoherent — and a
-    /// refused proposal must not disturb what is already live.
-    #[test]
-    fn an_invalid_policy_is_refused_and_the_previous_one_stays_live() {
-        let mgr = EconomicPolicyManager::new();
-        let before = mgr.current();
-
-        let broken = EconomicPolicy {
-            validating: ValidatingSchedule {
-                operator_bps: 4_000,
-                treasury_bps: 6_000,
-            },
-            ..EconomicPolicy::default()
-        };
-        assert!(mgr.apply(broken).is_err());
-        assert_eq!(mgr.current(), before, "the live policy must be untouched");
+        assert_eq!(mgr.current(), policy);
     }
 }

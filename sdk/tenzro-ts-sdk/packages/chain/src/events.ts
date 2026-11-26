@@ -9,10 +9,29 @@ export interface EventPage {
   events: { event: ChainEvent; proof?: EventProof }[];
   /** The proof that the page left nothing out, when asked for. */
   completeness?: CompletenessProof;
-  /** The cursor to resume after (`height:tx_index:event_index`). */
-  cursor: string | null;
+  /** On a page read forward, the cursor to resume after (`height:tx_index:event_index`). */
+  cursor?: string | null;
+  /** On a newest-first page, the cursor that reads the older page; `null` once the oldest held height was read. */
+  before_cursor?: string | null;
   /** The highest height whose events the node holds. */
   tip: number | null;
+  /** On the newest page of `tenzro_queryEvents`, for a caller that may read the node's conditions: their changes, newest first. */
+  node_events?: NodeEvent[];
+}
+
+/** A condition on the node opening, clearing or being answered: the node's own account of itself, with no proof. */
+export interface NodeEvent {
+  /** The event's sequence on the node's event stream. */
+  sequence: number;
+  kind: 'condition_opened' | 'condition_cleared' | 'condition_answered';
+  summary: string;
+  /** When the node saw it, RFC 3339 in UTC. */
+  at: string;
+  /** The node's height when it saw it. */
+  block: number;
+  /** The condition's id. */
+  condition: string;
+  severity: 'info' | 'warning' | 'critical';
 }
 
 /** An event filter: `event_types` ('log' | 'transaction_included'), `addresses` (20-byte hex), positional `topics`, `from_block`, `to_block`. */
@@ -43,10 +62,11 @@ export class EventsClient {
   }
 
   /**
-   * A page of the events `filter` selects after `fromCursor`, each with its
-   * proof. With `completeness`, also the proof that the page left nothing
-   * out (check it with `verifyCompleteness`), every proof anchored at
-   * `anchorIndex` or at the latest certified checkpoint.
+   * A page of the events `filter` selects after `fromCursor` (from the
+   * oldest held height when omitted), each with its proof. With
+   * `completeness`, also the proof that the page left nothing out (check it
+   * with `verifyCompleteness`), every proof anchored at `anchorIndex` or at
+   * the latest certified checkpoint.
    */
   async query(
     filter: EventFilter,
@@ -59,9 +79,30 @@ export class EventsClient {
     return this.rpc.call<EventPage>('tenzro_queryEvents', {
       filter,
       limit,
-      ...(fromCursor ? { from_cursor: fromCursor } : {}),
+      ...(fromCursor ? { from_cursor: fromCursor } : { from_height: 0 }),
       ...(toCursor ? { to_cursor: toCursor } : {}),
       ...(completeness ? { completeness: true } : {}),
+      ...(anchorIndex !== undefined ? { anchor_index: anchorIndex } : {}),
+    });
+  }
+
+  /**
+   * The newest events `filter` selects before `beforeCursor` (from the tip
+   * when omitted), newest first, each with its proof anchored at
+   * `anchorIndex` or at the latest certified checkpoint. Pass the page's
+   * `before_cursor` back for the older page; it is `null` once the oldest
+   * height the node holds was read.
+   */
+  async newest(
+    filter: EventFilter,
+    beforeCursor?: string,
+    limit = 100,
+    anchorIndex?: number,
+  ): Promise<EventPage> {
+    return this.rpc.call<EventPage>('tenzro_queryEvents', {
+      filter,
+      limit,
+      ...(beforeCursor ? { before_cursor: beforeCursor } : {}),
       ...(anchorIndex !== undefined ? { anchor_index: anchorIndex } : {}),
     });
   }

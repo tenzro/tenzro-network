@@ -321,8 +321,10 @@ mod tests {
         let exp: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("expected.json")).unwrap())
                 .unwrap();
-        crate::seeded_catalog();
-        let entry = crate::catalog::get_rerank_model_by_id("qwen3-vl-reranker-2b").unwrap();
+        let catalog = crate::Catalog::test_seed();
+        let entry = catalog
+            .get_rerank_model_by_id("qwen3-vl-reranker-2b")
+            .unwrap();
         let spec = entry.vision_input.clone().unwrap();
         let marker = llama_cpp_2::mtmd::mtmd_default_marker();
         let read = |name: &str| std::fs::read(dir.join(name)).unwrap();

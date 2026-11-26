@@ -26,6 +26,27 @@ pub const GAS_SET_AGENT_TERMS: u64 = 60_000;
 pub const GAS_AGENT_ACT: u64 = 40_000;
 /// Topic of the log recorded terms emit.
 pub const AGENT_TERMS_TOPIC: &[u8] = b"AgentTermsSet";
+/// Gate of the rule that terms are recorded only with a daily ceiling and
+/// an end time ([`check_bounds`]); dormant until a vote sets its epoch.
+pub const BOUNDS_KEY: &str = "feature.agent_terms_bounds.activation_epoch";
+
+/// Once [`BOUNDS_KEY`] is live, terms are recorded only when they state a
+/// daily spending ceiling (`"0"` for an agent that moves no value) and an
+/// expiry. Terms recorded before it stay as they were and the agent keeps
+/// acting under them; the rule applies to what is recorded from then on,
+/// so the next change of such terms, a renewal included, states both.
+fn check_bounds(state: &dyn VmState, terms: &AgentTerms) -> std::result::Result<(), &'static str> {
+    if !crate::feature_gate::is_live_now(state, BOUNDS_KEY) {
+        return Ok(());
+    }
+    if terms.delegation_scope.max_daily_spend.is_none() {
+        return Err("the terms state no daily spending ceiling (max_daily_spend)");
+    }
+    if terms.expires_at_ms.is_none() {
+        return Err("the terms state no expiry (expires_at_ms)");
+    }
+    Ok(())
+}
 /// Topic of the log an executed agent action emits.
 pub const AGENT_ACT_TOPIC: &[u8] = b"AgentAct";
 
@@ -58,6 +79,11 @@ impl StoredAgentTerms {
 /// Governed parameter: how long, in ms, an agent may act after its root last
 /// approved its terms in full.
 pub const PARAM_MAX_UNRENEWED_MS: &str = "agent.max_unrenewed_ms";
+
+/// Gate of the rule that a `PayerSettle` from an agent's registered wallet is
+/// refused once the agent's terms have expired, as an `AgentAct`, a protocol
+/// payment and a channel voucher already are.
+pub const SPEND_EXPIRY_GATE: &str = "feature.agent_spend_expiry.activation_epoch";
 /// Genesis value of [`PARAM_MAX_UNRENEWED_MS`]: 90 days.
 pub const DEFAULT_MAX_UNRENEWED_MS: u64 = 90 * DAY_MS;
 
@@ -480,7 +506,12 @@ pub(super) fn set_terms(
         }
         _ => {}
     }
+    let counted = match existing {
+        None => super::agent_cap::check_new_agent(state, &terms.controller_did).map_err(refuse)?,
+        Some(_) => None,
+    };
     check_trifecta(terms.exposure(), terms.trifecta_exception).map_err(refuse)?;
+    check_bounds(state, terms).map_err(refuse)?;
     let digest = verify_approval(state, terms, rotate, approval, at_ms.max(0) as u64)?;
     // A root's approval authorizes one change; replaying it must not restore older terms.
     let used = approval_used_key(&agent, &digest);
@@ -508,8 +539,11 @@ pub(super) fn set_terms(
         && existing
             .as_ref()
             .is_some_and(|e| only_extends_expiry(&e.terms, terms));
-    let mut changes = Vec::new();
     let replaced = record.version > 1;
+    if !replaced {
+        super::identity_caps::require_room(state, &terms.controller_did)?;
+    }
+    let mut changes = Vec::new();
     write_json(state, &terms_key(&agent), &record, &mut changes)?;
     write_json(state, &used, &record.version, &mut changes)?;
     if !replaced {
@@ -519,6 +553,9 @@ pub(super) fn set_terms(
             &agent,
             &mut changes,
         )?;
+    }
+    if let Some(live) = counted {
+        super::agent_cap::note_new_agent(state, &terms.controller_did, live, &mut changes)?;
     }
     let log_data = serde_json::to_vec(&serde_json::json!({
         "agent_did": agent,
@@ -816,6 +853,11 @@ pub fn check_and_record_agent_spend(
     let amount = spend_units(state, Some(&stored.terms), asset, amount, usd_e6)?;
     check_agent_status(state, agent_did, at_ms)?;
     check_renewed(state, agent_did, &stored, at_ms)?;
+    if crate::feature_gate::is_live_now(&*state, SPEND_EXPIRY_GATE)
+        && stored.terms.expires_at_ms.is_some_and(|at| at_ms >= at)
+    {
+        return Err("expiry".to_string());
+    }
     let history = read_agent_history(state, agent_did, counterparty, at_ms);
     let s = &stored.terms.delegation_scope;
     let per_tx = tenzro_types::agent_terms::parse_amount(s.max_transaction_value.as_deref())
@@ -1501,6 +1543,75 @@ mod escrow_tests {
         };
         let sig: p256::ecdsa::Signature = key.sign_prehash(&action.digest()).unwrap();
         (action, sig.to_bytes().to_vec())
+    }
+
+    /// An action is the agent's only when its serving node's key signed it:
+    /// another key cannot act as this agent, and nothing moves.
+    #[test]
+    fn a_key_that_is_not_the_agents_cannot_act_as_it() {
+        let (mut state, _) = setup();
+        let other = SigningKey::from_slice(&[8u8; 32]).unwrap();
+        let payee = hex::encode([9u8; 32]);
+        let create = AgentEscrow::Create {
+            expires_at_ms: 5_000,
+            release_conditions: ReleaseConditions::ProviderSignature,
+            reference: None,
+        };
+        let (a, sig) = signed(&state, &other, 400, &payee, create);
+        assert!(act(&mut state, 1, &a, &sig, 1_000).is_err());
+        assert_eq!(state.get_balance(&agent_wallet(AGENT)), 1_000);
+        assert_eq!(read_agent_act_nonce(&state, AGENT), 0);
+    }
+
+    /// Terms past their expiry stop a generic spend once the gate is live;
+    /// before it, the rule in force before it holds and the spend is counted
+    /// as it always was.
+    #[test]
+    fn a_generic_spend_after_the_terms_expired_is_refused_once_the_gate_is_live() {
+        let (mut state, _) = setup();
+        let mut stored: StoredAgentTerms = read_agent_terms(&state, AGENT).unwrap();
+        stored.terms.expires_at_ms = Some(5_000);
+        write_json(&mut state, &terms_key(AGENT), &stored, &mut Vec::new()).unwrap();
+        let payee = hex::encode([9u8; 32]);
+
+        // Dormant: the expiry is not read here.
+        assert!(!crate::feature_gate::is_live_now(&state, SPEND_EXPIRY_GATE));
+        check_and_record_agent_spend(&mut state, AGENT, &payee, None, 10, 0, 6_000)
+            .expect("the rule before the gate");
+
+        super::super::set_governed_param_for_test(&mut state, SPEND_EXPIRY_GATE, 0);
+        assert!(crate::feature_gate::is_live_now(&state, SPEND_EXPIRY_GATE));
+        // Before the expiry it pays; at and after it, it does not.
+        check_and_record_agent_spend(&mut state, AGENT, &payee, None, 10, 0, 4_999).unwrap();
+        for at in [5_000, 6_000] {
+            assert_eq!(
+                check_and_record_agent_spend(&mut state, AGENT, &payee, None, 10, 0, at)
+                    .unwrap_err(),
+                "expiry"
+            );
+        }
+    }
+
+    /// Terms that allow more than the wallet holds do not let the agent spend
+    /// what it does not have: the action is refused and nothing moves.
+    #[test]
+    fn an_agent_cannot_spend_more_than_its_wallet_holds() {
+        let (mut state, key) = setup();
+        let mut stored: StoredAgentTerms = read_agent_terms(&state, AGENT).unwrap();
+        stored.terms.delegation_scope.max_daily_spend = Some("5000".into());
+        write_json(&mut state, &terms_key(AGENT), &stored, &mut Vec::new()).unwrap();
+        let wallet = agent_wallet(AGENT);
+        let payee = hex::encode([9u8; 32]);
+        let create = AgentEscrow::Create {
+            expires_at_ms: 5_000,
+            release_conditions: ReleaseConditions::ProviderSignature,
+            reference: None,
+        };
+        let (a, sig) = signed(&state, &key, 2_000, &payee, create);
+        assert!(act(&mut state, 1, &a, &sig, 1_000).is_err());
+        assert_eq!(state.get_balance(&wallet), 1_000);
+        assert_eq!(read_agent_spent(&state, AGENT, 1_000), 0);
+        assert!(read_escrow(&state, &derive_escrow_id(&Address::new(wallet), 0)).is_none());
     }
 
     /// A paused agent pays nothing until its pause ends.
@@ -2421,6 +2532,54 @@ mod machine_root_tests {
         );
     }
 
+    /// Before the bounds rule is live, terms without a ceiling or an
+    /// expiry are recorded as before. Once it is live they are refused,
+    /// naming what is missing; an agent recorded without bounds before the
+    /// switch keeps acting under its terms, and its next change states both.
+    #[test]
+    fn terms_need_a_ceiling_and_an_expiry_once_the_bounds_rule_is_live() {
+        let root = TestHybridSigner::hybrid(29);
+        let (mut state, mut terms, did) = world(&root);
+        // A per-transaction ceiling alone sizes the bond, so these terms were
+        // recordable before the rule: no daily ceiling and no expiry.
+        terms.delegation_scope.max_transaction_value = Some("100".into());
+        terms.delegation_scope.max_daily_spend = None;
+        terms.expires_at_ms = None;
+        assert_eq!(
+            crate::feature_gate::activation_epoch(&state, BOUNDS_KEY),
+            crate::feature_gate::NEVER
+        );
+        let approval = machine_approval(OP_DELEGATE_AGENT, &terms.target(None), &root);
+        set_terms(&mut state, &terms, None, &approval, 0).unwrap();
+
+        super::super::set_governed_param_for_test(&mut state, BOUNDS_KEY, 0);
+        let mut a = Agent {
+            state,
+            did,
+            key: Agent::node_key(),
+        };
+        a.act(&a.action(10), 1).unwrap();
+
+        let renewal = read_agent_terms(&a.state, &a.did).unwrap().terms;
+        let approval = machine_approval(OP_UPDATE_AGENT_TERMS, &renewal.target(Some(false)), &root);
+        let refused = set_terms(&mut a.state, &renewal, Some(false), &approval, 2).unwrap_err();
+        assert!(refused.to_string().contains("max_daily_spend"), "{refused}");
+
+        let mut capped = renewal.clone();
+        capped.delegation_scope.max_daily_spend = Some("100".into());
+        let approval = machine_approval(OP_UPDATE_AGENT_TERMS, &capped.target(Some(false)), &root);
+        let refused = set_terms(&mut a.state, &capped, Some(false), &approval, 3).unwrap_err();
+        assert!(refused.to_string().contains("expires_at_ms"), "{refused}");
+
+        let mut bounded = capped.clone();
+        bounded.expires_at_ms = Some(1_000_000);
+        let approval = machine_approval(OP_UPDATE_AGENT_TERMS, &bounded.target(Some(false)), &root);
+        set_terms(&mut a.state, &bounded, Some(false), &approval, 4).unwrap();
+        let stored = read_agent_terms(&a.state, &a.did).unwrap();
+        assert_eq!(stored.terms.expires_at_ms, Some(1_000_000));
+        a.act(&a.action(10), 5).unwrap();
+    }
+
     /// The same single oversight path as a passkey root: an action the
     /// terms hold is refused until the machine root's step-up of that exact
     /// action arrives in it (held); with it, it runs (allowed); another key's
@@ -2651,6 +2810,30 @@ mod machine_root_tests {
         a.act(&a.action(10), 91 * DAY_MS + 1).unwrap();
     }
 
+    /// Live terms are widened only on their root's approval: another
+    /// registered machine's approval changes nothing, and the agent stays
+    /// held to what its root approved.
+    #[test]
+    fn terms_are_widened_only_by_their_root() {
+        let (mut a, _, terms) = approved(41);
+        let mut wider = terms.clone();
+        wider.delegation_scope.max_transaction_value = Some("1000000000".into());
+        wider.delegation_scope.max_daily_spend = Some("1000000000".into());
+        let other = TestHybridSigner::hybrid(42);
+        register(&mut a.state, &other);
+        let approval = machine_approval(OP_UPDATE_AGENT_TERMS, &wider.target(Some(false)), &other);
+        assert!(set_terms(&mut a.state, &wider, Some(false), &approval, 1).is_err());
+        let kept = read_agent_terms(&a.state, &a.did)
+            .unwrap()
+            .terms
+            .delegation_scope;
+        assert_eq!(
+            kept.max_transaction_value,
+            terms.delegation_scope.max_transaction_value
+        );
+        assert_eq!(kept.max_daily_spend, terms.delegation_scope.max_daily_spend);
+    }
+
     #[test]
     fn a_lapsed_agent_cannot_pay_through_a_payment_protocol() {
         let (a, _, _) = approved(33);
@@ -2669,6 +2852,130 @@ mod machine_root_tests {
         assert!(lapsed.contains("renewal"), "{lapsed}");
     }
 
+    /// One more agent under `root`, named `name`, with its bond funded.
+    fn another(
+        state: &mut crate::StateAdapter,
+        terms: &AgentTerms,
+        root: &TestHybridSigner,
+        name: &str,
+    ) -> std::result::Result<String, String> {
+        let mut next = terms.clone();
+        next.agent_name = name.into();
+        let did = agent_did(&next.controller_did, name).unwrap();
+        state.set_balance(
+            super::super::derive_bond_vault_address(&did).as_bytes(),
+            u128::MAX / 2,
+        );
+        let approval = machine_approval(OP_DELEGATE_AGENT, &next.target(None), root);
+        set_terms(state, &next, None, &approval, 0)
+            .map(|_| did)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_root_is_refused_an_agent_beyond_the_cap_once_the_rule_is_live() {
+        use super::super::agent_cap::{KEY, LIMIT_KEY, live_agents, seed_gas};
+        let (mut a, root, terms) = approved(35);
+        let controller = terms.controller_did.clone();
+        let counter = format!("agent_cap_live:{controller}");
+        super::super::set_governed_param_for_test(&mut a.state, LIMIT_KEY, 2);
+
+        // Dormant: the limit binds nobody, no counter is written and no
+        // seeding is charged.
+        another(&mut a.state, &terms, &root, "second").unwrap();
+        let third = another(&mut a.state, &terms, &root, "third").unwrap();
+        assert_eq!(live_agents(&a.state, &controller), 3);
+        assert!(
+            a.state
+                .get_storage(&SYSTEM_ADDRESS, counter.as_bytes())
+                .is_none()
+        );
+        assert_eq!(seed_gas(&a.state, &controller), 0);
+
+        // Live: the agents delegated before activation count. The root has
+        // three, so it gets no fourth, and the agents it has keep their
+        // terms and may have them changed.
+        super::super::set_governed_param_for_test(&mut a.state, KEY, 0);
+        assert_eq!(
+            seed_gas(&a.state, &controller),
+            3 * super::super::agent_cap::GAS_SEED_PER_AGENT
+        );
+        let refused = another(&mut a.state, &terms, &root, "fourth").unwrap_err();
+        assert!(refused.contains("at most 2"), "{refused}");
+        assert!(read_agent_terms(&a.state, &a.did).is_some());
+        let renew = machine_approval(OP_UPDATE_AGENT_TERMS, &terms.target(Some(false)), &root);
+        set_terms(&mut a.state, &terms, Some(false), &renew, 1).unwrap();
+
+        // Revocations recorded before the counter is seeded are read by the
+        // seeding scan; the first agent admitted seeds it.
+        for did in [third.as_str(), a.did.as_str()] {
+            a.state.set_storage(
+                &SYSTEM_ADDRESS,
+                &super::super::identity_revocation_key(did),
+                vec![1],
+            );
+        }
+        assert_eq!(live_agents(&a.state, &controller), 1);
+        another(&mut a.state, &terms, &root, "fourth").unwrap();
+        assert_eq!(seed_gas(&a.state, &controller), 0, "seeded");
+        assert_eq!(live_agents(&a.state, &controller), 2);
+        let full = another(&mut a.state, &terms, &root, "fifth").unwrap_err();
+        assert!(full.contains("at most 2"), "{full}");
+
+        // Another root is counted on its own.
+        let (b, _, other) = approved(36);
+        assert_eq!(live_agents(&b.state, &other.controller_did), 1);
+    }
+
+    /// Under the live rule the counter follows every revocation path once,
+    /// and a quarantine, which can be lifted, keeps the agent counted.
+    #[test]
+    fn revoking_frees_a_place_once_and_a_quarantine_does_not() {
+        use super::super::agent_audit::{AgentQuarantine, mark_revoked, quarantine_key};
+        use super::super::agent_cap::{KEY, LIMIT_KEY, live_agents};
+        let (mut a, root, terms) = approved(37);
+        let controller = terms.controller_did.clone();
+        super::super::set_governed_param_for_test(&mut a.state, LIMIT_KEY, 2);
+        super::super::set_governed_param_for_test(&mut a.state, KEY, 0);
+        let second = another(&mut a.state, &terms, &root, "second").unwrap();
+        assert_eq!(live_agents(&a.state, &controller), 2);
+        assert!(another(&mut a.state, &terms, &root, "third").is_err());
+
+        let quarantine = AgentQuarantine {
+            controller_did: controller.clone(),
+            by: "validators".into(),
+            reason_code: 1,
+            evidence_hash: None,
+            at_ms: 0,
+            revoked: false,
+        };
+        write_json(
+            &mut a.state,
+            &quarantine_key(&second),
+            &quarantine,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(live_agents(&a.state, &controller), 2, "a quarantine counts");
+        assert!(another(&mut a.state, &terms, &root, "third").is_err());
+
+        for _ in 0..2 {
+            let _ = mark_revoked(
+                &mut a.state,
+                &second,
+                &controller,
+                "root".into(),
+                &[7; 32],
+                1,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            );
+        }
+        assert_eq!(live_agents(&a.state, &controller), 1, "uncounted once");
+        another(&mut a.state, &terms, &root, "third").unwrap();
+        assert_eq!(live_agents(&a.state, &controller), 2);
+    }
+
     #[test]
     fn the_renewal_window_follows_governance() {
         let (mut a, _, _) = approved(34);
@@ -2676,5 +2983,50 @@ mod machine_root_tests {
         a.act(&a.action(10), DAY_MS - 1).unwrap();
         let lapsed = a.act(&a.action(10), DAY_MS).unwrap_err();
         assert!(lapsed.contains("renewal"), "{lapsed}");
+    }
+
+    /// Terms authorize nothing from the moment they expire.
+    #[test]
+    fn an_agent_does_not_act_on_expired_terms() {
+        let root = TestHybridSigner::hybrid(32);
+        let (mut state, mut terms, did) = world(&root);
+        terms.expires_at_ms = Some(5);
+        let approval = machine_approval(OP_DELEGATE_AGENT, &terms.target(None), &root);
+        set_terms(&mut state, &terms, None, &approval, 0).unwrap();
+        let mut a = Agent {
+            state,
+            did,
+            key: Agent::node_key(),
+        };
+        a.act(&a.action(10), 4).unwrap();
+        let wallet = a.state.get_balance(&agent_wallet(&a.did));
+        let err = a.act(&a.action(10), 5).unwrap_err();
+        assert!(err.contains("expiry"), "{err}");
+        assert_eq!(a.state.get_balance(&agent_wallet(&a.did)), wallet);
+    }
+
+    /// A node cannot spend an agent's authority it does not hold: an action
+    /// naming a machine the terms do not list is refused, and so is one that
+    /// names the listed machine but is signed by another node's key.
+    #[test]
+    fn a_node_the_terms_do_not_name_cannot_act_for_the_agent() {
+        let root = TestHybridSigner::hybrid(33);
+        let (mut state, terms, did) = world(&root);
+        let approval = machine_approval(OP_DELEGATE_AGENT, &terms.target(None), &root);
+        set_terms(&mut state, &terms, None, &approval, 0).unwrap();
+        let other = p256::ecdsa::SigningKey::from_slice(&[8u8; 32]).unwrap();
+        let mut a = Agent {
+            state,
+            did,
+            key: other,
+        };
+        let wallet = a.state.get_balance(&agent_wallet(&a.did));
+
+        let mut elsewhere = a.action(10);
+        elsewhere.machine_did = "did:tenzro:machine:elsewhere".into();
+        assert!(a.act(&elsewhere, 1).is_err());
+        assert!(a.act(&a.action(10), 1).is_err());
+        assert_eq!(a.state.get_balance(&agent_wallet(&a.did)), wallet);
+        assert_eq!(read_agent_spent(&a.state, &a.did, 1), 0);
     }
 }

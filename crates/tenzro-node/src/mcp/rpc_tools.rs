@@ -31,6 +31,30 @@ pub(super) struct RpcTool {
 
 pub(super) const RPC_TOOLS: &[RpcTool] = &[
     RpcTool {
+        method: "tenzro_getAppTransportInfo",
+        name: "get_app_transport_info",
+        access: Access::Read,
+        description: "Where application devices reach this node over WebTransport (preview): the listener URL and, when the node mints its own certificates, their SHA-256 hashes signed by the key its access tokens verify under. No params.",
+    },
+    RpcTool {
+        method: "tenzro_getAppTransportUsage",
+        name: "get_app_transport_usage",
+        access: Access::Read,
+        description: "What the app transport carried for the signed-in caller (streams, bytes sent, bytes received), or for every identity when the caller administers the node. No params.",
+    },
+    RpcTool {
+        method: "tenzro_resolvePaymentIntent",
+        name: "resolve_payment_intent",
+        access: Access::Read,
+        description: "The settlement plan leg that carries a payment stated without a rail: the payee's first accepted rail the payer can fund and the caller priced. Params: `usd_e6`, `payee`, `accepts`, `means`, `amounts` (one per accepted rail), optional `instruction_digest` and `reserve`. Stateless.",
+    },
+    RpcTool {
+        method: "tenzro_recordExecutionReceipt",
+        name: "record_execution_receipt",
+        access: Access::Owner,
+        description: "Record, once, a receipt an outside platform gave an agent for work it ran there: the receipt's SHA-256 enters the agent's signed audit log. Params: `agent_did`, `platform`, `receipt`, optional `units`, and the agent's `did_envelope` over the request. A receipt sent again returns its first record with `first: false`.",
+    },
+    RpcTool {
         method: "tenzro_checkDelegateTarget",
         name: "check_delegate_target",
         access: Access::Read,
@@ -43,10 +67,22 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         description: "An account's opt-in outflow policy, its pending change and its releases. Params: `account` (hex). Returns the policy, or `null` when none is set.",
     },
     RpcTool {
+        method: "tenzro_getAgentTermsCredential",
+        name: "get_agent_terms_credential",
+        access: Access::Read,
+        description: "A delegated agent's Terms as an unsigned W3C VC 2.0 credential its controller signs, the claims of an OAuth on-behalf-of token, and agent registration data. Params: `agent_did`. Null when the agent has no Terms.",
+    },
+    RpcTool {
         method: "tenzro_getKeystore",
         name: "get_keystore",
         access: Access::Read,
         description: "A passkey account's keystore from consensus state: its linked passkeys, policy, recovery signers and pending recovery, its commitment (the previous_commitment its next KeystoreUpdate names) and whether its passkeys may spend now. Pass `anchor` for an account with no keystore on chain to get its genesis record.",
+    },
+    RpcTool {
+        method: "tenzro_getAccountSigningKey",
+        name: "get_account_signing_key",
+        access: Access::Read,
+        description: "The public keys a P-256 key signs with for an account now, from consensus state, as a signature by it is judged in a block. Params: `public_key` (hex `x || y`), `account` (hex). Returns `p256`, `ml_dsa` (the ML-DSA-65 key enrolled for it, or `null`) and `rp_id` (the relying party a passkey assertion must be for when the account's keystore links the key, else `null`); an error says why the key does not act for the account.",
     },
     RpcTool {
         method: "tenzro_getToolCallRecords",
@@ -181,6 +217,12 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         description: "The first step of creating a cluster or changing its members. Derives the cluster DID from the operator and name and returns what must be signed: the custody challenge request the operator's passkey answers, and the digest each member's hardware key accepts. Computes only; stores nothing.",
     },
     RpcTool {
+        method: "tenzro_estimateGas",
+        name: "estimate_gas",
+        access: Access::Read,
+        description: "The gas limit a native transaction needs, from the params `tenzro_getSigningPayload` takes (`from`, `to`, `nonce`, `chain_id`, `gas_price`, `timestamp`, `valid_until`, `tx_type`). Returns a hex quantity: what the transaction's kind is charged, computed from its payload and the latest state where the charge depends on them. An EVM transaction is estimated with `eth_estimateGas`.",
+    },
+    RpcTool {
         method: "tenzro_eventStatus",
         name: "event_status",
         access: Access::Read,
@@ -205,10 +247,22 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         description: "Top-level dispatcher for `tenzro_chat`. Routes by shape: - presence of `messages` → rich shape (multi-turn, tools, content blocks) - presence of `message` → simple shape (single-turn string) - both or neither → error See `docs/chat-api.md` for the public contract. `tenzro_fabricProfile` — how this node's accelerators and network are wired.",
     },
     RpcTool {
+        method: "tenzro_fileChallengeFault",
+        name: "file_challenge_fault",
+        access: Access::Operator,
+        description: "Take an inference challenge its committee upheld to the chain: `{ challenge_id, dispute }`, with `dispute` the answer the challenged commitment was signed into (`{ receipt, request, output }`). The node files the inference fault for it from its validator account; one already on chain is not filed again. Returns `{ challenge_id, fault_id }`. Operator only.",
+    },
+    RpcTool {
         method: "tenzro_flagAgentAudit",
         name: "flag_agent_audit",
         access: Access::Operator,
         description: "`epoch`, `findings`: submit this validator's findings, such as quarantining an agent on the network's authority or tripping the bridge circuit breaker. They take effect once validators holding two thirds of bonded stake have made them. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_fleetHostEvidence",
+        name: "fleet_host_evidence",
+        access: Access::Operator,
+        description: "This machine's evidence for the fleet hardware proof an operator sends this reward epoch: its TPM's quote over the epoch's possession challenge. Params: `operator` (the operator's identity), `bind` (optional bool: add the quote that joins this host to the operator's fleet), `gpu` (optional bool: add this host's GPU report). Returns one fleet host record; nothing is submitted. Backs `tenzro fleet evidence`.",
     },
     RpcTool {
         method: "tenzro_get7702Delegation",
@@ -316,7 +370,7 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         method: "tenzro_getCompactCertificate",
         name: "get_compact_certificate",
         access: Access::Read,
-        description: "The compact certificate with `index`, or the latest, and the session certificates its slots name, as hex bincode (`tenzro_consensus::compact::CompactCertificate`, `Vec<tenzro_consensus::SessionCertificate>`).",
+        description: "The compact certificate with `index`, or the latest, and the session certificates its slots name, as hex bincode (`tenzro_light::compact::CompactCertificate`, `Vec<tenzro_consensus::SessionCertificate>`).",
     },
     RpcTool {
         method: "tenzro_getConsensusMetrics",
@@ -514,7 +568,19 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         method: "tenzro_getProviderScorecard",
         name: "get_provider_scorecard",
         access: Access::Read,
-        description: "One provider's scorecard. Params: `provider` (account address). Returns its standing on chain (identity, compute bond, role stakes, validator entry), this node's reputation score for it, the price cards it announced, and, from the settlements this node recorded, its settled count, value and p50/p95 latency over the last 24 hours and 7 days.",
+        description: "One provider's scorecard. Params: `provider` (account address). Returns its standing on chain (identity, compute bond, role stakes, validator entry), the work consensus verified for it (`verified_work`: its latest reward coupons with epoch, role bucket, work weight, reward and status, and its hardware level record; the same on every node), this node's reputation score for it, the price cards it announced, its settled value and count in its last two reward epochs as consensus state keeps them (`revenue`), the models its latest heartbeat reports warm (`warm_models`), and, from the settlements this node recorded, its settled count, value and p50/p95 latency over the last 24 hours and 7 days.",
+    },
+    RpcTool {
+        method: "tenzro_getStorageHoldingReceipt",
+        name: "get_storage_holding_receipt",
+        access: Access::Read,
+        description: "This node's signed receipt for the shards it holds now of one object stored under a placement constraint. Params: `object_id`. Returns `{ receipt, constraint }` or null when it holds none: the receipt names the object, the held shard commitments, the holder's machine DID, its operator account, the region it declares, its jurisdiction claim, the constraint digest and the signing time, signed by the node's record signer. Region and claim are what the operator declares, not a geolocation.",
+    },
+    RpcTool {
+        method: "tenzro_listStorageProviders",
+        name: "list_storage_providers",
+        access: Access::Read,
+        description: "The storage providers this node has heard announce storage, best record first: each with its endpoint id, provider account, declared region, its standing (0..standing_max) read from consensus state and whether any SLA verdict in the standing window judged it. Also returns the governed share of each shard's replicas placement reserves for providers with no record yet. No params.",
     },
     RpcTool {
         method: "tenzro_getNetworkActivity",
@@ -557,6 +623,36 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         name: "graceful_exit",
         access: Access::Operator,
         description: "Admin RPC for clean validator shutdown. Pattern: Solana `agave-validator exit` + Cosmos SDK `cosmovisor` halt. The caller (operator, K8s preStop hook, or systemd unit) requests an orderly stand-down; we wait until the local replica leads none of the rounds its leader schedule looks ahead over, then trigger the existing `NodeEvent::Shutdown` path. The 5s drain in `main.rs` does the rest. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_restartNode",
+        name: "restart_node",
+        access: Access::Operator,
+        description: "Restarts this node through the service that runs it: the node stands down as for a graceful exit (optional `max_wait_secs`, `force`), drains and ends with the status its service starts it again on. Refused when no service runs the node, since nothing would start it again. Returns `{ok, service, waited_secs}` before the process ends. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_installUpdate",
+        name: "install_update",
+        access: Access::Operator,
+        description: "Starts the installed updater for the newest verified release this node knows of, the same run an armed automatic install starts. The updater stages the release and restarts only a node with no staked role; a staked node runs the new release after `tenzro_restartNode`. Refused when no newer release is known, while another install runs, or when the updater is not installed beside the node. Returns `{ok, version}` once the updater is started. No params. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_listConditions",
+        name: "list_conditions",
+        access: Access::Operator,
+        description: "What on this node is open and needs its operator's attention, the most severe first: the node stopping, catching up with or not following the network, a subsystem degraded or not working, a committee that loses its quorum if this validator stops, a newer release ready to install, a role stake below what the role requires, the data disk filling, a key holder with no grant in force. Each has an id that stays the same while it is open, a kind, a code, a severity (info, warning, critical), a title, a detail, the time it began (`since`) and the operator's acknowledgement (`ack`: `{by, reason, at}` or null). One the node acts on by itself once its operator approves (an update, when a device is bound to the operator) also has `needs: \"passkey\"`, a `challenge` (base64url) and the `rp_id` a passkey signs it under; `tenzro_submitApproval` answers it. An empty list means nothing is open. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_acknowledgeCondition",
+        name: "acknowledge_condition",
+        access: Access::Operator,
+        description: "Acknowledges an open condition from `tenzro_listConditions`. Params `{id, since, reason}`: `since` as the list gives it, so an acknowledgement never lands on a later opening of the condition; `reason` is 1 to 500 characters. The node stores it and lists it as the condition's `ack` until the condition clears or grows graver, and publishes it as a `condition_answered` event. Refused when the condition is not open or opened again since. Returns `{ok, id, ack}`. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_submitApproval",
+        name: "submit_approval",
+        access: Access::Operator,
+        description: "Answers an open condition that asks (`needs` in `tenzro_listConditions`). Params `{condition_id, approve, assertion?}`. An approval carries `assertion: {credential_id, authenticator_data, client_data_json, signature}` (all base64url): a passkey bound to the operator signing the condition's `challenge` under its `rp_id`, with user verification. The node then does what the condition names (for an update, starts its install) and the condition asks no more. A challenge answers once; a refused approval leaves the condition asking with a fresh one. A decline needs no assertion: the condition stays listed while it holds and asks no more. Returns `{ok, condition_id, approved, done?}`. Operator only: the access policy admits the operator DID or a policy admin.",
     },
     RpcTool {
         method: "tenzro_getHardwareProfile",
@@ -652,7 +748,7 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         method: "tenzro_getHardwareLevel",
         name: "get_hardware_level",
         access: Access::Read,
-        description: "An address's hardware security level and hardware type (TPM vendor and specification, signature scheme), derived on chain from verified attestation: the record the last reward epoch close wrote and the level derived now. Params: `{ address }`.",
+        description: "An address's hardware security level and hardware type (TPM vendor and specification, signature scheme), derived on chain from verified attestation: the record the last reward epoch close wrote, the level derived now, and `unproven`, why the address is at level 0 when it is. Params: `{ address }`.",
     },
     RpcTool {
         method: "tenzro_listRewardCoupons",
@@ -853,6 +949,48 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         description: "Unbind a device and end the sessions it granted. The two happen together, and that is the point: removing the device without ending its sessions would leave a lost phone's access live, which is the exact situation the user is trying to fix. Operator only: the access policy admits the operator DID or a policy admin.",
     },
     RpcTool {
+        method: "tenzro_pairDevice",
+        name: "pair_device",
+        access: Access::Owner,
+        description: "Pair a device with this node. With no arguments an administrator starts a pairing and gets a one-time code, its QR code as rows of 0 and 1, the pairing's id, and under `lan` the addresses of the node's paired-device listener with the certificate hashes a device pins there; with `id` an administrator reads where that pairing stands. With `secret`, `label` and `kind` (phone, tablet, tv, car, browser or desktop) a device signed in with its own key redeems the code: the access policy then names that identity for the admin calls a paired device may make, and for no others. A code works once and for five minutes; its first four characters name the pairing, five wrong secrets cancel the pairing they name, and five wrong codes from one address are the last the node reads from it for five minutes. A device not yet paired signs in by passing the code as `pairing_code` to `tenzro_issueAccessToken`, for a token only this method accepts.",
+    },
+    RpcTool {
+        method: "tenzro_listPairedDevices",
+        name: "list_paired_devices",
+        access: Access::Operator,
+        description: "The devices paired with this node: identity, label, kind, when each was paired, and which one is the caller. Answers an administrator or a paired device.",
+    },
+    RpcTool {
+        method: "tenzro_requestDeviceCode",
+        name: "request_device_code",
+        access: Access::OpenWrite,
+        description: "A device with no passkey or hardware key of its own, such as a television, asks to be signed in (the OAuth device authorization grant's shape). With `dpop_jkt`, the thumbprint of the key its tokens will be bound to, and an optional `label`, it gets a secret `device_code`, a `user_code` to show, `expires_in` (600 seconds) and the poll `interval`. Two waiting codes per address and sixteen in all.",
+    },
+    RpcTool {
+        method: "tenzro_approveDeviceCode",
+        name: "approve_device_code",
+        access: Access::Operator,
+        description: "Answer a device waiting with `user_code`, from an administrator or a paired device, with `approve` true or false. Approving needs the operator's passkey on this call: without `assertion` the call is refused with a `challenge` to sign, the `rp_id` and the device's `label`; with the assertion the device is listed with the paired devices as kind tv and its next poll signs it in.",
+    },
+    RpcTool {
+        method: "tenzro_pollDeviceCode",
+        name: "poll_device_code",
+        access: Access::OpenWrite,
+        description: "A device asks, with its `device_code`, whether it is signed in: `authorization_pending`, `slow_down`, `access_denied` or `expired_token` until approved; then, for as long as it stays paired, an access token bound to its key that opens the open reads alone.",
+    },
+    RpcTool {
+        method: "tenzro_unpairDevice",
+        name: "unpair_device",
+        access: Access::Operator,
+        description: "End a paired device's access and drop its record. Takes the device's `id`. An administrator removes any device; a paired device removes only itself.",
+    },
+    RpcTool {
+        method: "tenzro_getRpcProviderLeg",
+        name: "get_rpc_provider_leg",
+        access: Access::Read,
+        description: "The validator an address names as its RPC provider, the governed leg paid to it, whether the leg is in force, and what the leg has paid the address as a validator.",
+    },
+    RpcTool {
         method: "tenzro_getRole",
         name: "get_role",
         access: Access::Read,
@@ -928,13 +1066,37 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         method: "tenzro_signChallengeVote",
         name: "sign_challenge_vote",
         access: Access::Operator,
-        description: "Or `{ challenge_id, verdict, salt }` → `{ voter, public_key, signature }`. Params: `{ challenge_id, commit_hash }`. Operator only: the access policy admits the operator DID or a policy admin.",
+        description: "Sign this node's vote on a challenge it holds a seat on, with its validator key. Signs only the verdict this node's own re-execution found. `phase: \"commit\"` → `{ voter, public_key, commit_hash, signature }`; `phase: \"reveal\"` → `{ voter, public_key, signature }`. Params: `{ phase, challenge_id, verdict, salt }`. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_reexecuteChallenge",
+        name: "reexecute_challenge",
+        access: Access::Operator,
+        description: "On a seat's own node: take a challenge's inputs from the node holding it, check them against the provider's receipt, re-execute them through the model and record the verdict this node may then sign (`true` when the commitment did not verify). Params: `{ challenge_id, inputs? }` → `{ challenge_id, voter, verdict, scored: { steps_total, steps_passed, failing_steps } }`. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_listSeatDuties",
+        name: "list_seat_duties",
+        access: Access::Operator,
+        description: "The open inference challenges this node holds a committee seat on, with their deadlines and whether this node has re-executed (and the verdict and scores it found), committed and revealed. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_getChallengeInputs",
+        name: "get_challenge_inputs",
+        access: Access::Read,
+        description: "On the node a challenge was filed on: the challenged inputs, for a drawn seat only. The request is signed by the seat's validator key over the challenge id, the voter and `requested_at`. Params: `{ challenge_id, voter, requested_at, signature }`.",
     },
     RpcTool {
         method: "tenzro_signalUpgradeReady",
         name: "signal_upgrade_ready",
         access: Access::Operator,
         description: "Hash the binary staged in this node's data directory, and if it is the one named, quote it with this machine's TPM and send `UpgradeReady` from the validator account. Params: `{ code_hash }`. Operator only: the access policy admits the operator DID or a policy admin.",
+    },
+    RpcTool {
+        method: "tenzro_slaGetEnergy",
+        name: "sla_get_energy",
+        access: Access::Read,
+        description: "What SLA challenges cost the bonded compute fleet in energy at the probe cadence in force: probes per unit per day, the challenge share of the fleet's own energy in basis points against the governed budget, and per declared readiness tier the units, burst cadence and per-unit challenge and idle energy. `wake_rule_live` says whether scheduled probes are priced as liveness replies and bursts as tier wakes, or every probe as a cool-tier wake. Joule figures are decimal strings.",
     },
     RpcTool {
         method: "tenzro_slaVerdict",
@@ -946,7 +1108,7 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         method: "tenzro_standbyQuote",
         name: "standby_quote",
         access: Access::OpenWrite,
-        description: "Live operators holding `model_id` on standby in `jurisdiction`, cheapest first, with the account a reservation escrow must pay and the hourly fee each one advertises. A buyer funds a stream escrow to the returned `operator` before the session starts. Params: `{model_id, jurisdiction}`.",
+        description: "Live operators holding `model_id` on standby in `jurisdiction`, cheapest first, with the account a reservation escrow must pay, the hourly fee each one advertises, and that fee as basis points of the chain's compute price index for the operator's hardware class (`fee_bps_of_index`, null while the class has no index). A buyer funds a stream escrow to the returned `operator` before the session starts. Params: `{model_id, jurisdiction}`.",
     },
     RpcTool {
         method: "tenzro_submitTrustRecord",
@@ -958,7 +1120,7 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         method: "tenzro_syncing",
         name: "syncing",
         access: Access::Read,
-        description: "Whether this node is syncing, and its current and target heights.",
+        description: "Whether this node follows the network: one state (starting, catching_up, following, stalled) with the reason when it is not following, its height, the highest height it heard from the network, the gap now and a little earlier, and the time since its last import.",
     },
     RpcTool {
         method: "tenzro_teeAttestationChallenge",
@@ -1012,7 +1174,7 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         method: "tenzro_validatorPublicKeys",
         name: "validator_public_keys",
         access: Access::Operator,
-        description: "This node's own validator entry, formatted for a genesis file. Everything a founding validator entry needs: the account, the two public halves of the hardware consensus key, the node key, and both keys' proofs of possession over the registration. A node without a TPM 2.0 or Secure Enclave has no entry to give. Operator only: the access policy admits the operator DID or a policy admin.",
+        description: "This node's own validator entry, formatted for a genesis file. Everything a founding validator entry needs: the account, the two public halves of the hardware consensus key, the node key, and both keys' proofs of possession over the registration. A node with no hardware consensus key (its own TPM 2.0 or Secure Enclave, or another machine's TPM through the key holder) has no entry to give. Operator only: the access policy admits the operator DID or a policy admin.",
     },
     RpcTool {
         method: "tenzro_validatorSelfStake",
@@ -1037,6 +1199,12 @@ pub(super) const RPC_TOOLS: &[RpcTool] = &[
         name: "verify_inference_receipt",
         access: Access::Read,
         description: "→ `{ valid, error?, ... }`. With `level: \"tee\"` a receipt without TEE evidence is not valid. Params: `{ receipt, level? }`.",
+    },
+    RpcTool {
+        method: "tenzro_verifyJurisdictionReceipt",
+        name: "verify_jurisdiction_receipt",
+        access: Access::Read,
+        description: "→ `{ valid, error?, form, machine_did, registered, ... }`: the receipt's signature in either form (`record`, or `identity_key` checked against the machine's key history on chain) and whether the key it names is registered for its machine. Params: `{ receipt }`.",
     },
     RpcTool {
         method: "tenzro_verifyKyaCredential",

@@ -29,6 +29,11 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
 function Section([string]$t) { Write-Host ''; Write-Host "== $t" }
 
 $MKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+# What differs between a PATH now and its snapshot, for a failed check.
+function Get-PathDiff($now, $snap) {
+    $n = $now.Value -split ';'; $o = $snap.Value -split ';'
+    "kind $($snap.Kind) -> $($now.Kind); added [$(($n | Where-Object { $o -notcontains $_ }) -join ';')]; removed [$(($o | Where-Object { $n -notcontains $_ }) -join ';')]"
+}
 function Get-PathRaw([string]$scope) {
     $k = if ($scope -eq 'machine') { [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($MKey) } else { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment') }
     try {
@@ -88,7 +93,7 @@ $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\T
 function Verify-Installed([string]$mode, [string]$version) {
     $bin = Join-Path $InstallDir 'bin'
     Check 'network profile present: share\network\<chain_id>.toml' (@(Get-ChildItem -LiteralPath (Join-Path $InstallDir 'share\network') -Filter '*.toml' -ErrorAction SilentlyContinue).Count -ge 1)
-    foreach ($f in 'bin\tenzro.exe', 'bin\tenzro-node.exe', 'bin\DirectML.dll', 'bin\onnxruntime_providers_shared.dll', 'bin\onnxruntime_providers_cuda.dll', 'bin\tenzro-check.cmd', 'LICENSE.txt', 'NOTICE.txt', 'PROVENANCE.txt', 'tenzro-check.ps1', 'tenzro-terminal.cmd') {
+    foreach ($f in 'bin\tenzro.exe', 'bin\tenzro-node.exe', 'bin\DirectML.dll', 'bin\onnxruntime_providers_shared.dll', 'bin\onnxruntime_providers_cuda.dll', 'bin\tenzro-check.cmd', 'control\TenzroControl.exe', 'control\tenzro_control.dll', 'LICENSE.txt', 'NOTICE.txt', 'PROVENANCE.txt', 'tenzro-check.ps1', 'tenzro-terminal.cmd') {
         Check "file present: $f" (Test-Path -LiteralPath (Join-Path $InstallDir $f))
     }
     $arp = @(ArpEntries)
@@ -97,7 +102,7 @@ function Verify-Installed([string]$mode, [string]$version) {
         Check "ARP publisher is Tenzro" ($arp[0].Publisher -eq 'Tenzro') $arp[0].Publisher
         Check "ARP version is $version" ($arp[0].DisplayVersion -eq $version) $arp[0].DisplayVersion
     }
-    foreach ($s in 'Tenzro.lnk', 'Tenzro setup.lnk', 'Tenzro hardware check.lnk', 'Uninstall Tenzro.lnk') {
+    foreach ($s in 'Tenzro Control.lnk', 'Tenzro.lnk', 'Tenzro setup.lnk', 'Tenzro hardware check.lnk', 'Uninstall Tenzro.lnk') {
         Check "shortcut: $s" (Test-Path -LiteralPath (Join-Path $startMenu $s))
     }
     $sys = Count-Entry 'machine' $bin; $usr = Count-Entry 'user' $bin
@@ -177,8 +182,8 @@ try {
     Check 'msiexec exit code 0' ($rc -eq 0) "rc=$rc"
     Verify-Removed 'after uninstall'
     $a = Get-PathRaw 'machine'; $b = Get-PathRaw 'user'
-    Check 'machine PATH identical to the snapshot' ($a.Value -eq $snapM.Value -and $a.Kind -eq $snapM.Kind)
-    Check 'user PATH identical to the snapshot' ($b.Value -eq $snapU.Value -and $b.Kind -eq $snapU.Kind)
+    Check 'machine PATH identical to the snapshot' ($a.Value -eq $snapM.Value -and $a.Kind -eq $snapM.Kind) (Get-PathDiff $a $snapM)
+    Check 'user PATH identical to the snapshot' ($b.Value -eq $snapU.Value -and $b.Kind -eq $snapU.Kind) (Get-PathDiff $b $snapU)
 
     # ------------------------------------------------------------ user
     Section 'Install, ADDTOPATH=user'
@@ -193,7 +198,7 @@ try {
     Check 'uninstall by package path: exit code 0' ($rc -eq 0) "rc=$rc"
     Verify-Removed 'user mode uninstall'
     $b = Get-PathRaw 'user'
-    Check 'user PATH identical to the snapshot' ($b.Value -eq $snapU.Value -and $b.Kind -eq $snapU.Kind)
+    Check 'user PATH identical to the snapshot' ($b.Value -eq $snapU.Value -and $b.Kind -eq $snapU.Kind) (Get-PathDiff $b $snapU)
 
     # ------------------------------------------------------------ none
     Section 'Install, ADDTOPATH=none'
@@ -257,8 +262,8 @@ finally {
 
 Section 'Final state'
 $a = Get-PathRaw 'machine'; $b = Get-PathRaw 'user'
-Check 'machine PATH identical to the start-of-run snapshot' ($a.Value -eq $snapM.Value -and $a.Kind -eq $snapM.Kind)
-Check 'user PATH identical to the start-of-run snapshot' ($b.Value -eq $snapU.Value -and $b.Kind -eq $snapU.Kind)
+Check 'machine PATH identical to the start-of-run snapshot' ($a.Value -eq $snapM.Value -and $a.Kind -eq $snapM.Kind) (Get-PathDiff $a $snapM)
+Check 'user PATH identical to the start-of-run snapshot' ($b.Value -eq $snapU.Value -and $b.Kind -eq $snapU.Kind) (Get-PathDiff $b $snapU)
 Check 'test folder removed' (-not (Test-Path -LiteralPath $InstallDir))
 Write-Host "Logs: $LogDir"
 Write-Host ''

@@ -1,8 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { Reading, Snapshot } from "./data.js";
-import { Field, Heading, Muted, Show, Table, Word, type Column } from "./ui.js";
-import { formatDuration, formatTnzo, shortId } from "./format.js";
+import type { Alert, AlertEvent, Level } from "./alerts.js";
+import type { Peer, Reading, Snapshot } from "./data.js";
+import { Field, Heading, Muted, Show, Table, Word, type Column, type Tone } from "./ui.js";
+import { ageText, formatDuration, formatTnzo, shortId } from "./format.js";
+import type { Shown } from "./redact.js";
 
 export interface ScreenProps {
   snap: Snapshot;
@@ -12,10 +14,23 @@ export interface ScreenProps {
   selected: number;
   account: string | null;
   accountSource: "chosen" | "payee" | "none";
+  alerts: Alert[];
+  alertSource: "conditions" | "rules" | "unknown";
+  events: AlertEvent[];
+  settings: { url: Shown; refreshMs: number; color: boolean };
 }
 
-export function rowCount(screen: string, snap: Snapshot): number {
+const LEVEL_WORD: Record<Level, string> = { page: "PAGE", warn: "WARN", info: "INFO" };
+const LEVEL_TONE: Record<Level, Tone> = { page: "bad", warn: "warn", info: "plain" };
+
+export function rowCount(screen: string, snap: Snapshot, alerts: Alert[], events: AlertEvent[]): number {
   switch (screen) {
+    case "health":
+      return alerts.length;
+    case "logs":
+      return events.length;
+    case "peers":
+      return snap.peers.state === "ok" ? snap.peers.value.length : snap.peers.state === "error" && snap.peers.last ? snap.peers.last.value.length : 0;
     case "models":
       return snap.models.state === "ok" ? snap.models.value.length : snap.models.state === "error" && snap.models.last ? snap.models.last.value.length : 0;
     case "validators":
@@ -209,6 +224,96 @@ export function Governance({ snap, now, selected, height, width }: ScreenProps) 
       {r.state === "pending" ? <Muted>loading...</Muted> : null}
       {r.state === "error" ? (r.last ? <Show r={r} now={now}>{() => null}</Show> : <Word tone="bad">no data: {r.error}</Word>) : null}
       {hasRows(r) ? <Table columns={cols} rows={rows} width={width} selected={selected} height={height - 1} empty="No proposals yet." /> : null}
+    </Box>
+  );
+}
+
+export function Health({ alerts, alertSource, now, selected, height, width }: ScreenProps) {
+  const cols: Column<Alert>[] = [
+    { title: "LEVEL", width: 5, get: (a) => LEVEL_WORD[a.level] },
+    { title: "FOR", width: 9, get: (a) => ageText(now - a.since).replace(" ago", "") },
+    { title: "ACK", width: 3, get: (a) => (a.ack ? "yes" : "no") },
+    { title: "WHAT", width: 56, get: (a) => a.title },
+  ];
+  const cur = alerts[selected];
+  const from = alertSource === "conditions" ? "this node's conditions list, and the console's rules for the rest" : alertSource === "rules" ? "the console's own rules (this node serves no conditions list)" : "not known yet";
+  return (
+    <Box flexDirection="column">
+      <Heading>Health: what needs attention</Heading>
+      <Muted>{"Source: " + from}</Muted>
+      <Table columns={cols} rows={alerts} width={width} selected={selected} height={height - 5} empty="Nothing needs attention." />
+      {cur ? (
+        <Box flexDirection="column">
+          <Text wrap="truncate-end">
+            {"  "}
+            <Word tone={LEVEL_TONE[cur.level]}>{LEVEL_WORD[cur.level]}</Word> {cur.detail}
+          </Text>
+          {cur.ack ? <Muted>{`  acknowledged ${ageText(now - cur.ack.at)}: ${cur.ack.reason}`}</Muted> : <Muted>{"  not acknowledged. Press a to acknowledge it with a reason."}</Muted>}
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
+export function Peers({ snap, now, selected, height, width }: ScreenProps) {
+  const cols: Column<Peer>[] = [
+    { title: "PEER", width: 18, get: (p) => (p.self ? "this node" : shortId(p.peer_id, 8, 6)) },
+    { title: "ROLES", width: 22, get: (p) => p.roles.join(", ") || "none" },
+    { title: "TIER", width: 8, get: (p) => p.hardware_tier ?? "-" },
+    { title: "ANCHOR", width: 10, get: (p) => p.identity_anchor ?? "-" },
+    { title: "REGION", width: 8, get: (p) => p.region ?? "-" },
+    { title: "HEARD", width: 10, right: true, get: (p) => (p.self || p.age_ms === undefined ? "-" : ageText(p.age_ms)) },
+  ];
+  const r = snap.peers;
+  const rows = r.state === "ok" ? r.value : r.state === "error" && r.last ? r.last.value : [];
+  return (
+    <Box flexDirection="column">
+      <Heading>Peers this node has heard from</Heading>
+      {r.state === "pending" ? <Muted>loading...</Muted> : null}
+      {r.state === "error" ? (r.last ? <Show r={r} now={now}>{() => null}</Show> : <Word tone="bad">no data: {r.error}</Word>) : null}
+      {hasRows(r) ? <Table columns={cols} rows={rows} width={width} selected={selected} height={height - 3} empty="No peers have announced themselves yet." /> : null}
+      {rows[selected] ? <Muted>{"  machine: " + (rows[selected]!.machine_did ?? "not announced")}</Muted> : null}
+    </Box>
+  );
+}
+
+export function Logs({ events, now, selected, height, width }: ScreenProps) {
+  const cols: Column<AlertEvent>[] = [
+    { title: "WHEN", width: 12, get: (e) => ageText(now - e.at) },
+    { title: "EVENT", width: 12, get: (e) => e.what },
+    { title: "LEVEL", width: 5, get: (e) => LEVEL_WORD[e.level] },
+    { title: "WHAT", width: 44, get: (e) => e.title },
+  ];
+  return (
+    <Box flexDirection="column">
+      <Heading>Log of this console session, newest first</Heading>
+      <Muted>Alerts raised, cleared and acknowledged since the console started.</Muted>
+      <Muted>The node's own log stays on the node.</Muted>
+      <Table columns={cols} rows={events} width={width} selected={selected} height={height - 3} empty="Nothing has happened yet." />
+    </Box>
+  );
+}
+
+export function Settings({ settings, account, accountSource }: ScreenProps) {
+  return (
+    <Box flexDirection="column">
+      <Heading>Settings of this console</Heading>
+      <Field label="Node">
+        <Text>{settings.url}</Text>
+      </Field>
+      <Field label="Refresh">
+        <Text>{`every ${formatDuration(settings.refreshMs / 1000)}; an answer older than ${formatDuration((3 * settings.refreshMs) / 1000)} is shown as stale`}</Text>
+      </Field>
+      <Field label="Color">
+        <Text>{settings.color ? "on" : "off"}</Text>
+      </Field>
+      <Field label="Account">
+        <Text>{account ? `${shortId(account, 12, 8)} (${accountSource === "chosen" ? "chosen by you" : "this node's payee"})` : "none chosen"}</Text>
+      </Field>
+      <Box marginTop={1} flexDirection="column">
+        <Muted>These are set when the console starts: --rpc, --address, --no-color.</Muted>
+        <Muted>This console reads. A planned stop (S) is the one thing it can ask the local helper for.</Muted>
+      </Box>
     </Box>
   );
 }

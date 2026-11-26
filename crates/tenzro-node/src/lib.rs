@@ -1,7 +1,7 @@
 //! Tenzro Network Full Node
 //!
 //! This crate provides the full node implementation for Tenzro Network,
-//! an AI-Native, Agentic, Tokenized Settlement Layer blockchain.
+//! a network of compute of every kind, settled in TNZO on the Tenzro Ledger.
 //!
 //! # Overview
 //!
@@ -219,7 +219,11 @@ pub mod agent_audit;
 pub mod agent_delegation;
 pub mod agent_guardrails;
 mod agent_http_signature;
+mod agent_terms_credential;
 pub mod announce;
+pub mod announced_account;
+#[cfg(feature = "app-transport")]
+pub mod app_transport;
 pub mod approval_effects;
 pub mod attestation_log;
 pub mod attestation_rpc;
@@ -234,12 +238,14 @@ mod catalog_fault;
 mod catalog_rpc;
 pub mod catalog_sync;
 pub mod certified_import;
+pub mod challenge_notice;
 pub mod challenge_rpc;
 pub mod chat_content;
 pub mod checkpoint_recorder;
 pub mod cluster_identity;
 pub mod compute_index_reporter;
 pub mod compute_observations;
+pub mod conditions;
 pub mod config;
 pub mod connector;
 pub mod consensus_driver;
@@ -249,6 +255,7 @@ pub mod da_committee;
 pub mod da_committee_surface;
 pub mod data_integrity;
 pub mod decode_check;
+mod device_code;
 pub mod device_rpc;
 pub mod doctor;
 mod duty_rpc;
@@ -266,12 +273,25 @@ pub mod exposure;
 pub mod fd_limit;
 pub mod gcra;
 mod governance_rpc;
+mod grid_carbon;
 pub mod hash_vouchers;
 pub mod hosted_operators;
 mod insurance_rpc;
 pub mod journal_writer;
 /// Allocator arena cap and periodic trim, against resident-memory growth.
 pub mod malloc_tuning;
+mod operator_counts;
+
+// A node run inside an Android app's process (the light build): the binary's
+// own start-up, compiled into this library, which it names as the binary
+// does, and the app's run and stop.
+#[cfg(all(target_os = "android", not(feature = "inference")))]
+extern crate self as tenzro_node;
+#[cfg(all(target_os = "android", not(feature = "inference")))]
+pub mod embedded;
+#[cfg(all(target_os = "android", not(feature = "inference")))]
+#[path = "main.rs"]
+mod node_main;
 #[cfg(test)]
 mod plan_stager_tests;
 pub mod policy_reflection;
@@ -279,8 +299,6 @@ mod provider_listing_rpc;
 mod token_rpc;
 pub mod tool_call_record;
 pub mod training_provenance;
-#[cfg(test)]
-mod validator_net_tests;
 /// The EU AI Act disclosure. Lives in `tenzro-types` now, because the CLI
 /// renders the same text this emits and the two must not drift.
 pub use tenzro_types::eu_ai_disclosure;
@@ -290,7 +308,9 @@ pub mod block_summary;
 pub mod da_retention;
 pub mod event_index;
 pub mod event_loop;
+pub mod evm_pool_guard;
 pub mod fee_market_rpc;
+pub mod follow_state;
 pub mod forward_billing;
 pub mod genesis;
 pub mod gpu_revocation;
@@ -318,11 +338,13 @@ mod network_rpc;
 pub mod optimistic;
 pub mod relay_health;
 pub mod remote_tpm;
+/// `tenzro-node tpm clients`: the provider file's client list, edited by command.
+pub mod tpm_clients;
 #[cfg(unix)]
 pub mod tpm_key_holder;
 mod trust_hooks;
 mod trust_rpc;
-pub(crate) mod tx_record;
+pub mod tx_record;
 pub mod update_advert;
 pub mod update_notice;
 pub mod validator_admission;
@@ -353,6 +375,7 @@ pub mod load_shed;
 pub mod loaded_models;
 pub mod machine_access;
 pub mod machine_admission;
+pub mod machine_conformance;
 pub mod machine_registration;
 pub mod mcp;
 #[cfg(feature = "inference")]
@@ -389,22 +412,30 @@ pub mod node_did_document;
 mod offer_ranking;
 pub mod openai_responses;
 pub mod openai_tools;
+pub mod operator_alert;
+#[cfg(feature = "paired-devices")]
+pub mod paired_listener;
+mod pairing_rpc;
 pub mod passkey_rpc;
 pub mod payment_channels;
 pub mod payment_gate;
 pub mod payment_rails;
 pub mod payment_receipt_store;
 pub mod payment_rpc;
+#[cfg(feature = "pinned-cert")]
+pub mod pinned_cert;
 mod plan_rpc;
 pub mod pq_rotation_rpc;
 pub mod prefix_probe;
+mod price_watch;
 pub mod pricing;
 pub mod proof_log;
 pub mod provider_heartbeat;
 mod provider_standing;
 pub mod recovery;
+pub mod restart;
 pub mod role_bonds;
-pub mod router_inputs;
+pub mod root_signatures;
 pub mod rpc;
 pub mod rpc_gates;
 pub mod rpc_gateway;
@@ -418,15 +449,19 @@ pub mod settlement_preferences_bridge;
 mod shard_quarantine;
 pub mod single_instance;
 pub mod sla_attest;
+pub(crate) mod sla_responder;
 pub mod snapshot;
 #[cfg(feature = "inference")]
 mod sponsored_inference;
 pub mod standby;
+#[cfg(feature = "inference")]
+mod standby_reservation;
 pub mod state_commitment;
 pub(crate) mod state_reads;
 mod state_rpc;
 pub mod state_sync_policy;
 pub mod storage_maintenance;
+pub mod storage_placement;
 pub mod storage_provider_runtime;
 pub mod streaming;
 pub mod surge;
@@ -435,18 +470,17 @@ pub mod terms_gate;
 pub mod territory;
 pub mod tier;
 mod transaction_index;
+mod usage_payer;
 pub mod validator_signer;
 pub mod visibility_rpc;
 pub mod web;
 mod work_settlements;
 mod zk_attest;
+mod zk_proofs;
 mod zk_rpc;
 
 // Re-export commonly used types
-// `EconomicsConfig` is the type of a public `NodeConfig` field, so it has to
-// be nameable by anyone constructing a config — otherwise the field can be
-// read but never set from outside the crate.
-pub use config::{EconomicsConfig, NodeConfig};
+pub use config::NodeConfig;
 pub use error::{NodeError, Result};
 pub use handle::{NodeHandle, spawn_in_background, spawn_in_background_with_unlocker};
 pub use health::{HealthMonitor, HealthStatus, OverallHealth, SubsystemStatus};

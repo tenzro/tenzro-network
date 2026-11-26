@@ -1,0 +1,18 @@
+[package]
+name = "tenzro-state-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "State trie hash rules and the state proof verifier for Tenzro Network: a pure check of one committed entry against a state root, with no storage"
+
+[dependencies]
+tenzro-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

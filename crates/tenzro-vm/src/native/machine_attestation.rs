@@ -42,7 +42,7 @@ pub fn admitted_tpm_holder(state: &dyn VmState, device: &str) -> Option<String> 
 /// attestation is `att`: one it was admitted under, the autonomous machine
 /// its attestation key roots, or one that claimed it at a reward epoch
 /// close. A revoked identity answers for nothing.
-fn other_holder(state: &dyn VmState, did: &str, att: &MachineAttestation) -> Option<String> {
+pub fn other_holder(state: &dyn VmState, did: &str, att: &MachineAttestation) -> Option<String> {
     let device = tenzro_types::hardware_level::device_id(&att.evidence.ek_public);
     let autonomous = attestation_key_sec1(&att.evidence)
         .ok()
@@ -55,7 +55,7 @@ fn other_holder(state: &dyn VmState, did: &str, att: &MachineAttestation) -> Opt
     ]
     .into_iter()
     .flatten()
-    .find(|holder| holder != did && !is_identity_revoked(state, holder))
+    .find(|holder| holder != did && !identity_revoked_in_force(state, holder))
 }
 
 /// Attach the TPM attestation `data` (an [`AttachMachineAttestationOp`])

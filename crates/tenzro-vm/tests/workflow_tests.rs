@@ -175,6 +175,7 @@ mod helpers {
             vm_type,
             1337,
         )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis())
     }
 }
 
@@ -210,7 +211,8 @@ mod evm_workflows {
             0,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let deploy_result = evm
             .execute_with_state_adapter(&deploy_tx, &mut state)
             .await
@@ -241,7 +243,8 @@ mod evm_workflows {
             1,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let call_result = evm
             .execute_with_state_adapter(&call_tx, &mut state)
             .await
@@ -298,7 +301,8 @@ mod evm_workflows {
             0,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let price_result = evm
             .execute_with_state_adapter(&price_tx, &mut state)
             .await
@@ -321,7 +325,8 @@ mod evm_workflows {
                 nonce,
                 VmType::Evm,
                 1337,
-            );
+            )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
             let r = evm
                 .execute_with_state_adapter(&swap_tx, &mut state)
                 .await
@@ -359,7 +364,8 @@ mod evm_workflows {
                 nonce,
                 VmType::Evm,
                 1337,
-            );
+            )
+            .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
             let r = evm
                 .execute_with_state_adapter(&release_tx, &mut state)
                 .await
@@ -404,7 +410,8 @@ mod evm_workflows {
             0,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let r = evm
             .execute_with_state_adapter(&release_tx, &mut state)
             .await
@@ -435,7 +442,8 @@ mod evm_workflows {
             1,
             VmType::Evm,
             1337,
-        );
+        )
+        .with_block_timestamp_ms(chrono::Utc::now().timestamp_millis());
         let r2 = evm
             .execute_with_state_adapter(&retry_tx, &mut state)
             .await

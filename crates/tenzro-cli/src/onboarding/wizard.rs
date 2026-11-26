@@ -574,8 +574,6 @@ pub fn resolve_choice(
 /// What the user wants to be on the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Persona {
-    /// Consume the network; no serving duties, no stake.
-    Participant,
     /// Provide AI, storage, compute or other services, with a bond.
     Operator,
     /// Take part in consensus; always on, bond required.
@@ -585,12 +583,7 @@ pub enum Persona {
 }
 
 /// Every persona, in the order the wizard lists them.
-pub const PERSONAS: [Persona; 4] = [
-    Persona::Participant,
-    Persona::Operator,
-    Persona::Validator,
-    Persona::RpcProvider,
-];
+pub const PERSONAS: [Persona; 3] = [Persona::Operator, Persona::Validator, Persona::RpcProvider];
 
 /// The services an operator can provide.
 pub const OPERATOR_SERVICES: [NetworkRole; 3] = [
@@ -603,7 +596,6 @@ impl Persona {
     /// The name the wizard shows.
     pub fn label(self) -> &'static str {
         match self {
-            Persona::Participant => "Participant",
             Persona::Operator => "Operator",
             Persona::Validator => "Validator",
             Persona::RpcProvider => "RPC provider",
@@ -613,7 +605,6 @@ impl Persona {
     /// The `--mode` value this persona corresponds to, where one exists.
     pub fn mode_flag(self) -> Option<&'static str> {
         match self {
-            Persona::Participant => Some("consume"),
             Persona::Operator => Some("provide"),
             Persona::Validator => Some("validate"),
             Persona::RpcProvider => None,
@@ -629,7 +620,6 @@ impl Persona {
     /// serves AI, the `--mode provide` default.
     pub fn roles(self, services: &[NetworkRole]) -> RoleSet {
         match self {
-            Persona::Participant => RoleSet::client(),
             Persona::Operator if services.is_empty() => RoleSet::from(NetworkRole::ModelProvider),
             Persona::Operator => RoleSet::from_roles(services.iter().copied()),
             Persona::Validator => RoleSet::from(NetworkRole::Validator),
@@ -637,16 +627,17 @@ impl Persona {
         }
     }
 
-    /// The persona that best describes a role set given with `--roles`.
-    pub fn of_roles(roles: &RoleSet) -> Persona {
+    /// The persona that best describes a role set given with `--roles`;
+    /// none for a node that serves nothing and only follows the chain.
+    pub fn of_roles(roles: &RoleSet) -> Option<Persona> {
         if roles.has(NetworkRole::Validator) {
-            Persona::Validator
+            Some(Persona::Validator)
         } else if roles.has(NetworkRole::Rpc) {
-            Persona::RpcProvider
+            Some(Persona::RpcProvider)
         } else if roles.is_provider() {
-            Persona::Operator
+            Some(Persona::Operator)
         } else {
-            Persona::Participant
+            None
         }
     }
 }
@@ -787,34 +778,29 @@ pub fn unmet(req: &Requirement, m: &MachineFacts) -> Vec<Unmet> {
 
 /// One line on what a persona requires, for the menu.
 pub fn requirement_line(p: Persona, services: &[NetworkRole]) -> String {
-    match p {
-        Persona::Participant => "needs nothing: no stake, no always-on duty".into(),
-        _ => {
-            let roles = p.roles(services);
-            let reqs: Vec<Requirement> = roles.iter().filter_map(requirement_of).collect();
-            let ram = reqs.iter().map(|r| r.min_ram_gb).max().unwrap_or(0);
-            let disk = reqs.iter().map(|r| r.min_storage_gb).max().unwrap_or(0);
-            let stake: u128 = reqs.iter().map(|r| r.stake_wei).sum();
-            let mut parts = vec![
-                format!("{ram} GB memory"),
-                format!("{disk} GB free storage"),
-            ];
-            if reqs.iter().any(|r| r.accelerator) {
-                parts.push("an accelerator for AI and compute".into());
-            }
-            if reqs.iter().any(|r| r.hardware_key) {
-                parts.push("a TPM or Secure Enclave".into());
-            }
-            if reqs.iter().any(|r| r.always_on) {
-                parts.push("always on".into());
-            }
-            parts.push(format!(
-                "a bond of {} TNZO",
-                stake / tenzro_types::constants::ONE_TNZO
-            ));
-            format!("needs {}", parts.join(", "))
-        }
+    let roles = p.roles(services);
+    let reqs: Vec<Requirement> = roles.iter().filter_map(requirement_of).collect();
+    let ram = reqs.iter().map(|r| r.min_ram_gb).max().unwrap_or(0);
+    let disk = reqs.iter().map(|r| r.min_storage_gb).max().unwrap_or(0);
+    let stake: u128 = reqs.iter().map(|r| r.stake_wei).sum();
+    let mut parts = vec![
+        format!("{ram} GB memory"),
+        format!("{disk} GB free storage"),
+    ];
+    if reqs.iter().any(|r| r.accelerator) {
+        parts.push("an accelerator for AI and compute".into());
     }
+    if reqs.iter().any(|r| r.hardware_key) {
+        parts.push("a TPM or Secure Enclave".into());
+    }
+    if reqs.iter().any(|r| r.always_on) {
+        parts.push("always on".into());
+    }
+    parts.push(format!(
+        "a bond of {} TNZO",
+        stake / tenzro_types::constants::ONE_TNZO
+    ));
+    format!("needs {}", parts.join(", "))
 }
 
 /// Whether a persona can be chosen on this machine, and what is unmet if not.
@@ -917,15 +903,14 @@ impl Admission {
 pub fn admission_refusal() -> String {
     "Validator admission is closed while the network stabilises, and this machine is not on the admitted set.\n\
      Why: the first validators are the founding set; new validators are admitted by a governance vote once the network is stable.\n\
-     Fix: run as an operator or a participant now. To ask to be admitted as a validator, write to team@tenzro.com."
+     Fix: run as an operator now. To ask to be admitted as a validator, write to team@tenzro.com."
         .to_string()
 }
 
 /// The menu note on the validator line while admission is closed to this machine.
 pub fn admission_menu_note(p: Persona, a: &Admission) -> Option<String> {
-    (p == Persona::Validator && a.refuses_validator()).then(|| {
-        " [closed while the network stabilises: run as an operator or participant]".to_string()
-    })
+    (p == Persona::Validator && a.refuses_validator())
+        .then(|| " [closed while the network stabilises: run as an operator]".to_string())
 }
 
 /// The gate for roles given with `--roles` or `--mode`: a validator role is
@@ -933,7 +918,7 @@ pub fn admission_menu_note(p: Persona, a: &Admission) -> Option<String> {
 pub fn gate_admission(roles: &RoleSet, a: &Admission) -> Result<()> {
     if roles.is_validator() && a.refuses_validator() {
         return Err(anyhow!(
-            "{}\nPick the operator or participant role and run `tenzro setup` again.",
+            "{}\nPick the operator role and run `tenzro setup` again.",
             admission_refusal()
         ));
     }
@@ -1003,6 +988,74 @@ pub const TESTNET_VALUE_LINE: &str = "Testnet tokens have no monetary value.";
 
 /// How to continue later from the funding step.
 pub const RESUME_HINT: &str = "Your progress is saved. Run `tenzro setup` again at any time and it resumes at the funding step.";
+
+/// What setup proposes a machine does, before the operator chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proposal {
+    /// Follow the chain with no role: as a light node, or keeping the whole chain.
+    Follow { light: bool },
+    /// Take a persona's role.
+    Persona(Persona),
+}
+
+impl Proposal {
+    /// The roles the proposal runs. An operator proposal serves AI.
+    pub fn roles(self) -> RoleSet {
+        match self {
+            Proposal::Follow { light: true } => RoleSet::from(NetworkRole::LightClient),
+            Proposal::Follow { light: false } => RoleSet::from(NetworkRole::FullNode),
+            Proposal::Persona(p) => p.roles(&[]),
+        }
+    }
+}
+
+/// The most memory, in GB, of a machine setup proposes to follow as a light
+/// node: Pi-class and other small machines.
+pub const LIGHT_MAX_RAM_GB: f64 = 8.0;
+
+/// The role setup proposes for `machine`, and the reason in one line. A
+/// machine that does not stay on follows (a role is a promise to be there);
+/// one with an accelerator serves models; one that stays on and holds keys in
+/// hardware validates, while validator admission is open to it; a small
+/// machine follows as a light node, a larger one keeps the whole chain.
+pub fn propose(
+    machine: &MachineFacts,
+    stays_on: bool,
+    validator_open: bool,
+) -> (Proposal, &'static str) {
+    let light = machine.ram_gb <= LIGHT_MAX_RAM_GB;
+    if !stays_on {
+        return (
+            Proposal::Follow { light },
+            "it does not stay on, and a role is a promise to be there: it follows the chain",
+        );
+    }
+    if machine.accelerator
+        && persona_gate(Persona::Operator, &[NetworkRole::ModelProvider], machine).is_ok()
+    {
+        return (
+            Proposal::Persona(Persona::Operator),
+            "it has an accelerator and the memory to serve models, which is paid per call",
+        );
+    }
+    if validator_open && persona_availability(Persona::Validator, machine).is_ok() {
+        return (
+            Proposal::Persona(Persona::Validator),
+            "it stays on, holds its keys in a TPM or Secure Enclave, and has the memory and disk",
+        );
+    }
+    if light {
+        (
+            Proposal::Follow { light: true },
+            "a small machine (8 GB of memory or less): it follows the chain as a light node",
+        )
+    } else {
+        (
+            Proposal::Follow { light: false },
+            "it keeps the whole chain; choose a role to serve if it is to be paid",
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1241,16 +1294,12 @@ mod tests {
 
     #[test]
     fn personas_map_onto_the_role_machinery() {
-        assert_eq!(Persona::Participant.roles(&[]), RoleSet::client());
         assert!(Persona::Validator.roles(&[]).is_validator());
         assert!(Persona::RpcProvider.roles(&[]).has(NetworkRole::Rpc));
         assert!(Persona::Operator.roles(&[]).has(NetworkRole::ModelProvider));
         let s = Persona::Operator.roles(&[NetworkRole::StorageProvider]);
         assert!(s.has(NetworkRole::StorageProvider) && !s.has(NetworkRole::ModelProvider));
-        assert_eq!(
-            Persona::from_mode_flag("consume"),
-            Some(Persona::Participant)
-        );
+        assert_eq!(Persona::from_mode_flag("consume"), None);
         assert_eq!(Persona::from_mode_flag("provide"), Some(Persona::Operator));
         assert_eq!(
             Persona::from_mode_flag("validate"),
@@ -1258,20 +1307,21 @@ mod tests {
         );
         assert_eq!(
             Persona::of_roles(&RoleSet::from(NetworkRole::Rpc)),
-            Persona::RpcProvider
+            Some(Persona::RpcProvider)
         );
+        assert_eq!(Persona::of_roles(&RoleSet::client()), None);
     }
 
     #[test]
-    fn a_participant_meets_every_requirement_and_needs_no_stake() {
+    fn a_node_that_serves_nothing_meets_every_requirement_and_needs_no_stake() {
         let tiny = MachineFacts {
             ram_gb: 1.0,
             storage_gb: 1.0,
             accelerator: false,
             hardware_key: false,
         };
-        assert!(persona_gate(Persona::Participant, &[], &tiny).is_ok());
-        let stake = required_stake_wei(&Persona::Participant.roles(&[]), 0);
+        assert!(gate_roles(&RoleSet::client(), &tiny).is_ok());
+        let stake = required_stake_wei(&RoleSet::client(), 0);
         assert_eq!(funding_decision(stake, Some(0)), Funding::NotNeeded);
     }
 
@@ -1351,7 +1401,6 @@ mod tests {
 
     #[test]
     fn each_persona_line_states_its_requirements() {
-        assert!(requirement_line(Persona::Participant, &[]).contains("no stake"));
         let v = requirement_line(Persona::Validator, &[]);
         assert!(
             v.contains("always on") && v.contains("bond of 10000 TNZO") && v.contains("TPM"),
@@ -1410,7 +1459,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("closed while the network stabilises"), "{err}");
-        assert!(err.contains("operator or a participant"), "{err}");
+        assert!(err.contains("run as an operator now"), "{err}");
         assert!(err.contains("team@tenzro.com"), "{err}");
         assert!(err.contains("Why:") && err.contains("Fix:"), "{err}");
         assert!(
@@ -1420,11 +1469,11 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(gate_admission(&Persona::Participant.roles(&[]), &closed).is_ok());
+        assert!(gate_admission(&RoleSet::client(), &closed).is_ok());
         assert!(
             admission_menu_note(Persona::Validator, &closed)
                 .unwrap()
-                .contains("operator or participant")
+                .contains("run as an operator]")
         );
         assert!(admission_menu_note(Persona::Operator, &closed).is_none());
     }
@@ -1475,5 +1524,69 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap().to_lowercase();
         assert!(!json.contains("private") && !json.contains("secret"));
+    }
+
+    fn machine_facts(
+        ram_gb: f64,
+        storage_gb: f64,
+        accelerator: bool,
+        hardware_key: bool,
+    ) -> MachineFacts {
+        MachineFacts {
+            ram_gb,
+            storage_gb,
+            accelerator,
+            hardware_key,
+        }
+    }
+
+    #[test]
+    fn setup_proposes_a_role_from_what_the_machine_measures() {
+        // A Pi: 4 GB, no accelerator, no TPM.
+        let pi = machine_facts(4.0, 64.0, false, false);
+        assert_eq!(propose(&pi, true, true).0, Proposal::Follow { light: true });
+        assert_eq!(
+            propose(&pi, true, true).0.roles(),
+            RoleSet::from(NetworkRole::LightClient)
+        );
+        // A part-time laptop with a GPU follows: it is not there all the time.
+        let laptop = machine_facts(32.0, 500.0, true, true);
+        assert_eq!(
+            propose(&laptop, false, true).0,
+            Proposal::Follow { light: false }
+        );
+        // The same machine left on serves models.
+        assert_eq!(
+            propose(&laptop, true, true).0,
+            Proposal::Persona(Persona::Operator)
+        );
+        // A server with a TPM and no accelerator validates, while admission is open.
+        let server = machine_facts(64.0, 2000.0, false, true);
+        assert_eq!(
+            propose(&server, true, true).0,
+            Proposal::Persona(Persona::Validator)
+        );
+        assert_eq!(
+            propose(&server, true, false).0,
+            Proposal::Follow { light: false }
+        );
+        // A server without a hardware key cannot validate: it keeps the chain.
+        let plain = machine_facts(64.0, 2000.0, false, false);
+        assert_eq!(
+            propose(&plain, true, true).0,
+            Proposal::Follow { light: false }
+        );
+        // Every proposal is one the machine meets.
+        for (m, on) in [
+            (&pi, true),
+            (&laptop, true),
+            (&server, true),
+            (&plain, true),
+            (&laptop, false),
+        ] {
+            if let Proposal::Persona(p) = propose(m, on, true).0 {
+                assert!(persona_availability(p, m).is_ok(), "{p:?} on {m:?}");
+            }
+        }
     }
 }

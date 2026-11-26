@@ -24,7 +24,12 @@ fuzz_target!(|input: (&[u8], u128, u16, u16, u16, u128)| {
             let again: PlanOp = bincode::deserialize(&bincode::serialize(&op).unwrap()).unwrap();
             assert_eq!(again, op);
             if let PlanOp::Open { split, .. } = &op {
-                let params = FeeParams { fee_bps, min_fee: 0, burn_bps, insurance_bps };
+                let params = FeeParams {
+                    fee_bps,
+                    min_fee: 0,
+                    burn_bps,
+                    insurance_bps,
+                };
                 if let Ok(a) = apply(gross, split, &params, network_fees) {
                     assert!(a.conserves());
                     assert_eq!(apply(gross, split, &params, network_fees).unwrap(), a);

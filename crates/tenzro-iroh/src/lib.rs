@@ -47,9 +47,11 @@
 //!
 //! # Identity, relays and discovery
 //!
-//! Nodes are addressed by machine identity. The endpoint key is fresh at
-//! every bind and held only in memory; the machine's hardware key certifies
-//! it in a signed [`identity_record::EndpointRecord`]. Records travel on
+//! Nodes are addressed by machine identity. The node derives the endpoint key
+//! from the machine's hardware root at each boot (the same endpoint id after a
+//! restart) and holds it only in memory; without one the key is made at
+//! random at each bind. The machine's hardware key certifies it in a signed
+//! [`identity_record::EndpointRecord`]. Records travel on
 //! Tenzro's own discovery network ([`discovery`]): every node stores,
 //! verifies and answers them on the `tenzro/discovery` ALPN, and resolves
 //! `EndpointId`s from them. Relaying is an operator role ([`relay`]),
@@ -61,7 +63,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod app_stream;
 pub mod block_sync;
+pub mod bounded;
+pub mod bulk_pacer;
 pub mod config;
 pub mod connection_limits;
 pub mod consensus;
@@ -76,6 +81,9 @@ pub mod jsonrpc;
 pub mod lan_discovery;
 pub mod licence_gate;
 pub mod limits;
+#[cfg(test)]
+mod measure;
+pub mod path_metrics;
 pub mod paths;
 pub mod pq_endpoint;
 pub mod reachability;
@@ -85,6 +93,10 @@ pub mod resolver;
 pub mod state_sync;
 pub mod tpm_sign;
 pub mod update_advert;
+pub mod zk_proof;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_ports;
 
 pub use block_sync::{
     ALPN_BLOCK_SYNC, BlockSyncServer, DeferredBlockSyncServer, block_sync_request,
@@ -107,21 +119,24 @@ pub use jsonrpc::{
     DeferredMcpHandler, JsonRpcDispatcher, JsonRpcProtocol, MAX_FRAME_BYTES, McpProtocol,
     McpStreamHandler, call as jsonrpc_call,
 };
+pub use path_metrics::{PathReport, TIME_TO_DIRECT_BUCKETS};
 pub use pq_endpoint::{MachinePqKey, PqChannel};
 pub use reachability::{Connectivity, NatKind, Reachability};
 pub use request::{
-    ALPN_AGENT_KEY, ALPN_AGENT_TOKEN, ALPN_DA_COMMITTEE, ALPN_INFER, ALPN_KV_CHECKPOINT,
+    ALPN_AGENT_KEY, ALPN_AGENT_TOKEN, ALPN_DA_COMMITTEE, ALPN_INFER, ALPN_KV_CHECKPOINT, ALPN_SLA,
     DeferredRequestHandler, MAX_AGENT_KEY_REQUEST, MAX_INFER_BYTES, MAX_KV_CHECKPOINT_REQUEST,
     MAX_STORE_REQUEST, Reply, ReplyBody, RequestHandler, RequestProtocol, Response, request,
 };
 pub use resolver::{IrohBackedResolver, IrohResolver};
 pub use state_sync::{
-    ALPN_STATE_SYNC, DeferredSnapshotDirectory, SnapshotDirectory, merge_peers, parse_peer,
+    ALPN_STATE_SYNC, ALPN_STATE_SYNC_ANCHOR, AnchorAnswer, AnchorSource, DeferredAnchorSource,
+    DeferredSnapshotDirectory, SnapshotDirectory, merge_peers, parse_peer, request_anchor,
 };
 pub use tpm_sign::{
     ALPN_TPM_SIGN, TpmSignProtocol, TpmSignServer, endpoint_id_of, serve_tpm_sign,
     tpm_sign_request, tpm_sign_request_once,
 };
+pub use zk_proof::{ALPN_ZK_PROOF, DeferredProofSink, MAX_PROOF_BYTES, ProofSink, send_proof};
 
 // Re-export the parsed URI type so downstream crates only need to import
 // `tenzro_iroh::TenzroUri` rather than reaching into `tenzro_types`.

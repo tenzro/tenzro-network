@@ -388,6 +388,9 @@ impl RemoteStateActor {
                 let info = RemoteInfo {
                     endpoint_id: self.state.endpoint_id,
                     addrs,
+                    #[cfg(test)]
+                    holepunch_held: self.state.last_holepunch.is_some()
+                        || self.state.scheduled_holepunch.is_some(),
                 };
                 tx.send(info).ok();
             }
@@ -519,6 +522,12 @@ impl RemoteStateActor {
         if self.connections.is_empty() {
             trace!("last connection closed - clearing selected_path");
             self.state.selected_path = None;
+            // The paths the last holepunch opened closed with that connection,
+            // so it does not count against the next one. Otherwise a remote
+            // connected again within HOLEPUNCH_ATTEMPTS_INTERVAL stays on the
+            // relay until that interval has passed.
+            self.state.last_holepunch = None;
+            self.state.scheduled_holepunch = None;
         }
     }
 
@@ -741,9 +750,7 @@ impl RemoteStateActor {
                 // to avoid the client and server independently closing different paths
                 // and racing to abandon the last one.
                 if conn.side().is_client()
-                    && path_fourtuple.is_ip()
-                    && path_fourtuple != &selected
-                    && conn_state.paths.values().filter(|a| a.is_ip()).count() > 1
+                    && is_redundant_ip_path(path_fourtuple, &selected, &conn_state.paths)
                 {
                     trace!(?path_fourtuple, %conn_id, %path_id, "closing direct path");
                     match path.close() {
@@ -1111,7 +1118,12 @@ impl State {
                     | Some(Err(PathError::MaxPathIdReached)) => {
                         self.scheduled_open_path =
                             Some(Instant::now() + Duration::from_millis(333));
-                        schedule_open_path(&mut self.pending_open_paths, open_4tuple);
+                        // The number of distinct candidate 4-tuples for a remote is
+                        // small (single digits), so `contains` is a short linear scan
+                        // and bounds the queue to that set.
+                        if !self.pending_open_paths.contains(open_4tuple) {
+                            self.pending_open_paths.push_back(open_4tuple.clone());
+                        }
                         trace!(?open_4tuple, ?ret, "scheduling open_path");
                     }
                     _ => warn!(?ret, "Opening path failed"),
@@ -1644,38 +1656,57 @@ mod tests {
     }
 }
 
-/// Queues `addr` for the next scheduled attempt to open it, once. Each
-/// attempt tries every connection to the remote and requeues the address
-/// for each one still out of path ids; queued per connection, the queue
-/// multiplied by the number of connections on every attempt, a third of a
-/// second apart, and exhausted the node's memory within a minute.
-fn schedule_open_path(queue: &mut VecDeque<transports::FourTuple>, addr: &transports::FourTuple) {
-    if !queue.contains(addr) {
-        queue.push_back(addr.clone());
-    }
+/// Whether `path` is an IP path to close on a connection whose established
+/// paths are `paths`, given the `selected` path.
+///
+/// The selected path must itself be established on the connection first.
+/// Until it is, the connection may still be carrying its traffic on paths that
+/// were closed earlier and are only waiting for their abandoned event, so they
+/// are still listed in `paths`: closing the remaining open one would leave the
+/// connection without a path, and the transport refuses with `LastOpenPath`
+/// on every path selection.
+fn is_redundant_ip_path(
+    path: &transports::FourTuple,
+    selected: &transports::FourTuple,
+    paths: &FxHashMap<PathId, transports::FourTuple>,
+) -> bool {
+    path.is_ip()
+        && path != selected
+        && paths.values().any(|p| p == selected)
+        && paths.values().filter(|p| p.is_ip()).count() > 1
 }
 
 #[cfg(test)]
-mod scheduled_open_path_tests {
+mod redundant_ip_path_tests {
     use super::*;
 
-    /// Retrying an address on three connections that all stay out of path
-    /// ids leaves it queued once, attempt after attempt.
+    fn ip(addr: &str) -> transports::FourTuple {
+        transports::FourTuple::from_remote(transports::Addr::Ip(addr.parse().unwrap()))
+    }
+
+    /// While the selected path is not yet established on a connection, no
+    /// other IP path is closed there, so the connection keeps a path.
     #[test]
-    fn a_retried_path_stays_queued_once() {
-        let addr = transports::FourTuple::from_remote(transports::Addr::Ip(
-            "192.0.2.1:4433".parse().unwrap(),
-        ));
-        let mut queue = VecDeque::new();
-        schedule_open_path(&mut queue, &addr);
-        for _ in 0..30 {
-            let attempt = std::mem::take(&mut queue);
-            for a in &attempt {
-                for _connection in 0..3 {
-                    schedule_open_path(&mut queue, a);
-                }
-            }
-        }
-        assert_eq!(queue.len(), 1);
+    fn no_path_is_closed_before_the_selected_one_is_established() {
+        let (a, b, selected) = (ip("192.0.2.1:4433"), ip("192.0.2.2:4433"), ip("192.0.2.3:4433"));
+        let mut paths = FxHashMap::default();
+        paths.insert(PathId::ZERO, a.clone());
+        paths.insert(PathId::from(1u32), b.clone());
+        assert!(!is_redundant_ip_path(&a, &selected, &paths));
+        assert!(!is_redundant_ip_path(&b, &selected, &paths));
+
+        paths.insert(PathId::from(2u32), selected.clone());
+        assert!(is_redundant_ip_path(&a, &selected, &paths));
+        assert!(is_redundant_ip_path(&b, &selected, &paths));
+        assert!(!is_redundant_ip_path(&selected, &selected, &paths));
+    }
+
+    /// A connection with the selected path as its only IP path closes nothing.
+    #[test]
+    fn the_only_ip_path_is_kept() {
+        let selected = ip("192.0.2.3:4433");
+        let mut paths = FxHashMap::default();
+        paths.insert(PathId::ZERO, selected.clone());
+        assert!(!is_redundant_ip_path(&selected, &selected, &paths));
     }
 }

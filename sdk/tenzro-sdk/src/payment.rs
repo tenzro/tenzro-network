@@ -428,6 +428,18 @@ impl PaymentClient {
 }
 
 impl PaymentClient {
+    /// Calls `tenzro_resolvePaymentIntent`: the settlement plan leg that
+    /// carries a payment stated without a rail: the payee's first accepted
+    /// rail the payer can fund and the caller priced. `params` carries
+    /// `usd_e6`, `payee`, `accepts`, `means`, `amounts` (one per accepted
+    /// rail) and optionally `instruction_digest` and `reserve`. Stateless.
+    pub async fn resolve_payment_intent(
+        &self,
+        params: serde_json::Value,
+    ) -> crate::error::SdkResult<serde_json::Value> {
+        self.rpc.call("tenzro_resolvePaymentIntent", params).await
+    }
+
     /// Choose the asset `payee_did` is paid in (`keep_inbound` or `tnzo`).
     /// The payee's hardware `signer` signs the change as the account owner;
     /// its key must be one of the DID's authentication keys.

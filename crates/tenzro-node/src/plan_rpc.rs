@@ -69,16 +69,21 @@ fn plan_json(plan: &SettlementPlan) -> Value {
     })
 }
 
-/// `tenzro_getPlan {plan_id}`.
+/// `tenzro_getPlan {plan_id}`, with the treasury line the plan fixed at
+/// open (`treasury_line`: the split line it comes from, the rate in bps and,
+/// once committed, the amount taken; `null` when it fixed none).
 pub(crate) async fn get_plan(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     let params = params.unwrap_or(Value::Null);
     let id = hex32(&params, "plan_id")?;
-    let plan = tenzro_vm::native::read_plan(&state(node)?, &id)
+    let state = state(node)?;
+    let plan = tenzro_vm::native::read_plan(&state, &id)
         .ok_or_else(|| err(-32004, format!("plan 0x{} not found", hex::encode(id))))?;
-    Ok(plan_json(&plan))
+    let mut out = plan_json(&plan);
+    out["treasury_line"] = json!(tenzro_vm::native::read_treasury_line(&state, &id));
+    Ok(out)
 }
 
 /// `tenzro_getPlanDecision {plan_id}`: the decision, and the fixed-size
@@ -95,6 +100,7 @@ pub(crate) async fn get_plan_decision(
     let commitment = tenzro_vm::native::read_decision_commitment(&state, &id).unwrap_or_default();
     Ok(json!({
         "decision": decision,
+        "treasury_line": tenzro_vm::native::read_treasury_line(&state, &id),
         "commitment": hex::encode(commitment),
         "proof": proof_key(&format!("decision:{}", hex::encode(id))),
     }))

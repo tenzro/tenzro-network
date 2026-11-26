@@ -597,7 +597,7 @@ mod tests {
     /// whose test signs with one passkey clears the spending floor.
     fn add_second_root(validator: &WebAuthnValidator, account: &[u8]) {
         let key = WebAuthnAccountKey::new([0x5au8; 32], [0x5bu8; 32], device_bound());
-        enroll_hybrid(&validator, account.to_vec(), b"second-root".to_vec(), key);
+        enroll_hybrid(validator, account.to_vec(), b"second-root".to_vec(), key);
     }
 
     /// A passkey: its credential id, P-256 key and enrolment record.
@@ -636,10 +636,21 @@ mod tests {
         /// The passkey's assertion over `hash` under `context`, user
         /// verified, from [`ORIGIN`].
         fn sign(&self, context: SignatureContext, hash: &[u8; 32]) -> PasskeySignature {
+            self.sign_from(ORIGIN, context, hash)
+        }
+
+        /// The passkey's assertion over `hash` under `context`, user
+        /// verified, as a client at `origin` reports it.
+        fn sign_from(
+            &self,
+            origin: &str,
+            context: SignatureContext,
+            hash: &[u8; 32],
+        ) -> PasskeySignature {
             let client_data_json = serde_json::json!({
                 "type": "webauthn.get",
                 "challenge": WebAuthnValidator::expected_challenge_for(context, hash),
-                "origin": ORIGIN,
+                "origin": origin,
             })
             .to_string()
             .into_bytes();
@@ -971,6 +982,44 @@ mod tests {
                 .unwrap()
                 .is_failure()
         );
+    }
+
+    #[test]
+    fn an_android_app_origin_is_refused_whatever_the_node_lists() {
+        // A passkey answers to the relying party its keystore records and to
+        // no related origins, so an app origin the node's own policy lists
+        // validates nothing here.
+        let app = format!("android:apk-key-hash:{}", "A".repeat(43));
+        let op_hash = [0x42u8; 32];
+        let passkey = TestPasskey::generate();
+        let validator = WebAuthnValidator::new(
+            [0xCCu8; 20],
+            WebAuthnRelyingParty::RegistrableDomain {
+                rp_id: RP.to_string(),
+                related_origins: vec![app.clone()],
+            },
+        );
+        let account = vec![0x01; 20];
+        enroll_hybrid(
+            &validator,
+            account.clone(),
+            passkey.credential_id.clone(),
+            passkey.enrollment.clone(),
+        );
+        add_second_root(&validator, &account);
+
+        let context = SignatureContext::UserOperation;
+        let signed_from = |origin: &str| {
+            let mut leg = passkey.sign_from(origin, context, &op_hash);
+            leg.signature.pq = Some(pq_leg(&test_pq_key(&passkey.p256_xy()), context, &op_hash));
+            PasskeySignature::encode_bundle(std::slice::from_ref(&leg)).expect("encode")
+        };
+        let from_web = dummy_user_op(account.clone(), signed_from(ORIGIN));
+        let result = validator.validate_user_op(&from_web, &op_hash).unwrap();
+        assert!(!result.is_failure(), "the web origin validates");
+        let from_app = dummy_user_op(account, signed_from(&app));
+        let result = validator.validate_user_op(&from_app, &op_hash).unwrap();
+        assert!(result.is_failure(), "the app origin must not validate");
     }
 
     #[test]

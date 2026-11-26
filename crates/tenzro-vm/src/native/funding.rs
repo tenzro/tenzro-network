@@ -5,7 +5,6 @@
 use super::*;
 use crate::funding::{
     FundingOp, GrantRecord, MilestoneRecord, ParticipantKind, is_requestable, participant_kind,
-    root_did,
 };
 use crate::governance::{GrantRelease, GrantVesting, ProposalAction, ProposalStatus};
 
@@ -95,6 +94,17 @@ pub fn machine_endorsed(
     verify_endorsement(&att.evidence, &roots, (now_ms.max(0) / 1000) as u64)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Whether `did`'s TPM endorsement certificate names a firmware TPM's
+/// vendor ([`tenzro_tee::tpm_attest::is_firmware_tpm`]). Meaningful only
+/// for a machine [`machine_endorsed`] accepts.
+pub fn machine_firmware_tpm(state: &dyn VmState, did: &str) -> bool {
+    machine_attestation(state, did).is_ok_and(|att| {
+        let (vendor, _) =
+            tenzro_tee::tpm_attest::ek_certificate_profile(&att.evidence.ek_certificate);
+        tenzro_tee::tpm_attest::is_firmware_tpm(&vendor)
+    })
 }
 
 /// Read a JSON record from `SYSTEM_ADDRESS` storage.
@@ -283,7 +293,7 @@ impl NativeExecutor {
                 &grant_id,
                 index,
                 &evidence,
-                deterministic_now_ms(tx),
+                deterministic_now_ms(tx)?,
                 &mut changes,
                 &mut logs,
             )?,
@@ -291,7 +301,7 @@ impl NativeExecutor {
                 state,
                 &grant_id,
                 index,
-                deterministic_now_ms(tx),
+                deterministic_now_ms(tx)?,
                 &mut changes,
                 &mut logs,
             )?,
@@ -348,8 +358,8 @@ impl NativeExecutor {
             )));
         }
         action.validate().map_err(|e| refuse(e.to_string()))?;
-        let now_ms = deterministic_now_ms(tx);
-        let root = root_did(did);
+        let now_ms = deterministic_now_ms(tx)?;
+        let root = operator::root_did_in_force(state, did);
 
         match &action {
             ProposalAction::TreasuryGrant {

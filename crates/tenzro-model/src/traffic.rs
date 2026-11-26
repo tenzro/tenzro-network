@@ -60,7 +60,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -84,6 +84,13 @@ pub enum QosClass {
     /// Throughput work with a loose deadline. Yields to interactive traffic
     /// and is the first to be shed.
     Batch,
+    /// Work served from capacity that would otherwise idle, at the spot
+    /// price. Admitted like batch (beyond the batch share too when the
+    /// operator lets spot fill idle slots), and once running it gives its
+    /// slot up to an interactive request that finds the node full: its
+    /// guard's yield flag is raised and the generation stops at the next
+    /// token, billed for the tokens it produced.
+    Spot,
 }
 
 impl QosClass {
@@ -106,7 +113,7 @@ impl From<QosClass> for AdmissionClass {
     fn from(c: QosClass) -> Self {
         match c {
             QosClass::Interactive => AdmissionClass::Interactive,
-            QosClass::Batch => AdmissionClass::Batch,
+            QosClass::Batch | QosClass::Spot => AdmissionClass::Batch,
         }
     }
 }
@@ -156,6 +163,18 @@ pub enum Refusal {
         /// When to come back.
         retry_after_ms: u64,
     },
+    /// Serving this request would draw more power than the operator's
+    /// energy budget allows while other requests are running.
+    OverEnergyBudget {
+        /// Watts the requests in flight draw.
+        in_use_watts: u32,
+        /// Watts this request would add.
+        draw_watts: u32,
+        /// The operator's budget.
+        budget_watts: u32,
+        /// When to come back.
+        retry_after_ms: u64,
+    },
 }
 
 impl Refusal {
@@ -165,7 +184,8 @@ impl Refusal {
             Self::AtCapacity { retry_after_ms, .. }
             | Self::QueueWaitTooLong { retry_after_ms, .. }
             | Self::QueueFull { retry_after_ms, .. }
-            | Self::ShedForInteractive { retry_after_ms } => *retry_after_ms,
+            | Self::ShedForInteractive { retry_after_ms }
+            | Self::OverEnergyBudget { retry_after_ms, .. } => *retry_after_ms,
         }
     }
 
@@ -193,9 +213,22 @@ impl Refusal {
             Self::ShedForInteractive { .. } => {
                 "batch work shed to protect interactive capacity".to_string()
             }
+            Self::OverEnergyBudget {
+                in_use_watts,
+                draw_watts,
+                budget_watts,
+                ..
+            } => format!(
+                "energy budget: {in_use_watts} W in use and this request draws {draw_watts} W, \
+                 past the {budget_watts} W the operator allows"
+            ),
         }
     }
 }
+
+/// How soon an interactive caller is told to retry after a spot request was
+/// asked to yield its slot: the slot frees at the spot request's next token.
+pub const SPOT_YIELD_RETRY_MS: u64 = 100;
 
 /// Configuration for the admission layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +254,10 @@ pub struct TrafficConfig {
     /// network discovery routes to it. Reservations are refused once they
     /// would eat into this.
     pub public_floor: u32,
+    /// Whether spot requests may take any free slot rather than only the
+    /// batch share. Safe because an interactive request that finds the node
+    /// full makes a running spot request yield its slot.
+    pub spot_fill_idle: bool,
 }
 
 impl TrafficConfig {
@@ -241,6 +278,7 @@ impl TrafficConfig {
             // rest, but a node that has sold everything is invisible to the
             // network that routes work to it.
             public_floor: (max_concurrent / 4).max(1),
+            spot_fill_idle: false,
         }
     }
 }
@@ -381,6 +419,11 @@ pub struct RequestGuard {
     /// Set when this request drew on a lease's reserved capacity, so the
     /// slot returns to that lease rather than to the public pool.
     lease_id: Option<String>,
+    /// Watts this request draws against the energy budget.
+    energy_watts: u32,
+    /// A spot request's yield flag, raised when an interactive request needs
+    /// its slot.
+    yield_flag: Option<Arc<AtomicBool>>,
     started: Instant,
     deadline: Duration,
     inner: Arc<TrafficInner>,
@@ -420,6 +463,19 @@ impl RequestGuard {
         self.class
     }
 
+    /// A spot request's yield flag: the generation stops at the next token
+    /// once it is raised. `None` for every other class.
+    pub fn yield_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.yield_flag.clone()
+    }
+
+    /// Whether this request was asked to give its slot up.
+    pub fn yielded(&self) -> bool {
+        self.yield_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    }
+
     /// How long it has been running.
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
@@ -428,6 +484,10 @@ impl RequestGuard {
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
+        if self.energy_watts > 0 {
+            let mut state = self.inner.state.lock();
+            state.energy.in_use_watts = state.energy.in_use_watts.saturating_sub(self.energy_watts);
+        }
         if self.aborted {
             self.inner.release_aborted(
                 &self.model_id,
@@ -472,7 +532,11 @@ struct TrafficInner {
 #[derive(Debug, Default)]
 struct TrafficState {
     in_flight_interactive: u32,
+    /// Batch and spot requests in flight.
     in_flight_batch: u32,
+    /// Running spot requests, oldest first: model, scheduler ticket and
+    /// yield flag.
+    spot: Vec<(String, u64, Arc<AtomicBool>)>,
     /// Per-model scheduler from the Praecise engine: the two-term cost model, what is
     /// running on that model and how many callers are waiting for it. Slot
     /// count is whatever the caller last declared (the per-model serving
@@ -480,6 +544,46 @@ struct TrafficState {
     scheds: HashMap<String, Scheduler>,
     /// Guaranteed capacity sold to leases, by lease id.
     reservations: HashMap<String, Reservation>,
+    /// The operator's energy budget and what is drawn against it.
+    energy: EnergyState,
+}
+
+/// The operator's energy budget, the draw of each admission queue, and the
+/// watts the requests in flight draw together.
+#[derive(Debug, Default)]
+struct EnergyState {
+    config: crate::engine_config::EnergyConfig,
+    in_use_watts: u32,
+}
+
+impl EnergyState {
+    /// Watts one request on admission queue `key` draws: its own entry, or
+    /// the `language` entry for a language model, whose queue is its model id.
+    fn draw_for(&self, key: &str) -> u32 {
+        let draw = &self.config.draw_watts;
+        if let Some(w) = draw.get(key) {
+            return *w;
+        }
+        // The queue names of the engines, as `Engine`'s Display writes them: the
+        // model host is not built without the `engine` feature, the queues still are.
+        let engine_queue = key
+            .split_once('/')
+            .is_some_and(|(engine, _)| matches!(engine, "onnx" | "praecise"))
+            || key == "diffusion";
+        if engine_queue {
+            0
+        } else {
+            draw.get("language").copied().unwrap_or(0)
+        }
+    }
+
+    /// Whether drawing `draw` more would pass the budget. A request is never
+    /// refused on an idle node, so one that alone exceeds the budget still
+    /// runs, by itself.
+    fn refuses(&self, draw: u32) -> bool {
+        let budget = self.config.budget_watts;
+        budget > 0 && draw > 0 && self.in_use_watts > 0 && self.in_use_watts + draw > budget
+    }
 }
 
 impl TrafficState {
@@ -491,6 +595,28 @@ impl TrafficState {
 
     fn total_in_flight(&self) -> u32 {
         self.in_flight_interactive + self.in_flight_batch
+    }
+
+    fn forget_spot(&mut self, model_id: &str, ticket: u64) {
+        self.spot
+            .retain(|(m, t, _)| !(m == model_id && *t == ticket));
+    }
+
+    /// Ask the most recently admitted spot request that has not been asked
+    /// yet to give its slot up. Whether one was asked.
+    fn preempt_newest_spot(&mut self) -> bool {
+        match self
+            .spot
+            .iter()
+            .rev()
+            .find(|(_, _, f)| !f.load(Ordering::Relaxed))
+        {
+            Some((_, _, flag)) => {
+                flag.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Slots promised to leases, whether or not they are being used.
@@ -545,6 +671,7 @@ impl TrafficInner {
         let mut state = self.state.lock();
         // Zero generated tokens: frees the scheduler slot, teaches nothing.
         state.sched(model_id).abort(ticket);
+        state.forget_spot(model_id, ticket);
         if let Some(id) = lease_id
             && let Some(r) = state.reservations.get_mut(id)
         {
@@ -554,7 +681,7 @@ impl TrafficInner {
             QosClass::Interactive => {
                 state.in_flight_interactive = state.in_flight_interactive.saturating_sub(1);
             }
-            QosClass::Batch => {
+            QosClass::Batch | QosClass::Spot => {
                 state.in_flight_batch = state.in_flight_batch.saturating_sub(1);
             }
         }
@@ -575,6 +702,7 @@ impl TrafficInner {
             state
                 .sched(model_id)
                 .finish(ticket, generated_tokens, first_token_ms, now_ms());
+            state.forget_spot(model_id, ticket);
             if let Some(id) = lease_id
                 && let Some(r) = state.reservations.get_mut(id)
             {
@@ -584,7 +712,7 @@ impl TrafficInner {
                 QosClass::Interactive => {
                     state.in_flight_interactive = state.in_flight_interactive.saturating_sub(1);
                 }
-                QosClass::Batch => {
+                QosClass::Batch | QosClass::Spot => {
                     state.in_flight_batch = state.in_flight_batch.saturating_sub(1);
                 }
             }
@@ -675,6 +803,11 @@ impl TrafficManager {
                 counters: Counters::default(),
             }),
         }
+    }
+
+    /// Set the operator's energy budget and the draw of each admission queue.
+    pub fn set_energy(&self, config: &crate::engine_config::EnergyConfig) {
+        self.inner.state.lock().energy.config = config.clone();
     }
 
     /// Take a slot for a request now.
@@ -972,22 +1105,32 @@ impl TrafficManager {
         //    A lease drawing on its own reservation is exempt: those slots
         //    were set aside for it and counting them against the public
         //    ceiling would deny a renter the capacity they paid for.
+        //    An interactive request that finds the node full asks a running
+        //    spot request to yield; the slot frees at its next token, so the
+        //    caller is told to retry almost at once.
         if !drew_on_lease && state.total_in_flight() >= state.public_ceiling(cfg.max_concurrent) {
             let limit = state.public_ceiling(cfg.max_concurrent);
             let in_flight = state.total_in_flight();
+            let yielding = class == QosClass::Interactive && state.preempt_newest_spot();
             drop(state);
             return Err(self.refuse(Refusal::AtCapacity {
                 in_flight,
                 limit,
-                retry_after_ms: 1_000,
+                retry_after_ms: if yielding { SPOT_YIELD_RETRY_MS } else { 1_000 },
             }));
         }
 
         // 2. Batch reservation. Interactive traffic is never shed here — the
         //    whole point of the reservation is that batch load cannot starve
         //    a waiting human.
+        //    Spot obeys it too unless the operator lets spot fill idle slots.
+        let shed_by_reservation = match class {
+            QosClass::Interactive => false,
+            QosClass::Batch => true,
+            QosClass::Spot => !cfg.spot_fill_idle,
+        };
         if !drew_on_lease
-            && class == QosClass::Batch
+            && shed_by_reservation
             && state.in_flight_batch >= cfg.max_concurrent_batch
         {
             drop(state);
@@ -996,7 +1139,23 @@ impl TrafficManager {
             }));
         }
 
-        // 3. There is no deadline prediction here any more. Predicting
+        // 3. Energy budget. A lease drawing on its own reservation is not
+        //    refused (its capacity was sold), but its draw still counts.
+        let energy_watts = state.energy.draw_for(model_id);
+        if !drew_on_lease && state.energy.refuses(energy_watts) {
+            let in_use_watts = state.energy.in_use_watts;
+            let budget_watts = state.energy.config.budget_watts;
+            drop(state);
+            return Err(self.refuse(Refusal::OverEnergyBudget {
+                in_use_watts,
+                draw_watts: energy_watts,
+                budget_watts,
+                retry_after_ms: 1_000,
+            }));
+        }
+        state.energy.in_use_watts = state.energy.in_use_watts.saturating_add(energy_watts);
+
+        // 4. There is no deadline prediction here any more. Predicting
         //    end-to-end time against a fixed deadline, from a cost model that
         //    had never seen an output length, refused nearly every real
         //    coding turn on a 30 tok/s decoder and got worse the longer it
@@ -1008,8 +1167,15 @@ impl TrafficManager {
 
         match class {
             QosClass::Interactive => state.in_flight_interactive += 1,
-            QosClass::Batch => state.in_flight_batch += 1,
+            QosClass::Batch | QosClass::Spot => state.in_flight_batch += 1,
         }
+        let yield_flag = (class == QosClass::Spot).then(|| {
+            let flag = Arc::new(AtomicBool::new(false));
+            state
+                .spot
+                .push((model_id.to_string(), ticket, Arc::clone(&flag)));
+            flag
+        });
         let charged_lease = if drew_on_lease {
             let id = lease_id.expect("drew_on_lease implies a lease id");
             if let Some(r) = state.reservations.get_mut(id) {
@@ -1030,6 +1196,8 @@ impl TrafficManager {
             first_token_ms: None,
             aborted: false,
             lease_id: charged_lease,
+            energy_watts,
+            yield_flag,
             started: Instant::now(),
             deadline,
             inner: Arc::clone(&self.inner),
@@ -1204,6 +1372,7 @@ mod tests {
             // Most tests predate reservations and assert on the full pool, so
             // the default here keeps everything sellable-agnostic.
             public_floor: 0,
+            spot_fill_idle: false,
         }
     }
 
@@ -1214,12 +1383,144 @@ mod tests {
             max_concurrent_batch: batch,
             max_queue_depth: 64,
             public_floor: floor,
+            spot_fill_idle: false,
         }
     }
 
     /// A nominal request shape for tests that do not care about cost.
     fn sh() -> Shape {
         Shape::new(1_000, 256)
+    }
+
+    /// An interactive request that finds the node full asks the newest
+    /// running spot request to yield, is told to retry almost at once, and
+    /// gets the slot once the spot request releases it.
+    #[test]
+    fn a_full_node_asks_the_newest_spot_request_to_yield() {
+        let tm = TrafficManager::new(cfg(3, 3));
+        let older = tm.admit("m", QosClass::Spot, None, sh()).unwrap();
+        let newer = tm.admit("m", QosClass::Spot, None, sh()).unwrap();
+        let _interactive = tm.admit("m", QosClass::Interactive, None, sh()).unwrap();
+        assert!(!older.yielded() && !newer.yielded());
+
+        match tm.admit("m", QosClass::Interactive, None, sh()) {
+            Err(Refusal::AtCapacity { retry_after_ms, .. }) => {
+                assert_eq!(retry_after_ms, SPOT_YIELD_RETRY_MS);
+            }
+            other => panic!("expected AtCapacity, got {other:?}"),
+        }
+        assert!(newer.yielded(), "the newest spot request yields");
+        assert!(!older.yielded());
+
+        // A second full refusal asks the next one; a request yields once.
+        assert!(tm.admit("m", QosClass::Interactive, None, sh()).is_err());
+        assert!(older.yielded());
+
+        drop(newer);
+        tm.admit("m", QosClass::Interactive, None, sh())
+            .expect("the yielded slot is free");
+    }
+
+    /// With no spot request running, a full node refuses an interactive
+    /// request exactly as before, and batch requests are never asked to
+    /// yield.
+    #[test]
+    fn without_spot_work_a_full_node_refuses_as_before() {
+        let tm = TrafficManager::new(cfg(2, 2));
+        let batch = tm.admit("m", QosClass::Batch, None, sh()).unwrap();
+        let _i = tm.admit("m", QosClass::Interactive, None, sh()).unwrap();
+        match tm.admit("m", QosClass::Interactive, None, sh()) {
+            Err(Refusal::AtCapacity { retry_after_ms, .. }) => assert_eq!(retry_after_ms, 1_000),
+            other => panic!("expected AtCapacity, got {other:?}"),
+        }
+        assert!(batch.yield_flag().is_none());
+        assert!(!batch.yielded());
+    }
+
+    /// Spot stays inside the batch share unless the operator lets it fill
+    /// idle slots; then it may take any free slot below the ceiling.
+    #[test]
+    fn spot_fills_idle_slots_only_when_the_operator_allows_it() {
+        let tm = TrafficManager::new(cfg(4, 1));
+        let _s = tm.admit("m", QosClass::Spot, None, sh()).unwrap();
+        assert!(matches!(
+            tm.admit("m", QosClass::Spot, None, sh()),
+            Err(Refusal::ShedForInteractive { .. })
+        ));
+
+        let mut c = cfg(4, 1);
+        c.spot_fill_idle = true;
+        let tm = TrafficManager::new(c);
+        let spot: Vec<_> = (0..4)
+            .map(|_| tm.admit("m", QosClass::Spot, None, sh()).unwrap())
+            .collect();
+        assert_eq!(spot.len(), 4);
+        // Batch still keeps to its share.
+        assert!(tm.admit("m", QosClass::Batch, None, sh()).is_err());
+    }
+
+    #[test]
+    fn requests_are_refused_past_the_operators_energy_budget() {
+        let tm = TrafficManager::new(cfg(64, 32));
+        let energy = |budget: u32| crate::engine_config::EnergyConfig {
+            budget_watts: budget,
+            draw_watts: [
+                ("language".to_string(), 300),
+                ("onnx/vision".to_string(), 150),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        tm.set_energy(&energy(400));
+        let i = QosClass::Interactive;
+
+        let llm = tm.admit("qwen3.6-27b", i, None, sh()).expect("idle node");
+        let refused = tm.admit("onnx/vision", i, None, sh()).unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                Refusal::OverEnergyBudget {
+                    in_use_watts: 300,
+                    draw_watts: 150,
+                    budget_watts: 400,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        // A queue with no draw entry is not bounded by power.
+        let _forecast = tm
+            .admit("onnx/forecast", i, None, sh())
+            .expect("draws nothing");
+        drop(llm);
+
+        let v1 = tm.admit("onnx/vision", i, None, sh()).expect("150 of 400");
+        let _v2 = tm.admit("onnx/vision", i, None, sh()).expect("300 of 400");
+        assert!(
+            tm.admit("onnx/vision", i, None, sh()).is_err(),
+            "450 of 400"
+        );
+        drop(v1);
+        let _v3 = tm
+            .admit("onnx/vision", i, None, sh())
+            .expect("a finished request frees its draw");
+
+        // On an idle node a request larger than the whole budget still runs.
+        let tm = TrafficManager::new(cfg(64, 32));
+        tm.set_energy(&energy(100));
+        let big = tm.admit("qwen3.6-27b", i, None, sh()).expect("alone");
+        assert!(tm.admit("qwen3.6-27b", i, None, sh()).is_err());
+        drop(big);
+
+        // Without a budget nothing is refused for power.
+        let tm = TrafficManager::new(cfg(64, 32));
+        tm.set_energy(&energy(0));
+        let _held: Vec<_> = (0..5)
+            .map(|_| {
+                tm.admit("qwen3.6-27b", i, None, sh())
+                    .expect("no energy bound")
+            })
+            .collect();
     }
 
     #[test]

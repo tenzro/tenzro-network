@@ -21,7 +21,7 @@
 //! does not matter who asks.
 
 use super::*;
-use tenzro_types::transaction::ComputeClaimOp;
+use tenzro_types::transaction::{ClaimPlacement, ComputeClaimOp};
 
 /// Selector for every claim operation; the payload names which.
 pub const SELECTOR_COMPUTE_CLAIM: [u8; 4] = [0x01, 0x00, 0x00, 0x75];
@@ -86,6 +86,8 @@ pub struct ClaimRecord {
     /// Holder payment still in the vault.
     #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub payment: u128,
+    /// The rule the holder bought the claim under, when it stated one.
+    pub placement: Option<ClaimPlacement>,
     pub state: ClaimState,
 }
 
@@ -102,7 +104,93 @@ impl ClaimRecord {
     }
 }
 
-fn claim_key(id: &str) -> String {
+/// Governed key: the most entries in either list of a [`ClaimPlacement`].
+pub const PLACEMENT_MAX_ENTRIES_PARAM: &str = "feature.claim_placement.max_entries";
+
+/// Genesis value of [`PLACEMENT_MAX_ENTRIES_PARAM`].
+pub const DEFAULT_PLACEMENT_MAX_ENTRIES: u64 = 16;
+
+/// Highest value [`PLACEMENT_MAX_ENTRIES_PARAM`] may be set to.
+pub const CEILING_PLACEMENT_MAX_ENTRIES: u64 = 64;
+
+/// Gate of the placement rule: from this epoch an `Accept` may state where
+/// the claim's capacity must sit.
+pub const PLACEMENT_KEY: &str = "feature.claim_placement.activation_epoch";
+
+fn account_key(s: &str) -> String {
+    s.trim_start_matches("0x").to_ascii_lowercase()
+}
+
+/// Judge `claim` against a buyer's `rule` and return the rule in its stored
+/// form: country codes upper-case, accounts lower-case without `0x`, each
+/// list sorted without duplicates. Refuses an empty rule, a token that is not
+/// a country code or an account, more than [`PLACEMENT_MAX_ENTRIES_PARAM`] in a
+/// list, a claim whose declared country is not listed, and a claim whose
+/// writer is not listed.
+fn check_placement(
+    state: &dyn VmState,
+    claim: &ClaimRecord,
+    rule: ClaimPlacement,
+) -> Result<ClaimPlacement> {
+    if !crate::feature_gate::is_live_now(state, PLACEMENT_KEY) {
+        return Err(refuse("a placement rule is not active yet"));
+    }
+    let mut jurisdiction: Vec<String> = rule
+        .jurisdiction
+        .iter()
+        .map(|c| c.trim().to_ascii_uppercase())
+        .collect();
+    let mut operators: Vec<String> = rule
+        .operators
+        .iter()
+        .map(|o| account_key(o.trim()))
+        .collect();
+    jurisdiction.sort();
+    jurisdiction.dedup();
+    operators.sort();
+    operators.dedup();
+    if jurisdiction.is_empty() && operators.is_empty() {
+        return Err(refuse(
+            "a placement rule names countries, operators or both",
+        ));
+    }
+    let most = network_param(state, PLACEMENT_MAX_ENTRIES_PARAM) as usize;
+    if jurisdiction.len() > most || operators.len() > most {
+        return Err(refuse(format!(
+            "a placement rule names at most {most} countries and {most} operators"
+        )));
+    }
+    if jurisdiction
+        .iter()
+        .any(|c| c.len() != 2 || !c.chars().all(|ch| ch.is_ascii_uppercase()))
+    {
+        return Err(refuse("a placement country is a two-letter country code"));
+    }
+    if operators
+        .iter()
+        .any(|o| o.is_empty() || !o.chars().all(|ch| ch.is_ascii_hexdigit()))
+    {
+        return Err(refuse("a placement operator is a hex account"));
+    }
+    if !jurisdiction.is_empty() && !jurisdiction.contains(&claim.region) {
+        return Err(refuse(format!(
+            "the claim sits in '{}', outside the placement rule's countries",
+            claim.region
+        )));
+    }
+    if !operators.is_empty() && !operators.contains(&account_key(&claim.writer)) {
+        return Err(refuse(
+            "the claim's writer is not among the placement rule's operators",
+        ));
+    }
+    Ok(ClaimPlacement {
+        jurisdiction,
+        operators,
+    })
+}
+
+/// System storage slot of the claim `id`.
+pub fn claim_key(id: &str) -> String {
     format!("cclaim:{}", id)
 }
 
@@ -141,6 +229,41 @@ pub fn claims_of(state: &dyn VmState, addr: &[u8]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Governed key: chunks of each due object one SLA possession probe asks
+/// the provider to prove. A provider that kept only a fraction `f` of an
+/// object's chunks passes one probe with probability about `f^samples`, so
+/// the hourly probes add up: 460 samples, enough to catch 1% of an object
+/// missing with 99% confidence, accumulate within a few days. The answer
+/// for every due object travels in one gossip message, which bounds it.
+pub const POSSESSION_PROBE_SAMPLES_PARAM: &str = "feature.possession_probe.samples";
+/// Genesis value of [`POSSESSION_PROBE_SAMPLES_PARAM`].
+pub const DEFAULT_POSSESSION_PROBE_SAMPLES: u64 = 8;
+/// Upper bound of [`POSSESSION_PROBE_SAMPLES_PARAM`]: the most whose answer
+/// for the most objects a probe carries still fits one gossip message.
+pub const MAX_POSSESSION_PROBE_SAMPLES: u64 = 24;
+
+/// Whether `owner` delivers a held claim from the bond or stake
+/// `provider_did` in the hour `epoch`.
+pub fn delivers_held_claim(
+    state: &dyn VmState,
+    owner: &[u8],
+    provider_did: &str,
+    epoch: u64,
+) -> bool {
+    let writer = hex::encode(owner);
+    claims_of(state, owner)
+        .iter()
+        .filter_map(|id| read_claim(state, id))
+        .any(|claim| {
+            let first = (claim.delivery_start_ms.max(0) / MARKET_EPOCH_MS) as u64;
+            claim.state == ClaimState::Held
+                && claim.writer == writer
+                && claim.provider_did == provider_did
+                && first <= epoch
+                && epoch < first + claim.epochs
+        })
+}
+
 /// The held storage claims the SLA subject `provider_did` (a compute bond or
 /// a storage stake) delivers in the hour containing `now_ms`: the objects it
 /// must prove it keeps retrievable to be found available this hour.
@@ -149,6 +272,14 @@ pub fn storage_claims_due(
     provider_did: &str,
     now_ms: i64,
 ) -> Vec<ClaimRecord> {
+    held_claims_at(state, provider_did, now_ms)
+        .into_iter()
+        .filter(|c| c.storage_descriptor.is_some())
+        .collect()
+}
+
+/// The held claims `provider_did` delivers at `now_ms`.
+fn held_claims_at(state: &dyn VmState, provider_did: &str, now_ms: i64) -> Vec<ClaimRecord> {
     let Some(writer) = super::sla_subject(state, provider_did).map(|s| s.owner) else {
         return Vec::new();
     };
@@ -156,13 +287,26 @@ pub fn storage_claims_due(
         .iter()
         .filter_map(|id| read_claim(state, id))
         .filter(|c| {
-            c.storage_descriptor.is_some()
-                && c.state == ClaimState::Held
+            c.state == ClaimState::Held
                 && c.provider_did == provider_did
                 && c.delivery_start_ms <= now_ms
                 && now_ms < c.delivery_end_ms()
         })
         .collect()
+}
+
+/// What the holders of `provider_did`'s held claims are paid back if market
+/// hour `hour` is judged unavailable: each claim's hourly strike, at most
+/// what it has left to pay.
+pub fn hour_refund(state: &dyn VmState, provider_did: &str, hour: u64) -> u128 {
+    held_claims_at(
+        state,
+        provider_did,
+        (hour as i64).saturating_mul(MARKET_EPOCH_MS),
+    )
+    .iter()
+    .map(|c| c.strike_per_epoch.min(c.payment))
+    .fold(0u128, u128::saturating_add)
 }
 
 fn note_party(
@@ -274,6 +418,8 @@ fn pay_writer(
     let payout = super::economy::settle_payout(state, &holder, writer, amount, &earning, changes)?;
     pay(state, vault, writer, payout.credit)?;
     let held = state.get_balance(vault);
+    // The fee, the treasury leg and the RPC-provider leg leave the vault
+    // with the credit; each was credited to its account by the payout.
     let fee = amount - payout.credit;
     if held < fee {
         return Err(VmError::InsufficientBalance {
@@ -385,7 +531,7 @@ impl NativeExecutor {
         state.set_balance(&tx.from, payer - gas_cost);
 
         let me = hex::encode(&tx.from);
-        let now = deterministic_now_ms(tx);
+        let now = deterministic_now_ms(tx)?;
         let mut changes = Vec::new();
         let mut burned = 0u128;
 
@@ -419,6 +565,14 @@ impl NativeExecutor {
                 {
                     return Err(refuse("storage_descriptor is a 32-byte hex digest"));
                 }
+                super::storage_class::check_offer(
+                    state,
+                    storage_descriptor.is_some(),
+                    unit.as_deref(),
+                    units_per_epoch,
+                    strike_per_epoch,
+                )
+                .map_err(refuse)?;
                 if hardware_class == 0 || hardware_class > 4 {
                     return Err(refuse("a claim must name a known hardware class"));
                 }
@@ -483,6 +637,7 @@ impl NativeExecutor {
                     epochs_settled: 0,
                     collateral,
                     payment: 0,
+                    placement: None,
                     state: ClaimState::Offered,
                 }
             }
@@ -501,6 +656,7 @@ impl NativeExecutor {
             ComputeClaimOp::Accept {
                 claim_id,
                 max_total,
+                placement,
             } => {
                 let mut c = load(state, &claim_id)?;
                 if c.state != ClaimState::Offered || now >= c.delivery_start_ms {
@@ -508,6 +664,9 @@ impl NativeExecutor {
                 }
                 if c.writer == me {
                     return Err(refuse("a writer cannot buy its own claim"));
+                }
+                if let Some(rule) = placement {
+                    c.placement = Some(check_placement(state, &c, rule)?);
                 }
                 let total = c.total_strike();
                 if total > max_total {
@@ -655,6 +814,49 @@ mod tests {
         }
     }
 
+    /// The class rule binds an offer only from its activation epoch: the
+    /// same offer in an unknown class is written while the rule is dormant
+    /// and refused once it is live, when a known class is still written.
+    #[tokio::test]
+    async fn a_storage_offer_is_held_to_its_class_only_once_the_rule_is_live() {
+        let stored = |unit: &str| {
+            let mut op = unit_offer(Some(unit), 1 << 30);
+            if let ComputeClaimOp::Offer {
+                storage_descriptor, ..
+            } = &mut op
+            {
+                *storage_descriptor = Some("ab".repeat(32));
+            }
+            op
+        };
+        let (exec, mut state, writer, _buyer) = setup();
+        exec.execute_transaction(
+            &tx(&writer, stored("stored_bytes@frozen"), 0, 5 * H),
+            &mut state,
+        )
+        .await
+        .expect("dormant: the tier of a unit is not checked");
+
+        set_governed_param_for_test(&mut state, super::super::storage_class::KEY, 0);
+        let refused = exec
+            .execute_transaction(
+                &tx(&writer, stored("stored_bytes@frozen"), 1, 5 * H),
+                &mut state,
+            )
+            .await;
+        match refused {
+            Err(e) => assert!(e.to_string().contains("not a storage class"), "{e}"),
+            Ok(res) => assert!(!res.success, "live: an unknown class is refused"),
+        }
+        let nonce = state.get_nonce(&writer);
+        exec.execute_transaction(
+            &tx(&writer, stored("stored_bytes@hot"), nonce, 5 * H),
+            &mut state,
+        )
+        .await
+        .expect("live: a known class inside its price range is written");
+    }
+
     #[tokio::test]
     async fn a_claim_on_metered_capacity_names_a_unit_and_a_quantity() {
         let (exec, mut state, writer, _buyer) = setup();
@@ -703,6 +905,7 @@ mod tests {
                 ComputeClaimOp::Accept {
                     claim_id: id.clone(),
                     max_total: 300,
+                    placement: None,
                 },
                 0,
                 now,
@@ -792,6 +995,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bond_delivers_a_held_claim_only_in_its_hours_and_only_once_bought() {
+        let (exec, mut state, writer, buyer) = setup();
+        let now = 5 * H;
+        exec.execute_transaction(&tx(&writer, offer("did:gpu"), 0, now), &mut state)
+            .await
+            .unwrap();
+        assert!(
+            !delivers_held_claim(&state, &writer, "did:gpu", 10),
+            "offered, not bought"
+        );
+        let accept = ComputeClaimOp::Accept {
+            claim_id: claim_id_for(&writer, 0),
+            max_total: 300,
+            placement: None,
+        };
+        exec.execute_transaction(&tx(&buyer, accept, 0, now), &mut state)
+            .await
+            .unwrap();
+        for hour in [10, 11, 12] {
+            assert!(
+                delivers_held_claim(&state, &writer, "did:gpu", hour),
+                "hour {hour}"
+            );
+        }
+        assert!(!delivers_held_claim(&state, &writer, "did:gpu", 9));
+        assert!(!delivers_held_claim(&state, &writer, "did:gpu", 13));
+        assert!(!delivers_held_claim(&state, &writer, "did:other", 10));
+        assert!(
+            !delivers_held_claim(&state, &buyer, "did:gpu", 10),
+            "the holder delivers nothing"
+        );
+    }
+
+    #[tokio::test]
     async fn a_physical_claim_settles_hour_by_hour_on_sla_verdicts() {
         let (exec, mut state, writer, buyer) = setup();
         let now = 5 * H;
@@ -811,6 +1048,7 @@ mod tests {
         let accept = |max| ComputeClaimOp::Accept {
             claim_id: id.clone(),
             max_total: max,
+            placement: None,
         };
         assert!(
             exec.execute_transaction(&tx(&buyer, accept(299), 0, now), &mut state)
@@ -899,6 +1137,7 @@ mod tests {
             let accept = ComputeClaimOp::Accept {
                 claim_id: id.clone(),
                 max_total: 30 * TNZO,
+                placement: None,
             };
             exec.execute_transaction(&tx(&buyer, accept, 0, 5 * H), &mut state)
                 .await
@@ -966,6 +1205,77 @@ mod tests {
         assert_eq!(state.get_balance(&writer), TNZO);
     }
 
+    /// A buyer's placement rule is checked against the claim's declared
+    /// country and writer, refused when the claim sits outside it, dormant
+    /// until its gate opens, and recorded on the held claim.
+    #[tokio::test]
+    async fn a_placement_rule_refuses_a_claim_outside_it_and_is_recorded() {
+        let (exec, mut state, writer, buyer) = setup();
+        let now = 5 * H;
+        exec.execute_transaction(&tx(&writer, offer("did:gpu"), 0, now), &mut state)
+            .await
+            .unwrap();
+        let id = claim_id_for(&writer, 0);
+        let rule = |countries: &[&str], operators: Vec<String>| {
+            Some(ClaimPlacement {
+                jurisdiction: countries.iter().map(|c| c.to_string()).collect(),
+                operators,
+            })
+        };
+        let accept = |placement| ComputeClaimOp::Accept {
+            claim_id: id.clone(),
+            max_total: 300,
+            placement,
+        };
+        // Dormant: a stated rule is refused until the gate names an epoch.
+        assert!(
+            exec.execute_transaction(
+                &tx(&buyer, accept(rule(&["SG"], vec![])), 0, now),
+                &mut state
+            )
+            .await
+            .is_err()
+        );
+        set_governed_param_for_test(&mut state, PLACEMENT_KEY, 0);
+        for bad in [
+            rule(&["US"], vec![]),
+            rule(&["SG"], vec![hex::encode(&buyer)]),
+            rule(&[], vec![]),
+            rule(&["Singapore"], vec![]),
+        ] {
+            assert!(
+                exec.execute_transaction(&tx(&buyer, accept(bad), 0, now), &mut state)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(read_claim(&state, &id).unwrap().state, ClaimState::Offered);
+        }
+        let writer_hex = hex::encode(&writer);
+        exec.execute_transaction(
+            &tx(
+                &buyer,
+                accept(rule(
+                    &["us", "sg"],
+                    vec![format!("0x{}", writer_hex.to_uppercase())],
+                )),
+                0,
+                now,
+            ),
+            &mut state,
+        )
+        .await
+        .unwrap();
+        let held = read_claim(&state, &id).unwrap();
+        assert_eq!(held.state, ClaimState::Held);
+        assert_eq!(
+            held.placement,
+            Some(ClaimPlacement {
+                jurisdiction: vec!["SG".into(), "US".into()],
+                operators: vec![writer_hex],
+            })
+        );
+    }
+
     #[tokio::test]
     async fn offers_must_start_on_a_future_hour() {
         let (exec, mut state, writer, _) = setup();
@@ -1019,6 +1329,7 @@ mod tests {
         let accept = ComputeClaimOp::Accept {
             claim_id: claim.claim_id.clone(),
             max_total: 300,
+            placement: None,
         };
         exec.execute_transaction(&tx(&buyer, accept, 0, 0), &mut state)
             .await
@@ -1027,5 +1338,49 @@ mod tests {
         assert_eq!(storage_claims_due(&state, "did:gpu", 10 * H).len(), 1);
         assert!(storage_claims_due(&state, "did:other", 10 * H).is_empty());
         assert!(storage_claims_due(&state, "did:gpu", 13 * H).is_empty());
+        let strike = claim.strike_per_epoch;
+        assert!(strike > 0);
+        assert_eq!(hour_refund(&state, "did:gpu", 9), 0);
+        assert_eq!(hour_refund(&state, "did:gpu", 10), strike);
+        assert_eq!(hour_refund(&state, "did:other", 10), 0);
+        assert_eq!(hour_refund(&state, "did:gpu", 13), 0);
+    }
+
+    #[tokio::test]
+    async fn the_usd_penalty_is_dormant_then_never_below_the_hours_refund() {
+        use crate::native::{
+            USD_SLA_PENALTY_KEY, USD_SLA_PENALTY_PARAM, set_governed_param_for_test,
+            sla_unavailable_penalty,
+        };
+        let (exec, mut state, writer, buyer) = setup();
+        exec.execute_transaction(&tx(&writer, offer("did:gpu"), 0, 0), &mut state)
+            .await
+            .unwrap();
+        let claim = read_claim(&state, &claim_id_for(&writer, 0)).unwrap();
+        let accept = ComputeClaimOp::Accept {
+            claim_id: claim.claim_id.clone(),
+            max_total: 300,
+            placement: None,
+        };
+        exec.execute_transaction(&tx(&buyer, accept, 0, 0), &mut state)
+            .await
+            .unwrap();
+        // Dormant: the governed TNZO penalty, whatever the hour refunds.
+        assert_eq!(
+            sla_unavailable_penalty(&state, "did:gpu", 10),
+            crate::native::DEFAULT_SLA_UNAVAILABLE_PENALTY_GWEI as u128 * 1_000_000_000
+        );
+        set_governed_param_for_test(&mut state, USD_SLA_PENALTY_KEY, 0);
+        // Live with no USD figure set: the hour's refund.
+        assert_eq!(
+            sla_unavailable_penalty(&state, "did:gpu", 10),
+            claim.strike_per_epoch
+        );
+        assert_eq!(sla_unavailable_penalty(&state, "did:gpu", 9), 0);
+        // Live with a USD figure above the refund: that figure at the fee rate.
+        set_governed_param_for_test(&mut state, USD_SLA_PENALTY_PARAM, 5_000_000);
+        let usd = crate::native::economy::usd_to_wei(&state, 5_000_000 * 1_000_000_000_000);
+        assert!(usd > claim.strike_per_epoch);
+        assert_eq!(sla_unavailable_penalty(&state, "did:gpu", 10), usd);
     }
 }

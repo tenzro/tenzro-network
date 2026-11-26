@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Docs](https://img.shields.io/docsrs/tenzro-sdk)](https://docs.rs/tenzro-sdk)
 
-The official Tenzro SDK for Rust: a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, payments, agents and settlement.
+The official Tenzro SDK for Rust: a typed client for every JSON-RPC method the node serves, transactions signed by your hardware key, inference, storage, compute claims, payments, agents and settlement.
 
 ## Compatibility
 
@@ -28,12 +28,12 @@ they need. `full`, the default, enables them all.
 
 | Feature | Modules |
 | --- | --- |
-| `payments` | `web` (x402 payers, the publisher gate as a tower layer), `payment`, `permit2`, `funding`, `purchase` |
+| `payments` | `web` (x402 payers, the publisher gate as a tower layer), `payment`, `permit2`, `funding`, `ledger_pay` |
 | `settlement` | `settle` (split engine, settlement plans), `settlement` (escrow) |
 | `agents` | `agent`, `agent_payments`, `task` |
 | `bridge` | `bridge`, `bridge_fee`, `eip7702`, `agent_accounts` |
 | `inference` | `inference`, `chat`, `streaming`, `multimodal`, `media_gen`, `provider`, `training`, `catalog` |
-| `chain` | `governance`, `token`, `nft` (offline calldata and decoders for the NFT factory precompile), `staking`, `validator`, `contract`, `tee`, `zk`, `storage`, `files`, `events`, and the other registries |
+| `chain` | `governance`, `token`, `nft` (offline calldata and decoders for the NFT factory precompile), `staking`, `validator`, `contract`, `tee`, `zk`, `storage`, `compute`, `files`, `events`, and the other registries |
 
 A thin build names what it uses:
 
@@ -155,6 +155,46 @@ settles on chain: `client.settlement()` reads payments and escrows and settles
 a payment, `client.settle()` builds settlement plans across chains and reads a
 plan, its decision and each leg's receipt, and `client.payment()` handles x402
 and MPP payments. The publisher gate is a tower layer in `web`.
+
+## Storage and compute
+
+`client.storage()` stores and reads back objects on a node serving the
+`storage` role. The provider erasure-codes each object across shards and
+prices storage at a fixed rate per byte-epoch (`set_fixed_rate`). Storage is
+held to proofs of retrievability: a renter pays through a storage compute
+claim that commits the object's `descriptor_digest`, and each hour the claim
+pays the provider only if validators found its bond available, which requires
+a possession proof of the object.
+
+`client.compute()` covers compute rental. Rental is held to availability
+proofs and billed per epoch: validators probe every bonded provider and freeze
+one SLA verdict per provider and hour, and an hour judged unavailable is never
+paid. `bond_params`, `get_bond` and `list_bonds` read provider bonds;
+`get_claim` and `list_claims` read compute claims (a storage claim carries
+`storage_descriptor`); `price_feed` reads what validators observed providers
+charge. `rent` signs a `CreateEscrow` with stream release to the provider's
+bonded address; the provider draws accrued epochs with `ClaimEscrowStream`
+and the renter stops the rental with `RefundEscrow`.
+
+```rust,no_run
+# async fn run(
+#     client: tenzro_sdk::TenzroClient,
+#     signer: &dyn tenzro_sdk::wallet::HybridSigner,
+# ) -> tenzro_sdk::SdkResult<()> {
+use tenzro_sdk::RentRequest;
+
+let compute = client.compute();
+let bond = compute
+    .get_bond("did:tenzro:machine:<provider>")
+    .await?
+    .expect("the provider has posted a compute bond");
+// Three hours at 2 TNZO an hour, streamed per hour.
+let rent = RentRequest::for_bond(&bond, 2_000_000_000_000_000_000, 3)?;
+let submitted = compute.rent(signer, &rent).await?;
+# let _ = submitted;
+# Ok(())
+# }
+```
 
 ## Governance
 
@@ -288,6 +328,18 @@ the node hands back.
 
 Each envelope is bound to the method name and to that call's parameters, so one
 produced for a given action cannot be replayed as another.
+
+## Differences from the TypeScript SDK
+
+The two SDKs bind the same node methods and have the same error helpers; `scripts/sdk-parity.py` checks this against the [JSON-RPC reference](https://github.com/tenzro/tenzro-network/blob/main/docs/RPC.md). These are the methods it finds unbound on purpose:
+
+- `eth_*`: the Ethereum JSON-RPC methods the node serves for EVM wallets and libraries. Use an Ethereum library (ethers, viem, alloy) on the same endpoint; the SDKs call an `eth_` method only where they need one (gas price, fee history).
+- `net_*`: Ethereum network methods, likewise; the SDKs read peers and sync state through `tenzro_` methods.
+- `web3_sha3`: Keccak-256 of the given bytes, computed locally by any Ethereum library.
+- `tenzro_getHandoverChain`: read by the light client (`tenzro-light`) to follow the committee from epoch to epoch; the SDKs do not follow the handover chain yet.
+## Light client (preview)
+
+With the `light` feature (off by default), `client.light_client(&anchor)` follows the committee from a trusted anchor (chain id, genesis hash, an epoch and its committee root, from the genesis file) through each epoch's handover, accepts a checkpoint only under a quorum certificate, and checks state values and identity keys against the certified state root: `sync(&clock)`, `state_value(namespace, key, &clock)`, `resolve_identity(did, &clock)`, `key_history(did, &clock)` (each key with the time it took effect; `key_at(t)` names the key a record made at `t` must be signed with). `clock` bounds how old a checkpoint may be against your own time, so a node cannot serve an old state as current. The checks are the `tenzro-light` crate's, the same the Kotlin and Swift packages run.
 
 ## Reference
 

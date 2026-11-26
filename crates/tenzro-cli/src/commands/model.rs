@@ -26,6 +26,8 @@ pub enum ModelCommand {
     Serve(ModelServeCmd),
     /// Stop serving a model
     Stop(ModelStopCmd),
+    /// How your own apps on this machine use the models this node serves
+    Apps(ModelAppsCmd),
     /// Delete a downloaded model (removes all local files and caches)
     Delete(ModelDeleteCmd),
     /// List all model service endpoints
@@ -62,6 +64,7 @@ impl ModelCommand {
             Self::Download(cmd) => cmd.execute().await,
             Self::Serve(cmd) => cmd.execute().await,
             Self::Stop(cmd) => cmd.execute().await,
+            Self::Apps(cmd) => cmd.execute().await,
             Self::Delete(cmd) => cmd.execute().await,
             Self::Endpoints(cmd) => cmd.execute().await,
             Self::Endpoint(cmd) => cmd.execute().await,
@@ -167,24 +170,23 @@ impl ModelListCmd {
     }
 
     pub async fn execute(&self) -> Result<()> {
-        use tenzro_model::{HfDownloader, get_model_catalog};
+        use tenzro_model::HfDownloader;
 
         if self.loaded {
             return self.execute_loaded().await;
         }
 
-        crate::commands::catalog::install_from(&self.catalog_rpc).await?;
+        let cell = tenzro_model::CatalogCell::default();
+        crate::commands::catalog::install_from(&self.catalog_rpc, &cell).await?;
 
         output::print_header("Available Models");
 
         let models_dir = tenzro_types::paths::models_dir();
-        let downloader = HfDownloader::new(models_dir);
+        let downloader = HfDownloader::new(models_dir, cell.clone());
 
-        let catalog = get_model_catalog();
+        let catalog = cell.current().get_model_catalog();
 
-        // Load persisted config to know which models are served
-        let config = crate::config::load_config();
-        let served_models = config.served_models;
+        let served_models = node_serving(&self.catalog_rpc).await;
 
         if self.format == "json" {
             let json_models: Vec<serde_json::Value> = catalog
@@ -225,7 +227,7 @@ impl ModelListCmd {
                         "size_bytes": m.size_bytes,
                         "min_ram_gb": m.min_ram_gb,
                         "context_length": m.context_length,
-                        "license": tenzro_model::catalog::entry(&m.id).map(|e| e.licence.name),
+                        "license": cell.current().entry(&m.id).map(|e| e.licence.name.clone()),
                         "downloaded": is_downloaded,
                         "serving": is_serving,
                         "availability": availability,
@@ -325,25 +327,27 @@ pub struct ModelInfoCmd {
 
 impl ModelInfoCmd {
     pub async fn execute(&self) -> Result<()> {
-        use tenzro_model::{HfDownloader, get_model_by_id};
+        use tenzro_model::HfDownloader;
 
-        crate::commands::catalog::install_from(&self.catalog_rpc).await?;
-        let licence = tenzro_model::catalog::entry(&self.model_id)
-            .map(|e| e.licence.name)
+        let cell = tenzro_model::CatalogCell::default();
+        crate::commands::catalog::install_from(&self.catalog_rpc, &cell).await?;
+        let catalog = cell.current();
+        let licence = catalog
+            .entry(&self.model_id)
+            .map(|e| e.licence.name.clone())
             .unwrap_or_default();
 
-        let entry = get_model_by_id(&self.model_id);
+        let entry = catalog.get_model_by_id(&self.model_id);
 
         match entry {
             Some(m) => {
                 output::print_header(&format!("Model Information: {}", self.model_id));
 
                 let models_dir = tenzro_types::paths::models_dir();
-                let downloader = HfDownloader::new(models_dir);
+                let downloader = HfDownloader::new(models_dir, cell.clone());
                 let is_downloaded = downloader.is_downloaded(&m.id);
 
-                let config = crate::config::load_config();
-                let is_serving = config.served_models.contains(&m.id);
+                let is_serving = node_serving(&self.catalog_rpc).await.contains(&m.id);
 
                 println!();
                 output::print_field("Model ID", &m.id);
@@ -513,11 +517,12 @@ impl ModelDownloadCmd {
     }
 
     async fn execute_local(&self) -> Result<()> {
-        use tenzro_model::{HfDownloader, get_model_by_id};
+        use tenzro_model::HfDownloader;
 
-        crate::commands::catalog::install_from(&self.catalog_rpc).await?;
+        let cell = tenzro_model::CatalogCell::default();
+        crate::commands::catalog::install_from(&self.catalog_rpc, &cell).await?;
 
-        let entry = match get_model_by_id(&self.model_id) {
+        let entry = match cell.current().get_model_by_id(&self.model_id) {
             Some(e) => e,
             None => {
                 return Err(anyhow::anyhow!(
@@ -528,7 +533,7 @@ impl ModelDownloadCmd {
         };
 
         let models_dir = tenzro_types::paths::models_dir();
-        let downloader = HfDownloader::new(models_dir);
+        let downloader = HfDownloader::new(models_dir, cell.clone());
 
         if downloader.is_downloaded(&self.model_id) {
             output::print_success(&format!("Model '{}' is already downloaded", self.model_id));
@@ -600,15 +605,49 @@ impl ModelDownloadCmd {
     }
 }
 
+/// The models the node at `rpc` has loaded and serves, as the node itself
+/// reports them. Empty when no node answers there.
+async fn node_serving(rpc: &str) -> Vec<String> {
+    let rpc = crate::rpc::RpcClient::new(rpc);
+    let reply = rpc
+        .call::<serde_json::Value>("tenzro_listModels", serde_json::json!({ "loaded": true }))
+        .await;
+    let Ok(reply) = reply else {
+        return Vec::new();
+    };
+    reply["models"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|row| row["model_id"].as_str())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Start serving a model
 #[derive(Debug, Parser)]
 pub struct ModelServeCmd {
     /// Model ID to serve
     model_id: String,
 
-    /// RPC endpoint to serve on a remote node (omit to serve locally)
+    /// RPC endpoint of the node that serves the model. Defaults to the local
+    /// one, which this program takes as the endpoint it uses (--rpc on the
+    /// command line, TENZRO_RPC, or the one `tenzro setup` saved).
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Context per request, in tokens. The node gives every concurrent
+    /// request a whole context of KV cache, so this is the main lever on the
+    /// memory a serve takes. Defaults to the catalog's context; never longer
+    /// than it and never shorter than 2048.
     #[arg(long)]
-    rpc: Option<String>,
+    context_length: Option<u32>,
+
+    /// Most requests the node admits to this model at once. Defaults to what
+    /// the node measures its hardware can take.
+    #[arg(long)]
+    max_concurrent: Option<u32>,
 
     /// Force a LAN cluster even when the model fits one machine. By default
     /// the node forms a cluster only when the model is too large for the
@@ -661,29 +700,22 @@ pub struct ModelServeCmd {
     /// Models with an inline MTP head are unaffected: their speculation is
     /// trained into the target's own weights, so there is nothing separate to
     /// decline.
-    ///
-    /// Applies to a node serve — `--rpc`, or a node running locally. Drafters
-    /// are loaded by the node, so a bare `model serve` that only warms weights
-    /// in this process never loads one either way.
     #[arg(long)]
     no_speculative: bool,
 
-    /// Node whose model catalog is read (the catalog is published data
-    /// that nodes serve, not compiled into this binary).
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    catalog_rpc: String,
+    /// Unload the model after this many minutes without a request. It stays
+    /// served: its next request loads it again. The node allows limits within
+    /// its `[memory] idle_unload_min_secs` and `idle_unload_max_secs`. Without
+    /// it the model stays loaded until `tenzro model stop`.
+    #[arg(long, value_name = "MINUTES")]
+    idle_unload: Option<u64>,
 }
 
 impl ModelServeCmd {
     pub async fn execute(&self) -> Result<()> {
-        if let Some(ref rpc_url) = self.rpc {
-            return self.execute_remote(rpc_url).await;
-        }
-        self.execute_local().await
-    }
-
-    async fn execute_remote(&self, rpc_url: &str) -> Result<()> {
         use crate::rpc::RpcClient;
+        let resolved = crate::endpoint::for_command(&self.rpc);
+        let rpc_url = resolved.as_str();
 
         output::print_header(&format!("Serving Model on Node: {}", self.model_id));
         println!();
@@ -711,6 +743,15 @@ impl ModelServeCmd {
         // would override a node-side default if one is ever introduced.
         if self.no_speculative {
             req["load_drafter"] = serde_json::json!(false);
+        }
+        if let Some(n) = self.context_length {
+            req["context_length"] = serde_json::json!(n);
+        }
+        if let Some(n) = self.max_concurrent {
+            req["max_concurrent"] = serde_json::json!(n);
+        }
+        if let Some(minutes) = self.idle_unload {
+            req["idle_unload_secs"] = serde_json::json!(minutes.saturating_mul(60));
         }
         let result: serde_json::Value = rpc
             .call("tenzro_serveModel", req)
@@ -745,66 +786,70 @@ impl ModelServeCmd {
 
         Ok(())
     }
+}
 
-    async fn execute_local(&self) -> Result<()> {
-        use tenzro_model::{HfDownloader, ModelRuntime, get_model_by_id};
+/// How the operator's own apps on this machine use the models this node
+/// serves: its OpenAI-compatible routes on the RPC listener. A model served
+/// `--private` answers callers on this machine only, and no API key exists.
+#[derive(Debug, Parser)]
+pub struct ModelAppsCmd {
+    /// RPC endpoint of this machine's node
+    #[arg(long, default_value = crate::endpoint::LOCAL_RPC)]
+    rpc: String,
+}
 
-        crate::commands::catalog::install_from(&self.catalog_rpc).await?;
-
-        let entry = match get_model_by_id(&self.model_id) {
-            Some(e) => e,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "Model '{}' not found in catalog",
-                    self.model_id
-                ));
-            }
-        };
-
-        let models_dir = tenzro_types::paths::models_dir();
-        let downloader = HfDownloader::new(models_dir);
-
-        if !downloader.is_downloaded(&self.model_id) {
-            return Err(anyhow::anyhow!(
-                "Model '{}' is not downloaded. Run 'tenzro model download {}' first.",
-                self.model_id,
-                self.model_id
-            ));
+impl ModelAppsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        if !on_this_machine(&self.rpc) {
+            anyhow::bail!(
+                "{} is not this machine: apps reach a node's private models only on the node's own machine",
+                self.rpc
+            );
         }
-
-        output::print_header(&format!("Serving Model: {}", entry.name));
-
-        let spinner = output::create_spinner("Loading model into memory...");
-
-        let runtime = ModelRuntime::new()?;
-        let gguf_path = downloader.model_path(&self.model_id);
-
-        match runtime
-            .load_model_with_context(&self.model_id, &gguf_path, Some(entry.context_length))
-            .await
-        {
-            Ok(()) => {
-                spinner.finish_and_clear();
-                output::print_success(&format!("Model '{}' loaded successfully!", entry.name));
-
-                // Update persisted config
-                let mut config = crate::config::load_config();
-                if !config.served_models.contains(&self.model_id) {
-                    config.served_models.push(self.model_id.clone());
-                }
-                let _ = crate::config::save_config(&config);
-
-                println!();
-                output::print_info("Model is ready for inference. Use 'tenzro chat' to interact.");
-            }
-            Err(e) => {
-                spinner.finish_and_clear();
-                return Err(anyhow::anyhow!("Failed to load model: {}", e));
-            }
+        let served = node_serving(&self.rpc).await;
+        for line in apps_guide(&self.rpc, &served) {
+            println!("{line}");
         }
-
         Ok(())
     }
+}
+
+/// Whether `rpc` names this machine (a loopback address or `localhost`).
+fn on_this_machine(rpc: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(rpc) else {
+        return false;
+    };
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
+/// What `model apps` prints: the base URL an OpenAI client takes, the models
+/// it can name, and one request to try.
+fn apps_guide(rpc: &str, served: &[String]) -> Vec<String> {
+    let base = format!("{}/v1", rpc.trim_end_matches('/'));
+    let mut lines = vec![
+        "Apps on this machine use the node's OpenAI-compatible routes:".to_string(),
+        format!("  OPENAI_BASE_URL={base}"),
+        "  OPENAI_API_KEY=local   (the node reads no key; OpenAI clients want a value)".to_string(),
+    ];
+    let Some(model) = served.first() else {
+        lines.push(
+            "The node serves no model yet: `tenzro model serve <MODEL_ID> --private` serves one to this machine only."
+                .to_string(),
+        );
+        return lines;
+    };
+    lines.push(format!("Models it serves: {}", served.join(", ")));
+    lines.push(format!(
+        "Try: curl {base}/chat/completions -H 'content-type: application/json' \\
+       -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hello\"}}]}}'"
+    ));
+    lines
 }
 
 /// Stop serving a model
@@ -846,8 +891,8 @@ impl ModelStopCmd {
         // stopped anything: the weights stay resident, the memory stays held,
         // the endpoint stays online and the persisted intent stays on disk, so
         // a restart warms it straight back. A node that does not answer at all
-        // is an operator who runs theirs on demand — nothing is serving, and
-        // recording the decision locally is the whole of what "stop" can mean.
+        // stopped nothing either: it serves the model again when it starts,
+        // from its own record, and nothing on this side can change that.
         if let Err(e) = result {
             let node_answered = rpc
                 .call::<serde_json::Value>("tenzro_getNodeStatus", serde_json::json!([]))
@@ -865,22 +910,13 @@ impl ModelStopCmd {
                 return Err(anyhow::anyhow!("stop refused by {}: {}", self.rpc, e));
             }
 
-            let mut config = crate::config::load_config();
-            config.served_models.retain(|id| id != &self.model_id);
-            let _ = crate::config::save_config(&config);
-            output::print_info(&format!(
-                "No node answered at {}. Recorded locally: '{}' will not be \
-                 served when a node starts here.",
-                self.rpc, self.model_id
+            return Err(anyhow::anyhow!(
+                "no node answered at {}, so '{}' was not stopped; a node that serves it \
+                 serves it again when it starts, so stop it once the node is running",
+                self.rpc,
+                self.model_id
             ));
-            return Ok(());
         }
-
-        // Only now: the node has unloaded it and cleared the persisted intent,
-        // so this records the same decision on the CLI side.
-        let mut config = crate::config::load_config();
-        config.served_models.retain(|id| id != &self.model_id);
-        let _ = crate::config::save_config(&config);
 
         output::print_success(&format!(
             "Model '{}' stopped on {} — memory released, and it will not be \
@@ -901,6 +937,38 @@ pub struct ModelDeleteCmd {
     /// Skip confirmation prompt
     #[arg(long, short = 'y')]
     yes: bool,
+
+    /// RPC endpoint of the node whose copy of the model is deleted too
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+/// What became of the node's copy of `model_id`, from the node's answer to
+/// `tenzro_deleteModel`: the blob store copies it released, or, when the node
+/// could not be asked, that its copy was kept and how to remove it.
+fn node_copy_report(model_id: &str, rpc: &str, answer: Result<serde_json::Value>) -> String {
+    match answer {
+        Ok(v) => format!(
+            "node at {rpc}: model '{model_id}' deleted, {} blob store copies released",
+            v.get("blobs_released")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0)
+        ),
+        Err(e) => format!(
+            "node at {rpc} kept its copy of '{model_id}' ({e}); remove it with \
+             `tenzro model delete-served --model-id {model_id} --rpc <node RPC>`"
+        ),
+    }
+}
+
+/// Deleting without `--yes` asks first, which needs a terminal to ask on.
+fn confirmable(terminal: bool, model_id: &str) -> Result<()> {
+    if terminal {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "deleting model '{model_id}' asks for confirmation and there is no terminal to ask on; pass --yes to delete without asking"
+    )
 }
 
 impl ModelDeleteCmd {
@@ -908,15 +976,13 @@ impl ModelDeleteCmd {
         use tenzro_model::HfDownloader;
 
         let models_dir = tenzro_types::paths::models_dir();
-        let downloader = HfDownloader::new(models_dir);
+        let downloader = HfDownloader::new(models_dir, tenzro_model::CatalogCell::default());
 
-        if !downloader.is_downloaded(&self.model_id) {
-            output::print_info(&format!("Model '{}' is not downloaded", self.model_id));
-            return Ok(());
-        }
-
+        let local = downloader.is_downloaded(&self.model_id);
         if !self.yes {
             use dialoguer::Confirm;
+            use std::io::IsTerminal as _;
+            confirmable(std::io::stdin().is_terminal(), &self.model_id)?;
             let confirm = Confirm::new()
                 .with_prompt(format!(
                     "Delete model '{}' and all cached files?",
@@ -931,24 +997,28 @@ impl ModelDeleteCmd {
             }
         }
 
-        // Remove from served_models config first
-        let mut config = crate::config::load_config();
-        config.served_models.retain(|id| id != &self.model_id);
-        let _ = crate::config::save_config(&config);
-
         // Delete model files (including HF cache)
-        match downloader.delete_model(&self.model_id) {
-            Ok(()) => {
-                output::print_success(&format!(
-                    "Model '{}' deleted (local files and HF cache removed)",
-                    self.model_id
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to delete model: {}", e));
-            }
+        if local {
+            downloader
+                .delete_model(&self.model_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to delete model: {}", e))?;
+            output::print_success(&format!(
+                "Model '{}' deleted (local files and HF cache removed)",
+                self.model_id
+            ));
+        } else {
+            output::print_info(&format!("Model '{}' is not downloaded here", self.model_id));
         }
 
+        // The node keeps its own copy, in its blob store for peers.
+        let answer = crate::rpc::RpcClient::new(&self.rpc)
+            .call::<serde_json::Value>(
+                "tenzro_deleteModel",
+                serde_json::json!({ "model_id": self.model_id }),
+            )
+            .await;
+        output::print_info(&node_copy_report(&self.model_id, &self.rpc, answer));
         Ok(())
     }
 }
@@ -2026,7 +2096,10 @@ impl ModelDeleteServedRpcCmd {
     pub async fn execute(&self) -> anyhow::Result<()> {
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
-            .call("tenzro_deleteModel", serde_json::json!([self.model_id]))
+            .call(
+                "tenzro_deleteModel",
+                serde_json::json!({ "model_id": self.model_id }),
+            )
             .await?;
         crate::output::print_json(&result)
     }
@@ -2405,5 +2478,83 @@ impl ModelTrainedProvenanceRpcCmd {
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc.call("tenzro_trainedModelProvenance", params).await?;
         crate::output::print_json(&result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{confirmable, node_copy_report};
+
+    #[test]
+    fn apps_reach_only_this_machines_node_and_are_told_its_base_url() {
+        use super::{apps_guide, on_this_machine};
+        for rpc in [
+            "http://127.0.0.1:8545",
+            "http://localhost:8545/",
+            "http://[::1]:8545",
+        ] {
+            assert!(on_this_machine(rpc), "{rpc}");
+        }
+        for rpc in [
+            "https://rpc.tenzro.com",
+            "http://10.0.0.2:8545",
+            "127.0.0.1:8545",
+        ] {
+            assert!(!on_this_machine(rpc), "{rpc}");
+        }
+        let none = apps_guide("http://127.0.0.1:8545/", &[]);
+        assert!(none.contains(&"  OPENAI_BASE_URL=http://127.0.0.1:8545/v1".to_string()));
+        assert!(none.last().unwrap().contains("--private"));
+        let served = ["m1".to_string(), "m2".to_string()];
+        let some = apps_guide("http://127.0.0.1:8545", &served);
+        assert!(some.contains(&"Models it serves: m1, m2".to_string()));
+        assert!(
+            some.last()
+                .unwrap()
+                .contains("http://127.0.0.1:8545/v1/chat/completions")
+        );
+        assert!(some.last().unwrap().contains(r#""model":"m1""#));
+    }
+
+    #[test]
+    fn a_serve_always_goes_to_a_node() {
+        use clap::Parser;
+        let cmd = super::ModelServeCmd::try_parse_from(["serve", "m"]).unwrap();
+        assert_eq!(cmd.rpc, crate::endpoint::LOCAL_RPC);
+        let rpc = "http://10.0.0.5:8545";
+        let cmd = super::ModelServeCmd::try_parse_from(["serve", "m", "--rpc", rpc]).unwrap();
+        assert_eq!(cmd.rpc, rpc);
+    }
+
+    #[test]
+    fn an_idle_limit_is_given_in_minutes() {
+        use clap::Parser;
+        let args = ["serve", "m", "--idle-unload", "30"];
+        let cmd = super::ModelServeCmd::try_parse_from(args).unwrap();
+        assert_eq!(cmd.idle_unload, Some(30));
+    }
+
+    #[test]
+    fn a_delete_reports_what_became_of_the_nodes_copy() {
+        let released = node_copy_report(
+            "qwen",
+            "http://n",
+            Ok(serde_json::json!({ "blobs_released": 3 })),
+        );
+        assert!(
+            released.contains("3 blob store copies released"),
+            "{released}"
+        );
+        let kept = node_copy_report("qwen", "http://n", Err(anyhow::anyhow!("refused")));
+        assert!(kept.contains("kept its copy"), "{kept}");
+        assert!(kept.contains("delete-served --model-id qwen"), "{kept}");
+    }
+
+    #[test]
+    fn delete_without_a_terminal_says_to_pass_yes() {
+        assert!(confirmable(true, "m").is_ok());
+        let refused = confirmable(false, "qwen").unwrap_err().to_string();
+        assert!(refused.contains("'qwen'"), "{refused}");
+        assert!(refused.contains("--yes"), "{refused}");
     }
 }

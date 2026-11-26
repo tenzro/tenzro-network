@@ -37,10 +37,14 @@ fuzz_target!(|input: Input<'_>| {
     if let Ok(delivery) = Delivery::decode(input.delivery) {
         let set = ValidatorSet::new(committee(), input.threshold.clamp(1, 7), "fuzz");
         assert!(
-            set.verify_quorum(&input.digest, &delivery.committee).is_err(),
+            set.verify_quorum(&input.digest, &delivery.committee)
+                .is_err(),
             "signatures from no member key passed the committee"
         );
-        assert!(set.verify_quorum(&input.digest, &delivery.blessing).is_err());
+        assert!(
+            set.verify_quorum(&input.digest, &delivery.blessing)
+                .is_err()
+        );
     }
     let proof: Vec<Vec<u8>> = input.proof.into_iter().take(64).collect();
     let _ = verify_trie_value(&input.root, input.key, &proof);

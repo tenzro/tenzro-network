@@ -17,6 +17,14 @@ ed25519-dalek = { workspace = true }
 curve25519-dalek = { workspace = true }
 k256 = { workspace = true }
 p256 = { workspace = true }
+# The RustCrypto 0.14 release candidates do not keep semver between
+# candidates: p256 and k256 build only against the exact candidates the
+# workspace names. Naming them here carries those pins into every build of
+# this crate, not only builds that use the workspace's lock file.
+elliptic-curve = { workspace = true }
+ecdsa = { workspace = true }
+primeorder = { workspace = true }
+primefield = { workspace = true }
 # `signature` 3.x is the trait crate implemented by ecdsa 0.17-rc.18.
 # ed25519-dalek 2.x still re-exports `signature` 2.x via its public API, so
 # the v3 traits must be imported under disambiguating aliases at k256/p256
@@ -65,6 +73,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "crypto_benchmarks"
 harness = false
+required-features = ["test-keys"]
 
 [lints]
 workspace = true

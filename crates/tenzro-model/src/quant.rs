@@ -661,24 +661,6 @@ pub fn resolve_onnx_precision(
         })
 }
 
-/// List a HuggingFace repo's files.
-///
-/// [`select_file`] needs the repo's real listing because tier filenames are
-/// not derivable — shard counts differ per tier and some names are bespoke.
-/// This is the call that gets it.
-///
-/// Uses the public model API, which returns `siblings` without authentication
-/// for the ungated repos the catalog is restricted to. A gated repo returns
-/// 401 here rather than failing later mid-download, which is the better place
-/// to find out.
-pub async fn list_repo_files(hf_repo: &str) -> crate::Result<Vec<String>> {
-    Ok(list_repo_entries(hf_repo)
-        .await?
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect())
-}
-
 /// List a repo's files with their sizes.
 ///
 /// The size matters as much as the name: a caller swapping precision needs to
@@ -686,22 +668,13 @@ pub async fn list_repo_files(hf_repo: &str) -> crate::Result<Vec<String>> {
 /// memory budget and to tell an already-downloaded file of a *different*
 /// tier from the one being asked for.
 pub async fn list_repo_entries(hf_repo: &str) -> crate::Result<Vec<(String, u64)>> {
-    #[derive(serde::Deserialize)]
-    struct Sibling {
-        rfilename: String,
-        #[serde(default)]
-        size: Option<u64>,
-    }
-    #[derive(serde::Deserialize)]
-    struct RepoInfo {
-        #[serde(default)]
-        siblings: Vec<Sibling>,
-    }
-
     // `blobs=true` is required for `siblings` to carry sizes; without it the
     // API returns filenames only, and a caller comparing an on-disk file
     // against the tier it asked for has nothing to compare with.
-    let url = format!("https://huggingface.co/api/models/{hf_repo}?blobs=true");
+    let url = format!(
+        "{}/api/models/{hf_repo}?blobs=true",
+        crate::hf_download::hub_base()
+    );
     let client = reqwest::Client::builder()
         // Short relative to a download: this is one small JSON body, and a
         // caller choosing a precision should not wait out a download-length
@@ -718,14 +691,40 @@ pub async fn list_repo_entries(hf_repo: &str) -> crate::Result<Vec<(String, u64)
         crate::ModelError::DownloadError(format!("could not reach the HF API for {hf_repo}: {e}"))
     })?;
 
-    if !response.status().is_success() {
+    let status = response.status();
+    let body = response.bytes().await.map_err(|e| {
+        crate::ModelError::DownloadError(format!(
+            "could not read the HF API reply for {hf_repo}: {e}"
+        ))
+    })?;
+    repo_entries_from_reply(hf_repo, status, &body)
+}
+
+/// The files a repo's API reply lists, or why the reply is not a listing.
+fn repo_entries_from_reply(
+    hf_repo: &str,
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> crate::Result<Vec<(String, u64)>> {
+    #[derive(serde::Deserialize)]
+    struct Sibling {
+        rfilename: String,
+        #[serde(default)]
+        size: Option<u64>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RepoInfo {
+        #[serde(default)]
+        siblings: Vec<Sibling>,
+    }
+
+    if !status.is_success() {
         return Err(crate::ModelError::DownloadError(format!(
-            "HF API returned {} for {hf_repo}; the repo may be gated, renamed, or private",
-            response.status()
+            "HF API returned {status} for {hf_repo}; the repo may be gated, renamed, or private"
         )));
     }
 
-    let info: RepoInfo = response.json().await.map_err(|e| {
+    let info: RepoInfo = serde_json::from_slice(body).map_err(|e| {
         crate::ModelError::DownloadError(format!("malformed HF API response for {hf_repo}: {e}"))
     })?;
 
@@ -767,6 +766,15 @@ pub struct ResolvedQuant {
 /// guess which precisions exist.
 pub async fn resolve(hf_repo: &str, wanted: QuantTier) -> crate::Result<ResolvedQuant> {
     let entries = list_repo_entries(hf_repo).await?;
+    resolve_in(hf_repo, &entries, wanted)
+}
+
+/// `resolve` against a listing already in hand.
+fn resolve_in(
+    hf_repo: &str,
+    entries: &[(String, u64)],
+    wanted: QuantTier,
+) -> crate::Result<ResolvedQuant> {
     let files: Vec<String> = entries.iter().map(|(n, _)| n.clone()).collect();
     let available = available_tiers(&files);
 
@@ -932,15 +940,33 @@ mod tests {
         assert!(q4 < int8, "4-bit should be smaller than 8-bit");
     }
 
-    #[tokio::test]
-    #[ignore = "hits the HuggingFace API; run with --run-ignored"]
-    async fn the_suffix_convention_matches_a_real_onnx_repo() {
+    /// A repo's listing as the hub's API answered when the fixture was
+    /// recorded: `tests/fixtures/hf-gguf-repo.json` is `unsloth/Qwen3-0.6B-GGUF`,
+    /// `hf-onnx-repo.json` is `onnx-community/Qwen3-Embedding-0.6B-ONNX`.
+    fn recorded(repo: &str, body: &str) -> Vec<(String, u64)> {
+        repo_entries_from_reply(repo, reqwest::StatusCode::OK, body.as_bytes())
+            .expect("a recorded listing parses")
+    }
+
+    fn gguf_repo() -> Vec<(String, u64)> {
+        recorded(
+            "unsloth/Qwen3-0.6B-GGUF",
+            include_str!("../tests/fixtures/hf-gguf-repo.json"),
+        )
+    }
+
+    #[test]
+    fn the_suffix_convention_matches_a_real_onnx_repo() {
         // The whole scheme rests on onnx-community's naming holding. If they
         // change it, deriving filenames silently starts producing 404s, and
         // this is what catches that.
-        let files = list_repo_files("onnx-community/Qwen3-Embedding-0.6B-ONNX")
-            .await
-            .expect("public repo");
+        let files: Vec<String> = recorded(
+            "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+            include_str!("../tests/fixtures/hf-onnx-repo.json"),
+        )
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
         for p in [
             OnnxPrecision::Fp32,
             OnnxPrecision::Fp16,
@@ -1112,16 +1138,13 @@ mod tests {
         assert_eq!(nearest_available(&[], QuantTier::Q4KM), None);
     }
 
-    #[tokio::test]
-    #[ignore = "hits the HuggingFace API; run with --run-ignored"]
-    async fn a_real_repo_lists_the_tiers_it_actually_publishes() {
+    #[test]
+    fn a_real_repo_lists_the_tiers_it_actually_publishes() {
         // The unit tests above use a synthetic listing, which proves the
         // matching logic but not that the shapes match reality. This checks
         // the assumption the whole module rests on: that HF's `siblings`
         // field names files the way `select_file` expects.
-        let files = list_repo_files("unsloth/Qwen3-0.6B-GGUF")
-            .await
-            .expect("public ungated repo should list");
+        let files: Vec<String> = gguf_repo().into_iter().map(|(n, _)| n).collect();
         assert!(!files.is_empty(), "listing must not be empty");
         assert!(
             files.iter().any(|f| f.ends_with(".gguf")),
@@ -1136,20 +1159,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "hits the HuggingFace API; run with --run-ignored"]
-    async fn resolving_reports_the_tiers_real_size_not_the_catalogs() {
+    #[test]
+    fn resolving_reports_the_tiers_real_size_not_the_catalogs() {
         // Found live: asking for Q8_0 when Q4_K_M was already on disk
         // returned "completed" and left the 4-bit file in place, because the
         // already-downloaded check compared against the catalog's size for
         // its own pinned tier. The resolver has to report what the chosen
         // tier actually weighs or that check cannot tell them apart.
-        let q4 = resolve("unsloth/Qwen3-0.6B-GGUF", QuantTier::Q4KM)
-            .await
-            .expect("published");
-        let q8 = resolve("unsloth/Qwen3-0.6B-GGUF", QuantTier::Q8_0)
-            .await
-            .expect("published");
+        let listing = gguf_repo();
+        let q4 =
+            resolve_in("unsloth/Qwen3-0.6B-GGUF", &listing, QuantTier::Q4KM).expect("published");
+        let q8 =
+            resolve_in("unsloth/Qwen3-0.6B-GGUF", &listing, QuantTier::Q8_0).expect("published");
 
         assert!(
             q4.size_bytes > 0 && q8.size_bytes > 0,
@@ -1164,15 +1185,17 @@ mod tests {
         assert_ne!(q4.filename, q8.filename);
     }
 
-    #[tokio::test]
-    #[ignore = "hits the HuggingFace API; run with --run-ignored"]
-    async fn resolving_an_unpublished_tier_substitutes_and_says_so() {
+    #[test]
+    fn resolving_an_unpublished_tier_substitutes_and_says_so() {
         // The caller must be able to tell "you got what you asked for" from
         // "you got the nearest thing", or a precision substitution silently
         // becomes an unexplained quality change.
-        let resolved = resolve("unsloth/Qwen3-0.6B-GGUF", QuantTier::default())
-            .await
-            .expect("repo resolves");
+        let resolved = resolve_in(
+            "unsloth/Qwen3-0.6B-GGUF",
+            &gguf_repo(),
+            QuantTier::default(),
+        )
+        .expect("repo resolves");
         assert!(resolved.filename.ends_with(".gguf"));
         assert!(!resolved.available.is_empty());
         if resolved.substituted {
@@ -1180,14 +1203,16 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "hits the HuggingFace API; run with --run-ignored"]
-    async fn a_missing_repo_fails_at_resolve_rather_than_mid_download() {
+    #[test]
+    fn a_missing_repo_fails_at_resolve_rather_than_mid_download() {
         // Finding out at listing time is much better than a 404 partway
         // through fetching several gigabytes.
-        let err = list_repo_files("unsloth/definitely-not-a-real-repo-xyzzy")
-            .await
-            .expect_err("nonexistent repo must error");
+        let err = repo_entries_from_reply(
+            "unsloth/definitely-not-a-real-repo-xyzzy",
+            reqwest::StatusCode::NOT_FOUND,
+            b"{\"error\":\"Repository not found\"}",
+        )
+        .expect_err("nonexistent repo must error");
         let msg = err.to_string();
         assert!(
             msg.contains("gated") || msg.contains("404") || msg.contains("renamed"),

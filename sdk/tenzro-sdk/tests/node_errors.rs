@@ -102,3 +102,26 @@ async fn a_not_found_without_build_data_is_not_the_light_build() {
     assert!(!node.is_light_build());
     assert!(node.data.is_none());
 }
+
+#[tokio::test]
+async fn the_settlement_floor_and_an_unmet_jurisdiction_are_told_apart() {
+    let err = call_with_error(serde_json::json!({
+        "code": -32026,
+        "message": "This call metered 9, below the network's micro-settlement floor of 10.",
+        "data": { "cost_wei": "9", "micro_settlement_floor": "10", "remedy": "open_channel" }
+    }))
+    .await;
+    let node = err.node_error().expect("a node error");
+    assert!(node.is_below_settlement_floor());
+    assert!(!node.is_jurisdiction_unmet());
+    assert_eq!(node.data.as_ref().unwrap()["remedy"], "open_channel");
+
+    let err = call_with_error(serde_json::json!({
+        "code": -32024,
+        "message": "This node does not satisfy jurisdiction pin 'DE'"
+    }))
+    .await;
+    let node = err.node_error().expect("a node error");
+    assert!(node.is_jurisdiction_unmet());
+    assert!(!node.is_below_settlement_floor());
+}

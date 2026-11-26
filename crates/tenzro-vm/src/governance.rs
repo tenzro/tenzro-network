@@ -394,6 +394,13 @@ pub const TIMELOCK_PARAM: &str = "governance.timelock_ms";
 pub const EXPEDITED_TIMELOCK_PARAM: &str = "governance.expedited_timelock_ms";
 /// Governed key: Ratify timelock, ms.
 pub const RATIFY_TIMELOCK_PARAM: &str = "governance.ratify_timelock_ms";
+/// Governed key: the newest release whose governed keys and bounds a
+/// parameter change may use, as `major * 1_000_000 + minor * 1_000 + patch`.
+pub const RELEASE_FLOOR_PARAM: &str = "governance.release_floor";
+/// Release 0.2.1, encoded as [`RELEASE_FLOOR_PARAM`] counts.
+pub const RELEASE_0_2_1: u64 = 2_001;
+/// Release 0.2.2, encoded as [`RELEASE_FLOOR_PARAM`] counts.
+pub const RELEASE_0_2_2: u64 = 2_002;
 /// Governed key: quorum, bps of bonded stake.
 pub const QUORUM_PARAM: &str = "governance.quorum_bps";
 /// Governed key: standard threshold, bps of participating stake.
@@ -501,6 +508,7 @@ pub fn capture_guard(key: &str) -> Option<Tighten> {
         | staking::EQUIVOCATION_MIN_SLASH_PARAM
         | staking::CORRELATION_MULTIPLIER_PARAM
         | staking::CORRELATION_WINDOW_PARAM
+        | staking::CORRELATION_WINDOW_DAY_PARAM
         | bridge_committee::EQUIVOCATION_SLASH_PARAM
         | crate::native::inference_fault::CATALOG_FAULT_SLASH_BPS_PARAM
         | crate::native::payment_settlement::plan::ATTESTOR_SLASH_PARAM
@@ -659,6 +667,11 @@ pub enum GovernanceError {
     /// enactment where the only outcome is a failed transaction.
     #[error("'{key}' is not a governed parameter")]
     UnknownParameter { key: String },
+    /// The key, or its bounds, came with a release above the network's
+    /// release floor: a node still on an older release would refuse the
+    /// change and part from the chain.
+    #[error("{key} came with release {since}, above the network's release floor {floor}")]
+    ParameterNotReleased { key: String, since: u64, floor: u64 },
     /// The value is outside the range that leaves a working network.
     #[error("{key} = {value} is outside the permitted range {min}..={max}")]
     ParameterOutOfRange {
@@ -1248,6 +1261,24 @@ pub enum ProposalAction {
         /// Why, recorded on-chain with the proposal.
         memo: String,
     },
+    /// Approve an RPC provider, by the label verifiers name in their bond,
+    /// or renew a revoked approval. From `feature.rpc_provider_approval`
+    /// a bridge committee seats only verifiers reading through an approved
+    /// provider ([`crate::native::rpc_provider_approval`]).
+    ApproveRpcProvider {
+        /// The provider's label, at most 64 bytes.
+        provider: String,
+        /// Why, recorded on-chain with the proposal.
+        memo: String,
+    },
+    /// Revoke an RPC provider's approval. Takes effect at each route's next
+    /// committee draw; approving again undoes it.
+    RevokeRpcProvider {
+        /// The provider's label.
+        provider: String,
+        /// Why, recorded on-chain with the proposal.
+        memo: String,
+    },
     /// Approve `grantee` to receive grants, or renew its approval. Approval
     /// confers no vote, no reward and no class.
     ApproveGrantee {
@@ -1327,6 +1358,42 @@ pub enum ProposalAction {
     ReinstateValidator {
         /// The jailed validator.
         validator: Address,
+        /// Why, recorded on-chain with the proposal.
+        memo: String,
+    },
+    /// Set or clear the finality policy of a CCIP 2.0 route, or of one asset
+    /// it carries ([`tenzro_bridge::route::finality::CcipFinalityPolicy`]):
+    /// the transfers sent before the sending chain's finality it accepts and
+    /// the bucket they draw on. `None` clears it, so the route accepts only
+    /// transfers that waited for finality. No route has a policy at genesis:
+    /// whether any route mints before its sending chain's finality is decided
+    /// by this vote. Waits for `feature.ccip_finality_policy`
+    /// ([`crate::native::bridge::CCIP_FINALITY_POLICY_KEY`]). A `Network`
+    /// action.
+    SetBridgeFinalityPolicy {
+        /// The route's transport.
+        adapter: tenzro_types::bridge_route::BridgeRouteAdapter,
+        /// The route's external chain, as the route names it.
+        source_chain: String,
+        /// The carried asset the policy is for; `None` for the route's own
+        /// value.
+        asset: Option<String>,
+        /// The policy, checked against the route at submission and again at
+        /// enactment.
+        policy: Option<tenzro_bridge::route::finality::CcipFinalityPolicy>,
+        /// Why, recorded on-chain with the proposal.
+        memo: String,
+    },
+    /// Mark an account as affiliated with the network's founders, or clear
+    /// the mark ([`crate::native::affiliated_share`]): sponsorship and grants
+    /// paid to marked accounts are published as a share of the year's
+    /// payouts and held to `feature.affiliated_share.max_bps` of it. Waits
+    /// for `feature.affiliated_share`. A `Network` action.
+    SetAffiliation {
+        /// The account.
+        account: Address,
+        /// Mark it, or clear the mark.
+        affiliated: bool,
         /// Why, recorded on-chain with the proposal.
         memo: String,
     },
@@ -1559,7 +1626,11 @@ impl ProposalAction {
                         }
                     }
                     PolicyTrack::SecurityFix { basis } => {
-                        if !matches!(update, PolicyUpdate::ProtocolUpgrade { .. }) {
+                        if !matches!(
+                            update,
+                            PolicyUpdate::ProtocolUpgrade { .. }
+                                | PolicyUpdate::ProtocolUpgradePlatforms { .. }
+                        ) {
                             return Err(GovernanceError::InvalidPolicy(
                                 "only a protocol upgrade may take the security-fix track".into(),
                             ));
@@ -1739,6 +1810,35 @@ impl ProposalAction {
                         field: "code_hash",
                         len: code_hash.len(),
                     });
+                }
+                if memo.len() > MAX_TEXT_LEN {
+                    return Err(GovernanceError::TextTooLong {
+                        field: "memo",
+                        len: memo.len(),
+                    });
+                }
+                Ok(())
+            }
+            ProposalAction::SetBridgeFinalityPolicy {
+                source_chain,
+                asset,
+                memo,
+                ..
+            } => {
+                if source_chain.trim().is_empty() {
+                    return Err(GovernanceError::InvalidBridgeRoute(
+                        "a finality policy must name the route's source chain".to_string(),
+                    ));
+                }
+                if asset.as_deref().is_some_and(|a| a.trim().is_empty()) {
+                    return Err(GovernanceError::InvalidBridgeRoute(
+                        "a finality policy for a carried asset must name the asset".to_string(),
+                    ));
+                }
+                if memo.trim().is_empty() {
+                    return Err(GovernanceError::InvalidPolicy(
+                        "a finality policy change must say why, in its memo".into(),
+                    ));
                 }
                 if memo.len() > MAX_TEXT_LEN {
                     return Err(GovernanceError::TextTooLong {
@@ -1961,11 +2061,30 @@ impl ProposalAction {
                 }
                 Ok(())
             }
+            ProposalAction::ApproveRpcProvider { provider, memo }
+            | ProposalAction::RevokeRpcProvider { provider, memo } => {
+                crate::native::rpc_provider_approval::check_label(provider).map_err(|_| {
+                    GovernanceError::TextTooLong {
+                        field: "provider",
+                        len: provider.len(),
+                    }
+                })?;
+                if memo.len() > MAX_TEXT_LEN {
+                    return Err(GovernanceError::TextTooLong {
+                        field: "memo",
+                        len: memo.len(),
+                    });
+                }
+                Ok(())
+            }
             ProposalAction::RevokeOperator {
                 operator: who,
                 memo,
             }
-            | ProposalAction::RevokeGrantee { grantee: who, memo } => {
+            | ProposalAction::RevokeGrantee { grantee: who, memo }
+            | ProposalAction::SetAffiliation {
+                account: who, memo, ..
+            } => {
                 if who.as_bytes().iter().all(|b| *b == 0) {
                     return Err(GovernanceError::ZeroAddress { field: "account" });
                 }
@@ -2107,11 +2226,15 @@ impl ProposalAction {
             ProposalAction::ApproveGrantee { .. } => ActionDomain::Treasury,
             // Revoking only stops later payments; approving again undoes it.
             ProposalAction::RevokeOperator { .. } => ActionDomain::Network,
+            ProposalAction::ApproveRpcProvider { .. } => ActionDomain::Network,
+            ProposalAction::RevokeRpcProvider { .. } => ActionDomain::Network,
             ProposalAction::RevokeGrantee { .. } => ActionDomain::Network,
             ProposalAction::SponsorOperatorRunningCost { .. } => ActionDomain::Treasury,
             ProposalAction::SponsorOperatorStable { .. } => ActionDomain::Treasury,
             // Returns a slashed party to the set a vote already put out.
             ProposalAction::ReinstateValidator { .. } => ActionDomain::Sanction,
+            ProposalAction::SetBridgeFinalityPolicy { .. } => ActionDomain::Network,
+            ProposalAction::SetAffiliation { .. } => ActionDomain::Network,
         }
     }
 
@@ -2145,11 +2268,15 @@ impl ProposalAction {
             ProposalAction::RecallSponsoredBond { .. } => "recall_sponsored_bond",
             ProposalAction::ApproveOperator { .. } => "approve_operator",
             ProposalAction::RevokeOperator { .. } => "revoke_operator",
+            ProposalAction::ApproveRpcProvider { .. } => "approve_rpc_provider",
+            ProposalAction::RevokeRpcProvider { .. } => "revoke_rpc_provider",
             ProposalAction::ApproveGrantee { .. } => "approve_grantee",
             ProposalAction::RevokeGrantee { .. } => "revoke_grantee",
             ProposalAction::SponsorOperatorRunningCost { .. } => "sponsor_operator_running_cost",
             ProposalAction::SponsorOperatorStable { .. } => "sponsor_operator_stable",
             ProposalAction::ReinstateValidator { .. } => "reinstate_validator",
+            ProposalAction::SetBridgeFinalityPolicy { .. } => "set_bridge_finality_policy",
+            ProposalAction::SetAffiliation { .. } => "set_affiliation",
         }
     }
 
@@ -2251,8 +2378,38 @@ pub fn upgrade_ready_digest(code_hash: &[u8; 32], validator: &[u8]) -> [u8; 32] 
     h.finalize().into()
 }
 
+/// The binary an enacted upgrade names for one platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationDigest {
+    /// The platform, as the proposal named it.
+    pub platform: String,
+    /// Hex SHA-256 of the binary.
+    pub code_hash: String,
+}
+
+/// The binaries of an enacted upgrade built for several platforms, recorded
+/// beside its [`UpgradeActivation`]: from the activation height every node
+/// runs one of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradePlatforms {
+    /// The proposal that decided it, the one its [`UpgradeActivation`] names.
+    pub proposal_id: String,
+    /// The binary for each platform.
+    pub digests: Vec<ActivationDigest>,
+}
+
+impl UpgradePlatforms {
+    /// Whether the upgrade names the binary whose hex SHA-256 is
+    /// `code_hash`, for any platform.
+    pub fn names_binary(&self, code_hash: &str) -> bool {
+        self.digests.iter().any(|d| d.code_hash == code_hash)
+    }
+}
+
 /// A protocol upgrade enacted with its readiness met: the height from which
-/// every node runs `code_hash`.
+/// every node runs `code_hash`, or, for an upgrade built for several
+/// platforms, one of the binaries its [`UpgradePlatforms`] record names
+/// (`code_hash` is then the first of them).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpgradeActivation {
     /// The proposal that decided it.
@@ -2304,6 +2461,11 @@ pub fn policy_kind(update: &PolicyUpdate) -> &'static str {
         PolicyUpdate::BridgeOutflowLimitsSet { .. } => "bridge_outflow_limits",
         PolicyUpdate::FinalityProgramSet { .. } => "finality_program",
         PolicyUpdate::HandoverProgramSet { .. } => "handover_program",
+        PolicyUpdate::ProtocolUpgradePlatforms { .. } => "protocol_upgrade_platforms",
+        PolicyUpdate::WebauthnRootsSet { .. } => "webauthn_attestation_roots",
+        PolicyUpdate::NrasJwksSet { .. } => "nras_jwks",
+        PolicyUpdate::BootNodesSet { .. } => "boot_nodes",
+        PolicyUpdate::UpdateNoticeKeysSet { .. } => "update_notice_keys",
     }
 }
 
@@ -2334,9 +2496,7 @@ pub fn validate_policy_update(update: &PolicyUpdate) -> Result<(), GovernanceErr
             }
             Ok(())
         }
-        PolicyUpdate::EconomicPolicyUpdate { policy } => policy
-            .validate()
-            .map_err(|e| GovernanceError::InvalidPolicy(e.to_string())),
+        PolicyUpdate::EconomicPolicyUpdate { .. } => Ok(()),
         PolicyUpdate::AdaptiveBurnConfigUpdate {
             base_fee_burn_bps,
             local_fee_burn_bps,
@@ -2394,6 +2554,26 @@ pub fn validate_policy_update(update: &PolicyUpdate) -> Result<(), GovernanceErr
             }
             Ok(())
         }
+        PolicyUpdate::WebauthnRootsSet { roots_pem } => {
+            for pem in roots_pem {
+                tenzro_tee::x509::parse_pem_chain(pem).map_err(|e| {
+                    GovernanceError::InvalidPolicy(format!("WebAuthn attestation root: {e}"))
+                })?;
+            }
+            Ok(())
+        }
+        PolicyUpdate::NrasJwksSet { jwks_json } => {
+            crate::native::gateway_sets::check_nras_jwks(jwks_json)
+                .map_err(|e| GovernanceError::InvalidPolicy(format!("NVIDIA key set: {e}")))
+        }
+        PolicyUpdate::BootNodesSet { identities } => {
+            crate::native::gateway_sets::check_boot_nodes(identities)
+                .map_err(|e| GovernanceError::InvalidPolicy(format!("boot nodes: {e}")))
+        }
+        PolicyUpdate::UpdateNoticeKeysSet { keys_hex } => {
+            crate::native::gateway_sets::check_update_notice_keys(keys_hex)
+                .map_err(|e| GovernanceError::InvalidPolicy(format!("update notice keys: {e}")))
+        }
         PolicyUpdate::GpuDeviceRootsSet { roots_pem } => {
             for pem in roots_pem {
                 tenzro_tee::x509::parse_pem_chain(pem)
@@ -2441,6 +2621,52 @@ pub fn validate_policy_update(update: &PolicyUpdate) -> Result<(), GovernanceErr
                 return Err(GovernanceError::InvalidPolicy(
                     "the handover program image id is zero".into(),
                 ));
+            }
+            Ok(())
+        }
+        PolicyUpdate::ProtocolUpgradePlatforms { version, digests } => {
+            if version.trim().is_empty() || version.len() > 64 {
+                return bad("a protocol upgrade names its version in 1..=64 characters".into());
+            }
+            if digests.is_empty() || digests.len() > tenzro_types::token::MAX_UPGRADE_PLATFORMS {
+                return bad(format!(
+                    "a protocol upgrade names a binary for 1..={} platforms, not {}",
+                    tenzro_types::token::MAX_UPGRADE_PLATFORMS,
+                    digests.len()
+                ));
+            }
+            for (i, d) in digests.iter().enumerate() {
+                let named = !d.platform.is_empty()
+                    && d.platform.len() <= 64
+                    && d.platform.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                    });
+                if !named {
+                    return bad(
+                        "a protocol upgrade names each platform as a target triple of 1..=64 \
+                         lowercase letters, digits, '-' and '_'"
+                            .into(),
+                    );
+                }
+                if d.code_hash.len() != 32 {
+                    return bad(format!(
+                        "a protocol upgrade carries the 32-byte SHA-256 of each binary; the one \
+                         for {} is {} bytes",
+                        d.platform,
+                        d.code_hash.len()
+                    ));
+                }
+                // One platform named twice would leave two binaries claiming
+                // it; one binary under two platforms is a mislabelled build.
+                if digests[..i]
+                    .iter()
+                    .any(|e| e.platform == d.platform || e.code_hash == d.code_hash)
+                {
+                    return bad(format!(
+                        "a protocol upgrade names each platform and each binary once; {} repeats",
+                        d.platform
+                    ));
+                }
             }
             Ok(())
         }
@@ -3060,6 +3286,27 @@ pub const AUDIT_RETENTION_PARAM: &str = "storage.audit_retention_seconds";
 /// days, six months rounded up.
 pub const AUDIT_RETENTION_FLOOR_SECS: u64 = 183 * 24 * 60 * 60;
 
+/// Gate of the sealed endpoint pull between validators: from its activation
+/// epoch a validator's publication may carry a request for the endpoints it
+/// holds no opened copy of.
+pub const SEALED_ENDPOINT_PULL_GATE: &str = "feature.sealed_endpoint_pull.activation_epoch";
+
+/// Gate of session-signed provider heartbeats: from its activation epoch a
+/// serving node signs its heartbeats with an in-memory session key its
+/// machine identity certified once, and a node accepts that form.
+pub const HEARTBEAT_SESSION_GATE: &str = "feature.heartbeat_session.activation_epoch";
+
+/// The longest a heartbeat session certificate may be valid, in milliseconds.
+pub const HEARTBEAT_SESSION_MAX_LIFETIME_KEY: &str = "heartbeat.session_max_lifetime_ms";
+
+/// How far past a verifier's clock a heartbeat session certificate's issue
+/// time may be, in milliseconds.
+pub const HEARTBEAT_SESSION_ISSUE_SKEW_KEY: &str = "heartbeat.session_issue_skew_ms";
+
+/// How far a provider heartbeat's timestamp may be from the receiving node's
+/// clock, in milliseconds.
+pub const HEARTBEAT_MAX_SKEW_KEY: &str = "heartbeat.max_skew_ms";
+
 /// Every parameter governance may set.
 ///
 /// Adding one here is what makes it governable; a constant not in this table
@@ -3067,10 +3314,460 @@ pub const AUDIT_RETENTION_FLOOR_SECS: u64 = 183 * 24 * 60 * 60;
 /// should be adjustable at runtime.
 pub const GOVERNED_PARAMS: &[GovernedParam] = &[
     crate::feature_gate::registry_entry(
+        crate::native::reward_root::KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose reward coupons go only to work whose root is a passkey-held human or an autonomous machine with a manufacturer-endorsed TPM; other work is left unmatched and its share stays in the pool. Dormant until a vote sets it; the vote waits until tenzro_getRewardEpoch shows reward_root.all_matched for every active validator.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::availability_reward::SLA_TIERS_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which validators judge each readiness tier's SLA verdict against its own governed share (sla.<tier>_available_bps); before it every subject is available above half its probes.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::settlement_asset::UNIT_BASKET_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which ledger payments are valued in the fiat basket (feature.unit_basket.weight_*), scaled so the unit is worth one dollar at the switch; before it they are valued in the dollar.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::availability_reward::FIRMWARE_TPM_TIER_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a machine whose TPM its manufacturer certifies as firmware on the host processor (Intel PTT, AMD fTPM, Qualcomm) earns feature.firmware_tpm_tier.reward_bps of the availability reward, a tier below a discrete chip.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::SLA_FAILURE_WINDOW_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose unavailable SLA verdicts count toward a failure window: the verdict that brings a subject's count within feature.sla_failure_window.window_epochs to feature.sla_failure_window.max_failures takes feature.sla_failure_window.multiple times the flat penalty, and the count starts again. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::SLA_FAILURE_WINDOW_EPOCHS_PARAM,
+        min: 1,
+        max: 24 * 366,
+        genesis: 24 * 30,
+        tighten: Tighten::Up,
+        description: "One-hour epochs an unavailable SLA verdict counts toward the failure-window multiple. Read from feature.sla_failure_window.activation_epoch.",
+    },
+    GovernedParam {
+        key: HEARTBEAT_SESSION_MAX_LIFETIME_KEY,
+        min: 60_000,
+        max: 86_400_000,
+        genesis: 3_600_000,
+        tighten: Tighten::Down,
+        description: "The longest a heartbeat session certificate may be valid, in milliseconds, from the moment it was issued. A node refuses a session-signed heartbeat whose certificate is valid for longer. Lowering it tightens the rule.",
+    },
+    GovernedParam {
+        key: HEARTBEAT_SESSION_ISSUE_SKEW_KEY,
+        min: 1_000,
+        max: 300_000,
+        genesis: 60_000,
+        tighten: Tighten::Down,
+        description: "How far past a node's own clock a heartbeat session certificate's issue time may be, in milliseconds. Lowering it tightens the rule.",
+    },
+    GovernedParam {
+        key: HEARTBEAT_MAX_SKEW_KEY,
+        min: 1_000,
+        max: 300_000,
+        genesis: 60_000,
+        tighten: Tighten::Down,
+        description: "How far a provider heartbeat's timestamp may be from the receiving node's clock, in milliseconds, before the node drops it. Lowering it tightens the rule.",
+    },
+    GovernedParam {
+        key: crate::native::SLA_FAILURE_MAX_PARAM,
+        min: 1,
+        max: 100,
+        genesis: 3,
+        tighten: Tighten::Down,
+        description: "Unavailable SLA verdicts within the window whose last takes the failure-window multiple. Read from feature.sla_failure_window.activation_epoch.",
+    },
+    GovernedParam {
+        key: crate::native::SLA_FAILURE_MULTIPLE_PARAM,
+        min: 1,
+        max: 100,
+        genesis: 5,
+        tighten: Tighten::Up,
+        description: "Times the flat sla.unavailable.penalty_gwei the failure-window's triggering verdict takes. Read from feature.sla_failure_window.activation_epoch.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::evm::CONFORMANCE_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks run the EVM with the whole Prague precompile set and account removal: the BLS12-381 precompiles at 0x0b to 0x11 and KZG point evaluation at 0x0a are served, an account that destroys itself in the transaction that created it leaves no nonce, code or storage, and an error of the engine after a transaction ran fails it at its whole gas limit, and the EVM and SVM transactions of a block run only while they have used less than evm.block_gas_limit. Until then the BLS12-381 addresses are accounts with no code, a call to 0x0a fails its whole transaction, such an account keeps what it wrote, an engine error is charged as a transaction that never ran, and a block's gas is not limited. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::gateway_sets::NRAS_JWKS_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which governance may replace the JSON Web Key Set NVIDIA attestation tokens are verified under (`NrasJwksSet`), and from which a validator reads that set from chain state instead of a file of its own. Until then a proposal that names the set is refused.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::gateway_sets::BOOT_NODES_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which governance may replace the machine identities a node dials to find the network (`BootNodesSet`), and from which a node that has chain state reads them from it. A node without chain state dials the list its genesis file names. Until then a proposal that names the set is refused.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::gateway_sets::UPDATE_NOTICE_KEYS_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which governance may replace the release signing keys a signed update notice must verify under (`UpdateNoticeKeysSet`), and from which a node reads them from chain state. Until then a proposal that names the keys is refused.",
+    ),
+    crate::feature_gate::registry_entry(
+        SEALED_ENDPOINT_PULL_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a validator's endpoint announcement may name the committee members whose sealed endpoints it asks for, and a member named publishes them again. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        HEARTBEAT_SESSION_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a serving node signs its provider heartbeats with a session key its machine identity certified once for at most an hour (and again each hour) instead of a hardware batch signature every few seconds, and every node accepts that form beside the batch form. Set it after every node runs a release that knows the form: a node that does not drops the heartbeat as unverifiable.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::inference_fault::CHALLENGE_WINDOWS_FIT_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch from which a change of the inference challenge commit window, its reveal window or the fault window is refused when the two committee windows together would exceed the fault window.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::rpc_provider_approval::RPC_PROVIDER_APPROVAL_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a bridge committee seats only verifiers whose bond names an RPC provider governance has approved and not revoked; before it any provider label is accepted.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::settlement_asset::INTAKE_EXPOSURE_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose settlements in a stable asset are refused when what the treasury keeps of the settlement fee and the treasury leg in that asset would lift it past the max_exposure_bps of the treasury its registry entry sets; the payer settles in another asset or in TNZO. Until then only payout swaps are held to the ceiling. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::ROLE_AVAILABILITY_REWARD_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which an available verdict on an RPC, edge relay or storage role stake pays the availability reward against the owner's machine identity, as a validator's does; before it only validators and compute bonds can earn it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::ROOT_VOTE_CAP_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which feature.root_vote_cap.max_share_bps bounds what the ballots of one root's validators count together on a proposal; before it each validator's ballot counts its whole weight.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::rewards::VALIDATOR_STAKE_WEIGHT_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a validator's consensus work is weighted by its bonded stake when an epoch closes; before it each vote and block counts the same whoever bonded what.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::staking::ACTIVE_SET_CAP_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which feature.active_set_cap.max_active bounds the active validator set; before it candidates are activated within the churn budget alone.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::rewards::REWARD_CLAWBACK_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a slash also returns the same share of the offender's reward still in vesting escrow to the rewards pool; before it vesting rewards are untouched by a slash.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::economy::EXTERNAL_PAYMENT_ACTIVITY_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a payment made off the ledger and recorded on it (proven on its own chain or attested) counts in its epoch's settled value at its signed USD price, so paid demand read from activity includes it; before it such a payment records no activity.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::availability_reward::AVAILABILITY_PAID_ACTIVITY_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which the availability reward pays only a subject whose owner earned the governed minimum of provider work within the governed window (feature.availability_paid_activity.window_epochs, .min_work_wei, .bootstrap_until_epoch); before it recent paid work is not asked for.",
+    ),
+    GovernedParam {
+        key: crate::native::availability_reward::AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS_PARAM,
+        min: 0,
+        max: crate::native::availability_reward::MAX_AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS,
+        genesis: crate::native::availability_reward::DEFAULT_AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS,
+        tighten: Tighten::Neither,
+        description: "Reward epochs back, counting the current one, within which the owner of an availability-reward subject must have earned the governed minimum of provider work (recorded only for settled payments from a registered party of another root identity) for the reward to pay it. Zero asks for no paid activity.",
+    },
+    GovernedParam {
+        key: crate::native::availability_reward::AVAILABILITY_REWARD_MIN_PAID_WORK_PARAM,
+        min: 0,
+        max: crate::native::availability_reward::MAX_AVAILABILITY_REWARD_MIN_PAID_WORK,
+        genesis: crate::native::availability_reward::DEFAULT_AVAILABILITY_REWARD_MIN_PAID_WORK,
+        tighten: Tighten::Neither,
+        description: "Least provider work, wei of reward weight, the owner of an availability-reward subject must have earned over the paid-activity window. Weight is the governed share of the protocol fee a settlement paid, so this is a floor on fees other parties paid; genesis is what 100 TNZO of settled payments earn at the genesis fee and provider share.",
+    },
+    GovernedParam {
+        key: crate::native::availability_reward::AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH_PARAM,
+        min: 0,
+        max: crate::native::availability_reward::MAX_AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH,
+        genesis: crate::native::availability_reward::DEFAULT_AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH,
+        tighten: Tighten::Neither,
+        description: "Reward epoch before which the availability reward's paid-activity requirement is waived, so a network with no paid demand yet can pay its first hardware-bound operators. Zero waives nothing.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::beacon::PROBE_BEACON_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which validators draw each SLA probe under the randomness beacon value in force, so a probe's challenge cannot be computed before that value exists, and a probed node answers no probe drawn without one; before it probes are drawn from epoch, round, issuer and subject alone.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::ledger::FEE_PAYER_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a native transaction whose memo carries another account's consent (prefix tenzro-fee-payer-1:, the payer's signature over the transaction body under its own context) has its fee paid by that account: the gas limit at the gas price is advanced from the payer before the transaction runs and what the gas did not use goes back. Before it such a memo is a plain memo and the sender pays.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::CUSTOM_ESCROW_REFUSED_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which CreateEscrow refuses a custom release condition (free text no validator can check) and no proof releases an escrow already under one, which its payer refunds; before it any non-empty proof releases one.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::rewards::SETTLED_WORK_REGISTERED_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which ReportSettledWork counts a plan only when its payer and the payee reporting it are both registered identities of different roots; before it an account with no identity counts as a party of its own.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::economy::REPORT_AGREEMENT_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a validator's rate report carries no rate for a symbol whose two middle quotes (an even number of sources) spread wider than fees.usd_rate_breaker_spread_bps; before it the lower middle quote is the report's rate.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::bridge::CCIP_FINALITY_POLICY_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks read the finality a CCIP 2.0 transfer asked for: one that waited for its sending chain's finality draws on its lane as before; any other is refused unless its route (or carried asset) has a finality policy that allows it, and then draws on that policy's own bucket. From this epoch on governance may set such a policy (SetBridgeFinalityPolicy); no route has one until it does. Until then the finality a message carries is not read and the proposal is refused. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::ROOT_REVOCATION_REACH_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks treat an identity derived under a revoked root (a machine the root registered) as revoked wherever a revoked identity is refused or its hardware is released. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::agent_terms::SPEND_EXPIRY_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks refuse a PayerSettle from a delegated agent's registered wallet \
+         once the agent's terms have expired, as AgentAct, protocol payments and channel vouchers \
+         already are.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::agent_terms::BOUNDS_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks record an agent's terms only when they state a daily spending ceiling (max_daily_spend) and an expiry (expires_at_ms). Terms recorded before it stay in force; their next change states both. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::settlement_asset::PAYER_SHARE_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks count what each payer settles in an asset and refuse a payment that would take it past its share of the asset's epoch inflow cap, so a higher fee, which orders a payment earlier, cannot take the whole of what is left. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::settlement_asset::PAYER_SHARE_BPS_KEY,
+        min: 1,
+        max: 10_000,
+        genesis: 2_500,
+        tighten: Tighten::Down,
+        description: "Once the per-payer share rule is live, the most one payer may settle in an asset in an epoch, in basis points of the asset's epoch inflow cap. A lower share tightens the rule.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::sponsorship_end::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which running-cost sponsorship (TNZO or stable) is refused while trailing paid usage carries the validator set: value settled between distinct registered roots over the last feature.sponsorship_usage_end.window_epochs closed reward epochs, at the fee rate in force, at or above feature.sponsorship_usage_end.paid_usage_usd_day_per_validator a day per validator. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::sponsorship_end::PER_VALIDATOR_PARAM,
+        min: 0,
+        max: 1_000_000,
+        genesis: 4_300,
+        tighten: Tighten::Down,
+        description: "Paid usage a day, whole USD, per validator at which running-cost sponsorship ends once the usage trigger is in force; lowering it ends sponsorship sooner, which protects the treasury.",
+    },
+    GovernedParam {
+        key: crate::native::sponsorship_end::WINDOW_PARAM,
+        min: 7,
+        max: 365,
+        genesis: 90,
+        tighten: Tighten::Down,
+        description: "Closed reward epochs the trailing paid usage that ends running-cost sponsorship is counted over; a shorter window ends it sooner after usage rises.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::affiliated_share::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept a proposal marking an account as affiliated with the founders, publish the year's sponsorship and grants paid to marked accounts, and refuse a payout to one that would lift that share above feature.affiliated_share.max_bps. Until then the proposal is refused. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::affiliated_share::CAP_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: 2_500,
+        tighten: Tighten::Down,
+        description: "Most of a calendar year's sponsorship and grants, bps of the year's total in each unit, that accounts marked as affiliated with the founders may receive once the affiliated share is in force; a payout that would exceed it is refused.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::availability_reward::AVAILABILITY_DEMAND_TARGET_USD_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose availability reward reads its demand target from feature.availability_demand_target_usd.usd_per_day (whole USD) instead of reward.availability_demand_target_atto_usd_per_day, which cannot hold more than about 18 USD a day. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::availability_reward::AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM,
+        min: 0,
+        max: crate::native::availability_reward::MAX_AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY,
+        genesis: crate::native::availability_reward::DEFAULT_AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY,
+        tighten: Tighten::Neither,
+        description: "Verified-paid demand, whole USD per day, at which the availability reward's demand offset has phased the reward to zero. Read from feature.availability_demand_target_usd.activation_epoch. Zero (genesis) disables the offset.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::availability_reward::AVAILABILITY_INDEX_CAP_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose availability rewards cap a unit paid per proven GPU at feature.availability_index_cap.bps of the datacenter-GPU compute price index in force, when that is below the absolute per-unit-hour cap. Units with no proven GPU keep the absolute cap. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::availability_reward::AVAILABILITY_INDEX_CAP_BPS_PARAM,
+        min: 0,
+        max: crate::native::availability_reward::MAX_AVAILABILITY_INDEX_CAP_BPS,
+        genesis: crate::native::availability_reward::DEFAULT_AVAILABILITY_INDEX_CAP_BPS,
+        tighten: Tighten::Down,
+        description: "Basis points of the datacenter-GPU compute price index one proven GPU's unit-hour of availability reward may reach once the indexed cap is live. Read only from feature.availability_index_cap.activation_epoch.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::USD_COMPUTE_BOND_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose new compute bonds must meet the minimum kept at its USD value at stake.bond_floor_rate_nano_usd, as role stakes do; bonds already posted keep serving at the TNZO minimum. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::paid_readiness::PAID_READINESS_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose settlements record the hour a provider served a request paid by another root, which validators count as its readiness proof for that hour instead of probing it. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::economy::RATE_SYMBOL_ISOLATION_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks judge each symbol of an opened rate report on its own: a symbol that fails its source count or quote checks is left out and the report's other symbols count. Before it, one failing symbol refuses the whole opening. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::sla_energy_budget::SLA_WAKE_ENERGY_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose SLA energy budget check and energy report charge a scheduled probe a liveness reply and a burst challenge the wake cost of the unit's declared readiness tier at that tier's burst cadence, against the tier's own idle energy. Before it every scheduled probe is charged a cool-tier wake against the cool-tier idle baseline. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::staking::EXIT_FLOOR_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks refuse a validator's exit that would leave the seated validators below the launch arithmetic (at least the launch minimum of members, and more than two thirds of the stake left without the largest). Applies only to a chain whose genesis kept the index of seated validators. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::evm::PRAGUE_ONLY_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks run the EVM under the Prague rule set alone. Until then a creation whose init code opens with the EOF magic is validated and deployed as an EOF container. A container deployed before this epoch is legacy code from it on: a call into it halts on its first byte and the code opcodes read its bytes whole, so it can no longer be used. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::evm::OSAKA_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks run the EVM under the Osaka rule set, on the engine of that rule set: the CLZ opcode, the P256VERIFY precompile at 0x100 at its Ethereum price, the MODEXP input bound and price, a transaction gas limit of at most 16,777,216, the BLS12-381 precompiles at 0x0b to 0x11 and KZG point evaluation at 0x0a, and an account destroyed in the transaction that created it leaves nothing behind. From this epoch on a node's pool admits no EVM transaction above that gas limit. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::staking::OUTSIDE_CAP_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks refuse a validator bond that would take the stake of validators outside the genesis set past the governed share of the seated stake. Applies only to a chain whose genesis kept the index of seated validators. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::staking::OUTSIDE_CAP_BPS_KEY,
+        min: 0,
+        max: 10_000,
+        genesis: 2_000,
+        tighten: Tighten::Down,
+        description: "Once the outside-stake cap is live, the most stake validators outside the genesis set may hold, in basis points of the seated stake. Governance raises it in published steps; a lower value tightens the rule.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::upgrade::PLATFORMS_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept a protocol upgrade proposal that names a binary per platform (protocol_upgrade_platforms): readiness counts validators that quoted any named binary, and a node runs through the activation on any of them. Until then such a proposal is refused and an upgrade names one binary. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::operator_cap::REGION_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose committee every node stages so that the validators of approved operators that declared one region hold at most consensus.region_weight_max_bps of its seats, their stakes scaled down until they do, so losing any one region leaves a quorum. A region is what the operator declared at approval; a validator without one is held to no region. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::operator_cap::REGION_CAP_PARAM,
+        min: 1_000,
+        max: 3_333,
+        genesis: 3_300,
+        tighten: Tighten::Down,
+        description: "Most of the committee's seats the validators declared in one region may hold once the region cap is in force, bps; below a third, so the loss of one region leaves a quorum.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::operator_cap::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose committee every node stages so that the validators behind one root identity (a machine's controller, or the identity itself) hold at most consensus.operator_weight_max_bps of its seats, their stakes scaled down until they do. The cap binds roots, not people: validators under separate root identities count as separate operators. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::operator_cap::CAP_PARAM,
+        min: 1_000,
+        max: 3_333,
+        genesis: 3_300,
+        tighten: Tighten::Down,
+        description: "Most of the committee's seats the validators behind one root identity may hold once the operator cap is in force, bps; below a third, so no one operator can stop or split the committee alone.",
+    },
+    crate::feature_gate::registry_entry(
         crate::identity_required::KEY,
         crate::feature_gate::NEVER,
         "First epoch whose blocks refuse a transaction from an account with no registered identity (RegisterIdentity, key enrolment and protocol records stay open; a bonded validator is exempt). Dormant until a vote sets it.",
     ),
+    crate::feature_gate::registry_entry(
+        crate::keystore::RECOVERY_ROTATION_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks complete a passkey account's recovery by replacing every passkey it held with the recovered one (policy back to one passkey), and whose keystore logs name the owner and the passkeys each change linked and retired. Until then a recovery adds its passkey beside the others. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        RBC_WHOLE_MEMBER_FAULT_BOUND_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose reliable broadcast computes its thresholds from the most seats whole committee members within f = (n - 1) / 3 can hold, in place of f itself, so a committee of a few equal validators still delivers in two steps when one is silent. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::operator::KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks derive the root behind an identity one way everywhere a rule counts parties (funding limits, fee-weighted shares, distinct payers, a validator's operator, an aged human root): through the controllers its agent terms name, then the root its DID is derived under, a machine root named as a machine. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::beacon::IDLE_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch in which validators hold their beacon contributions while nobody uses the chain, sending one per idle interval. It binds what validators send; a block accepts the same contributions before and after.",
+    ),
+    GovernedParam {
+        key: crate::native::beacon::IDLE_INTERVAL_PARAM,
+        min: 60_000,
+        max: 86_400_000,
+        genesis: 1_800_000,
+        tighten: Tighten::Neither,
+        description: "How old the beacon's latest value may grow, ms, while nobody uses the chain, before a validator contributes all the same. Read once the idle beacon rule is live.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::first_registration::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks waive the fee of a registration (RegisterIdentity or a key enrolment) from an account that cannot pay it: at most two per account, and no more per epoch than feature.first_registration_free.waivers_per_epoch, counting every waived registration that executes, kept or reverted. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::first_registration::WAIVERS_PER_EPOCH_PARAM,
+        min: 0,
+        max: 1_024,
+        genesis: 16,
+        tighten: Tighten::Down,
+        description: "How many registrations an epoch waives the fee of once feature.first_registration_free is live. A registration is kept only with the identity's own hardware or passkey proof; reverted attempts count too, so this bounds the free blockspace. 0 waives none.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::invariant_monitor::ROLE_STAKE_GUARD_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks check that the role-stake vault holds at least every role's bonded stake, and freeze role bonding, unbonding and withdrawal when it does not, until governance lifts the freeze.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::DEFERRED_SLASH_REMOVAL_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch from which a validator slashed for signing two checkpoints, its penalty already applied, keeps its seat while the active set without it would have fewer than four validators or, counting only the validators that signed in the last certified epoch as live, could not certify or would have no spare. It is jailed at the first epoch boundary where the set without it holds, and staking.inactivity_limit_epochs epochs after the slash regardless. Before this epoch a slashed validator is jailed at once.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::token_ledger::ERC7943_FINAL_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks run the final ERC-7943 rules: a token's frozen amount may exceed the balance, the token factory and facades serve canSend and canReceive in place of canTransact under interface id 0x3edbb4c4, and a facade logs the standard Frozen, Transfer and ForcedTransfer events. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::evm::gateway::GATEWAY_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks run the ERC-7786 gateway at 0x1012: an EVM contract sends a message over a governed bridge route with sendMessage, and a route that refuses it fails the transaction. Until then the address is an account with no code. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::keystore::RECOVERY_CANCEL_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks let a recovery the recovery signers started be cancelled only by passkeys of the account holding two independent roots or by the signers at their threshold, and refuse a change of the recovery signers while such a recovery is pending. Until then any one passkey cancels a recovery. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::evm::gateway::DELIVERY_GAS_KEY,
+        min: 50_000,
+        max: 10_000_000,
+        genesis: 500_000,
+        tighten: Tighten::Down,
+        description: "Gas the ERC-7786 gateway gives a recipient contract's receiveMessage when a DeliverMessage operation delivers a message from a bridge route. The operation's sender pays for all of it, whatever the recipient uses.",
+    },
     GovernedParam {
         key: crate::identity_required::MODE_KEY,
         min: crate::identity_required::Mode::Enforce as u64,
@@ -3078,6 +3775,324 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         genesis: crate::identity_required::Mode::Enforce as u64,
         tighten: Tighten::Down,
         description: "What the identity rule does once live, at execution and at every node's peer, mempool and edge admission: 0 enforce (refuse an account or peer with no registered identity), 1 audit (refuse nothing, log what enforce would refuse), 2 off. Relaxing applies at the next epoch, and a change to audit runs on the expedited track; returning to enforce waits out the tightening grace window.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::agent_cap::KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks refuse a root (a human or an autonomous machine) a further agent once it has feature.agent_cap.max_agents_per_root agents it has not revoked. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::agent_cap::LIMIT_KEY,
+        min: 1,
+        max: 65_536,
+        genesis: 64,
+        tighten: Tighten::Down,
+        description: "Most agents one root may have delegated and not revoked, once the agent cap is live. Agents a root already has are never removed by a lower value; it is refused new ones until it is under the limit.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::burn_bound_release::KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose closes hold what the rewards pool releases to a ratio of the TNZO the epoch burned. Before it, release follows the schedule and the paid-work peg alone.",
+    ),
+    GovernedParam {
+        key: crate::native::burn_bound_release::RATIO_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: 10_000,
+        tighten: Tighten::Down,
+        description: "Most an epoch releases from the rewards pool under the burn-bound rule, bps of its burn budget (its burn and burn-equivalent). At most one times the burn, so a payer buying its own service burns more than the pool returns.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::SMOOTHING_KEEP_PARAM,
+        min: 0,
+        max: 9_900,
+        genesis: 0,
+        tighten: Tighten::Neither,
+        description: "Share of the prior burn budget kept each epoch under the burn-bound rule, bps; the rest is the epoch's own burn. 0 makes the budget each epoch's own burn; 8571 keeps six sevenths.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::YEARLY_LIMIT_PARAM,
+        min: 1,
+        max: 10_000,
+        genesis: 1_000,
+        tighten: Tighten::Down,
+        description: "Most one schedule year releases under the burn-bound rule, bps of the rewards pool left when the year began.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::STEP_POOL_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: 1_000,
+        tighten: Tighten::Up,
+        description: "Share of the genesis rewards pool, bps, under which the burn-bound rule applies its step ratio instead of its ratio.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::STEP_RATIO_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: 5_000,
+        tighten: Tighten::Down,
+        description: "The burn-bound ratio once the pool is under the step, bps of the burn budget; a value above the ratio counts as the ratio.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::FLOOR_POOL_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: 200,
+        tighten: Tighten::Up,
+        description: "Share of the genesis rewards pool, bps, under which the burn-bound rule releases nothing; validators' running cost is still paid from the fees kept.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::BOOT_RATIO_PARAM,
+        min: 10_000,
+        max: 30_000,
+        genesis: 10_000,
+        tighten: Tighten::Down,
+        description: "Matched ratio at the burn-bound rule's first epoch, bps of the epoch's own burn, falling in a straight line to the ratio over the matched epochs. It only lifts the epoch ceiling: a settlement still earns at most its own reward ceiling. 10000 or anything at or under the ratio is no matched start.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::BOOT_EPOCHS_PARAM,
+        min: 0,
+        max: 1_000_000,
+        genesis: 0,
+        tighten: Tighten::Down,
+        description: "Epochs after the burn-bound rule goes live over which the matched ratio falls to the ratio.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::BOOT_BUDGET_PARAM,
+        min: 0,
+        max: 500,
+        genesis: 0,
+        tighten: Tighten::Down,
+        description: "Most the matched start of the burn-bound rule releases in all, bps of the genesis rewards pool.",
+    },
+    GovernedParam {
+        key: crate::native::burn_bound_release::SHARE_CAP_PARAM,
+        min: 1,
+        max: 10_000,
+        genesis: 3_333,
+        tighten: Tighten::Down,
+        description: "Most one address takes of an epoch's release under the burn-bound rule, bps of the release its ceiling allows; the rest lapses and stays in the pool.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::payment_settlement::plan::TREASURY_LINE_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose settlement plans fix their treasury line at open: a plan whose remainder goes to a bonded provider records the treasury-leg rate of its work class then, and its commit takes that share of the provider's credit for the treasury. A later change of the rate does not reach a plan already open. Before it, a plan pays no treasury leg.",
+    ),
+    GovernedParam {
+        key: crate::native::treasury_reserve::NO_VOLUME_SALE_PARAM,
+        min: 0,
+        max: 10_000_000,
+        genesis: 0,
+        tighten: Tighten::Down,
+        description: "The running-cost reserve's sale cap, whole TNZO an epoch, while no validator volume report is recent enough to size it; never above treasury.max_sale_tnzo_epoch. 0 pays nothing until a market reports volume.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::storage_class::KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks hold a storage claim to its class: an offer in stored_bytes names hot, warm or cold and prices inside that class's range, and validators count an object proven only when its possession proof arrives within the class deadline. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::compute_claim::PLACEMENT_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept a placement rule on a bought claim: the buyer names countries, operators or both, the purchase is refused for a claim whose declared country or writer is outside it, and the held claim records the rule.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::identity_succession::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept RevokeIdentityTo: a root revokes itself in favour of a successor, its delegated agents are quarantined for good instead of revoked, and only the successor reclaims what their wallets hold. Until then the transaction is refused. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::identity_succession::SUCCESSOR_HUMAN_ONLY_PARAM,
+        min: 0,
+        max: 1,
+        genesis: 1,
+        tighten: Tighten::Up,
+        description: "Whether the successor a root names when it is revoked in its favour must be a human identity: 1 a human root only, 0 any root (a human or an autonomous machine).",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::zk_verdict::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept ZK verdicts: a bonded validator states that a proof it received directly and verified outside the block verifies, and the proof is recorded where the ZK_VERIFY precompile reads it once validators holding two thirds of the bonded stake stated the same verdict. Once in force, nodes refuse AttestZkProof at submission. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::build_attestation::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept BuildAttestation transactions from accounts bonded in the attestor role, and enact a protocol upgrade only once every binary it names has feature.builder_attestations.min_builders such attestations from builders whose bonds stand. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::build_attestation::MIN_BUILDERS_PARAM,
+        min: 1,
+        max: 64,
+        genesis: 2,
+        tighten: Tighten::Up,
+        description: "Distinct bonded builders that must have rebuilt and attested each binary of a protocol upgrade before it enacts, once builder attestations are in force.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::bond_onramp::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept a validator bond bought with a stable settlement asset: the treasury takes the asset and pays TNZO, at the higher of the rate in force and the safety rate less fees.onramp_spread_bps, straight into the buyer's validator bond, within treasury.onramp_max_tnzo_epoch. The treasury exchanging TNZO for stable assets distributes TNZO, so setting this is the owner's decision. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::bond_onramp::CAP_PARAM,
+        min: 0,
+        max: 10_000_000,
+        genesis: 0,
+        tighten: Tighten::Down,
+        description: "Most TNZO, whole, the bond on-ramp pays from the treasury into validator bonds in one epoch; zero pays nothing. Raising it above zero distributes TNZO for stable assets, which is the owner's decision.",
+    },
+    GovernedParam {
+        key: crate::native::bond_onramp::SPREAD_PARAM,
+        min: 0,
+        max: 2_000,
+        genesis: 100,
+        tighten: Tighten::Up,
+        description: "Share of a bond purchase's value the treasury keeps, bps: the TNZO paid into the bond is the stable's value at the higher of the rate in force and the safety rate, less this.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::rpc_provider_leg::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept a payee naming the bonded validator it relies on, and pay that validator fees.rpc_provider_leg_bps of each TNZO settlement to a payee that holds no validator bond. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::rpc_provider_leg::RATE_PARAM,
+        min: 0,
+        max: 2_000,
+        genesis: 1_000,
+        tighten: Tighten::Down,
+        description: "Share of what a TNZO settlement leaves a non-validating payee after the settlement fee and the treasury leg that is paid to the validator it named, bps, once the RPC-provider leg is in force.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::registration_attestation::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks register a root only with hardware evidence the chain checks: an autonomous machine with a TPM quote by the attestation key its DID derives from, a human with a device-bound WebAuthn passkey attested to a governance-set root over a challenge naming the DID and key. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::identity_keys::ROOT_SIGNATURES_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch from which a node signs its jurisdiction receipts with its identity key at the version the chain records for it (one member of a batch whose root that key signed), when the chain records its key, and verifiers check such a receipt against the identity's key history. Until then receipts carry the hardware record signature only. Node behaviour: no block reads it. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::identity_keys::ROOT_SIGNATURES_MAX_GAP_PARAM,
+        min: 1_000,
+        max: 3_600_000,
+        genesis: 60_000,
+        tighten: Tighten::Down,
+        description: "Milliseconds a verifier's chain view may lag its clock when it checks a record signed with an identity key, and the most a record's signing time may run ahead of that clock. A view older than this is refused rather than trusted to know of a key declared compromised.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::identity_caps::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks hold a root to feature.identity_caps.per_root delegated identities (the agents it delegated and the machines registered under its DID, revoked ones included): one more is refused. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::identity_caps::PER_ROOT_PARAM,
+        min: 1,
+        max: 1_000_000,
+        genesis: 64,
+        tighten: Tighten::Down,
+        description: "Most delegated identities (agents and machines under its DID, revoked ones included) one root may stand behind once identity caps are in force.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.hot_deadline_ms",
+        min: 5_000,
+        max: 10 * 60 * 1000,
+        genesis: 10_000,
+        tighten: Tighten::Down,
+        description: "How long after a possession probe goes out the proof for a hot storage claim must reach the validator to count, ms. The probe window still binds when it is shorter.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.hot_price_floor",
+        min: 0,
+        max: 10_000_000_000_000_000_000,
+        genesis: 0,
+        tighten: Tighten::Neither,
+        description: "Lowest price of a hot storage claim, wei per gibibyte kept for an hour.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.hot_price_ceiling",
+        min: 1,
+        max: 10_000_000_000_000_000_000,
+        genesis: 10_000_000_000_000_000_000,
+        tighten: Tighten::Neither,
+        description: "Highest price of a hot storage claim, wei per gibibyte kept for an hour.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.warm_deadline_ms",
+        min: 5_000,
+        max: 10 * 60 * 1000,
+        genesis: 20_000,
+        tighten: Tighten::Down,
+        description: "How long after a possession probe goes out the proof for a warm storage claim must reach the validator to count, ms. The probe window still binds when it is shorter.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.warm_price_floor",
+        min: 0,
+        max: 10_000_000_000_000_000_000,
+        genesis: 0,
+        tighten: Tighten::Neither,
+        description: "Lowest price of a warm storage claim, wei per gibibyte kept for an hour.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.warm_price_ceiling",
+        min: 1,
+        max: 10_000_000_000_000_000_000,
+        genesis: 10_000_000_000_000_000_000,
+        tighten: Tighten::Neither,
+        description: "Highest price of a warm storage claim, wei per gibibyte kept for an hour.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.cold_deadline_ms",
+        min: 5_000,
+        max: 10 * 60 * 1000,
+        genesis: 30_000,
+        tighten: Tighten::Down,
+        description: "How long after a possession probe goes out the proof for a cold storage claim must reach the validator to count, ms. The probe window still binds when it is shorter.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.cold_price_floor",
+        min: 0,
+        max: 10_000_000_000_000_000_000,
+        genesis: 0,
+        tighten: Tighten::Neither,
+        description: "Lowest price of a cold storage claim, wei per gibibyte kept for an hour.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.cold_price_ceiling",
+        min: 1,
+        max: 10_000_000_000_000_000_000,
+        genesis: 10_000_000_000_000_000_000,
+        tighten: Tighten::Neither,
+        description: "Highest price of a cold storage claim, wei per gibibyte kept for an hour.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::economy::PROVIDER_REVENUE_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose settlements keep, for each payee paid for provider work, the value and count it was settled in its last two reward epochs, so every node reports the same provider revenue. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: "feature.storage_classes.hot_read_price_ceiling",
+        min: 0,
+        max: 10_000_000_000_000_000_000,
+        genesis: 10_000_000_000_000_000_000,
+        tighten: Tighten::Down,
+        description: "Highest price a provider may charge to read a hot object, wei per gibibyte read.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.warm_read_price_ceiling",
+        min: 0,
+        max: 10_000_000_000_000_000_000,
+        genesis: 10_000_000_000_000_000_000,
+        tighten: Tighten::Down,
+        description: "Highest price a provider may charge to read a warm object, wei per gibibyte read.",
+    },
+    GovernedParam {
+        key: "feature.storage_classes.cold_read_price_ceiling",
+        min: 0,
+        max: 10_000_000_000_000_000_000,
+        genesis: 10_000_000_000_000_000_000,
+        tighten: Tighten::Down,
+        description: "Highest price a provider may charge to read a cold object, wei per gibibyte read.",
     },
     GovernedParam {
         key: "stake.validator_tnzo",
@@ -3361,7 +4376,7 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         max: 5_000,
         genesis: crate::native::economy::DEFAULT_RATE_BREAKER_SPREAD_BPS,
         tighten: Tighten::Down,
-        description: "Widest spread between the low and high stake-weighted quantiles of an epoch's rate reports, in basis points of the low quantile, before that epoch holds the rate instead of moving it and counts toward the dispersion breaker.",
+        description: "Widest spread between the low and high stake-weighted quantiles of an epoch's rate reports, in basis points of the low quantile, before that epoch holds the rate instead of moving it and counts toward the dispersion breaker. Once feature.report_agreement.activation_epoch is live, also the widest spread between the two middle quotes of a report with an even number of sources, in basis points of the lower, before that report carries no rate for the symbol.",
     },
     GovernedParam {
         key: crate::native::economy::RATE_BREAKER_GAP_PARAM,
@@ -3602,6 +4617,19 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         genesis: crate::native::validator_cover::DEFAULT_TARGET_MONTHS,
         tighten: Tighten::Neither,
         description: "Months of the active validators' running cost the validator cover reserve fills up to from stable settlement fees; fees beyond it stay with the treasury.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::validator_cover::SEATS_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose closes fund only the validator seats paid usage carries: the cover reserve's fill target and epoch payout follow the stable fees booked since the last close over one validator's epoch cost, at least feature.cover_funded_seats.seat_floor, split equally over the active set. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::validator_cover::SEAT_FLOOR_PARAM,
+        min: 0,
+        max: 1_000,
+        genesis: 7,
+        tighten: Tighten::Down,
+        description: "Fewest validator seats the cover reserve funds in an epoch once funded seats are in force, whatever paid usage carried. Lowering it is the tightening direction: a lower floor draws less from the reserve in thin epochs, so the reserve lasts.",
     },
     GovernedParam {
         key: "validator.base_cap_tnzo_month",
@@ -3921,7 +4949,9 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         max: crate::native::availability_reward::MAX_AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY,
         genesis: crate::native::availability_reward::DEFAULT_AVAILABILITY_REWARD_DEMAND_TARGET_ATTO_USD_PER_DAY,
         tighten: Tighten::Up,
-        description: "Verified-paid-demand target, atto-USD per day, at \
+        description: "Verified-paid-demand target, atto-USD per day (at most \
+                      about 18 USD; read until \
+                      feature.availability_demand_target_usd.activation_epoch), at \
                       which the availability reward's demand offset has \
                       phased the reward all the way to zero. Converted to \
                       wei at the validator-signed rate in force. Zero \
@@ -3937,6 +4967,21 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         description: "One-hour epochs the availability reward's demand \
                       offset trails behind the attested epoch when summing \
                       verified-paid demand. Genesis one day.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::availability_reward::UNIT_BUDGET_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose availability reward per verified unit is a share of a budget pinned to verified paid demand, split equally over the units the last closed hour verified and never above the decayed cap. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::availability_reward::UNIT_BUDGET_DEMAND_BPS_PARAM,
+        min: 0,
+        max: crate::native::availability_reward::MAX_UNIT_BUDGET_DEMAND_BPS,
+        genesis: 0,
+        tighten: Tighten::Down,
+        description: "Share of verified paid demand per hour that budgets the availability \
+                      reward once the unit budget is live, bps. Zero at genesis: the vote \
+                      that activates the budget sets it.",
     },
     GovernedParam {
         key: crate::native::availability_reward::AVAILABILITY_READINESS_COLD_BPS_PARAM,
@@ -3969,6 +5014,106 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         description: "Availability reward multiplier, bps, for \
                       ReadinessTier::Warm -- the default tier for any \
                       subject that has never declared one. Genesis 100%.",
+    },
+    GovernedParam {
+        key: crate::native::availability_reward::SLA_WARM_AVAILABLE_BPS_PARAM,
+        min: 0,
+        max: 9_999,
+        genesis: crate::native::availability_reward::DEFAULT_SLA_AVAILABLE_BPS,
+        tighten: Tighten::Up,
+        description: "Share of a validator's probes, bps, a Warm subject \
+                      must answer more than for an available verdict, once \
+                      feature.sla_tiers is live. Genesis more than half.",
+    },
+    GovernedParam {
+        key: crate::native::availability_reward::SLA_COOL_AVAILABLE_BPS_PARAM,
+        min: 0,
+        max: 9_999,
+        genesis: crate::native::availability_reward::DEFAULT_SLA_AVAILABLE_BPS,
+        tighten: Tighten::Up,
+        description: "Share of a validator's probes, bps, a Cool subject \
+                      must answer more than for an available verdict, once \
+                      feature.sla_tiers is live. Genesis more than half.",
+    },
+    GovernedParam {
+        key: crate::native::availability_reward::SLA_COLD_AVAILABLE_BPS_PARAM,
+        min: 0,
+        max: 9_999,
+        genesis: crate::native::availability_reward::DEFAULT_SLA_AVAILABLE_BPS,
+        tighten: Tighten::Up,
+        description: "Share of a validator's probes, bps, a Cold subject \
+                      must answer more than for an available verdict, once \
+                      feature.sla_tiers is live. Genesis more than half.",
+    },
+    GovernedParam {
+        key: crate::native::settlement_asset::BASKET_USD_WEIGHT_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: crate::native::settlement_asset::BASKET_WEIGHTS[0].2,
+        tighten: Tighten::Neither,
+        description: "Weight of the dollar (USD) in the fiat basket \
+                      payments are valued in once feature.unit_basket is \
+                      live, bps of the weights' sum. A reweight takes \
+                      effect at the next epoch start, scaled so nothing \
+                      jumps. Genesis: the IMF SDR 2022 weight.",
+    },
+    GovernedParam {
+        key: crate::native::settlement_asset::BASKET_EUR_WEIGHT_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: crate::native::settlement_asset::BASKET_WEIGHTS[1].2,
+        tighten: Tighten::Neither,
+        description: "Weight of the euro (EUR) in the fiat basket \
+                      payments are valued in once feature.unit_basket is \
+                      live, bps of the weights' sum. A reweight takes \
+                      effect at the next epoch start, scaled so nothing \
+                      jumps. Genesis: the IMF SDR 2022 weight.",
+    },
+    GovernedParam {
+        key: crate::native::settlement_asset::BASKET_CNY_WEIGHT_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: crate::native::settlement_asset::BASKET_WEIGHTS[2].2,
+        tighten: Tighten::Neither,
+        description: "Weight of the renminbi (CNY) in the fiat basket \
+                      payments are valued in once feature.unit_basket is \
+                      live, bps of the weights' sum. A reweight takes \
+                      effect at the next epoch start, scaled so nothing \
+                      jumps. Genesis: the IMF SDR 2022 weight.",
+    },
+    GovernedParam {
+        key: crate::native::settlement_asset::BASKET_JPY_WEIGHT_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: crate::native::settlement_asset::BASKET_WEIGHTS[3].2,
+        tighten: Tighten::Neither,
+        description: "Weight of the yen (JPY) in the fiat basket \
+                      payments are valued in once feature.unit_basket is \
+                      live, bps of the weights' sum. A reweight takes \
+                      effect at the next epoch start, scaled so nothing \
+                      jumps. Genesis: the IMF SDR 2022 weight.",
+    },
+    GovernedParam {
+        key: crate::native::settlement_asset::BASKET_GBP_WEIGHT_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: crate::native::settlement_asset::BASKET_WEIGHTS[4].2,
+        tighten: Tighten::Neither,
+        description: "Weight of the pound (GBP) in the fiat basket \
+                      payments are valued in once feature.unit_basket is \
+                      live, bps of the weights' sum. A reweight takes \
+                      effect at the next epoch start, scaled so nothing \
+                      jumps. Genesis: the IMF SDR 2022 weight.",
+    },
+    GovernedParam {
+        key: crate::native::availability_reward::AVAILABILITY_FIRMWARE_TPM_BPS_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: crate::native::availability_reward::DEFAULT_AVAILABILITY_FIRMWARE_TPM_BPS,
+        tighten: Tighten::Down,
+        description: "Share of the availability reward, bps, a machine on a \
+                      firmware TPM earns once feature.firmware_tpm_tier is \
+                      live; a discrete chip earns all of it. Genesis half.",
     },
     GovernedParam {
         key: "fees.settlement_fee_burn_bps",
@@ -4332,6 +5477,36 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
                       objects follow storage.audit_retention_seconds.",
     },
     GovernedParam {
+        key: crate::native::inference_fault::VERIFY_LOGIT_DELTA_PARAM,
+        min: 0,
+        max: 10_000,
+        genesis: crate::native::inference_fault::DEFAULT_VERIFY_LOGIT_DELTA_MILLI,
+        tighten: Tighten::Neither,
+        description: "Largest mean absolute top-k logit difference (thousandths) a \
+                      re-executed step of an inference commitment may show and \
+                      still pass.",
+    },
+    GovernedParam {
+        key: crate::native::inference_fault::VERIFY_PASSING_BPS_PARAM,
+        min: 5_000,
+        max: 10_000,
+        genesis: crate::native::inference_fault::DEFAULT_VERIFY_PASSING_BPS,
+        tighten: Tighten::Neither,
+        description: "Least share (bps) of an inference commitment's steps that \
+                      must pass on re-execution for it to verify, counting the \
+                      tolerated misses as passing.",
+    },
+    GovernedParam {
+        key: crate::native::inference_fault::VERIFY_TOLERATED_MISSES_PARAM,
+        min: 0,
+        max: 64,
+        genesis: crate::native::inference_fault::DEFAULT_VERIFY_TOLERATED_MISSES,
+        tighten: Tighten::Neither,
+        description: "Failing steps an inference commitment may carry beyond \
+                      the passing share while more of its steps pass than fail, \
+                      so a short honest answer survives a rounding miss.",
+    },
+    GovernedParam {
         key: crate::native::inference_fault::SAMPLE_BPS_PARAM,
         min: 1,
         max: 10_000,
@@ -4542,6 +5717,11 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         tighten: Tighten::Neither,
         description: "Most one insurance claim may take, in whole TNZO.",
     },
+    crate::feature_gate::registry_entry(
+        crate::native::ROOT_PAUSE_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks let a root (a human or an autonomous machine) pause every agent it delegated with one pause that names the root itself, sent from the wallet the root is registered with. The agents neither act nor pay on Tenzro until it ends; grants already issued on other chains run to their expiry. Dormant until a vote sets it.",
+    ),
     GovernedParam {
         key: "agent.remote_grant_ttl_ms",
         min: 10_000,
@@ -4708,6 +5888,16 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
                       governance may only move it earlier.",
     },
     GovernedParam {
+        key: crate::native::ROOT_VOTE_CAP_PARAM,
+        min: 100,
+        max: 10_000,
+        genesis: 10_000,
+        tighten: Tighten::Down,
+        description: "Most of a proposal's eligible stake, in basis points, the ballots of \
+                      one root's validators count together once its feature gate is live; a \
+                      ballot past it counts only what is left.",
+    },
+    GovernedParam {
         key: STEWARD_MAX_SEATS_PARAM,
         min: 0,
         max: 15,
@@ -4740,6 +5930,17 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         tighten: Tighten::Down,
         description: "Longest validity window for a privileged transaction (governance, \
                       guardian, issuer, agent Terms and kill-switch actions).",
+    },
+    GovernedParam {
+        key: crate::evm::BLOCK_GAS_LIMIT_PARAM,
+        min: 1_000_000,
+        max: 1_000_000_000,
+        genesis: 30_000_000,
+        tighten: Tighten::Down,
+        description: "Gas the EVM and SVM transactions of one block may use, once \
+                      feature.evm_conformance is live. They run in order while the gas \
+                      used so far is below it; the one that crosses it completes and the \
+                      rest run in a later block.",
     },
     GovernedParam {
         key: crate::delegation_guard::MAX_AUTHORIZATIONS_PARAM,
@@ -5034,6 +6235,21 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         description: "Gwei slashed from a serving role's stake for one frozen \
                       unavailable SLA verdict.",
     },
+    crate::feature_gate::registry_entry(
+        crate::native::USD_SLA_PENALTY_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose unavailable SLA verdicts take a penalty set in USD and never less than the hour's refund to the provider's claim holders. Dormant until a vote sets it.",
+    ),
+    GovernedParam {
+        key: crate::native::USD_SLA_PENALTY_PARAM,
+        min: 0,
+        max: 10_000_000_000_000,
+        genesis: 0,
+        tighten: Tighten::Up,
+        description: "Micro-USD an unavailable SLA verdict takes once the USD penalty is \
+                      live, converted at the fee rate; never less than the hour's refund. \
+                      Zero at genesis: the vote that activates it sets it.",
+    },
     GovernedParam {
         key: crate::native::payment_settlement::netting::NETTING_EPOCH_PARAM,
         min: 60 * 1000,
@@ -5219,6 +6435,16 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
                       inactivity never takes it below this.",
     },
     GovernedParam {
+        key: crate::native::staking::ACTIVE_SET_CAP_PARAM,
+        min: tenzro_types::launch_rule::MIN_LAUNCH_VALIDATORS as u64,
+        max: 10_000,
+        genesis: 10_000,
+        tighten: Tighten::Down,
+        description: "Most validators the active set holds once its feature gate is live: \
+                      bonded candidates beyond it wait in stake order for a free seat, and a \
+                      seated validator is never removed for it.",
+    },
+    GovernedParam {
         key: crate::native::staking::CORRELATION_WINDOW_PARAM,
         min: 1,
         max: 100_000,
@@ -5227,6 +6453,21 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         description: "Equivocations within this many checkpoints of each other are \
                       correlated: each offender's penalty scales with the stake of \
                       all offenders in the window.",
+    },
+    crate::feature_gate::registry_entry(
+        crate::native::staking::CORRELATION_WINDOW_DAY_KEY,
+        crate::feature_gate::NEVER,
+        "First epoch whose equivocation slashes correlate offences up to feature.correlation_window_day.checkpoints checkpoints apart (at least one day) in place of slashing.correlation_window_checkpoints.",
+    ),
+    GovernedParam {
+        key: crate::native::staking::CORRELATION_WINDOW_DAY_PARAM,
+        min: crate::native::staking::CORRELATION_WINDOW_DAY_CHECKPOINTS,
+        max: 10_000_000,
+        genesis: crate::native::staking::CORRELATION_WINDOW_DAY_CHECKPOINTS,
+        tighten: Tighten::Up,
+        description: "Once feature.correlation_window_day is live, the checkpoints the \
+                      correlation window spans: at least one day of checkpoints at the \
+                      500 ms interval.",
     },
     GovernedParam {
         key: crate::native::staking::EQUIVOCATION_MIN_SLASH_PARAM,
@@ -5281,6 +6522,18 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         tighten: Tighten::Up,
         description: "Whole TNZO below which a slashed bond is drained entirely and \
                       marked slashed.",
+    },
+    GovernedParam {
+        key: RELEASE_FLOOR_PARAM,
+        min: RELEASE_0_2_2,
+        max: 999_999_999,
+        genesis: RELEASE_0_2_2,
+        tighten: Tighten::Neither,
+        description: "Newest release whose governed keys and bounds a parameter \
+                      change may use, as major * 1,000,000 + minor * 1,000 + \
+                      patch. Raise it only once every validator runs that \
+                      release: a node that does not know a key refuses the change \
+                      and parts from the chain.",
     },
     GovernedParam {
         key: VOTING_PERIOD_PARAM,
@@ -5677,6 +6930,19 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
                       rounds align to it; at most a third of a market epoch.",
     },
     GovernedParam {
+        key: crate::native::SLA_BURST_ROUNDS_PARAM,
+        min: 1,
+        max: 1_000,
+        genesis: 36,
+        tighten: Tighten::Neither,
+        description: "Probe rounds between two burst challenges against each operator \
+                      claiming more than one compute unit: every one of its units must \
+                      answer a matrix proof in the same window. Sparse enough that the \
+                      work stays a small share of challenge energy. Read only by a \
+                      validator's own prober to pace its challenges; no consensus rule \
+                      reads it.",
+    },
+    GovernedParam {
         key: crate::native::SLA_PROBE_WINDOW_PARAM,
         min: 15_000,
         max: 10 * 60 * 1000,
@@ -5684,6 +6950,25 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         tighten: Tighten::Down,
         description: "How long a provider has to answer a scheduled probe, ms; never \
                       longer than the probe interval.",
+    },
+    GovernedParam {
+        key: crate::native::compute_claim::PLACEMENT_MAX_ENTRIES_PARAM,
+        min: 1,
+        max: crate::native::compute_claim::CEILING_PLACEMENT_MAX_ENTRIES,
+        genesis: crate::native::compute_claim::DEFAULT_PLACEMENT_MAX_ENTRIES,
+        tighten: Tighten::Down,
+        description: "Most countries, and most operators, one placement rule on a bought \
+                      claim may name.",
+    },
+    GovernedParam {
+        key: crate::native::compute_claim::POSSESSION_PROBE_SAMPLES_PARAM,
+        min: 1,
+        max: crate::native::compute_claim::MAX_POSSESSION_PROBE_SAMPLES,
+        genesis: crate::native::compute_claim::DEFAULT_POSSESSION_PROBE_SAMPLES,
+        tighten: Tighten::Up,
+        description: "Chunks of each due object an SLA possession probe asks the provider \
+                      to prove; a provider missing a share f of an object passes a probe \
+                      with probability about (1-f)^samples.",
     },
     GovernedParam {
         key: crate::native::SLA_CHALLENGE_ENERGY_BUDGET_BPS_PARAM,
@@ -5755,6 +7040,16 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         genesis: DEFAULT_STANDING_WINDOW_HOURS,
         tighten: Tighten::Neither,
         description: "Closed SLA hours whose verdicts count toward routing standing.",
+    },
+    GovernedParam {
+        key: STORAGE_NEW_PROVIDER_SHARE_PARAM,
+        min: 0,
+        max: 5_000,
+        genesis: DEFAULT_STORAGE_NEW_PROVIDER_SHARE,
+        tighten: Tighten::Neither,
+        description: "Share of each shard's replicas placed on storage providers no verdict in the \
+                      standing window has judged yet, so a new provider can earn a record, bps, \
+                      rounded up to whole replicas.",
     },
     GovernedParam {
         key: KEYSTORE_ADD_DEVICE_WAIT_PARAM,
@@ -5851,6 +7146,24 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         genesis: 24 * 60 * 60 * 1000,
         tighten: Tighten::Neither,
         description: "Age at which a recovery code claim expires unrevealed, ms.",
+    },
+    crate::feature_gate::registry_entry(
+        COMMITTEE_CAP_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose committee holds at most consensus.max_committee_members validators, the highest stakes, a tie to the lower address: a certificate costs about 8.9 KB per signer and must fit one gossip message of a megabyte. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        EXIT_HOLD_GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose boundary holds a voluntary validator exit that would leave the seated set below the launch arithmetic, the exiting validator staying counted until the set can spare it. Raise it only after every validator runs a release that knows the rule.",
+    ),
+    GovernedParam {
+        key: MAX_COMMITTEE_MEMBERS_PARAM,
+        min: 4,
+        max: 110,
+        genesis: 100,
+        tighten: Tighten::Down,
+        description: "Most validators the committee of an epoch holds, once the committee cap is in force. Validators past it by stake rank hold no seat that epoch. A certificate costs about 8.9 KB per signer and must fit one gossip message of 1,048,576 bytes, so no value above 110 can be certified.",
     },
     GovernedParam {
         key: CONSENSUS_LEADER_LOOKAHEAD_PARAM,
@@ -6174,6 +7487,21 @@ pub const GOVERNED_PARAMS: &[GovernedParam] = &[
         description: "Least time between a validator's rounds it may configure, at \
                       the longest, ms. Read when an epoch begins.",
     },
+    crate::feature_gate::registry_entry(
+        crate::native::native_call::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept NativeCall transactions: one kind that reaches, by selector, the native operations listed for it (an identity's key change, a root's revocation in favour of a successor, a builder's attestation), each also waiting for its own gate. Until then the kind is refused at submission and in blocks. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::identity_keys::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks accept identity key changes (an identity's root recording its next Ed25519 and ML-DSA-65 key, declaring a key compromised or revoking a delegation) and keep one head per identity over the logs about it. Until then the transaction is refused and no head is written. Dormant until a vote sets it.",
+    ),
+    crate::feature_gate::registry_entry(
+        crate::native::presence::GATE,
+        crate::feature_gate::NEVER,
+        "First epoch whose blocks let the owner of a compute bond say it stops or resumes serving, from the next hour, and give an hour it said it was offline, and owes to no held claim, no availability verdict: no penalty and no availability reward. Validators and storage stakes are always judged. Dormant until a vote sets it.",
+    ),
 ];
 
 /// Governed key: an exit larger than this share of its outflow bucket's
@@ -6275,7 +7603,8 @@ pub fn holder_veto_applies(action: &ProposalAction) -> bool {
     ) || matches!(
         action,
         ProposalAction::PolicyUpdate {
-            update: PolicyUpdate::ProtocolUpgrade { .. },
+            update: PolicyUpdate::ProtocolUpgrade { .. }
+                | PolicyUpdate::ProtocolUpgradePlatforms { .. },
             ..
         }
     )
@@ -6358,7 +7687,8 @@ pub const DEFAULT_STEWARD_MAX_SEATS: u64 = 5;
 ///   answer is at least what it was paid;
 /// - the validator unbonding period is at least the standard voting period
 ///   plus its timelock: stake that votes is still bonded, and slashable,
-///   when its decision takes effect.
+///   when its decision takes effect;
+/// - each storage class's price floor is at most its ceiling.
 pub fn joint_change_allowed(
     key: &str,
     value: u64,
@@ -6372,6 +7702,8 @@ pub fn joint_change_allowed(
     use crate::native::inference_fault::{PENALTY_PAYMENT_PARAM, SAMPLE_BPS_PARAM};
     use crate::native::rewards::PROVIDER_REWARD_COST_PARAM;
     let get = |k: &str| if k == key { value } else { scheduled(k) };
+    crate::native::storage_class::joint_change_allowed(key, value, scheduled)
+        .map_err(GovernanceError::InvalidPolicy)?;
     if key == LEVEL1_BONUS_PARAM || key == LEVEL2_BONUS_PARAM || key == LEVEL3_BONUS_PARAM {
         let (l1, l2, l3) = (
             get(LEVEL1_BONUS_PARAM),
@@ -6545,9 +7877,38 @@ pub const KEYSTORE_RECOVERY_CODE_REVEAL_DELAY_PARAM: &str =
     "keystore.recovery_code_reveal_delay_ms";
 /// Age at which a recovery code claim expires, ms.
 pub const KEYSTORE_RECOVERY_CODE_CLAIM_TTL_PARAM: &str = "keystore.recovery_code_claim_ttl_ms";
+/// First epoch whose reliable broadcast counts the faulty seats as whole
+/// committee members.
+pub const RBC_WHOLE_MEMBER_FAULT_BOUND_KEY: &str =
+    "feature.rbc_whole_member_fault_bound.activation_epoch";
 /// Rounds between the anchor that closes a checkpoint and the first round
 /// the seed it releases draws leaders for.
 pub const CONSENSUS_LEADER_LOOKAHEAD_PARAM: &str = "consensus.leader_lookahead_rounds";
+
+/// Governed most validators a committee holds, once
+/// [`COMMITTEE_CAP_GATE`] is in force.
+pub const MAX_COMMITTEE_MEMBERS_PARAM: &str = "consensus.max_committee_members";
+
+/// The gate of the hold on voluntary validator exits that would leave the
+/// seated set below the launch arithmetic.
+pub const EXIT_HOLD_GATE: &str = "feature.exit_hold.activation_epoch";
+
+/// The gate of the committee member cap.
+pub const COMMITTEE_CAP_GATE: &str = "feature.committee_cap.activation_epoch";
+
+/// The most validators the committee of `epoch` may hold: the governed
+/// number once the cap is in force for `epoch`, else no limit. Every node
+/// reads it from the state at the end of the epoch before, so every node
+/// derives the same committee.
+pub fn committee_member_cap(state: &dyn crate::traits::VmState, epoch: u64) -> Option<usize> {
+    crate::feature_gate::is_live(state, COMMITTEE_CAP_GATE, epoch).then(|| {
+        usize::try_from(crate::native::network_param(
+            state,
+            MAX_COMMITTEE_MEMBERS_PARAM,
+        ))
+        .unwrap_or(usize::MAX)
+    })
+}
 /// The most a sender's transactions wait on their assigned validator before
 /// the next in turn may batch them, ms.
 pub const CONSENSUS_SENDER_FAILOVER_PARAM: &str = "consensus.sender_failover_ms";
@@ -6591,10 +7952,401 @@ pub const DEFAULT_STANDING_UNJUDGED_BPS: u64 = 5_000;
 pub const STANDING_WINDOW_HOURS_PARAM: &str = "routing.standing_window_hours";
 /// Genesis value of [`STANDING_WINDOW_HOURS_PARAM`]: one day.
 pub const DEFAULT_STANDING_WINDOW_HOURS: u64 = 24;
+/// Governed key: share of a shard's replicas reserved for unjudged storage
+/// providers.
+pub const STORAGE_NEW_PROVIDER_SHARE_PARAM: &str = "storage.placement_new_provider_bps";
+/// Genesis value of [`STORAGE_NEW_PROVIDER_SHARE_PARAM`]: a fifth.
+pub const DEFAULT_STORAGE_NEW_PROVIDER_SHARE: u64 = 2_000;
 
 /// Look up a governed parameter by key.
 pub fn governed_param(key: &str) -> Option<&'static GovernedParam> {
     GOVERNED_PARAMS.iter().find(|p| p.key == key)
+}
+
+/// Governed keys added, or whose bounds changed, after release 0.2.1, with
+/// the release that brought them. A key not listed dates from 0.2.1.
+pub const KEYS_SINCE: &[(&str, u64)] = &[
+    (RELEASE_FLOOR_PARAM, RELEASE_0_2_2),
+    (TIMELOCK_PARAM, RELEASE_0_2_2),
+    (SEALED_ENDPOINT_PULL_GATE, RELEASE_0_2_2),
+    (HEARTBEAT_SESSION_GATE, RELEASE_0_2_2),
+    (HEARTBEAT_SESSION_MAX_LIFETIME_KEY, RELEASE_0_2_2),
+    (HEARTBEAT_SESSION_ISSUE_SKEW_KEY, RELEASE_0_2_2),
+    (HEARTBEAT_MAX_SKEW_KEY, RELEASE_0_2_2),
+    (crate::native::gateway_sets::NRAS_JWKS_GATE, RELEASE_0_2_2),
+    (crate::native::gateway_sets::BOOT_NODES_GATE, RELEASE_0_2_2),
+    (
+        crate::native::gateway_sets::UPDATE_NOTICE_KEYS_GATE,
+        RELEASE_0_2_2,
+    ),
+    (crate::identity_required::KEY, RELEASE_0_2_2),
+    (
+        crate::native::settlement_asset::PAYER_SHARE_GATE,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::settlement_asset::PAYER_SHARE_BPS_KEY,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::staking::EXIT_FLOOR_GATE, RELEASE_0_2_2),
+    (crate::native::staking::OUTSIDE_CAP_GATE, RELEASE_0_2_2),
+    (crate::native::staking::OUTSIDE_CAP_BPS_KEY, RELEASE_0_2_2),
+    (crate::identity_required::MODE_KEY, RELEASE_0_2_2),
+    (
+        crate::native::inference_fault::CHALLENGE_WINDOWS_FIT_KEY,
+        RELEASE_0_2_2,
+    ),
+    (crate::keystore::RECOVERY_ROTATION_GATE, RELEASE_0_2_2),
+    (crate::keystore::RECOVERY_CANCEL_GATE, RELEASE_0_2_2),
+    (crate::native::ROOT_PAUSE_KEY, RELEASE_0_2_2),
+    (
+        "feature.ccip_finality_policy.activation_epoch",
+        RELEASE_0_2_2,
+    ),
+    (RBC_WHOLE_MEMBER_FAULT_BOUND_KEY, RELEASE_0_2_2),
+    (
+        crate::native::staking::CORRELATION_WINDOW_DAY_KEY,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::staking::CORRELATION_WINDOW_DAY_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::invariant_monitor::ROLE_STAKE_GUARD_KEY,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::DEFERRED_SLASH_REMOVAL_KEY, RELEASE_0_2_2),
+    (crate::native::beacon::IDLE_GATE, RELEASE_0_2_2),
+    (crate::native::beacon::IDLE_INTERVAL_PARAM, RELEASE_0_2_2),
+    (crate::native::agent_cap::KEY, RELEASE_0_2_2),
+    (crate::native::agent_cap::LIMIT_KEY, RELEASE_0_2_2),
+    (crate::native::ROOT_REVOCATION_REACH_KEY, RELEASE_0_2_2),
+    (crate::native::operator::KEY, RELEASE_0_2_2),
+    (crate::native::reward_root::KEY, RELEASE_0_2_2),
+    (crate::native::agent_terms::BOUNDS_KEY, RELEASE_0_2_2),
+    (crate::native::agent_terms::SPEND_EXPIRY_GATE, RELEASE_0_2_2),
+    (crate::native::economy::REPORT_AGREEMENT_GATE, RELEASE_0_2_2),
+    (
+        crate::native::rewards::SETTLED_WORK_REGISTERED_GATE,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::CUSTOM_ESCROW_REFUSED_GATE, RELEASE_0_2_2),
+    (crate::ledger::FEE_PAYER_GATE, RELEASE_0_2_2),
+    (crate::native::beacon::PROBE_BEACON_GATE, RELEASE_0_2_2),
+    (
+        crate::native::availability_reward::AVAILABILITY_PAID_ACTIVITY_GATE,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_REWARD_PAID_ACTIVITY_EPOCHS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_REWARD_MIN_PAID_WORK_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_REWARD_BOOTSTRAP_UNTIL_EPOCH_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::economy::EXTERNAL_PAYMENT_ACTIVITY_GATE,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::rewards::REWARD_CLAWBACK_GATE, RELEASE_0_2_2),
+    (crate::native::staking::ACTIVE_SET_CAP_GATE, RELEASE_0_2_2),
+    (crate::native::staking::ACTIVE_SET_CAP_PARAM, RELEASE_0_2_2),
+    (
+        crate::native::rewards::VALIDATOR_STAKE_WEIGHT_GATE,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::ROOT_VOTE_CAP_GATE, RELEASE_0_2_2),
+    (crate::native::ROOT_VOTE_CAP_PARAM, RELEASE_0_2_2),
+    (crate::native::SLA_BURST_ROUNDS_PARAM, RELEASE_0_2_2),
+    (crate::native::ROLE_AVAILABILITY_REWARD_GATE, RELEASE_0_2_2),
+    (
+        crate::native::availability_reward::SLA_TIERS_GATE,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::SLA_WARM_AVAILABLE_BPS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::SLA_COOL_AVAILABLE_BPS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::SLA_COLD_AVAILABLE_BPS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::settlement_asset::UNIT_BASKET_GATE,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::settlement_asset::BASKET_USD_WEIGHT_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::settlement_asset::BASKET_EUR_WEIGHT_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::settlement_asset::BASKET_CNY_WEIGHT_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::settlement_asset::BASKET_JPY_WEIGHT_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::settlement_asset::BASKET_GBP_WEIGHT_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::FIRMWARE_TPM_TIER_GATE,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::rpc_provider_approval::RPC_PROVIDER_APPROVAL_GATE,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_FIRMWARE_TPM_BPS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::burn_bound_release::KEY, RELEASE_0_2_2),
+    (
+        crate::native::burn_bound_release::RATIO_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::SMOOTHING_KEEP_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::YEARLY_LIMIT_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::STEP_POOL_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::STEP_RATIO_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::FLOOR_POOL_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::BOOT_RATIO_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::BOOT_EPOCHS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::BOOT_BUDGET_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::burn_bound_release::SHARE_CAP_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::payment_settlement::plan::TREASURY_LINE_KEY,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::validator_cover::SEATS_GATE, RELEASE_0_2_2),
+    (
+        crate::native::validator_cover::SEAT_FLOOR_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::sponsorship_end::GATE, RELEASE_0_2_2),
+    (
+        crate::native::sponsorship_end::PER_VALIDATOR_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::sponsorship_end::WINDOW_PARAM, RELEASE_0_2_2),
+    (
+        crate::native::settlement_asset::INTAKE_EXPOSURE_GATE,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::affiliated_share::GATE, RELEASE_0_2_2),
+    (crate::native::affiliated_share::CAP_PARAM, RELEASE_0_2_2),
+    (
+        crate::native::treasury_reserve::NO_VOLUME_SALE_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_INDEX_CAP_KEY,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_INDEX_CAP_BPS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::paid_readiness::PAID_READINESS_KEY,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::economy::RATE_SYMBOL_ISOLATION_KEY,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_DEMAND_TARGET_USD_KEY,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::compute_claim::POSSESSION_PROBE_SAMPLES_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::SLA_FAILURE_WINDOW_KEY, RELEASE_0_2_2),
+    (
+        crate::native::SLA_FAILURE_WINDOW_EPOCHS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::SLA_FAILURE_MAX_PARAM, RELEASE_0_2_2),
+    (crate::native::SLA_FAILURE_MULTIPLE_PARAM, RELEASE_0_2_2),
+    (
+        crate::native::sla_energy_budget::SLA_WAKE_ENERGY_KEY,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::UNIT_BUDGET_KEY,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::availability_reward::UNIT_BUDGET_DEMAND_BPS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::USD_COMPUTE_BOND_KEY, RELEASE_0_2_2),
+    (crate::native::USD_SLA_PENALTY_KEY, RELEASE_0_2_2),
+    (crate::native::USD_SLA_PENALTY_PARAM, RELEASE_0_2_2),
+    (crate::native::first_registration::GATE, RELEASE_0_2_2),
+    (
+        crate::native::first_registration::WAIVERS_PER_EPOCH_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::evm::PRAGUE_ONLY_KEY, RELEASE_0_2_2),
+    (crate::evm::OSAKA_KEY, RELEASE_0_2_2),
+    (COMMITTEE_CAP_GATE, RELEASE_0_2_2),
+    (MAX_COMMITTEE_MEMBERS_PARAM, RELEASE_0_2_2),
+    (
+        crate::native::inference_fault::VERIFY_LOGIT_DELTA_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::inference_fault::VERIFY_PASSING_BPS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::inference_fault::VERIFY_TOLERATED_MISSES_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (EXIT_HOLD_GATE, RELEASE_0_2_2),
+    (crate::token_ledger::ERC7943_FINAL_KEY, RELEASE_0_2_2),
+    (crate::evm::gateway::GATEWAY_KEY, RELEASE_0_2_2),
+    (crate::evm::CONFORMANCE_KEY, RELEASE_0_2_2),
+    (crate::evm::BLOCK_GAS_LIMIT_PARAM, RELEASE_0_2_2),
+    (crate::native::storage_class::KEY, RELEASE_0_2_2),
+    (crate::native::compute_claim::PLACEMENT_KEY, RELEASE_0_2_2),
+    (
+        crate::native::compute_claim::PLACEMENT_MAX_ENTRIES_PARAM,
+        RELEASE_0_2_2,
+    ),
+    ("feature.storage_classes.hot_deadline_ms", RELEASE_0_2_2),
+    ("feature.storage_classes.hot_price_floor", RELEASE_0_2_2),
+    ("feature.storage_classes.hot_price_ceiling", RELEASE_0_2_2),
+    ("feature.storage_classes.warm_deadline_ms", RELEASE_0_2_2),
+    ("feature.storage_classes.warm_price_floor", RELEASE_0_2_2),
+    ("feature.storage_classes.warm_price_ceiling", RELEASE_0_2_2),
+    ("feature.storage_classes.cold_deadline_ms", RELEASE_0_2_2),
+    ("feature.storage_classes.cold_price_floor", RELEASE_0_2_2),
+    ("feature.storage_classes.cold_price_ceiling", RELEASE_0_2_2),
+    (crate::native::economy::PROVIDER_REVENUE_KEY, RELEASE_0_2_2),
+    (STORAGE_NEW_PROVIDER_SHARE_PARAM, RELEASE_0_2_2),
+    (
+        "feature.storage_classes.hot_read_price_ceiling",
+        RELEASE_0_2_2,
+    ),
+    (
+        "feature.storage_classes.warm_read_price_ceiling",
+        RELEASE_0_2_2,
+    ),
+    (
+        "feature.storage_classes.cold_read_price_ceiling",
+        RELEASE_0_2_2,
+    ),
+    (crate::native::upgrade::PLATFORMS_GATE, RELEASE_0_2_2),
+    (crate::native::native_call::GATE, RELEASE_0_2_2),
+    (crate::native::identity_keys::GATE, RELEASE_0_2_2),
+    (
+        crate::native::identity_keys::ROOT_SIGNATURES_GATE,
+        RELEASE_0_2_2,
+    ),
+    (
+        crate::native::identity_keys::ROOT_SIGNATURES_MAX_GAP_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::identity_succession::GATE, RELEASE_0_2_2),
+    (
+        crate::native::identity_succession::SUCCESSOR_HUMAN_ONLY_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::build_attestation::GATE, RELEASE_0_2_2),
+    (
+        crate::native::build_attestation::MIN_BUILDERS_PARAM,
+        RELEASE_0_2_2,
+    ),
+    (crate::native::registration_attestation::GATE, RELEASE_0_2_2),
+    (crate::native::identity_caps::GATE, RELEASE_0_2_2),
+    (crate::native::identity_caps::PER_ROOT_PARAM, RELEASE_0_2_2),
+    (crate::native::presence::GATE, RELEASE_0_2_2),
+    (crate::native::zk_verdict::GATE, RELEASE_0_2_2),
+    (crate::native::bond_onramp::GATE, RELEASE_0_2_2),
+    (crate::native::bond_onramp::CAP_PARAM, RELEASE_0_2_2),
+    (crate::native::bond_onramp::SPREAD_PARAM, RELEASE_0_2_2),
+    (crate::native::rpc_provider_leg::GATE, RELEASE_0_2_2),
+    (crate::native::rpc_provider_leg::RATE_PARAM, RELEASE_0_2_2),
+    (crate::native::operator_cap::GATE, RELEASE_0_2_2),
+    (crate::native::operator_cap::CAP_PARAM, RELEASE_0_2_2),
+    (crate::native::operator_cap::REGION_GATE, RELEASE_0_2_2),
+    (crate::native::operator_cap::REGION_CAP_PARAM, RELEASE_0_2_2),
+    (crate::evm::gateway::DELIVERY_GAS_KEY, RELEASE_0_2_2),
+];
+/// The release that brought `key` or its current bounds.
+pub fn key_since(key: &str) -> u64 {
+    KEYS_SINCE
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(RELEASE_0_2_1, |(_, release)| *release)
+}
+
+/// Refuses a change of `key` while the network's release `floor` is below
+/// the release that brought it. Every node of a release refuses a key it
+/// does not know, so a change that only newer nodes accept would part the
+/// chain; holding it until the floor is raised keeps every node agreed.
+pub fn change_released(key: &str, floor: u64) -> Result<(), GovernanceError> {
+    let since = key_since(key);
+    if since > floor {
+        return Err(GovernanceError::ParameterNotReleased {
+            key: key.to_string(),
+            since,
+            floor,
+        });
+    }
+    Ok(())
 }
 
 /// Genesis value of a governed parameter, for a reader without chain state.
@@ -7181,6 +8933,82 @@ pub fn decide_guarded(
 }
 
 #[cfg(test)]
+mod release_floor_tests {
+    use super::*;
+
+    /// The 0.2.1 table, as `key min max` lines.
+    fn keys_0_2_1() -> Vec<(&'static str, u64, u64)> {
+        include_str!("governed_keys_0_2_1.txt")
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let mut f = l.split(' ');
+                let key = f.next().unwrap();
+                let min = f.next().unwrap().parse().unwrap();
+                let max = f.next().unwrap().parse().unwrap();
+                (key, min, max)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_key_newer_than_0_2_1_names_its_release() {
+        let old = keys_0_2_1();
+        for p in GOVERNED_PARAMS {
+            let unchanged = old
+                .iter()
+                .any(|(k, min, max)| *k == p.key && *min == p.min && *max == p.max);
+            assert!(
+                unchanged || key_since(p.key) > RELEASE_0_2_1,
+                "{} is new or rebounded since 0.2.1 and is missing from KEYS_SINCE",
+                p.key
+            );
+        }
+    }
+
+    #[test]
+    fn every_listed_key_is_governed_and_listed_once() {
+        for (i, (key, _)) in KEYS_SINCE.iter().enumerate() {
+            assert!(governed_param(key).is_some(), "{key} is not governed");
+            assert!(KEYS_SINCE[..i].iter().all(|(k, _)| k != key), "{key} twice");
+        }
+    }
+
+    #[test]
+    fn a_change_waits_for_the_floor_to_reach_its_release() {
+        let floor = governed_param(RELEASE_FLOOR_PARAM).unwrap().genesis;
+        // A key is changeable once the floor reaches the release that brought
+        // it: every key of a release at or below the genesis floor is released
+        // at genesis, and a newer release's keys wait until governance moves
+        // the floor, after every validator runs that release.
+        for p in GOVERNED_PARAMS {
+            let since = key_since(p.key);
+            if since <= floor {
+                assert!(change_released(p.key, floor).is_ok(), "{}", p.key);
+            } else {
+                assert!(
+                    matches!(
+                        change_released(p.key, floor),
+                        Err(GovernanceError::ParameterNotReleased { since: s, .. }) if s == since
+                    ),
+                    "{} is newer than the genesis floor and must be refused there",
+                    p.key
+                );
+                assert!(change_released(p.key, since).is_ok(), "{}", p.key);
+            }
+        }
+        assert!(change_released(VOTING_PERIOD_PARAM, RELEASE_0_2_1).is_ok());
+        assert!(matches!(
+            change_released(TIMELOCK_PARAM, RELEASE_0_2_1),
+            Err(GovernanceError::ParameterNotReleased {
+                since: RELEASE_0_2_2,
+                ..
+            })
+        ));
+    }
+}
+
+#[cfg(test)]
 mod share_tests {
     use super::share_at_least;
 
@@ -7534,6 +9362,12 @@ mod large_spend_tests {
             ),
             (rewards::MINT_MIN_MULT_PARAM, 5_000, 5_001, 4_999),
             (staking::CORRELATION_WINDOW_PARAM, 100, 99, 101),
+            (
+                staking::CORRELATION_WINDOW_DAY_PARAM,
+                200_000,
+                199_999,
+                200_001,
+            ),
             (
                 crate::native::inference_fault::CATALOG_FAULT_SLASH_BPS_PARAM,
                 1_000,
@@ -8711,5 +10545,37 @@ mod supply_target_tests {
         assert!(validate_policy_update(&targets(i32::MAX)).is_err());
         assert!(validate_policy_update(&targets(0)).is_ok());
         assert!(validate_policy_update(&targets(-50)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod committee_cap_tests {
+    use super::*;
+    use crate::StateAdapter;
+    use crate::native::set_governed_param_for_test;
+
+    /// The cap is no limit while its gate is dormant, and from its
+    /// activation epoch on the governed number; before that epoch still no
+    /// limit.
+    #[test]
+    fn the_member_cap_applies_from_its_activation_epoch_and_not_before() {
+        let mut state = StateAdapter::new();
+        assert_eq!(committee_member_cap(&state, 1_000_000), None, "dormant");
+        set_governed_param_for_test(&mut state, COMMITTEE_CAP_GATE, 7);
+        assert_eq!(committee_member_cap(&state, 6), None, "before its epoch");
+        assert_eq!(committee_member_cap(&state, 7), Some(100));
+        set_governed_param_for_test(&mut state, MAX_COMMITTEE_MEMBERS_PARAM, 40);
+        assert_eq!(committee_member_cap(&state, 8), Some(40));
+    }
+
+    /// The governed bounds keep a committee certifiable: a full certificate
+    /// of the most members still fits one gossip message.
+    #[test]
+    fn the_cap_bounds_keep_a_full_certificate_in_one_gossip_message() {
+        const BYTES_PER_SIGNER: usize = 8_925;
+        const GOSSIP_MESSAGE: usize = 1_048_576;
+        let p = governed_param(MAX_COMMITTEE_MEMBERS_PARAM).unwrap();
+        assert!(p.max as usize * BYTES_PER_SIGNER <= GOSSIP_MESSAGE);
+        assert!(p.min <= p.genesis && p.genesis <= p.max);
     }
 }

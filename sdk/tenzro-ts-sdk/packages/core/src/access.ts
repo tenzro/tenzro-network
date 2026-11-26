@@ -32,8 +32,8 @@ export interface AccessChallenge {
   challenge_id: string;
   /** The challenge a passkey signs (`webauthn.get`), base64url. */
   challenge: string;
-  /** The digest a hardware key signs, hex. */
-  device_digest: string;
+  /** The message a hardware key signs, hex. */
+  device_message: string;
   expires_in: number;
 }
 
@@ -51,7 +51,7 @@ export type SignInProof =
       kind: "device";
       /** Hex: the key the DID derives from, or one registered on it. */
       public_key: string;
-      /** Hex: ECDSA P-256 `r || s` over SHA-256 of the digest, or Ed25519. */
+      /** Hex: ECDSA P-256 `r || s` over SHA-256 of the message, or Ed25519 over the message. */
       signature: string;
     };
 

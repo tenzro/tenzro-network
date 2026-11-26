@@ -57,12 +57,13 @@ test("chain reads on the top-level client", async () => {
   assert.equal(await check(n, "tenzro_getNonce", "0x3", () => c.getNonce(ADDR), [ADDR]), 3);
   const report = await check(n, "tenzro_getNodeStatus", { state: "Running", block_height: 9 }, () => c.nodeInfo(), []);
   assert.equal(report.state, "Running");
+  assert.equal(await check(n, "web3_clientVersion", "tenzro-node/0.2.2", () => c.clientVersion(), []), "tenzro-node/0.2.2");
   assert.equal(await check(n, "tenzro_totalSupply", "1000", () => c.totalSupply(), []), "1000");
   assert.equal(await check(n, "tenzro_peerCount", "0x4", () => c.peerCount(), []), 4);
   await check(n, "tenzro_getNetworkStats", { available: false }, () => c.getNetworkStats(), []);
-  assert.equal(await check(n, "tenzro_syncing", false, () => c.isSyncing(), []), false);
+  assert.equal(await check(n, "tenzro_syncing", { state: "following" }, () => c.isSyncing(), []), false);
   assert.equal(
-    await check(n, "tenzro_syncing", { syncing: true, startingBlock: "0x0", currentBlock: "0x1", highestBlock: "0x9" }, () => c.isSyncing(), []),
+    await check(n, "tenzro_syncing", { state: "catching_up", local_height: 1, network_head: 9 }, () => c.isSyncing(), []),
     true,
   );
   assert.equal(await check(n, "tenzro_getFinalizedBlock", "0x8", () => c.getFinalizedBlock(), []), 8);
@@ -106,8 +107,8 @@ test("consensus, state and validator reads", async () => {
   const n = node();
   const v = new sdk.ValidatorClient(n.rpc);
   await check(n, "tenzro_getValidatorState", null, () => v.getState(ADDR), [{ address: ADDR }]);
-  await check(n, "tenzro_listValidators", { count: 0, validators: [] }, () => v.list("Active"), [{ status: "Active" }]);
-  await check(n, "tenzro_listActiveValidators", { count: 0, validators: [] }, () => v.listActive(), []);
+  await check(n, "tenzro_listValidators", { count: 0, operators: { machines: 0, distinct_operators: 0, without_identity: 0 }, validators: [] }, () => v.list("Active"), [{ status: "Active" }]);
+  await check(n, "tenzro_listActiveValidators", { count: 0, operators: { machines: 0, distinct_operators: 0, without_identity: 0 }, validators: [] }, () => v.listActive(), []);
   const header = await check(n, "tenzro_currentHeader", { height: 9, tier: "live" }, () => v.currentHeader(), []);
   assert.equal(header.tier, "live");
   await check(n, "tenzro_getCheckpointCertificate", { index: 4 }, () => v.getCheckpointCertificate({ index: 4 }), { index: 4 });
@@ -123,9 +124,11 @@ test("consensus, state and validator reads", async () => {
   await check(n, "tenzro_getRewardEpoch", { epoch: 3 }, () => v.getRewardEpoch({ epoch: 3 }), { epoch: 3 });
   await check(n, "tenzro_getRewardSchedule", {}, () => v.getRewardSchedule(), []);
   await check(n, "tenzro_getStateProof", { value: null }, () => v.getStateProof({ namespace: "accounts", key: "ab" }), { namespace: "accounts", key: "ab" });
+  await check(n, "tenzro_getStateProof", { value: null }, () => v.getStateProof({ namespace: "accounts", key: "ab", height: 7 }), { namespace: "accounts", key: "ab", height: 7 });
   await check(n, "tenzro_getStateRoot", { height: 9 }, () => v.getStateRoot(), []);
   await check(n, "tenzro_getVesting", {}, () => v.getVesting({ address: ADDR }), { address: ADDR });
   await check(n, "tenzro_getHardwareLevel", {}, () => v.getHardwareLevel({ address: ADDR }), { address: ADDR });
+  await check(n, "tenzro_fleetHostEvidence", { did: "did:tenzro:machine:h" }, () => v.fleetHostEvidence({ operator: "did:tenzro:human:o", bind: true }), { operator: "did:tenzro:human:o", bind: true });
   await check(n, "tenzro_listRewardCoupons", {}, () => v.listRewardCoupons({ address: ADDR }), { address: ADDR });
   await check(n, "tenzro_validatorPublicKeys", {}, () => v.validatorPublicKeys(), []);
   await check(n, "tenzro_validatorSelfStake", "0xh", () => v.validatorSelfStake({ additional: 5 }), { additional: 5 });
@@ -169,18 +172,13 @@ test("data availability, storage and the platform reads", async () => {
     mlDsaPublicKey: () => null,
     signComposite: async () => [new Uint8Array(64).fill(9), null],
   };
-  await check(n, "tenzro_storageStoreObject", { object_id: "o" }, () => s.storeObject("o", ADDR, new Uint8Array([104, 105]), 4, 2, "did:tenzro:human:o", owner), { object_id: "o", owner: ADDR, data: "aGk=", data_shards: 4, parity_shards: 2, owner_did: "did:tenzro:human:o" });
+  await check(n, "tenzro_storageStoreObject", { object_id: "o" }, () => s.storeObject("o", ADDR, new Uint8Array([104, 105]), 4, 2, "did:tenzro:human:o", owner, undefined, { class: "cold" }), { object_id: "o", owner: ADDR, data: "aGk=", data_shards: 4, parity_shards: 2, owner_did: "did:tenzro:human:o", class: "cold" });
   assert.ok(typeof n.last("tenzro_storageStoreObject").did_envelope === "string");
-  assert.deepEqual(Array.from(await check(n, "tenzro_storageRetrieveObject", { data: "aGk=" }, () => s.retrieveObject("o", "did:tenzro:human:o", owner), { object_id: "o" })), [104, 105]);
+  assert.deepEqual(Array.from(await check(n, "tenzro_storageRetrieveObject", { data: "aGk=" }, () => s.retrieveObject("o", "did:tenzro:human:o", owner, { cumulative_amount: "5" }), { object_id: "o", voucher: { cumulative_amount: "5" } })), [104, 105]);
   assert.ok(typeof n.last("tenzro_storageRetrieveObject").did_envelope === "string");
   await check(n, "tenzro_storageSetPricing", {}, () => s.setFixedRate(7n), [{ mode: "fixed", rate: "7" }]);
+  await check(n, "tenzro_storageSetPricing", {}, () => s.setReadRates(7n, { hot: 300n, warm: 20n, cold: 1n }), [{ mode: "fixed", rate: "7", read_rates: { hot: "300", warm: "20", cold: "1" } }]);
   await check(n, "tenzro_storageStatus", {}, () => s.status(), []);
-  await check(n, "tenzro_daAvailability", {}, () => s.daAvailability({ address: ADDR }), { address: ADDR });
-  await check(n, "tenzro_daChallenge", {}, () => s.daChallenge({ commitment: "0xcc", target_index: 3 }), { commitment: "0xcc", target_index: 3 });
-  await check(n, "tenzro_daCommittee", {}, () => s.daCommittee(), []);
-  await check(n, "tenzro_daListBlobs", {}, () => s.daListBlobs(), []);
-  await check(n, "tenzro_daListChallenges", {}, () => s.daListChallenges({ limit: 4 }), { limit: 4 });
-
   const da = new sdk.DaRetentionClient(n.rpc);
   await check(n, "tenzro_getDaObject", {}, () => da.object("0xcc"), { commitment: "0xcc" });
   await check(n, "tenzro_getDaRetention", {}, () => da.retention(), {});
@@ -236,7 +234,10 @@ test("events, iroh, staking, SLA and duties", async () => {
   const ev = new sdk.EventsClient(n.rpc);
   const filter = { event_types: ["Log"] };
   await check(n, "tenzro_subscribe", { events: [] }, () => ev.subscribe(filter, "1:0:0", 100, true), { filter, wait_ms: 100, proofs: true, from_cursor: "1:0:0" });
-  await check(n, "tenzro_queryEvents", { events: [] }, () => ev.query(filter, undefined, "9:0:0", 10), { filter, limit: 10, to_cursor: "9:0:0" });
+  await check(n, "tenzro_queryEvents", { events: [] }, () => ev.query(filter, undefined, "9:0:0", 10), { filter, limit: 10, from_height: 0, to_cursor: "9:0:0" });
+  await check(n, "tenzro_queryEvents", { events: [] }, () => ev.query(filter, "3:0:0", undefined, 10), { filter, limit: 10, from_cursor: "3:0:0" });
+  await check(n, "tenzro_queryEvents", { events: [] }, () => ev.newest(filter), { filter, limit: 100 });
+  await check(n, "tenzro_queryEvents", { events: [] }, () => ev.newest(filter, "9:0:0", 10, 4), { filter, limit: 10, before_cursor: "9:0:0", anchor_index: 4 });
   assert.deepEqual(await check(n, "tenzro_getEventProof", { proof: { p: 1 } }, () => ev.proof("1:0:0", 2), { cursor: "1:0:0", anchor_index: 2 }), { p: 1 });
   await check(n, "tenzro_eventStatus", {}, () => ev.eventStatus(), {});
   await check(n, "tenzro_verifyEventProof", { valid: true }, () => ev.verifyEventProof({ proof: { p: 1 } }), { proof: { p: 1 } });
@@ -260,6 +261,7 @@ test("events, iroh, staking, SLA and duties", async () => {
   const sla = new sdk.SlaClient(n.rpc);
   await check(n, "tenzro_slaIssueProbe", {}, () => sla.issueProbe("did:p", 1, 2, 99), { provider_did: "did:p", epoch: 1, round: 2, deadline_ms: 99 });
   await check(n, "tenzro_slaListOutstandingProbes", {}, () => sla.listOutstandingProbes(), []);
+  await check(n, "tenzro_slaGetEnergy", {}, () => sla.energyReport(), []);
   await check(n, "tenzro_slaGetParams", {}, () => sla.getParams(), []);
   await check(n, "tenzro_slaVerdict", {}, () => sla.slaVerdict({ provider_did: "did:p", epoch: 4 }), { provider_did: "did:p", epoch: 4 });
 
@@ -302,7 +304,6 @@ test("tokens, reserves, economics, gateway and payments", async () => {
   await check(n, "tenzro_getBurnRateConfig", {}, () => b.getBurnRateConfig(), [{}]);
   await check(n, "tenzro_getEconomicPolicy", {}, () => b.getEconomicPolicy(), [{}]);
   await check(n, "tenzro_getSupplyMetrics", {}, () => b.getSupplyMetrics(), [{}]);
-  await check(n, "tenzro_getBurnRateRecommendation", {}, () => b.getBurnRateRecommendation(), [{}]);
   await check(n, "tenzro_getFeeRate", {}, () => b.getFeeRate("ETH"), [{ symbol: "ETH" }]);
   await check(n, "tenzro_getEconomyMetrics", {}, () => b.getEconomyMetrics(2), [{ epoch: 2 }]);
 

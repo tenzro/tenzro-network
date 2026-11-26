@@ -214,12 +214,22 @@ pub fn console_line(data_dir: &Path) -> Option<String> {
     })
 }
 
-/// Whether any of `roles` is one whose restart its operator times: a
-/// validator or a provider.
+/// Whether any of `roles` is one whose restart its operator times: every
+/// role but following the chain as a full, light or micro node. A role is
+/// read as the node's status names it (`Validator`, `LightClient`) or as its
+/// short token (`validator`, `light`): case and punctuation do not count.
 pub fn serves_role<'a>(roles: impl IntoIterator<Item = &'a str>) -> bool {
-    roles
-        .into_iter()
-        .any(|r| matches!(r, "validator" | "provider" | "model-provider" | "ai"))
+    roles.into_iter().any(|r| {
+        let name: String = r
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        !matches!(
+            name.as_str(),
+            "" | "fullnode" | "light" | "lightclient" | "micro" | "micronode"
+        )
+    })
 }
 
 /// The restart advice for the operator of a node that serves a role, from
@@ -315,7 +325,7 @@ pub struct NoticeCmd {
     /// Ask the release channel (and, failing that, a node) for a newer notice first.
     #[arg(long)]
     refresh: bool,
-    /// The release channel to ask: an https URL or a local directory.
+    /// The release channel to ask: `stable`, `security` or `beta`, an https URL, or a local directory.
     #[arg(long, env = "TENZRO_UPDATE_CHANNEL", default_value = super::DEFAULT_CHANNEL)]
     channel: String,
     /// Print the notice as one JSON object.
@@ -382,21 +392,79 @@ pub struct NoticesCmd {
     /// `on` or `off`: whether banners and status lines about new releases show.
     #[arg(value_parser = ["on", "off"])]
     state: Option<String>,
+    /// `on` or `off`: whether a verified newer release installs by itself. A
+    /// node that serves a staked role still stages only and is restarted by
+    /// its operator, so this never restarts a validator on its own.
+    #[arg(long, value_parser = ["on", "off"])]
+    auto_install: Option<String>,
+    /// Hours an ordinary release's automatic install is spread over across
+    /// machines; this machine's turn in it is derived from its identity. 0
+    /// installs at once. A security release is never staggered.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=i64::from(tenzro_update_notice::rollout::MAX_STAGGER_HOURS)))]
+    stagger_hours: Option<u16>,
+    /// The hours (UTC) in which an automatic install may start, `<start>-<end>`
+    /// (`2-5`, or `22-1` across midnight), or `any`. A security release
+    /// ignores them.
+    #[arg(long)]
+    install_hours: Option<String>,
     #[command(flatten)]
     at: super::Where,
+}
+
+/// The install hours `--install-hours` names: `any` clears them.
+fn install_hours(
+    s: &str,
+) -> std::result::Result<Option<tenzro_update_notice::rollout::InstallHours>, String> {
+    if s == "any" {
+        Ok(None)
+    } else {
+        tenzro_update_notice::rollout::InstallHours::parse(s).map(Some)
+    }
 }
 
 impl NoticesCmd {
     pub(super) fn execute(&self) -> Result<()> {
         let data_dir = self.at.data_dir();
         let mut prefs = Prefs::load(&data_dir);
-        if let Some(s) = &self.state {
-            prefs.notices = s == "on";
+        let changes = self.state.is_some()
+            || self.auto_install.is_some()
+            || self.stagger_hours.is_some()
+            || self.install_hours.is_some();
+        if changes {
+            if let Some(s) = &self.state {
+                prefs.notices = s == "on";
+            }
+            if let Some(s) = &self.auto_install {
+                prefs.auto_install = s == "on";
+            }
+            if let Some(h) = self.stagger_hours {
+                prefs.stagger_hours = h;
+            }
+            if let Some(s) = &self.install_hours {
+                prefs.install_hours = install_hours(s).map_err(|e| anyhow::anyhow!(e))?;
+            }
             prefs
                 .save(&data_dir)
                 .with_context(|| "save the notice settings")?;
         }
         output::print_field("Release notices", if prefs.notices { "on" } else { "off" });
+        output::print_field(
+            "Automatic installs",
+            if prefs.auto_install { "on" } else { "off" },
+        );
+        output::print_field(
+            "Stagger window",
+            &format!(
+                "{} hours (security releases install at once)",
+                prefs.stagger_hours
+            ),
+        );
+        output::print_field(
+            "Install hours (UTC)",
+            &prefs.install_hours.map_or("any".to_string(), |h| {
+                format!("{:02}:00 to {:02}:00", h.start, h.end)
+            }),
+        );
         Ok(())
     }
 }
@@ -534,6 +602,9 @@ mod tests {
         .unwrap();
         let cmd = NoticesCmd {
             state: Some("off".into()),
+            auto_install: None,
+            stagger_hours: None,
+            install_hours: None,
             at: super::super::Where {
                 data_dir: Some(data.path().to_path_buf()),
             },
@@ -546,5 +617,100 @@ mod tests {
         };
         assert!(banner_line(data.path(), None, tty, now_ms()).is_none());
         assert!(!Prefs::load(data.path()).notices);
+    }
+
+    #[test]
+    fn automatic_installs_are_off_until_turned_on_and_survive_a_restart() {
+        let data = tempfile::tempdir().unwrap();
+        assert!(!Prefs::load(data.path()).auto_install, "off by default");
+        let set = |v: &str| NoticesCmd {
+            state: None,
+            auto_install: Some(v.to_string()),
+            stagger_hours: None,
+            install_hours: None,
+            at: super::super::Where {
+                data_dir: Some(data.path().to_path_buf()),
+            },
+        };
+        set("on").execute().unwrap();
+        assert!(Prefs::load(data.path()).auto_install, "survives a reload");
+        assert!(
+            Prefs::load(data.path()).notices,
+            "the notices choice is untouched"
+        );
+        set("off").execute().unwrap();
+        assert!(!Prefs::load(data.path()).auto_install);
+    }
+
+    #[test]
+    fn the_stagger_window_and_install_hours_are_kept_until_changed() {
+        let data = tempfile::tempdir().unwrap();
+        let cmd = |stagger: Option<u16>, hours: Option<&str>| NoticesCmd {
+            state: None,
+            auto_install: None,
+            stagger_hours: stagger,
+            install_hours: hours.map(str::to_string),
+            at: super::super::Where {
+                data_dir: Some(data.path().to_path_buf()),
+            },
+        };
+        let defaults = Prefs::load(data.path());
+        assert_eq!(
+            defaults.stagger_hours,
+            tenzro_update_notice::rollout::DEFAULT_STAGGER_HOURS
+        );
+        assert_eq!(defaults.install_hours, None);
+        cmd(Some(6), Some("2-5")).execute().unwrap();
+        let set = Prefs::load(data.path());
+        assert_eq!(set.stagger_hours, 6);
+        assert_eq!(
+            set.install_hours,
+            Some(tenzro_update_notice::rollout::InstallHours { start: 2, end: 5 })
+        );
+        // Changing one leaves the other; `any` clears the hours.
+        cmd(None, Some("any")).execute().unwrap();
+        let cleared = Prefs::load(data.path());
+        assert_eq!(cleared.stagger_hours, 6);
+        assert_eq!(cleared.install_hours, None);
+        assert!(cmd(None, Some("5-5")).execute().is_err());
+        assert_eq!(Prefs::load(data.path()), cleared);
+    }
+
+    /// Every role a node is staked or relied on for counts, not only
+    /// validating and serving models.
+    #[test]
+    fn only_a_node_that_just_follows_the_chain_serves_no_role() {
+        assert!(!serves_role(["fullnode"]));
+        assert!(!serves_role(["light", "micro"]));
+        assert!(!serves_role(["FullNode", "LightClient", "MicroNode"]));
+        assert!(!serves_role([]));
+        // As a node's status names them.
+        for role in [
+            "Validator",
+            "ModelProvider",
+            "TeeProvider",
+            "StorageProvider",
+            "Rpc",
+        ] {
+            assert!(serves_role([role]), "{role}");
+            assert!(serves_role(["LightClient", role]), "{role}");
+        }
+        for role in [
+            "validator",
+            "ai",
+            "tee",
+            "compute",
+            "storage",
+            "attestor",
+            "rpc",
+            "edge",
+            "archive",
+            "bootstrap",
+            "wallet",
+            "catalog",
+        ] {
+            assert!(serves_role([role]), "{role}");
+            assert!(serves_role(["fullnode", role]), "{role}");
+        }
     }
 }

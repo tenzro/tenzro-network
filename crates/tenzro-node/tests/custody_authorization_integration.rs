@@ -29,7 +29,7 @@ impl TestNode {
             // A loopback endpoint on a port of its own, so the test does not
             // contend with a node already running on the host.
             iroh: tenzro_iroh::TenzroIrohConfig {
-                bind_addr: free_udp_port(),
+                bind_addr: (std::net::Ipv4Addr::LOCALHOST, 0).into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -346,10 +346,3 @@ async fn re_enrolling_a_passkey_returns_its_identity_and_creates_nothing() {
 // ---------------------------------------------------------------------------
 // The legitimate path still works
 // ---------------------------------------------------------------------------
-
-/// A UDP port on loopback that was free a moment ago.
-fn free_udp_port() -> std::net::SocketAddr {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .expect("a free loopback port")
-}

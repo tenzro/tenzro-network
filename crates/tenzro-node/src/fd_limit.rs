@@ -10,9 +10,10 @@
 //! unit sets it).
 
 /// Raise the soft `RLIMIT_NOFILE` to the hard limit. Returns the resulting
-/// soft limit, or an error naming the system call that failed.
+/// soft limit (`rlim_t`: 32 bits wide on 32-bit systems), or an error naming
+/// the system call that failed.
 #[cfg(unix)]
-pub fn raise_to_hard_limit() -> Result<u64, String> {
+pub fn raise_to_hard_limit() -> Result<libc::rlim_t, String> {
     let mut lim = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,

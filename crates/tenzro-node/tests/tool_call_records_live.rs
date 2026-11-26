@@ -24,14 +24,8 @@ use dpop_bearer::Bearer;
 use tenzro_node::{NodeConfig, RpcServer, TenzroNode};
 
 const SYSTEM_ADDRESS: [u8; 20] = [0xFF; 20];
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+/// The machine DID the node under test answers A2A envelopes for.
+const AUDIENCE: &str = "did:tenzro:machine:records-node";
 
 async fn mcp_call(url: &str, path: &str, who: &Bearer, name: &str, arguments: Value) -> Value {
     let params = json!({
@@ -97,7 +91,8 @@ impl A2aSender {
         let nonce = hex::encode(uuid::Uuid::new_v4().as_bytes());
         let task_id = env::envelope_task_id(method, params);
         let digest = env::params_digest_hex(method, params).unwrap();
-        let preimage = env::canonical_preimage(method, &task_id, &self.did, &nonce, now, &digest);
+        let preimage =
+            env::canonical_preimage(AUDIENCE, method, &task_id, &self.did, &nonce, now, &digest);
         let sig = self.key.sign(preimage.as_bytes()).unwrap();
         let meta = params["message"]
             .as_object_mut()
@@ -120,7 +115,7 @@ impl A2aSender {
 }
 
 #[tokio::test]
-#[ignore = "needs this machine's hardware identity key (TPM 2.0 or Secure Enclave)"]
+#[ignore = "starts a node: needs this machine's hardware key; run under scripts/tests/cargo-test-with-swtpm.sh with --ignored"]
 async fn agent_tool_calls_over_mcp_and_a2a_are_signed_records_that_verify_offline() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let cfg = NodeConfig {
@@ -144,31 +139,34 @@ async fn agent_tool_calls_over_mcp_and_a2a_are_signed_records_that_verify_offlin
     let rpc_url = format!("http://{}", addr_rx.await.expect("bound address"));
 
     let web = Arc::new(tenzro_node::web::handlers::WebState::new());
-    let mcp_port = free_port();
     let rx = tx.subscribe();
     let (n, w) = (node.clone(), web.clone());
+    let (mcp_tx, mcp_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         tenzro_node::mcp::server::start_mcp_server_with_shutdown(
-            format!("127.0.0.1:{mcp_port}"),
+            "127.0.0.1:0".to_string(),
             n,
             w,
             rx,
+            Some(mcp_tx),
         )
         .await
     });
-    let a2a_port = free_port();
-    let state = tenzro_node::a2a::server::build_a2a_state(node.clone(), web);
+    let state =
+        tenzro_node::a2a::server::build_a2a_state(node.clone(), web, Some(AUDIENCE.to_string()));
     let rx = tx.subscribe();
+    let (a2a_tx, a2a_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         tenzro_node::a2a::server::start_a2a_server_with_shutdown(
-            format!("127.0.0.1:{a2a_port}"),
+            "127.0.0.1:0".to_string(),
             state,
             rx,
+            Some(a2a_tx),
         )
         .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let mcp_url = format!("http://127.0.0.1:{mcp_port}");
+    let mcp_url = format!("http://{}", mcp_rx.await.expect("MCP bound address"));
+    let a2a_addr = a2a_rx.await.expect("A2A bound address");
     let client = reqwest::Client::new();
 
     // An agent with a DPoP-bound access token calls a tool on /mcp and the
@@ -204,7 +202,7 @@ async fn agent_tool_calls_over_mcp_and_a2a_are_signed_records_that_verify_offlin
     });
     sender.sign("SendMessage", &mut params);
     let a2a: Value = client
-        .post(format!("http://127.0.0.1:{a2a_port}/a2a"))
+        .post(format!("http://{a2a_addr}/a2a"))
         .header("A2A-Version", "1.0")
         .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": params }))
         .send()
@@ -341,6 +339,7 @@ async fn agent_tool_calls_over_mcp_and_a2a_are_signed_records_that_verify_offlin
         commerce: vec![],
         governance: vec![],
         token_actions: vec![],
+        service: vec![],
         receipts: vec![],
         models: vec![],
         jurisdiction: Jurisdiction {

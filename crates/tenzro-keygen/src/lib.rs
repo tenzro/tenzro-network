@@ -184,6 +184,36 @@ impl NodeKeys {
             .map_err(other)
     }
 
+    /// The public halves (Ed25519, ML-DSA-65) of this machine's identity key
+    /// at `version`: the key the chain records for the machine's identity
+    /// with an identity key change, and the key batch roots of its records
+    /// are signed with once the chain names it. Each version is its own
+    /// derived key, so moving to the next one replaces the key.
+    pub fn identity_key(&self, version: u64) -> Result<([u8; 32], Vec<u8>)> {
+        let label = identity_label(version);
+        Ok((
+            self.root.ed25519_public(&label).map_err(other)?,
+            self.root.ml_dsa65_public(&label).map_err(other)?,
+        ))
+    }
+
+    /// Both signatures of the identity key at `version` over `statement`: the
+    /// Ed25519 one over the bytes, and the ML-DSA-65 one under the batch-root
+    /// context.
+    pub fn sign_with_identity_key(
+        &self,
+        version: u64,
+        statement: &[u8],
+    ) -> Result<([u8; 64], Vec<u8>)> {
+        let label = identity_label(version);
+        Ok((
+            self.root.ed25519_sign(&label, statement).map_err(other)?,
+            self.root
+                .ml_dsa65_sign(&label, tenzro_crypto::pq::context::BATCH_ROOT, statement)
+                .map_err(other)?,
+        ))
+    }
+
     /// The hybrid X25519 + ML-KEM-768 key sealed model shards are wrapped
     /// to, as an envelope recipient.
     pub fn model_recipient(&self) -> Result<DerivedHybridRecipient> {
@@ -225,6 +255,11 @@ impl NodeKeys {
             .ml_dsa65_sign(VALIDATOR_ML_DSA_LABEL, ctx, message)
             .map_err(|e| CryptoError::Other(format!("derived ML-DSA-65 signature: {e}")))
     }
+}
+
+/// The derivation label of the machine identity key at `version`.
+fn identity_label(version: u64) -> String {
+    format!("tenzro/identity/v{version}")
 }
 
 /// The validator Ed25519 key as a [`Signer`]. Holds only the public key.
@@ -352,6 +387,57 @@ mod tests {
         assert_eq!(a.ml_dsa_65.len(), tenzro_crypto::ML_DSA_65_VK_LEN);
         let c = keys("/n2").validator_pubkeys().unwrap();
         assert_ne!(a.ed25519, c.ed25519);
+    }
+
+    /// A machine whose data directory is lost and made again gets back the
+    /// same keys, and so the same validator identity and the same ledger
+    /// account: nothing it signs with is kept in the directory, so there is
+    /// nothing in it to lose.
+    #[test]
+    fn a_machine_rebuilt_on_an_empty_data_directory_has_the_same_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("node");
+        std::fs::create_dir_all(data.join("db")).unwrap();
+        std::fs::write(data.join("db").join("CURRENT"), b"state").unwrap();
+        let before = NodeKeys::open(&data).unwrap().validator_pubkeys().unwrap();
+
+        std::fs::remove_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let after = NodeKeys::open(&data).unwrap().validator_pubkeys().unwrap();
+        assert_eq!(before.ed25519, after.ed25519);
+        assert_eq!(before.ml_dsa_65, after.ml_dsa_65);
+        assert_eq!(
+            std::fs::read_dir(&data).unwrap().count(),
+            0,
+            "opening the keys writes nothing into the data directory"
+        );
+    }
+
+    #[test]
+    fn each_identity_key_version_is_its_own_key_and_its_signatures_verify() {
+        let k = keys("/n1");
+        let (ed1, ml1) = k.identity_key(1).unwrap();
+        let (ed2, ml2) = k.identity_key(2).unwrap();
+        assert_ne!(ed1, ed2);
+        assert_ne!(ml1, ml2);
+        assert_eq!(
+            k.identity_key(1).unwrap().0,
+            ed1,
+            "the same version, the same key"
+        );
+        assert_ne!(ed1.to_vec(), k.validator_pubkeys().unwrap().ed25519);
+        let (ed_sig, ml_sig) = k.sign_with_identity_key(1, b"statement").unwrap();
+        ed25519_dalek::VerifyingKey::from_bytes(&ed1)
+            .unwrap()
+            .verify_strict(b"statement", &ed25519_dalek::Signature::from_bytes(&ed_sig))
+            .unwrap();
+        tenzro_crypto::pq::ml_dsa_verify(
+            &ml1,
+            tenzro_crypto::pq::context::BATCH_ROOT,
+            b"statement",
+            &ml_sig,
+        )
+        .unwrap();
     }
 
     #[test]

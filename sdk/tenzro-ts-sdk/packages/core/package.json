@@ -44,7 +44,7 @@
     "prepublishOnly": "node -e \"require('fs').accessSync('dist/index.js')\""
   },
   "peerDependencies": {
-    "@tenzro/device-key": "0.1.0"
+    "@tenzro/device-key": "0.2.2"
   },
   "peerDependenciesMeta": {
     "@tenzro/device-key": {

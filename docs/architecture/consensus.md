@@ -38,7 +38,15 @@ drives it from `crates/tenzro-node/src/consensus_driver.rs`.
   record names relays, never an address. Publicly a validator shows its key,
   stake, announcements and certificates, never a network location. A
   validator needs no inbound port: it reaches the others over the Tenzro
-  relays and the point-to-point paths the transport opens from them.
+  relays and the point-to-point paths the transport opens from them. In the
+  `enforce` onboarding mode a validator dials only its boot list, the
+  validators' machines and the peers named with `--state-sync-from`;
+  inbound connections that pass the identity gate are still admitted, so
+  nodes can sync from it, and only its gossip neighbours stay within its
+  boot list and the validators (see NETWORK.md). Each validator's boot list
+  names every other genesis validator with its relay: on a new chain no
+  identity is registered yet, and a validator without the others on its list
+  finds no peers.
 - Stake is apportioned into integer seats (largest remainder over a budget
   of 1,000 seats by default). No validator holds more than 10% of the
   committee's weight once the set has at least ten validators; the excess is

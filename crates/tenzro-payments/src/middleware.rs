@@ -96,6 +96,9 @@ pub struct PaymentGateMiddleware {
     /// `upto` credential sent concurrently would be served N times and settled
     /// once.
     in_flight: Arc<dashmap::DashSet<String>>,
+    /// The key sets of the payment networks whose trusted agent signatures
+    /// this gate checks (see [`crate::rfc9421::tap`]).
+    tap: Option<Arc<crate::rfc9421::tap::TapVerifier>>,
 }
 
 /// The JSON response field an inference handler reports its metered cost in
@@ -137,7 +140,17 @@ impl PaymentGateMiddleware {
             metered_settlement: false,
             meter: None,
             in_flight: Arc::new(dashmap::DashSet::new()),
+            tap: None,
         }
+    }
+
+    /// Check trusted agent signatures against `verifier`: a request that
+    /// carries one is served only when it verifies, and the verified
+    /// [`TapAgent`](crate::rfc9421::tap::TapAgent) rides in the request's
+    /// extensions for the handlers behind the gate to read.
+    pub fn with_trusted_agents(mut self, verifier: Arc<crate::rfc9421::tap::TapVerifier>) -> Self {
+        self.tap = Some(verifier);
+        self
     }
 
     /// Settle `upto` credentials at the metered cost of the work they paid
@@ -409,6 +422,33 @@ fn multipart_field(body: &[u8], boundary: &str, name: &str) -> Option<String> {
 /// The JSON refusal body every inference route answers with, naming which
 /// refusal it is: only a 402 is about credentials, so a 403 or 404 must not
 /// read as a bad key.
+/// The parts of `request` an RFC 9421 signature covers: method, authority
+/// (the `Host` header when the URI has none), path, query and every header,
+/// lowercased.
+fn tap_request_parts(request: &Request) -> crate::rfc9421::RequestParts {
+    let uri = request.uri();
+    let authority = uri
+        .authority()
+        .map(|a| a.as_str().to_string())
+        .or_else(|| {
+            request
+                .headers()
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let mut parts =
+        crate::rfc9421::RequestParts::for_request(request.method().as_str(), authority, uri.path())
+            .with_query(uri.query().unwrap_or_default());
+    for (name, value) in request.headers() {
+        if let Ok(v) = value.to_str() {
+            parts = parts.with_header(name.as_str().to_ascii_lowercase(), v);
+        }
+    }
+    parts
+}
+
 fn refusal_response(status: u16, msg: &str) -> Response {
     let body = serde_json::json!({
         "error": {
@@ -467,6 +507,17 @@ pub const PAYMENT_REQUIRED_OFF_HTTP: &str = "payment required for this model; si
 /// to be named by the access policy; the operator's is to finish wiring payments.
 pub const PAYMENT_REQUIRED_NO_GATEWAY: &str = "payment required for this model, but this node has no payment gateway configured to collect it; sign in as a caller this node's access policy names";
 
+/// Who pays for a request the gate admits on a credential, put on the
+/// request for its handler: the credential's payer, which the gateway
+/// verified before the handler runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaidBy {
+    /// The payer's DID, as the credential names it.
+    pub payer_did: String,
+    /// The payer's account, hex, as the credential names it.
+    pub payer_address: String,
+}
+
 pub async fn payment_gate_handler(
     State(middleware): State<PaymentGateMiddleware>,
     mut request: Request,
@@ -476,6 +527,25 @@ pub async fn payment_gate_handler(
     let resource = uri.path();
 
     debug!("Payment gate checking resource: {}", resource);
+
+    if let Some(tap) = middleware.tap.as_ref() {
+        let parts = tap_request_parts(&request);
+        if crate::rfc9421::tap::TapVerifier::is_tap_request(&parts) {
+            let now = chrono::Utc::now().timestamp().max(0) as u64;
+            match tap.verify(&parts, now) {
+                Ok(agent) => {
+                    debug!(key_id = %agent.key_id, "trusted agent signature verified");
+                    request.extensions_mut().insert(agent);
+                }
+                Err(e) => {
+                    return Ok(refusal_response(
+                        401,
+                        &format!("trusted agent signature refused: {e}"),
+                    ));
+                }
+            }
+        }
+    }
 
     // Every inference route runs the node's one admission check before any
     // payment logic: a key admits, a gated or private model is refused without
@@ -500,6 +570,12 @@ pub async fn payment_gate_handler(
             warn!("Failed to parse payment credential: {}", e);
             PaymentGateError::InvalidCredential(e.to_string())
         })?;
+        // The handler runs only once this credential has verified (and, when
+        // not metered, settled); a refused credential never reaches it.
+        request.extensions_mut().insert(PaidBy {
+            payer_did: credential.payer_did.clone(),
+            payer_address: credential.payer_address.clone(),
+        });
         debug!(
             "Verifying credential {} for challenge {}",
             credential.credential_id, credential.challenge_id
@@ -867,11 +943,18 @@ fn escape_quoted(s: &str) -> String {
     out
 }
 
+/// The header a Payment challenge asks the credential to travel in, so the
+/// client keeps its ordinary `Authorization` header for other credentials
+/// (the challenge's `header` parameter).
+pub const PAYMENT_AUTHORIZATION_HEADER: &str = "Payment-Authorization";
+
 /// The payment a request carries, if any:
 ///
 /// - `PAYMENT-SIGNATURE: <base64 JSON>`, an x402 payment payload;
-/// - `Authorization: Payment <base64url JSON>`, a credential in the HTTP
-///   Payment authentication scheme;
+/// - `Payment-Authorization: Payment <base64url JSON>` or
+///   `Authorization: Payment <base64url JSON>`, a credential in the HTTP
+///   Payment authentication scheme, in the header the challenge asked for or
+///   in the ordinary one;
 /// - `Payment-Credential: <base64 JSON>`, a credential.
 ///
 /// `header` looks a header up by name.
@@ -881,7 +964,10 @@ pub fn credential_from_headers<'a>(
     if let Some(value) = header(crate::x402::PAYMENT_SIGNATURE_HEADER) {
         return Some(crate::x402::credential_from_header(value));
     }
-    if let Some(value) = header("Authorization").and_then(|v| v.strip_prefix("Payment ")) {
+    let payment_scheme = |name| header(name).and_then(|v: &'a str| v.strip_prefix("Payment "));
+    if let Some(value) =
+        payment_scheme(PAYMENT_AUTHORIZATION_HEADER).or_else(|| payment_scheme("Authorization"))
+    {
         return Some(
             crate::mpp::IetfPaymentBody::from_base64url(value)
                 .and_then(crate::mpp::IetfPaymentBody::into_credential),
@@ -1016,7 +1102,10 @@ impl IntoResponse for PaymentGateError {
                 // Build IETF-compliant WWW-Authenticate per draft-ryan-httpauth-payment-01.
                 // ABNF: challenge = "Payment" 1*SP auth-params
                 // Required params: id, realm, method, intent, request
-                // Optional: expires, digest, description, opaque
+                // Optional: expires, digest, description, opaque, header. The
+                // credential is asked for in Payment-Authorization, so a
+                // client keeps its Authorization header for its own
+                // credentials; one sent in Authorization is read as well.
                 let request_b64 = {
                     use base64::{Engine as _, engine::general_purpose};
                     // Embed the JSON challenge body as base64url-nopad-encoded request param
@@ -1024,12 +1113,13 @@ impl IntoResponse for PaymentGateError {
                 };
                 let www_auth = format!(
                     "Payment id=\"{}\", realm=\"{}\", method=\"{}\", intent=\"charge\", \
-                     request=\"{}\", expires=\"{}\"",
+                     request=\"{}\", expires=\"{}\", header=\"{}\"",
                     escape_quoted(&challenge.challenge_id),
                     escape_quoted(&challenge.resource),
                     escape_quoted(payment_method(&challenge.protocol)),
                     request_b64,
                     challenge.expires_at.to_rfc3339(),
+                    PAYMENT_AUTHORIZATION_HEADER,
                 );
 
                 let mut builder = Response::builder()
@@ -1188,6 +1278,10 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(www_auth.starts_with("Payment "), "got: {www_auth}");
+        assert!(
+            www_auth.contains(&format!("header=\"{PAYMENT_AUTHORIZATION_HEADER}\"")),
+            "got: {www_auth}"
+        );
         assert!(www_auth.contains("realm="));
         assert!(www_auth.contains("method=\"test\""));
     }
@@ -1245,6 +1339,65 @@ mod tests {
             rail.calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "served only after the rail settled"
+        );
+    }
+
+    /// The handler of a paid request is told who paid, on both the settled
+    /// and the metered path.
+    #[tokio::test]
+    async fn the_handler_of_a_paid_request_is_told_who_paid() {
+        let echo = || {
+            get(|paid: Option<axum::Extension<PaidBy>>| async move {
+                axum::Json(serde_json::json!({
+                    "payer_address": paid.map(|p| p.0.payer_address),
+                    "cost_wei": "800",
+                }))
+            })
+        };
+        // Settled before serving.
+        let rail = RecordingRail::new(RailOutcome::Settled {
+            reference: "0xtx".to_string(),
+        });
+        let gateway = gateway_with(rail);
+        let challenge = gateway
+            .create_challenge("test", "/paid-resource", 1000, "TNZO", PAYEE)
+            .await
+            .unwrap();
+        let credential = TestProtocol
+            .create_credential(&challenge, "", &signer())
+            .await
+            .unwrap();
+        let store = gateway.challenge_store();
+        let app = Router::new().route("/paid-resource", echo()).layer(
+            axum::middleware::from_fn_with_state(
+                PaymentGateMiddleware::new(gateway, gate_config(), store),
+                payment_gate_handler,
+            ),
+        );
+        let request = Request::builder()
+            .uri("/paid-resource")
+            .header("Payment-Credential", encode(&credential))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let seen: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(seen["payer_address"], credential.payer_address.as_str());
+
+        // Metered: served first, settled after, and still told.
+        let m = metered_app(true, false, None, echo()).await;
+        let resp = m.app.oneshot(paid_request(&m.credential)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let seen: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            seen["payer_address"]
+                .as_str()
+                .is_some_and(|a| !a.is_empty()),
+            "{seen}"
         );
     }
 
@@ -1338,6 +1491,16 @@ mod tests {
         let got = credential_from_headers(|n| (n == "Authorization").then_some(auth.as_str()))
             .unwrap()
             .unwrap();
+        assert_eq!(got.credential_id, "cred-1");
+        // In the header a challenge asks for, beside an ordinary
+        // Authorization the client keeps for another credential.
+        let got = credential_from_headers(|n| match n {
+            PAYMENT_AUTHORIZATION_HEADER => Some(auth.as_str()),
+            "Authorization" => Some("Bearer an-access-token"),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
         assert_eq!(got.credential_id, "cred-1");
 
         let mut challenge = crate::types::PaymentChallenge {

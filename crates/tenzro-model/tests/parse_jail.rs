@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 
 use tenzro_model::parse_jail::{self, JailError, ModelFormat, ModelIndex};
 
+#[path = "support/listing.rs"]
+mod listing;
+
 const PLANTED_MAGIC: &[u8; 4] = b"PLNT";
 
 /// The variable a host finds its shared libraries through, and what separates
@@ -273,6 +276,7 @@ fn forbidden_call_is_killed(call: fn()) -> (bool, i32) {
 /// Address space a CUDA build of the node has mapped (its GPU and ONNX
 /// Runtime libraries) before its parser child locks down; more than the
 /// child's whole memory allowance.
+#[cfg(unix)]
 const CUDA_BUILD_MAPPED_BYTES: usize = 3 << 29;
 
 /// Maps, without committing, as much address space as a CUDA build of the
@@ -300,6 +304,9 @@ fn map_like_a_cuda_build() {
 }
 
 fn main() {
+    if listing::answered_list("parse_jail", true) {
+        return;
+    }
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(parse_jail::PARSE_JAIL_ARG))
     {

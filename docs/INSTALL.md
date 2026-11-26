@@ -1,7 +1,7 @@
 # Install Tenzro
 
-Install it, run `tenzro`, done. The first run checks your machine, asks what you want to do (use the network, provide
-compute, run a validator or try a local chain), sets up your keys, starts the node and shows the console. The
+Install it, run `tenzro`, done. The first run checks your machine, asks what you want to do (provide compute, run a
+validator or try a local chain), sets up your keys, starts the node and shows the console. The
 installer itself starts nothing: no service is installed or enabled, nothing joins the network, and no key is
 created until you choose to in the first run.
 
@@ -50,10 +50,10 @@ certificate (see "Unsigned installers" below), so the release signature is what 
 
 ```bash
 # Debian, Ubuntu (24.04 or newer)
-sudo apt install ./tenzro-cpu_0.2.1-1_amd64.deb
+sudo apt install ./tenzro-cpu_0.2.2-1_amd64.deb
 
 # Fedora (40 or newer), RHEL 10 and relatives
-sudo dnf install ./tenzro-cpu-0.2.1-1.x86_64.rpm
+sudo dnf install ./tenzro-cpu-0.2.2-1.x86_64.rpm
 ```
 
 Choose the variant that matches the machine:
@@ -86,7 +86,7 @@ At the end of the install the package manager shows the result of the hardware c
 ```text
 Tenzro is installed. Nothing was started and nothing joined the network.
 
-Tenzro hardware check (version 0.2.1-1)
+Tenzro hardware check (version 0.2.2-1)
   package build : cpu
   binary reports: build=CPU gpus=0 onnx=CPU startup=ok
 
@@ -108,7 +108,7 @@ Remove: `sudo apt remove tenzro-cpu` (or `purge`), `sudo dnf remove tenzro-cpu`.
 Double-click `tenzro-<version>-windows-x86_64-cuda.msi`, or from an elevated prompt:
 
 ```bat
-msiexec /i tenzro-0.2.1-windows-x86_64-cuda.msi
+msiexec /i tenzro-0.2.2-windows-x86_64-cuda.msi
 ```
 
 The wizard shows a licence page, an install folder (default `C:\Program Files\Tenzro`), a choice of how to
@@ -119,11 +119,11 @@ add Tenzro to your PATH (for all users, for you only, or not at all), and a fina
 Silent install for scripts and fleets (no final page, nothing launched):
 
 ```bat
-msiexec /i tenzro-0.2.1-windows-x86_64-cuda.msi /qn ADDTOPATH=system INSTALLFOLDER="C:\Tools\Tenzro"
+msiexec /i tenzro-0.2.2-windows-x86_64-cuda.msi /qn ADDTOPATH=system INSTALLFOLDER="C:\Tools\Tenzro"
 ```
 
 `ADDTOPATH` is `system`, `user` or `none`. The MSI is per-machine, so it asks for administrator rights; it installs no service, and the hardware check runs only when you tick the final box, choose "Tenzro hardware check" or type `tenzro-check`, never during the install itself. Uninstall from "Apps > Installed apps >
-Tenzro", or `msiexec /x tenzro-0.2.1-windows-x86_64-cuda.msi`; the PATH entry is removed with it. This is the CUDA
+Tenzro", or `msiexec /x tenzro-0.2.2-windows-x86_64-cuda.msi`; the PATH entry is removed with it. This is the CUDA
 build and needs an NVIDIA GPU with a current driver; on a machine without one the hardware check says so and
 tells you to use the command line only or another build. Language models need the CUDA 13 runtime libraries on
 the machine, and ONNX models on the GPU need cuDNN 9 as well; neither is part of the installer. The installer
@@ -135,7 +135,7 @@ puts `DirectML.dll` and the ONNX Runtime provider libraries beside the programs 
 Open `tenzro-<version>-macos.pkg` and follow the installer, or:
 
 ```bash
-sudo installer -pkg tenzro-0.2.1-macos.pkg -target /
+sudo installer -pkg tenzro-0.2.2-macos.pkg -target /
 ```
 
 One file serves both kinds of Mac: Apple silicon gets the Metal build, Intel gets the CPU build. It installs
@@ -144,7 +144,9 @@ launcher opens Terminal, shows the hardware check and starts `tenzro setup`. mac
 checkbox, so the last page tells you to open that launcher or run `tenzro setup`.
 
 On a Mac with a Secure Enclave the node keeps its identity keys there and they cannot be exported. A virtual
-machine without a Secure Enclave cannot run a validator node.
+machine without a Secure Enclave runs a node, validators included, only with its
+keys in another machine's TPM through a key holder
+([NODE.md](NODE.md#raspberry-pi-and-other-edge-devices), which states the limits).
 
 Remove: `sudo tenzro-uninstall`. It removes the programs, the launcher and the installer receipt; your keys and data are untouched.
 
@@ -174,7 +176,7 @@ safe to continue only after you verified the file as above:
   instead of "Tenzro". A file downloaded with a browser also carries a web-origin mark, and Windows SmartScreen may
   show "Windows protected your PC": choose "More info", then "Run anyway". Neither prompt appears when you install
   with `msiexec` from a prompt on a file you copied locally.
-* **macOS**: Gatekeeper refuses a package from an unidentified developer: "tenzro-0.2.1-macos.pkg cannot be opened
+* **macOS**: Gatekeeper refuses a package from an unidentified developer: "tenzro-0.2.2-macos.pkg cannot be opened
   because it is from an unidentified developer". Open System Settings > Privacy & Security and choose "Open Anyway", or
   Control-click the file and choose Open, or run `sudo installer -pkg ... -target /` (the installer command does not
   apply Gatekeeper), or remove the download mark with `xattr -d com.apple.quarantine <file>`.
@@ -186,3 +188,19 @@ Signing the installers would need a Windows Authenticode certificate (an EV cert
 an Apple Developer ID Application and Installer certificate plus notarization. Those tie the installers' acceptance to
 those vendors' accounts; Tenzro's own trust chain is the release signature above, and these certificates would only
 remove the warnings.
+
+## Signing and notarising the macOS package (maintainers)
+
+`scripts/release/macos-release.sh` is the one wrapper for the Apple side, on a Mac:
+
+- `doctor` lists which inputs are present (Xcode tools, the Developer ID Application and Installer certificates, the notary profile); it prints names only.
+- `setup` finds or helps create the two certificates (the request is made locally and the private key goes into the login keychain), stores the notary credentials with `xcrun notarytool store-credentials` (it prompts; nothing secret passes through the script) and writes `TENZRO_MACOS_SIGN_IDENTITY`, `TENZRO_MACOS_INSTALLER_IDENTITY` and `TENZRO_MACOS_NOTARY_PROFILE` to `~/.config/tenzro/macos-release.env`, outside the repository.
+- `release <other-arch-archive> [ref] [dist] [out]` runs `build-macos.sh` (Developer ID and hardened runtime), `build-pkg.sh` (sign, notarise, staple) and then `codesign --verify`, `pkgutil --check-signature`, `spctl -a -t install` and `stapler validate`; a failed check exits non-zero. Without credentials it ends at the unsigned package and lists what is missing (`--require-signed` makes that an error).
+
+`TENZRO_MACOS_DRY_RUN=1` prints the commands instead of running them; `scripts/release/test_macos_release.sh` runs that on Linux. `TENZRO_MACOS_ENTITLEMENTS=<plist>` passes an entitlements file to codesign; none is passed by default.
+
+### Shipping the node inside your own signed installer
+
+Anyone can use `macos-release.sh` with their own `TENZRO_MACOS_*` identities: your Developer ID Application and Installer certificates and your notary profile, run through `setup`, then `release`. Tenzro signs and approves nothing, and you hold no keys: a user's keys are made in that Mac's Secure Enclave on first run and never leave it. The node does not check who signed it; a network's trust in a machine rests on its hardware key, never on the code-signing identity.
+
+Trade-off to tell your users: an Enclave key is not bound to the signer. The key blob in `~/Library/Application Support/Tenzro/device-keys` only unwraps on that Mac's Secure Enclave, but any local program that can read the blob can ask the Enclave to use it. A key made with user presence (`userPresence`) adds a biometric or password prompt for each use.

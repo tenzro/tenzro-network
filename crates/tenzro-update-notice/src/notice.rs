@@ -11,7 +11,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use base64::Engine as _;
-use p256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
+#[cfg(any(test, feature = "test-keys"))]
+use p256::ecdsa::signature::hazmat::PrehashSigner;
+use p256::ecdsa::signature::hazmat::PrehashVerifier;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -29,6 +31,13 @@ pub const MAX_LIFETIME_MS: u64 = 180 * 24 * 3600 * 1000;
 pub const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 /// Most platform archives one notice lists.
 pub const MAX_PLATFORMS: usize = 16;
+/// Most artifact digests a notice may list.
+pub const MAX_ARTIFACTS: usize = 64;
+/// The artifacts a notice may state a digest for: the two binaries of a
+/// release and the operator console's bundle.
+pub const ARTIFACT_NAMES: &[&str] = &["tenzro", "tenzro-node", "tenzro-tui"];
+/// The platform of an artifact that is the same on every platform.
+pub const ANY_PLATFORM: &str = "any";
 /// Largest archive a notice may list.
 pub const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -228,6 +237,101 @@ pub struct PlatformArchive {
     pub size: u64,
 }
 
+/// The digest of one thing a release installs, so that what runs can check
+/// itself against the signed notice.
+///
+/// For a single file (`tenzro`, `tenzro-node`) the digest is the SHA-256 of
+/// the file. For a directory (`tenzro-tui`, the console's bundle) it is
+/// [`bundle_digest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    /// `<arch>-<os>`, or [`ANY_PLATFORM`] for an artifact every platform shares.
+    pub platform: String,
+    /// One of [`ARTIFACT_NAMES`].
+    pub name: String,
+    /// Lowercase hex SHA-256.
+    pub sha256: String,
+}
+
+/// The digest of a directory of files: the SHA-256 of one text line per file,
+/// `<lowercase hex SHA-256 of the file><two spaces><path>\n`, where the path
+/// is relative to the directory with `/` between its parts, and the lines are
+/// in the byte order of their paths. It is what
+/// `find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum` prints,
+/// hashed once. A symbolic link or an empty directory tree is refused.
+pub fn bundle_digest(root: &Path) -> std::io::Result<String> {
+    fn walk(
+        dir: &Path,
+        prefix: &str,
+        out: &mut Vec<(String, std::path::PathBuf)>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name().into_string().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "a file name is not UTF-8")
+            })?;
+            let rel = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{rel} is a symbolic link"),
+                ));
+            }
+            if kind.is_dir() {
+                walk(&entry.path(), &rel, out)?;
+            } else {
+                out.push((rel, entry.path()));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(root, "", &mut files)?;
+    if files.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the directory holds no file",
+        ));
+    }
+    files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let mut all = Sha256::new();
+    for (rel, path) in files {
+        let digest = hex::encode(Sha256::digest(std::fs::read(path)?));
+        all.update(format!("{digest}  {rel}\n"));
+    }
+    Ok(hex::encode(all.finalize()))
+}
+
+/// The digest [`Artifact::sha256`] states for `path`: of the file, or of the
+/// directory as [`bundle_digest`] defines it.
+pub fn artifact_digest(path: &Path) -> std::io::Result<String> {
+    if path.is_dir() {
+        bundle_digest(path)
+    } else {
+        Ok(hex::encode(Sha256::digest(std::fs::read(path)?)))
+    }
+}
+
+fn platform_ok(platform: &str) -> bool {
+    !platform.is_empty()
+        && platform.len() <= 32
+        && platform
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn digest_ok(sha256: &str) -> bool {
+    sha256.len() == 64
+        && sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// The signed payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notice {
@@ -259,6 +363,10 @@ pub struct Notice {
     pub manifest_url: String,
     /// A digest and size per platform archive.
     pub platforms: Vec<PlatformArchive>,
+    /// A digest per installed artifact. A notice signed before releases
+    /// stated these has none.
+    #[serde(default)]
+    pub artifacts: Vec<Artifact>,
 }
 
 fn plain_text(s: &str) -> bool {
@@ -288,6 +396,17 @@ impl Notice {
     /// The archive for `platform`, if the notice lists one.
     pub fn archive_for(&self, platform: &str) -> Option<&PlatformArchive> {
         self.platforms.iter().find(|p| p.platform == platform)
+    }
+
+    /// The digest the notice states for artifact `name` on `platform`: the
+    /// platform's own entry, else the one every platform shares.
+    pub fn artifact_digest(&self, platform: &str, name: &str) -> Option<&str> {
+        [platform, ANY_PLATFORM].iter().find_map(|p| {
+            self.artifacts
+                .iter()
+                .find(|a| a.platform == *p && a.name == name)
+                .map(|a| a.sha256.as_str())
+        })
     }
 
     /// Shape checks. A notice is data: plain text and https links only.
@@ -332,17 +451,31 @@ impl Notice {
                 && p.archive
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
-            let platform_ok = !p.platform.is_empty()
-                && p.platform.len() <= 32
-                && p.platform
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
-            let digest_ok = p.sha256.len() == 64
-                && p.sha256
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-            if !name_ok || !platform_ok || !digest_ok || p.size == 0 || p.size > MAX_ARCHIVE_BYTES {
+            if !name_ok
+                || !platform_ok(&p.platform)
+                || !digest_ok(&p.sha256)
+                || p.size == 0
+                || p.size > MAX_ARCHIVE_BYTES
+            {
                 return Err(malformed(format!("platform entry {:?}", p.platform)));
+            }
+        }
+        if self.artifacts.len() > MAX_ARTIFACTS {
+            return Err(malformed("artifacts"));
+        }
+        for (i, a) in self.artifacts.iter().enumerate() {
+            let twice = self.artifacts[..i]
+                .iter()
+                .any(|b| b.platform == a.platform && b.name == a.name);
+            if !ARTIFACT_NAMES.contains(&a.name.as_str())
+                || !platform_ok(&a.platform)
+                || !digest_ok(&a.sha256)
+                || twice
+            {
+                return Err(malformed(format!(
+                    "artifact entry {:?} on {:?}",
+                    a.name, a.platform
+                )));
             }
         }
         Ok(())
@@ -427,10 +560,12 @@ pub fn assemble(
     serde_json::to_vec_pretty(&env).map_err(malformed)
 }
 
-/// A P-256 key held in memory, for tests and the rehearsal of the release
-/// process. The release key is never held this way.
+/// A P-256 key held in memory, for tests. The release key is never held this
+/// way, and no build that ships has this type.
+#[cfg(any(test, feature = "test-keys"))]
 pub struct LocalKey(p256::ecdsa::SigningKey);
 
+#[cfg(any(test, feature = "test-keys"))]
 impl LocalKey {
     /// A key from a 32-byte scalar.
     pub fn from_bytes(scalar: &[u8; 32]) -> Result<Self, NoticeError> {
@@ -545,7 +680,7 @@ pub fn verify(bytes: &[u8], policy: &Policy<'_>) -> Result<Notice, NoticeError> 
 }
 
 /// Fixtures for tests in this crate and others.
-#[cfg(any(test, feature = "fixture"))]
+#[cfg(any(test, feature = "test-keys"))]
 pub mod fixture {
     use super::*;
 
@@ -581,6 +716,7 @@ pub mod fixture {
                 sha256: "ab".repeat(32),
                 size: 123_456_789,
             }],
+            artifacts: Vec::new(),
         }
     }
 
@@ -687,6 +823,180 @@ mod tests {
             &policy(&keys, "0.2.1"),
         )
         .unwrap();
+    }
+
+    fn artifact(platform: &str, name: &str, byte: &str) -> Artifact {
+        Artifact {
+            platform: platform.into(),
+            name: name.into(),
+            sha256: byte.repeat(32),
+        }
+    }
+
+    /// The notice as a reader built before artifacts existed sees it: the
+    /// fields that reader knew, parsed the way it parsed them.
+    #[derive(Deserialize)]
+    struct NoticeBeforeArtifacts {
+        version: String,
+        #[serde(default)]
+        notes_url: String,
+        platforms: Vec<PlatformArchive>,
+    }
+
+    /// What a reader built before artifacts existed does with signed bytes:
+    /// the signature over the payload bytes as they are, then the parse.
+    fn read_as_before(bytes: &[u8], key: &[u8]) -> NoticeBeforeArtifacts {
+        let env: Envelope = serde_json::from_slice(bytes).unwrap();
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(&env.payload)
+            .unwrap();
+        let sig = signature_bytes(&env.signatures[0].sig).unwrap();
+        assert!(verify_prehash(key, &signing_message(&payload), &sig));
+        serde_json::from_slice(&payload).unwrap()
+    }
+
+    #[test]
+    fn a_notice_with_artifacts_verifies_for_this_reader_and_for_one_that_never_knew_them() {
+        let k = key(1);
+        let keys = vec![k.public_sec1()];
+        let mut with = notice("0.2.2", Severity::Normal);
+        with.artifacts = vec![
+            artifact("x86_64-linux", "tenzro-node", "cd"),
+            artifact("x86_64-linux", "tenzro", "ce"),
+            artifact(ANY_PLATFORM, "tenzro-tui", "cf"),
+        ];
+        let bytes = signed(&k, &with);
+        let read = verify(&bytes, &policy(&keys, "0.2.1")).unwrap();
+        assert_eq!(read, with);
+        assert_eq!(
+            read.artifact_digest("x86_64-linux", "tenzro-node"),
+            Some("cd".repeat(32).as_str())
+        );
+        // An artifact every platform shares answers for any platform.
+        assert_eq!(
+            read.artifact_digest("aarch64-macos", "tenzro-tui"),
+            Some("cf".repeat(32).as_str())
+        );
+        assert_eq!(read.artifact_digest("aarch64-macos", "tenzro-node"), None);
+        let old = read_as_before(&bytes, &keys[0]);
+        assert_eq!(
+            (
+                old.version.as_str(),
+                old.platforms.len(),
+                old.notes_url.is_empty()
+            ),
+            ("0.2.2", 1, false)
+        );
+    }
+
+    #[test]
+    fn a_notice_signed_before_artifacts_existed_still_verifies() {
+        let k = key(1);
+        let keys = vec![k.public_sec1()];
+        // The payload a release signed before the field existed: no such key in it.
+        let mut payload = serde_json::to_value(notice("0.2.2", Severity::Normal)).unwrap();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("artifacts")
+            .unwrap();
+        let bytes = k.sign(&serde_json::to_vec(&payload).unwrap());
+        let read = verify(&bytes, &policy(&keys, "0.2.1")).unwrap();
+        assert!(read.artifacts.is_empty());
+        assert_eq!(read.artifact_digest("x86_64-linux", "tenzro-node"), None);
+        assert_eq!(read_as_before(&bytes, &keys[0]).version, "0.2.2");
+    }
+
+    #[test]
+    fn an_artifact_entry_is_a_known_name_a_platform_and_a_digest_once() {
+        let good = |a: Vec<Artifact>| {
+            let mut n = notice("0.2.2", Severity::Normal);
+            n.artifacts = a;
+            n.check_shape()
+        };
+        assert!(good(vec![artifact("x86_64-linux", "tenzro", "ab")]).is_ok());
+        assert!(good(vec![artifact("x86_64-linux", "installer", "ab")]).is_err());
+        assert!(good(vec![artifact("x86 64", "tenzro", "ab")]).is_err());
+        assert!(good(vec![artifact("x86_64-linux", "tenzro", "AB")]).is_err());
+        assert!(good(vec![artifact("x86_64-linux", "tenzro", "a")]).is_err());
+        assert!(
+            good(vec![
+                artifact("x86_64-linux", "tenzro", "ab"),
+                artifact("x86_64-linux", "tenzro", "cd"),
+            ])
+            .is_err()
+        );
+        assert!(
+            good(vec![
+                artifact("x86_64-linux", "tenzro", "ab"),
+                artifact("aarch64-linux", "tenzro", "cd"),
+            ])
+            .is_ok()
+        );
+        assert!(good(vec![artifact(ANY_PLATFORM, "tenzro-tui", "ab"); 1]).is_ok());
+        let many = (0..=MAX_ARTIFACTS)
+            .map(|i| artifact(&format!("p{i}"), "tenzro", "ab"))
+            .collect::<Vec<_>>();
+        assert!(good(many).is_err());
+    }
+
+    #[test]
+    fn a_bundle_digest_is_the_hash_of_its_sorted_file_list() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("lib/deep")).unwrap();
+        std::fs::write(d.path().join("cli.js"), b"console.log(1)\n").unwrap();
+        std::fs::write(d.path().join("lib/deep/z.js"), b"z").unwrap();
+        std::fs::write(d.path().join("lib/a.js"), b"a").unwrap();
+        // The list, in the byte order of the paths, as sha256sum prints it.
+        let mut list = String::new();
+        for (path, bytes) in [
+            ("cli.js", &b"console.log(1)\n"[..]),
+            ("lib/a.js", b"a"),
+            ("lib/deep/z.js", b"z"),
+        ] {
+            list.push_str(&format!("{}  {path}\n", hex::encode(Sha256::digest(bytes))));
+        }
+        let want = hex::encode(Sha256::digest(list.as_bytes()));
+        assert_eq!(bundle_digest(d.path()).unwrap(), want);
+        assert_eq!(artifact_digest(d.path()).unwrap(), want);
+        // One byte of one file, or a file's name, changes it.
+        std::fs::write(d.path().join("lib/a.js"), b"b").unwrap();
+        assert_ne!(bundle_digest(d.path()).unwrap(), want);
+        std::fs::write(d.path().join("lib/a.js"), b"a").unwrap();
+        std::fs::rename(d.path().join("lib/a.js"), d.path().join("lib/b.js")).unwrap();
+        assert_ne!(bundle_digest(d.path()).unwrap(), want);
+        // A single file's digest is the file's own.
+        assert_eq!(
+            artifact_digest(&d.path().join("cli.js")).unwrap(),
+            hex::encode(Sha256::digest(b"console.log(1)\n"))
+        );
+        assert!(bundle_digest(&d.path().join("lib/deep/none")).is_err());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(bundle_digest(empty.path()).is_err());
+    }
+
+    /// The value the operator console computes for the same files, so the two
+    /// implementations of the definition cannot drift apart.
+    #[test]
+    fn a_bundle_digest_matches_the_consoles_vector() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("sub")).unwrap();
+        std::fs::write(d.path().join("app.js"), b"a").unwrap();
+        std::fs::write(d.path().join("cli.js"), b"b").unwrap();
+        std::fs::write(d.path().join("sub/x.js"), b"c").unwrap();
+        assert_eq!(
+            bundle_digest(d.path()).unwrap(),
+            "5f4dc4c8db1c691f6092b7e622c9d778e9ed987c7cf94570ac2e8ceb0c2fefe7"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_with_a_symbolic_link_has_no_digest() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.js"), b"a").unwrap();
+        std::os::unix::fs::symlink(d.path().join("a.js"), d.path().join("b.js")).unwrap();
+        assert!(bundle_digest(d.path()).is_err());
     }
 
     #[test]

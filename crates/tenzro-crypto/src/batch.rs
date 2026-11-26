@@ -149,6 +149,22 @@ impl RootSignature {
         m
     }
 
+    /// The identifier of this root signature by `identity`: SHA-256 of a
+    /// domain tag and [`RootSignature::message`]. It is what the identity
+    /// names to revoke the batch, and with it every record signed in it.
+    pub fn id(&self, identity: &CompositePublicKey) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"tenzro/batch-root/id/v1");
+        h.update(Self::message(
+            identity,
+            self.signed_at_ms,
+            self.count,
+            &self.root,
+        ));
+        h.finalize().into()
+    }
+
     /// Verifies under `identity` with the governed requirement the node last
     /// read from chain state ([`set_pq_leg_required_from_ms`]).
     pub fn verify(&self, identity: &CompositePublicKey) -> Result<()> {
@@ -445,19 +461,35 @@ impl HardwareBatcher {
 // ---------------------------------------------------------------------------
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Waiter = mpsc::Sender<BatchedSignature>;
 
 /// A pending batched signature: resolves when the batch it joined is signed.
-pub struct Ticket(mpsc::Receiver<BatchedSignature>);
+pub struct Ticket {
+    signed: mpsc::Receiver<BatchedSignature>,
+    at_hardware: Arc<AtomicBool>,
+}
+
+/// How often a ticket past its deadline looks again while the hardware signs.
+const HARDWARE_WAIT_STEP: Duration = Duration::from_millis(50);
 
 impl Ticket {
-    /// Waits for the batch to be signed, at most `timeout`.
+    /// Waits for the batch to be signed. `timeout` covers the time before the
+    /// batch reaches the hardware: a batch the hardware is signing when it
+    /// passes is waited for, at most [`MAX_ADAPTIVE_EXTRA`] longer.
     pub fn wait(self, timeout: Duration) -> Result<BatchedSignature> {
-        self.0.recv_timeout(timeout).map_err(|e| match e {
+        let mut signed = self.signed.recv_timeout(timeout);
+        let late = Instant::now();
+        while matches!(signed, Err(mpsc::RecvTimeoutError::Timeout))
+            && self.at_hardware.load(Ordering::Relaxed)
+            && late.elapsed() < MAX_ADAPTIVE_EXTRA
+        {
+            signed = self.signed.recv_timeout(HARDWARE_WAIT_STEP);
+        }
+        signed.map_err(|e| match e {
             mpsc::RecvTimeoutError::Timeout => bad("the batch was not signed in time"),
             mpsc::RecvTimeoutError::Disconnected => {
                 bad("the batch was dropped without a signature (signing refused)")
@@ -489,6 +521,24 @@ pub struct BatchService {
     /// Recent worst hardware time for one flush attempt, in ms: it follows
     /// the slowest attempt up at once and decays a quarter per attempt.
     slow_flush_ms: AtomicU64,
+    /// Set while a call that may sign holds the hardware.
+    at_hardware: Arc<AtomicBool>,
+}
+
+/// Marks the hardware as signing until dropped.
+struct Signing<'a>(&'a AtomicBool);
+
+impl<'a> Signing<'a> {
+    fn begin(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Relaxed);
+        Self(flag)
+    }
+}
+
+impl Drop for Signing<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 impl BatchService {
@@ -508,6 +558,7 @@ impl BatchService {
             }),
             immediate_min_interval_ms,
             slow_flush_ms: AtomicU64::new(0),
+            at_hardware: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -576,6 +627,8 @@ impl BatchService {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Self::gate(&mut st, now_ms, true)?;
         st.waiting.push(tx);
+        let _signing = (st.batcher.pending() + 1 >= st.batcher.capacity())
+            .then(|| Signing::begin(&self.at_hardware));
         let started = std::time::Instant::now();
         let flushed = st.batcher.submit(message, now_ms);
         if !matches!(flushed, Ok(None)) {
@@ -584,7 +637,10 @@ impl BatchService {
         if let Ok(Some(sigs)) = flushed {
             Self::resolve(&mut st.waiting, sigs);
         }
-        Ok(Ticket(rx))
+        Ok(Ticket {
+            signed: rx,
+            at_hardware: self.at_hardware.clone(),
+        })
     }
 
     /// Signs the pending batch when its oldest message has waited the
@@ -597,6 +653,7 @@ impl BatchService {
         // A failed signature leaves everything pending and the next tick tries
         // the whole queue again; submissions are refused while it is full, so
         // the retry is bounded and the queue empties when the hardware recovers.
+        let _signing = (st.batcher.pending() > 0).then(|| Signing::begin(&self.at_hardware));
         let started = std::time::Instant::now();
         let ticked = st.batcher.tick(now_ms);
         if !matches!(ticked, Ok(None)) {
@@ -625,15 +682,20 @@ impl BatchService {
         }
         let (tx, rx) = mpsc::channel();
         st.waiting.push(tx);
-        // Keep waiters and pending messages aligned: submit, then force.
-        let _ = st.batcher.submit(message, now_ms);
-        if st.batcher.pending() > 0 {
-            let started = std::time::Instant::now();
-            let flushed = st.batcher.flush(now_ms);
-            self.note_flush(started);
-            let sigs = flushed?;
-            Self::resolve(&mut st.waiting, sigs);
-        }
+        // The message joins the pending batch and the batch is signed now:
+        // by the batcher when the message filled it, otherwise forced here.
+        // Either way the signatures go to the waiters, in order.
+        let signing = Signing::begin(&self.at_hardware);
+        let started = std::time::Instant::now();
+        let flushed = match st.batcher.submit(message, now_ms) {
+            Ok(Some(sigs)) => Ok(sigs),
+            Ok(None) => st.batcher.flush(now_ms),
+            Err(e) => Err(e),
+        };
+        self.note_flush(started);
+        drop(signing);
+        let sigs = flushed?;
+        Self::resolve(&mut st.waiting, sigs);
         st.last_immediate_ms = Some(now_ms);
         rx.try_recv().map_err(|_| bad("the batch was not signed"))
     }
@@ -885,6 +947,26 @@ mod tests {
         assert_eq!(svc.observed_flush_ms(), 3_000);
     }
 
+    #[test]
+    fn a_ticket_waits_for_the_flush_that_is_signing_its_batch() {
+        let slow = Arc::new(Slow(
+            TestHybridSigner::hybrid(46),
+            Duration::from_millis(400),
+        ));
+        let svc = Arc::new(BatchService::new(slow, P, 0).unwrap());
+        let ticket = svc.submit(b"a".to_vec(), 0).unwrap();
+        let ticker = {
+            let svc = svc.clone();
+            std::thread::spawn(move || svc.tick(2_000))
+        };
+        // The deadline passes while the hardware signs; the signature arrives.
+        ticket.wait(Duration::from_millis(100)).unwrap();
+        assert_eq!(ticker.join().unwrap().unwrap(), 1);
+        // Nothing at the hardware: the deadline stands.
+        let idle = svc.submit(b"b".to_vec(), 3_000).unwrap();
+        assert!(idle.wait(Duration::from_millis(20)).is_err());
+    }
+
     fn rig(seed: u8) -> (Arc<Counted>, HardwareBatcher) {
         let id = Arc::new(Counted(TestHybridSigner::hybrid(seed), AtomicUsize::new(0)));
         (id.clone(), HardwareBatcher::new(id, P).unwrap())
@@ -970,16 +1052,100 @@ mod tests {
             }
             let sigs = b.flush(0).unwrap();
             for (i, s) in sigs.iter().enumerate() {
-                s.verify(id.public_key(), &vec![i as u8; 3], 0, 0).unwrap();
+                s.verify(id.public_key(), &[i as u8; 3], 0, 0).unwrap();
                 let mut moved = s.clone();
                 moved.proof.index = (s.proof.index + 1) % s.proof.count;
                 if n > 1 {
-                    assert!(
-                        moved
-                            .verify(id.public_key(), &vec![i as u8; 3], 0, 0)
-                            .is_err()
-                    );
+                    assert!(moved.verify(id.public_key(), &[i as u8; 3], 0, 0).is_err());
                 }
+            }
+        }
+    }
+
+    /// A batched signature stands for the one message it was made for:
+    /// not for another member of its batch, not for the message with any
+    /// bit changed, cut short or extended, not under a changed root, path
+    /// or count, and not for the bytes of an inner node of the tree.
+    #[test]
+    fn a_batched_signature_binds_the_message_it_was_made_for_and_no_other() {
+        let id = Arc::new(Counted(TestHybridSigner::hybrid(52), AtomicUsize::new(0)));
+        let refused = |s: &BatchedSignature, m: &[u8]| s.verify(id.public_key(), m, 0, 0).is_err();
+        for n in 1..=8usize {
+            let messages: Vec<Vec<u8>> = (0..n)
+                .map(|i| format!("record {i} of {n}").into_bytes())
+                .collect();
+            let mut b = HardwareBatcher::new(
+                id.clone(),
+                BatchParams {
+                    max_batch: 64,
+                    flush_interval_ms: 1,
+                },
+            )
+            .unwrap();
+            for m in &messages {
+                b.submit(m.clone(), 0).unwrap();
+            }
+            let sigs = b.flush(0).unwrap();
+            assert_eq!(sigs.len(), n);
+            for (i, s) in sigs.iter().enumerate() {
+                let own = &messages[i];
+                s.verify(id.public_key(), own, 0, 0).unwrap();
+                for (j, other) in messages.iter().enumerate() {
+                    assert_eq!(refused(s, other), j != i, "member {j} under proof {i}");
+                }
+                for byte in 0..own.len() {
+                    for bit in 0..8 {
+                        let mut m = own.clone();
+                        m[byte] ^= 1 << bit;
+                        assert!(refused(s, &m), "bit {bit} of byte {byte}");
+                    }
+                }
+                let mut longer = own.clone();
+                longer.push(0);
+                assert!(refused(s, &longer));
+                assert!(refused(s, &own[..own.len() - 1]));
+                assert!(refused(s, b""));
+
+                let mut t = s.clone();
+                t.root.root[0] ^= 1;
+                assert!(refused(&t, own));
+                for k in 0..s.proof.path.len() {
+                    let mut t = s.clone();
+                    t.proof.path[k][31] ^= 1;
+                    assert!(refused(&t, own), "path element {k}");
+                }
+                let mut t = s.clone();
+                t.proof.path.push([0; 32]);
+                assert!(refused(&t, own));
+                if !s.proof.path.is_empty() {
+                    let mut t = s.clone();
+                    t.proof.path.pop();
+                    assert!(refused(&t, own));
+                }
+                let mut t = s.clone();
+                t.proof.count += 1;
+                assert!(refused(&t, own));
+            }
+            // The two halves under the root, presented as a message: the
+            // leaf and node hashes are separate domains.
+            if n >= 2 {
+                let leaves: Vec<[u8; 32]> = messages.iter().map(|m| leaf_hash(m)).collect();
+                let k = split(n as u64) as usize;
+                let mut inner = root_of(&leaves[..k]).to_vec();
+                inner.extend_from_slice(&root_of(&leaves[k..]));
+                assert_eq!(
+                    node_hash(&root_of(&leaves[..k]), &root_of(&leaves[k..])),
+                    sigs[0].root.root
+                );
+                let mut t = sigs[0].clone();
+                t.proof = BatchProof {
+                    index: 0,
+                    count: 1,
+                    path: Vec::new(),
+                };
+                t.root.count = 1;
+                assert!(refused(&t, &inner));
+                assert_ne!(t.proof.root_for(&inner), Some(sigs[0].root.root));
             }
         }
     }
@@ -995,6 +1161,115 @@ mod tests {
         let again: RecordSignature = serde_json::from_slice(&bytes).unwrap();
         again.verify_record_now(id.public_key(), b"m").unwrap();
         assert!(again.verify_record_now(id.public_key(), b"x").is_err());
+    }
+
+    /// The JSON form of a record's signature, pinned: a release that
+    /// changes it changes this vector on purpose or not at all. Records
+    /// written by one release are read by the next.
+    const RECORD_SIGNATURE_VECTOR: &str = concat!(
+        "{\"batched\":{\"proof\":{\"index\":1,\"count\":3,\"path\":[",
+        "[17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17],",
+        "[34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34]]},",
+        "\"root\":{\"signed_at_ms\":1700000000000,\"count\":3,\"root\":",
+        "[51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51],",
+        "\"signature\":{\"classical\":{\"form\":\"raw\",\"signature\":\"4444444444444444444444444444444444444444444444444444444444444444",
+        "4444444444444444444444444444444444444444444444444444444444444444\"},",
+        "\"pq\":\"5555555555555555\"}}}}",
+    );
+
+    fn vector_signature() -> RecordSignature {
+        RecordSignature {
+            batched: BatchedSignature {
+                proof: BatchProof {
+                    index: 1,
+                    count: 3,
+                    path: vec![[0x11; 32], [0x22; 32]],
+                },
+                root: RootSignature {
+                    signed_at_ms: 1_700_000_000_000,
+                    count: 3,
+                    root: [0x33; 32],
+                    signature: CompositeSignature::hybrid(
+                        crate::composite::ClassicalProof::Raw {
+                            signature: vec![0x44; 64],
+                        },
+                        vec![0x55; 8],
+                    ),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn the_record_signature_form_is_the_pinned_vector() {
+        let sig = vector_signature();
+        assert_eq!(
+            serde_json::to_string(&sig).unwrap(),
+            RECORD_SIGNATURE_VECTOR
+        );
+        let read: RecordSignature = serde_json::from_str(RECORD_SIGNATURE_VECTOR).unwrap();
+        assert_eq!(read, sig);
+    }
+
+    #[test]
+    fn a_record_signature_in_another_form_is_refused() {
+        let good: serde_json::Value = serde_json::from_str(RECORD_SIGNATURE_VECTOR).unwrap();
+        // The bare batched signature, without the record's field around it.
+        assert!(serde_json::from_value::<RecordSignature>(good["batched"].clone()).is_err());
+        // A field of the proof or of the root missing.
+        for (outer, field) in [
+            ("proof", "count"),
+            ("proof", "path"),
+            ("root", "signed_at_ms"),
+        ] {
+            let mut cut = good.clone();
+            cut["batched"][outer].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<RecordSignature>(cut).is_err(),
+                "{outer}.{field}"
+            );
+        }
+        // A path element or a root that is not 32 bytes.
+        let mut short = good.clone();
+        short["batched"]["proof"]["path"][0]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(serde_json::from_value::<RecordSignature>(short).is_err());
+        let mut short = good.clone();
+        short["batched"]["root"]["root"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(serde_json::from_value::<RecordSignature>(short).is_err());
+    }
+
+    #[test]
+    fn every_batched_record_signature_reads_back_as_written_and_still_verifies() {
+        let id = Arc::new(Counted(TestHybridSigner::hybrid(61), AtomicUsize::new(0)));
+        for n in 1..=9usize {
+            let mut b = HardwareBatcher::new(
+                id.clone(),
+                BatchParams {
+                    max_batch: 64,
+                    flush_interval_ms: 1,
+                },
+            )
+            .unwrap();
+            for i in 0..n {
+                b.submit(vec![i as u8; i + 1], 0).unwrap();
+            }
+            for (i, sig) in b.flush(0).unwrap().into_iter().enumerate() {
+                let rec = RecordSignature::batched(sig);
+                let json = serde_json::to_string(&rec).unwrap();
+                let read: RecordSignature = serde_json::from_str(&json).unwrap();
+                assert_eq!(read, rec);
+                assert_eq!(serde_json::to_string(&read).unwrap(), json);
+                read.batched
+                    .verify(id.public_key(), &vec![i as u8; i + 1], 0, 0)
+                    .unwrap();
+            }
+        }
     }
 
     #[test]
@@ -1026,6 +1301,32 @@ mod tests {
         assert_eq!(id.1.load(Ordering::SeqCst), 1);
         assert!(svc.sign_now(b"again".to_vec(), 500).is_err());
         svc.sign_now(b"later".to_vec(), 1_010).unwrap();
+        assert_eq!(id.1.load(Ordering::SeqCst), 2);
+    }
+
+    /// An immediate signature whose message fills the batch is signed by
+    /// that fill. The tickets already waiting get the signatures of their own
+    /// messages, the immediate caller gets its own, and the next batch goes
+    /// to its own tickets.
+    #[test]
+    fn an_immediate_signature_that_fills_the_batch_resolves_every_ticket_with_its_own_message() {
+        let id = Arc::new(Counted(TestHybridSigner::hybrid(44), AtomicUsize::new(0)));
+        let svc = BatchService::new(id.clone(), P, 0).unwrap();
+        let queued: Vec<_> = (0..3u8).map(|i| svc.submit(vec![i], 10).unwrap()).collect();
+        let now = svc.sign_now(b"now".to_vec(), 10).unwrap();
+        now.verify(id.public_key(), b"now", 10, 0).unwrap();
+        assert_eq!(id.1.load(Ordering::SeqCst), 1);
+        for (i, t) in queued.into_iter().enumerate() {
+            let s = t.wait(Duration::from_millis(10)).unwrap();
+            s.verify(id.public_key(), &[i as u8], 10, 0).unwrap();
+        }
+        let next: Vec<_> = (10..14u8)
+            .map(|i| svc.submit(vec![i], 20).unwrap())
+            .collect();
+        for (i, t) in next.into_iter().enumerate() {
+            let s = t.wait(Duration::from_millis(10)).unwrap();
+            s.verify(id.public_key(), &[10 + i as u8], 20, 0).unwrap();
+        }
         assert_eq!(id.1.load(Ordering::SeqCst), 2);
     }
 

@@ -1,7 +1,10 @@
 # cargo-audit configuration.
 #
 # Every entry is a *recorded decision* backed by a reachability analysis, not a
-# silenced warning. Each states what was verified and what would invalidate it.
+# silenced warning. Each states what was verified and what would invalidate it,
+# who answers for it (OWNER) and the day by which it is assessed again
+# (RECHECK BY). scripts/supply-chain/acceptance-recheck.py, run by the advisory
+# gate, refuses an entry without either and an entry whose day has passed.
 # Assessed 2026-07-31.
 #
 # Advisories cleared by upgrading rather than ignoring, same session:
@@ -55,31 +58,8 @@ ignore = [
   #
   # RE-ASSESS IF: an RSA signing or decryption path is wired to a request
   # handler, or `visa_tap::issuer` gains a non-Ed25519 algorithm.
+  # OWNER: release owner. RECHECK BY: 2027-01-31.
   "RUSTSEC-2023-0071",
-
-  # ---------------------------------------------------------------------------
-  # RUSTSEC-2026-0118 — hickory-proto 0.25.2, NSEC3 closest-encloser proof
-  # validation enters an unbounded loop on cross-zone responses.
-  #
-  # NOT COMPILED — a compile-time fact, not a judgement call. In hickory-proto
-  # 0.25.2 the entire DNSSEC module is feature-gated:
-  #
-  #     #[cfg(any(feature = "dnssec-aws-lc-rs", feature = "dnssec-ring"))]
-  #     pub mod dnssec;                                     // src/lib.rs:55
-  #
-  # and `src/dnssec/nsec3.rs` — the vulnerable code — lives inside it. The
-  # features active in this build are `tokio`, `mdns`, `std`, `futures-io` and
-  # `socket2`; neither dnssec feature is enabled. Verified independently by
-  # `cargo tree -p hickory-proto@0.25.2 --depth 1`, which pulls in neither
-  # `ring` nor `aws-lc-rs` — both optional deps activated only by those
-  # features.
-  #
-  # Note the advisory's `patched` field is empty, which reads as "no fix
-  # exists"; its `unaffected` field is `>=0.26.0-beta.1`, so the 0.26 line is
-  # in fact clear. Read both fields before concluding an advisory is permanent.
-  #
-  # RE-ASSESS IF: anything enables `dnssec-ring` or `dnssec-aws-lc-rs`.
-  "RUSTSEC-2026-0118",
 
   # ---------------------------------------------------------------------------
   # RUSTSEC-2025-0055 — tracing-subscriber 0.2.25, ANSI escape sequences from
@@ -96,6 +76,7 @@ ignore = [
   #
   # RE-ASSESS IF: anything installs an ark-relations layer, or risc0 moves to
   # an ark-relations release on tracing-subscriber 0.3.
+  # OWNER: release owner. RECHECK BY: 2027-01-31.
   "RUSTSEC-2025-0055",
 
   # ---------------------------------------------------------------------------
@@ -118,6 +99,7 @@ ignore = [
   # RE-ASSESS IF: anything signs, derives or decrypts with k256 0.13 or p521
   # 0.13 (an alloy local signer, say), or crypto-bigint 0.7 again appears in
   # an advisory: this id covers both lines.
+  # OWNER: release owner. RECHECK BY: 2027-01-31.
   "RUSTSEC-2026-0387",
 
   # ---------------------------------------------------------------------------
@@ -132,5 +114,20 @@ ignore = [
   # RE-ASSESS IF: a vulnerability (not only the unmaintained notice) is filed
   # against bincode 1.x, or a fuzz target finds an allocation or panic inside
   # bincode itself.
+  # OWNER: release owner. RECHECK BY: 2027-01-31.
   "RUSTSEC-2025-0141",
+
+  # ---------------------------------------------------------------------------
+  # RUSTSEC-2026-0543 — chrono 0.4, unmaintained (no vulnerability, no patched
+  # release; https://rustsec.org/advisories/RUSTSEC-2026-0543.html, read
+  # 19 Nov 2026).
+  #
+  # The workspace crates use chrono types in the serialized form of identity,
+  # trust and ledger records. Moving to jiff or time changes those forms, so it
+  # waits for a flag-day release; chrono-tz (RUSTSEC-2026-0555) is already
+  # replaced in the node.
+  #
+  # RE-ASSESS IF: chrono is migrated or a maintained release appears.
+  # OWNER: release owner. RECHECK BY: 2027-01-31.
+  "RUSTSEC-2026-0543",
 ]

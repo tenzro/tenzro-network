@@ -1,22 +1,26 @@
 //! Operator-earnings beyond per-call settlement: the spot tier, the standby
 //! fee and the availability (readiness) reward.
 //!
-//! None of the three legs is implemented on the ledger yet,
-//! so this module cannot replay them
-//! through [`crate::economy`] the way [`crate::treasury`] and
-//! [`crate::staking`] replay existing ledger rules. Instead, like
-//! [`crate::growth`] (an aggregate model of the classes and channels the
-//! ledger does not itself execute), it layers the legs' rate-card and
-//! reward-ledger economics analytically on top of one real
-//! [`crate::economy::Economy`] run per market mode: the demand, price,
-//! treasury-runway and listing-gate trajectory is the ledger's own code: the
-//! three legs' income, decay, vesting and challenge-energy arithmetic is the
-//! part still to be built, swept here to choose its governed parameters.
+//! The demand, price, treasury-runway and listing-gate trajectory comes from
+//! one real [`crate::economy::Economy`] run per market mode. The availability
+//! reward is the ledger's own rule: each day's per-unit-hour reward is
+//! `tenzro_vm::native::availability_reward::unit_hour_reward` on a state
+//! holding the sweep point's governed cap and half-life, at that day's TNZO
+//! price, once with the absolute cap and once with the indexed cap live (the
+//! datacenter-GPU index held at the list rate, the simulated unit a proven
+//! GPU). The demand offset runs on the whole-USD target with its gate live,
+//! at the listing gate's 60,000 USD/day, each day's unrelated demand settled
+//! in the hour the reward is read at. Spot and
+//! standby are operator-set rate-card lines with no network rule to replay,
+//! so their income stays rate-card arithmetic, as do vesting, Sybil and
+//! challenge-energy figures.
 
 use serde::Serialize;
 
 use crate::economy::{Day, Economy, Market, RunConfig, RunOutcome};
 use crate::listing::{ListingGate, UNRELATED_USD_DAY};
+use tenzro_vm::native::{self as n, availability_reward as ar};
+use tenzro_vm::traits::VmState;
 
 /// Reference GPU-hour list rate the three legs price against (H100-class
 /// spot, VERIFY doc section 6: raw spot USD 1-2/GPU-hour; mid of range).
@@ -128,9 +132,9 @@ pub struct LegResult {
     /// reported in USD/GPU-hour below, which does not depend on this).
     pub chain_price_usd_end: f64,
     /// Day the chain's unrelated demand first reached the listing gate's
-    /// USD/day threshold (`UNRELATED_USD_DAY`): used below as the demand
-    /// offset's target_demand, and reported here as the natural reference
-    /// point for "when does usage income dominate".
+    /// USD/day threshold (`UNRELATED_USD_DAY`), the demand offset's target
+    /// in the design: the day the offset would have phased the reward out,
+    /// and the reference point for "when does usage income dominate".
     pub target_demand_reached_day: Option<f64>,
 
     // -- treasury concentration: structural, not re-simulated here --
@@ -160,6 +164,9 @@ pub struct LegResult {
     /// demand offset yet) and at its end (decayed, demand-offset applied).
     pub operator_income_reward_usd_gpu_hour_start: f64,
     pub operator_income_reward_usd_gpu_hour_end: f64,
+    /// The same with the indexed cap live, at the run's start and end.
+    pub operator_income_reward_indexed_usd_gpu_hour_start: f64,
+    pub operator_income_reward_indexed_usd_gpu_hour_end: f64,
     /// Day usage income (spot + standby, constant rate-card income) first
     /// exceeds the reward income for an all-cold-declared idle unit: the
     /// crossover the design is meant to produce. `None` if it never does
@@ -218,53 +225,90 @@ fn target_demand_reached_day(days: &[Day]) -> Option<f64> {
         .map(|d| d.snap.day)
 }
 
-/// Exponential decay, half-life in months, `t_days` since launch.
-fn decay(half_life_months: f64, t_days: f64) -> f64 {
-    let half_life_days = half_life_months * 30.4375;
-    0.5f64.powf(t_days / half_life_days.max(1.0))
-}
-
-/// Governance's demand offset: the reward budget falls to zero as paid,
-/// unrelated demand reaches `UNRELATED_USD_DAY` (the listing gate's own
-/// threshold, reused here as the target the reward hands operators over
-/// at -- section 9: "same scale as the existing listing-gate threshold").
-fn demand_offset(unrelated_demand_usd_day: f64) -> f64 {
-    (1.0 - unrelated_demand_usd_day / UNRELATED_USD_DAY).clamp(0.0, 1.0)
-}
-
-/// Per-unit-day reward at tier `warm`'s multiplier (the reward's own unit:
-/// one idle GPU-hour-equivalent capacity unit, at the warm tier, scaled by
-/// the tier multiplier elsewhere), at day `t_days`, day `d`'s demand.
-fn reward_per_unit_day(p: &LegParams, d: &Day, t_days: f64) -> f64 {
-    let cap_usd_day = p.reward_cap_share * LIST_RATE_USD_GPU_HOUR * 24.0;
-    cap_usd_day
-        * decay(p.decay_half_life_months, t_days)
-        * demand_offset(d.unrelated_demand_usd_day)
+/// The availability reward one unit earns per hour on each of `days`, USD,
+/// by the ledger's rule: the governed cap is `reward_cap_share` of the list
+/// rate in TNZO at the first day's price, decaying from the first epoch on
+/// the sweep point's half-life; with `indexed`, the indexed cap is live
+/// against a datacenter-GPU index at the list rate and the unit is a proven
+/// GPU. The demand offset targets [`UNRELATED_USD_DAY`] and each day's
+/// unrelated demand is settled in the hour that day's reward is read at.
+fn ledger_reward_usd_gpu_hour(p: &LegParams, days: &[Day], indexed: bool) -> Vec<f64> {
+    let Some(first) = days.first() else {
+        return Vec::new();
+    };
+    let mut st = tenzro_vm::StateAdapter::new();
+    let cap_wei = p.reward_cap_share * LIST_RATE_USD_GPU_HOUR / first.price_usd.max(1e-9) * 1e18;
+    let cap_wei = cap_wei.min(ar::MAX_AVAILABILITY_REWARD_PER_UNIT_HOUR as f64) as u64;
+    n::set_genesis_param(
+        &mut st,
+        ar::AVAILABILITY_REWARD_PER_UNIT_HOUR_PARAM,
+        cap_wei,
+    );
+    n::set_genesis_param(
+        &mut st,
+        ar::AVAILABILITY_REWARD_DECAY_HALF_LIFE_DAYS_PARAM,
+        (p.decay_half_life_months * 30.4375).round() as u64,
+    );
+    n::set_genesis_param(&mut st, ar::AVAILABILITY_REWARD_DECAY_START_EPOCH_PARAM, 1);
+    n::set_genesis_param(&mut st, ar::AVAILABILITY_DEMAND_TARGET_USD_KEY, 0);
+    n::set_genesis_param(
+        &mut st,
+        ar::AVAILABILITY_REWARD_DEMAND_TARGET_USD_PER_DAY_PARAM,
+        UNRELATED_USD_DAY as u64,
+    );
+    if indexed {
+        n::set_genesis_param(&mut st, ar::AVAILABILITY_INDEX_CAP_KEY, 0);
+        let index = serde_json::json!({
+            "rate_nano_usd": ((LIST_RATE_USD_GPU_HOUR * 1e9).round() as u128).to_string(),
+            "epoch": 0,
+        });
+        let symbol =
+            n::economy::compute_index_symbol(tenzro_types::hardware::HardwareClass::DatacenterGpu)
+                .expect("the datacenter-GPU class has an index");
+        st.set_storage(
+            &n::SYSTEM_ADDRESS,
+            n::economy::live_key(symbol).as_bytes(),
+            serde_json::to_vec(&index).expect("an index record encodes"),
+        );
+    }
+    days.iter()
+        .map(|d| {
+            let rate = (d.price_usd * 1e9).round().max(1.0) as u64;
+            n::set_genesis_param(&mut st, n::economy::GOVERNANCE_RATE_PARAM, rate);
+            let epoch = 1 + (d.snap.day.max(0.0) * 24.0) as u64;
+            let settled = d.unrelated_demand_usd_day / d.price_usd.max(1e-9) * 1e18;
+            let activity = n::economy::EpochActivity {
+                settled_value: settled.max(0.0) as u128,
+                ..Default::default()
+            };
+            st.set_storage(
+                &n::SYSTEM_ADDRESS,
+                n::economy::activity_key(epoch).as_bytes(),
+                serde_json::to_vec(&activity).expect("an activity record encodes"),
+            );
+            ar::unit_hour_reward(&st, epoch, indexed) as f64 / 1e18 * d.price_usd
+        })
+        .collect()
 }
 
 fn leg_result(p: LegParams, mc: &MacroContext) -> LegResult {
     let days = &mc.outcome.days;
-    let first = days.first();
     let last = days.last();
 
     let spot_rate = LIST_RATE_USD_GPU_HOUR * (1.0 - p.spot_discount);
     let standby_rate = LIST_RATE_USD_GPU_HOUR * p.standby_fee_share;
 
-    let reward_start = first
-        .map(|d| reward_per_unit_day(&p, d, d.snap.day) / 24.0 * Tier::Warm.reward_mult())
-        .unwrap_or(0.0);
-    let reward_end = last
-        .map(|d| reward_per_unit_day(&p, d, d.snap.day) / 24.0 * Tier::Warm.reward_mult())
-        .unwrap_or(0.0);
+    let ledger = ledger_reward_usd_gpu_hour(&p, days, false);
+    let indexed = ledger_reward_usd_gpu_hour(&p, days, true);
+    let reward_start = ledger.first().copied().unwrap_or(0.0) * Tier::Warm.reward_mult();
+    let reward_end = ledger.last().copied().unwrap_or(0.0) * Tier::Warm.reward_mult();
 
     let usage_income_usd_gpu_hour = p.spot_share * spot_rate + p.standby_uptake * standby_rate;
     let crossover_day = days
         .iter()
-        .find(|d| {
-            let r = reward_per_unit_day(&p, d, d.snap.day) / 24.0 * Tier::Cold.reward_mult();
-            usage_income_usd_gpu_hour >= r
-        })
-        .map(|d| d.snap.day)
+        .zip(&ledger)
+        .find(|(_, r)| usage_income_usd_gpu_hour >= *r * Tier::Cold.reward_mult())
+        .map(|(d, _)| d.snap.day)
         .or((usage_income_usd_gpu_hour >= reward_start).then_some(0.0));
 
     // Sybil deterrence at the warm tier, the easiest tier to fake (highest
@@ -300,6 +344,8 @@ fn leg_result(p: LegParams, mc: &MacroContext) -> LegResult {
         operator_income_standby_usd_gpu_hour: standby_rate,
         operator_income_reward_usd_gpu_hour_start: reward_start,
         operator_income_reward_usd_gpu_hour_end: reward_end,
+        operator_income_reward_indexed_usd_gpu_hour_start: indexed.first().copied().unwrap_or(0.0),
+        operator_income_reward_indexed_usd_gpu_hour_end: indexed.last().copied().unwrap_or(0.0),
         crossover_day,
         sybil_attacker_net_usd: attacker_net,
         sybil_at_risk_usd: at_risk,
@@ -380,12 +426,12 @@ pub fn sweep(days: u32, seed: u64) -> Vec<LegResult> {
 /// The results as a Markdown table.
 pub fn table(results: &[LegResult]) -> String {
     let mut s = String::from(
-        "| market | decay half-life mo | spot discount | standby uptake | listing-gate yr | runway end mo | spot $/GPU-h | standby $/GPU-h | reward $/GPU-h start | reward $/GPU-h end | crossover day | Sybil net $ | Sybil at-risk $ | Sybil profitable | challenge E warm % | challenge E cool % | fleet challenge E % | idle E saved % |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "| market | decay half-life mo | spot discount | standby uptake | listing-gate yr | runway end mo | spot $/GPU-h | standby $/GPU-h | reward $/GPU-h start | reward $/GPU-h end | indexed reward $/GPU-h start | indexed reward $/GPU-h end | crossover day | Sybil net $ | Sybil at-risk $ | Sybil profitable | challenge E warm % | challenge E cool % | fleet challenge E % | idle E saved % |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for r in results {
         let p = &r.params;
         s.push_str(&format!(
-            "| {} | {:.0} | {:.0}% | {:.0}% | {} | {:.1} | {:.3} | {:.3} | {:.4} | {:.4} | {} | {:.2} | {:.2} | {} | {:.3} | {:.3} | {:.3} | {:.1} |\n",
+            "| {} | {:.0} | {:.0}% | {:.0}% | {} | {:.1} | {:.3} | {:.3} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {:.2} | {:.2} | {} | {:.3} | {:.3} | {:.3} | {:.1} |\n",
             p.market,
             p.decay_half_life_months,
             100.0 * p.spot_discount,
@@ -398,6 +444,8 @@ pub fn table(results: &[LegResult]) -> String {
             r.operator_income_standby_usd_gpu_hour,
             r.operator_income_reward_usd_gpu_hour_start,
             r.operator_income_reward_usd_gpu_hour_end,
+            r.operator_income_reward_indexed_usd_gpu_hour_start,
+            r.operator_income_reward_indexed_usd_gpu_hour_end,
             r.crossover_day
                 .map(|d| format!("{d:.0}"))
                 .unwrap_or_else(|| "not within run".into()),
@@ -417,16 +465,35 @@ pub fn table(results: &[LegResult]) -> String {
 mod tests {
     use super::*;
 
+    /// Days every test's economy runs over. The tests check the legs'
+    /// arithmetic and the ledger rule, not long-horizon outcomes; the full
+    /// sweep over two years is `tenzro-econsim earnings --days 730`.
+    const TEST_DAYS: u32 = 400;
+
+    /// One economy run per market for the whole test binary: each run is
+    /// the expensive part, and every test reads it without changing it.
+    fn ctx(market: Market) -> &'static MacroContext {
+        static CTX: std::sync::OnceLock<[MacroContext; 3]> = std::sync::OnceLock::new();
+        let all = CTX.get_or_init(|| {
+            [Market::Growth, Market::Flat, Market::Downturn].map(|m| macro_context(m, 1, TEST_DAYS))
+        });
+        match market {
+            Market::Growth => &all[0],
+            Market::Flat => &all[1],
+            Market::Downturn => &all[2],
+        }
+    }
+
     #[test]
     fn sybil_deterrence_holds_at_section_9_defaults() {
-        let mc = macro_context(Market::Flat, 1, 400);
+        let mc = ctx(Market::Flat);
         let p = sweep_grid()
             .into_iter()
             .find(|p| {
                 p.market == "flat" && p.decay_half_life_months == 12.0 && p.spot_discount == 0.5
             })
             .expect("a default-ish point exists in the grid");
-        let r = leg_result(p, &mc);
+        let r = leg_result(p, mc);
         assert!(
             !r.sybil_profitable,
             "attacker net {} should not exceed at-risk {} at the section 9 defaults",
@@ -463,14 +530,14 @@ mod tests {
 
     #[test]
     fn crossover_day_is_found_when_usage_income_eventually_exceeds_reward() {
-        let mc = macro_context(Market::Growth, 1, 1000);
+        let mc = ctx(Market::Growth);
         let mut p = sweep_grid()
             .into_iter()
             .find(|p| p.market == "growth" && p.decay_half_life_months == 6.0)
             .expect("a fast-decay growth point exists");
         p.spot_share = 1.0;
         p.standby_uptake = 1.0;
-        let r = leg_result(p, &mc);
+        let r = leg_result(p, mc);
         assert!(
             r.crossover_day.is_some(),
             "a fast-decaying reward against full spot+standby uptake should cross over within 1000 days"
@@ -479,7 +546,9 @@ mod tests {
 
     #[test]
     fn sweep_grid_is_nonempty_and_every_point_runs() {
-        let results = sweep(200, 1);
+        // Every grid point over a 30-day horizon: what this checks is that
+        // each point evaluates, not what a long run concludes.
+        let results = sweep(30, 1);
         assert_eq!(results.len(), sweep_grid().len());
         assert!(results.iter().all(|r| r.chain_price_usd_end > 0.0));
     }
@@ -506,7 +575,7 @@ mod tests {
         // With spot_share swept down toward 0, usage income shrinks and the
         // reward's own decay should start to matter, so crossover_day must
         // differ across spot_share values for otherwise-identical points.
-        let mc = macro_context(Market::Growth, 1, 730);
+        let mc = ctx(Market::Growth);
         let base = sweep_grid()
             .into_iter()
             .find(|p| {
@@ -519,11 +588,90 @@ mod tests {
         let mut high = base;
         high.spot_share = 0.5;
 
-        let r_low = leg_result(low, &mc);
-        let r_high = leg_result(high, &mc);
+        let r_low = leg_result(low, mc);
+        let r_high = leg_result(high, mc);
         assert_ne!(
             r_low.crossover_day, r_high.crossover_day,
             "sweeping spot_share should change crossover_day, not leave it fixed at day 1 everywhere"
         );
+    }
+
+    /// The ledger's indexed cap never pays more than its absolute cap, both
+    /// start equal (the absolute cap is set at the first day's price to the
+    /// index share), and they part as the TNZO price moves: in a market whose
+    /// price rises the absolute cap, fixed in TNZO, is worth more than the
+    /// index share, which is fixed in USD.
+    #[test]
+    fn the_indexed_cap_holds_the_reward_to_its_share_of_the_index() {
+        let mc = ctx(Market::Growth);
+        let p = sweep_grid()
+            .into_iter()
+            .find(|p| p.market == "growth" && p.decay_half_life_months == 24.0)
+            .expect("a slow-decay growth point exists");
+        // No paid demand, so the offset does not mask either cap.
+        let mut days: Vec<Day> = mc.outcome.days.clone();
+        for d in &mut days {
+            d.unrelated_demand_usd_day = 0.0;
+        }
+        let absolute = ledger_reward_usd_gpu_hour(&p, &days, false);
+        let indexed = ledger_reward_usd_gpu_hour(&p, &days, true);
+        assert!(absolute[0] > 0.0);
+        assert!((absolute[0] - indexed[0]).abs() < 1e-6 * absolute[0]);
+        assert!(
+            absolute
+                .iter()
+                .zip(&indexed)
+                .all(|(a, i)| *i <= *a * (1.0 + 1e-9))
+        );
+        let rose = days.last().unwrap().price_usd > days[0].price_usd;
+        let last = absolute.len() - 1;
+        assert_eq!(rose, indexed[last] < absolute[last] * (1.0 - 1e-6));
+    }
+
+    /// The reward follows the ledger's half-life: after one half-life at a
+    /// steady price it is half the starting reward.
+    #[test]
+    fn the_ledger_reward_halves_over_one_half_life() {
+        let mc = ctx(Market::Flat);
+        let mut p = sweep_grid()
+            .into_iter()
+            .find(|p| p.market == "flat" && p.decay_half_life_months == 12.0)
+            .expect("a 12-month flat point exists");
+        p.decay_half_life_months = 365.0 / 30.4375;
+        let mut days: Vec<Day> = mc.outcome.days.clone();
+        let price = days[0].price_usd;
+        for d in &mut days {
+            d.price_usd = price;
+            d.unrelated_demand_usd_day = 0.0;
+        }
+        let r = ledger_reward_usd_gpu_hour(&p, &days, false);
+        let at_365 = days.iter().position(|d| d.snap.day >= 365.0).unwrap();
+        let ratio = r[at_365] / r[0];
+        assert!((ratio - 0.5).abs() < 0.01, "ratio {ratio}");
+    }
+
+    /// Paid demand at the 60,000 USD/day target phases the ledger's reward
+    /// to zero; half of it halves the reward.
+    #[test]
+    fn the_demand_offset_phases_the_reward_out_at_the_target() {
+        let mc = ctx(Market::Flat);
+        let p = sweep_grid()
+            .into_iter()
+            .find(|p| p.market == "flat" && p.decay_half_life_months == 24.0)
+            .expect("a slow-decay flat point exists");
+        let mut days: Vec<Day> = mc.outcome.days.clone();
+        let price = days[0].price_usd;
+        for (i, d) in days.iter_mut().enumerate() {
+            d.price_usd = price;
+            d.unrelated_demand_usd_day = [0.0, UNRELATED_USD_DAY / 2.0, UNRELATED_USD_DAY][i % 3];
+        }
+        let r = ledger_reward_usd_gpu_hour(&p, &days, false);
+        assert!(r[0] > 0.0);
+        assert!(
+            (r[1] / r[0] - 0.5).abs() < 0.01,
+            "half the target: {}",
+            r[1] / r[0]
+        );
+        assert_eq!(r[2], 0.0);
     }
 }

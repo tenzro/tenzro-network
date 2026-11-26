@@ -1,0 +1,124 @@
+{
+  "did_derivation": [
+    {
+      "label": "counting key",
+      "attestation_key_sec1": "040102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+      "did": "did:tenzro:machine:80021d3e93e66475b0a023e7a35885eb6899f2e0121cf14a44c19f78633b0b1d"
+    },
+    {
+      "label": "constant key",
+      "attestation_key_sec1": "04abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      "did": "did:tenzro:machine:215ecd4d1c1ce4b033630053224ff0066ecded95810557e8448cb344812596d6"
+    }
+  ],
+  "admission_challenge": [
+    {
+      "label": "a wallet key and a nonce",
+      "did": "did:tenzro:machine:80021d3e93e66475b0a023e7a35885eb6899f2e0121cf14a44c19f78633b0b1d",
+      "wallet_public_key": "0407070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707070707",
+      "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "challenge": "f3682b465247aa6bc575b1accb7aa8948388a15e0b5483bc257143c15d9784ce"
+    },
+    {
+      "label": "no wallet key, as the self-check asks",
+      "did": "did:tenzro:machine:215ecd4d1c1ce4b033630053224ff0066ecded95810557e8448cb344812596d6",
+      "wallet_public_key": "",
+      "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+      "challenge": "9cbeefeb33ff198354cf39664134402846f7c4e14306c0120f657f03f27924d1"
+    }
+  ],
+  "identifier_sources": [
+    {
+      "label": "tpm:ek",
+      "grade": "attestable"
+    },
+    {
+      "label": "tcm:ek",
+      "grade": "attestable"
+    },
+    {
+      "label": "intel:ppin",
+      "grade": "fused"
+    },
+    {
+      "label": "amd:ppin",
+      "grade": "fused"
+    },
+    {
+      "label": "amd:snp-chip-id",
+      "grade": "attestable"
+    },
+    {
+      "label": "intel:ppid",
+      "grade": "attestable"
+    },
+    {
+      "label": "arm:midr",
+      "grade": "model"
+    },
+    {
+      "label": "apple:ecid",
+      "grade": "fused"
+    },
+    {
+      "label": "apple:sep",
+      "grade": "attestable"
+    },
+    {
+      "label": "qualcomm:qfprom",
+      "grade": "attestable"
+    },
+    {
+      "label": "hisilicon:platform",
+      "grade": "attestable"
+    },
+    {
+      "label": "mediatek:efuse",
+      "grade": "fused"
+    },
+    {
+      "label": "rockchip:otp",
+      "grade": "fused"
+    },
+    {
+      "label": "allwinner:sid",
+      "grade": "fused"
+    },
+    {
+      "label": "hygon:psp",
+      "grade": "attestable"
+    },
+    {
+      "label": "domestic:tpcm",
+      "grade": "attestable"
+    },
+    {
+      "label": "rpi:dus",
+      "grade": "attestable"
+    },
+    {
+      "label": "rpi:serial",
+      "grade": "fused"
+    },
+    {
+      "label": "atecc:serial",
+      "grade": "attestable"
+    },
+    {
+      "label": "se050:id",
+      "grade": "attestable"
+    },
+    {
+      "label": "esp32:efuse",
+      "grade": "attestable"
+    },
+    {
+      "label": "mcu:uid",
+      "grade": "fused"
+    },
+    {
+      "label": "smbios:platform",
+      "grade": "fused"
+    }
+  ]
+}
