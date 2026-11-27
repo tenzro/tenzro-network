@@ -41,7 +41,7 @@ cargo build --release -p tenzro-node
 
 Output:
 ```
-tenzro-node 0.2.1
+tenzro-node 0.2.2
 ```
 
 ## Running Your First Node

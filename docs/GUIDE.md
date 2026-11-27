@@ -119,7 +119,7 @@ for the light tier.
 | Linux aarch64 | `tenzro-node-linux-aarch64-cpu.tar.gz` | `tenzro-node-linux-aarch64-cuda.tar.gz` (NVIDIA) |
 | Windows x86_64 | `tenzro-node-windows-x86_64-cpu.zip` | `tenzro-node-windows-x86_64-cuda.zip` (NVIDIA) |
 | macOS Apple silicon | | `tenzro-node-macos-aarch64-metal.tar.gz` |
-| macOS Intel | `tenzro-node-macos-x86_64-cpu.tar.gz` | |
+| macOS Intel | not in 0.2.2 | |
 
 Installers for each platform (MSI, pkg, install script, deb, rpm) are described in [INSTALL.md](INSTALL.md).
 

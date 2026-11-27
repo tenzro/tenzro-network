@@ -14,7 +14,7 @@ param(
     [string]$UpgradeMsi = '',
     [string]$InstallDir = 'C:\tmp\tz-msi-test\',
     [string]$LogDir = '',
-    [string]$Version = '0.2.1'
+    [string]$Version = '0.2.2'
 )
 
 $ErrorActionPreference = 'Stop'
