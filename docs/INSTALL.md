@@ -11,8 +11,9 @@ Native packages are pre-release and unsigned (see "Unsigned installers" below).
 
 | You use | Do this | Then |
 |---|---|---|
-| Windows 10 and 11 (x86-64) | Open `tenzro-<version>-windows-x86_64-cuda.msi` | Open a new terminal and run `tenzro` |
-| macOS 11 and newer | Open `tenzro-<version>-macos.pkg` | Open a new terminal and run `tenzro` |
+| Windows 10 and 11 (x86-64), with an NVIDIA GPU | Open `tenzro-<version>-windows-x86_64-cuda.msi` | Open a new terminal and run `tenzro` |
+| Windows 10 and 11 (x86-64), without one | Open `tenzro-<version>-windows-x86_64-cpu.msi` | Open a new terminal and run `tenzro` |
+| macOS 14 and newer on Apple silicon | Open `tenzro-<version>-macos.pkg` | Open a new terminal and run `tenzro` |
 | Linux | Run `curl -fsSL https://downloads.tenzro.com/install.sh \| sh` | Run `tenzro` |
 
 Verified: the Windows MSI, the macOS package and the Linux arm64 install script (see
@@ -26,8 +27,8 @@ Package details, verifying a download by hand, silent installs and the manual ar
 |---|---|---|
 | Debian, Ubuntu | `tenzro-cpu_<version>_amd64.deb` or `tenzro-cuda_<version>_arm64.deb` | `tenzro`, `tenzro-node`, `tenzro-check` on your PATH |
 | Fedora, RHEL and relatives | `tenzro-cpu-<version>.x86_64.rpm` or `tenzro-cuda-<version>.aarch64.rpm` | the same |
-| Windows 10 and 11 (x86-64) | `tenzro-<version>-windows-x86_64-cuda.msi` | the same, a Start Menu entry, an uninstaller |
-| macOS 11 and newer | `tenzro-<version>-macos.pkg` (Apple silicon and Intel in one file) | the same, a launcher in Applications |
+| Windows 10 and 11 (x86-64) | `tenzro-<version>-windows-x86_64-cuda.msi` (NVIDIA GPU) or `tenzro-<version>-windows-x86_64-cpu.msi` | the same, a Start Menu entry, an uninstaller |
+| macOS 14 and newer, Apple silicon | `tenzro-<version>-macos.pkg` | the same, a launcher in Applications |
 
 Every installer repackages the exact files of the signed release archive it names (the package
 records that archive's SHA-256 and the release commit). Nothing is rebuilt. The package files are
@@ -138,7 +139,7 @@ Open `tenzro-<version>-macos.pkg` and follow the installer, or:
 sudo installer -pkg tenzro-0.2.2-macos.pkg -target /
 ```
 
-One file serves both kinds of Mac: Apple silicon gets the Metal build, Intel gets the CPU build. It installs
+The 0.2.2 package is for Apple silicon Macs (the Metal build) on macOS 14 and newer; macOS 27 runs on Apple silicon only. An Intel package (the CPU build, for Intel Macs on macOS 14 to 26) follows. It installs
 into `/usr/local/lib/tenzro` with links in `/usr/local/bin`, plus a launcher called **Tenzro** in Applications. The
 launcher opens Terminal, shows the hardware check and starts `tenzro setup`. macOS's installer has no "run after install"
 checkbox, so the last page tells you to open that launcher or run `tenzro setup`.
@@ -202,5 +203,20 @@ remove the warnings.
 ### Shipping the node inside your own signed installer
 
 Anyone can use `macos-release.sh` with their own `TENZRO_MACOS_*` identities: your Developer ID Application and Installer certificates and your notary profile, run through `setup`, then `release`. Tenzro signs and approves nothing, and you hold no keys: a user's keys are made in that Mac's Secure Enclave on first run and never leave it. The node does not check who signed it; a network's trust in a machine rests on its hardware key, never on the code-signing identity.
+
+### The Secure Enclave key, unsigned or signed
+
+The node keeps its device key in the Secure Enclave through CryptoKit, which hands back a wrapped key blob that the node stores in a file; it does not use the keychain, so it needs no provisioning profile and no entitlement (Apple: "There is no Secure Enclave entitlement"). That is why an unsigned node works, and an operator may run either way:
+
+- **Unsigned (the binary Tenzro provides).** Best effort: on the systems tried the node creates its key on first start and reopens it on every start, but Apple documents no support for a Secure Enclave key from an unsigned program, so it may stop working on an OS update. If it cannot open its key it stops with an explicit error and never makes a new one.
+- **Signed by a developer, the option operators can rely on.** A distribution from a developer such as Praecise, signed with their Developer ID (hardened runtime, no entitlements, as `macos-release.sh` does) and checked with the script below on a Mac before it ships. Each developer runs the check with their own identity; the result is theirs to publish.
+
+Apple does not document whether the blob depends on who signed the binary, so the claim is checked, not assumed. `scripts/release/verify-enclave-signing.sh` runs on a Mac with a Secure Enclave (not a VM) and, for each pair of signing states (ad-hoc, and your Developer ID, in both orders), makes a key under the first, opens and signs with it, re-signs the binary as the second, and opens and signs again. It ends with `ENCLAVE SIGNING PASS` or `ENCLAVE SIGNING FAIL`. Run it with your identity before you ship a signed package.
+
+Verified result: on 26 Nov 2026, on a MacBook Air (M2) with macOS 26.6.2, signed in at the desktop, all four pairs passed (unsigned to unsigned, unsigned to a Developer ID, a Developer ID to unsigned, and a Developer ID to the same one, hardened runtime, no entitlements): a key made under the first state opened and signed under the second. The check runs the key code in a test program built from the same crate as the node, not the shipped node binary, and it must run in the desktop session: over SSH the key creation and the signing both failed. Other macOS versions, Intel Macs and a node run as a launchd daemon have not been checked.
+
+If a key blob cannot be opened (a different Mac, or a change the check would have caught), the node stops with an explicit error; it never makes a new key silently, so the machine identity cannot change without you knowing. The recovery is the identity-key change (`tenzro-node identity-key`) or re-enrolment.
+
+The floor is macOS 14. macOS 27 runs on Apple silicon only; the Intel archive serves Intel Macs on macOS 14 to 26.
 
 Trade-off to tell your users: an Enclave key is not bound to the signer. The key blob in `~/Library/Application Support/Tenzro/device-keys` only unwraps on that Mac's Secure Enclave, but any local program that can read the blob can ask the Enclave to use it. A key made with user presence (`userPresence`) adds a biometric or password prompt for each use.
