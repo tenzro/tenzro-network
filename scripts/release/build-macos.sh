@@ -33,6 +33,10 @@ stage=$(mktemp -d)/$name
 trap 'rm -rf "$src" "$(dirname "$stage")"' EXIT
 git archive --format=tar "$commit" | tar -x -C "$src"
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo/target-release/macos}
+# The node reaches the Secure Enclave through a CryptoKit shim built for macOS 14 (the first release with the
+# surface it uses), so the binaries say macOS 14 is their floor: an older Mac is refused cleanly at launch.
+# macOS 27 runs Apple silicon only; the Intel archive serves the Intel Macs on macOS 14 to 26.
+export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}
 # ONNX Runtime from the pinned library (packaging/onnxruntime.tsv), checked by hash; nothing is fetched by the
 # build. Intel macOS has no prebuilt runtime and loads one at run time, so it links none.
 if [ "$target" = aarch64-apple-darwin ]; then
@@ -50,6 +54,14 @@ mkdir -p "$dbg"
 for b in tenzro-node tenzro; do dsymutil "$stage/bin/$b" -o "$dbg/$b.dSYM" && strip -S "$stage/bin/$b"; done
 release_network_profile "$src" "$stage"
 release_console "$src" "$stage"
+# The app uses the glass button styles of the macOS 26 SDK where the system has them (and runs from
+# macOS 14), so it is built with Xcode 26 or newer. A runner whose default Xcode is older has the
+# newer ones installed beside it: use the newest.
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+  xc=$(ls -d /Applications/Xcode_2[6-9]*.app 2>/dev/null | sort -V | tail -n 1)
+  if [ -n "$xc" ]; then DEVELOPER_DIR="$xc/Contents/Developer"; export DEVELOPER_DIR; fi
+fi
+echo "Xcode: $(xcode-select -p) (SDK $(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo unknown))"
 # Tenzro Control, the desktop app the installer puts in /Applications, for the
 # same processor.
 app=$(sh "$src/apps/tenzro-control/apple/bundle.sh" "$([ "$arch" = x86_64 ] && echo macos-x86_64 || echo macos)" | tail -n 1)

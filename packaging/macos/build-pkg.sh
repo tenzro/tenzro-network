@@ -2,7 +2,10 @@
 # Build one macOS installer package from the two signed macOS release archives,
 # repackaging the exact bytes. macOS only (pkgbuild, productbuild, otool).
 #
-#   build-pkg.sh <tenzro-node-macos-aarch64-metal.tar.gz> <tenzro-node-macos-x86_64-cpu.tar.gz> <out-dir>
+#   build-pkg.sh <tenzro-node-macos-aarch64-metal.tar.gz> <tenzro-node-macos-x86_64-cpu.tar.gz | none> <out-dir>
+#
+# With "none" for the Intel archive the package is for Apple silicon only (macOS 27 runs on Apple silicon only,
+# and the Intel archive can follow): its distribution offers the Metal build and refuses Intel Macs.
 #
 # One tenzro-<version>-macos.pkg holds both payloads and installs the one that
 # matches the Mac (Apple silicon: Metal build; Intel: CPU build).
@@ -21,6 +24,7 @@ set -euo pipefail
 [ "$(uname -s)" = Darwin ] || { echo "REFUSING: pkgbuild and productbuild only run on macOS" >&2; exit 1; }
 arm=${1:?usage: build-pkg.sh <aarch64-metal.tar.gz> <x86_64-cpu.tar.gz> <out-dir>}
 x86=${2:?}; out=${3:?}
+arm_only=0; [ "$x86" = none ] && arm_only=1
 here=$(cd "$(dirname "$0")" && pwd)
 pk=$(cd "$here/.." && pwd); repo=$(cd "$pk/.." && pwd)
 mkdir -p "$out"; out=$(cd "$out" && pwd)
@@ -70,14 +74,15 @@ EOF
         --scripts "$here/scripts" --install-location / --ownership recommended "$w/components/tenzro-$flavour.pkg" >/dev/null
 }
 stage "$arm" metal com.tenzro.node.metal
-stage "$x86" cpu com.tenzro.node.cpu
+[ "$arm_only" = 1 ] || stage "$x86" cpu com.tenzro.node.cpu
 
-minos=$(printf '%s\n%s\n' "$(cat "$w/minos-metal")" "$(cat "$w/minos-cpu")" | sort -V | head -1)
+if [ "$arm_only" = 1 ]; then minos=$(cat "$w/minos-metal"); else minos=$(printf '%s\n%s\n' "$(cat "$w/minos-metal")" "$(cat "$w/minos-cpu")" | sort -V | head -1); fi
 minos=${minos:-11.0}
 mkdir -p "$w/resources"
 cp "$here/resources/welcome.html" "$here/resources/conclusion.html" "$w/resources/"
 cp "$repo/LICENSE" "$w/resources/license.txt"
-sed "s/@VERSION@/$version/g; s/@MINOS@/$minos/g" "$here/distribution.xml.in" > "$w/distribution.xml"
+tmpl=$here/distribution.xml.in; [ "$arm_only" = 1 ] && tmpl=$here/distribution-arm64.xml.in
+sed "s/@VERSION@/$version/g; s/@MINOS@/$minos/g" "$tmpl" > "$w/distribution.xml"
 pkg=$out/tenzro-$version-macos.pkg
 sign=()
 [ -z "${TENZRO_MACOS_INSTALLER_IDENTITY:-}" ] || sign=(--sign "$TENZRO_MACOS_INSTALLER_IDENTITY" --timestamp)

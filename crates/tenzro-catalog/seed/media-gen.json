@@ -318,7 +318,7 @@
         "default_width": 2048,
         "description": "Qwen-Image-2.1 unified text-to-image and multi-reference editing, 7B DiT. Qwen Research License: non-commercial, so never charged for",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "qwen-image",
         "gguf_file": null,
@@ -475,7 +475,7 @@
         "default_width": 1328,
         "description": "Qwen-Image-Edit instruction-driven image editing, multi-reference",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "qwen-image",
         "gguf_file": null,
@@ -610,7 +610,7 @@
         "default_width": 1024,
         "description": "Z-Image Turbo few-step text-to-image, 9 steps without guidance",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "z-image",
         "gguf_file": null,
@@ -724,7 +724,7 @@
         "default_width": 1024,
         "description": "FLUX.2 klein 4B text-to-image and editing, runs on consumer GPUs",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux2",
         "gguf_file": null,
@@ -839,7 +839,7 @@
         "default_width": 1024,
         "description": "FLUX.2 klein base 4B — undistilled text-to-image and editing",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux2",
         "gguf_file": null,
@@ -1131,6 +1131,27 @@
     "capability_priors": {},
     "components": [
       {
+        "path": "ae.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3",
+        "size": 336211292
+      },
+      {
+        "path": "config.json",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "c4fc638a9618e8ddc25f013c009be4d2aa9bd631d89dcf45149a377dd472c67d",
+        "size": 828
+      },
+      {
+        "path": "model.safetensors",
+        "repo": "black-forest-labs/flux-3-image-klein",
+        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
+        "sha256": "c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c",
+        "size": 11097404512
+      },
+      {
         "path": "modular_model_index.json",
         "repo": "black-forest-labs/flux-3-image-klein",
         "revision": "337337621b8526e120f2275d250242f4a6bedd75",
@@ -1220,48 +1241,6 @@
         "revision": "337337621b8526e120f2275d250242f4a6bedd75",
         "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
         "size": 2776833
-      },
-      {
-        "path": "transformer/config.json",
-        "repo": "black-forest-labs/flux-3-image-klein",
-        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
-        "sha256": "e748b382508f3171d1f4039688b23d1f809aebe4507b3ed5a29bca01b4b58877",
-        "size": 436
-      },
-      {
-        "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
-        "repo": "black-forest-labs/flux-3-image-klein",
-        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
-        "sha256": "4f01de41470090586d7a25aa4aec93987724eae45db45b68de2b3f566f438a8b",
-        "size": 9907529352
-      },
-      {
-        "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
-        "repo": "black-forest-labs/flux-3-image-klein",
-        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
-        "sha256": "6f6217ab2c7ce5ef177ec202f79d4c2ddab78111c4645030c8828ec615d5f02c",
-        "size": 1189878064
-      },
-      {
-        "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
-        "repo": "black-forest-labs/flux-3-image-klein",
-        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
-        "sha256": "cc3ba9b73dc3f10ff877dea398c1d48455a4b2164da5cbb7d92b4bb4b66040cc",
-        "size": 37951
-      },
-      {
-        "path": "vae/config.json",
-        "repo": "black-forest-labs/flux-3-image-klein",
-        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
-        "sha256": "66564b3cd3f3f3ce5ce3cd4df72f1de883b242c7f338e27d420fe5ddcb0a6ed9",
-        "size": 808
-      },
-      {
-        "path": "vae/diffusion_pytorch_model.safetensors",
-        "repo": "black-forest-labs/flux-3-image-klein",
-        "revision": "337337621b8526e120f2275d250242f4a6bedd75",
-        "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
-        "size": 336213556
       }
     ],
     "gated": true,
@@ -1288,8 +1267,9 @@
         "default_num_frames": null,
         "default_steps": 16,
         "default_width": 1024,
-        "description": "FLUX 3 Image Klein 5.6B, distilled, bfloat16: 16 flow-map steps, no guidance, 1024x1024 by default, up to 4 MP. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet. Vendor peak memory at 1024x1024: 31 GB.",
+        "description": "FLUX 3 Image Klein 5.6B, distilled, bfloat16: 16 flow-map steps, no guidance, 1024x1024 by default, up to 4 MP. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Runs on the native engine. Vendor peak memory at 1024x1024: 31 GB.",
         "distilled": false,
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux3",
         "gguf_file": null,
@@ -1306,8 +1286,8 @@
         "name": "FLUX 3 Image Klein",
         "parameters": "5.6B",
         "pipeline_class": "Flux3DistilledModularPipeline",
-        "size_bytes": 20320946362,
-        "status": "planned",
+        "size_bytes": 20320902827,
+        "status": "native",
         "transformer_class": null
       }
     }
@@ -1369,8 +1349,9 @@
         "default_num_frames": null,
         "default_steps": 16,
         "default_width": 1024,
-        "description": "FLUX 3 Image Klein 5.6B, distilled, FP8 transformer (variants/fp8r) with the bfloat16 entry's text encoder and autoencoder. Float8 weights with per-row scales. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet. Vendor peak memory at 1024x1024: 26 GB.",
+        "description": "FLUX 3 Image Klein 5.6B, distilled, FP8 transformer (variants/fp8r) with the bfloat16 entry's text encoder and autoencoder. Float8 weights with per-row scales. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Runs on the native engine. Vendor peak memory at 1024x1024: 26 GB.",
         "distilled": false,
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux3",
         "gguf_file": null,
@@ -1388,7 +1369,7 @@
         "parameters": "5.6B",
         "pipeline_class": "Flux3DistilledModularPipeline",
         "size_bytes": 15494453843,
-        "status": "planned",
+        "status": "native",
         "transformer_class": null
       }
     },
@@ -1398,7 +1379,7 @@
         "parts": [
           "modular_model_index.json",
           "text_encoder",
-          "vae"
+          "ae.safetensors"
         ]
       }
     ]
@@ -1460,8 +1441,9 @@
         "default_num_frames": null,
         "default_steps": 16,
         "default_width": 1024,
-        "description": "FLUX 3 Image Klein 5.6B, distilled, NVFP4 transformer (variants/nvfp4) with the bfloat16 entry's text encoder and autoencoder. 4-bit NVFP4 weights, which need a GPU with FP4 tensor cores. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet. Vendor peak memory at 1024x1024: 25 GB.",
+        "description": "FLUX 3 Image Klein 5.6B, distilled, NVFP4 transformer (variants/nvfp4) with the bfloat16 entry's text encoder and autoencoder. 4-bit NVFP4 weights, which need a GPU with FP4 tensor cores. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Runs on the native engine. Vendor peak memory at 1024x1024: 25 GB.",
         "distilled": false,
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux3",
         "gguf_file": null,
@@ -1479,7 +1461,7 @@
         "parameters": "5.6B",
         "pipeline_class": "Flux3DistilledModularPipeline",
         "size_bytes": 14501182292,
-        "status": "planned",
+        "status": "native",
         "transformer_class": null
       }
     },
@@ -1489,7 +1471,7 @@
         "parts": [
           "modular_model_index.json",
           "text_encoder",
-          "vae"
+          "ae.safetensors"
         ]
       }
     ]
@@ -1656,8 +1638,9 @@
         "default_num_frames": null,
         "default_steps": 50,
         "default_width": 1024,
-        "description": "FLUX 3 Image Klein Base 5.6B, undistilled, bfloat16: 50 steps at guidance 4.0, built for fine-tuning and research. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Planned: no native engine port yet.",
+        "description": "FLUX 3 Image Klein Base 5.6B, undistilled, bfloat16: 50 steps at guidance 4.0, built for fine-tuning and research. Text-to-image and editing from up to 10 reference images (image2image, edit sources read in order); elements are placed with bounding boxes written into the prompt on a 0-1000 grid. The model takes full scene captions: its card recommends writing them with the prompt upsampler flux-3-image-klein-pup, which callers run themselves. Text encoder Qwen3-VL-4B-Instruct. Runs on the native engine.",
         "distilled": false,
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux3",
         "gguf_file": null,
@@ -1675,7 +1658,7 @@
         "parameters": "5.6B",
         "pipeline_class": "Flux3ModularPipeline",
         "size_bytes": 20300498668,
-        "status": "planned",
+        "status": "native",
         "transformer_class": null
       }
     }
@@ -1978,7 +1961,7 @@
         "default_width": 1280,
         "description": "Wan 2.2 hybrid text/image-to-video at 720P 24fps on a single 24 GB GPU; also rolls forward as a prompt-driven world session",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "wan2.2",
         "gguf_file": null,
@@ -2248,7 +2231,7 @@
         "default_width": 768,
         "description": "LTX-2.3 22B distilled text-to-video with a synchronized soundtrack: Q5_K_M transformer, 8-step distilled schedule at half size, latent upsampling and a 3-step refinement, no guidance",
         "distilled": true,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "ltx2",
         "gguf_file": "distilled-1.1/ltx-2.3-22b-distilled-1.1-UD-Q5_K_M.gguf",
@@ -2401,7 +2384,7 @@
         "default_width": 768,
         "description": "LTX-2.3 22B text-to-video with a synchronized soundtrack, 30 steps with prompt, spatio-temporal and modality guidance, in bf16",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "ltx2",
         "gguf_file": null,
@@ -2743,7 +2726,7 @@
         "default_width": 1,
         "description": "ACE-Step v1.5 XL Turbo text-to-music: 48 kHz stereo, prompt plus optional lyrics, guidance-distilled to 8 steps.",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "acestep",
         "gguf_file": null,
@@ -2871,7 +2854,7 @@
         "default_width": 1,
         "description": "ACE-Step v1.5 XL SFT text-to-music: 48 kHz stereo, the supervised fine-tune, 50 steps at guidance 7.0.",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "acestep",
         "gguf_file": null,
@@ -2999,7 +2982,7 @@
         "default_width": 1,
         "description": "ACE-Step v1.5 XL Base text-to-music: 48 kHz stereo, the un-fine-tuned base for adaptation, 50 steps at guidance 7.0.",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "acestep",
         "gguf_file": null,
@@ -4013,7 +3996,7 @@
         "default_width": 832,
         "description": "NVIDIA Cosmos3 Edge world foundation model, 4B, image-to-video at 480p/121 frames. Ungated, commercial use permitted. Takes JSON-structured prompts rather than plain text",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "cosmos3",
         "gguf_file": null,
@@ -4088,7 +4071,7 @@
         "default_width": 384,
         "description": "DeepSeek Janus-Pro 1B unified model: its language backbone writes a 24x24 grid of image tokens under classifier-free guidance, one token per step, and a VQ decoder turns the grid into a 384x384 image. The backbone runs from a GGUF of its language model (f16), the image head and decoder from the checkpoint.",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "janus",
         "gguf_file": "Janus-Pro-1B.f16.gguf",
@@ -4359,7 +4342,7 @@
         "default_width": 512,
         "description": "FLUX 3 world-action policy for the SO-101 arm: two cameras side by side on a 256x512 canvas, 42-step delta-action chunks at 30 Hz, 4 Euler steps. Under the FLUX Kommunity License: a node serves it once its operator has accepted flux-kommunity-1.0; the weights are gated at their origin.",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux3-action",
         "gguf_file": null,
@@ -4483,7 +4466,7 @@
         "default_width": 736,
         "description": "FLUX 3 world-action policy for the DROID platform: three cameras on a 544x736 canvas, 32-step absolute-action chunks at 15 Hz, 4 UniPC steps. Under the FLUX Kommunity License: a node serves it once its operator has accepted flux-kommunity-1.0; the weights are gated at their origin.",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "flux3-action",
         "gguf_file": null,
@@ -4598,7 +4581,7 @@
         "default_width": 736,
         "description": "NVIDIA Cosmos3 Edge world-action policy for the DROID platform: one observation image plus an instruction to a 32-step action chunk (10 values per step: end-effector pose and gripper) with its rollout frames, at 15 Hz. Ungated, commercial use permitted; the commercially servable policy entry. Observation canvases are the action resolution-tier canvases, for example 256x256 (tier 256) or 736x544 (tier 480).",
         "distilled": false,
-        "engine_rev": "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021",
+        "engine_rev": "eca8fb1182841531a6d587b284c761d8d06210b8",
         "expert_pair": null,
         "family": "cosmos3",
         "gguf_file": null,

@@ -36,6 +36,12 @@ WORKDIR /build
 ENV CC=clang
 ENV CXX=clang++
 ENV ROCM_PATH=/opt/rocm
+# Fetch git dependencies with the git command line (libgit2 fails with an SSL error from inside this container) and retry.
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV CARGO_NET_RETRY=10
+ENV CARGO_HTTP_TIMEOUT=600
+# The toolchain is installed above; naming it stops rustup re-syncing rust-toolchain.toml over the network on the first rustc call.
+ENV RUSTUP_TOOLCHAIN=1.99.1
 
 # Target GPU architectures for the ggml HIP kernels (CMAKE_HIP_ARCHITECTURES).
 # gfx90a = MI210/MI250, gfx942 = MI300X/MI325X, gfx1100 = RX 7900 XTX / RDNA3,
@@ -64,9 +70,17 @@ RUN python3 scripts/release/fetch-onnxruntime.py --target "$(uname -m)-unknown-l
       --prefix /opt/onnxruntime --link-at /opt/onnxruntime/pinned
 ENV ORT_LIB_LOCATION=/opt/onnxruntime/pinned
 
+# Keep line tables and symbols through the cargo build; the debug files are split off
+# and the shipped binary loses its debug sections in the next step (function names stay), as in Dockerfile.cuda.
+ENV CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+
 RUN cargo build --release --locked -p tenzro-node --features tenzro-node/rocm && \
     cargo build --release --locked -p tenzro-cli && \
     cp /opt/onnxruntime/pinned/libonnxruntime_providers_*.so target/release/
+
+# Split the debug information off: the shipped binaries keep their function names, the debug files
+# (matched by build-id and .gnu_debuglink) are collected for crash symbolisation.
+RUN set -eux; mkdir -p /debug; \n    for b in tenzro-node tenzro; do \n      objcopy --only-keep-debug target/release/$b /debug/$b.debug; \n      strip --strip-debug target/release/$b; \n      objcopy --add-gnu-debuglink=/debug/$b.debug target/release/$b; \n    done
 
 
 # Stage 2: Runtime
@@ -90,6 +104,7 @@ COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
 # ONNX Runtime loads its MIGraphX provider from the binary's folder at run time.
 COPY --from=builder /build/target/release/libonnxruntime_providers_shared.so /build/target/release/libonnxruntime_providers_migraphx.so /usr/local/bin/
 COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+COPY --from=builder /debug /usr/local/share/tenzro-debug
 
 # Create data directories
 # One root for everything on the persistent volume. `TENZRO_HOME` moves the

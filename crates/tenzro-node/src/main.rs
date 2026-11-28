@@ -3215,6 +3215,7 @@ fn run_tpm_delete_handle(_handle: &str) -> Result<()> {
     run_tpm_provision()
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn run_tpm_check(roots: &[PathBuf], out: Option<&std::path::Path>) -> Result<()> {
     use tenzro_node::machine_conformance::{admissible, requirements};
     let other = |e: String| error::NodeError::Other(e);

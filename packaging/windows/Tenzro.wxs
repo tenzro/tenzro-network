@@ -36,13 +36,13 @@
            Language="1033"
            InstallerVersion="500">
 
-    <SummaryInformation Description="Tenzro command line and node (CUDA build)" Keywords="Tenzro" />
+    <SummaryInformation Description="Tenzro command line and node ($(var.Flavour) build)" Keywords="Tenzro" />
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of Tenzro is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="$(Compression)" />
 
     <!-- Add/Remove Programs -->
-    <Property Id="ARPCOMMENTS" Value="Tenzro command line and node, CUDA build. Installs no service and starts nothing." />
+    <Property Id="ARPCOMMENTS" Value="Tenzro command line and node, $(var.Flavour) build. Installs no service and starts nothing." />
     <Property Id="ARPURLINFOABOUT" Value="https://tenzro.com" />
     <Property Id="ARPNOREPAIR" Value="1" />
 

@@ -21,7 +21,8 @@ param(
     [string]$PublicCommit = 'unknown',
     [string]$LicensePath = '',
     [string]$NoticePath = '',
-    [ValidateSet('low', 'medium', 'high')][string]$Compression = 'high'
+    [ValidateSet('low', 'medium', 'high')][string]$Compression = 'high',
+    [ValidateSet('cuda', 'cpu')][string]$Flavour = 'cuda'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -99,8 +100,13 @@ function Assert-Console([string[]]$Console, [string[]]$ConsoleSrc) {
 }
 # console check end
 Assert-Console $consoleFiles $consoleSrcFiles
-foreach ($need in 'bin\onnxruntime_providers_shared.dll', 'bin\onnxruntime_providers_cuda.dll') {
-    if ($libFiles -notcontains $need) { throw "the CUDA archive has no $need" }
+$FlavourLabel = if ($Flavour -eq 'cuda') { 'CUDA' } else { 'CPU' }
+if ($Flavour -eq 'cuda') {
+    foreach ($need in 'bin\onnxruntime_providers_shared.dll', 'bin\onnxruntime_providers_cuda.dll') {
+        if ($libFiles -notcontains $need) { throw "the CUDA archive has no $need" }
+    }
+} elseif ($libFiles | Where-Object { $_ -match 'providers_cuda' }) {
+    throw 'a CUDA archive was given with -Flavour cpu'
 }
 $exeSha = @{}
 foreach ($f in $files) { $exeSha[$f] = Get-Sha256 (Join-Path $payload $f) }
@@ -128,7 +134,7 @@ foreach ($ch in $lic.ToCharArray()) {
 
 # Provenance
 $prov = @"
-Tenzro $Version (Windows x86_64, CUDA build)
+Tenzro $Version (Windows x86_64, $FlavourLabel build)
 
 This package repackages the released binaries unchanged.
 
@@ -146,11 +152,11 @@ as described in the release verification guide before installing.
 
 This installer starts no service and joins no network. It adds the bin
 folder to PATH only if you choose that. Run tenzro-check to test whether
-this machine can run the CUDA build.
+this machine can run the $FlavourLabel build.
 "@
 [IO.File]::WriteAllText((Join-Path $stage 'PROVENANCE.txt'), ($prov -replace "`r?`n", "`r`n"), [Text.Encoding]::ASCII)
 
-$productCode = '{' + (New-NameGuid $UpgradeCode "tenzro-windows-x86_64-cuda-$Version") + '}'
+$productCode = '{' + (New-NameGuid $UpgradeCode "tenzro-windows-x86_64-$Flavour-$Version") + '}'
 
 # The libraries and network profiles differ from archive to archive, so their
 # components are written here and compiled with Tenzro.wxs.
@@ -221,7 +227,7 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Dir
 Remove-Item -LiteralPath $OutMsi -ErrorAction SilentlyContinue
 & wix build -arch x64 -o $OutMsi `
     -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
-    -d "Version=$Version" -d "ProductCode=$productCode" -d "Compression=$Compression" `
+    -d "Version=$Version" -d "Flavour=$FlavourLabel" -d "ProductCode=$productCode" -d "Compression=$Compression" `
     -d "PayloadDir=$payload" -d "StageDir=$stage" -d "ScriptDir=$here" `
     -d "SourceCommit=$SourceCommit" -d "PublicCommit=$PublicCommit" -d "ArchiveSha256=$zipSha" `
     (Join-Path $here 'Tenzro.wxs') $payloadWxs

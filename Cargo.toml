@@ -509,16 +509,16 @@ hf-hub = { version = "0.4", features = ["tokio"] }
 # Praecise Engine (github.com/Praecise/praecise-engine): the batch engine and its
 # llama.cpp bindings, a third-party dependency pinned by commit. Upgrading it is
 # bumping this one rev (all six crates come from the same commit).
-llama-cpp-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
-llama-cpp-sys-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
+llama-cpp-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "eca8fb1182841531a6d587b284c761d8d06210b8" }
+llama-cpp-sys-2 = { git = "https://github.com/Praecise/praecise-engine", rev = "eca8fb1182841531a6d587b284c761d8d06210b8" }
 # No features here: without `bundled-llama` praecise-runtime is the engine-free
 # part (admission, commitments, KV blob types). tenzro-model's `engine` feature
 # turns on `bundled-llama` and `image-gen`.
-praecise-runtime = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
-praecise-host = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
-praecise-diffusion = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
-praecise-train = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021" }
-praecise-onnx = { git = "https://github.com/Praecise/praecise-engine", rev = "57379ccf8ca5ba6496e97ee7ceb37c2ca2074021", default-features = false }
+praecise-runtime = { git = "https://github.com/Praecise/praecise-engine", rev = "eca8fb1182841531a6d587b284c761d8d06210b8" }
+praecise-host = { git = "https://github.com/Praecise/praecise-engine", rev = "eca8fb1182841531a6d587b284c761d8d06210b8" }
+praecise-diffusion = { git = "https://github.com/Praecise/praecise-engine", rev = "eca8fb1182841531a6d587b284c761d8d06210b8" }
+praecise-train = { git = "https://github.com/Praecise/praecise-engine", rev = "eca8fb1182841531a6d587b284c761d8d06210b8" }
+praecise-onnx = { git = "https://github.com/Praecise/praecise-engine", rev = "eca8fb1182841531a6d587b284c761d8d06210b8", default-features = false }
 
 ndarray = "0.16"
 # Safetensors parsing for MoE per-expert weight blobs and gating networks.

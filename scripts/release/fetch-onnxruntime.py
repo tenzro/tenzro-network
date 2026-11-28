@@ -125,7 +125,7 @@ def link(dest, at=CHECKOUT_LINK):
     elif os.path.exists(at):
         raise Refused(f"{at} exists and is not a link; remove it and fetch again")
     if os.name == "nt":
-        subprocess.run(["cmd", "/c", "mklink", "/J", at, dest], check=True, capture_output=True)
+        subprocess.run(f'cmd /c mklink /J "{at}" "{dest}"', shell=True, check=True, capture_output=True)
     else:
         os.symlink(dest, at)
     return at

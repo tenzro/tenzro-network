@@ -11,9 +11,9 @@ a=${1:?identity A (or -)}; b=${2:?identity B (or -)}
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
 export TENZRO_DEVICE_KEY_DIR=$t/keys
-(cd "$repo" && cargo build --locked -p tenzro-device-key --example enclave_probe --target-dir "$t/target")
+(cd "$repo" && cargo build --locked -p tenzro-device-key --example enclave_probe --target-dir "${ENCLAVE_PROBE_TARGET:-$t/target}")
 probe=$t/enclave_probe
-cp "$t/target/debug/examples/enclave_probe" "$probe"
+cp "${ENCLAVE_PROBE_TARGET:-$t/target}/debug/examples/enclave_probe" "$probe"
 label=resign-test-$$
 step() { echo "step: $*"; }
 step "sign with A"; codesign --force --options runtime --sign "$a" "$probe"

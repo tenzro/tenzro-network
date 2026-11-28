@@ -255,6 +255,19 @@ Invoke-Step "control-ffi" "cargo" @("build", "--release", "--locked",
 $native = Join-Path $control "windows\native\x64"
 New-Item -ItemType Directory -Force -Path $native | Out-Null
 Copy-Item (Join-Path $controlTarget "release\tenzro_control.dll") $native
+# The window icon is generated from web/icon.svg and is not committed (.gitignore), so a
+# fresh export of the commit has none and the C# compiler stops on it.
+$icon = Join-Path $control "windows\icon.ico"
+if (-not (Test-Path $icon)) {
+    $shim = Join-Path $env:TEMP "tz-py3shim"
+    New-Item -ItemType Directory -Force -Path $shim | Out-Null
+    [IO.File]::WriteAllText((Join-Path $shim "python3"), "#!/bin/sh`nexec python `"`$@`"`n")
+    $env:PATH = "$shim;$env:PATH"
+    $sh = Join-Path $env:ProgramFiles "Git\bin\sh.exe"
+    if (-not (Test-Path $sh)) { throw "REFUSING: Git for Windows sh.exe not found; it makes the window icon" }
+    & $sh (Join-Path $control "tools\icons.sh") windows (Join-Path $control "windows")
+    if (-not (Test-Path $icon)) { throw "REFUSING: icons.sh left no icon.ico" }
+}
 Invoke-Step "control-app" "dotnet" @("publish", (Join-Path $control "windows\TenzroControl.csproj"),
     "-c", "Release", "-r", "win-x64", "-p:Platform=x64", "--self-contained", "-o", (Join-Path $stage "control"))
 # Tenzro Control's text is English only, so of the Windows App SDK's resource

@@ -21,6 +21,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::token::LlamaToken;
 use parking_lot::Mutex;
+use praecise_diffusion::flux3::image::{Flux3Image, OutputSize};
 use praecise_diffusion::flux3::release::{
     PolicyRelease, RawObservation, ReleasedPolicy, frames_from_grid,
 };
@@ -116,6 +117,26 @@ fn edit_images(
     kind: MediaGenKind,
     inputs: &[(MediaGenInputRole, Vec<u8>)],
 ) -> Result<Vec<RgbImage>> {
+    edit_images_with(id, kind, inputs, prepare_reference)
+}
+
+/// [`edit_images`] with the references as decoded, for a pipeline that fits
+/// them itself (FLUX 3 Image Klein pads one reference to its canvas rather
+/// than cropping it).
+fn edit_images_decoded(
+    id: &str,
+    kind: MediaGenKind,
+    inputs: &[(MediaGenInputRole, Vec<u8>)],
+) -> Result<Vec<RgbImage>> {
+    edit_images_with(id, kind, inputs, decode_reference)
+}
+
+fn edit_images_with(
+    id: &str,
+    kind: MediaGenKind,
+    inputs: &[(MediaGenInputRole, Vec<u8>)],
+    prepare: fn(&[u8]) -> Result<RgbImage>,
+) -> Result<Vec<RgbImage>> {
     only_roles(
         id,
         inputs,
@@ -123,7 +144,7 @@ fn edit_images(
     )?;
     let images = inputs
         .iter()
-        .map(|(_, b)| prepare_reference(b))
+        .map(|(_, b)| prepare(b))
         .collect::<Result<Vec<_>>>()?;
     if kind == MediaGenKind::Image2Image && images.is_empty() {
         return Err(ModelError::InvalidModel(format!(
@@ -190,6 +211,7 @@ struct NativeModel {
 /// A loaded native pipeline, one variant per ported pipeline class.
 enum Pipeline {
     Flux2(Flux2Klein),
+    Flux3Image(Box<Flux3Image>),
     ZImage(ZImage),
     AceStep(AceStep),
     Cosmos3(Cosmos3),
@@ -373,6 +395,8 @@ impl std::fmt::Debug for MediaRuntime {
 /// `pipeline_class` is here; every other entry is `planned`.
 pub const NATIVE_PIPELINES: &[&str] = &[
     "Flux2KleinPipeline",
+    "Flux3DistilledModularPipeline",
+    "Flux3ModularPipeline",
     "ZImagePipeline",
     "AceStepPipeline",
     "Cosmos3OmniPipeline",
@@ -452,6 +476,14 @@ impl MediaRuntime {
                     let p = Flux2Klein::load(&files, opts).map_err(failed)?;
                     let d = (p.device().to_string(), p.resident_bytes(), p.is_distilled());
                     (Pipeline::Flux2(p), d.0, d.1, d.2)
+                }
+                // FLUX 3 Image Klein: the distilled flow map and the base model
+                // share one pipeline; a quantised entry's directory carries only
+                // its own transformer under variants/.
+                "Flux3DistilledModularPipeline" | "Flux3ModularPipeline" => {
+                    let p = Flux3Image::load_release(&files, opts).map_err(failed)?;
+                    let d = (p.device().to_string(), p.resident_bytes(), p.is_distilled());
+                    (Pipeline::Flux3Image(Box::new(p)), d.0, d.1, d.2)
                 }
                 "ZImagePipeline" => {
                     let p = ZImage::load(&files, opts).map_err(failed)?;
@@ -647,6 +679,29 @@ impl MediaRuntime {
                             _ => unreachable!("matched above"),
                         }
                         .map_err(engine)?;
+                        let t = image.timings;
+                        Ok(Rendered {
+                            bytes: encode_png(image.width, image.height, image.rgb)?,
+                            mime: "image/png".to_string(),
+                            seed,
+                            generation_ms: t.encode_ms + t.denoise_ms + t.decode_ms,
+                        })
+                    }
+                    (Pipeline::Flux3Image(f), MediaGenKind::Text2Image | MediaGenKind::Image2Image) => {
+                        let references = edit_images_decoded(&id, kind, &inputs)?;
+                        let req = Request {
+                            prompt: params.prompt.clone(),
+                            references,
+                            width: params.width,
+                            height: params.height,
+                            steps: params.steps,
+                            guidance_scale: params.guidance_scale,
+                            seed,
+                        };
+                        // References are prepared as the release's own code does
+                        // (one kept whole on a padded canvas, several fitted to
+                        // one megapixel each); the output size is the request's.
+                        let image = f.edit(&req, OutputSize::AsRequested).map_err(engine)?;
                         let t = image.timings;
                         Ok(Rendered {
                             bytes: encode_png(image.width, image.height, image.rgb)?,
@@ -1281,6 +1336,19 @@ fn fit_frame(bytes: &[u8], width: u32, height: u32) -> Result<RgbImage> {
 /// Side lengths of a reference image are a multiple of this.
 const REFERENCE_CELL: u32 = 16;
 
+/// Decode a reference image at its own size.
+fn decode_reference(bytes: &[u8]) -> Result<RgbImage> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| ModelError::InvalidModel(format!("input image: {e}")))?
+        .to_rgb8();
+    let (width, height) = img.dimensions();
+    Ok(RgbImage {
+        width,
+        height,
+        rgb: img.into_raw(),
+    })
+}
+
 /// Decode a reference image and bring it to a size the engine accepts: scaled
 /// down to at most [`MAX_REFERENCE_PIXELS`] keeping its aspect, then
 /// centre-cropped so both sides are a multiple of [`REFERENCE_CELL`].
@@ -1444,6 +1512,30 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(refused, ModelError::EngineConflict { .. }),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn flux3_image_klein_is_native_and_a_checkpoint_without_its_transformer_is_named() {
+        for class in ["Flux3DistilledModularPipeline", "Flux3ModularPipeline"] {
+            assert!(NATIVE_PIPELINES.contains(&class), "{class}");
+            assert_eq!(source_directories(class), 1, "{class}");
+        }
+        let rt = MediaRuntime::with_host(Arc::default(), CatalogCell::default());
+        let dir = std::env::temp_dir().join("tenzro-flux3-image-klein-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let refused = rt
+            .load(
+                "flux-3-image-klein",
+                "Flux3DistilledModularPipeline",
+                &[dir],
+                1,
+                Precision::Bf16,
+            )
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("model.safetensors"),
             "{refused}"
         );
     }

@@ -139,3 +139,80 @@ async fn janus_renders_an_image_from_image_tokens() {
     assert!(media_fingerprint::agree(&fp, &fp2, fp.tolerance_bps()));
     assert!(rt.unload("janus-pro-1b"));
 }
+
+/// FLUX 3 Image Klein on the release's own files: text-to-image, the same seed
+/// again, and an edit from the first picture, through the node's media runtime.
+///
+/// `TENZRO_MEDIA_FLUX3_KLEIN_CHECKPOINT` names the directory the catalog entry
+/// `flux-3-image-klein` pins (`model.safetensors`, `ae.safetensors`,
+/// `config.json`, `modular_model_index.json`, `text_encoder/`); optionally
+/// `TENZRO_MEDIA_OUT`. The weights are gated, so the files are fetched by hand.
+#[tokio::test]
+#[ignore = "needs the gated FLUX 3 Image Klein release files"]
+async fn flux3_image_klein_renders_and_edits() {
+    use tenzro_types::MediaGenInputRole;
+
+    let rt = MediaRuntime::with_host(Default::default(), CatalogCell::new(Catalog::test_seed()));
+    let dirs = [env_path("TENZRO_MEDIA_FLUX3_KLEIN_CHECKPOINT")];
+    let info = rt
+        .load(
+            "flux-3-image-klein",
+            "Flux3DistilledModularPipeline",
+            &dirs,
+            1,
+            MediaPrecision::Bf16,
+        )
+        .expect("load");
+    eprintln!(
+        "flux-3-image-klein on {} ({} resident bytes)",
+        info.device, info.resident_bytes
+    );
+    let prompt = "A red bicycle leaning against a white wall in soft morning light, sharp photograph, shallow depth of field";
+    let r = render(
+        &rt,
+        "flux-3-image-klein",
+        MediaGenKind::Text2Image,
+        params(prompt, 1024, 1024, 16, 1.0),
+    )
+    .await;
+    let img = image::load_from_memory(&r.bytes).expect("a PNG").to_rgb8();
+    assert_eq!(img.dimensions(), (1024, 1024));
+    let fp = keep("flux3-klein.png", &r);
+    let spread = fp.luma.iter().max().unwrap() - fp.luma.iter().min().unwrap();
+    assert!(
+        spread > 20,
+        "a picture, not a flat field: luma spread {spread}"
+    );
+
+    let again = render(
+        &rt,
+        "flux-3-image-klein",
+        MediaGenKind::Text2Image,
+        params(prompt, 1024, 1024, 16, 1.0),
+    )
+    .await;
+    let fp2 = keep("flux3-klein-again.png", &again);
+    assert!(media_fingerprint::agree(&fp, &fp2, fp.tolerance_bps()));
+
+    // An edit from that picture: one reference, kept whole, at its own size.
+    let job = RenderJob {
+        job_id: "flux-3-image-klein-edit".into(),
+        kind: MediaGenKind::Image2Image,
+        params: params("Make the bicycle blue", 1024, 1024, 16, 1.0),
+        seed: 7,
+        requester: [0; 32],
+        inputs: vec![(MediaGenInputRole::EditSource, r.bytes.clone())],
+        role: None,
+        inbound_latent: None,
+    };
+    let edited = match rt.render("flux-3-image-klein", job).await.expect("edit") {
+        Output::Media(e) => e,
+        Output::Latent(_) => panic!("handed over a latent"),
+    };
+    let out = image::load_from_memory(&edited.bytes)
+        .expect("a PNG")
+        .to_rgb8();
+    assert_eq!(out.dimensions(), (1024, 1024));
+    keep("flux3-klein-edit.png", &edited);
+    assert!(rt.unload("flux-3-image-klein"));
+}

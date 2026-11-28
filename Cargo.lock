@@ -7587,7 +7587,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llama-cpp-2"
 version = "0.1.154"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -7600,7 +7600,7 @@ dependencies = [
 [[package]]
 name = "llama-cpp-sys-2"
 version = "0.1.154"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "bindgen 0.73.2",
  "cc",
@@ -10548,7 +10548,7 @@ dependencies = [
 [[package]]
 name = "praecise-codec"
 version = "0.1.0"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "libc",
  "matroska-demuxer",
@@ -10565,7 +10565,7 @@ dependencies = [
 [[package]]
 name = "praecise-diffusion"
 version = "0.1.0"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "flate2",
  "half",
@@ -10585,12 +10585,12 @@ dependencies = [
 [[package]]
 name = "praecise-hardware"
 version = "0.1.0"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 
 [[package]]
 name = "praecise-host"
 version = "0.1.0"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "libc",
  "parking_lot 0.13.0",
@@ -10606,7 +10606,7 @@ dependencies = [
 [[package]]
 name = "praecise-onnx"
 version = "0.1.0"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "base64 0.23.1",
  "hound",
@@ -10629,7 +10629,7 @@ dependencies = [
 [[package]]
 name = "praecise-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "chacha20poly1305 0.11.0",
  "encoding_rs",
@@ -10653,7 +10653,7 @@ dependencies = [
 [[package]]
 name = "praecise-train"
 version = "0.1.0"
-source = "git+https://github.com/Praecise/praecise-engine?rev=57379ccf8ca5ba6496e97ee7ceb37c2ca2074021#57379ccf8ca5ba6496e97ee7ceb37c2ca2074021"
+source = "git+https://github.com/Praecise/praecise-engine?rev=eca8fb1182841531a6d587b284c761d8d06210b8#eca8fb1182841531a6d587b284c761d8d06210b8"
 dependencies = [
  "hex",
  "llama-cpp-2",

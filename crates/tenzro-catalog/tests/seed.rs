@@ -581,14 +581,15 @@ fn action_policies_carry_their_licence_and_embodiment() {
     );
 }
 
-/// FLUX 3 Image Klein is listed with every file pinned at one commit and
-/// stays planned until a native port runs it. The FP8 and NVFP4 entries pin
-/// their own transformer and load the bfloat16 entry's text encoder and
-/// autoencoder. All are gated by the FLUX Kommunity License, whose
+/// FLUX 3 Image Klein is listed with every file pinned at one commit and runs
+/// on the native engine at the revision its entry names. The bfloat16 entries
+/// pin the diffusers transformer shards, which the engine reads under the
+/// release's tensor names. The FP8 and NVFP4 entries pin their own
+/// transformer and load the bfloat16 entry's text encoder and autoencoder. All are gated by the FLUX Kommunity License, whose
 /// commercial terms travel with the entry. The prompt upsampler the model
 /// card recommends is its own language model, never chained by the node.
 #[test]
-fn flux3_image_klein_is_pinned_gated_and_planned() {
+fn flux3_image_klein_is_pinned_gated_and_native() {
     let klein = entry("flux-3-image-klein").expect("catalogued");
     for id in [
         "flux-3-image-klein",
@@ -598,9 +599,9 @@ fn flux3_image_klein_is_pinned_gated_and_planned() {
     ] {
         let e = entry(id).expect("catalogued");
         let m = get_media_gen_model_by_id(id).expect("media entry");
-        assert_eq!(m.status, MediaGenStatus::Planned, "{id}");
-        assert!(m.engine_rev.is_none(), "{id}");
-        assert!(runnable_media_gen_model(id).is_err(), "{id}");
+        assert_eq!(m.status, MediaGenStatus::Native, "{id}");
+        assert_eq!(m.engine_rev.as_deref().map(str::len), Some(40), "{id}");
+        assert!(runnable_media_gen_model(id).is_ok(), "{id}");
         assert_eq!(
             m.kinds,
             [
@@ -626,11 +627,13 @@ fn flux3_image_klein_is_pinned_gated_and_planned() {
         let view = e
             .checkpoint_view(std::slice::from_ref(&klein))
             .expect("checkpoint view");
-        for part in [
-            "modular_model_index.json",
-            "text_encoder/config.json",
-            "vae/config.json",
-        ] {
+        // The autoencoder is the release's `ae.safetensors`, or a diffusers `vae/` directory.
+        assert!(
+            view.iter()
+                .any(|f| f.at == "ae.safetensors" || f.at == "vae/config.json"),
+            "{id}: no autoencoder in view"
+        );
+        for part in ["modular_model_index.json", "text_encoder/config.json"] {
             assert!(
                 view.iter().any(|f| f.at == part),
                 "{id}: {part} not in view"
@@ -883,6 +886,45 @@ fn every_in_process_media_entry_pins_its_checkpoint() {
                 base.iter()
                     .any(|f| f.starts_with("text_encoder/") && f.ends_with(".safetensors")),
                 "{}: no text encoder weights",
+                e.id
+            );
+            continue;
+        }
+        if matches!(
+            e.pipeline_class.as_str(),
+            "Flux3DistilledModularPipeline" | "Flux3ModularPipeline"
+        ) {
+            // FLUX 3 Image Klein reads a transformer (the diffusers shards, or
+            // a quantised variant's own file), the Qwen3-VL text encoder and
+            // the autoencoder; a quantised entry takes the last two from the
+            // bfloat16 entry it requires.
+            let deps: Vec<_> = full
+                .requires
+                .iter()
+                .filter_map(|d| entry(&d.entry))
+                .collect();
+            let view = full.checkpoint_view(&deps).expect("checkpoint view");
+            let at: Vec<&str> = view.iter().map(|f| f.at).collect();
+            for need in ["text_encoder/config.json", "text_encoder/tokenizer.json"] {
+                assert!(at.contains(&need), "{}: {need} not in the view", e.id);
+            }
+            assert!(
+                at.contains(&"ae.safetensors") || at.contains(&"vae/config.json"),
+                "{}: no autoencoder",
+                e.id
+            );
+            let has = |dir: &str| {
+                at.iter()
+                    .any(|f| f.starts_with(dir) && f.ends_with(".safetensors"))
+            };
+            assert!(
+                has("text_encoder/") && (has("vae/") || at.contains(&"ae.safetensors")),
+                "{}: {at:?}",
+                e.id
+            );
+            assert!(
+                has("transformer/") || has("variants/") || at.contains(&"model.safetensors"),
+                "{}: no transformer weights",
                 e.id
             );
             continue;
